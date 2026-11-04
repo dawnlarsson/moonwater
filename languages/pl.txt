@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Wybrane: pierwsze dostępne
 settings_already_joined	71fb	już połączono z %s
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
 settings_asks_first	e9bd	pyta najpierw
+settings_badge_error	9cf1	Błąd
+settings_badge_warning	fc8f	Ostrzeżenie
 settings_battery_charging	5116	, ładowanie
 settings_battery_discharging	7964	, rozładowanie
 settings_battery_full	ded8	, naładowana
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Wpisz, aby filtrować
 settings_forget	5220	zapomnij %s
 settings_help_more	93ec	moonwater help podaje więcej, niż wymienia Wszystkie polecenia: pierwszy wiersz uruchamia dowolne polecenie
 settings_identify_screens	8be8	Zidentyfikuj ekrany
+settings_issue_gpu_cooling	63ed	Karta chłodzi się po zawieszeniach (%1$d z rzędu)
+settings_issue_gpu_family	6311	Ta rodzina GPU nie jest obsługiwana (rodzina %1$d)
+settings_issue_gpu_lists	1433	Listy są wyłączone: karta nie składa obrazu naprawdę
+settings_issue_gpu_lost	28ed	Aplikacje straciły %1$d z %2$d klatek na rzecz procesora
+settings_issue_gpu_map	f52f	Jądro odmówiło mapowania obrazów okien dla karty (krok %1$d, błąd %2$d)
+settings_issue_gpu_refused	f29c	Karta odrzuciła %1$d prezentacji: %2$s
+settings_issue_gpu_scanout	1379	Karta odrzuciła framebuffer okna do bezpośredniego wyjścia (błąd %1$d)
+settings_issue_gpu_untrusted	14ea	Autotest karty narysował źle, więc karta nie jest zaufana (rodzina %1$d)
+settings_issue_gpu_userptr	ff23	Jądro zbudowano bez obsługi userptr dla GPU (CONFIG_DRM_AMDGPU_USERPTR), więc karta nie może odczytać obrazów okien: zbuduj jądro ponownie z tą opcją
+settings_issue_unknown	e812	Problem, którego ta wersja nie nazywa (kod %1$d)
 settings_item_add	fbef	Enter zapamiętuje nazwę urządzenia; radio włącza się dla tego, co się sparuje
 settings_item_ask	6aad	Enter prosi o hasło i łączy
 settings_item_cannot	e643	moonwater nie może spełnić wymagań tej sieci
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (zalecana)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	W użyciu: karta złożyła %1$d z %2$d prezentacji (%3$d%%)
+settings_status_none	afed	Brak obsługiwanego GPU: procesor rysuje wszystko
+settings_status_not	2583	Nieużywana: karta złożyła %1$d z %2$d prezentacji, resztę narysował procesor
+settings_status_off	4e63	Wyłączona: ustawienie jest wyłączone, więc procesor rysuje wszystko
+settings_status_partly	af8b	Częściowo w użyciu: karta złożyła %1$d z %2$d prezentacji (%3$d%%)
+settings_status_waiting	dfe6	Czekam na pierwsze prezentacje
 settings_stopped	f34e	zatrzymano
 settings_too_long	fed7	moonwater trwał zbyt długo i został zatrzymany
 settings_too_many	db0e	to więcej słów, niż przyjmuje polecenie

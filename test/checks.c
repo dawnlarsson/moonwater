@@ -222550,12 +222550,96 @@ static void iss_rows_hostile(void)
               windows_issues_read(null, &iss_copy) == 0 && windows_issues_read(&iss_table, null) == 0);
 }
 
+// The GPU's issues from the table (windows_gpu_wanted) and its status (windows_gpu_judge): each a row of its own.
+static struct windows_issue iss_want[WINDOWS_GPU_CODES];
+
+static unsigned int iss_wanted_has(unsigned int count, unsigned int code)
+{
+        for (unsigned int k = 0; k < count; k++)
+                if (iss_want[k].code == code)
+                        return k + 1;
+        return 0;
+}
+
+static void iss_rows_gpu(void)
+{
+        unsigned int count;
+        struct windows gpu;
+
+        memory_zero(&gpu, sizeof(gpu));
+        gpu.gpu_on = 1, gpu.gpu_able = 1;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: a working GPU with no refusals raises none", count == 0);
+        gpu.gpu_map_why = 3u | 19u << 8;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: a map refused at step 3 with error 19 is the missing userptr, an error",
+              iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) - 1].severity == WINDOWS_ISSUE_ERROR &&
+                  !iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP));
+        gpu.gpu_map_why = 3u | 22u << 8;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: another error at step 3 is the generic map error with its numbers",
+              iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) &&
+                  iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) - 1].a == 3 && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP) - 1].b == 22);
+        memory_copy(gpu.gpu_said, "amdgpu: HMM_MIRROR kernel config option is not enabled", 52);
+        gpu.gpu_map_why = 2u | 12u << 8;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: the kernel's words naming HMM_MIRROR are the userptr case, whatever the step",
+              iss_wanted_has(count, WINDOWS_ISSUE_GPU_USERPTR) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_MAP));
+        memory_zero(gpu.gpu_said, sizeof(gpu.gpu_said));
+        gpu.gpu_map_why = 0;
+        gpu.gpu_refused[9] = 12, gpu.gpu_drawn = 10, gpu.gpu_processor = 90;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: a refusal reason shows when it refused enough presents, with its count and its reason's index",
+              iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) - 1].a == 12 &&
+                  iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED) - 1].b == 9);
+        gpu.gpu_refused[9] = 3;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: fewer refusals than the minimum raise none", !iss_wanted_has(count, WINDOWS_ISSUE_GPU_REFUSED));
+        gpu.gpu_refused[9] = 0, gpu.gpu_able = 0;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: lists off with the GPU working says so, a warning", iss_wanted_has(count, WINDOWS_ISSUE_GPU_LISTS) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LISTS) - 1].severity == WINDOWS_ISSUE_WARNING);
+        gpu.gpu_able = 1, gpu.gpu_state = WINDOWS_GPU_UNTRUSTED, gpu.gpu_family = 144;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: an untrusted card is an error with its family", iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED) - 1].a == 144);
+        gpu.gpu_state = WINDOWS_GPU_NO_CARD;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: a card of no family we have kernels for is a warning with its family", iss_wanted_has(count, WINDOWS_ISSUE_GPU_FAMILY) && !iss_wanted_has(count, WINDOWS_ISSUE_GPU_UNTRUSTED));
+        gpu.gpu_family = 0, gpu.gpu_state = WINDOWS_GPU_COOLING, gpu.gpu_steps = 2;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: cooling down after hangs is a warning with the count", iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) - 1].a == 2);
+        gpu.gpu_state = WINDOWS_GPU_UP, gpu.gpu_steps = 0, gpu.list_tried[0] = 100, gpu.list_lost[0][0] = 4, gpu.pid[0] = 7;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: lost frames under a tenth of those tried raise none", !iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST));
+        gpu.list_lost[0][0] = 20;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: lost frames over a tenth of those tried are a warning with both counts",
+              iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) - 1].a == 20 &&
+                  iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST) - 1].b == 100);
+        gpu.refused = 1, gpu.refused_error = 22;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: a framebuffer the card refused for scan-out is a warning with the kernel's error", iss_wanted_has(count, WINDOWS_ISSUE_GPU_SCANOUT) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_SCANOUT) - 1].a == 22);
+        gpu.gpu_on = 0;
+        count = windows_gpu_wanted(&gpu, iss_want, WINDOWS_GPU_CODES);
+        check("gpu issues: with the setting off there are none, whatever the counters say", count == 0);
+        check("gpu status: the setting off is off", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 90, 10) == WINDOWS_GPU_STATUS_OFF);
+        gpu.gpu_on = 1;
+        check("gpu status: a card that is none is no supported GPU", (gpu.gpu_state = WINDOWS_GPU_NO_CARD, windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 0, 50)) == WINDOWS_GPU_STATUS_NONE);
+        gpu.gpu_state = WINDOWS_GPU_UP;
+        check("gpu status: almost all presents on the card are in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 95, 5) == WINDOWS_GPU_STATUS_IN_USE);
+        check("gpu status: half is partly in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 50, 50) == WINDOWS_GPU_STATUS_PARTLY);
+        check("gpu status: none on the card is not in use", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_PARTLY, 0, 100) == WINDOWS_GPU_STATUS_NOT);
+        check("gpu status: in use stays in use at 70 percent, where it would not be entered again", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 70, 30) == WINDOWS_GPU_STATUS_IN_USE);
+        check("gpu status: not in use is not left at 70 percent", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_NOT, 70, 30) == WINDOWS_GPU_STATUS_PARTLY);
+        check("gpu status: fewer than sixteen presents keep the answer", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 3, 2) == WINDOWS_GPU_STATUS_IN_USE);
+}
+
 b32 main(void)
 {
         iss_rows_basic();
         iss_rows_full();
         iss_rows_torn();
         iss_rows_hostile();
+        iss_rows_gpu();
         return test_report(null);
 }
 #endif /* CHECK_issues */

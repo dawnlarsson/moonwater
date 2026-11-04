@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Vald: den första som finns
 settings_already_joined	71fb	redan ansluten till %s
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
 settings_asks_first	e9bd	frågar först
+settings_badge_error	9cf1	Fel
+settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Skriv för att filtrera
 settings_forget	5220	glöm %s
 settings_help_more	93ec	moonwater help säger mer än Alla kommandon listar: den första raden kör vilket kommando som helst
 settings_identify_screens	8be8	Identifiera skärmar
+settings_issue_gpu_cooling	63ed	Grafikkortet svalnar efter hängningar (%1$d i rad)
+settings_issue_gpu_family	6311	Den här GPU-familjen stöds inte (familj %1$d)
+settings_issue_gpu_lists	1433	Listorna är av: grafikkortet sammanställer inte på riktigt
+settings_issue_gpu_lost	28ed	Appar tappade %1$d av %2$d bildrutor till processorn
+settings_issue_gpu_map	f52f	Kärnan vägrade mappa fönsterbilderna för grafikkortet (steg %1$d, fel %2$d)
+settings_issue_gpu_refused	f29c	Grafikkortet vägrade %1$d bildrutor: %2$s
+settings_issue_gpu_scanout	1379	Grafikkortet vägrade ett fönsters framebuffer för direkt utmatning (fel %1$d)
+settings_issue_gpu_untrusted	14ea	Grafikkortets självtest ritade fel, så det litar vi inte på (familj %1$d)
+settings_issue_gpu_userptr	ff23	Kärnan byggdes utan userptr-stöd för grafikkortet (CONFIG_DRM_AMDGPU_USERPTR), så det kan inte läsa fönsterbilderna: bygg om kärnan med det
+settings_issue_unknown	e812	Ett problem som den här versionen inte namnger (kod %1$d)
 settings_item_add	fbef	Enter sparar namnet på en enhet; radion slås på för det som paras
 settings_item_ask	6aad	Enter frågar efter lösenordet och ansluter
 settings_item_cannot	e643	moonwater kan inte ansluta till det som det här nätverket kräver
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d %% (rekommenderad)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Skärm %1$d: %2$s
 settings_screen_named	d918	Skärm %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	Används: grafikkortet sammanställde %1$d av %2$d bildrutor (%3$d%%)
+settings_status_none	afed	Inget GPU som stöds: processorn ritar allt
+settings_status_not	2583	Används inte: grafikkortet sammanställde %1$d av %2$d bildrutor, processorn ritade resten
+settings_status_off	4e63	Av: inställningen är av, så processorn ritar allt
+settings_status_partly	af8b	Delvis i bruk: grafikkortet sammanställde %1$d av %2$d bildrutor (%3$d%%)
+settings_status_waiting	dfe6	Väntar på de första bildrutorna
 settings_stopped	f34e	stoppad
 settings_too_long	fed7	moonwater tog för lång tid och stoppades
 settings_too_many	db0e	det är fler ord än ett kommando tar

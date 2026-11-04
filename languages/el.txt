@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Επιλογή: η πρώτη διαθέσιμη
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα
+settings_badge_error	9cf1	Σφάλμα
+settings_badge_warning	fc8f	Προειδοποίηση
 settings_battery_charging	5116	, φορτίζει
 settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Πληκτρολογήστε για φιλτράρισ
 settings_forget	5220	ξέχνα το %s
 settings_help_more	93ec	το moonwater help λέει περισσότερα από όσα δείχνει το «Όλες οι εντολές»: η πρώτη γραμμή εκτελεί οποιαδήποτε εντολή
 settings_identify_screens	8be8	Αναγνώριση οθονών
+settings_issue_gpu_cooling	63ed	Η κάρτα ψύχεται μετά από κολλήματα (%1$d στη σειρά)
+settings_issue_gpu_family	6311	Αυτή η οικογένεια GPU δεν υποστηρίζεται (οικογένεια %1$d)
+settings_issue_gpu_lists	1433	Οι λίστες είναι κλειστές: η κάρτα δεν συνθέτει στ' αλήθεια
+settings_issue_gpu_lost	28ed	Οι εφαρμογές έχασαν %1$d από %2$d καρέ προς τον επεξεργαστή
+settings_issue_gpu_map	f52f	Ο πυρήνας αρνήθηκε να αντιστοιχίσει τις εικόνες των παραθύρων για την κάρτα (βήμα %1$d, σφάλμα %2$d)
+settings_issue_gpu_refused	f29c	Η κάρτα αρνήθηκε %1$d καρέ: %2$s
+settings_issue_gpu_scanout	1379	Η κάρτα αρνήθηκε το framebuffer ενός παραθύρου για άμεση έξοδο (σφάλμα %1$d)
+settings_issue_gpu_untrusted	14ea	Το αυτοτέστ της κάρτας σχεδίασε λάθος, γι' αυτό δεν είναι αξιόπιστη (οικογένεια %1$d)
+settings_issue_gpu_userptr	ff23	Ο πυρήνας μεταγλωττίστηκε χωρίς υποστήριξη userptr για την GPU (CONFIG_DRM_AMDGPU_USERPTR), οπότε η κάρτα δεν μπορεί να διαβάσει τις εικόνες των παραθύρων: μεταγλωττίστε ξανά τον πυρήνα με αυτήν
+settings_issue_unknown	e812	Ένα πρόβλημα που αυτή η έκδοση δεν ονομάζει (κωδικός %1$d)
 settings_item_add	fbef	το Enter κρατά το όνομα μιας συσκευής· η ασύρματη λειτουργία ενεργοποιείται για ό,τι ζευγαρώνει
 settings_item_ask	6aad	το Enter ζητά τον κωδικό και συνδέεται
 settings_item_cannot	e643	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (προτεινόμενο)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Οθόνη %1$d: %2$s
 settings_screen_named	d918	Οθόνη %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	Σε χρήση: η κάρτα συνέθεσε %1$d από %2$d καρέ (%3$d%%)
+settings_status_none	afed	Δεν υπάρχει υποστηριζόμενη GPU: τα πάντα τα σχεδιάζει ο επεξεργαστής
+settings_status_not	2583	Δεν είναι σε χρήση: η κάρτα συνέθεσε %1$d από %2$d καρέ, το υπόλοιπο το σχεδίασε ο επεξεργαστής
+settings_status_off	4e63	Απενεργοποιημένη: η ρύθμιση είναι κλειστή, τα πάντα τα σχεδιάζει ο επεξεργαστής
+settings_status_partly	af8b	Εν μέρει σε χρήση: η κάρτα συνέθεσε %1$d από %2$d καρέ (%3$d%%)
+settings_status_waiting	dfe6	Αναμονή για τα πρώτα καρέ
 settings_stopped	f34e	διακόπηκε
 settings_too_long	fed7	το moonwater άργησε πολύ και σταμάτησε
 settings_too_many	db0e	είναι περισσότερες λέξεις από όσες δέχεται μια εντολή

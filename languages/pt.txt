@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Escolhido: o primeiro que existe
 settings_already_joined	71fb	já conectado a %s
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
 settings_asks_first	e9bd	pergunta antes
+settings_badge_error	9cf1	Erro
+settings_badge_warning	fc8f	Aviso
 settings_battery_charging	5116	, carregando
 settings_battery_discharging	7964	, descarregando
 settings_battery_full	ded8	, completa
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Digite para filtrar
 settings_forget	5220	esquecer %s
 settings_help_more	93ec	moonwater help diz mais do que Todos os comandos lista: a primeira linha executa qualquer comando
 settings_identify_screens	8be8	Identificar telas
+settings_issue_gpu_cooling	63ed	A placa está esfriando depois de travamentos (%1$d seguidos)
+settings_issue_gpu_family	6311	Esta família de GPU não é suportada (família %1$d)
+settings_issue_gpu_lists	1433	As listas estão desligadas: a placa não está compondo de fato
+settings_issue_gpu_lost	28ed	Os aplicativos perderam %1$d de %2$d quadros para o processador
+settings_issue_gpu_map	f52f	O kernel recusou mapear as imagens das janelas para a placa (passo %1$d, erro %2$d)
+settings_issue_gpu_refused	f29c	A placa recusou %1$d apresentações: %2$s
+settings_issue_gpu_scanout	1379	A placa recusou o framebuffer de uma janela para a saída direta (erro %1$d)
+settings_issue_gpu_untrusted	14ea	O autoteste da placa desenhou errado, por isso ela não é confiável (família %1$d)
+settings_issue_gpu_userptr	ff23	O kernel foi compilado sem suporte a userptr para a GPU (CONFIG_DRM_AMDGPU_USERPTR), por isso a placa não consegue ler as imagens das janelas: recompile o kernel com ele
+settings_issue_unknown	e812	Um problema que esta versão não nomeia (código %1$d)
 settings_item_add	fbef	Enter guarda o nome de um dispositivo; o rádio liga para o que for emparelhado
 settings_item_ask	6aad	Enter pede a senha e conecta
 settings_item_cannot	e643	moonwater não pode entrar no que esta rede pede
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (recomendada)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Tela %1$d: %2$s
 settings_screen_named	d918	Tela %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	Em uso: a placa compôs %1$d de %2$d apresentações (%3$d%%)
+settings_status_none	afed	Nenhuma GPU suportada: o processador desenha tudo
+settings_status_not	2583	Não está em uso: a placa compôs %1$d de %2$d apresentações; o processador desenhou o resto
+settings_status_off	4e63	Desligada: a configuração está desligada, por isso o processador desenha tudo
+settings_status_partly	af8b	Em parte: a placa compôs %1$d de %2$d apresentações (%3$d%%)
+settings_status_waiting	dfe6	À espera das primeiras apresentações
 settings_stopped	f34e	interrompido
 settings_too_long	fed7	moonwater demorou demais e foi interrompido
 settings_too_many	db0e	são mais palavras do que um comando aceita

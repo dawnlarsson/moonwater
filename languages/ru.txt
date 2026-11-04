@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Выбрано: первый из имеющихся
 settings_already_joined	71fb	уже подключено к %s
 settings_any_text	89dc	любая команда, как слова после moonwater: её глагол, затем аргументы
 settings_asks_first	e9bd	сначала спросит
+settings_badge_error	9cf1	Ошибка
+settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Введите для фильтрации
 settings_forget	5220	забыть %s
 settings_help_more	93ec	moonwater help говорит больше, чем перечислено в «Все команды»: первая строка выполняет любую команду
 settings_identify_screens	8be8	Определить экраны
+settings_issue_gpu_cooling	63ed	Видеокарта остывает после зависаний (подряд: %1$d)
+settings_issue_gpu_family	6311	Это семейство GPU не поддерживается (семейство %1$d)
+settings_issue_gpu_lists	1433	Списки выключены: видеокарта по-настоящему не собирает кадр
+settings_issue_gpu_lost	28ed	Приложения потеряли %1$d из %2$d кадров, которые пришлось рисовать процессору
+settings_issue_gpu_map	f52f	Ядро отказалось отображать картинки окон для видеокарты (шаг %1$d, ошибка %2$d)
+settings_issue_gpu_refused	f29c	Видеокарта отказалась от %1$d кадров: %2$s
+settings_issue_gpu_scanout	1379	Видеокарта отказалась от framebuffer окна для прямого вывода (ошибка %1$d)
+settings_issue_gpu_untrusted	14ea	Самотест видеокарты нарисовал неверно, поэтому ей не доверяют (семейство %1$d)
+settings_issue_gpu_userptr	ff23	Ядро собрано без поддержки userptr для GPU (CONFIG_DRM_AMDGPU_USERPTR), поэтому видеокарта не может читать картинки окон: пересоберите ядро с этой опцией
+settings_issue_unknown	e812	Проблема, которую эта версия не называет (код %1$d)
 settings_item_add	fbef	Enter запоминает имя устройства; радио включается для того, что соединяется
 settings_item_ask	6aad	Enter спросит пароль и подключится
 settings_item_cannot	e643	moonwater не может подключиться к тому, что требует эта сеть
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d %% (рекомендуется)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Экран %1$d: %2$s
 settings_screen_named	d918	Экран %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	Используется: видеокарта собрала %1$d из %2$d кадров (%3$d%%)
+settings_status_none	afed	Нет поддерживаемого GPU: всё рисует процессор
+settings_status_not	2583	Не используется: видеокарта собрала %1$d из %2$d кадров, остальное нарисовал процессор
+settings_status_off	4e63	Выключено: настройка отключена, всё рисует процессор
+settings_status_partly	af8b	Частично используется: видеокарта собрала %1$d из %2$d кадров (%3$d%%)
+settings_status_waiting	dfe6	Ожидание первых кадров
 settings_stopped	f34e	остановлено
 settings_too_long	fed7	moonwater работал слишком долго и был остановлен
 settings_too_many	db0e	это больше слов, чем принимает команда

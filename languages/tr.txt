@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Seçilen: ilk bulunan
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
 settings_asks_first	e9bd	önce sorar
+settings_badge_error	9cf1	Hata
+settings_badge_warning	fc8f	Uyarı
 settings_battery_charging	5116	, şarj oluyor
 settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Süzmek için yazın
 settings_forget	5220	%s öğesini unut
 settings_help_more	93ec	moonwater help, Tüm komutlar'ın listelediğinden fazlasını söyler: ilk satır herhangi bir komutu çalıştırır
 settings_identify_screens	8be8	Ekranları tanımla
+settings_issue_gpu_cooling	63ed	Kart, takılmalardan sonra soğuyor (art arda %1$d)
+settings_issue_gpu_family	6311	Bu GPU ailesi desteklenmiyor (aile %1$d)
+settings_issue_gpu_lists	1433	Listeler kapalı: kart gerçekten birleştirme yapmıyor
+settings_issue_gpu_lost	28ed	Uygulamalar %2$d kareden %1$d tanesini işlemciye kaptırdı
+settings_issue_gpu_map	f52f	Çekirdek, pencere görüntülerini kart için eşlemeyi reddetti (adım %1$d, hata %2$d)
+settings_issue_gpu_refused	f29c	Kart %1$d sunumu reddetti: %2$s
+settings_issue_gpu_scanout	1379	Kart, bir pencerenin framebuffer'ını doğrudan çıkış için reddetti (hata %1$d)
+settings_issue_gpu_untrusted	14ea	Kartın öz testi yanlış çizdi, bu yüzden güvenilmiyor (aile %1$d)
+settings_issue_gpu_userptr	ff23	Çekirdek, GPU için userptr desteği olmadan derlenmiş (CONFIG_DRM_AMDGPU_USERPTR), bu yüzden kart pencere görüntülerini okuyamıyor: çekirdeği bu seçenekle yeniden derleyin
+settings_issue_unknown	e812	Bu sürümün adlandırmadığı bir sorun (kod %1$d)
 settings_item_add	fbef	Enter bir aygıtın adını saklar; radyo eşleşenler için açılır
 settings_item_ask	6aad	Enter parolasını sorar ve bağlanır
 settings_item_cannot	e643	moonwater bu ağın istediğine katılamıyor
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%%%d (önerilen)
 settings_scale_plain	e76a	%%%d
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	Kullanımda: kart %2$d sunumun %1$d tanesini birleştirdi (%3$d%%)
+settings_status_none	afed	Desteklenen GPU yok: her şeyi işlemci çizer
+settings_status_not	2583	Kullanılmıyor: kart %2$d sunumun %1$d tanesini birleştirdi; kalanını işlemci çizdi
+settings_status_off	4e63	Kapalı: ayar kapalı, bu yüzden her şeyi işlemci çizer
+settings_status_partly	af8b	Kısmen kullanımda: kart %2$d sunumun %1$d tanesini birleştirdi (%3$d%%)
+settings_status_waiting	dfe6	İlk sunumlar bekleniyor
 settings_stopped	f34e	durduruldu
 settings_too_long	fed7	moonwater çok uzun sürdü ve durduruldu
 settings_too_many	db0e	bu, bir komutun alabileceğinden fazla sözcük

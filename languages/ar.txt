@@ -69,6 +69,8 @@ mixer_why_nothing	ff66	مختار: أول جهاز متاح
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
 settings_asks_first	e9bd	يسأل أولا
+settings_badge_error	9cf1	خطأ
+settings_badge_warning	fc8f	تحذير
 settings_battery_charging	5116	، قيد الشحن
 settings_battery_discharging	7964	، قيد التفريغ
 settings_battery_full	ded8	، مشحونة بالكامل
@@ -85,6 +87,16 @@ settings_filter_hint	4aa0	اكتب للتصفية
 settings_forget	5220	نسيان %s
 settings_help_more	93ec	يعرض moonwater help أكثر مما تسرده «كل الأوامر»: الصف الأول ينفذ أي أمر
 settings_identify_screens	8be8	تعريف الشاشات
+settings_issue_gpu_cooling	63ed	البطاقة تبرد بعد التعليق (%1$d مرات متتالية)
+settings_issue_gpu_family	6311	هذه عائلة المعالجات الرسومية غير مدعومة (العائلة %1$d)
+settings_issue_gpu_lists	1433	القوائم مُعطّلة: البطاقة لا تركّب فعليًا
+settings_issue_gpu_lost	28ed	خسرت التطبيقات %1$d من %2$d إطارًا لصالح المعالج
+settings_issue_gpu_map	f52f	رفض النواة تعيين صور النوافذ للبطاقة (الخطوة %1$d، الخطأ %2$d)
+settings_issue_gpu_refused	f29c	رفضت البطاقة %1$d إطارًا: %2$s
+settings_issue_gpu_scanout	1379	رفضت البطاقة المخزن الإطاري لنافذة للإخراج المباشر (الخطأ %1$d)
+settings_issue_gpu_untrusted	14ea	اختبار البطاقة الذاتي رسم بشكل خاطئ، لذلك لا يُوثق بها (العائلة %1$d)
+settings_issue_gpu_userptr	ff23	بُني النواة دون دعم userptr للمعالج الرسومي (CONFIG_DRM_AMDGPU_USERPTR)، لذلك لا تستطيع البطاقة قراءة صور النوافذ: أعد بناء النواة مع هذا الخيار
+settings_issue_unknown	e812	مشكلة لا تسمّيها هذه النسخة (الرمز %1$d)
 settings_item_add	fbef	Enter يحفظ اسم الجهاز؛ ويعمل الراديو لإقران ما يقترن
 settings_item_ask	6aad	Enter يطلب كلمة المرور ويتصل
 settings_item_cannot	e643	لا يستطيع moonwater تلبية ما تطلبه هذه الشبكة للاتصال
@@ -124,6 +136,12 @@ settings_scale_best	2ba0	%d%% (موصى به)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	الشاشة %1$d: %2$s
 settings_screen_named	d918	الشاشة %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	قيد الاستخدام: ركّبت البطاقة %1$d من %2$d إطارًا (%3$d%%)
+settings_status_none	afed	لا توجد وحدة معالجة رسومية مدعومة: يرسم المعالج كل شيء
+settings_status_not	2583	غير مستخدمة: ركّبت البطاقة %1$d من %2$d إطارًا، ورسم المعالج الباقي
+settings_status_off	4e63	متوقفة: الإعداد مُعطّل، لذلك يرسم المعالج كل شيء
+settings_status_partly	af8b	مستخدمة جزئيًا: ركّبت البطاقة %1$d من %2$d إطارًا (%3$d%%)
+settings_status_waiting	dfe6	في انتظار أول الإطارات
 settings_stopped	f34e	توقف
 settings_too_long	fed7	استغرق moonwater وقتا طويلا فتم إيقافه
 settings_too_many	db0e	هذه كلمات أكثر مما يقبله أمر واحد

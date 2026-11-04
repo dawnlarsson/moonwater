@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Scelto: il primo disponibile
 settings_already_joined	71fb	già connesso a %s
 settings_any_text	89dc	un comando qualsiasi, come le parole dopo moonwater: il verbo e i suoi argomenti
 settings_asks_first	e9bd	chiede prima
+settings_badge_error	9cf1	Errore
+settings_badge_warning	fc8f	Avviso
 settings_battery_charging	5116	, in carica
 settings_battery_discharging	7964	, in scarica
 settings_battery_full	ded8	, carica
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Digita per filtrare
 settings_forget	5220	dimentica %s
 settings_help_more	93ec	moonwater help dice più di quanto elenca Tutti i comandi: la prima riga esegue un comando qualsiasi
 settings_identify_screens	8be8	Identifica schermi
+settings_issue_gpu_cooling	63ed	La scheda si sta raffreddando dopo dei blocchi (%1$d di fila)
+settings_issue_gpu_family	6311	Questa famiglia di GPU non è supportata (famiglia %1$d)
+settings_issue_gpu_lists	1433	Le liste sono disattivate: la scheda non compone davvero
+settings_issue_gpu_lost	28ed	Le app hanno perso %1$d fotogrammi su %2$d a favore del processore
+settings_issue_gpu_map	f52f	Il kernel ha rifiutato di mappare le immagini delle finestre per la scheda (passo %1$d, errore %2$d)
+settings_issue_gpu_refused	f29c	La scheda ha rifiutato %1$d presentazioni: %2$s
+settings_issue_gpu_scanout	1379	La scheda ha rifiutato il framebuffer di una finestra per l'uscita diretta (errore %1$d)
+settings_issue_gpu_untrusted	14ea	L'autotest della scheda ha disegnato male, quindi non è affidabile (famiglia %1$d)
+settings_issue_gpu_userptr	ff23	Il kernel è stato compilato senza il supporto userptr per la GPU (CONFIG_DRM_AMDGPU_USERPTR), quindi la scheda non può leggere le immagini delle finestre: ricompilare il kernel con esso
+settings_issue_unknown	e812	Un problema che questa versione non nomina (codice %1$d)
 settings_item_add	fbef	Enter conserva il nome di un dispositivo; la radio si accende per ciò che si associa
 settings_item_ask	6aad	Enter chiede la password e si connette
 settings_item_cannot	e643	moonwater non può soddisfare ciò che questa rete richiede
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (consigliata)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Schermo %1$d: %2$s
 settings_screen_named	d918	Schermo %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	In uso: la scheda ha composto %1$d di %2$d presentazioni (%3$d%%)
+settings_status_none	afed	Nessuna GPU supportata: il processore disegna tutto
+settings_status_not	2583	Non in uso: la scheda ha composto %1$d di %2$d presentazioni; il processore ha disegnato il resto
+settings_status_off	4e63	Disattivata: l'impostazione è spenta, quindi il processore disegna tutto
+settings_status_partly	af8b	In parte: la scheda ha composto %1$d di %2$d presentazioni (%3$d%%)
+settings_status_waiting	dfe6	In attesa delle prime presentazioni
 settings_stopped	f34e	interrotto
 settings_too_long	fed7	moonwater ha impiegato troppo ed è stato fermato
 settings_too_many	db0e	sono più parole di quante ne accetti un comando

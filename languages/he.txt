@@ -69,6 +69,8 @@ mixer_why_nothing	ff66	נבחר: הראשון שקיים
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
 settings_asks_first	e9bd	ישאל קודם
+settings_badge_error	9cf1	שגיאה
+settings_badge_warning	fc8f	אזהרה
 settings_battery_charging	5116	, בטעינה
 settings_battery_discharging	7964	, בפריקה
 settings_battery_full	ded8	, מלאה
@@ -85,6 +87,16 @@ settings_filter_hint	4aa0	הקלד כדי לסנן
 settings_forget	5220	שכח את %s
 settings_help_more	93ec	moonwater help אומר יותר ממה ש"כל הפקודות" מציג: השורה הראשונה מריצה כל פקודה
 settings_identify_screens	8be8	זיהוי מסכים
+settings_issue_gpu_cooling	63ed	הכרטיס מתקרר אחרי תקיעות (%1$d ברציפות)
+settings_issue_gpu_family	6311	משפחת GPU זו אינה נתמכת (משפחה %1$d)
+settings_issue_gpu_lists	1433	הרשימות כבויות: הכרטיס אינו מרכיב בפועל
+settings_issue_gpu_lost	28ed	אפליקציות איבדו %1$d מתוך %2$d פריימים למעבד
+settings_issue_gpu_map	f52f	הליבה סירבה למפות את תמונות החלונות לכרטיס (שלב %1$d, שגיאה %2$d)
+settings_issue_gpu_refused	f29c	הכרטיס סירב ל-%1$d פריימים: %2$s
+settings_issue_gpu_scanout	1379	הכרטיס סירב למאגר המסגרת של חלון ליציאה ישירה (שגיאה %1$d)
+settings_issue_gpu_untrusted	14ea	בדיקת העצמי של הכרטיס צייר לא נכון, ולכן לא נותנים בו אמון (משפחה %1$d)
+settings_issue_gpu_userptr	ff23	הליבה נבנתה בלי תמיכת userptr ל-GPU (CONFIG_DRM_AMDGPU_USERPTR), ולכן הכרטיס לא יכול לקרוא את תמונות החלונות: בנה מחדש את הליבה עם האפשרות הזו
+settings_issue_unknown	e812	בעיה שהגרסה הזו אינה מכנה (קוד %1$d)
 settings_item_add	fbef	Enter שומר את שם ההתקן; הרדיו נדלק עבור מה שמזווגים
 settings_item_ask	6aad	Enter מבקש את הסיסמה ומתחבר
 settings_item_cannot	e643	moonwater לא יכול לעמוד בדרישות הרשת הזאת להתחברות
@@ -124,6 +136,12 @@ settings_scale_best	2ba0	%d%% (מומלץ)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	מסך %1$d: %2$s
 settings_screen_named	d918	מסך %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים (%3$d%%)
+settings_status_none	afed	هیچ GPU پشتیبانی‌شده‌ای نیست: پردازنده همه چیز را می‌کشد
+settings_status_not	2583	לא בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים, והמעבד צייר את השאר
+settings_status_off	4e63	خاموش: تنظیم خاموش است، پس پردازنده همه چیز را می‌کشد
+settings_status_partly	af8b	בשימוש חלקי: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים (%3$d%%)
+settings_status_waiting	dfe6	ממתין לפריימים הראשונים
 settings_stopped	f34e	נעצר
 settings_too_long	fed7	moonwater לקח יותר מדי זמן ונעצר
 settings_too_many	db0e	אלו יותר מילים ממה שפקודה אחת מקבלת

@@ -22337,6 +22337,22 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (table->gpu_map_why & 255) == 3 ? (string_address) "the kernel would not take the pages" :
                                                            (string_address) "the kernel would not give the pages their address",
                          (positive)(table->gpu_map_why >> 8));
+        // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
+        {
+                struct windows_issues board;
+
+                if (windows_issues_read(table, &board))
+                        for (int at = 0; at < WINDOWS_ISSUES; at++)
+                                if (board.issue[at].used)
+                                        host_say(log, "  issue           %s: %s, %s (%p, %p)%s%s\n", board.issue[at].key,
+                                                 board.issue[at].severity == WINDOWS_ISSUE_ERROR ? (string_address) "error" : (string_address) "warning",
+                                                 board.issue[at].code < WINDOWS_ISSUE_COUNT ? windows_issue_names[board.issue[at].code] : (string_address) "an unnamed code",
+                                                 (positive)board.issue[at].a, (positive)board.issue[at].b,
+                                                 board.issue[at].detail[0] ? (string_address) ": " : (string_address) "",
+                                                 board.issue[at].detail);
+                if (board.refused)
+                        host_say(log, "  issue           %p more not shown: the board is full\n", (positive)board.refused);
+        }
         //      The apps' draw lists: the windows drawn from their lists (list state 1) and the lists the compositor refused.
         {
                 unsigned int from_lists = 0;

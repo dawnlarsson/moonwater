@@ -9373,6 +9373,9 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_TABS 4
 #define UI_ROW_SWATCHES 5
 #define UI_ROW_FIELD 6
+// A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
+#define UI_ROW_BADGE_WARNING 1
+#define UI_ROW_BADGE_ERROR 2
 
 // What a row shows, said by the app whenever the kit asks (ui_list.describe); what is not said is none.
 struct ui_row
@@ -9392,6 +9395,9 @@ struct ui_row
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
+        int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
+        const char address_to badge_words; // what that badge says
+        b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
 };
 
 struct ui_list
@@ -9713,7 +9719,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
         int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room, across, across_w;
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
-        struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null;
+        struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null, address_to badge = null;
+        int badge_w = 0, badge_right = 0;
         char cut[UI_CUT_TEXT];
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
@@ -9723,6 +9730,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM);
         if (row.dim)
                 ink = quiet;
+        if (row.sub)
+                text_left += ui_dev(ui, 20), ink = quiet;
         if (l->lit && id == l->focus)
         {
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
@@ -9779,10 +9788,36 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         }
         if (row.kind == UI_ROW_TABS || row.kind == UI_ROW_SWATCHES)
                 trailing = ui_list_trailing(ui, l, id, &row, right, y, 0);
+        // The badge: the row's own second control, at the right (left of a switch, which is at the very right). Its width comes out of the
+        // room the label and the value have, and a row that is no switch has its right edge moved in by it.
+        if (row.badge)
+        {
+                badge = ui_list_control(l, id, 1);
+                if (badge)
+                {
+                        if (badge->kind != UI_BADGE)
+                        {
+                                memory_zero(badge, sizeof(*badge));
+                                badge->kind = UI_BADGE;
+                                ui_control_start(badge);
+                        }
+                        badge->role = row.badge == UI_ROW_BADGE_ERROR ? UI_ERROR : UI_WARNING;
+                        badge->label = row.badge_words;
+                        ui_control_size(ui, badge);
+                        badge->h = 22, badge->y = (y + height / 2) * 100 / ui->scale - 11;
+                        badge_right = row.kind == UI_ROW_SWITCH ? right - ui_dev(ui, 52) - gap : right;
+                        badge->x = ui_mirror(badge_right * 100 / ui->scale - badge->w, badge->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
+                        badge_w = ui_dev(ui, badge->w) + gap;
+                        if (row.kind != UI_ROW_SWITCH)
+                                right -= badge_w;
+                        ui_control_draw(ui, badge);
+                }
+        }
         label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap
                                          : row.kind == UI_ROW_FIELD && row.head ? (w - 2 * inset) * 2 / 3 : (w - 2 * inset) / 3);
         // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
         // motion is read, and no word measured: its label's width places only its value and a field's well.
+        label_room -= row.kind == UI_ROW_SWITCH ? badge_w : 0;
         if (row.label && (seen || row.kind == UI_ROW_FIELD))
                 wide = ui_kit_text_flipped(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
                                                                            label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),

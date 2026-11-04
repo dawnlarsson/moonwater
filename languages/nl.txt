@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Gekozen: de eerste die er is
 settings_already_joined	71fb	al verbonden met %s
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst
+settings_badge_error	9cf1	Fout
+settings_badge_warning	fc8f	Waarschuwing
 settings_battery_charging	5116	, laadt op
 settings_battery_discharging	7964	, ontlaadt
 settings_battery_full	ded8	, vol
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Typ om te filteren
 settings_forget	5220	%s vergeten
 settings_help_more	93ec	moonwater help vermeldt meer dan Alle opdrachten toont: de eerste rij voert elke opdracht uit
 settings_identify_screens	8be8	Schermen identificeren
+settings_issue_gpu_cooling	63ed	De kaart koelt af na vastlopers (%1$d achter elkaar)
+settings_issue_gpu_family	6311	Deze GPU-familie wordt niet ondersteund (familie %1$d)
+settings_issue_gpu_lists	1433	Lijsten staan uit: de kaart stelt niet echt samen
+settings_issue_gpu_lost	28ed	Apps verloren %1$d van %2$d frames aan de processor
+settings_issue_gpu_map	f52f	De kernel weigerde de vensterbeelden voor de kaart te mappen (stap %1$d, fout %2$d)
+settings_issue_gpu_refused	f29c	De kaart weigerde %1$d presentaties: %2$s
+settings_issue_gpu_scanout	1379	De kaart weigerde de framebuffer van een venster voor directe uitvoer (fout %1$d)
+settings_issue_gpu_untrusted	14ea	De zelftest van de kaart tekende verkeerd, dus die wordt niet vertrouwd (familie %1$d)
+settings_issue_gpu_userptr	ff23	De kernel is gebouwd zonder userptr-ondersteuning voor de GPU (CONFIG_DRM_AMDGPU_USERPTR), dus de kaart kan de vensterbeelden niet lezen: bouw de kernel opnieuw met die optie
+settings_issue_unknown	e812	Een probleem dat deze versie niet benoemt (code %1$d)
 settings_item_add	fbef	Enter bewaart de naam van een apparaat; de radio gaat aan voor wat koppelt
 settings_item_ask	6aad	Enter vraagt om het wachtwoord en verbindt
 settings_item_cannot	e643	moonwater kan niet voldoen aan wat dit netwerk vraagt
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (aanbevolen)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Scherm %1$d: %2$s
 settings_screen_named	d918	Scherm %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	In gebruik: de kaart heeft %1$d van %2$d presentaties samengesteld (%3$d%%)
+settings_status_none	afed	Geen ondersteunde GPU: de processor tekent alles
+settings_status_not	2583	Niet in gebruik: de kaart heeft %1$d van %2$d presentaties samengesteld; de processor heeft de rest getekend
+settings_status_off	4e63	Uit: de instelling staat uit, dus de processor tekent alles
+settings_status_partly	af8b	Gedeeltelijk in gebruik: de kaart heeft %1$d van %2$d presentaties samengesteld (%3$d%%)
+settings_status_waiting	dfe6	Wachten op de eerste presentaties
 settings_stopped	f34e	gestopt
 settings_too_long	fed7	moonwater deed er te lang over en werd gestopt
 settings_too_many	db0e	dat zijn meer woorden dan een opdracht aankan

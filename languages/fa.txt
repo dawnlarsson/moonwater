@@ -69,6 +69,8 @@ mixer_why_nothing	ff66	انتخاب: اولین موجود
 settings_already_joined	71fb	از قبل به %s متصل است
 settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
 settings_asks_first	e9bd	ابتدا می‌پرسد
+settings_badge_error	9cf1	خطا
+settings_badge_warning	fc8f	هشدار
 settings_battery_charging	5116	، در حال شارژ
 settings_battery_discharging	7964	، در حال تخلیه
 settings_battery_full	ded8	، شارژ کامل
@@ -85,6 +87,16 @@ settings_filter_hint	4aa0	برای پالایش تایپ کنید
 settings_forget	5220	فراموش کردن %s
 settings_help_more	93ec	moonwater help بیش از «همه فرمان‌ها» می‌گوید: ردیف اول هر فرمانی را اجرا می‌کند
 settings_identify_screens	8be8	شناسایی نمایشگر‌ها
+settings_issue_gpu_cooling	63ed	کارت بعد از قفل‌شدن‌ها خنک می‌شود (%1$d بار پشت سر هم)
+settings_issue_gpu_family	6311	این خانواده GPU پشتیبانی نمی‌شود (خانواده %1$d)
+settings_issue_gpu_lists	1433	فهرست‌ها خاموش‌اند: کارت واقعاً ترکیب نمی‌کند
+settings_issue_gpu_lost	28ed	برنامه‌ها %1$d از %2$d فریم را به پردازنده واگذار کردند
+settings_issue_gpu_map	f52f	هسته از نگاشت تصویر پنجره‌ها برای کارت خودداری کرد (گام %1$d، خطای %2$d)
+settings_issue_gpu_refused	f29c	کارت %1$d فریم را رد کرد: %2$s
+settings_issue_gpu_scanout	1379	کارت فریم‌بافر یک پنجره را برای خروجی مستقیم رد کرد (خطای %1$d)
+settings_issue_gpu_untrusted	14ea	خودآزمایی کارت اشتباه کشید، پس به آن اعتماد نمی‌شود (خانواده %1$d)
+settings_issue_gpu_userptr	ff23	هسته بدون پشتیبانی userptr برای GPU ساخته شده (CONFIG_DRM_AMDGPU_USERPTR)، پس کارت نمی‌تواند تصاویر پنجره‌ها را بخواند: هسته را با این گزینه دوباره بسازید
+settings_issue_unknown	e812	مشکلی که این نسخه نام ندارد (کد %1$d)
 settings_item_add	fbef	Enter نام دستگاه را نگه می‌دارد؛ رادیو برای آنچه جفت می‌شود روشن می‌شود
 settings_item_ask	6aad	Enter گذرواژه را می‌پرسد و متصل می‌شود
 settings_item_cannot	e643	moonwater نمی‌تواند خواسته‌های این شبکه را برای اتصال برآورده کند
@@ -124,6 +136,12 @@ settings_scale_best	2ba0	%d%% (پیشنهادی)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	نمایشگر %1$d: %2$s
 settings_screen_named	d918	نمایشگر %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	در حال استفاده: کارت %1$d از %2$d فریم را ترکیب کرد (%3$d%%)
+settings_status_none	afed	کوئی معاون GPU نہیں: پروسیسر سب کچھ بناتا ہے
+settings_status_not	2583	استفاده نمی‌شود: کارت %1$d از %2$d فریم را ترکیب کرد و پردازنده بقیه را کشید
+settings_status_off	4e63	بند: ترتیب بند ہے، اس لیے پروسیسر سب کچھ بناتا ہے
+settings_status_partly	af8b	تا حدی در حال استفاده: کارت %1$d از %2$d فریم را ترکیب کرد (%3$d%%)
+settings_status_waiting	dfe6	منتظر اولین فریم‌ها
 settings_stopped	f34e	متوقف شد
 settings_too_long	fed7	moonwater زمان زیادی گرفت و متوقف شد
 settings_too_many	db0e	این بیش از تعداد واژه‌هایی است که یک فرمان می‌پذیرد

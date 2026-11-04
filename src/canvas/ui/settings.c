@@ -766,6 +766,203 @@ static fn settings_changed(int top, int bottom)
         ui_page_damage(&settings.page, top, bottom);
 }
 
+/* ---- the issue board: each row's badge and the lines under it (window.c's windows_issue_*) ---- */
+static int settings_section_start(int row);
+static fn settings_rebuild(void);
+/*
+        A row whose option has issues on the board (its key is the row's verb, "canvas gpu") shows a badge at its right, the worst severity,
+        and the lines under it: one for each issue, its message and then its detail (the kernel's words, copyable as text). The GPU's row
+        also has a status line first, what the card does now (windows_gpu_judge, from the table's counters over the last ten seconds).
+        The board is read once a second while Settings is open, and the lines are made again when what they say changed. Each line is a
+        list row of its own, numbered after the rows, so the kit lays them out, scrolls them and moves the rows under them.
+*/
+#define SETTINGS_SUBS 40           // the lines under the rows at most
+#define SETTINGS_SUB_TEXT 240      // bytes of one line
+#define SETTINGS_BOARD_NS 1000000000ll
+#define SETTINGS_GPU_SAMPLES 10    // samples of the GPU's presents the status is judged on (a second each)
+struct settings_sub
+{
+        int section;                 // the section of the row it is under
+        b32 detail;                  // a detail line: quieter
+        const char address_to words; // what its badge says (Warning, Error), or none
+        char text[SETTINGS_SUB_TEXT];
+};
+static struct settings_sub settings_sub[SETTINGS_SUBS];
+static int settings_sub_count;
+static struct windows_issues settings_board;
+static positive settings_board_due;
+static char settings_status[SETTINGS_SUB_TEXT];
+static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
+static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
+static unsigned int settings_gpu_shown_total;
+
+// The key a row's issues are filed under: its verb's words, joined with a blank (canvas gpu). The key is empty for a row that has no verb.
+static b32 settings_key_of(int row, char address_to key, positive room)
+{
+        const struct settings_row address_to which = row >= 0 && row < SETTINGS_ANY ? &settings_rows[row] : null;
+
+        key[0] = 0;
+        if (!which || !which->read[0])
+                return false;
+        for (positive k = 0; k < SETTING_WORDS && which->read[k]; k++)
+        {
+                if (k)
+                        string_append_bounded((string_address)key, (string_address)" ", room);
+                string_append_bounded((string_address)key, (string_address)which->read[k], room);
+        }
+        return true;
+}
+
+// The row's badge, when the board has an issue under its key: the worst severity, its words.
+static void settings_badge(int row, struct ui_row address_to out)
+{
+        char key[WINDOWS_ISSUE_KEY];
+        unsigned int worst;
+
+        if (!settings_key_of(row, key, sizeof(key)))
+                return;
+        worst = windows_issues_worst(&settings_board, key, null);
+        if (!worst)
+                return;
+        out->badge = worst == WINDOWS_ISSUE_ERROR ? UI_ROW_BADGE_ERROR : UI_ROW_BADGE_WARNING;
+        out->badge_words = worst == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning);
+}
+
+// The GPU's status from the table, judged on the presents of the last samples: the card's drawn and the processor's, each read as the
+// difference from the last sample (a table that counts down is read as none), and the words it says.
+static void settings_gpu_sample(void)
+{
+        struct windows address_to table = settings.own.table;
+        unsigned int drawn = 0, processor = 0;
+
+        if (!table)
+                return;
+        settings_gpu_ring_drawn[settings_gpu_at] = table->gpu_drawn >= settings_gpu_drawn ? table->gpu_drawn - settings_gpu_drawn : 0;
+        settings_gpu_ring_processor[settings_gpu_at] = table->gpu_processor >= settings_gpu_processor ? table->gpu_processor - settings_gpu_processor : 0;
+        settings_gpu_drawn = table->gpu_drawn, settings_gpu_processor = table->gpu_processor;
+        settings_gpu_at = (settings_gpu_at + 1) % SETTINGS_GPU_SAMPLES;
+        for (positive k = 0; k < SETTINGS_GPU_SAMPLES; k++)
+                drawn += settings_gpu_ring_drawn[k], processor += settings_gpu_ring_processor[k];
+        settings_gpu_status = windows_gpu_judge(table, settings_gpu_status, drawn, processor);
+        settings_gpu_shown_total = drawn + processor;
+        switch (settings_gpu_status)
+        {
+        case WINDOWS_GPU_STATUS_OFF: language_format(settings_status, sizeof(settings_status), WORDS(settings_status_off)); break;
+        case WINDOWS_GPU_STATUS_NONE: language_format(settings_status, sizeof(settings_status), WORDS(settings_status_none)); break;
+        case WINDOWS_GPU_STATUS_IN_USE:
+        case WINDOWS_GPU_STATUS_PARTLY:
+        case WINDOWS_GPU_STATUS_NOT:
+                if (!settings_gpu_shown_total)
+                {
+                        language_format(settings_status, sizeof(settings_status), WORDS(settings_status_waiting));
+                        break;
+                }
+                language_format(settings_status, sizeof(settings_status),
+                                settings_gpu_status == WINDOWS_GPU_STATUS_IN_USE ? WORDS(settings_status_in_use)
+                                : settings_gpu_status == WINDOWS_GPU_STATUS_PARTLY ? WORDS(settings_status_partly) : WORDS(settings_status_not),
+                                (long)drawn, (long)(drawn + processor), (long)(drawn * 100 / (drawn + processor)));
+                break;
+        }
+}
+
+// Adds a line under the row being listed: its text (a message, a detail or a status), at list position count. Returns the count.
+static int settings_sub_put(int section, b32 detail, const char address_to words, const char address_to text, int count)
+{
+        struct settings_sub address_to sub;
+
+        if (settings_sub_count >= SETTINGS_SUBS || count >= UI_LIST_MOST - 1)
+                return count;
+        sub = &settings_sub[settings_sub_count];
+        sub->section = section, sub->detail = detail, sub->words = words;
+        string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
+        settings.list.id[count] = (unsigned short)(SETTINGS_ALL + (positive)settings_sub_count++);
+        return count + 1;
+}
+
+// The text of an issue's message, in the reader's language: its code's words, with its numbers, or the words that say a code this version
+// does not name.
+static void settings_issue_text(const struct windows_issue address_to issue, char address_to into, positive room)
+{
+        switch (issue->code)
+        {
+        case WINDOWS_ISSUE_GPU_MAP: language_format(into, room, WORDS(settings_issue_gpu_map), (long)issue->a, (long)issue->b); break;
+        case WINDOWS_ISSUE_GPU_USERPTR: language_format(into, room, WORDS(settings_issue_gpu_userptr)); break;
+        case WINDOWS_ISSUE_GPU_REFUSED: language_format(into, room, WORDS(settings_issue_gpu_refused), (long)issue->a, issue->detail); break;
+        case WINDOWS_ISSUE_GPU_LISTS: language_format(into, room, WORDS(settings_issue_gpu_lists)); break;
+        case WINDOWS_ISSUE_GPU_COOLING: language_format(into, room, WORDS(settings_issue_gpu_cooling), (long)issue->a); break;
+        case WINDOWS_ISSUE_GPU_UNTRUSTED: language_format(into, room, WORDS(settings_issue_gpu_untrusted), (long)issue->a); break;
+        case WINDOWS_ISSUE_GPU_FAMILY: language_format(into, room, WORDS(settings_issue_gpu_family), (long)issue->a); break;
+        case WINDOWS_ISSUE_GPU_LOST: language_format(into, room, WORDS(settings_issue_gpu_lost), (long)issue->a, (long)issue->b); break;
+        case WINDOWS_ISSUE_GPU_SCANOUT: language_format(into, room, WORDS(settings_issue_gpu_scanout), (long)issue->a); break;
+        default: language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code); break;
+        }
+}
+
+// The lines under row, listed after it from position count: the GPU's status first, then each issue under its key, its message and its
+// detail when it has one. Returns the new count.
+static int settings_sub_rows(int row, int count)
+{
+        char key[WINDOWS_ISSUE_KEY], text[SETTINGS_SUB_TEXT];
+        const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
+        int section;
+
+        if (!settings_key_of(row, key, sizeof(key)))
+                return count;
+        section = settings_section_start(row);
+        if (string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU) && which && which->kind == SETTINGS_SWITCH)
+        {
+                string_copy_bounded((string_address)text, (string_address)settings_status, sizeof(text));
+                count = settings_sub_put(section, false, null, text, count);
+        }
+        for (int i = 0; i < WINDOWS_ISSUES && count < UI_LIST_MOST - 1; i++)
+        {
+                const struct windows_issue address_to issue = &settings_board.issue[i];
+
+                if (!issue->used || !windows_issue_same(issue->key, key))
+                        continue;
+                settings_issue_text(issue, text, sizeof(text));
+                count = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
+                                         text, count);
+                if (issue->detail[0])
+                        count = settings_sub_put(section, true, null, issue->detail, count);
+        }
+        return count;
+}
+
+// A line under a row, described for the kit: indented, its text quiet, and its badge's words at the right when it is an issue.
+static fn settings_sub_describe(int at, struct ui_row address_to row)
+{
+        const struct settings_sub address_to sub = &settings_sub[at];
+
+        row->sub = 1, row->section = sub->section, row->label = sub->text, row->value = sub->words;
+        row->dim = sub->detail;
+}
+
+// The board, read once a second while Settings is open (its due time is when it is read next): the GPU's sample, and when what the rows
+// show changed, the rows made again. Returns how long till it is due, in nanoseconds (-1 with no table).
+static long settings_board_tick(void)
+{
+        positive now = (positive)ui_kit.now;
+        struct windows_issues copy;
+        char before[SETTINGS_SUB_TEXT];
+
+        if (!settings.own.table)
+                return -1;
+        if (settings_board_due && now < settings_board_due)
+                return (long)(settings_board_due - now);
+        settings_board_due = now + (positive)SETTINGS_BOARD_NS;
+        if (!windows_issues_read(settings.own.table, &copy))
+                return (long)SETTINGS_BOARD_NS;
+        string_copy_bounded((string_address)before, (string_address)settings_status, sizeof(before));
+        settings_gpu_sample();
+        if (memory_compare(&copy, &settings_board, sizeof(copy)) || !string_equals((string_address)before, (string_address)settings_status))
+        {
+                settings_board = copy;
+                settings_rebuild();
+        }
+        return (long)SETTINGS_BOARD_NS;
+}
+
 /* ---- the rows ---- */
 
 static positive settings_rows_count(void)
@@ -1497,7 +1694,7 @@ static fn settings_layout(void)
         // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
         if (!settings.list.ids)
         {
-                settings.list.ids = (int)SETTINGS_ALL;
+                settings.list.ids = (int)SETTINGS_ALL + SETTINGS_SUBS;
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
                 settings.list.hover = settings.list.down = -1;
@@ -1535,9 +1732,13 @@ static fn settings_rebuild(void)
         int count = 0;
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
+        settings_sub_count = 0;
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
+                {
                         settings.list.id[count++] = (unsigned short)row;
+                        count = settings_sub_rows((int)row, count);
+                }
         // The rows of a list come after, each in the group of its feed.
         for (int list = 0; list < SETTINGS_LISTS; list++)
                 for (int at = 0; at < settings.item_count[list]; at++)
@@ -3175,6 +3376,10 @@ static fn settings_activate(int row, int way)
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         char next[SETTINGS_VALUE];
 
+        // A line under a row (an issue, a status) is no row: Enter on it does nothing.
+        if (row >= (int)SETTINGS_ALL)
+                return;
+
         if (item)
         {
                 settings_item_activate(row, item);
@@ -3219,7 +3424,9 @@ static fn settings_activate(int row, int way)
 // The status as the keys come to a row from another: a command says what it does, and leaving one clears it.
 static fn settings_said_of(int before)
 {
-        if (settings.list.focus >= SETTINGS_ANY)
+        if (settings.list.focus >= (int)SETTINGS_ALL)
+                settings_say((string_address) "");
+        else if (settings.list.focus >= SETTINGS_ANY)
                 settings_say((string_address)settings_text(settings.list.focus));
         else if (before >= SETTINGS_ANY)
                 settings_say((string_address) "");
@@ -3671,9 +3878,17 @@ static fn settings_describe(int id, struct ui_row address_to row)
         unsigned int state = which ? settings.state[id] : SETTINGS_READ;
         const char address_to shown = which ? settings.value[id] : "";
 
+        if (id >= (int)SETTINGS_ALL)
+        {
+                if (id - (int)SETTINGS_ALL < settings_sub_count)
+                        settings_sub_describe(id - (int)SETTINGS_ALL, row);
+                return;
+        }
         row->section = settings_section_start(id);
         row->header = language_of(settings_section(id));
         row->label = settings_label_shown(id);
+        if (which)
+                settings_badge(id, row);
         if (id == settings_editing())
         {
                 const struct settings_generic address_to generic = settings_generic_of(id);
@@ -4134,6 +4349,14 @@ static fn settings_chose(int id)
 // 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
+        // The board, read once a second (settings_board_tick): when the rows' lines change, the page is laid out again.
+        if (settings.list.ids)
+        {
+                long board = settings_board_tick();
+
+                if (board >= 0 && (timeout < 0 || board < timeout))
+                        timeout = board;
+        }
         // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
         if (!settings.page.card && (gallery.on || settings_editing() >= 0 || settings.filter_open))
         {

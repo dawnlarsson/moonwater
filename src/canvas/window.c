@@ -558,12 +558,18 @@ enum windows_issue_code
         WINDOWS_ISSUE_GPU_FAMILY,    // this GPU family is not supported (a the family)
         WINDOWS_ISSUE_GPU_LOST,      // apps lost frames to the processor: a the lost frames, b the frames tried
         WINDOWS_ISSUE_GPU_SCANOUT,   // the card refused a window's framebuffer for direct scan-out: a the kernel's error number
+        WINDOWS_ISSUE_GPU_USERPTR,   // the kernel was built without userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR): a the step, b the error
         WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
         WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
         WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
+// The codes' names, for moonwater debug (the Settings words are the reader's own).
+static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
+        "none", "the kernel refused to map window pictures", "the card refused presents", "the lists are off", "the card is cooling down",
+        "the card's self-test drew wrong", "the GPU family is not supported", "apps lost frames to the processor", "the card refused direct scan-out",
+        "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate"};
 
 struct windows_issue
 {
@@ -1004,6 +1010,12 @@ struct windows
         */
         unsigned int issue_seq, issue_lock, issue_count, issue_refused;
         struct windows_issue issues[WINDOWS_ISSUES];
+        /*
+                The GPU's state for the board (windows_gpu_wanted, windows_gpu_judge), the compositor's: gpu_on is the canvas gpu setting, gpu_able
+                is whether the lists go to the card (compositor_gpu_able), gpu_state is 0 up, 1 untrusted, 2 no card, 3 cooling down after hangs,
+                and gpu_steps the cool-downs in a row.
+        */
+        unsigned int gpu_on, gpu_able, gpu_state, gpu_steps;
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -1189,7 +1201,7 @@ static unsigned int windows_issue_clear(struct windows *table, const char *key, 
 
 // Copies the board: 1 when the copy is one the writers left whole, 0 when they kept writing through every try (the caller says the board is
 // busy and reads it again later). The copy is sanitized here, whatever the table says of itself.
-static int windows_issues_read(struct windows *table, struct windows_issues *into)
+static int windows_issues_read(const struct windows *table, struct windows_issues *into)
 {
         for (int tries = 0; table && into && tries < WINDOWS_ISSUE_TRIES; tries++)
         {
@@ -1239,6 +1251,111 @@ static unsigned int windows_issues_worst(const struct windows_issues *all, const
                                 (*count)++;
                 }
         return worst;
+}
+
+// The key of the GPU option's issues, as Settings' row for "canvas gpu" has it.
+#define WINDOWS_KEY_GPU "canvas gpu"
+// The codes the GPU raises under its key, in the order the board shows them (windows_gpu_wanted says which hold now).
+static const unsigned int windows_gpu_codes[] = {
+        WINDOWS_ISSUE_GPU_USERPTR, WINDOWS_ISSUE_GPU_MAP, WINDOWS_ISSUE_GPU_UNTRUSTED, WINDOWS_ISSUE_GPU_FAMILY, WINDOWS_ISSUE_GPU_COOLING,
+        WINDOWS_ISSUE_GPU_REFUSED, WINDOWS_ISSUE_GPU_LISTS, WINDOWS_ISSUE_GPU_LOST, WINDOWS_ISSUE_GPU_SCANOUT};
+#define WINDOWS_GPU_CODES (sizeof(windows_gpu_codes) / sizeof(windows_gpu_codes[0]))
+// The GPU states (the table's gpu_state, and what Settings' status line says): the card is up, untrusted, not there, or cooling down.
+#define WINDOWS_GPU_UP 0u
+#define WINDOWS_GPU_UNTRUSTED 1u
+#define WINDOWS_GPU_NO_CARD 2u
+#define WINDOWS_GPU_COOLING 3u
+// What Settings says the GPU does: off (the setting), no supported GPU, in use, partly in use, not in use (windows_gpu_judge).
+#define WINDOWS_GPU_STATUS_OFF 0u
+#define WINDOWS_GPU_STATUS_NONE 1u
+#define WINDOWS_GPU_STATUS_IN_USE 2u
+#define WINDOWS_GPU_STATUS_PARTLY 3u
+#define WINDOWS_GPU_STATUS_NOT 4u
+// A refusal reason is shown when it refused at least this many presents and at least one in this many of the presents the card was given.
+#define WINDOWS_GPU_REFUSAL_MIN 8u
+#define WINDOWS_GPU_REFUSAL_SHARE 20u
+// The lost frames worth an issue: this many, and one in ten of the frames tried.
+#define WINDOWS_GPU_LOST_MIN 8u
+
+// Whether text has the bytes of word (the reader's own strings are ended, so the search stops at the null).
+static int windows_has_word(const char *text, const char *word)
+{
+        for (unsigned int at = 0; text[at]; at++)
+        {
+                unsigned int k = 0;
+
+                while (word[k] && text[at + k] == word[k])
+                        k++;
+                if (!word[k])
+                        return 1;
+        }
+        return 0;
+}
+
+// The issues the GPU has now, from the table (the compositor's counters, which are read here and never written): each is set in want[] with its
+// severity, code, numbers and detail, and the number of them is returned (at most room). A code not in the answer is not raised: the caller clears
+// it. What the GPU is not doing is the answer, when the setting is off: none.
+static unsigned int windows_gpu_wanted(const struct windows *table, struct windows_issue *want, unsigned int room)
+{
+        unsigned int count = 0, step, error, total, refused_top = 0, refused_why = 0, tried = 0, lost = 0;
+
+        if (!table || !want || !table->gpu_on)
+                return 0;
+        // A new issue is added at the end of the answer, from the board's point of view in the order of the codes it knows.
+        #define WANT(sev, cod, x, y, text) do { if (count < room) { struct windows_issue *w = &want[count++]; memory_zero(w, sizeof(*w)); \
+                w->severity = (sev), w->code = (cod), w->a = (x), w->b = (y); string_copy_bounded((string_address)w->detail, (string_address)(text), WINDOWS_ISSUE_DETAIL); } } while (0)
+        step = table->gpu_map_why & 255u, error = table->gpu_map_why >> 8;
+        if (step && (windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)))
+                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_USERPTR, step, error, table->gpu_said);
+        else if (step)
+                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, step, error, table->gpu_said);
+        if (table->gpu_state == WINDOWS_GPU_UNTRUSTED)
+                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
+        if (table->gpu_state == WINDOWS_GPU_NO_CARD && table->gpu_family)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, "");
+        if (table->gpu_state == WINDOWS_GPU_COOLING)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, table->gpu_steps, 0, "");
+        for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
+                if (table->gpu_refused[why] > refused_top)
+                        refused_top = table->gpu_refused[why], refused_why = why;
+        total = table->gpu_drawn + table->gpu_processor;
+        if (refused_top >= WINDOWS_GPU_REFUSAL_MIN && refused_top * WINDOWS_GPU_REFUSAL_SHARE >= total && refused_why)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, windows_gpu_reasons[refused_why]);
+        if (!table->gpu_able && table->gpu_state == WINDOWS_GPU_UP && table->gpu_drawn + table->gpu_processor > 0)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                if (table->pid[row] && table->list_tried[row])
+                {
+                        tried += table->list_tried[row];
+                        for (unsigned int why = 0; why < UI_LOST_COUNT; why++)
+                                lost += table->list_lost[row][why];
+                }
+        if (lost >= WINDOWS_GPU_LOST_MIN && lost * 10 >= tried)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LOST, lost, tried, "");
+        if (table->refused && table->refused_error)
+                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_SCANOUT, table->refused_error, 0, "");
+        #undef WANT
+        return count;
+}
+
+// What Settings' status line says the GPU does, from the table's counters since the last judgement (drawn and processor presents of the
+// last sample): previous is the answer last time, so a share that moves about a threshold does not flap. Fewer than 16 presents keep it.
+static unsigned int windows_gpu_judge(const struct windows *table, unsigned int previous, unsigned int drawn, unsigned int processor)
+{
+        unsigned int total = drawn + processor, share;
+
+        if (!table->gpu_on)
+                return WINDOWS_GPU_STATUS_OFF;
+        if (table->gpu_state == WINDOWS_GPU_NO_CARD && !table->gpu_family)
+                return WINDOWS_GPU_STATUS_NONE;
+        if (total < 16)
+                return previous == WINDOWS_GPU_STATUS_OFF || previous == WINDOWS_GPU_STATUS_NONE ? WINDOWS_GPU_STATUS_NOT : previous;
+        share = drawn * 100 / total;
+        if (previous == WINDOWS_GPU_STATUS_IN_USE)
+                return share >= 65 ? WINDOWS_GPU_STATUS_IN_USE : share > 15 ? WINDOWS_GPU_STATUS_PARTLY : WINDOWS_GPU_STATUS_NOT;
+        if (previous == WINDOWS_GPU_STATUS_NOT)
+                return share <= 15 ? WINDOWS_GPU_STATUS_NOT : share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : WINDOWS_GPU_STATUS_PARTLY;
+        return share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : share <= 15 ? WINDOWS_GPU_STATUS_NOT : WINDOWS_GPU_STATUS_PARTLY;
 }
 
 /*

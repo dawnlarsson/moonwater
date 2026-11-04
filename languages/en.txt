@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Picked: the first one there is
 settings_already_joined	71fb	already joined to %s
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first
+settings_badge_error	9cf1	Error
+settings_badge_warning	fc8f	Warning
 settings_battery_charging	5116	, Charging
 settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Type to filter
 settings_forget	5220	forget %s
 settings_help_more	93ec	moonwater help says more than All commands lists: the first row runs any command
 settings_identify_screens	8be8	Identify screens
+settings_issue_gpu_cooling	63ed	The card is cooling down after hangs (%1$d in a row)
+settings_issue_gpu_family	6311	This GPU family is not supported (family %1$d)
+settings_issue_gpu_lists	1433	Lists are off: the card is not composing in earnest
+settings_issue_gpu_lost	28ed	Apps lost %1$d of %2$d frames to the processor
+settings_issue_gpu_map	f52f	The kernel refused to map window pictures for the card (step %1$d, error %2$d)
+settings_issue_gpu_refused	f29c	The card refused %1$d presents: %2$s
+settings_issue_gpu_scanout	1379	The card refused a window's framebuffer for direct scan-out (error %1$d)
+settings_issue_gpu_untrusted	14ea	The card's self-test drew wrong, so it is not trusted (family %1$d)
+settings_issue_gpu_userptr	ff23	The kernel was built without userptr support for the GPU (CONFIG_DRM_AMDGPU_USERPTR), so the card cannot read window pictures: rebuild the kernel with it
+settings_issue_unknown	e812	A problem this version does not name (code %1$d)
 settings_item_add	fbef	Enter keeps the name of a device; the radio goes on for what pairs
 settings_item_ask	6aad	Enter asks for its passphrase and joins it
 settings_item_cannot	e643	moonwater cannot join what this network asks for
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d%% (recommended)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Screen %1$d: %2$s
 settings_screen_named	d918	Screen %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	In use: the card composed %1$d of %2$d presents (%3$d%%)
+settings_status_none	afed	No supported GPU: the processor draws everything
+settings_status_not	2583	Not in use: the card composed %1$d of %2$d presents, the processor drew the rest
+settings_status_off	4e63	Off: the setting is off, so the processor draws everything
+settings_status_partly	af8b	Partly in use: the card composed %1$d of %2$d presents (%3$d%%)
+settings_status_waiting	dfe6	Waiting for the first presents
 settings_stopped	f34e	stopped
 settings_too_long	fed7	moonwater took too long, and was stopped
 settings_too_many	db0e	that is more words than one command takes

@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Elegido: el primero que hay
 settings_already_joined	71fb	ya conectado a %s
 settings_any_text	89dc	cualquier comando, como las palabras tras moonwater: su verbo y sus argumentos
 settings_asks_first	e9bd	pregunta antes
+settings_badge_error	9cf1	Error
+settings_badge_warning	fc8f	Aviso
 settings_battery_charging	5116	, cargando
 settings_battery_discharging	7964	, descargando
 settings_battery_full	ded8	, completa
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Escriba para filtrar
 settings_forget	5220	olvidar %s
 settings_help_more	93ec	moonwater help dice más de lo que lista Todos los comandos: la primera fila ejecuta cualquier comando
 settings_identify_screens	8be8	Identificar pantallas
+settings_issue_gpu_cooling	63ed	La tarjeta se está enfriando tras bloqueos (%1$d seguidos)
+settings_issue_gpu_family	6311	Esta familia de GPU no es compatible (familia %1$d)
+settings_issue_gpu_lists	1433	Las listas están desactivadas: la tarjeta no compone de verdad
+settings_issue_gpu_lost	28ed	Las apps perdieron %1$d de %2$d fotogramas en favor del procesador
+settings_issue_gpu_map	f52f	El kernel rechazó mapear las imágenes de las ventanas para la tarjeta (paso %1$d, error %2$d)
+settings_issue_gpu_refused	f29c	La tarjeta rechazó %1$d presentaciones: %2$s
+settings_issue_gpu_scanout	1379	La tarjeta rechazó el framebuffer de una ventana para la salida directa (error %1$d)
+settings_issue_gpu_untrusted	14ea	La autoprueba de la tarjeta dibujó mal, así que no es de confianza (familia %1$d)
+settings_issue_gpu_userptr	ff23	El kernel se compiló sin soporte userptr para la GPU (CONFIG_DRM_AMDGPU_USERPTR), así que la tarjeta no puede leer las imágenes de las ventanas: recompile el kernel con él
+settings_issue_unknown	e812	Un problema que esta versión no nombra (código %1$d)
 settings_item_add	fbef	Enter guarda el nombre de un dispositivo; la radio se activa para lo que se empareje
 settings_item_ask	6aad	Enter pide su contraseña y se conecta
 settings_item_cannot	e643	moonwater no puede conectarse a lo que esta red pide
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d %% (recomendada)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Pantalla %1$d: %2$s
 settings_screen_named	d918	Pantalla %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	En uso: la tarjeta compuso %1$d de %2$d presentaciones (%3$d%%)
+settings_status_none	afed	No hay GPU compatible: el procesador dibuja todo
+settings_status_not	2583	No en uso: la tarjeta compuso %1$d de %2$d presentaciones; el procesador dibujó el resto
+settings_status_off	4e63	Desactivada: el ajuste está apagado, así que el procesador dibuja todo
+settings_status_partly	af8b	Parcialmente en uso: la tarjeta compuso %1$d de %2$d presentaciones (%3$d%%)
+settings_status_waiting	dfe6	Esperando las primeras presentaciones
 settings_stopped	f34e	detenido
 settings_too_long	fed7	moonwater tardó demasiado y se detuvo
 settings_too_many	db0e	son más palabras de las que admite un comando

@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Choisi : le premier qui existe
 settings_already_joined	71fb	déjà connecté à %s
 settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments
 settings_asks_first	e9bd	demande d'abord
+settings_badge_error	9cf1	Erreur
+settings_badge_warning	fc8f	Avertissement
 settings_battery_charging	5116	, en charge
 settings_battery_discharging	7964	, en décharge
 settings_battery_full	ded8	, pleine
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Saisir pour filtrer
 settings_forget	5220	oublier %s
 settings_help_more	93ec	moonwater help en dit plus que Toutes les commandes n'en liste : la première ligne lance n'importe quelle commande
 settings_identify_screens	8be8	Identifier les écrans
+settings_issue_gpu_cooling	63ed	La carte refroidit après des blocages (%1$d à la suite)
+settings_issue_gpu_family	6311	Cette famille de GPU n'est pas prise en charge (famille %1$d)
+settings_issue_gpu_lists	1433	Les listes sont désactivées : la carte ne compose pas réellement
+settings_issue_gpu_lost	28ed	Des applications ont perdu %1$d images sur %2$d au profit du processeur
+settings_issue_gpu_map	f52f	Le noyau a refusé de mapper les images des fenêtres pour la carte (étape %1$d, erreur %2$d)
+settings_issue_gpu_refused	f29c	La carte a refusé %1$d présentations : %2$s
+settings_issue_gpu_scanout	1379	La carte a refusé le framebuffer d'une fenêtre pour l'affichage direct (erreur %1$d)
+settings_issue_gpu_untrusted	14ea	L'autotest de la carte a mal dessiné, elle n'est donc pas fiable (famille %1$d)
+settings_issue_gpu_userptr	ff23	Le noyau a été compilé sans prise en charge userptr pour le GPU (CONFIG_DRM_AMDGPU_USERPTR), donc la carte ne peut pas lire les images des fenêtres : recompilez le noyau avec cette option
+settings_issue_unknown	e812	Un problème que cette version ne nomme pas (code %1$d)
 settings_item_add	fbef	Enter garde le nom d'un appareil ; la radio s'active pour ce qui s'appaire
 settings_item_ask	6aad	Enter demande son mot de passe et rejoint
 settings_item_cannot	e643	moonwater ne peut pas rejoindre ce que ce réseau demande
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d %% (recommandée)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Écran %1$d : %2$s
 settings_screen_named	d918	Écran %1$d : %2$s [%3$s]
+settings_status_in_use	2ec7	En service : la carte a composé %1$d présentations sur %2$d (%3$d%%)
+settings_status_none	afed	Aucun GPU pris en charge : le processeur dessine tout
+settings_status_not	2583	Non utilisée : la carte a composé %1$d présentations sur %2$d, le processeur a dessiné le reste
+settings_status_off	4e63	Désactivée : le réglage est coupé, le processeur dessine tout
+settings_status_partly	af8b	En partie : la carte a composé %1$d présentations sur %2$d (%3$d%%)
+settings_status_waiting	dfe6	En attente des premières présentations
 settings_stopped	f34e	arrêté
 settings_too_long	fed7	moonwater a pris trop de temps et a été arrêté
 settings_too_many	db0e	c'est plus de mots que n'en prend une commande

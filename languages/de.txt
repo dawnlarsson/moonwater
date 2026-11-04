@@ -68,6 +68,8 @@ mixer_why_nothing	ff66	Gewählt: der erste vorhandene
 settings_already_joined	71fb	bereits verbunden mit %s
 settings_any_text	89dc	ein beliebiger Befehl, wie die Wörter nach moonwater: sein Verb, dann seine Argumente
 settings_asks_first	e9bd	fragt zuerst
+settings_badge_error	9cf1	Fehler
+settings_badge_warning	fc8f	Warnung
 settings_battery_charging	5116	, lädt
 settings_battery_discharging	7964	, entlädt
 settings_battery_full	ded8	, voll
@@ -84,6 +86,16 @@ settings_filter_hint	4aa0	Zum Filtern tippen
 settings_forget	5220	%s vergessen
 settings_help_more	93ec	moonwater help nennt mehr, als Alle Befehle auflistet: die erste Zeile führt jeden Befehl aus
 settings_identify_screens	8be8	Bildschirme identifizieren
+settings_issue_gpu_cooling	63ed	Die Grafikkarte kühlt nach Hängern ab (%1$d hintereinander)
+settings_issue_gpu_family	6311	Diese GPU-Familie wird nicht unterstützt (Familie %1$d)
+settings_issue_gpu_lists	1433	Listen sind aus: die Grafikkarte setzt nicht wirklich zusammen
+settings_issue_gpu_lost	28ed	Apps haben %1$d von %2$d Bildern an den Prozessor verloren
+settings_issue_gpu_map	f52f	Der Kernel hat das Abbilden der Fensterbilder für die Grafikkarte abgelehnt (Schritt %1$d, Fehler %2$d)
+settings_issue_gpu_refused	f29c	Die Grafikkarte hat %1$d Bilder abgelehnt: %2$s
+settings_issue_gpu_scanout	1379	Die Grafikkarte hat den Framebuffer eines Fensters für die direkte Ausgabe abgelehnt (Fehler %1$d)
+settings_issue_gpu_untrusted	14ea	Der Selbsttest der Grafikkarte hat falsch gezeichnet, daher wird ihr nicht vertraut (Familie %1$d)
+settings_issue_gpu_userptr	ff23	Der Kernel wurde ohne userptr-Unterstützung für die GPU gebaut (CONFIG_DRM_AMDGPU_USERPTR), daher kann die Grafikkarte die Fensterbilder nicht lesen: den Kernel damit neu bauen
+settings_issue_unknown	e812	Ein Problem, das diese Version nicht benennt (Code %1$d)
 settings_item_add	fbef	Enter merkt sich den Namen eines Geräts; das Funkmodul schaltet sich für Kopplungen ein
 settings_item_ask	6aad	Enter fragt nach dem Passwort und verbindet
 settings_item_cannot	e643	moonwater kann nicht erfüllen, was dieses Netzwerk verlangt
@@ -123,6 +135,12 @@ settings_scale_best	2ba0	%d %% (empfohlen)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Bildschirm %1$d: %2$s
 settings_screen_named	d918	Bildschirm %1$d: %2$s [%3$s]
+settings_status_in_use	2ec7	In Benutzung: die Grafikkarte hat %1$d von %2$d Bildern zusammengesetzt (%3$d%%)
+settings_status_none	afed	Keine unterstützte GPU: der Prozessor zeichnet alles
+settings_status_not	2583	Nicht in Benutzung: die Grafikkarte hat %1$d von %2$d Bildern zusammengesetzt, der Prozessor hat den Rest gezeichnet
+settings_status_off	4e63	Aus: die Einstellung ist ausgeschaltet, daher zeichnet der Prozessor alles
+settings_status_partly	af8b	Teilweise in Benutzung: die Grafikkarte hat %1$d von %2$d Bildern zusammengesetzt (%3$d%%)
+settings_status_waiting	dfe6	Warten auf die ersten Bilder
 settings_stopped	f34e	angehalten
 settings_too_long	fed7	moonwater brauchte zu lange und wurde angehalten
 settings_too_many	db0e	das sind mehr Wörter, als ein Befehl annimmt

@@ -7821,6 +7821,48 @@ static void compositor_gpu_lists_sync(void)
                 was = want, compositor_lists_set(want);
 }
 
+// The GPU's issues on the board (window.c's windows_gpu_wanted, under the key canvas gpu): the state the table publishes for Settings
+// (gpu_on, gpu_able, gpu_state, gpu_steps), then each code set when it holds now, with its numbers and the kernel's words, and cleared when
+// it does not. A code is written only when what it says changed, so a present costs a compare and a board write is rare.
+static void compositor_gpu_issues(void)
+{
+        static struct windows_issue last[WINDOWS_GPU_CODES];
+        struct windows_issue want[WINDOWS_GPU_CODES];
+        struct windows *table = compositor.table;
+        unsigned int count;
+
+        if (!table)
+                return;
+        table->gpu_on = (unsigned int)compositor_gpu, table->gpu_able = (unsigned int)compositor_gpu_able;
+        table->gpu_state = compositor_gpu_state.dead ? (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_UNTRUSTED ? WINDOWS_GPU_UNTRUSTED : WINDOWS_GPU_NO_CARD)
+                           : compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until ? WINDOWS_GPU_COOLING
+                                                                                                                              : WINDOWS_GPU_UP;
+        table->gpu_steps = compositor_gpu_state.cool_steps;
+        memory_zero(want, sizeof(want));
+        count = windows_gpu_wanted(table, want, WINDOWS_GPU_CODES);
+        for (unsigned int slot = 0; slot < WINDOWS_GPU_CODES; slot++)
+        {
+                struct windows_issue *now = null;
+
+                for (unsigned int k = 0; k < count; k++)
+                        if (want[k].code == windows_gpu_codes[slot])
+                                now = &want[k];
+                if (now)
+                {
+                        now->used = 1;
+                        if (!memory_compare(&last[slot], now, sizeof(*now)))
+                                continue;
+                        if (windows_issue_set(table, WINDOWS_KEY_GPU, now->severity, now->code, now->a, now->b, now->detail))
+                                memory_copy(&last[slot], now, sizeof(*now));
+                }
+                else if (last[slot].used)
+                {
+                        windows_issue_clear(table, WINDOWS_KEY_GPU, windows_gpu_codes[slot]);
+                        memory_zero(&last[slot], sizeof(last[slot]));
+                }
+        }
+}
+
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it (and the reason is counted).
 static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
 {
@@ -7828,6 +7870,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
 
         compositor_gpu_able_count(why);
         compositor_gpu_lists_sync();
+        compositor_gpu_issues();
 
         if (why == COMPOSITOR_GPU_WHY_DRAWN)
         {
