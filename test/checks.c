@@ -135569,7 +135569,7 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.child <= 0 && settings.feed_due > clock_monotonic_nanoseconds());
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
-                        settings.own.table = null, settings.shown = -1;
+                        settings.own.table = null, settings.buffers.shown = -1;
                         settings.group = 0;
                         settings.item_count[0] = 0;
                         settings.item_count[1] = 0;
@@ -135843,7 +135843,7 @@ static fn settings_frames_pass(void)
         settings_frames.table->shown[settings.own.row] = settings_frames.table->frame[settings.own.row];
         settings_frames.frames++;
         if (!settings_frames.wrong)
-                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address) "shown");
+                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address) "shown");
 }
 
 // The loop until a time: a pass now, then a frame each display period while anything moves.
@@ -135939,7 +135939,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
         {
                 settings.dirty = true;
                 settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
-                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
         }
         check("settings frames: every buffer shown is the whole picture drawn at its time", !settings_frames.wrong);
         settings.child = 0;
@@ -136089,7 +136089,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
         {
                 settings.dirty = true;
                 settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
-                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
         }
         check("settings frames: every buffer a script shows is the whole picture drawn at its time", !settings_frames.wrong);
         string_format(log, "  settings frames (%s): %p frames, %p of them moving, %p changes answered\n", name,
@@ -137324,7 +137324,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 struct window_row own;
                 int width, height, shown, group;
                 struct ui_control address_to controls;
-        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.shown, settings.group, settings.list.controls};
+        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.buffers.shown, settings.group, settings.list.controls};
 
         if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
             font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
@@ -137351,9 +137351,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
         ui_kit_inks(&settings.ui);
         ui_kit_settle();
         check_settings_edges();
-        settings.shown = -1;
+        ui_buffers_start(&settings.buffers);
         settings.focused = 1;
-        settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
         settings_frames.now = 5000000000ull;
         ui_kit.drawn = 0;
         ui_kit.busy = 0;
@@ -137517,7 +137516,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
 
         settings.ui = saved.ui;
         settings.own = saved.own;
-        settings.width = saved.width, settings.height = saved.height, settings.shown = saved.shown, settings.group = saved.group;
+        settings.width = saved.width, settings.height = saved.height, settings.buffers.shown = saved.shown, settings.group = saved.group;
         settings.list.controls = saved.controls;
         settings_layout();
         compositor_call(syscall(munmap), (positive)table, WINDOWS_HEADER + 2 * buffer, 0, 0, 0, 0);
@@ -138320,7 +138319,7 @@ static fn check_rtl_mirror(void)
                 settings.state[at] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[at], (string_address)(row->standard ? row->standard : "1"), SETTINGS_VALUE);
         }
-        settings.shown = -1;
+        settings.buffers.shown = -1;
         settings.pane = 0;
         // The cuts the kit remembers are of the faces the checks before this one drew with.
         if (ui_cuts)
@@ -147809,7 +147808,7 @@ b32 main()
                         if (!settings_map())
                                 return 1;
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.choice = -1, settings.pane = 1, settings.shown = -1, settings.focused = 1;
+                        settings.editing = -1, settings.choice = -1, settings.pane = 1, settings.buffers.shown = -1, settings.focused = 1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];
@@ -148056,7 +148055,7 @@ b32 main()
                         unsigned int glass = dark ? 0x2b2b2eu : 0xb4b4b4u;
 
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.choice = -1, settings.pane = 1, settings.shown = -1;
+                        settings.editing = -1, settings.choice = -1, settings.pane = 1, settings.buffers.shown = -1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];

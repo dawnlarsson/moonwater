@@ -9450,6 +9450,110 @@ static b32 ui_lines_key(const struct ui address_to ui, struct ui_scroll address_
 }
 
 /*
+        The two buffers of an app's window: the compositor reads one while the app paints the other. The kit keeps what each
+        lacks, the rows that changed since it was last drawn (the frame before, or the one before that for the other) and the
+        rows the compositor spoiled in it, and draws only those, or the whole picture when a buffer lacks all of it. Rows are
+        device pixels, [top, bottom); shown is the buffer on the screen, -1 when none is yet. The app says what changed
+        (ui_buffers_all, ui_buffers_rows) and calls ui_buffers_present for its picture.
+*/
+struct ui_buffers
+{
+        int shown;
+        int change_top, change_bottom;         // the rows changed since the last picture (empty when bottom <= top)
+        b32 change_all;                        // or all of them
+        int stale_top[2], stale_bottom[2];     // for each buffer, the rows it lacks since it was last drawn
+        b32 stale_all[2];                      // or all of them
+};
+
+// Rows [from, to) added to the rows [top, bottom) (empty when bottom <= top): the union, the empty one none.
+static void ui_rows_add(int address_to top, int address_to bottom, int from, int to)
+{
+        if (to <= from)
+                return;
+        if (*bottom <= *top)
+        {
+                *top = from;
+                *bottom = to;
+                return;
+        }
+        *top = from < *top ? from : *top;
+        *bottom = to > *bottom ? to : *bottom;
+}
+
+// Both buffers lack the whole picture: the next one is drawn whole.
+static fn ui_buffers_all(struct ui_buffers address_to b)
+{
+        b->change_all = true;
+}
+
+// Rows [top, bottom) of the picture may have changed, and no others: the next picture draws them.
+static fn ui_buffers_rows(struct ui_buffers address_to b, int top, int bottom)
+{
+        ui_rows_add(&b->change_top, &b->change_bottom, top, bottom);
+}
+
+// A window's start: nothing shown, and both buffers lack the whole picture.
+static fn ui_buffers_start(struct ui_buffers address_to b)
+{
+        b->shown = -1;
+        b->change_all = b->stale_all[0] = b->stale_all[1] = true;
+}
+
+/*
+        One picture into the buffer the compositor is not reading: paint draws its rows [top, bottom), within height. False
+        while the compositor has not taken the last one (the picture is due again). True once it is done, even when no row
+        changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
+*/
+static b32 ui_buffers_present(struct ui_buffers address_to b, const struct window_row address_to own, int width, int height,
+                              void (*paint)(unsigned int address_to pixels, int top, int bottom))
+{
+        struct windows address_to table = own->table;
+        unsigned int row = own->row;
+        int slot = b->shown < 0 ? 0 : 1 - b->shown, other = 1 - slot, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
+        int spoiled_top = 0, spoiled_bottom = 0, drawn_top = b->stale_top[slot], drawn_bottom = b->stale_bottom[slot];
+        b32 whole = b->stale_all[slot] || b->change_all;
+
+        if (b->shown >= 0 && !windows_ready(own))
+                return false;
+        if (windows_spoiled(own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
+                spoiled_top = spoiled_y, spoiled_bottom = spoiled_y + spoiled_height;
+        ui_rows_add(&drawn_top, &drawn_bottom, b->change_top, b->change_bottom);
+        ui_rows_add(&drawn_top, &drawn_bottom, spoiled_top, spoiled_bottom);
+        if (whole)
+                drawn_top = 0, drawn_bottom = height;
+        drawn_top = drawn_top < 0 ? 0 : drawn_top;
+        drawn_bottom = drawn_bottom > height ? height : drawn_bottom;
+        if (drawn_bottom > drawn_top)
+                paint(windows_buffer(table, row, (unsigned int)slot), drawn_top, drawn_bottom);
+        else
+                drawn_top = drawn_bottom = 0;
+        // The buffer is the picture now; the other lacks what changed since it was last drawn, which is what changed now.
+        b->stale_top[slot] = b->stale_bottom[slot] = 0;
+        b->stale_all[slot] = false;
+        b->stale_top[other] = b->change_top;
+        b->stale_bottom[other] = b->change_bottom;
+        b->stale_all[other] = b->change_all;
+        b->change_top = b->change_bottom = 0;
+        b->change_all = false;
+        if (!whole && drawn_bottom <= drawn_top && b->shown >= 0)
+                return true;
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        if (whole)
+                table->damage_width[row] = 0;
+        else
+        {
+                table->damage_x[row] = 0;
+                table->damage_y[row] = drawn_top;
+                table->damage_width[row] = (unsigned int)width;
+                table->damage_height[row] = drawn_bottom - drawn_top;
+        }
+        windows_show(own, (unsigned int)slot);
+        b->shown = slot;
+        return true;
+}
+
+/*
         One app's window and loop. The runner claims the standard descriptors,
         takes the window, sets its title, name, glass, scale and ground, and calls
         open. Then it runs the loop: events, closing, focus, ground, the size

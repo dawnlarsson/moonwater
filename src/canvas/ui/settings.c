@@ -714,7 +714,7 @@ static struct
         char edit_from[SETTINGS_VALUE];
         struct ui_popup popup;
         char status[SETTINGS_STATUS];
-        int width, height, shown;
+        int width, height;
         unsigned int ground;
         b32 focused, dirty;
 
@@ -739,13 +739,8 @@ static struct
         positive queued;
         b32 told;         // the first reading is said in the machine's log
 
-        // The picture: the rows changed since the last one was made (empty when bottom <= top), or all of it; and for each
-        // buffer, the rows it lacks since it was last drawn, or all of it. The two buffers alternate, so each lacks what
-        // changed since the frame before last.
-        int change_top, change_bottom;
-        b32 change_all;
-        int stale_top[2], stale_bottom[2];
-        b32 stale_all[2];
+        // The picture's two buffers and the rows each lacks (the kit's): what changed, what the compositor spoiled.
+        struct ui_buffers buffers;
         // What the wrapped lines were made for: the card, the width and the scale.
         unsigned int card_generation;
         b32 wrap_made;
@@ -787,33 +782,18 @@ static b32 settings_map(void)
         return true;
 }
 
-// Rows [from, to) added to the rows [top, bottom) (empty when bottom <= top): the union, the empty one none.
-static void settings_rows_add(int address_to top, int address_to bottom, int from, int to)
-{
-        if (to <= from)
-                return;
-        if (*bottom <= *top)
-        {
-                *top = from;
-                *bottom = to;
-                return;
-        }
-        *top = from < *top ? from : *top;
-        *bottom = to > *bottom ? to : *bottom;
-}
-
 // The picture may have changed anywhere: the next one is drawn whole.
 static fn settings_dirty(void)
 {
         settings.dirty = true;
-        settings.change_all = true;
+        ui_buffers_all(&settings.buffers);
 }
 
 // Rows [top, bottom) of the picture may have changed, and no others: the next one draws them.
 static fn settings_changed(int top, int bottom)
 {
         settings.dirty = true;
-        settings_rows_add(&settings.change_top, &settings.change_bottom, top, bottom);
+        ui_buffers_rows(&settings.buffers, top, bottom);
 }
 
 /* ---- the rows ---- */
@@ -4716,7 +4696,7 @@ static const char address_to settings_card_line(int at, char address_to into, po
         The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): the kit's page
         (its title, the search field that shows the filter, the status line), then the column of groups and the rows of
         the group chosen, or the card, and over them the menu a choice opened. settings_paint calls it only for a band
-        with rows in it.
+        with rows in it (ui_buffers_present calls it).
 */
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
@@ -4766,80 +4746,14 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
 }
 
 /*
-        The picture in the buffer slot, redrawn in the rows it lacks: those
-        that changed since it was last drawn (the frame before, or the one
-        before that for the other buffer) and those the compositor spoiled in
-        it. Answers whether the whole of it was drawn, and the rows drawn,
-        [top, bottom): the damage the compositor reads again.
+        One picture into the kit's buffers (ui_buffers_present draws the rows that changed or were spoiled, and shows the
+        buffer): the picture is due until the compositor has taken the last one, and clean after it.
 */
-static b32 settings_paint(unsigned int address_to pixels, int slot, int spoiled_top, int spoiled_bottom, int address_to top,
-                          int address_to bottom)
-{
-        int drawn_top = settings.stale_top[slot], drawn_bottom = settings.stale_bottom[slot], other = 1 - slot;
-        b32 whole = settings.stale_all[slot] || settings.change_all;
-
-        settings_rows_add(&drawn_top, &drawn_bottom, settings.change_top, settings.change_bottom);
-        settings_rows_add(&drawn_top, &drawn_bottom, spoiled_top, spoiled_bottom);
-        if (whole)
-        {
-                drawn_top = 0;
-                drawn_bottom = settings.height;
-        }
-        drawn_top = drawn_top < 0 ? 0 : drawn_top;
-        drawn_bottom = drawn_bottom > settings.height ? settings.height : drawn_bottom;
-        if (drawn_bottom > drawn_top)
-                settings_draw_rows(pixels, drawn_top, drawn_bottom);
-        else
-                drawn_top = drawn_bottom = 0;
-
-        // The buffer is the picture now; the other lacks what changed since it was last drawn, which is what changed now.
-        settings.stale_top[slot] = settings.stale_bottom[slot] = 0;
-        settings.stale_all[slot] = false;
-        settings.stale_top[other] = settings.change_top;
-        settings.stale_bottom[other] = settings.change_bottom;
-        settings.stale_all[other] = settings.change_all;
-        settings.change_top = settings.change_bottom = 0;
-        settings.change_all = false;
-        *top = drawn_top;
-        *bottom = drawn_bottom;
-        return whole;
-}
-
-// One picture, into the buffer the compositor is not reading; false when there is none yet.
 static b32 settings_frame(void)
 {
-        struct windows address_to table = settings.own.table;
-        unsigned int row = settings.own.row;
-        int slot = settings.shown < 0 ? 0 : 1 - settings.shown, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
-        int spoiled_top = 0, spoiled_bottom = 0, top, bottom;
-        b32 whole;
-
-        if (settings.shown >= 0 && !windows_ready(&settings.own))
+        if (!ui_buffers_present(&settings.buffers, &settings.own, settings.width, settings.height, settings_draw_rows))
                 return false;
-        if (windows_spoiled(&settings.own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
-        {
-                spoiled_top = spoiled_y;
-                spoiled_bottom = spoiled_y + spoiled_height;
-        }
-        whole = settings_paint(windows_buffer(table, row, (unsigned int)slot), slot, spoiled_top, spoiled_bottom, &top, &bottom);
         settings.dirty = false;
-        // Nothing drawn (what moves was nowhere in the picture): the buffer is the one shown, and showing it again is a
-        // knock, a take and a present for no pixel. It is drawn into again next time, lacking nothing.
-        if (!whole && bottom <= top && settings.shown >= 0)
-                return true;
-        table->width[row] = (unsigned int)settings.width;
-        table->height[row] = (unsigned int)settings.height;
-        if (whole)
-                table->damage_width[row] = 0;
-        else
-        {
-                table->damage_x[row] = 0;
-                table->damage_y[row] = top;
-                table->damage_width[row] = settings.width;
-                table->damage_height[row] = bottom - top;
-        }
-        windows_show(&settings.own, (unsigned int)slot);
-        settings.shown = slot;
         return true;
 }
 
@@ -5043,11 +4957,10 @@ static b32 settings_main()
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
         settings.editing = -1;
-        settings.shown = -1;
+        ui_buffers_start(&settings.buffers);
         settings.output = -1;
         settings.pane = 1; // the keys start in the rows, on the first of them
         settings.choice = -1;
-        settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
         {
