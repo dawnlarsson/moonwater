@@ -12,7 +12,8 @@ Last run: see the commit that changed this line.
 import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c')}
+engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c'),
+           'control': os.path.join(root, 'src/audio/control.c')}
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='audio-mutations-')
 only = sys.argv[1:]
@@ -112,6 +113,18 @@ M = [
     ("pulse", "the default sink open to all", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (name)\n                {", "if (name)\n                {"),
     ("pulse", "a flush that cuts at once", "s->voice.ring.write = s->voice.ring.limit;\n                                s->flushing = 1;", "s->voice.ring.limit = s->voice.ring.write = s->voice.ring.read;\n                                s->flushing = 1;"),
     ("pulse", "cork not applied", "s->corked = cork;\n                if (cork)\n                        s->underrun = 1;\n                pulse_stream_apply(s);", "s->corked = cork;"),
+    # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
+    ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
+    ("control", "a mute turned over", "pulse_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended", "pulse_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended"),
+    ("control", "the channel count not kept", "        c->kept[c->kept_next].index = index;\n        c->kept[c->kept_next].channels = channels;\n        c->kept_next = (c->kept_next + 1) % CTL_CACHE;", "        c->kept_next = (c->kept_next + 1) % CTL_CACHE;"),
+    ("control", "a wrong count not mended", "                if (got != CTL_INVALID)\n                        return got < 0 ? got : 0;", "                return got < 0 ? got : 0;"),
+    ("control", "an access error as a failure", "return code == PULSE_ERR_ACCESS ? CTL_ACCESS :", "return code == PULSE_ERR_ACCESS ? CTL_FAILED :"),
+    ("control", "a missing stream as a failure", "code == PULSE_ERR_NOENTITY ? CTL_NOENTITY", "code == PULSE_ERR_NOENTITY ? CTL_FAILED"),
+    ("control", "any tag taken for ours", "if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)", "if (frame[20] != 'L' || frame[25] != 'L')"),
+    ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
+    ("control", "the sink named by nothing", "pulse_w_u32(&w, PULSE_INVALID);\n        pulse_w_string(&w, sink);\n        pulse_w_cvolume(&w, both, 2);", "pulse_w_u32(&w, PULSE_INVALID);\n        pulse_w_string(&w, 0);\n        pulse_w_cvolume(&w, both, 2);"),
+    ("control", "a stream's mute misread", "into->muted = pulse_r_bool(&r);", "into->muted = 0, (void)pulse_r_bool(&r);"),
+    ("control", "the stream killed is another", "ctl_begin(c, &w, PULSE_COMMAND_KILL_SINK_INPUT);\n        pulse_w_u32(&w, index);", "ctl_begin(c, &w, PULSE_COMMAND_KILL_SINK_INPUT);\n        pulse_w_u32(&w, index + 1);"),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}
@@ -133,7 +146,7 @@ def run(index):
         shutil.copy(v, d + "/src/audio/" + k + ".c")
     open(d + "/src/audio/" + which + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
     exe = d + "/check"
-    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + which, d + "/test/checks.c", "-o", exe, "-lm"],
+    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + ("pulse" if which == "control" else which), d + "/test/checks.c", "-o", exe, "-lm"],
                         capture_output=True, text=True, errors="replace")
     if cc.returncode:
         return (name, "BUILD ERROR", cc.stderr[:200])

@@ -170383,6 +170383,8 @@ int main(void)
 
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
+#define CTL_NO_SYSTEM
+#include "../src/audio/control.c"
 
 static unsigned pt_checks, pt_failures;
 
@@ -172581,6 +172583,212 @@ static void pt_test_fuzz(void)
         (void)pt_fuzz_dead;
 }
 
+/* ---- the control client (src/audio/control.c) against this engine, with no socket between ---- */
+
+static long pt_ctl_slot;
+static unsigned char pt_ctl_bytes[PULSE_OUT];
+static long pt_ctl_have, pt_ctl_at, pt_ctl_sends, pt_ctl_deaf, pt_ctl_fail_send, pt_ctl_stale;
+
+// What the client sends goes to the engine as the bytes a connection would carry.
+static long pt_ctl_send(void *context, const unsigned char *bytes, long count)
+{
+        (void)context;
+        pt_ctl_sends++;
+        if (pt_ctl_fail_send)
+                return -1;
+        // An answer to a request of another tag, and an error to one, come first: the client reads past them to its own.
+        if (pt_ctl_stale)
+        {
+                static const unsigned char other[2][30] = {{0, 0, 0, 10, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'L', 0, 0, 0, 2, 'L', 0, 0, 7, 77},
+                                                         {0, 0, 0, 15, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'L', 0, 0, 0, 0, 'L', 0, 0, 7, 78}};
+                static const unsigned char code[5] = {'L', 0, 0, 0, 3};
+
+                memcpy(pt_ctl_bytes + pt_ctl_have, other[1], 30), memcpy(pt_ctl_bytes + pt_ctl_have + 30, code, 5), pt_ctl_have += 35;
+                memcpy(pt_ctl_bytes + pt_ctl_have, other[0], 30), pt_ctl_have += 30;
+        }
+        return pulse_client_feed(&pt_engine, pt_ctl_slot, bytes, count) < 0 ? -1 : 0;
+}
+
+// And what the engine queued is what it reads, a part at a time; a server that says nothing is a read that fails, as a timeout does.
+static long pt_ctl_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)context;
+        (void)timeout_ms;
+        while (pt_ctl_have - pt_ctl_at < count)
+        {
+                const unsigned char *out;
+                long n = pt_ctl_deaf ? 0 : pulse_client_out(&pt_engine, pt_ctl_slot, &out);
+
+                if (n <= 0)
+                        return -1;
+                if (pt_ctl_have + n > (long)sizeof(pt_ctl_bytes))
+                        return -1;
+                memcpy(pt_ctl_bytes + pt_ctl_have, out, (size_t)n);
+                pt_ctl_have += n;
+                pulse_client_sent(&pt_engine, pt_ctl_slot, n);
+        }
+        memcpy(bytes, pt_ctl_bytes + pt_ctl_at, (size_t)count);
+        pt_ctl_at += count;
+        if (pt_ctl_at == pt_ctl_have)
+                pt_ctl_at = pt_ctl_have = 0;
+        return 0;
+}
+
+static struct ctl pt_ctl;
+
+// The control client joined to the engine as a client of uid, its handshake done; the engine's slot, or -1.
+static long pt_ctl_join(long uid)
+{
+        long slot = pulse_client_open(&pt_engine, uid, 4242);
+
+        if (slot < 0)
+                return -1;
+        pt_ctl_slot = slot;
+        pt_ctl_have = pt_ctl_at = pt_ctl_sends = pt_ctl_deaf = pt_ctl_fail_send = pt_ctl_stale = 0;
+        memset(&pt_ctl, 0, sizeof(pt_ctl));
+        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive};
+        return ctl_start(&pt_ctl) == 0 ? slot : -1;
+}
+
+static struct pulse_stream *pt_stream_of(unsigned long index)
+{
+        for (int i = 0; i < PULSE_STREAMS; i++)
+                if (pt_engine.stream[i].used && pt_engine.stream[i].index == index)
+                        return pt_engine.stream + i;
+        return 0;
+}
+
+static void pt_test_control_client(void)
+{
+        long owner, person, other;
+        unsigned long channel, index, index6, missing;
+        struct pulse_stream *s;
+        struct ctl_input info;
+        long sends;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        owner = pt_connect(1000, 11, 35, "Player");
+        PTCHECK(pt_create(owner, 35, 20, 19200, 19200, 4800, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a stereo stream");
+        PTCHECK(pt_create(owner, 35, 21, 19200, 19200, 4800, &channel, &index6, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 6, 48000, 0) == 0, "and a six channel one");
+
+        // The handshake: the engine has a client that is authorised, called by the name, at the newest version.
+        person = pt_ctl_join(0);
+        PTCHECK(person >= 0 && ctl_ready(&pt_ctl), "the handshake is done");
+        PTCHECK(person >= 0 && pt_engine.client[person]->authorized && pt_engine.client[person]->version == PULSE_VERSION && pt_engine.client[person]->root,
+                "the engine has an authorised client of the newest version, and it is the person's (uid 0)");
+        {
+                char name[64];
+
+                pulse_props_text(&pt_engine.client[person]->props, "application.name", name, sizeof(name));
+                PTCHECK(!strcmp(name, CTL_NAME), "the client names itself: %s", name);
+        }
+
+        // What it reads of a stream: its channels, its volume, its mute.
+        PTCHECK(ctl_get_input(&pt_ctl, index, &info) == 0 && info.index == index && info.channels == 2 && info.volume == 0x10000 && !info.muted,
+                "a stereo stream: 2 channels, 100%%, not muted (%ld %lu %d)", info.channels, info.volume, info.muted);
+        PTCHECK(ctl_get_input(&pt_ctl, index6, &info) == 0 && info.channels == 6, "a six channel stream: %ld", info.channels);
+        PTCHECK(ctl_kept_channels(&pt_ctl, index) == 2 && ctl_kept_channels(&pt_ctl, index6) == 6, "and the counts are kept by index");
+        PTCHECK(ctl_get_input(&pt_ctl, 9999, &info) == CTL_NOENTITY, "a stream that is not there is CTL_NOENTITY");
+
+        // A volume is sent as one number on every channel the stream has, one request when the count is known.
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0x8000) == 0, "a stereo volume is taken");
+        PTCHECK(pt_ctl_sends == sends + 1, "and costs one request when the count is kept (%ld)", pt_ctl_sends - sends);
+        s = pt_stream_of(index);
+        PTCHECK(s && s->volume[0] == 0x8000 && s->volume[1] == 0x8000, "both channels are at the volume");
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index6, 0x4000) == 0, "a six channel volume is taken");
+        s = pt_stream_of(index6);
+        PTCHECK(s && s->volume[0] == 0x4000 && s->volume[1] == 0x4000 && s->volume[2] == 0x4000 && s->volume[3] == 0x4000 && s->volume[4] == 0x4000 &&
+                    s->volume[5] == 0x4000,
+                "all six channels are at the volume");
+        PTCHECK(ctl_get_input(&pt_ctl, index, &info) == 0 && info.volume == 0x8000, "and it is read back: %lu", info.volume);
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0x30000) == 0 && pt_stream_of(index)->volume[0] == CTL_VOLUME_MAX, "a volume past 200%% is held to it");
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0) == 0 && pt_stream_of(index)->volume[0] == 0 && pt_stream_of(index)->volume[1] == 0, "and 0 is 0");
+
+        // A count the server refuses is asked again and the volume sent once more, and kept right.
+        ctl_keep_channels(&pt_ctl, index, 6);
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0xc000) == 0 && pt_stream_of(index)->volume[0] == 0xc000 && pt_stream_of(index)->volume[1] == 0xc000,
+                "a wrong count is mended: asked again, sent again");
+        PTCHECK(pt_ctl_sends == sends + 3 && ctl_kept_channels(&pt_ctl, index) == 2, "three requests, and the right count kept (%ld, %ld)", pt_ctl_sends - sends,
+                ctl_kept_channels(&pt_ctl, index));
+        PTCHECK(ctl_set_input_volume(&pt_ctl, 9999, 0x8000) == CTL_NOENTITY, "a volume for a stream that is not there is CTL_NOENTITY");
+
+        // The mute.
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == 0 && pt_stream_of(index)->muted == 1, "mute: the stream is muted");
+        PTCHECK(ctl_get_input(&pt_ctl, index, &info) == 0 && info.muted == 1, "and it reads muted");
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 0) == 0 && pt_stream_of(index)->muted == 0, "unmuted");
+        PTCHECK(ctl_set_input_mute(&pt_ctl, 9999, 1) == CTL_NOENTITY, "a mute for a stream that is not there is CTL_NOENTITY");
+
+        // Answers that are not ours are read past: another tag's reply, and another tag's error.
+        pt_ctl_stale = 1;
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == 0 && pt_stream_of(index)->muted == 1 && ctl_set_input_mute(&pt_ctl, index, 0) == 0 && !pt_stream_of(index)->muted,
+                "a reply and an error with other tags before the answer are read past");
+        pt_ctl_stale = 0;
+
+        // The master volume and mute, by the sink's name: the person's.
+        PTCHECK(ctl_set_sink_volume(&pt_ctl, "null", 0x8000) == 0 && pt_engine.sink[0].volume[0] == 0x8000 && pt_engine.sink[0].volume[1] == 0x8000,
+                "the sink's volume is on both channels");
+        PTCHECK(ctl_set_sink_volume(&pt_ctl, "null", 0x30000) == 0 && pt_engine.sink[0].volume[0] == CTL_VOLUME_MAX, "and held to 200%%");
+        PTCHECK(ctl_set_sink_mute(&pt_ctl, "null", 1) == 0 && pt_engine.sink[0].muted == 1, "the sink is muted");
+        PTCHECK(ctl_set_sink_mute(&pt_ctl, "null", 0) == 0 && pt_engine.sink[0].muted == 0, "and not");
+        PTCHECK(ctl_set_sink_volume(&pt_ctl, "no such sink", 0x8000) == CTL_NOENTITY && ctl_set_sink_mute(&pt_ctl, "no such sink", 1) == CTL_NOENTITY,
+                "a sink that is not there is CTL_NOENTITY");
+
+        // Who may: a client that is not the person's changes its own streams only.
+        other = pt_ctl_join(1001);
+        PTCHECK(other >= 0, "another user joins");
+        PTCHECK(ctl_get_input(&pt_ctl, index, &info) == CTL_NOENTITY, "another user's stream is not found by it");
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == CTL_ACCESS && !pt_stream_of(index)->muted, "a mute of it is refused: CTL_ACCESS");
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0x2000) != 0 && pt_stream_of(index)->volume[0] == 0xc000, "and a volume is not changed");
+        PTCHECK(ctl_set_sink_volume(&pt_ctl, "null", 0x2000) == CTL_ACCESS && pt_engine.sink[0].volume[0] == CTL_VOLUME_MAX, "the master volume is not another user's to change");
+        PTCHECK(ctl_set_sink_mute(&pt_ctl, "null", 1) == CTL_ACCESS && !pt_engine.sink[0].muted, "nor its mute");
+        pulse_client_close(&pt_engine, other);
+
+        // A server that stops answering, or a connection that is gone, is CTL_FAILED, and then nothing is sent into it.
+        pulse_client_close(&pt_engine, person);
+        person = pt_ctl_join(0);
+        PTCHECK(person >= 0, "the person joins again");
+        pt_ctl_deaf = 1;
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == CTL_FAILED && !ctl_ready(&pt_ctl), "no answer in time: CTL_FAILED, and the client is not ready");
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0x1000) == CTL_FAILED && ctl_get_input(&pt_ctl, index, &info) == CTL_FAILED && pt_ctl_sends == sends,
+                "and a client that is not ready sends nothing");
+        pt_ctl_deaf = 0;
+        pulse_client_close(&pt_engine, person);
+        person = pt_ctl_join(0);
+        pt_ctl_fail_send = 1;
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == CTL_FAILED && !ctl_ready(&pt_ctl), "a send that fails: CTL_FAILED");
+        pt_ctl_fail_send = 0;
+        pulse_client_close(&pt_engine, person);
+
+        // The handshake against a server that is not there answers CTL_FAILED, and leaves the client not ready.
+        person = pulse_client_open(&pt_engine, 0, 4243);
+        pt_ctl_slot = person;
+        pt_ctl_have = pt_ctl_at = 0;
+        pt_ctl_deaf = 1;
+        memset(&pt_ctl, 0, sizeof(pt_ctl));
+        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive};
+        PTCHECK(ctl_start(&pt_ctl) == CTL_FAILED && !ctl_ready(&pt_ctl), "a handshake with no answer fails");
+        pt_ctl_deaf = 0;
+        pulse_client_close(&pt_engine, person);
+
+        // Ending a stream: the person may, and the stream is gone.
+        person = pt_ctl_join(0);
+        PTCHECK(ctl_kill_input(&pt_ctl, index) == 0, "the person ends a stream");
+        PTCHECK(!pt_stream_of(index) || pt_stream_of(index)->dying, "and it is ending");
+        pulse_client_close(&pt_engine, person);
+        pulse_client_close(&pt_engine, owner);
+        for (int block = 0; block < 6; block++)
+        {
+                unsigned char out[4096];
+
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+        }
+        PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped, "every client is given back: %lu made, %lu dropped", pt_engine.clients_made, pt_engine.clients_dropped);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -172600,6 +172808,7 @@ int main(void)
         pt_test_memory();
         pt_test_session();
         pt_test_fuzz();
+        pt_test_control_client();
         printf("CHECK_audio_pulse: %u checks, %u failures\n", pt_checks, pt_failures);
         return pt_failures ? 1 : 0;
 }
