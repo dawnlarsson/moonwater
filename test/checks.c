@@ -156413,8 +156413,8 @@ static fn terminal_gutter_check(void)
         mouse_sgr = true;
         terminal.modifiers = 0;
         terminal.pressed = false;
-        terminal.pointer_x = (int)(COLUMNS * terminal.cell_w) + 2;
-        terminal.pointer_y = 2 * (int)terminal.cell_h;
+        ui_kit.pointer_x = (int)terminal.pad + (int)(COLUMNS * terminal.cell_w) + 2;
+        ui_kit.pointer_y = (int)terminal.pad_y + 2 * (int)terminal.cell_h;
         event.type = WINDOW_EVENT_BUTTON, event.a = 0x110, event.b = 0, event.flags = WINDOW_KEY_DOWN;
         terminal_deliver((b32)ends[1], &event, &dirty);
         event.flags = 0;

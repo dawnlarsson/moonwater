@@ -157,8 +157,6 @@ static struct
         // Where the view sits in the ring: a line and how many of its rows are above.
         unsigned int view, view_skip;
 
-        // The pointer, in buffer pixels.
-        int pointer_x, pointer_y;
         unsigned int modifiers; // from the keys, which are the only events that say
         b32 pressed;
         int wheel_remainder;
@@ -527,6 +525,18 @@ static int terminal_scale(void)
         return terminal.ui.scale > 0 ? terminal.ui.scale : 100;
 }
 
+// The pointer in the grid's pixels: the kit's pointer (window pixels, ui_kit.pointer_x and _y) less the paper round the grid. A
+// button's event carries no place, so a press is at the last motion's place, which the kit keeps for every app.
+static int terminal_at_x(void)
+{
+        return ui_kit.pointer_x - (int)terminal.pad;
+}
+
+static int terminal_at_y(void)
+{
+        return ui_kit.pointer_y - (int)terminal.pad_y;
+}
+
 // The kit's ui for the window's picture: the terminal's own engine and faces, at the scale, over the buffer whole.
 static struct ui terminal_kit(unsigned int address_to whole)
 {
@@ -648,7 +658,7 @@ static b32 terminal_bar_takes(void)
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
                 return false;
         terminal_bar_place(first, shown, total);
-        return ui_scroll_reach(&kit, &terminal.bar, terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y);
+        return ui_scroll_reach(&kit, &terminal.bar, ui_kit.pointer_x, ui_kit.pointer_y);
 }
 
 // The bar's pointer, through the kit's own (ui_scroll_pointer): a press, a release or a motion at x, y in the window.
@@ -2067,8 +2077,8 @@ static void terminal_key(const struct window_event address_to event, struct wind
 // The pointer as a report in cells, the way the window's key ring carried it.
 static void terminal_pointer_key(unsigned int button, unsigned int flags, struct window_key address_to key)
 {
-        unsigned int column = (unsigned int)(terminal.pointer_x < 0 ? 0 : terminal.pointer_x) / terminal.cell_w;
-        unsigned int row = (unsigned int)(terminal.pointer_y < 0 ? 0 : terminal.pointer_y) / terminal.cell_h;
+        unsigned int column = (unsigned int)(terminal_at_x() < 0 ? 0 : terminal_at_x()) / terminal.cell_w;
+        unsigned int row = (unsigned int)(terminal_at_y() < 0 ? 0 : terminal_at_y()) / terminal.cell_h;
 
         column = column < COLUMNS ? column : COLUMNS - 1;
         row = row < ROWS ? row : ROWS - 1;
@@ -2161,20 +2171,20 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 if (!alternate)
                 {
                         terminal.finger.region = terminal_finger_region();
-                        ui_finger_move(&kit, &terminal.finger, terminal.pointer_x, terminal.pointer_y);
+                        ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                         // Where the grid fits there is no region to follow the finger: its reports are kept all the same, for a drag
                         // that finds the grid scrolling later.
                         if (!terminal.finger.region && ui_finger_dragged(&terminal.finger))
-                                ui_drag_follow(&terminal.finger.drag, terminal.pointer_y, (positive)ui_kit.now);
+                                ui_drag_follow(&terminal.finger.drag, terminal_at_y(), (positive)ui_kit.now);
                         if (terminal.finger.region && terminal_bar_out())
                                 *dirty = true;
                         return true;
                 }
                 terminal.finger.region = null;
-                ui_finger_move(&kit, &terminal.finger, terminal.pointer_x, terminal.pointer_y);
+                ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                 if (!ui_finger_dragged(&terminal.finger))
                         return true;
-                return terminal_finger_scroll(master, ui_drag_follow(&terminal.finger.drag, terminal.pointer_y, (positive)ui_kit.now),
+                return terminal_finger_scroll(master, ui_drag_follow(&terminal.finger.drag, terminal_at_y(), (positive)ui_kit.now),
                                               dirty, &moved);
         }
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
@@ -2186,7 +2196,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->flags & WINDOW_KEY_DOWN)
         {
                 // Whatever was moving the bar stops where it is drawn (ui_finger_down), and the press is where the finger is.
-                ui_finger_down(&terminal.finger, terminal.pointer_x, terminal.pointer_y, 0, alternate ? null : &terminal.bar);
+                ui_finger_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, alternate ? null : &terminal.bar);
                 terminal.finger_left = 0;
                 return true;
         }
@@ -2499,7 +2509,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
-                        terminal_menu_open(terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y,
+                        terminal_menu_open(ui_kit.pointer_x, ui_kit.pointer_y,
                                            ui_kit_touch);
                 return true;
         }
@@ -2517,14 +2527,14 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                                 terminal.selecting = false, address_to dirty = true;
                         return true;
                 }
-                if (terminal.pointer_x < 0 || terminal.pointer_y < 0)
+                if (terminal_at_x() < 0 || terminal_at_y() < 0)
                         return false;
-                row = (unsigned int)terminal.pointer_y / terminal.cell_h;
-                column = (unsigned int)terminal.pointer_x / terminal.cell_w;
+                row = (unsigned int)terminal_at_y() / terminal.cell_h;
+                column = (unsigned int)terminal_at_x() / terminal.cell_w;
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
-                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, ui_kit.now, terminal.pointer_x, terminal.pointer_y);
+                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, ui_kit.now, terminal_at_x(), terminal_at_y());
                 if (shift && terminal.selecting && terminal.clicks == 1)
                 {
                         terminal.select_active_line = line, terminal.select_active_column = at;
@@ -2548,10 +2558,10 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         }
         if (event->type == WINDOW_EVENT_MOTION && terminal.select_dragging)
         {
-                int y = terminal.pointer_y < 0 ? 0 : terminal.pointer_y, x = terminal.pointer_x < 0 ? 0 : terminal.pointer_x;
+                int y = terminal_at_y() < 0 ? 0 : terminal_at_y(), x = terminal_at_x() < 0 ? 0 : terminal_at_x();
 
-                terminal.select_edge.past = terminal.pointer_y < 0 ? terminal.pointer_y
-                                       : terminal.pointer_y >= (int)ROWS * terminal.cell_h ? terminal.pointer_y - (int)ROWS * terminal.cell_h + 1
+                terminal.select_edge.past = terminal_at_y() < 0 ? terminal_at_y()
+                                       : terminal_at_y() >= (int)ROWS * terminal.cell_h ? terminal_at_y() - (int)ROWS * terminal.cell_h + 1
                                                                                            : 0;
                 row = (unsigned int)y / terminal.cell_h;
                 column = (unsigned int)x / terminal.cell_w;
@@ -2642,8 +2652,8 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 terminal.touch_held = false;
                 if (terminal.bar.held)
                 {
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, terminal.pointer_x + (int)terminal.pad,
-                                             terminal.pointer_y + (int)terminal.pad_y, false, &moved);
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
+                                             ui_kit.pointer_y, false, &moved);
                         address_to dirty = address_to dirty || moved;
                 }
                 if (terminal.touch_select)
@@ -2670,10 +2680,10 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 return false;
         if (terminal.bar.held || terminal_bar_takes())
                 return true;
-        if (terminal.pointer_x < 0 || terminal.pointer_y < 0)
+        if (terminal_at_x() < 0 || terminal_at_y() < 0)
                 return true;
-        row = (unsigned int)terminal.pointer_y / terminal.cell_h;
-        column = (unsigned int)terminal.pointer_x / terminal.cell_w;
+        row = (unsigned int)terminal_at_y() / terminal.cell_h;
+        column = (unsigned int)terminal_at_x() / terminal.cell_w;
         if (row >= ROWS || column >= COLUMNS)
                 return true;
         terminal_place_at(row, column, &line, &at);
@@ -2704,12 +2714,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 {
         struct window_key key;
 
-        // A finger drags the view where the mouse would select; a program that asked for the pointer has it as a mouse.
-        if (event->type == WINDOW_EVENT_MOTION)
-        {
-                terminal.pointer_x = event->a - (int)terminal.pad;
-                terminal.pointer_y = event->b - (int)terminal.pad_y;
-        }
+        // A finger drags the view where the mouse would select; a program that asked for the pointer has it as a mouse. The
+        // pointer is the kit's (ui_event_context records a motion's place before this runs).
         if (event->type == WINDOW_EVENT_BUTTON && terminal_hold(event, dirty))
                 return true;
         if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
@@ -2745,11 +2751,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
         case WINDOW_EVENT_MOTION:
                 {
-                        // Where the pointer is from the grid's top left: the paper round it is no cell's.
+                        // The paper round the grid is no cell's, and terminal_at_x and terminal_at_y say where the pointer is in the grid.
                         b32 moved = false, lit = terminal.bar.hover;
-
-                        terminal.pointer_x = event->a - (int)terminal.pad;
-                        terminal.pointer_y = event->b - (int)terminal.pad_y;
 
                         // The kit's bar takes the motion that is over it or held; what it lights or moves is drawn again.
                         if (terminal.bar.held || terminal.bar.hover || terminal_bar_takes())
@@ -2782,8 +2785,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 {
                         b32 moved = false;
 
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, terminal.pointer_x + (int)terminal.pad,
-                                             terminal.pointer_y + (int)terminal.pad_y, down, &moved);
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
+                                             ui_kit.pointer_y, down, &moved);
                         if (moved)
                                 address_to dirty = true;
                         return true;
@@ -2791,7 +2794,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 // A left press on the paper right of the grid, and its release when the press was not the program's, is
                 // not the program's whether or not there is anything to scroll: a report there would be clamped onto the grid's last column.
-                if (event->a == UI_POINTER_LEFT && (down || !terminal.pressed) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+                if (event->a == UI_POINTER_LEFT && (down || !terminal.pressed) && terminal_at_x() >= (int)(COLUMNS * terminal.cell_w))
                         return true;
                 if (terminal_select_event(event, dirty))
                         return true;
@@ -3231,7 +3234,7 @@ static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
         if (terminal_view_scroll(terminal.select_edge.past < 0 ? (int)rows : -(int)rows))
                 *dirty = true;
         row = terminal.select_edge.past < 0 ? 0 : (int)ROWS - 1;
-        column = terminal.pointer_x < 0 ? 0 : terminal.pointer_x / terminal.cell_w;
+        column = terminal_at_x() < 0 ? 0 : terminal_at_x() / terminal.cell_w;
         column = column < (int)COLUMNS ? column : (int)COLUMNS;
         terminal_place_at((unsigned int)row, (unsigned int)column, &line, &at);
         if (line != terminal.select_active_line || at != terminal.select_active_column)
