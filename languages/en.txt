@@ -254,6 +254,7 @@ ui_field_full	fe02	that is as much as it holds
 =Network adapters	88ef	Network adapters
 =New USB devices	c15c	New USB devices
 =Normal	2772	Normal
+=On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
 =Other devices	8362	Other devices
 =Output device (name, or default)	d73c	Output device (name, or default)

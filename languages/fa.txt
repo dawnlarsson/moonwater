@@ -255,6 +255,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Network adapters	88ef	آداپتورهای شبکه
 =New USB devices	c15c	دستگاه‌های USB جدید
 =Normal	2772	عادی
+=On-screen keyboard	97f8	صفحه‌کلید روی صفحه
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
 =Other devices	8362	دستگاه‌های دیگر
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)

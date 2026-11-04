@@ -254,6 +254,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Network adapters	88ef	Karty sieciowe
 =New USB devices	c15c	Nowe urządzenia USB
 =Normal	2772	Normalnie
+=On-screen keyboard	97f8	Klawiatura ekranowa
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
 =Other devices	8362	Inne urządzenia
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)

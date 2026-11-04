@@ -255,6 +255,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Network adapters	88ef	محولات الشبكة
 =New USB devices	c15c	أجهزة USB الجديدة
 =Normal	2772	عادي
+=On-screen keyboard	97f8	لوحة المفاتيح على الشاشة
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
 =Other devices	8362	أجهزة أخرى
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)

@@ -254,6 +254,7 @@ ui_field_full	fe02	більше не вміщається
 =Network adapters	88ef	Мережеві адаптери
 =New USB devices	c15c	Нові USB-пристрої
 =Normal	2772	Звичайний
+=On-screen keyboard	97f8	Екранна клавіатура
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Other devices	8362	Інші пристрої
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)

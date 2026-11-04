@@ -254,6 +254,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Network adapters	88ef	Ağ bağdaştırıcıları
 =New USB devices	c15c	Yeni USB aygıtları
 =Normal	2772	Normal
+=On-screen keyboard	97f8	Ekran klavyesi
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Other devices	8362	Diğer aygıtlar
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)

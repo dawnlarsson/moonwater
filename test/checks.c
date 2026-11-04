@@ -140304,7 +140304,7 @@ static fn check_settings_groups(void)
                 const char address_to label;
                 const char address_to group;
         } placed[] = {
-            {"Keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
+            {"Keyboard", "Input"}, {"On-screen keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
             {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},

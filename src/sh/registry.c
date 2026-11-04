@@ -87,6 +87,7 @@
 #define SETTING_SHAKE_PATH "/root/canvas.cursor.shake"
 #define SETTING_SHAKE_DELAY_PATH "/root/canvas.cursor.shake.delay"
 #define SETTING_REPEAT_DELAY_PATH "/root/keyboard.repeat.delay"
+#define SETTING_ONSCREEN_PATH "/root/keyboard.onscreen"
 #define SETTING_REPEAT_RATE_PATH "/root/keyboard.repeat.rate"
 #define SETTING_SENSITIVITY_PATH "/root/mouse.sensitivity"
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
@@ -311,6 +312,13 @@ static const struct settings_row settings_rows[] = {
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
     {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0, null,
      .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it ar il ir [us]"},
+    //  The keyboard on the screen (src/canvas/compositor.c, the osk window): shown while a text field has the keys and there is no
+    //  keyboard to type on (auto), never (off), or whenever a field has them (on).
+    SETTING_PLAIN_ROW(null, "On-screen keyboard", SETTINGS_CHOICE, 0, ("keyboard", "onscreen"), "onscreen ", "auto off on",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ONSCREEN_PATH, .standard = "auto", .reset = "auto",
+                      .refusal = "the on-screen keyboard is auto, off or on, not %s\n",
+                      .usage = "keyboard onscreen [auto|off|on]",
+                      .help = "a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]"),
     SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,

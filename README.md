@@ -63,6 +63,7 @@ moonwater debug                        what the desktop is doing and why (root):
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater language [CODE|default]      the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it ar il ir [us]
+moonwater keyboard onscreen [auto|off|on]  a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
 moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
 moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual

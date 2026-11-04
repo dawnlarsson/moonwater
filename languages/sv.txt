@@ -254,6 +254,7 @@ ui_field_full	fe02	mer ryms inte
 =Network adapters	88ef	Nätverksadaptrar
 =New USB devices	c15c	Nya USB-enheter
 =Normal	2772	Normal
+=On-screen keyboard	97f8	Skärmtangentbord
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Other devices	8362	Andra enheter
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)

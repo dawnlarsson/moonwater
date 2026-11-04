@@ -254,6 +254,7 @@ ui_field_full	fe02	no cabe más
 =Network adapters	88ef	Adaptadores de red
 =New USB devices	c15c	Dispositivos USB nuevos
 =Normal	2772	Normal
+=On-screen keyboard	97f8	Teclado en pantalla
 =Open windows where they were last put	8711	Abrir las ventanas donde se dejaron
 =Other devices	8362	Otros dispositivos
 =Output device (name, or default)	d73c	Dispositivo de salida (nombre o default)

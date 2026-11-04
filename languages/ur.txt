@@ -255,6 +255,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Network adapters	88ef	نیٹ ورک اڈاپٹرز
 =New USB devices	c15c	نئی USB ڈیوائسز
 =Normal	2772	عام
+=On-screen keyboard	97f8	اسکرین کی بورڈ
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
 =Other devices	8362	دیگر ڈیوائسز
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)

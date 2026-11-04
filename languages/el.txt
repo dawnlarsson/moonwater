@@ -254,6 +254,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Network adapters	88ef	Προσαρμογείς δικτύου
 =New USB devices	c15c	Νέες συσκευές USB
 =Normal	2772	Κανονική
+=On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Other devices	8362	Άλλες συσκευές
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)

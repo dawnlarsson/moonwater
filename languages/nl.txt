@@ -254,6 +254,7 @@ ui_field_full	fe02	meer past er niet in
 =Network adapters	88ef	Netwerkadapters
 =New USB devices	c15c	Nieuwe USB-apparaten
 =Normal	2772	Normaal
+=On-screen keyboard	97f8	Toetsenbord op het scherm
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Other devices	8362	Andere apparaten
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)

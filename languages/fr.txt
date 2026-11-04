@@ -254,6 +254,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Network adapters	88ef	Adaptateurs réseau
 =New USB devices	c15c	Nouveaux périphériques USB
 =Normal	2772	Normal
+=On-screen keyboard	97f8	Clavier à l'écran
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Other devices	8362	Autres périphériques
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
