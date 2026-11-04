@@ -41,6 +41,42 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-081: the sound server's name cleaner let overlong and out-of-range four-byte UTF-8 through as text
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 10:04 +01:00 (`72df281d`); exposure closed the same morning |
+| Class | Improper handling of Unicode encoding (CWE-176, with CWE-172): non-canonical four-byte sequences shown as text |
+| Attacker | any program that can connect to the sound server (every local user has that; a program names its own client and streams) |
+| Reachable | `pulse_props_text` in `src/audio/pulse.c`, the cleaner every name a client sends passes through before it is shown: `application.name`, `media.name` and `application.icon_name`. Its output goes to the state page the sound server gives the mixer (`src/audio/service.c` lines 855 to 907), and to the key a program's remembered volume is kept under (`pulse.c`, `pulse_props_text` with `application.name` at the recall and remember sites) |
+| Moonwater exposure window | 2026-11-04 02:09:53 +01:00 (`b711e310`, the sound server first landed, with the four-byte branch as written) to 2026-11-04 10:04:44 +01:00 (`72df281d`): 7 hours 54 minutes 51 seconds |
+| Fixed by | `72df281d` (the cleaner's four-byte branch); the tests are in the same commit |
+
+**What happened.** The cleaner's comment says bad UTF-8 is shown as question marks, and its two-byte and three-byte branches
+refuse overlong forms and surrogates. Its four-byte branch checked only that the continuation bytes were continuation bytes.
+So an overlong `F0 80..8F xx xx` and a value past U+10FFFF (`F4 90..BF xx xx`) went through as text. A program could
+put either into its `application.name` or `media.name`, and the mixer showed the bytes as the program sent them instead of
+as `????`. The sound server does not decode them, so nothing crashed, no memory was touched and no other client's data
+was read; the harm is what the person sees for a program's name, and a remembered volume kept under a name that was not
+text.
+
+**Found by.** The audit of `src/audio/pulse.c` (memory note `audio-audit-pulse-a-2026-11-04`), reading the cleaner's
+branches against its own comment, not from a report.
+
+**Tests that fail without the fix.** `CHECK_audio_pulse` (`sh test/run audio`, the hosted build of `pulse.c`), the name
+table in `pt_test_text`: the rows `\xf0\x80\x80\x80` and `\xf4\x90\x80\x80` must come out as four `?` each, and the valid
+`\xf0\x90\x80\x80\xf4\x8f\xbf\xbf` (U+10000 and U+10FFFF) must be kept. Without the fix: `3405 checks, 2 failures`
+(name 9 and name 10). With it: `3405 checks, 0 failures`. Mutants in `test/audio_mutations.py` (target pulse): "overlong
+four-byte UTF-8 taken as text" and "four-byte UTF-8 past U+10FFFF taken as text" each delete one new refusal and turn the
+check red (1 failure each). Box run: none yet for this entry (the hosted build was run on the Mac, arm64).
+
+**Still open.** The cleaner is C on every machine. Its specification for an assembly body, with the same rules, is in the
+audit note; the body is not written. The state page's own text renderer (Canvas) was not checked for how it draws the
+bytes it is given (`?` is what the cleaner now passes). Two other findings in the same file are not fixed and not in
+this entry: a list reply can outgrow the sound server's reply buffer and drop the listing client (`pulse-b`'s half of the
+file, reported with the audit). The two commits after the fix (`7dea3bfd`, `e549a8e7`, a string copy and the output ring)
+change speed only: they are not security fixes and get no entry.
+
 ### MW-2026-080: the clipboard and paste were designed against snooping and paste injection before either existed
 
 | | |
