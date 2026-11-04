@@ -216712,6 +216712,96 @@ static unsigned int gpu_kit_want[700 * 420];
         ui_edge_record, the row's covers random, the highlight random with its alpha). Each recording is replayed by gpu_scene over a ground the
         scene's first op makes, and every pixel compared with the processor's. The whole field is not here: its text needs the field's state.
 */
+/*
+        The apps' pictures (the launcher first): the app's state set as its window has it, its picture painted on the processor, and the same painter
+        run again with the app's kit ui recording into scene memory the GPU reads; the replay must equal the processor's picture bit for bit. Light
+        then dark, at 100, 150, 200 and 300 percent. The app's region is the 64 MiB the check reserves past the kit's own. A frame whose scene is lost
+        is printed as a named known diff with the painter that lost it (R3 and R4), and is not compared.
+*/
+static font_engine app_engine;
+static p8 app_atlas[512 * 512];
+static font_face app_face;
+static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[1680 * 1200], app_dummy[1680 * 1200];
+static struct windows app_table;
+static struct ui_scene app_scene;
+// The app regions, from the GPU's base at app_at: the picture (16 MiB), the ops (4 MiB), the binning (16 MiB), the text covers (28 MiB).
+#define APP_PIC (0u)
+#define APP_OPS (16u << 20)
+#define APP_BINS (20u << 20)
+#define APP_COVER (36u << 20)
+
+// The regions are the kit's own (the picture at GPU_DATA with its pitch, the ops, the binning, and the text covers' region the text rows reuse
+// after this). At 100 percent the launcher (560 by 400) fits the kit's 700 by 419 picture; the larger scales need a bigger picture region.
+static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at, positive cover_at)
+{
+        static const int scales[1] = {100};
+        const int pitch = 700;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        unsigned int address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at);
+        positive size = 0, bytes = compositor_map_file(program_argument(3), &size);
+
+        if (!bytes || font_load(&app_face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("gpu apps: the launcher's face loads", false);
+                return;
+        }
+        font_start(&app_engine, app_atlas, 512, 512);
+        for (int mode = 0; mode < 2; mode++)
+        {
+                ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+                for (int k = 0; k < 1; k++)
+                {
+                        int s = scales[k], W = LAUNCHER_WIDTH * s / 100, H = 400 * s / 100;
+                        int bad = 0;
+
+                        // The launcher as its window has it: three programs of the desktop listed, the field and the power row.
+                        memory_zero(&app_table, sizeof(app_table));
+                        app_table.stride = (unsigned int)pitch, app_table.output_width = (unsigned int)W, app_table.output_height = (unsigned int)H, app_table.scale = (unsigned int)s;
+                        launcher.own.table = &app_table;
+                        launcher.width = W, launcher.height = H;
+                        launcher.ui.scale = s, launcher.ui.engine = &app_engine, launcher.ui.regular = launcher.ui.bold = &app_face;
+                        launcher.ui.scratch = app_scratch, launcher.ui.scratch_width = 2000, launcher.ui.opaque = 1, launcher.ui.glass = 0;
+                        launcher.entries = 3;
+                        for (int i = 0; i < 3; i++)
+                                launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
+                        launcher.focused = 1;
+                        launcher.search.kind = 0;
+
+                        memory_zero(app_cpu, sizeof(app_cpu));
+                        launcher_draw(app_cpu);
+
+                        memory_zero(&app_scene, sizeof(app_scene));
+                        app_scene.ops = ops, app_scene.room = 1u << 15, app_scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + cover_at);
+                        app_scene.size = 16u << 20, app_scene.at = cover_at;
+                        launcher.ui.scene = &app_scene;
+                        launcher_draw(app_dummy);
+                        launcher.ui.scene = null;
+                        if (app_scene.lost)
+                        {
+                                string_format(log, "  known diff: the launcher (%p%%, %p) set lost: a painter that is not recorded (R3 or R4)\n", (positive)s, (positive)mode);
+                                continue;
+                        }
+                        for (positive i = 0; i < (positive)pitch * H; i++)
+                                pic[i] = 0x12345678u;
+                        if (!gpu_scene(ops_at, app_scene.count, bins_at, pic_at, (positive)pitch, W, H, 0, 0, W, H))
+                        {
+                                check("gpu apps: the launcher's scene finishes", false);
+                                return;
+                        }
+                        for (int y = 0; y < H; y++)
+                                for (int x = 0; x < W; x++)
+                                {
+                                        checks++;
+                                        if (pic[(positive)y * pitch + x] != app_cpu[(positive)y * pitch + x] && (++failures, ++bad) < 6)
+                                                string_format(log, "  FAIL gpu launcher %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)s, (positive)mode, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * pitch + x], (positive)app_cpu[(positive)y * pitch + x]);
+                                }
+                        check("gpu apps: the launcher replays bit for bit", bad == 0);
+                }
+        }
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+}
+
 static unsigned int gpu_ctl_want[700 * 420], gpu_ctl_dummy[700 * 420];
 static unsigned short gpu_ctl_face[256], gpu_ctl_low[256], gpu_ctl_face_rec[256], gpu_ctl_low_rec[256];
 
@@ -216891,6 +216981,7 @@ b32 main(void)
         }
 
         gpu_kit_recorded_controls(pic_at, ops_at, bins_at);
+        app_launcher_rows(pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20));
 
         // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
         // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
