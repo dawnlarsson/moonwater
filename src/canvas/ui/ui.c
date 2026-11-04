@@ -456,7 +456,7 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         sample points, those in a corner's square counted inside its quarter
         circle. x and y are the pixel's place from the rectangle's top left.
 */
-static unsigned int ui_inside(int x, int y, int width, int height, int radius)
+static unsigned int ui_round_cover(int x, int y, int width, int height, int radius)
 {
         unsigned int inside = 0;
 
@@ -481,12 +481,12 @@ static unsigned int ui_inside(int x, int y, int width, int height, int radius)
 }
 
 /*
-        A corner's cover depends on its radius alone: the radius is already in device pixels, and ui_inside reads no
+        A corner's cover depends on its radius alone: the radius is already in device pixels, and ui_round_cover reads no
         other input. Its sample points are symmetric about the middle of the corner's square, so a pixel of any corner
         samples the same circle as the pixel mirrored across that middle into the top left quarter. That quarter is made
         once for each radius, the first time the radius is drawn, and kept: radius r at the sum of the squares below it,
         so the masks of every radius up to UI_CORNER_MOST take UI_CORNER_BYTES (22140), and a larger radius is not kept
-        (ui_inside answers it, as before). A radius is one slot, so no two radii share one.
+        (ui_round_cover answers it, as before). A radius is one slot, so no two radii share one.
 */
 #define UI_CORNER_MOST 40
 #define UI_CORNER_BYTES (UI_CORNER_MOST * (UI_CORNER_MOST + 1) * (2 * UI_CORNER_MOST + 1) / 6)
@@ -499,23 +499,23 @@ static const unsigned char address_to ui_corner_mask(int radius)
 
         if (!ui_corner_made[radius])
         {
-                // The quarter of a corner of radius, read from ui_inside itself: its square is 2 radius across.
+                // The quarter of a corner of radius, read from ui_round_cover itself: its square is 2 radius across.
                 for (int y = 0; y < radius; y++)
                         for (int x = 0; x < radius; x++)
-                                mask[y * radius + x] = (unsigned char)ui_inside(x, y, 2 * radius, 2 * radius, radius);
+                                mask[y * radius + x] = (unsigned char)ui_round_cover(x, y, 2 * radius, 2 * radius, radius);
                 ui_corner_made[radius] = 1;
         }
         return mask;
 }
 
-// ui_inside, read from a corner's mask where the pixel is in a corner's square. A pixel left of the middle or above it
+// ui_round_cover, read from a corner's mask where the pixel is in a corner's square. A pixel left of the middle or above it
 // is its own place in the top left quarter; one to the right or below is mirrored across the middle.
-static unsigned int ui_inside_cached(int x, int y, int width, int height, int radius)
+static unsigned int ui_round_cover_cached(int x, int y, int width, int height, int radius)
 {
         int mx, my;
 
         if (radius < 1 || radius > UI_CORNER_MOST)
-                return ui_inside(x, y, width, height, radius);
+                return ui_round_cover(x, y, width, height, radius);
         if (x < 0 || y < 0 || x >= width || y >= height)
                 return 0;
         if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
@@ -554,7 +554,7 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
                                 column = width - radius - 1;
                                 continue;
                         }
-                        cover = ui_inside_cached(column, row, width, height, radius);
+                        cover = ui_round_cover_cached(column, row, width, height, radius);
 
                         if (cover)
                                 ui_dot(ui, x + column, y + row, ui_cover(tone, cover));
@@ -11993,10 +11993,11 @@ static p32 ui_text_menu_do(struct ui address_to ui, struct ui_text address_to t,
         return ui_text_command(ui, t, commands[id]);
 }
 
-// Whether a point of the window (device pixels) is on the widget: a field's whole well, as it was last drawn.
+// Whether a point of the window (device pixels) is on the widget: a field's whole well, as it was last drawn. The rule is ui_reach_hit's
+// (the one hit test), with no finger's reach: the well is what the finger touches.
 static b32 ui_text_inside(const struct ui_text address_to t, int x, int y)
 {
-        return x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+        return ui_reach_hit(0, 0, x, y, t->well_left, t->well_top, t->well_right - t->well_left, t->well_bottom - t->well_top);
 }
 
 /*

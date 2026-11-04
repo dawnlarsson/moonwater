@@ -143395,7 +143395,7 @@ static fn check_kit_fills(void)
                 check("kit fill: a fill is cut to the picture's rows, above its top and below its height", held);
         }
 
-        // A corner's cover from its cached quarter (ui_inside_cached, which a rounded rectangle reads) is ui_inside's at
+        // A corner's cover from its cached quarter (ui_round_cover_cached, which a rounded rectangle reads) is ui_round_cover's at
         // every pixel of every size a corner of that radius is drawn at: the mirror into each corner must be exact.
         {
                 positive wrong = 0;
@@ -143411,15 +143411,15 @@ static fn check_kit_fills(void)
 
                                         for (int y = 0; y < height; y++)
                                                 for (int x = 0; x < width; x++)
-                                                        wrong += ui_inside_cached(x, y, width, height, radius) != ui_inside(x, y, width, height, radius);
+                                                        wrong += ui_round_cover_cached(x, y, width, height, radius) != ui_round_cover(x, y, width, height, radius);
                                 }
                 }
-                check("kit corners: a corner's cached cover is ui_inside's at every pixel, every radius to UI_CORNER_MOST and size", !wrong);
+                check("kit corners: a corner's cached cover is ui_round_cover's at every pixel, every radius to UI_CORNER_MOST and size", !wrong);
         }
 }
 
 /*
-        A rounded corner's cover (ui_inside) at radii the window's clamp allows: its sixteen samples square 8 radius and
+        A rounded corner's cover (ui_round_cover) at radii the window's clamp allows: its sixteen samples square 8 radius and
         64 radius squared, and past 5792 px those leave int, so the kit takes them in 64 bits. The reference is the same
         test written out in 64 bits, over the corner squares of rectangles whose sides are two radii and more.
 */
@@ -143455,7 +143455,7 @@ static fn check_kit_corners(void)
 
                 for (int y = 0; y < side; y += (r > 1000 ? 311 : 1))
                         for (int x = 0; x < side; x += (r > 1000 ? 297 : 1))
-                                wrong += ui_inside(x, y, side, side, r) != kit_corner_reference(x, y, side, side, r);
+                                wrong += ui_round_cover(x, y, side, side, r) != kit_corner_reference(x, y, side, side, r);
         }
         check("kit: a rounded corner's cover is the 64-bit cover at every radius, past the int square too", !wrong);
 }
