@@ -174,7 +174,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus"
 
@@ -258,6 +258,7 @@ describe()
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
+        gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
         dbus)     echo "the session bus (src/dbus): the wire, the authentication, names, match rules, routing, the Settings portal, two dozen kinds of message that end a connection, caps and a fuzz; and sd-bus, libdbus and GDBus against the sessionbus tool" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
@@ -6580,6 +6581,37 @@ lane_wayland()
 #       fixed-seed fuzz that gives every ring and table back. The output's rate follows its first stream (test/audio_rates.sh): a
 #       44100 Hz stream on an idle output is passed through sample for sample, a second stream of another rate is resampled to it,
 #       and the output takes the rate of the next first stream after five seconds idle.
+#       The apps' draw lists on the card, end to end (test/gpu_lists_e2e.sh): the headless compositor composes on the card with the
+#       settings and the mixer started the same way in two sessions, once with canvas gpu on (their rows are drawn from their lists,
+#       none refused) and once with it off; the two screens are compared pixel for pixel, the table's list state is read, and the
+#       setting is toggled while they run, with an applet killed mid-publish. Under a minute and a half on the box, five runs the
+#       same. Needs a render node (renderD128): without one the card composes nothing and the lane says so and passes.
+lane_gpulists()
+(
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        if [ ! -c /dev/dri/renderD128 ]; then
+                echo "gpulists: no render node here, the card composes nothing: skipped"
+                tally gpulists 1 1
+                return 0
+        fi
+        if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
+                note "gpulists: the shell binary did not build"
+                tally gpulists 0 1
+                return 1
+        fi
+        sh test/gpu_lists_e2e.sh "$work/shell" "$work/e2e" > "$work/lane.out" 2>&1
+        status=$?
+        cat "$work/lane.out"
+        if [ "$status" = 0 ]; then
+                tally gpulists 1 1
+        else
+                tally gpulists 0 1
+                note "gpulists: $status rows failed (the rows above)"
+        fi
+        return "$status"
+)
+
 lane_audio()
 (
         work=$(mktemp -d)
