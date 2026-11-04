@@ -217257,6 +217257,14 @@ static struct ui_scene app_scene;
 static struct mixer_big app_mixer;
 static int app_group; // which Settings page (its group) app 4 paints
 static struct ui_popmenu app_menu;
+static struct ui_findbar app_find;
+
+// The find bar, drawn at the top of its picture.
+static void app_find_paint(unsigned int address_to pixels)
+{
+        ui_begin(&settings.ui, pixels, settings.own.table->stride, settings.width, settings.height);
+        ui_findbar_draw(&settings.ui, &app_find, 0, settings.width, "Find");
+}
 
 // The popup menu: its picture is the window's, begun as the window is, with the menu drawn in its top left (ui_popmenu_draw).
 static void app_popmenu_paint(unsigned int address_to pixels)
@@ -217296,8 +217304,8 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
         positive need = 0;
         for (int k = 0; k < count; k++)
         {
-                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : MIXER_WIDTH) * s / 100;
-                int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
+                int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : which == 7 ? 60 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
 
                 if ((positive)pitch * H > need)
                         need = (positive)pitch * H;
@@ -217308,10 +217316,10 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
                 for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : MIXER_WIDTH) * s / 100;
-                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
+                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : which == 7 ? 60 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
-                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : mixer_draw;
+                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : which == 7 ? app_find_paint : mixer_draw;
 
                         // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
                         memory_zero(&app_table, sizeof(app_table));
@@ -217328,6 +217336,24 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                         launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
                                 launcher.focused = 1;
                                 launcher.search.kind = 0;
+                        }
+                        else if (which == 7)
+                        {
+                                // The find bar: its field (the query, the replacement, or the line's number), its mode (group 0 find, 1 replace, 2 line).
+                                settings.own.table = &app_table;
+                                settings.width = W, settings.height = H;
+                                settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
+                                settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
+                                gallery.on = 0;
+                                memory_zero(&app_find, sizeof(app_find));
+                                app_find.mode = app_group == 0 ? UI_FINDBAR_FIND : app_group == 1 ? UI_FINDBAR_REPLACE : UI_FINDBAR_LINE;
+                                ui_field_open(&app_find.field, &settings.own, "");
+                                {
+                                        const char address_to query = app_group == 2 ? "42" : "needle";
+
+                                        ui_text_set(&app_find.field, (const p8 address_to)query, string_length((string_address)query));
+                                }
+                                app_find.field.focused = 1;
                         }
                         else if (which == 6)
                         {
@@ -217392,7 +217418,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         app_scene.size = cover_size, app_scene.at = cover_at;
                         if (which == 0)
                                 launcher.ui.scene = &app_scene;
-                        else if (which == 4 || which == 5 || which == 6)
+                        else if (which == 4 || which == 5 || which == 6 || which == 7)
                                 settings.ui.scene = &app_scene;
                         else
                                 mixer.ui.scene = &app_scene;
@@ -217421,7 +217447,9 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                                 string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
                                                               (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)cpu[(positive)y * pitch + x]);
                                 }
-                        if (which == 6)
+                        if (which == 7)
+                                check("gpu apps: the find bar replays bit for bit", bad == 0);
+                        else if (which == 6)
                                 check("gpu apps: the popup menu replays bit for bit", bad == 0);
                         else if (which == 5)
                                 check("gpu apps: the gallery showcase replays bit for bit", bad == 0);
@@ -218904,6 +218932,12 @@ b32 main(void)
 
                                 for (app_group = 0; app_group < 3; app_group++)
                                         app_rows(6, big, kops, kbins, kbins + (4 << 20), 4u << 20, popmenu_scales, 4, 0);
+                        }
+                        {
+                                static const int find_scales[4] = {100, 150, 200, 300};
+
+                                for (app_group = 0; app_group < 3; app_group++)
+                                        app_rows(7, big, kops, kbins, kbins + (4 << 20), 4u << 20, find_scales, 4, 0);
                         }
                 }
         }
