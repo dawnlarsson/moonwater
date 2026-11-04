@@ -912,6 +912,16 @@ static p32 doc_byte(const struct doc address_to doc, p64 at)
 }
 
 // The k-th line end inside a piece (k from 1), the byte after the piece a LF when next_lf: the offset just past it.
+/*
+        The one line-end rule of a piece: the byte at at ends a line when it is an LF, or a CR that no LF follows. A CR that is the
+        piece's last byte is followed by the next piece's first byte, which is the LF when next_lf (the caller says so; the piece's
+        line count never asks, since it looks at the bytes before its own last).
+*/
+static b32 doc_piece_line_end(const p8 address_to bytes, p32 length, p32 at, b32 next_lf)
+{
+        return bytes[at] == '\n' || (bytes[at] == '\r' && !(at + 1 < length ? bytes[at + 1] == '\n' : next_lf));
+}
+
 static p64 doc_piece_break(const struct doc address_to doc, const struct doc_node address_to node, p64 k, b32 next_lf)
 {
         const p8 address_to bytes = doc_piece_bytes(doc, node);
@@ -920,13 +930,8 @@ static p64 doc_piece_break(const struct doc address_to doc, const struct doc_nod
         if (node->cr == node->pairs)
                 return memory_nth_of((address_any)bytes, '\n', node->length, k).x;
         for (p32 at = 0; at < node->length; at++)
-        {
-                b32 finish = bytes[at] == '\n' ||
-                          (bytes[at] == '\r' && !(at + 1 < node->length ? bytes[at + 1] == '\n' : next_lf));
-
-                if (finish && !--k)
+                if (doc_piece_line_end(bytes, node->length, at, next_lf) && !--k)
                         return at + 1;
-        }
         return node->length;
 }
 
@@ -1005,7 +1010,7 @@ static p64 doc_line_of(const struct doc address_to doc, p64 at)
                         // Every CR paired: none of them ends a line (the one at at - 1 included, whose LF is at).
                         if (node->cr != node->pairs)
                                 for (p64 i = 0; i < at; i++)
-                                        lines += bytes[i] == '\r' && bytes[i + 1] != '\n';
+                                        lines += bytes[i] == '\r' && doc_piece_line_end(bytes, node->length, (p32)i, false);
                         return lines;
                 }
                 lines += (p64)node->lf + node->cr - node->pairs - ((node->edge & DOC_LAST_CR) && after_node);

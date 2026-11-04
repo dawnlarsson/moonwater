@@ -132380,6 +132380,29 @@ static void check_doc_collapse(void)
 }
 
 /*
+        The line ends of a piece (doc_piece_line_end, the one rule): a CR and its LF are one line end even across two pieces (the CR the
+        last byte of one, the LF the first of the next), and a lone CR at a piece's end is a line end. A place between the two is on
+        the CR's line, as a single piece has it.
+*/
+static void check_doc_crlf_pieces(void)
+{
+    struct doc doc;
+
+    doc_open(&doc, (const p8 address_to)"a\r", 2);
+    doc_replace(&doc, 2, 0, (const p8 address_to)"\nb", 2);
+    check("doc line ends: a CR and its LF in two pieces are one line end",
+          doc_line_count(&doc) == 2 && doc_line_start(&doc, 1) == 3 && doc_line_of(&doc, 2) == 0 && doc_line_of(&doc, 3) == 1);
+    doc_close(&doc);
+    doc_open(&doc, (const p8 address_to)"a\r", 2);
+    doc_replace(&doc, 2, 0, (const p8 address_to)"b", 1);
+    check("doc line ends: a lone CR at the end of a piece is a line end", doc_line_count(&doc) == 2 && doc_line_start(&doc, 1) == 2 && doc_line_of(&doc, 2) == 1);
+    doc_close(&doc);
+    doc_open(&doc, (const p8 address_to)"a\r\nb", 4);
+    check("doc line ends: a CR and its LF in one piece are one line end", doc_line_count(&doc) == 2 && doc_line_start(&doc, 1) == 3 && doc_line_of(&doc, 2) == 0);
+    doc_close(&doc);
+}
+
+/*
         The columns of a line are one walk (doc_cluster_measure): a wide character takes two, a column in its first half is the
         boundary before it and in its second half the one after, and past the line's end the line's end. Both directions agree.
 */
@@ -151891,6 +151914,7 @@ static fn field_check(struct ui address_to wui)
         check_tabs_marks(wui);
         check_doc_columns();
         check_doc_collapse();
+        check_doc_crlf_pieces();
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);
