@@ -133806,11 +133806,11 @@ static fn check_launcher(void)
 
                 launcher_event(&finger);
                 launcher_event(&land);
-                pressed = ui_pressed(&launcher.press, 1) && launcher.list.focus == 1;
+                pressed = ui_pressed(&launcher.list.press, 1) && launcher.list.focus == 1;
                 finger.b += 3 * UI_ROW * launcher.ui.scale / 100;
                 launcher_event(&finger);
                 check("launcher: a finger shows the row it lands on pressed, and run nothing as it slides off",
-                      pressed && !ui_pressed(&launcher.press, 1) && launcher_event(&lift) && !launcher.press.down);
+                      pressed && !ui_pressed(&launcher.list.press, 1) && launcher_event(&lift) && !launcher.list.press.down);
                 check("launcher: a row is a finger's least height", UI_ROW >= 40);
         }
 #endif
@@ -153258,7 +153258,9 @@ static fn check_kit_defaults(struct ui address_to wui)
             {"src/canvas/ui/settings.c", "ui_page_column_press(&settings.ui, &settings.page, row, x, y)"}, {"src/canvas/ui/settings.c", "settings.confirm = 0"},
             {"src/canvas/ui/editor.c", "editor.armed"},           {"src/canvas/ui/editor.c", "again writes over"},
             {"src/canvas/ui/editor.c", "Ctrl+W again"},           {"src/canvas/ui/editor.c", "UI_SEARCH_H"},
-            {"src/canvas/ui/launcher.c", "UI_SEARCH_H"},          {"src/canvas/ui/launcher.c", "(row == launcher.press.target ? row : -1)"}, {"src/canvas/ui/settings.c", "(settings.list.down == settings.press.target))"},
+            {"src/canvas/ui/launcher.c", "UI_SEARCH_H"},          {"src/canvas/ui/launcher.c", "(row == launcher.press.target ? row : -1)"},
+            {"src/canvas/ui/launcher.c", "ui_press_begin("}, {"src/canvas/ui/launcher.c", "ui_press_end("}, {"src/canvas/ui/launcher.c", "ui_press_move("},
+            {"src/canvas/ui/launcher.c", "ui_list_let_go("}, {"src/canvas/ui/launcher.c", "ui_list_press_slide("}, {"src/canvas/ui/launcher.c", "ui_list_pointer("}, {"src/canvas/ui/settings.c", "(settings.list.down == settings.press.target))"},
             {"src/canvas/ui/terminal.c", "TERMINAL_CLICKS_NS"},   {"src/canvas/ui/terminal.c", "terminal.click_row"},
             {"src/canvas/ui/ui.c", "UI_SEARCH_H"}};
         positive copied = 0;
@@ -153602,16 +153604,34 @@ static fn check_field_hands(string_address regular)
                         struct window_event on = {WINDOW_EVENT_MOTION, 0, row_x, row_y}, off = {WINDOW_EVENT_MOTION, 0, row_x, row_y + 400};
 
                         launcher_event(&on);
-                        check("launcher: a press on a row shows it pressed and runs nothing", launcher_event(&press) && launcher.list.down == 0 && launcher.press.down);
+                        check("launcher: a press on a row shows it pressed and runs nothing", launcher_event(&press) && launcher.list.down == 0 && launcher.list.press.down);
                         launcher_event(&off);
-                        check("launcher: a press slid off its row shows none", launcher.list.down < 0 && launcher.press.down);
+                        check("launcher: a press slid off its row shows none", launcher.list.down < 0 && launcher.list.press.down);
+                        launcher.dirty = false;
                         launcher_event(&on);
-                        check("launcher: and shows it again on coming back to it", launcher.list.down == 0);
+                        check("launcher: and shows it again on coming back to it, and is drawn again", launcher.list.down == 0 && launcher.dirty);
                         launcher_event(&off);
-                        check("launcher: a release off the row runs nothing", launcher_event(&release) && !launcher.press.down && launcher.list.down < 0);
+                        check("launcher: a release off the row runs nothing", launcher_event(&release) && !launcher.list.press.down && launcher.list.down < 0);
                         launcher_event(&on);
                         launcher_event(&press);
-                        check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.press.down);
+                        check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.list.press.down);
+                }
+                // A row's press ripples from where it went down, as every list's row does (ui_list_click, ui_list_pointer). The kit
+                // makes no ripple in motion, so it is cleared for this press, and the press is let go off its row, which runs nothing.
+                {
+                        int row_y = ui_list_row_y(&launcher.list, 0) + ui_px(&launcher.ui, UI_ROW) / 2, row_x = left + 100;
+                        struct window_event on = {WINDOW_EVENT_MOTION, 0, row_x, row_y}, off = {WINDOW_EVENT_MOTION, 0, row_x, row_y + 400};
+                        b32 motion_was = ui_kit.motion;
+                        struct ui_control address_to own;
+
+                        ui_kit.motion = 0;
+                        launcher_event(&on);
+                        launcher_event(&press);
+                        own = ui_list_control(&launcher.list, 0, 0);
+                        check("launcher: a press on a row ripples from the press, as every list row does", own && (own->ripple[0].live || own->ripple[1].live || own->ripple[2].live));
+                        launcher_event(&off);
+                        check("launcher: a press let go off its row runs nothing and leaves no press", launcher_event(&release) && !launcher.list.press.down);
+                        ui_kit.motion = motion_was;
                 }
                 // The wheel turns a list longer than its window: the four desktop programs in a window one row tall, a notch a
                 // row, and the list glides to it (its aim moves, and a frame is asked for).

@@ -8625,6 +8625,7 @@ struct ui_list
         struct ui_scroll scroll;
         int hover, down;                   // the row under the pointer and the row pressed, -1 none
         int part, way;                     // a press's: the item of a tabs or swatches row it was on (-1 none), a step's way
+        struct ui_press press;             // the press on a row (ui_list_click): where it went down, and whether it is a drag
         int pointer_x, pointer_y;
         struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
 };
@@ -9164,6 +9165,45 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         l->focus = id, l->down = id, l->hover = id;
         ui_list_damage(ui, l, id);
         return id;
+}
+
+/*
+        A list's pointer and its clicks, the one rule for a list that takes a click. Motion lights the row under the pointer
+        (ui_list_pointer); a finger past the slop is a drag and no click, and a mouse held on a row shows it pressed while the
+        pointer is on that row (ui_list_press_slide). The primary button's press goes down on a row (ui_list_pointer: shown
+        pressed, rippled from the press, the focus there) and its release is the row's click where the press went down and
+        did not slide off; a press the compositor takes back (WINDOW_KEY_CANCEL) is none. Answers the row clicked, on the
+        release, or -1. x and y are the pointer's place, which a button's event does not carry.
+*/
+static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event, int x, int y)
+{
+        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        int row;
+
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                row = ui_list_hit(ui, l, x, y);
+                ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
+                if (touch)
+                {
+                        if (l->press.down && !l->press.dragged && ui_press_move(ui, &l->press, x, y))
+                                ui_list_let_go(ui, l);
+                }
+                else
+                        ui_list_press_slide(ui, l, &l->press, row);
+                return -1;
+        }
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
+                return -1;
+        if (event->flags & WINDOW_KEY_DOWN)
+        {
+                ui_press_begin(&l->press, x, y, ui_list_hit(ui, l, x, y), touch);
+                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
+                return -1;
+        }
+        ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
+        row = ui_press_end(&l->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+        return row >= 0 && row == ui_list_hit(ui, l, x, y) ? row : -1;
 }
 
 /* ---- a finger on a page ---- */

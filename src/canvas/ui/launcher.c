@@ -165,7 +165,6 @@ static struct
         unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
-        struct ui_press press; // a finger's press on a row: shown pressed as it lands, run as it lifts there
 
         // Opened beside the panel's launcher button (-a): the kit's anchor (ui_anchor_take), and whether the place is asked again
         // with the next picture, as the list grows and shrinks (a bar above a bottom panel keeps its bottom).
@@ -870,7 +869,7 @@ static b32 launcher_event(const struct window_event address_to event)
                 return launcher_key(event);
         case WINDOW_EVENT_MOTION:
                 row = ui_list_hit(&launcher.ui, &launcher.list, event->a, event->b);
-                ui_list_pointer(&launcher.ui, &launcher.list, WINDOW_EVENT_MOTION, event->a, event->b, false);
+                ui_list_click(&launcher.ui, &launcher.list, event, event->a, event->b);
                 // The row the pointer is on is the highlighted one, where it has moved to it and not where a key put it.
                 if (row >= 0 && (event->a != launcher.pointer_x || event->b != launcher.pointer_y) && row != launcher.list.focus)
                 {
@@ -879,16 +878,6 @@ static b32 launcher_event(const struct window_event address_to event)
                 }
                 launcher.pointer_x = event->a;
                 launcher.pointer_y = event->b;
-                // A finger moved off the slop is no press of the row it landed on.
-                if ((event->flags & WINDOW_KEY_TOUCH) && launcher.press.down && !launcher.press.dragged &&
-                    ui_press_move(&launcher.ui, &launcher.press, event->a, event->b))
-                {
-                        ui_list_let_go(&launcher.ui, &launcher.list);
-                        launcher.dirty = true;
-                }
-                // A mouse held on a row shows it pressed while the pointer is on that row, and not once it slides off (the kit's).
-                if (!(event->flags & WINDOW_KEY_TOUCH) && ui_list_press_slide(&launcher.ui, &launcher.list, &launcher.press, row))
-                        launcher.dirty = true;
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
@@ -896,23 +885,9 @@ static b32 launcher_event(const struct window_event address_to event)
                         launcher.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON:
-                if (event->a != UI_POINTER_LEFT)
-                        break;
-                row = ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y);
-                // A press is done where it went down, on its release: a finger's and a mouse's alike. The row it lands on is
-                // shown pressed, and a press that slides off it (a finger past the slop, a mouse off the row) runs nothing.
-                if (event->flags & WINDOW_KEY_DOWN)
-                {
-                        ui_press_begin(&launcher.press, launcher.pointer_x, launcher.pointer_y, row, (event->flags & WINDOW_KEY_TOUCH) != 0);
-                        if (row >= 0)
-                                launcher.list.focus = launcher.list.down = row;
-                        launcher.dirty = true;
-                        break;
-                }
-                ui_list_let_go(&launcher.ui, &launcher.list);
+                // The kit's click: a press goes down where the pointer is and runs on its release there, a finger's or a mouse's alike.
                 launcher.dirty = true;
-                if ((row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0)) >= 0 &&
-                    row == ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y))
+                if ((row = ui_list_click(&launcher.ui, &launcher.list, event, launcher.pointer_x, launcher.pointer_y)) >= 0)
                         return !launcher_run(row);
                 break;
         }
