@@ -22461,6 +22461,9 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->client_in_place || table->client_copied)
                 host_say(log, "  client frames   %p read in place, %p copied into the table; the card drew %p presents with one in place\n",
                          (positive)table->client_in_place, (positive)table->client_copied, (positive)table->client_card);
+        if (table->client_rects_card || table->client_rects_cpu)
+                host_say(log, "  client rects    %p damage rectangles copied by the card, %p by the processor\n",
+                         (positive)table->client_rects_card, (positive)table->client_rects_cpu);
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)

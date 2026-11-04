@@ -1052,6 +1052,7 @@ struct windows
         unsigned int metric_card_mean, metric_card_worst, metric_processor_mean, metric_processor_worst;
         unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
         unsigned int metric_presents, metric_lists;
+        unsigned int client_rects_card, client_rects_cpu; // the damage rectangles copied by the card, and by the processor
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u

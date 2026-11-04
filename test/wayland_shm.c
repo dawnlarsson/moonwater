@@ -7,7 +7,7 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-T] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-D] [-K] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-T] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
         -L lock the pointer and say each relative motion (built with -DHAVE_GAMES: the relative pointer and pointer constraints
@@ -17,6 +17,8 @@
         a client that knows whole scales only, with no fractional scale or viewport), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
         there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
+        -D damage a rectangle of 128 by 64 that moves each frame (the card's copy, which is over its threshold), and -K keep the window once the frames are
+        drawn, until it is closed.
         -T cut the files of its buffers to nothing once five frames are drawn, and exit: the compositor reads the pool it was shown in.
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
         compiled by libxkbcommon and each key says its keysym and its text).
@@ -130,7 +132,7 @@ static struct xdg_toplevel *toplevel;
 static struct wl_callback *frame_callback;
 static struct buffer buffers[2];
 
-static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only, cut_files;
+static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only, cut_files, big_damage, hold;
 static int child_wanted, maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
 static const char *title = "wayland-shm", *app_id = "wayland-shm";
 
@@ -280,7 +282,9 @@ static void redraw(void)
         }
         paint(b, frames);
         wl_surface_attach(surface, b->buffer, 0, 0);
-        if (damage_only)
+        if (big_damage)
+                wl_surface_damage_buffer(surface, (frames * 7) % (width - 128), 20, 128, 64);
+        else if (damage_only)
                 wl_surface_damage_buffer(surface, (frames * 3) % (width - 20) - 3, 10, 26, 20);
         else
                 wl_surface_damage_buffer(surface, 0, 0, width, height);
@@ -956,7 +960,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLSIC:PqvT")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdDKubLSIC:PqvT")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -968,6 +972,8 @@ int main(int argc, char **argv)
                 case 'm': maximize = 1; break;
                 case 'f': fullscreen = 1; break;
                 case 'd': damage_only = 1; break;
+                case 'D': big_damage = 1; break;
+                case 'K': hold = 1; break;
                 case 'u': child_wanted = 1; break;
                 case 'b': use_dmabuf = 1; break;
                 case 'L': use_lock = 1; break;
@@ -1105,6 +1111,8 @@ int main(int argc, char **argv)
                 wl_surface_commit(child);
         }
         while (!closed && frames < frames_wanted && wl_display_dispatch(display) != -1)
+                ;
+        while (hold && !closed && wl_display_dispatch(display) != -1)
                 ;
         if (wl_display_get_error(display))
         {

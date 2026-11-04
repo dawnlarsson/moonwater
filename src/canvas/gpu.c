@@ -1117,9 +1117,19 @@ static positive gpu_import_fd(int fd, positive bytes)
 
         if (gpu.broken || gpu.fd < 0 || !at || system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
                 return 0;
+        // The buffer is imported already: a dead import of it (let go of earlier in this tick) is held again, its address kept, and a live one is
+        // refused (the same buffer is not held twice); the handle this call got is let go of either way.
         for (unsigned int i = 0; i < gpu.imports; i++)
                 if (gpu.imported[i] == share[0])
-                        return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, share), 0;
+                {
+                        b32 dead = gpu.imported_dead[i];
+
+                        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, share);
+                        if (!dead)
+                                return 0;
+                        gpu.imported_dead[i] = 0;
+                        return gpu.imported_va[i];
+                }
         got = gpu_import_at(share[0], bytes, at);
         return got;
 }
@@ -1329,6 +1339,18 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
 // A picture (src, sp pixels a row) scaled to w by h pixels at dst (dp a row), nearest, the card told by tables where each column and row comes from: the processor
 // has made the w entries of the columns' and then the h entries of the rows' at tab (a GPU address), each the source's index (the source cell whose centre
 // is the point's). The card divides nothing, and reads nothing but what the tables name: false if the card did not finish it (as gpu_run says).
+// One rectangle copied on the card, d[y * dp + x] = s[y * sp + x] for x below w and y below h, the pitches in pixels (op 0). gpu_run waits for the
+// job, so when this is true the destination is written: nothing that reads it, or releases the source, is run before.
+static b32 gpu_copy(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a = GPU_ARGS;
+
+        if (!w || !h || !gpu_idle())
+                return false;
+        a->s = src, a->d = dst, a->g = 0, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = 0, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = 0;
+        return gpu_run();
+}
+
 static b32 gpu_scale(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int w, unsigned int h)
 {
         struct gpu_args address_to a = GPU_ARGS;

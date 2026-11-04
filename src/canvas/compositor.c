@@ -145,6 +145,32 @@ static void gpu_forget(const void *addr, positive bytes)
 {
         (void)addr, (void)bytes;
 }
+static b32 gpu_idle(void)
+{
+        return true;
+}
+static positive gpu_va_bytes(const void *pointer, positive bytes)
+{
+        (void)pointer, (void)bytes;
+        return 0;
+}
+static positive gpu_va_written(const void *pointer, positive bytes)
+{
+        (void)pointer, (void)bytes;
+        return 0;
+}
+static b32 gpu_map_as(const void *addr, positive size, b32 written)
+{
+        (void)addr, (void)size, (void)written;
+        return false;
+}
+#define gpu_map(addr, size) gpu_map_as(addr, size, 0)
+#define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
+static b32 gpu_copy(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
+{
+        (void)src, (void)sp, (void)dst, (void)dp, (void)w, (void)h;
+        return false;
+}
 #endif
 
 static struct taskbar_view compositor_taskbar_view(void);

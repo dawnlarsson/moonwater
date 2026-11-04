@@ -514,6 +514,54 @@ else
         row FAIL "a client that cuts its buffers' files under the compositor leaves it running" "$(tail -3 "$work/compositor.log")"
 fi
 
+# The damage a client sends that is negative, past the buffer, huge and many and overlapping is clipped, not refused: the connection is kept and the
+# compositor goes on (test/wayland_damage.py).
+out=$(python3 -I "$(dirname "$0")/wayland_damage.py" 2>&1)
+if alive && [ "$out" = kept ]; then
+        row ok "hostile damage (negative, past the buffer, huge, overlapping) is clipped: the client is kept and the compositor goes on"
+else
+        row FAIL "hostile damage (negative, past the buffer, huge, overlapping) is clipped" "$out $(tail -3 "$work/compositor.log")"
+fi
+
+# A window whose damage is a rectangle the card copies (over its threshold): the card's copy into the picture is the processor's, byte for byte, and
+# moonwater debug says the card copied rectangles (not the processor).
+case $extra in
+*-G*)
+        ln -sf "$compositor" "$work/bin/moonwater"
+        "$client" -D -K -n 20 -w 320 -h 240 -q > /dev/null 2>&1 &
+        held=$!
+        sleep 2
+        cp "$work/scan.img" "$work/card-damage.img"
+        "$work/bin/moonwater" debug > "$work/debug-damage.txt" 2>&1
+        kill "$held" 2> /dev/null
+        wait "$held" 2> /dev/null
+        stop
+        extra=
+        if start; then
+                "$client" -D -K -n 20 -w 320 -h 240 -q > /dev/null 2>&1 &
+                held=$!
+                sleep 2
+                cp "$work/scan.img" "$work/processor-damage.img"
+                kill "$held" 2> /dev/null
+                wait "$held" 2> /dev/null
+                if cmp -s "$work/card-damage.img" "$work/processor-damage.img"; then
+                        row ok "the card's copy of a window's damage is the processor's, byte for byte"
+                else
+                        row FAIL "the card's copy of a window's damage is the processor's, byte for byte" "the screens differ"
+                fi
+                stop
+        else
+                row FAIL "the compositor starts without the card for the damage comparison" "$(tail -3 "$work/compositor.log")"
+        fi
+        extra=-G
+        start || row FAIL "the compositor starts again after the damage comparison" "$(tail -3 "$work/compositor.log")"
+        if grep -q "client rects *[1-9][0-9]* damage rectangles copied by the card" "$work/debug-damage.txt" 2> /dev/null; then
+                row ok "the card copied damage rectangles into the picture (moonwater debug counts them)"
+        else
+                row FAIL "the card copied damage rectangles into the picture (moonwater debug counts them)" "$(grep "client" "$work/debug-damage.txt" | head -2)"
+        fi ;;
+esac
+
 # The compositor ends when asked, and takes its socket with it.
 stop
 if [ ! -S /run/moonwater/wayland-0 ]; then

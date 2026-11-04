@@ -110,6 +110,13 @@ static struct
                 const unsigned char *map;
                 long fd;
         } lent[WINDOWS];
+        // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
+        // when the buffer changes or the row closes.
+        struct
+        {
+                const unsigned char *map;
+                positive va;
+        } source[WINDOWS];
 } compositor_wl = {.listen = -1, .wake = -1, .lent = {{0}}};
 
 /* ---- the keymap a client reads ---- */
@@ -125,6 +132,9 @@ static struct
         machine reads it all the same.
 */
 #define COMPOSITOR_WL_KEYMAP_ROOM 24576
+// A damage rectangle of at least this many pixels is copied by the card (a job, which is a wait for the card): smaller ones are the processor's
+// copy, which is cheaper than the job. The one constant the card copy's threshold is.
+#define COMPOSITOR_WL_CARD_COPY_PIXELS 4096
 
 // The keys that are no characters, by Linux code: the symbol's name, and the type of key it is.
 static const struct
@@ -561,6 +571,8 @@ static void compositor_wl_row_close(void *context, int row)
         (void)context;
         if (row >= 0 && row < WINDOWS)
                 compositor_wl.laying[row].open = 0, compositor_wl_unlend(row);
+        if (row >= 0 && row < WINDOWS && compositor_wl.source[row].va)
+                gpu_release_import(compositor_wl.source[row].va), compositor_wl.source[row].va = 0, compositor_wl.source[row].map = 0;
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
@@ -765,6 +777,65 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         return 1;
 }
 
+/*
+        A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
+        being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
+        or a dma-buf through its import, which is held for the buffer while it is the one the damage is copied from (compositor_wl.source), and it
+        writes the picture's buffer through a written map of it. The job is complete when gpu_copy returns (gpu_run waits), before the caller goes on
+        and before the client's buffer is released. Refused, with the processor's copy done instead: a rectangle under
+        COMPOSITOR_WL_CARD_COPY_PIXELS, a blend, a card not up or busy, a pool cut under the read (the processor finds it, as before: its zeros are
+        refused), and a mapping the kernel refuses.
+*/
+static int compositor_wl_card_rect(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
+                                   long dx, long dy, long sx, long sy, long w, long h)
+{
+        unsigned long stride = (unsigned long)picture->stride, extent;
+        const unsigned char *src;
+        positive src_va, dst_va;
+        volatile unsigned int probe;
+
+        if (!gpu_ready() || picture->blend || !picture->pixels || !picture->map || picture->map_bytes <= 0 || w <= 0 || h <= 0 ||
+            w * h < COMPOSITOR_WL_CARD_COPY_PIXELS || !gpu_idle())
+                return 0;
+        src = picture->pixels + (unsigned long)sy * stride + (unsigned long)sx * 4;
+        extent = 4 * ((stride / 4) * (unsigned long)(h - 1) + (unsigned long)w);
+        // The rectangle's first and last pixels are read first: a pool cut under the read raises the SIGBUS the handler answers (zeros), here, so the
+        // card is not given the pages of a file that is gone.
+        probe = *(const volatile unsigned int *)src;
+        probe += *(const volatile unsigned int *)(src + extent - 4);
+        (void)probe;
+        if (compositor_wl_cut(picture->pixels))
+                return 0;
+        if (picture->sync_fd < 0)
+        {
+                src_va = gpu_va_bytes(src, extent);
+                if (!src_va && gpu_map(picture->map, (positive)picture->map_bytes))
+                        src_va = gpu_va_bytes(src, extent);
+                if (!src_va)
+                        return 0;
+        }
+        else
+        {
+                if (compositor_wl.source[row].map != picture->map)
+                {
+                        if (compositor_wl.source[row].va)
+                                gpu_release_import(compositor_wl.source[row].va);
+                        compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                        compositor_wl.source[row].map = compositor_wl.source[row].va ? picture->map : 0;
+                        if (!compositor_wl.source[row].va)
+                                return 0;
+                }
+                src_va = compositor_wl.source[row].va + (positive)(src - picture->map);
+        }
+        dst_va = gpu_va_written(to, compositor.buffer);
+        if (!dst_va && gpu_map_written(to, compositor.buffer))
+                dst_va = gpu_va_written(to, compositor.buffer);
+        if (!dst_va)
+                return 0;
+        return gpu_copy(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch,
+                        (unsigned int)w, (unsigned int)h);
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -871,17 +942,25 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         for (long c = left; c < right; c++)
                                                 into[c] = compositor_wl_over(from[c], into[c]);
                                 }
+                        else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top))
+                                table->client_rects_card++;
                         else if (picture->sync_fd >= 0)
+                        {
+                                table->client_rects_cpu++;
                                 // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
                                 memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                             (const unsigned int *)(picture->pixels + top * picture->stride) + left,
                                                             (unsigned long)picture->stride / 4, (unsigned long)(right - left),
                                                             (unsigned long)(bottom - top));
+                        }
                         else
+                        {
+                                table->client_rects_cpu++;
                                 memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                      (const unsigned int *)(picture->pixels + top * picture->stride) + left,
                                                      (unsigned long)picture->stride / 4, (unsigned long)(right - left),
                                                      (unsigned long)(bottom - top));
+                        }
                         compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
                 }
                 if (picture->sync_fd >= 0)
