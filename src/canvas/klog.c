@@ -107,8 +107,6 @@ static positive klog_line(const p8 address_to record, positive length, p8 addres
                 line[made++] = byte;
         }
 
-        line[made++] = '\r';
-        line[made++] = '\n';
         return made;
 }
 
@@ -117,6 +115,11 @@ static positive klog_line(const p8 address_to record, positive length, p8 addres
         (EPIPE) and is given the oldest record there is on the next read, which is what is wanted, so it is not an end.
         Nothing waiting is EAGAIN and only EAGAIN; anything else is the log gone.
 */
+// The reader's records are lines of the screen. A record is put on a new line after the one before it, not with a newline of its
+// own: a record that ends in one leaves the cursor on an empty row, which the view (and the selection) would count as a line.
+static b32 klog_begun;
+static const p8 klog_break[2] = {'\r', '\n'};
+
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget)
 {
         p8 record[KLOG_RECORD], line[KLOG_RECORD + 32];
@@ -135,6 +138,9 @@ static b32 klog_drain(b32 far, b32 address_to gone, positive budget)
                         made = klog_line(record, (positive)got, line);
                         if (made)
                         {
+                                if (klog_begun)
+                                        term_bytes(klog_break, 2);
+                                klog_begun = true;
                                 term_bytes(line, made);
                                 changed = true;
                         }

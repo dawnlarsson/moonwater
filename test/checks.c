@@ -123671,6 +123671,30 @@ static fn check_pointer(void)
                 }
                 terminal.pad_y = pad_y_was, terminal.height = height_was;
                 check("terminal: a handle on the last line draws nothing past the end of the picture", spoiled == 0);
+        /*
+                A kernel log's records (klog.c) are put on a new line after the one before, so the last record leaves the cursor on its
+                own line and not on an empty one below it: selecting the records copies them as the lines they are, with no empty line
+                after the last. The bytes are the reader's own pattern (klog_drain writes the separator, then the record).
+        */
+        {
+                static const char expect[] = "alpha\nbravo\ncharlie";
+                p8 address_to text = null;
+                positive room = 0, length;
+
+                terminal_view_live();
+                for (unsigned int line = 0; line < ROWS; line++)
+                        term_bytes("\r\n", 2);
+                term_bytes("alpha", 5);
+                term_bytes("\r\nbravo", 7);
+                term_bytes("\r\ncharlie", 9);
+                terminal_view_live();
+                terminal_select_set(terminal_place(window->head - 3, 0), terminal_place(window->head - 1, window->stride));
+                length = terminal_select_text(&text, &room);
+                check("reading: three records select as three lines, with no empty line after the last",
+                      length == sizeof(expect) - 1 && text && !memory_compare(text, expect, length));
+                array_store_release(text, room, length);
+                terminal_select_clear();
+        }
                 terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
         }
 #endif
