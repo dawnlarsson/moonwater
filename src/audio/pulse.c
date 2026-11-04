@@ -3839,6 +3839,9 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (s->sink != sink)
                 {
+                        // A stream that asked not to be moved is not moved by its program: the person (root) still may.
+                        if (s->no_move && !c->root)
+                                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                         if (audio_voice_retarget(&s->voice, p->sink[sink].rate) < 0)
                                 return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
                         s->sink = sink;

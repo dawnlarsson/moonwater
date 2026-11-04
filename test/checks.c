@@ -175080,6 +175080,8 @@ static void pt_make_source(void)
 }
 
 // A stereo 16-bit stream at 48000 with the buffer attributes given; the channel and the sink input's index, or -1.
+static int pt_next_no_move; // the no-move bool of the next stream pt_create makes (version 12 on)
+
 static int pt_create(long slot, unsigned version, unsigned long tag, unsigned long tlength, unsigned long prebuf, unsigned long minreq, unsigned long *channel, unsigned long *index,
                      unsigned long *missing, int corked, unsigned long volume, int volume_set, long format, int channels, unsigned long rate, const char *sink)
 {
@@ -175103,7 +175105,7 @@ static int pt_create(long slot, unsigned version, unsigned long tag, unsigned lo
         pt_vol(&w, channels, volume);
         if (version >= 12)
                 for (int i = 0; i < 7; i++)
-                        pt_bool(&w, 0);
+                        pt_bool(&w, i == 5 && pt_next_no_move); // no remap, no remix, fix format, fix rate, fix channels, no move, variable
         if (version >= 13)
         {
                 pt_bool(&w, 0);
@@ -179701,6 +179703,55 @@ static void pt_test_list_bounds(void)
         pulse_client_close(&pt_engine, slot);
 }
 
+/* ---- a stream that asked not to be moved is not moved by its program; the person (root) may move it ---- */
+
+static void pt_test_no_move(void)
+{
+        unsigned long channel, missing, pinned, free_index;
+        struct pt_w w;
+        long owner, person;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "one", "One", 48000);
+        pulse_sink_add(&pt_engine, "two", "Two", 48000);
+        owner = pt_connect(1000, 4700, 35, "Pinned");
+        person = pt_connect(0, 4701, 35, "Person");
+        pt_next_no_move = 1;
+        PTCHECK(pt_create(owner, 35, 10, 0, 0, 0, &channel, &pinned, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, "one") == 0, "a stream that asked not to be moved is made");
+        pt_next_no_move = 0;
+        PTCHECK(pt_create(owner, 35, 11, 0, 0, 0, &channel, &free_index, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, "one") == 0, "and one that did not ask");
+
+        // Its program moves it to the other sink: refused as the program's own no-move request, and it stays where it was.
+        memset(&w, 0, sizeof(w));
+        pt_u32(&w, pinned);
+        pt_u32(&w, 1);
+        pt_str(&w, 0);
+        pt_command(owner, PULSE_COMMAND_MOVE_SINK_INPUT, 12, &w);
+        pt_collect(owner);
+        PTCHECK(pt_expect_error(12, PULSE_ERR_ACCESS), "its program cannot move it (ACCESS)");
+        PTCHECK(pulse_input_of(&pt_engine, pinned)->sink == 0, "and it stays on its sink");
+
+        // The one that did not ask moves as before.
+        memset(&w, 0, sizeof(w));
+        pt_u32(&w, free_index);
+        pt_u32(&w, 1);
+        pt_str(&w, 0);
+        pt_command(owner, PULSE_COMMAND_MOVE_SINK_INPUT, 13, &w);
+        pt_collect(owner);
+        PTCHECK(pt_expect_ack(13) && pulse_input_of(&pt_engine, free_index)->sink == 1, "a stream that did not ask is moved");
+
+        // The person (root) may move it.
+        memset(&w, 0, sizeof(w));
+        pt_u32(&w, pinned);
+        pt_u32(&w, 1);
+        pt_str(&w, 0);
+        pt_command(person, PULSE_COMMAND_MOVE_SINK_INPUT, 14, &w);
+        pt_collect(person);
+        PTCHECK(pt_expect_ack(14) && pulse_input_of(&pt_engine, pinned)->sink == 1, "the person moves it");
+        pulse_client_close(&pt_engine, person);
+        pulse_client_close(&pt_engine, owner);
+}
+
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
 
 static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
@@ -180021,6 +180072,7 @@ int main(void)
         pt_test_list_bounds();
         pt_test_feed_cut();
         pt_test_samples_full();
+        pt_test_no_move();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();
