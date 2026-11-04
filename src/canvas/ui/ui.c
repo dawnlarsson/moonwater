@@ -11993,6 +11993,17 @@ static const char address_to ui_text_menu_key(const struct ui_text address_to t,
         return ui_text_menu_keys[id];
 }
 
+// The clipboard's three rows of a menu, Copy, Paste and Select All, in that order: each with the id the app chose by, the key the
+// menu shows beside it (null for none) and its state (UI_MENU_DISABLED where the app can not do it). Every menu that has them
+// (a text widget's bar and the terminal's) reads them here, so the words and the order are the kit's.
+static void ui_menu_clip_rows(struct ui_popmenu address_to m, int copy, const char address_to copy_key, p32 copy_state, int paste,
+                              const char address_to paste_key, p32 paste_state, int all, const char address_to all_key, p32 all_state)
+{
+        ui_popmenu_add(m, WORDS(menu_copy), copy_key, copy_state, copy);
+        ui_popmenu_add(m, WORDS(menu_paste), paste_key, paste_state, paste);
+        ui_popmenu_add(m, WORDS(menu_select_all), all_key, all_state, all);
+}
+
 // The items of the menu, or with actions only the four a finger's selection offers (the actions bar's): Cut, Copy, Paste and
 // Select All, each greyed when the widget can not do it (the bar leaves those out).
 static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t, b32 actions)
@@ -12003,11 +12014,10 @@ static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_tex
         if (actions)
         {
                 ui_popmenu_add(m, WORDS(menu_cut), ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
-                ui_popmenu_add(m, WORDS(menu_copy), ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
-                ui_popmenu_add(m, WORDS(menu_paste), ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
-                               fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
-                ui_popmenu_add(m, WORDS(menu_select_all), ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
-                               doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
+                ui_menu_clip_rows(m, UI_TEXT_MENU_COPY, ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden,
+                                  UI_TEXT_MENU_PASTE, ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
+                                  fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_ALL,
+                                  ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL), doc_length(&t->doc) ? 0 : UI_MENU_DISABLED);
                 return;
         }
         ui_popmenu_add(m, WORDS(menu_undo), ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),

@@ -2447,9 +2447,8 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         struct ui_popmenu address_to m = &terminal_menu.menu;
 
         m->count = 0;
-        ui_popmenu_add(m, WORDS(menu_copy), "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_COPY);
-        ui_popmenu_add(m, WORDS(menu_paste), "Ctrl+Shift+V", 0, TERMINAL_MENU_PASTE);
-        ui_popmenu_add(m, WORDS(menu_select_all), null, 0, TERMINAL_MENU_ALL);
+        ui_menu_clip_rows(m, TERMINAL_MENU_COPY, "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_PASTE,
+                          "Ctrl+Shift+V", 0, TERMINAL_MENU_ALL, null, 0);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
         ui_popmenu_add(m, WORDS(menu_zoom_out), "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
