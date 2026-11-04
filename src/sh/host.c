@@ -22354,6 +22354,20 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (positive)table->wl_idled);
         else
                 host_say(log, "  idle            no clock (the Wayland shim is off)\n");
+        //      The Wayland shim's hints: the bell rings and toplevel icons (counted), and the windows that say a content type, are modal, or have an icon.
+        if (table->wl_input_ms)
+        {
+                unsigned int content = 0, modal = 0, icon = 0;
+
+                for (unsigned int row = 0; row < WINDOWS; row++)
+                {
+                        content += table->wl_content[row] != 0;
+                        modal += table->wl_modal[row] != 0;
+                        icon += table->wl_icon[row] != 0;
+                }
+                host_say(log, "  hints           %p bell rings, %p toplevel icons set; windows: %p with a content type, %p modal, %p with an icon\n",
+                         (positive)table->wl_bells, (positive)table->wl_icons, (positive)content, (positive)modal, (positive)icon);
+        }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)

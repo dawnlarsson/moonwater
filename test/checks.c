@@ -169037,6 +169037,111 @@ static void test_idle_notify(void)
         wayland_stop();
 }
 
+/*
+        xdg-toplevel-icon and xdg_system_bell. An icon with a square buffer is shown on its toplevel from the commit after it is set; an
+        icon with neither pixels nor a name resets it; an icon on a toplevel is immutable; a buffer that is not a square of shared memory,
+        or a scale below one, is refused; a ring is counted with or without a surface. A refusal ends its client, so each has its own.
+*/
+static unsigned long square_buffer(struct session *s, long n)
+{
+        struct wlc *c = s->c;
+        unsigned long pool, buffer;
+        long fd = wl_file(n * n * 4, 0);
+
+        pool = wlc_id(c, WLI_wl_shm_pool, 1);
+        wlc_send(c, s->shm, WLQ_wl_shm_create_pool, pool, fd, (long)(n * n * 4));
+        close((int)fd);
+        buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, buffer, 0L, n, n, n * 4, (long)WLN_wl_shm_format_xrgb8888);
+        return buffer;
+}
+
+static unsigned long icon_session(struct session *s)
+{
+        session_open(s);
+        session_window(s, 0xff556677);
+        return wl_global(s->c, s->registry, WLI_xdg_toplevel_icon_manager_v1, 1);
+}
+
+static void test_icon(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long manager, buffer, icon, empty, bell;
+        long bells, icons, before;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        manager = icon_session(&s);
+        c = s.c;
+        WLCHECK(manager != 0 && c->errors == 0 && wlc_count(c, WLI_xdg_toplevel_icon_manager_v1, WLE_xdg_toplevel_icon_manager_v1_done) == 1,
+                "xdg-toplevel-icon is advertised, and its manager is sent done at once (no icon size is preferred)");
+        buffer = square_buffer(&s, 16);
+        icon = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
+        wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_add_buffer, buffer, 1L);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, icon);
+        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 0, "an icon is applied from the commit after it is set, as set_icon is double-buffered");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 1, "and the window has an icon from that commit");
+        wayland_hint_counts(&bells, &icons);
+        WLCHECK(icons == 1, "the icon set is counted once");
+        empty = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, empty);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, empty);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 0, "an icon with neither pixels nor a name resets the icon");
+        wayland_hint_counts(&bells, &icons);
+        WLCHECK(icons == 1, "and is not counted as a set");
+        wlc_end(c);
+
+        /* an icon on a toplevel is immutable: a later buffer is refused with immutable */
+        manager = icon_session(&s);
+        c = s.c;
+        buffer = square_buffer(&s, 16);
+        icon = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, icon);
+        wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_add_buffer, buffer, 1L);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_xdg_toplevel_icon_v1_error_immutable, "an icon set on a toplevel cannot take a buffer");
+        wlc_end(c);
+
+        /* a buffer that is not a square of shared memory, or a scale below one, is invalid_buffer */
+        manager = icon_session(&s);
+        c = s.c;
+        icon = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
+        wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_add_buffer, s.buffer, 1L);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_xdg_toplevel_icon_v1_error_invalid_buffer, "a buffer that is not square is invalid_buffer");
+        wlc_end(c);
+        manager = icon_session(&s);
+        c = s.c;
+        buffer = square_buffer(&s, 16);
+        icon = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
+        wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_add_buffer, buffer, 0L);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_xdg_toplevel_icon_v1_error_invalid_buffer, "a scale below one is invalid_buffer");
+        wlc_end(c);
+
+        /* a name is content; a ring is counted, with a surface or without */
+        manager = icon_session(&s);
+        c = s.c;
+        bell = wl_global(c, s.registry, WLI_xdg_system_bell_v1, 1);
+        icon = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
+        wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_set_name, "applications-games");
+        wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, icon);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 1, "an icon named by a name is an icon");
+        wayland_hint_counts(&before, &icons);
+        wlc_send(c, bell, WLQ_xdg_system_bell_v1_ring, s.surface);
+        wlc_send(c, bell, WLQ_xdg_system_bell_v1_ring, 0UL);
+        wayland_hint_counts(&bells, &icons);
+        WLCHECK(c->errors == 0 && bells == before + 2, "each ring is counted, with a surface or without one");
+        wlc_end(c);
+        wayland_stop();
+}
+
 static void test_presentation(void)
 {
         struct session s;
@@ -172786,6 +172891,7 @@ int main(int argc, char **argv)
         test_hints();
         test_inhibit_state();
         test_idle_notify();
+        test_icon();
         test_activation();
         test_pacing();
         test_cursor_shape();

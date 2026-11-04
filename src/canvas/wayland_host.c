@@ -1630,15 +1630,26 @@ static positive compositor_wl_due(void)
         return first;
 }
 
-// The idle clock the moonwater debug line reads (window.c's table): when the shim last had input, the inhibitors that hold, the idle notifications.
-static void compositor_wl_idle_table(void)
+// The shim's state for moonwater debug (window.c's table): the idle clock (when the shim last had input, the inhibitors that hold, the
+// idle notifications), the bell rings and icon sets, and each window's content type, modal hint and icon.
+static void compositor_wl_table(void)
 {
-        long input = 0, inhibitors = 0, idled = 0;
+        long input = 0, inhibitors = 0, idled = 0, bells = 0, icons = 0;
+        struct windows *table = compositor.table;
 
         wayland_idle_state(&input, &inhibitors, &idled);
-        compositor.table->wl_input_ms = (unsigned long)input;
-        compositor.table->wl_inhibitors = (unsigned int)inhibitors;
-        compositor.table->wl_idled = (unsigned int)idled;
+        wayland_hint_counts(&bells, &icons);
+        table->wl_input_ms = (unsigned long)input;
+        table->wl_inhibitors = (unsigned int)inhibitors;
+        table->wl_idled = (unsigned int)idled;
+        table->wl_bells = (unsigned int)bells;
+        table->wl_icons = (unsigned int)icons;
+        for (long row = 0; row < WINDOWS; row++)
+        {
+                table->wl_content[row] = (unsigned char)wayland_row_content(row);
+                table->wl_modal[row] = (unsigned char)wayland_row_modal(row);
+                table->wl_icon[row] = (unsigned char)wayland_row_icon(row);
+        }
 }
 
 // An input event the compositor read (a key, a button, a motion, a finger): the idle clock counts from it.
@@ -2151,7 +2162,7 @@ static void compositor_wl_wake(void)
                 wayland_screens_changed();
         }
         wayland_idle_tick();
-        compositor_wl_idle_table();
+        compositor_wl_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();
         if (stats.rows > 0 || stats.clients > 0)

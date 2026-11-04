@@ -81,6 +81,8 @@ enum {
         WLI_zwp_pointer_gesture_hold_v1,
         WLI_ext_idle_notifier_v1,
         WLI_ext_idle_notification_v1,
+        WLI_xdg_toplevel_icon_manager_v1,
+        WLI_xdg_toplevel_icon_v1,
         WLI_COUNT
 };
 
@@ -162,6 +164,8 @@ enum {
 #define WLV_zwp_pointer_gesture_hold_v1 3
 #define WLV_ext_idle_notifier_v1 2
 #define WLV_ext_idle_notification_v1 2
+#define WLV_xdg_toplevel_icon_manager_v1 1
+#define WLV_xdg_toplevel_icon_v1 1
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -716,6 +720,17 @@ enum {
 #define WLQ_ext_idle_notification_v1_destroy 0
 #define WLE_ext_idle_notification_v1_idled 0
 #define WLE_ext_idle_notification_v1_resumed 1
+#define WLQ_xdg_toplevel_icon_manager_v1_destroy 0
+#define WLQ_xdg_toplevel_icon_manager_v1_create_icon 1
+#define WLQ_xdg_toplevel_icon_manager_v1_set_icon 2
+#define WLE_xdg_toplevel_icon_manager_v1_icon_size 0
+#define WLE_xdg_toplevel_icon_manager_v1_done 1
+#define WLQ_xdg_toplevel_icon_v1_destroy 0
+#define WLQ_xdg_toplevel_icon_v1_set_name 1
+#define WLQ_xdg_toplevel_icon_v1_add_buffer 2
+#define WLN_xdg_toplevel_icon_v1_error_invalid_buffer 1
+#define WLN_xdg_toplevel_icon_v1_error_immutable 2
+#define WLN_xdg_toplevel_icon_v1_error_no_buffer 3
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1054,6 +1069,14 @@ static const unsigned char wl_q_ext_idle_notifier_v1_get_input_idle_notification
 static const unsigned char wl_q_ext_idle_notification_v1_destroy[] = {0, 0};
 static const unsigned char wl_e_ext_idle_notification_v1_idled[] = {0, 0};
 static const unsigned char wl_e_ext_idle_notification_v1_resumed[] = {0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_manager_v1_create_icon[] = {'n', WLI_xdg_toplevel_icon_v1, 0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_manager_v1_set_icon[] = {'o', WLI_xdg_toplevel, 'O', WLI_xdg_toplevel_icon_v1, 0, 0};
+static const unsigned char wl_e_xdg_toplevel_icon_manager_v1_icon_size[] = {'i', 0, 0, 0};
+static const unsigned char wl_e_xdg_toplevel_icon_manager_v1_done[] = {0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_v1_set_name[] = {'s', 0, 0, 0};
+static const unsigned char wl_q_xdg_toplevel_icon_v1_add_buffer[] = {'o', WLI_wl_buffer, 'i', 0, 0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1600,6 +1623,20 @@ static const struct wl_message wl_events_ext_idle_notification_v1[] = {
         {1, 0, wl_e_ext_idle_notification_v1_idled},
         {1, 0, wl_e_ext_idle_notification_v1_resumed},
 };
+static const struct wl_message wl_requests_xdg_toplevel_icon_manager_v1[] = {
+        {1, 1, wl_q_xdg_toplevel_icon_manager_v1_destroy},
+        {1, 0, wl_q_xdg_toplevel_icon_manager_v1_create_icon},
+        {1, 0, wl_q_xdg_toplevel_icon_manager_v1_set_icon},
+};
+static const struct wl_message wl_events_xdg_toplevel_icon_manager_v1[] = {
+        {1, 0, wl_e_xdg_toplevel_icon_manager_v1_icon_size},
+        {1, 0, wl_e_xdg_toplevel_icon_manager_v1_done},
+};
+static const struct wl_message wl_requests_xdg_toplevel_icon_v1[] = {
+        {1, 1, wl_q_xdg_toplevel_icon_v1_destroy},
+        {1, 0, wl_q_xdg_toplevel_icon_v1_set_name},
+        {1, 0, wl_q_xdg_toplevel_icon_v1_add_buffer},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1680,4 +1717,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_zwp_pointer_gesture_hold_v1] = {"zwp_pointer_gesture_hold_v1", 3, 1, 2, wl_requests_zwp_pointer_gesture_hold_v1, wl_events_zwp_pointer_gesture_hold_v1},
         [WLI_ext_idle_notifier_v1] = {"ext_idle_notifier_v1", 2, 3, 0, wl_requests_ext_idle_notifier_v1, 0},
         [WLI_ext_idle_notification_v1] = {"ext_idle_notification_v1", 2, 1, 2, wl_requests_ext_idle_notification_v1, wl_events_ext_idle_notification_v1},
+        [WLI_xdg_toplevel_icon_manager_v1] = {"xdg_toplevel_icon_manager_v1", 1, 3, 2, wl_requests_xdg_toplevel_icon_manager_v1, wl_events_xdg_toplevel_icon_manager_v1},
+        [WLI_xdg_toplevel_icon_v1] = {"xdg_toplevel_icon_v1", 1, 3, 0, wl_requests_xdg_toplevel_icon_v1, 0},
 };

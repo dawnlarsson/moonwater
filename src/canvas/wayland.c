@@ -362,6 +362,8 @@ struct wayland_surface
         // pending multiplier, 0xffffffff for opaque, which a commit shows as alpha), and an xdg_dialog's modal state.
         unsigned int content, alpha, pending_alpha;
         unsigned char modal;
+        // xdg-toplevel-icon: whether an icon with pixels or a name was set on the toplevel, pending and as the commit showed it.
+        unsigned char icon, pending_icon;
         // wp_tearing_control's presentation hint, asynchronous (tearing allowed) or not, pending and as the commit shows it.
         unsigned char pending_async, async_hint;
         unsigned char attention;     // an xdg-activation asked for the window that was not vouched for: it wants attention
@@ -575,6 +577,7 @@ static struct
         long dmabufs;                      // the buffers made of them, all clients
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
+        long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
@@ -979,6 +982,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_commit_timing_manager_v1, 1},
     {WLI_zwp_pointer_gestures_v1, 3},
     {WLI_ext_idle_notifier_v1, 2},
+    {WLI_xdg_toplevel_icon_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -2023,6 +2027,13 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         }
         else if (iface == WLI_zwp_linux_dmabuf_v1 && a[1].version < 4)
                 wayland_dmabuf_formats(c, id, a[1].version);
+        else if (iface == WLI_xdg_toplevel_icon_manager_v1)
+        {
+                // No icon size is preferred, so the done event alone (the protocol sends it when there is no preference).
+                struct wayland_event e = wayland_begin(c, id, WLE_xdg_toplevel_icon_manager_v1_done);
+
+                wayland_end(&e);
+        }
         else if (iface == WLI_wp_presentation)
         {
                 // The clock every presented time is on: CLOCK_MONOTONIC (1), the clock the compositor's frames are timed by.
@@ -2360,6 +2371,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         // The alpha multiplier and the tearing hint are the pending state at every commit, with or without a buffer (the
         // protocol's double buffering).
         s->alpha = s->pending_alpha;
+        s->icon = s->pending_icon;
         s->async_hint = s->pending_async;
         s->fifo_wait = s->pending_fifo;
         s->pending_fifo = 0;
@@ -5300,6 +5312,31 @@ static void wayland_hint_bind(struct wayland_client *c, long hint, struct waylan
 }
 
 /*
+        xdg-toplevel-icon. An icon is made with pixels or a name (its flags say which: WAYLAND_ICON_CONTENT) and is immutable once it is set
+        on a toplevel (WAYLAND_ICON_SET). set_icon is double-buffered: the toplevel's icon is the one set when its surface next commits,
+        and an icon with neither pixels nor a name resets it to the default. The pixels are not kept: nothing draws an icon yet.
+*/
+#define WAYLAND_ICON_CONTENT 1
+#define WAYLAND_ICON_SET 2
+
+static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
+{
+        unsigned int id = c->objects[toplevel].id;
+        struct wayland_surface *s = 0;
+
+        if (icon >= 0)
+                c->objects[icon].flags |= WAYLAND_ICON_SET;
+        for (long at = 0; at < WAYLAND_SURFACES && !s; at++)
+                if (c->surfaces[at].live && c->surfaces[at].role_id == id)
+                        s = &c->surfaces[at];
+        if (!s)
+                return;
+        s->pending_icon = icon >= 0 && (c->objects[icon].flags & WAYLAND_ICON_CONTENT) ? 1 : 0;
+        if (s->pending_icon)
+                wayland.icons++;
+}
+
+/*
         The hints a client gives a window, none of which is drawn yet but all of which the compositor can read (wayland_row_*):
         xdg_system_bell (a ring is taken and sounds nothing yet), xdg_dialog (modal or not, for the toplevel it was made for),
         wp_content_type (the surface's kind of content, none by default and none on destroy), wp_alpha_modifier (the multiplier
@@ -5395,7 +5432,32 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                                 s->pending_timestamp = 1;
                 }
                 return WAYLAND_OK;
-        default: // xdg_system_bell: a ring is taken
+        case WLI_xdg_toplevel_icon_manager_v1:
+                if (op == WLQ_xdg_toplevel_icon_manager_v1_set_icon)
+                        wayland_icon_set(c, a[0].slot, a[1].u ? a[1].slot : -1);
+                return WAYLAND_OK;
+        case WLI_xdg_toplevel_icon_v1:
+                if (op == WLQ_xdg_toplevel_icon_v1_set_name || op == WLQ_xdg_toplevel_icon_v1_add_buffer)
+                {
+                        if (self->flags & WAYLAND_ICON_SET)
+                                return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_immutable, "the icon is on a toplevel");
+                }
+                if (op == WLQ_xdg_toplevel_icon_v1_set_name)
+                        self->flags |= WAYLAND_ICON_CONTENT;
+                else if (op == WLQ_xdg_toplevel_icon_v1_add_buffer)
+                {
+                        struct wayland_buffer *b = &c->buffers[c->objects[a[0].slot].link];
+
+                        // A square of shared memory, at a scale of one or more (a dma-buf is not one).
+                        if (c->pools[b->pool].dmabuf || b->width != b->height || b->width <= 0 || a[1].i < 1)
+                                return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_invalid_buffer,
+                                                    "the buffer is not a square of shared memory");
+                        self->flags |= WAYLAND_ICON_CONTENT;
+                }
+                return WAYLAND_OK;
+        default: // xdg_system_bell: a ring is counted, and nothing sounds or flashes yet
+                if (self->iface == WLI_xdg_system_bell_v1 && op == WLQ_xdg_system_bell_v1_ring)
+                        wayland.bells++;
                 return WAYLAND_OK;
         }
 }
@@ -5977,6 +6039,8 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_xdg_wm_dialog_v1:
                 case WLI_xdg_dialog_v1:
                 case WLI_xdg_system_bell_v1:
+                case WLI_xdg_toplevel_icon_manager_v1:
+                case WLI_xdg_toplevel_icon_v1:
                 case WLI_wp_content_type_manager_v1:
                 case WLI_wp_content_type_v1:
                 case WLI_wp_alpha_modifier_v1:
@@ -6922,6 +6986,22 @@ WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idle
                 if (wayland.client[slot] && !wayland.client[slot]->dead)
                         for (long at = 0; at < WAYLAND_NOTIFIES; at++)
                                 *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
+}
+
+/* Whether a window has an icon set on its toplevel (xdg-toplevel-icon), as its commit showed it. */
+WAYLAND_API long wayland_row_icon(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->icon : 0;
+}
+
+/* How many xdg_system_bell rings and xdg-toplevel-icon sets there have been, over every client (for the moonwater debug line). */
+WAYLAND_API void wayland_hint_counts(long *bells, long *icons)
+{
+        *bells = wayland.bells;
+        *icons = wayland.icons;
 }
 
 WAYLAND_API long wayland_row_modal(long row)

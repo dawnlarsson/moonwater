@@ -107,6 +107,9 @@ CONFIG = [
     ("protocols", "staging/ext-idle-notify/ext-idle-notify-v1.xml", [
         "ext_idle_notifier_v1", "ext_idle_notification_v1",
     ]),
+    ("protocols", "staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml", [
+        "xdg_toplevel_icon_manager_v1", "xdg_toplevel_icon_v1",
+    ]),
 ]
 
 
