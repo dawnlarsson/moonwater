@@ -312,6 +312,7 @@ M = [
     ("service", 'the rest of a short card write is dropped', '                        if (audio_service.block_left > 0)\n                                return; // the card is full: the rest waits for the next wake', '                        audio_service.block_left = 0;'),
     ("service", 'an output file that cannot be written is kept', '                        audio_service.file = -1;\n                        return;', '                        return;'),
     ("service", "the state page's sequence steps by four", '__atomic_store_n(&page->seq, seq + 2, __ATOMIC_RELEASE);', '__atomic_store_n(&page->seq, seq + 4, __ATOMIC_RELEASE);'),
+    ("service", "the capture thread keeps the real-time policy", "        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread", "        (void)ordinary;"),
     ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]
 

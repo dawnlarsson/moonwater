@@ -180070,6 +180070,7 @@ int main(void)
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180319,6 +180320,21 @@ static void sv_test_fifo(void)
         unlink(path);
 }
 
+/* ---- the capture thread takes ordinary scheduling, not the loop's real-time policy: a thread starts with its maker's policy, so the
+        test puts this thread in SCHED_BATCH (no privilege needed) and runs the thread's entry: it must be SCHED_OTHER again ---- */
+static void sv_test_job(void)
+{
+        struct sched_param none = {0};
+
+        sv_setup();
+        sched_setscheduler(0, SCHED_BATCH, &none);
+        audio_service.job.kind = AUDIO_JOB_CLOSE;
+        audio_service.job.pcm.fd = -1;
+        audio_service.wake[1] = -1;
+        audio_job_entry(0);
+        SVCHECK(sched_getscheduler(0) == SCHED_OTHER, "the capture thread is ordinary (policy %d)", sched_getscheduler(0));
+}
+
 /* ---- the table of programs' volumes: the update is the newest, and the oldest goes when it is full ---- */
 static void sv_test_table(void)
 {
@@ -180466,6 +180482,7 @@ static int sv_main_checks(void)
         sv_test_settings();
         sv_test_fifo();
         sv_test_table();
+        sv_test_job();
         sv_test_socket();
         sv_test_card();
         sv_test_file();

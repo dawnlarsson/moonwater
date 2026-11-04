@@ -1455,8 +1455,12 @@ static fn audio_job_entry(address_any argument)
 {
         positive began = clock_monotonic_nanoseconds();
         char byte = 'x';
+        int ordinary = 0;
 
         (void)argument;
+        // The thread is made by the loop, which is real time (SCHED_FIFO), and a new thread takes its policy: a device's open or close is
+        // waiting on the hardware, and a spinning job at the loop's priority would hold the core the sound is mixed on. Ordinary scheduling.
+        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread
         if (audio_service.job.kind == AUDIO_JOB_OPEN)
         {
                 audio_service.job.result = audio_pcm_open(&audio_service.job.pcm, audio_service.job.card, audio_service.job.device, AUDIO_ALSA_CAPTURE, 48000, AUDIO_PERIOD, -1);
