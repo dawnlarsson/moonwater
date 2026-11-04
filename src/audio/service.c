@@ -36,7 +36,7 @@
 #define AUDIO_READ 65536              // one read from a client; a client gets AUDIO_READS of them a pass
 #define AUDIO_READS 4
 #define AUDIO_ACCEPTS 4
-#define AUDIO_PERIOD 256              // frames of a period at 48000 Hz
+#define AUDIO_PERIOD 128              // frames of a period at 48000 Hz (2.67 ms)
 #define AUDIO_STALL_NS 10000000000ull // a client that has taken none of what it was sent for this long is dropped
 #define AUDIO_RESCAN_NS 2000000000ull
 #define AUDIO_SETTINGS "/root"
@@ -70,6 +70,16 @@ static struct
         long card, device;
         const char *socket_path;
         const char *page_path;
+        // What the loop measures of itself: how long a pass takes, how late the clock's wake was, how little the card held when it was
+        // refilled; in buckets of a power of two of microseconds (bucket n is under 2^n us), and the worst of each.
+        struct
+        {
+                unsigned long wakes, slips;
+                unsigned long pass[16], late[16];
+                positive worst_pass, worst_late, due;
+                long min_fill, target;
+        } stats;
+        long budget;                    // bytes of what clients sent that a pass may still read: a flood is taken over several passes, the sound between them
         positive rescan_at, started_at;
         unsigned long long frames_played;
         const char *settings;           // where /root/audio.* are
@@ -156,7 +166,7 @@ static void audio_host_real(void *context, long *seconds, long *microseconds)
 // SIGTERM, SIGINT and SIGHUP, as a descriptor that is read.
 static int audio_signals(void)
 {
-        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1);
+        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (10 - 1);
 
         audio_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         return (int)audio_call(syscall(signalfd4), (positive)-1, (positive)address_of mask, 8, 0x800 | 0x80000, 0, 0);
@@ -342,6 +352,9 @@ static int audio_output_open(long asked_rate)
                                 pulse_sink_reconfigure(&audio_service.pulse, audio_service.sink, name, description, pcm.rate);
                         audio_timer_stop();
                         audio_say_text("playing on", description);
+                        string_format(log, "audio: the card runs at %p Hz in %p bytes a frame, a period of %p frames, a buffer of %p, filled to %p\n", (positive)pcm.rate, (positive)pcm.frame_bytes,
+                                      (positive)pcm.period, (positive)pcm.buffer, (positive)pcm.target);
+                        log_flush();
                         return 1;
                 }
                 audio_say("the card could not be opened, error", result);
@@ -734,6 +747,42 @@ static void audio_devices_pass(void)
         audio_output_open(audio_service.rate);
 }
 
+/* ---- the loop's own numbers ---- */
+
+static void audio_bucket(unsigned long *counts, positive ns)
+{
+        positive us = ns / 1000;
+        int at = 0;
+
+        while (us && at < 15)
+        {
+                us >>= 1;
+                at++;
+        }
+        counts[at]++;
+}
+
+static void audio_stats_say(const char *why)
+{
+        static const char *names[16] = {"<1", "<2", "<4", "<8", "<16", "<32", "<64", "<128", "<256", "<512", "<1k", "<2k", "<4k", "<8k", "<16k", "more"};
+
+        string_format(log, "audio: %s: %p wakes, the worst pass %p us, the worst lateness of the clock %p us, the least the card held at a wake %b of %b frames (a period is %b, %p wakes were more than half a period late), %p underruns\n", why,
+                      (positive)audio_service.stats.wakes, (positive)(audio_service.stats.worst_pass / 1000), (positive)(audio_service.stats.worst_late / 1000),
+                      (bipolar)audio_service.stats.min_fill, (bipolar)audio_service.stats.target, (bipolar)audio_service.pcm.period, (positive)audio_service.stats.slips,
+                      (positive)audio_service.pcm.xruns);
+        for (int kind = 0; kind < 2; kind++)
+        {
+                unsigned long *counts = kind ? audio_service.stats.late : audio_service.stats.pass;
+
+                string_format(log, "audio:   %s (us):", kind ? "lateness" : "pass");
+                for (int at = 0; at < 16; at++)
+                        if (counts[at])
+                                string_format(log, " %s=%p", names[at], (positive)counts[at]);
+                string_format(log, "\n");
+        }
+        log_flush();
+}
+
 /* ---- the clients ---- */
 
 static void audio_client_drop(long slot)
@@ -775,7 +824,7 @@ static void audio_accept(void)
 // What a client sent, up to a budget; false when it is to be dropped.
 static int audio_client_read(long slot)
 {
-        for (int reads = 0; reads < AUDIO_READS; reads++)
+        for (int reads = 0; reads < AUDIO_READS && audio_service.budget > 0; reads++)
         {
                 long got = audio_call(syscall(recvfrom), (positive)audio_service.fd[slot], (positive)audio_service.read, AUDIO_READ, 0x40, 0, 0); // MSG_DONTWAIT
 
@@ -783,6 +832,7 @@ static int audio_client_read(long slot)
                         return 0;
                 if (got < 0)
                         return got == -11 || got == -4; // EAGAIN, EINTR
+                audio_service.budget -= got;
                 if (pulse_client_feed(&audio_service.pulse, slot, audio_service.read, got) < 0)
                         return 0;
                 if (got < AUDIO_READ)
@@ -860,6 +910,7 @@ static void audio_card_pass(void)
 {
         struct audio_pcm *pcm = &audio_service.pcm;
         long avail = audio_pcm_avail(pcm), fill, want;
+        positive began = clock_monotonic_nanoseconds();
 
         if (avail < 0)
         {
@@ -879,13 +930,24 @@ static void audio_card_pass(void)
         }
         fill = pcm->buffer - avail;
         want = pcm->target - fill;
+        audio_service.stats.wakes++;
+        audio_service.stats.target = pcm->target;
+        if (audio_service.stats.wakes > 8 && (audio_service.stats.min_fill == 0 || fill < audio_service.stats.min_fill))
+                audio_service.stats.min_fill = fill ? fill : 1;
+        // A wake that came more than half a period after it was due: the card had played a period and a half or more since the last refill.
+        if (audio_service.stats.wakes > 8 && fill + pcm->period + pcm->period / 2 < pcm->target)
+                audio_service.stats.slips++;
         if (want > 0)
                 audio_produce(want);
         {
                 long delay = audio_pcm_delay(pcm);
+                positive took = clock_monotonic_nanoseconds() - began;
 
                 if (delay >= 0)
                         pulse_sink_delay(&audio_service.pulse, audio_service.sink, delay);
+                audio_bucket(audio_service.stats.pass, took);
+                if (took > audio_service.stats.worst_pass)
+                        audio_service.stats.worst_pass = took;
         }
 }
 
@@ -894,13 +956,30 @@ static void audio_clock_pass(void)
 {
         unsigned long long expirations = 0;
         long got = audio_call(syscall(read), (positive)audio_service.timer, (positive)&expirations, 8, 0, 0, 0);
+        positive began = clock_monotonic_nanoseconds(), period_ns = (positive)AUDIO_PERIOD * 1000000000ull / (positive)(audio_service.rate ? audio_service.rate : 48000), took;
 
         if (got != 8 || !expirations)
                 return;
+        // How late this wake is: the clock's first expiry of the ones it counted was due at the deadline before the ones it counts now.
+        if (audio_service.stats.due)
+        {
+                positive due = audio_service.stats.due;
+                positive late = began > due ? began - due : 0;
+
+                audio_bucket(audio_service.stats.late, late);
+                if (late > audio_service.stats.worst_late)
+                        audio_service.stats.worst_late = late;
+        }
+        audio_service.stats.due = (audio_service.stats.due ? audio_service.stats.due : began) + (positive)expirations * period_ns;
+        audio_service.stats.wakes++;
         if (expirations > 16)
                 expirations = 16;
         audio_produce((long)expirations * (AUDIO_PERIOD * audio_service.rate / 48000));
         pulse_sink_delay(&audio_service.pulse, audio_service.sink, 0);
+        took = clock_monotonic_nanoseconds() - began;
+        audio_bucket(audio_service.stats.pass, took);
+        if (took > audio_service.stats.worst_pass)
+                audio_service.stats.worst_pass = took;
 }
 
 static void audio_start(void)
@@ -1018,16 +1097,7 @@ static b32 audio_main()
                 positive now;
                 long awaited, wait[2] = {0, audio_service.pulse.streams_made != audio_service.pulse.streams_freed ? 16000000 : 250000000};
 
-                wanted[count] = (struct audio_poll){audio_service.signals, AUDIO_POLLIN, 0};
-                owner[count++] = -1;
-                wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
-                owner[count++] = -2;
-                for (long slot = 0; slot < PULSE_CLIENTS; slot++)
-                        if (audio_service.fd[slot] >= 0)
-                        {
-                                wanted[count] = (struct audio_poll){audio_service.fd[slot], (short)(AUDIO_POLLIN | (pulse_client_pending(&audio_service.pulse, slot) ? AUDIO_POLLOUT : 0)), 0};
-                                owner[count++] = slot;
-                        }
+                // The card (or the clock) is first in the list and so first in the pass: whatever the clients have sent waits behind the sound.
                 if (audio_service.pcm.fd >= 0)
                 {
                         wanted[count] = (struct audio_poll){audio_service.pcm.fd, AUDIO_POLLOUT, 0};
@@ -1038,15 +1108,34 @@ static b32 audio_main()
                         wanted[count] = (struct audio_poll){audio_service.timer, AUDIO_POLLIN, 0};
                         owner[count++] = -4;
                 }
+                wanted[count] = (struct audio_poll){audio_service.signals, AUDIO_POLLIN, 0};
+                owner[count++] = -1;
+                wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
+                owner[count++] = -2;
+                for (long slot = 0; slot < PULSE_CLIENTS; slot++)
+                        if (audio_service.fd[slot] >= 0)
+                        {
+                                wanted[count] = (struct audio_poll){audio_service.fd[slot], (short)(AUDIO_POLLIN | (pulse_client_pending(&audio_service.pulse, slot) ? AUDIO_POLLOUT : 0)), 0};
+                                owner[count++] = slot;
+                        }
                 awaited = audio_call(syscall(ppoll), (positive)wanted, count, (positive)wait, 0, 0, 0);
                 now = clock_monotonic_nanoseconds();
+                audio_service.budget = 4 * AUDIO_READ;
                 if (awaited >= 0)
                         for (unsigned int at = 0; at < count; at++)
                         {
                                 if (!wanted[at].returned)
                                         continue;
                                 if (owner[at] == -1)
-                                        running = 0;
+                                {
+                                        unsigned char info[128];
+
+                                        // SIGUSR1 (10) says the numbers and goes on; the others end it.
+                                        if (audio_call(syscall(read), (positive)audio_service.signals, (positive)info, sizeof(info), 0, 0, 0) >= 4 && info[0] == 10)
+                                                audio_stats_say("numbers");
+                                        else
+                                                running = 0;
+                                }
                                 else if (owner[at] == -2)
                                         audio_accept();
                                 else if (owner[at] == -3)
@@ -1115,6 +1204,7 @@ static b32 audio_main()
         audio_pcm_close(&audio_service.pcm);
         system_close(audio_service.listen);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.socket_path, 0, 0, 0, 0);
+        audio_stats_say("at the end");
         string_format(log, "audio: ended after %p frames, %p underruns\n", (positive)audio_service.frames_played, (positive)audio_service.pcm.xruns);
         log_flush();
         return 0;
