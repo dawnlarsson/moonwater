@@ -2385,6 +2385,13 @@ static fn ui_box_radii(const struct ui_box address_to box, b32 address_to rx, b3
         }
 }
 
+static inline b32 ui_box_straight(const struct ui_box address_to box, b32 ry, b32 y)
+{
+        b32 top = y * 256, bottom = top + 256;
+
+        return top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
+}
+
 /*
         A corner's half-width at a line, as the unit circle's: the root of 2^32 less u squared (u below 65536, the
         line's height in the corner over its radius, 16.16). The hardware takes it every time: a table of roots by u
@@ -2586,7 +2593,7 @@ static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry
         if (bottom <= box->y0 || top >= box->y1 || box->x1 <= box->x0)
                 return 0;
         // A row in the straight middle, all of it inside, is every line the box's own span.
-        straight = top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
+        straight = ui_box_straight(box, ry, y);
         corner = !straight && ry > 0 && rx > 0;
         // Each line's dy over the radius (ui_box_span's), and the lines outside the box, which take no part.
         for (b32 sub = 0; sub < UI_SUB; sub++)
@@ -2697,13 +2704,6 @@ static inline unsigned int ui_premultiplied(unsigned int argb, unsigned int cove
 }
 
 // Whether the row y is in the straight middle of a box (its radii as drawn, ry): every line of it is the one span.
-static inline b32 ui_box_straight(const struct ui_box address_to box, b32 ry, b32 y)
-{
-        b32 top = y * 256, bottom = top + 256;
-
-        return top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
-}
-
 static inline b32 ui_box_ry(const struct ui_box address_to box)
 {
         b32 rx = box->rx, ry = box->ry;
