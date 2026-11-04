@@ -155937,7 +155937,7 @@ static b32 lcheck_context(const char address_to stmt, positive length)
             "asm", "ASM_", "_Static_assert", "string_equals(", "memory_compare(", "string_has_prefix(", "string_compare", "memory_search(",
             "setting_by_path(", "compositor_word(", "ui_argument(", "program_argument(", "string_table_find(", "word_is(", "string_starts(",
             "compositor_kmsg(", "string_format(log", "log_direct(", "log_error", "host_say(", ".missing =", ".nofont =", ".title =",
-            "terminal_said(", "WINDOW_TRACE", "window_trace_word(", "window_trace_reason"};
+            "terminal_said(", "terminal_refused(", "WINDOW_TRACE", "window_trace_word(", "window_trace_reason"};
 
         for (positive k = 0; k < sizeof(names) / sizeof(names[0]); k++)
                 if (lcheck_has(stmt, length, names[k]))
