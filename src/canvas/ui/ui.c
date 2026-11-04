@@ -12528,6 +12528,15 @@ static p32 ui_field_send(struct ui address_to ui, struct ui_text address_to t, s
         return ui_field_event(ui, t, menu, event, ui_kit.pointer_x, ui_kit.pointer_y);
 }
 
+/*
+        Which of a window's text widgets has the keys: t has them when the window has them and the widget over it (a find bar above a
+        code view, which has them while it is open and was the last pressed) does not. Every app's focus of its views is this rule.
+*/
+static fn ui_text_focus_under(struct ui_text address_to t, b32 window, const struct ui_text address_to above)
+{
+        t->focused = window && !(above && above->focused);
+}
+
 /* ---- drawing ---- */
 /*
         The text painters: ui_text_draw paints a text widget, ui_text_field_draw a field, ui_text_draw_line one line. The colours

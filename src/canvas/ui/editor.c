@@ -70,6 +70,12 @@ static struct editor_tab address_to editor_now(void)
         return &editor.tabs[editor.tab];
 }
 
+// The code view has the keys when the window has them and the find bar does not (the kit's rule, ui_text_focus_under).
+static fn editor_keys(void)
+{
+        ui_text_focus_under(&editor_now()->view, editor.focused, &editor.find);
+}
+
 // A file's bytes: mapped when large, read when small, refused when it is not a regular file. False with a status.
 static b32 editor_load(struct editor_tab address_to tab, string_address path)
 {
@@ -287,7 +293,7 @@ static fn editor_close_tab(void)
                 editor.tab = 0;
         }
         // The tab shown now has the caret when the editor has the keys: a close is not a key, so no event gives it one.
-        editor_now()->view.focused = editor.focused && !editor.find.focused;
+        editor_keys();
 }
 
 /*
@@ -379,7 +385,7 @@ static fn editor_find_open(int what)
         doc_select_all(&editor.find.doc);
         editor.finding = what;
         editor.find.focused = true;
-        view->focused = false;
+        editor_keys();
 }
 
 // The next match of the find bar's text from the caret (back: before it), selected and shown.
@@ -420,7 +426,7 @@ static fn editor_find_enter(b32 back)
                 ui_text_reveal(&editor.ui, view);
                 editor.finding = 0;
                 editor.find.focused = false;
-                view->focused = true;
+                editor_keys();
                 return;
         }
         if (editor.finding == 2)
@@ -508,7 +514,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
 static fn editor_show_tab(int at)
 {
         editor.tab = at;
-        editor_now()->view.focused = editor.focused && !editor.find.focused;
+        editor_keys();
         editor.dirty = true;
 }
 
@@ -731,12 +737,12 @@ static b32 editor_event(const struct window_event address_to event)
                                 editor_command(command);
                 }
                 tab = editor_now();
-                tab->view.focused = editor.focused && !editor.find.focused;
+                editor_keys();
                 editor.dirty = true;
                 if (asks || event->type == WINDOW_EVENT_KEY)
                         return true;
         }
-        tab->view.focused = editor.focused && !editor.find.focused;
+        editor_keys();
         asks = ui_text_send(&editor.ui, &tab->view, event);
         if (asks & UI_TEXT_COMMAND)
                 editor_command(tab->view.command);
@@ -750,7 +756,7 @@ static b32 editor_event(const struct window_event address_to event)
 static b32 editor_focus(b32 focused)
 {
         editor.focused = focused;
-        editor_now()->view.focused = focused && !editor.find.focused;
+        editor_keys();
         if (focused)
                 for (int at = 0; at < editor.count; at++)
                         editor_check_disk(&editor.tabs[at]);

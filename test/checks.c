@@ -153409,6 +153409,31 @@ static fn check_kit_defaults(struct ui address_to wui)
         check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", false);
 #endif
 
+        /* The focus rule: the code view has the keys when the window has them and the find bar does not. Opening the bar takes them from
+              the view, and the bar's answer (a line to go to, Enter) gives them back: the goto branch sets the view's keys by the same rule. */
+#ifdef UI_CONFIRM_TEXT
+        {
+                unsigned int pixels[600 * 300];
+                b32 open_ok, goto_ok;
+
+                editor.ui = ui;
+                editor.width = 600, editor.height = 300, editor.own.stride = 600;
+                editor.count = 0;
+                editor.focused = true;
+                editor_open(null);
+                editor.tab = 0;
+                editor_draw(pixels);
+                editor_find_open(1);
+                open_ok = !editor_now()->view.focused && editor.find.focused;
+                editor_find_open(3);
+                ui_text_set(&editor.find, (const p8 address_to) "2", 1);
+                editor_find_enter(false);
+                goto_ok = editor.finding == 0 && !editor.find.focused && editor_now()->view.focused && editor.focused;
+                editor.count = 0;
+                check("editor focus: the find bar takes the keys from the code view, and a line's Enter gives them back to it", open_ok && goto_ok);
+        }
+#endif
+
         // A finger's long press in the code view, sent as the compositor sends it: the editor's own picture has the selection's handles
         // and its actions bar over the text (editor_draw ends with the overlay).
 #ifdef UI_TEXT_BAR_ITEMS
