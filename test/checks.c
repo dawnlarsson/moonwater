@@ -164122,6 +164122,1107 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_wayland */
 
+#ifdef CHECK_dbus
+/*
+        CHECK_dbus: Moonwater's session bus (src/dbus/dbus.c) against clients that speak its wire, and a fake host. The
+        messages the clients send are built with the bus's own writer (so a fault in it shows in the judge too, which the
+        end-to-end rows against libdbus and GDBus are for), and what it sends back is read by the bus's own parser, which
+        holds the grammar of the protocol; the hostile messages are bytes written out by hand.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_dbus test/checks.c
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../src/dbus/dbus.c"
+
+static unsigned db_checks, db_failures;
+
+#define DBCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                db_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        db_failures++;                                                                                \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
+        } while (0)
+
+static long db_allocs, db_releases, db_time;
+
+static void *db_alloc(void *context, long bytes)
+{
+        (void)context;
+        db_allocs++;
+        return calloc(1, (size_t)bytes);
+}
+
+static void db_release(void *context, void *block, long bytes)
+{
+        (void)context;
+        (void)bytes;
+        db_releases++;
+        free(block);
+}
+
+static long db_now(void *context)
+{
+        (void)context;
+        return db_time;
+}
+
+static void db_random(void *context, unsigned char *bytes, long count)
+{
+        (void)context;
+        for (long at = 0; at < count; at++)
+                bytes[at] = (unsigned char)(0x10 + at * 7);
+}
+
+static const struct dbus_host db_host = {0, db_alloc, db_release, db_now, db_random, 0};
+
+/* ---- a client ---- */
+
+static void db_feed(long slot, const void *bytes, long n)
+{
+        const unsigned char *p = (const unsigned char *)bytes;
+
+        while (n > 0)
+        {
+                long room, take;
+                unsigned char *to = dbus_in_room(slot, &room);
+
+                if (!to || room <= 0)
+                        return;
+                take = n < room ? n : room;
+                memcpy(to, p, (size_t)take);
+                dbus_in_done(slot, take);
+                p += take;
+                n -= take;
+        }
+}
+
+static unsigned long db_serial;
+
+// What the bus has queued for a client, as text up to count bytes (the authentication's lines).
+static long db_take_text(long slot, char *into, long room)
+{
+        const unsigned char *bytes;
+        long n = dbus_out(slot, &bytes);
+
+        if (n > room - 1)
+                n = room - 1;
+        memcpy(into, bytes, (size_t)n);
+        into[n] = 0;
+        dbus_sent(slot, n);
+        return n;
+}
+
+static long db_connect(long uid)
+{
+        long slot = dbus_connect(1000 + uid, uid);
+        char line[200], hello[64];
+        int n;
+
+        if (slot < 0)
+                return slot;
+        n = snprintf(hello, sizeof hello, "%ld", uid);
+        {
+                char hex[64];
+
+                for (int k = 0; k < n; k++)
+                        snprintf(hex + 2 * k, 3, "%02x", (unsigned)hello[k]);
+                snprintf(line, sizeof line, "%cAUTH EXTERNAL %s\r\n", 0, hex);
+        }
+        db_feed(slot, line, (long)strlen(line + 1) + 1);
+        db_take_text(slot, line, sizeof line);
+        if (strncmp(line, "OK ", 3))
+                return -2;
+        db_feed(slot, "BEGIN\r\n", 7);
+        return slot;
+}
+
+struct db_call
+{
+        unsigned char bytes[4096];
+        struct dbus_out w;
+        long body;
+};
+
+static void db_begin(struct db_call *c, unsigned type, unsigned flags, const struct dbus_fields *f)
+{
+        c->w = (struct dbus_out){c->bytes, 0, sizeof c->bytes, 0};
+        dbus_o_header(&c->w, type, flags, ++db_serial, f);
+        c->body = c->w.length;
+}
+
+static long db_end(struct db_call *c)
+{
+        dbus_o_end(&c->w, c->body);
+        return c->w.length;
+}
+
+static void db_send(long slot, struct db_call *c)
+{
+        db_feed(slot, c->bytes, db_end(c));
+}
+
+static unsigned long db_last_serial(void)
+{
+        return db_serial;
+}
+
+// A method call with strings (up to three) as its arguments.
+static void db_call(long slot, const char *dest, const char *path, const char *iface, const char *member, const char *sig, const char *a,
+                    const char *b)
+{
+        struct db_call c;
+        struct dbus_fields f = {path, iface, member, "", dest, "", sig, 0, 0};
+
+        db_begin(&c, DBUS_CALL, 0, &f);
+        if (a)
+                dbus_o_string(&c.w, a);
+        if (b)
+                dbus_o_string(&c.w, b);
+        db_send(slot, &c);
+}
+
+static void db_hello(long slot)
+{
+        db_call(slot, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "Hello", "", 0, 0);
+}
+
+static void db_su(long slot, const char *member, const char *name, unsigned flags)
+{
+        struct db_call c;
+        struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, member, "", DBUS_NAME_BUS, "", "su", 0, 0};
+
+        db_begin(&c, DBUS_CALL, 0, &f);
+        dbus_o_string(&c.w, name);
+        dbus_o_u32(&c.w, flags);
+        db_send(slot, &c);
+}
+
+static void db_request(long slot, const char *name, unsigned flags)
+{
+        db_su(slot, "RequestName", name, flags);
+}
+
+struct db_seen
+{
+        struct dbus_message m;
+        unsigned char bytes[8192];
+        long size;
+        int ok;
+};
+
+// The next message queued for a client, parsed (and taken off the queue); ok 0 when there is none or it is not one.
+static void db_next(long slot, struct db_seen *s)
+{
+        const unsigned char *bytes;
+        long n = dbus_out(slot, &bytes), total;
+
+        s->ok = 0;
+        if (n < 16)
+                return;
+        total = DBUS_ALIGN(16 + (long)dbus_get32(bytes + 12), 8) + (long)dbus_get32(bytes + 4);
+        if (total > n || total > (long)sizeof s->bytes)
+                return;
+        memcpy(s->bytes, bytes, (size_t)total);
+        s->size = total;
+        dbus_sent(slot, total);
+        s->ok = dbus_parse(s->bytes, total, &s->m) == 0;
+        if (!s->ok && getenv("DBDEBUG"))
+        {
+                fprintf(stderr, "unparsable message of %ld bytes:", total);
+                for (long k = 0; k < total; k++)
+                        fprintf(stderr, "%s%02x", k % 16 ? " " : "\n", s->bytes[k]);
+                fprintf(stderr, "\n");
+        }
+}
+
+static unsigned long db_u32_body(const struct db_seen *s)
+{
+        return dbus_get32(s->bytes + s->m.body_at);
+}
+
+static int db_string_arg(const struct db_seen *s, long index, char *text, long room)
+{
+        return dbus_arg_string(&s->m, index, text, room) >= 0;
+}
+
+// Takes messages off a client's queue until one is of the member (a signal) named, or there are none.
+static int db_find(long slot, struct db_seen *s, unsigned type, const char *member)
+{
+        for (int k = 0; k < 64; k++)
+        {
+                db_next(slot, s);
+                if (!s->ok)
+                        return 0;
+                if (s->m.type == type && (!member || dbus_equal(s->m.member, member)))
+                        return 1;
+        }
+        return 0;
+}
+
+static void db_drain(long slot)
+{
+        const unsigned char *bytes;
+        long n = dbus_out(slot, &bytes);
+
+        dbus_sent(slot, n);
+}
+
+static void db_reset(void)
+{
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+                dbus_drop(slot);
+        dbus_stop();
+        db_allocs = db_releases = db_time = 0;
+        db_serial = 0;
+        dbus_start(&db_host);
+}
+
+/* ---- the rows ---- */
+
+static void db_test_auth(void)
+{
+        long slot;
+        char text[300];
+        const char *external = "\0AUTH EXTERNAL 31303030\r\n";
+
+        db_reset();
+        slot = dbus_connect(7, 1000);
+        db_feed(slot, external, 25);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "OK ", 3) && strlen(text) == 3 + 32 + 2 && !strcmp(text + 35, "\r\n"), "EXTERNAL with the uid of the peer is accepted: %s", text);
+        db_feed(slot, "NEGOTIATE_UNIX_FD\r\n", 19);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "ERROR", 5), "passing descriptors is refused, not agreed");
+        db_feed(slot, "BEGIN\r\n", 7);
+        DBCHECK(!dbus_dead(slot), "BEGIN begins");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "\0AUTH EXTERNAL 31303031\r\n", 25);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "REJECTED", 8), "the uid of another is rejected");
+        db_feed(slot, "BEGIN\r\n", 7);
+        DBCHECK(dbus_dead(slot), "and a BEGIN without an authentication ends the connection");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "\0AUTH EXTERNAL 3130303030\r\n", 27);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "REJECTED", 8), "the uid with more after it is rejected");
+        db_feed(slot, "AUTH EXTERNAL 3130\r\n", 20);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "REJECTED", 8), "and so is part of it");
+        db_feed(slot, "AUTH EXTERNAL 3100\r\n", 20);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "REJECTED", 8), "and so is a byte that is not a digit of it");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "\0AUTH\r\n", 7);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "REJECTED EXTERNAL ANONYMOUS", 27), "AUTH alone lists the mechanisms");
+        db_feed(slot, "AUTH EXTERNAL\r\n", 15);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "DATA", 4), "EXTERNAL with no data asks for it");
+        db_feed(slot, "DATA 31303030\r\n", 15);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "OK ", 3), "and takes it");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "\0AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n", 1 + 15 + 6 + 19 + 7);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "DATA\r\nOK ", 9) && !dbus_dead(slot), "sd-bus's pipeline (EXTERNAL, an empty DATA, NEGOTIATE_UNIX_FD, BEGIN) is accepted: %s", text);
+        db_hello(slot);
+        {
+                struct db_seen s;
+
+                DBCHECK(db_find(slot, &s, DBUS_RETURN, 0), "and Hello after it is answered");
+        }
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "\0AUTH ANONYMOUS\r\n", 17);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "OK ", 3), "ANONYMOUS is accepted");
+        db_feed(slot, "NONSENSE\r\n", 10);
+        db_take_text(slot, text, sizeof text);
+        DBCHECK(!strncmp(text, "ERROR", 5) && !dbus_dead(slot), "a command that is none is an ERROR line");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_feed(slot, "x", 1);
+        DBCHECK(dbus_dead(slot), "the first byte is a NUL or the connection ends");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        {
+                char big[1200];
+
+                memset(big, 'a', sizeof big);
+                big[0] = 0;
+                db_feed(slot, big, sizeof big);
+        }
+        DBCHECK(dbus_dead(slot), "an authentication line past its cap ends the connection");
+        dbus_drop(slot);
+
+        slot = dbus_connect(8, 1000);
+        db_time += DBUS_HELLO_MS + 10;
+        dbus_tick();
+        DBCHECK(dbus_dead(slot), "a connection that says nothing for a few seconds ends");
+        dbus_drop(slot);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+static void db_test_hello_and_names(void)
+{
+        long a, b, c;
+        struct db_seen s;
+        char text[200];
+
+        db_reset();
+        a = db_connect(1000);
+        db_hello(a);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "s") && s.m.reply == db_last_serial() &&
+                    db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, ":1.2") && dbus_equal(s.m.sender, DBUS_NAME_BUS),
+                "Hello answers the unique name, from the bus: %s", text);
+        DBCHECK(db_find(a, &s, DBUS_SIGNAL, "NameAcquired") && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, ":1.2"),
+                "and NameAcquired follows");
+        db_hello(a);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "a second Hello is an error");
+
+        c = db_connect(1000);
+        db_call(c, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", 0, 0);
+        DBCHECK(dbus_dead(c), "a call before Hello that is not Hello ends the connection");
+        dbus_drop(c);
+
+        b = db_connect(1000);
+        db_hello(b);
+        db_drain(b);
+        db_drain(a);
+        db_request(a, "org.example.Alpha", 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1, "RequestName: primary owner");
+        db_request(a, "org.example.Alpha", 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 4, "again: already the owner");
+        db_request(b, "org.example.Alpha", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 3, "another client: the name exists");
+        db_request(b, DBUS_NAME_PORTAL, 2);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 3, "the portal's name is not for taking, replacing or not");
+        db_request(b, DBUS_NAME_BUS, 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0), "the bus's own name is not for owning");
+        db_request(b, ":1.99", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0), "a unique name is not for owning");
+        db_request(b, "no-dots", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0), "a name that is none is refused");
+
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", "org.example.Alpha", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, ":1.2"), "GetNameOwner");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", "org.example.Nobody", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.NameHasNoOwner"), "and of no one is an error");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", DBUS_NAME_PORTAL, 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, ":1.1"), "the portal is :1.1");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "NameHasOwner", "s", "org.example.Alpha", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1, "NameHasOwner");
+        db_su(b, "StartServiceByName", "org.example.Nobody", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown"), "a service nobody provides cannot be started");
+        db_su(b, "StartServiceByName", DBUS_NAME_PORTAL, 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 2, "and the portal, which runs, is already running");
+
+        // The names are told to those who ask: NameOwnerChanged with arg0 of one name.
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s",
+                "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.example.Beta'", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0), "AddMatch");
+        db_drain(b);
+        db_request(a, "org.example.Gamma", 0);
+        DBCHECK(!db_find(b, &s, DBUS_SIGNAL, "NameOwnerChanged"), "a name it did not ask for is not told");
+        db_request(a, "org.example.Beta", 0);
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "NameOwnerChanged") && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, "org.example.Beta") &&
+                    db_string_arg(&s, 2, text, sizeof text) && !strcmp(text, ":1.2"),
+                "a name it asked for is, with the new owner");
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ReleaseName", "s", "org.example.Beta", 0);
+        db_drain(a);
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "NameOwnerChanged") && db_string_arg(&s, 2, text, sizeof text) && !text[0], "and when it goes");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "RemoveMatch", "s",
+                "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.example.Beta'", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0), "RemoveMatch");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "RemoveMatch", "s", "type='signal',member='Nothing'", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0), "a rule that was never added cannot be removed");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "bogus='1'", 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.MatchRuleInvalid"), "a rule with a key unknown is invalid");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetConnectionUnixUser", "s", ":1.2", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1000, "GetConnectionUnixUser");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetConnectionCredentials", "s", ":1.2", 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "a{sv}"), "GetConnectionCredentials");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", 0, 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "as"), "ListNames");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", "org.freedesktop.DBus.Peer", "Ping", "", 0, 0);
+        DBCHECK(db_find(b, &s, DBUS_RETURN, 0), "Ping");
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "NoSuchMethod", "", 0, 0);
+        DBCHECK(db_find(b, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod"), "an unknown method is an error");
+
+        // A name goes with its owner, and is told.
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',member='NameOwnerChanged'", 0);
+        db_drain(b);
+        dbus_drop(a);
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "NameOwnerChanged"), "a client that goes is told to those who watch");
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+static void db_test_routing(void)
+{
+        long a, b, c;
+        struct db_seen s;
+        char text[200];
+        unsigned long serial;
+
+        db_reset();
+        a = db_connect(1000);
+        b = db_connect(1000);
+        c = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_hello(c);
+        db_drain(a);
+        db_drain(b);
+        db_drain(c);
+        db_request(b, "org.example.Server", 0);
+        db_drain(b);
+
+        // a calls the server by name, claiming to be someone else
+        {
+                struct db_call call;
+                struct dbus_fields f = {"/org/example", "org.example.Interface", "Ask", "", "org.example.Server", ":1.77", "s", 0, 0};
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_string(&call.w, "question");
+                db_send(a, &call);
+                serial = db_last_serial();
+        }
+        DBCHECK(db_find(b, &s, DBUS_CALL, "Ask") && dbus_equal(s.m.sender, ":1.2") && s.m.serial == serial && dbus_equal(s.m.destination, "org.example.Server") &&
+                    db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, "question"),
+                "a call by name reaches its owner with the sender the bus says, not the one the caller wrote (%s)", s.m.sender);
+        // c forges the reply
+        {
+                struct db_call reply;
+                struct dbus_fields f = {"", "", "", "", ":1.2", "", "s", serial, 1};
+
+                db_begin(&reply, DBUS_RETURN, 1, &f);
+                dbus_o_string(&reply.w, "forged");
+                db_send(c, &reply);
+        }
+        DBCHECK(!db_find(a, &s, DBUS_RETURN, 0), "a reply from a client the call was not asked of is dropped");
+        // b replies
+        {
+                struct db_call reply;
+                struct dbus_fields f = {"", "", "", "", ":1.2", "", "s", serial, 1};
+
+                db_begin(&reply, DBUS_RETURN, 1, &f);
+                dbus_o_string(&reply.w, "answer");
+                db_send(b, &reply);
+        }
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.m.reply == serial && dbus_equal(s.m.sender, ":1.3") && db_string_arg(&s, 0, text, sizeof text) &&
+                    !strcmp(text, "answer"),
+                "the reply reaches the caller, from the callee");
+        {
+                struct db_call reply;
+                struct dbus_fields f = {"", "", "", "", ":1.2", "", "s", serial, 1};
+
+                db_begin(&reply, DBUS_RETURN, 1, &f);
+                dbus_o_string(&reply.w, "again");
+                db_send(b, &reply);
+        }
+        DBCHECK(!db_find(a, &s, DBUS_RETURN, 0), "and a second reply to the same call is dropped");
+
+        // a callee that goes before it answers: the caller is told
+        {
+                struct db_call call;
+                struct dbus_fields f = {"/org/example", "org.example.Interface", "Wait", "", "org.example.Server", "", "", 0, 0};
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                db_send(a, &call);
+                serial = db_last_serial();
+        }
+        db_drain(b);
+        dbus_drop(b);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && s.m.reply == serial && !strcmp(s.m.error, "org.freedesktop.DBus.Error.NoReply"),
+                "a callee that goes without answering is an error to its caller");
+        db_call(a, "org.example.Server", "/org/example", "org.example.Interface", "Ask", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.ServiceUnknown"), "a name nobody owns is ServiceUnknown");
+        db_call(a, ":1.77", "/org/example", "org.example.Interface", "Ask", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "and so is a unique name nobody has");
+
+        // signals: broadcast to those whose rule they match, not to the others
+        b = db_connect(1000);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+        db_drain(c);
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',interface='org.example.Interface',path_namespace='/org/example'", 0);
+        db_call(c, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',member='Other'", 0);
+        db_drain(b);
+        db_drain(c);
+        {
+                struct db_call sig;
+                struct dbus_fields f = {"/org/example/thing", "org.example.Interface", "Changed", "", "", "", "s", 0, 0};
+
+                db_begin(&sig, DBUS_SIGNAL, 1, &f);
+                dbus_o_string(&sig.w, "payload");
+                db_send(a, &sig);
+        }
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "Changed") && dbus_equal(s.m.sender, ":1.2") && !db_find(c, &s, DBUS_SIGNAL, "Changed"),
+                "a signal reaches the client whose rule it matches, and no other");
+        {
+                struct db_call sig;
+                struct dbus_fields f = {"/elsewhere", "org.example.Interface", "Changed", "", "", "", "", 0, 0};
+
+                db_begin(&sig, DBUS_SIGNAL, 1, &f);
+                db_send(a, &sig);
+        }
+        DBCHECK(!db_find(b, &s, DBUS_SIGNAL, "Changed"), "a path outside the namespace does not match");
+        {
+                struct db_call sig;
+                struct dbus_fields f = {"/elsewhere", "org.example.Interface", "Private", "", ":1.4", "", "", 0, 0};
+
+                db_begin(&sig, DBUS_SIGNAL, 1, &f);
+                db_send(a, &sig);
+        }
+        DBCHECK(db_find(c, &s, DBUS_SIGNAL, "Private") && !db_find(b, &s, DBUS_SIGNAL, "Private"), "a signal sent to a client is its alone");
+
+        // path and namespace rules
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s",
+                "type='signal',interface='ca.desrt.dconf.Writer',path='/ca/desrt/dconf/Writer/user',arg0path='/org/gnome/desktop/interface/'", 0);
+        db_call(c, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',interface='org.example.N',arg0namespace='com.example.app'", 0);
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',interface='org.example.P',arg0path='/a/b'", 0);
+        db_drain(b);
+        db_drain(c);
+        {
+                static const struct
+                {
+                        const char *interface, *path, *arg;
+                        int b_sees, c_sees;
+                } cases[] = {
+                    {"ca.desrt.dconf.Writer", "/ca/desrt/dconf/Writer/user", "/org/gnome/desktop/interface/font-name", 1, 0},
+                    {"ca.desrt.dconf.Writer", "/ca/desrt/dconf/Writer/user", "/org/gnome/desktop/interface/", 1, 0},
+                    {"ca.desrt.dconf.Writer", "/ca/desrt/dconf/Writer/user", "/org/gnome/", 1, 0},
+                    {"ca.desrt.dconf.Writer", "/ca/desrt/dconf/Writer/user", "/org/gnome/desktop/sound/", 0, 0},
+                    {"ca.desrt.dconf.Writer", "/ca/desrt/dconf/Writer/user", "/org/gnome/desktop/interfaces", 0, 0},
+                    {"org.example.N", "/o", "com.example.app", 0, 1},
+                    {"org.example.N", "/o", "com.example.app.sub", 0, 1},
+                    {"org.example.N", "/o", "com.example.apple", 0, 0},
+                    {"org.example.P", "/o", "/a/b", 1, 0},
+                    {"org.example.P", "/o", "/a/bc", 0, 0},
+                    {"org.example.P", "/o", "/a/b/c", 0, 0},
+                };
+
+                for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++)
+                {
+                        struct db_call sig;
+                        struct dbus_fields f = {cases[k].path, cases[k].interface, "Changed", "", "", "", "s", 0, 0};
+
+                        db_begin(&sig, DBUS_SIGNAL, 1, &f);
+                        dbus_o_string(&sig.w, cases[k].arg);
+                        db_send(a, &sig);
+                        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "Changed") == cases[k].b_sees && db_find(c, &s, DBUS_SIGNAL, "Changed") == cases[k].c_sees,
+                                "the rules by path and by namespace on %s: b %d, c %d", cases[k].arg, cases[k].b_sees, cases[k].c_sees);
+                        db_drain(b);
+                        db_drain(c);
+                }
+        }
+
+        // the pending table is bounded
+        db_request(c, "org.example.Sink", 0);
+        db_drain(c);
+        for (int k = 0; k < DBUS_PENDING_PER + 4; k++)
+                db_call(a, "org.example.Sink", "/o", "org.example.I", "M", "", 0, 0);
+        {
+                long errors = 0;
+
+                while (db_find(a, &s, DBUS_ERROR, 0))
+                        errors += !strcmp(s.m.error, "org.freedesktop.DBus.Error.LimitsExceeded");
+                DBCHECK(errors == 4, "calls that wait for a reply are bounded per client (%ld refused)", errors);
+        }
+        dbus_drop(a);
+        dbus_drop(b);
+        dbus_drop(c);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+        for (long k = 0; k < DBUS_PENDING; k++)
+                DBCHECK(!dbus.pending[k].used, "no call waits for a reply when everyone is gone");
+}
+
+// A double's bits, for the settings.
+static unsigned long db_bits(double v)
+{
+        unsigned long bits;
+
+        memcpy(&bits, &v, 8);
+        return bits;
+}
+
+static void db_test_portal(void)
+{
+        long a, b;
+        struct db_seen s;
+        char text[200];
+        unsigned long colour[3] = {0, 0, 0};
+
+        db_reset();
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        colour[0] = db_bits(0.5);
+        colour[1] = db_bits(0.25);
+        colour[2] = db_bits(1.0);
+        dbus_setting_set("org.freedesktop.appearance", "accent-color", 'c', 0, colour, 0);
+        dbus_setting_set("org.freedesktop.appearance", "contrast", 'u', 0, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "text-scaling-factor", 'd', 0, (unsigned long[]){db_bits(1.25), 0, 0}, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "gtk-theme", 's', 0, 0, "Adwaita-dark");
+        dbus_setting_set("org.gnome.desktop.interface", "cursor-size", 'i', 32, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "enable-animations", 'b', 1, 0, 0);
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", "ss", "org.freedesktop.appearance", "color-scheme");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "v") && s.bytes[s.m.body_at] == 1 && s.bytes[s.m.body_at + 1] == 'u' &&
+                    dbus_get32(s.bytes + s.m.body_at + 4) == 1 && dbus_equal(s.m.sender, ":1.1"),
+                "ReadOne: the color-scheme is a variant of u, 1 (prefers dark)");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "Read", "ss", "org.freedesktop.appearance", "color-scheme");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "v") && s.bytes[s.m.body_at] == 1 && s.bytes[s.m.body_at + 1] == 'v' &&
+                    s.bytes[s.m.body_at + 3] == 1 && s.bytes[s.m.body_at + 4] == 'u',
+                "Read, the old one, answers a variant that holds the variant");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", "ss", "org.freedesktop.appearance", "accent-color");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && !memcmp(s.bytes + s.m.body_at, "\5(ddd)\0", 7) && s.m.body_length == 8 + 24 &&
+                    !memcmp(s.bytes + s.m.body_at + 8, &colour[0], 8) && !memcmp(s.bytes + s.m.body_at + 24, &colour[2], 8),
+                "the accent is a variant of (ddd)");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", "ss", "org.freedesktop.appearance", "nothing");
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.portal.Error.NotFound"), "a setting that is none is NotFound");
+
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadAll", "", DBUS_NAME_PORTAL, "", "as", 0, 0};
+                long length_at;
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_u32(&call.w, 0);
+                length_at = call.w.length - 4;
+                dbus_o_string(&call.w, "org.gnome.*");
+                dbus_o_patch32(&call.w, length_at, (unsigned long)(call.w.length - length_at - 4));
+                db_send(a, &call);
+        }
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "a{sa{sv}}") && s.ok, "ReadAll with org.gnome.* answers a{sa{sv}}");
+        {
+                int has_gnome = 0, has_appearance = 0;
+
+                for (long at = 0; at + 25 < s.size; at++)
+                {
+                        has_gnome |= !memcmp(s.bytes + at, "org.gnome.desktop.interface", 28);
+                        has_appearance |= !memcmp(s.bytes + at, "org.freedesktop.appearance", 27);
+                }
+                DBCHECK(has_gnome && !has_appearance, "and holds the gnome namespace and not the other");
+        }
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadAll", "", DBUS_NAME_PORTAL, "", "as", 0, 0};
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_u32(&call.w, 0);
+                db_send(a, &call);
+        }
+        {
+                int has_gnome = 0, has_appearance = 0;
+
+                DBCHECK(db_find(a, &s, DBUS_RETURN, 0), "ReadAll with no filter answers");
+                for (long at = 0; at + 25 < s.size; at++)
+                {
+                        has_gnome |= !memcmp(s.bytes + at, "org.gnome.desktop.interface", 28);
+                        has_appearance |= !memcmp(s.bytes + at, "org.freedesktop.appearance", 27);
+                }
+                DBCHECK(has_gnome && has_appearance, "and holds all of them");
+        }
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Settings", "version");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 2, "the Settings portal is version 2");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.Notification", "version");
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownProperty"), "a portal it does not have is an error, as a browser's check for it expects");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.FileChooser", "version");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.bytes[s.m.body_at + 1] == 'u' && dbus_get32(s.bytes + s.m.body_at + 4) == 1,
+                "the FileChooser answers its version, 1, which is below what a browser needs to use it (the reason is in dbus.c)");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.FileChooser", "OpenFile", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod"), "and its methods are not there");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "Write", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.UnknownMethod"), "a method it has not is UnknownMethod");
+        db_call(a, DBUS_NAME_PORTAL, "/elsewhere", "org.freedesktop.portal.Settings", "ReadAll", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "another object is an error");
+        {
+                struct db_call call;
+                struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.host.portal.Registry", "Register", "", DBUS_NAME_PORTAL, "", "sa{sv}", 0, 0};
+
+                db_begin(&call, DBUS_CALL, 0, &f);
+                dbus_o_string(&call.w, "org.example.App");
+                dbus_o_u32(&call.w, 0);
+                dbus_o_pad(&call.w, 8);
+                db_send(a, &call);
+                DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && s.m.body_length == 0, "the registry's Register is answered with nothing");
+        }
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
+        {
+                int found = 0;
+
+                DBCHECK(db_find(a, &s, DBUS_RETURN, 0), "Introspect answers");
+                for (long at = 0; at + 31 < s.size; at++)
+                        found |= !memcmp(s.bytes + at, "org.freedesktop.portal.Settings", 31);
+                DBCHECK(found, "and names the Settings interface");
+        }
+
+        // a change is told to those who listen for it, once
+        db_call(b, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s",
+                "type='signal',sender='org.freedesktop.portal.Desktop',interface='org.freedesktop.portal.Settings',member='SettingChanged'", 0);
+        db_drain(b);
+        db_drain(a);
+        DBCHECK(dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 2, 0, 0) == 1, "a setting that changes says so");
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "SettingChanged") && dbus_equal(s.m.sender, ":1.1") && dbus_equal(s.m.signature, "ssv") &&
+                    db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, "org.freedesktop.appearance") && db_string_arg(&s, 1, text, sizeof text) &&
+                    !strcmp(text, "color-scheme") && s.bytes[s.m.body_at + s.m.body_length - 7] == 1 && s.bytes[s.m.body_at + s.m.body_length - 6] == 'u' &&
+                    dbus_get32(s.bytes + s.m.body_at + s.m.body_length - 4) == 2,
+                "SettingChanged reaches the client that asked for it, with the new value");
+        DBCHECK(!db_find(a, &s, DBUS_SIGNAL, "SettingChanged"), "and not one that did not");
+        DBCHECK(dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 2, 0, 0) == 0 && !db_find(b, &s, DBUS_SIGNAL, "SettingChanged"),
+                "a setting set to what it is says nothing");
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", "ss", "org.freedesktop.appearance", "color-scheme");
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_get32(s.bytes + s.m.body_at + 4) == 2, "and a read after it is the new value");
+        {
+                int made = 0;
+                char key[16];
+
+                for (int k = 0; k < DBUS_SETTINGS + 4; k++)
+                {
+                        snprintf(key, sizeof key, "k%d", k);
+                        made += dbus_setting_set("org.example", key, 'u', k, 0, 0) >= 0;
+                }
+                DBCHECK(made < DBUS_SETTINGS + 4, "the settings are a table of a size (%d made)", made);
+        }
+        dbus_drop(a);
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/* ---- hostile messages ---- */
+
+static void db_test_hostile(void)
+{
+        long slot;
+
+        db_reset();
+        slot = db_connect(1000);
+        db_hello(slot);
+        db_drain(slot);
+        db_call(slot, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", 0, 0);
+        {
+                struct db_seen s;
+
+                DBCHECK(db_find(slot, &s, DBUS_RETURN, 0), "a client that is well gets its answer");
+        }
+        dbus_drop(slot);
+
+        // each of these, sent whole after a Hello, ends the connection (and does nothing else)
+        {
+                static const struct
+                {
+                        const char *name;
+                        unsigned char bytes[160];
+                        long size;
+                } cases[] = {
+                    {"the other byte order", {'B', 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, 16},
+                    {"a version that is not 1", {'l', 1, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
+                    {"a type that is none", {'l', 9, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
+                    {"a serial of 0", {'l', 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 16},
+                    {"a call with no path or member", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
+                    {"fields longer than the cap", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff}, 16},
+                    {"a call that has a body and no fields", {'l', 1, 0, 1, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, 25},
+                    {"a field of a type that is none", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 1, 1, 'z', 0, 0, 0, 0, 0}, 24},
+                    {"a path that is not one", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 1, 'o', 0, 3, 0, 0, 0, 'a', 'b', 0, 0, 0, 0, 0, 0}, 32},
+                    {"a string with a byte that is not UTF-8", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 3, 1, 's', 0, 3, 0, 0, 0, 0xc0, 0x80, 0, 0, 0, 0, 0, 0}, 32},
+                    {"a string that is not ended", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 3, 1, 's', 0, 3, 0, 0, 0, 'a', 'b', 'c', 'd', 0, 0, 0, 0}, 32},
+                    {"a name with no dot", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 0, 2, 1, 's', 0, 3, 0, 0, 0, 'a', 'b', 0, 0, 0, 0, 0, 0}, 32},
+                    {"padding that is not zero", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 1, 2, 3, 9, 0, 0, 0, 0}, 24},
+                };
+                for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++)
+                {
+                        slot = db_connect(1000);
+                        db_hello(slot);
+                        db_drain(slot);
+                        db_feed(slot, cases[k].bytes, cases[k].size);
+                        DBCHECK(dbus_dead(slot), "%s ends the connection", cases[k].name);
+                        dbus_drop(slot);
+                }
+        }
+        // bodies against their signatures
+        {
+                struct
+                {
+                        const char *name;
+                        const char *sig;
+                        unsigned char body[64];
+                        long size;
+                } bodies[] = {
+                    {"a string whose length passes the body", "s", {0xff, 0, 0, 0, 'a', 0}, 6},
+                    {"a boolean of 2", "b", {2, 0, 0, 0}, 4},
+                    {"an array whose length passes the body", "ay", {9, 0, 0, 0, 1, 2}, 6},
+                    {"an array of dict entries with a half entry", "a{sy}", {5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 'a'}, 13},
+                    {"a variant whose signature is two types", "v", {2, 'y', 'y', 0, 1, 1}, 6},
+                    {"a signature that is none", "g", {2, 'a', 'a', 0}, 4},
+                    {"an object path that is not one", "o", {2, 0, 0, 0, 'x', 'y', 0}, 7},
+                    {"a body shorter than its signature", "ss", {0, 0, 0, 0, 0}, 5},
+                    {"a body longer than its signature", "y", {1, 2}, 2},
+                    {"padding that is not zero in a body", "su", {1, 0, 0, 0, 'a', 0, 7, 7, 0, 0, 0, 0}, 12},
+                    {"a string that is not UTF-8", "s", {1, 0, 0, 0, 0xff, 0}, 6},
+                    {"a string with a character cut short", "s", {2, 0, 0, 0, 0xe2, 0x82, 0}, 7},
+                    {"a string with a surrogate", "s", {3, 0, 0, 0, 0xed, 0xa0, 0x80, 0}, 8},
+                    {"a dictionary keyed by a variant", "a{vy}", {0, 0, 0, 0, 0, 0, 0, 0}, 8},
+                    {"a dictionary keyed by an array", "a{asy}", {0, 0, 0, 0, 0, 0, 0, 0}, 8},
+                };
+                for (unsigned k = 0; k < sizeof bodies / sizeof bodies[0]; k++)
+                {
+                        struct db_call c;
+                        struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", DBUS_NAME_BUS, "", bodies[k].sig, 0, 0};
+
+                        slot = db_connect(1000);
+                        db_hello(slot);
+                        db_drain(slot);
+                        db_begin(&c, DBUS_CALL, 0, &f);
+                        dbus_o_raw(&c.w, bodies[k].body, bodies[k].size);
+                        db_send(slot, &c);
+                        DBCHECK(dbus_dead(slot), "%s ends the connection", bodies[k].name);
+                        dbus_drop(slot);
+                }
+        }
+        // a call whole in everything but a serial of 0
+        {
+                struct db_call c;
+                struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", DBUS_NAME_BUS, "", "", 0, 0};
+
+                slot = db_connect(1000);
+                db_hello(slot);
+                db_drain(slot);
+                db_begin(&c, DBUS_CALL, 0, &f);
+                memset(c.bytes + 8, 0, 4);
+                db_send(slot, &c);
+                DBCHECK(dbus_dead(slot), "a call with a serial of 0 ends the connection");
+                dbus_drop(slot);
+        }
+        // nesting
+        {
+                char sig[80];
+                struct db_call c;
+                struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", DBUS_NAME_BUS, "", sig, 0, 0};
+                int deep;
+
+                for (deep = 0; deep < 40; deep++)
+                        sig[deep] = 'a';
+                sig[deep] = 'y';
+                sig[deep + 1] = 0;
+                slot = db_connect(1000);
+                db_hello(slot);
+                db_drain(slot);
+                db_begin(&c, DBUS_CALL, 0, &f);
+                db_send(slot, &c);
+                DBCHECK(dbus_dead(slot), "a signature nested past 32 arrays ends the connection");
+                dbus_drop(slot);
+        }
+        // a message past the cap, announced by its header
+        slot = db_connect(1000);
+        db_hello(slot);
+        db_drain(slot);
+        {
+                unsigned char header[16] = {'l', 1, 0, 1, 0xff, 0xff, 0xff, 0x7f, 1, 0, 0, 0, 0, 0, 0, 0};
+
+                db_feed(slot, header, 16);
+        }
+        DBCHECK(dbus_dead(slot), "a message that announces more than the cap ends the connection");
+        dbus_drop(slot);
+        // a client that does not read is dropped, not waited for
+        {
+                long a = db_connect(1000), b = db_connect(1000);
+                int dropped = 0;
+
+                db_hello(a);
+                db_hello(b);
+                db_drain(a);
+                db_drain(b);
+                db_request(a, "org.example.Flood", 0);
+                db_drain(a);
+                for (int k = 0; k < 20000 && !dbus_dead(a); k++)
+                {
+                        struct db_call spam;
+                        struct dbus_fields f = {"/o", "org.example.I", "Spam", "", "org.example.Flood", "", "s", 0, 0};
+
+                        db_begin(&spam, DBUS_CALL, DBUS_FLAG_NO_REPLY, &f);
+                        dbus_o_string(&spam.w, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+                        db_send(b, &spam);
+                        db_drain(b);
+                }
+                dropped = dbus_dead(a) == 2;
+                DBCHECK(dropped, "a client that does not read fills its queue and is dropped (%ld)", dbus_dead(a));
+                DBCHECK(!dbus_dead(b), "and the one that called it is not");
+                dbus_drop(a);
+                dbus_drop(b);
+        }
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+static void db_test_caps(void)
+{
+        long slots[DBUS_CLIENTS + 2], made = 0, per_uid = 0;
+        struct db_seen s;
+        long a;
+
+        db_reset();
+        for (long k = 0; k < DBUS_CLIENTS + 2; k++)
+        {
+                slots[k] = dbus_connect(2000 + k, 0);
+                made += slots[k] >= 0;
+        }
+        DBCHECK(made == DBUS_CLIENTS, "no more clients than the table has (%ld)", made);
+        for (long k = 0; k < DBUS_CLIENTS + 2; k++)
+                if (slots[k] >= 0)
+                        dbus_drop(slots[k]);
+        for (long k = 0; k < DBUS_PER_UID + 3; k++)
+        {
+                slots[k] = dbus_connect(3000 + k, 1234);
+                per_uid += slots[k] >= 0;
+        }
+        DBCHECK(per_uid == DBUS_PER_UID, "and no more than DBUS_PER_UID of one user (%ld)", per_uid);
+        for (long k = 0; k < DBUS_PER_UID + 3; k++)
+                if (slots[k] >= 0)
+                        dbus_drop(slots[k]);
+
+        a = db_connect(1000);
+        db_hello(a);
+        db_drain(a);
+        {
+                char name[40];
+
+                for (int k = 0; k < DBUS_NAMES_PER + 3; k++)
+                {
+                        snprintf(name, sizeof name, "org.example.N%d", k);
+                        db_request(a, name, 0);
+                        db_drain(a);
+                }
+                DBCHECK(dbus.client[a]->names <= DBUS_NAMES_PER, "a client owns no more names than the cap (%ld)", dbus.client[a]->names);
+        }
+        {
+                int added = 0;
+                char rule[60];
+
+                for (int k = 0; k < DBUS_RULES + 5; k++)
+                {
+                        snprintf(rule, sizeof rule, "type='signal',member='M%d'", k);
+                        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", rule, 0);
+                        if (db_find(a, &s, DBUS_RETURN, 0))
+                                added++;
+                        db_drain(a);
+                }
+                DBCHECK(added == DBUS_RULES, "and no more rules than the cap (%d)", added);
+        }
+        dbus_drop(a);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/* ---- noise ---- */
+
+static unsigned long db_seed = 88172645463325252UL;
+
+static unsigned long db_random_next(void)
+{
+        db_seed ^= db_seed << 13;
+        db_seed ^= db_seed >> 7;
+        db_seed ^= db_seed << 17;
+        return db_seed;
+}
+
+// Random bytes, random cuts of valid messages, valid messages with a byte changed: nothing ends the bus, nothing is left.
+static void db_test_fuzz(long rounds)
+{
+        long a, b, accepted = 0, ended = 0;
+        struct db_call good;
+        struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", "", DBUS_NAME_PORTAL, "", "ss", 0, 0};
+
+        db_reset();
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        db_begin(&good, DBUS_CALL, 0, &f);
+        dbus_o_string(&good.w, "org.freedesktop.appearance");
+        dbus_o_string(&good.w, "color-scheme");
+        db_end(&good);
+        a = db_connect(1000);
+        db_hello(a);
+        db_drain(a);
+        for (long round = 0; round < rounds; round++)
+        {
+                unsigned char noise[600];
+                long size = good.w.length;
+
+                if (dbus_dead(a))
+                {
+                        ended++;
+                        dbus_drop(a);
+                        a = db_connect(1000);
+                        db_hello(a);
+                        db_drain(a);
+                }
+                b = db_random_next() % 4;
+                if (b == 0)
+                {
+                        long n = (long)(db_random_next() % sizeof noise);
+
+                        for (long k = 0; k < n; k++)
+                                noise[k] = (unsigned char)db_random_next();
+                        db_feed(a, noise, n);
+                }
+                else
+                {
+                        memcpy(noise, good.bytes, (size_t)size);
+                        for (long k = 0, changes = 1 + (long)(db_random_next() % 3); k < changes; k++)
+                                noise[db_random_next() % (unsigned long)size] = (unsigned char)db_random_next();
+                        db_feed(a, noise, b == 1 ? size : (long)(db_random_next() % (unsigned long)size));
+                        if (b == 3 && !dbus_dead(a))
+                                db_feed(a, good.bytes, size);
+                }
+                accepted += !dbus_dead(a);
+                db_drain(a);
+        }
+        dbus_drop(a);
+        DBCHECK(db_allocs == db_releases, "every record is returned after the noise (%ld %ld)", db_allocs, db_releases);
+        for (long k = 0; k < DBUS_PENDING; k++)
+                DBCHECK(!dbus.pending[k].used, "no call waits for a reply after the noise");
+        printf("CHECK_dbus fuzz: %ld rounds, %ld left the connection well, %ld ended it\n", rounds, accepted, ended);
+}
+
+int main(int argc, char **argv)
+{
+        long rounds = argc > 1 ? atol(argv[1]) : 20000;
+
+        db_test_auth();
+        db_test_hello_and_names();
+        db_test_routing();
+        db_test_portal();
+        db_test_hostile();
+        db_test_caps();
+        db_test_fuzz(rounds);
+        printf("CHECK_dbus: %u checks, %u failures\n", db_checks, db_failures);
+        return db_failures != 0;
+}
+#endif /* CHECK_dbus */
+
 #ifdef CHECK_audio_mix
 /*
         CHECK_audio_mix: the audio mixing core (src/audio/mix.c) against references written here, apart from it: sin and

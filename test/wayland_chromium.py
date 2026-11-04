@@ -4,11 +4,17 @@ Real Chromium on the Wayland shim, a setting changed while it runs, and what the
 DevTools port (standard library only: a websocket client of a few lines).
 
     python3 wayland_chromium.py scale PORT SCAN WIDTH HEIGHT DISPLAYS
+    python3 wayland_chromium.py theme PORT SETTINGS_DIRECTORY BROWSER_LOG
 
 scale: the headless compositor (SCAN is its screen file, WIDTH by HEIGHT, DISPLAYS /root/canvas.displays) is set to 100,
 150, 200, 125 and 100 percent in turn, and the page says each time what the browser sees: window.devicePixelRatio, the
 screen's size in CSS pixels (the logical size), and whether the page fits the screen. The scale of a screen is a live setting
 of the machine; a browser that does not follow it is the bug this holds.
+
+theme: with the session bus running (sessionbus, DBUS_SESSION_BUS_ADDRESS in the browser's environment), the theme of the machine
+(SETTINGS_DIRECTORY/canvas.theme) is set to dark, light and dark again, and the page asks matchMedia('(prefers-color-scheme:
+dark)') each time: the browser reads the org.freedesktop.appearance color-scheme from the Settings portal and follows its
+SettingChanged. BROWSER_LOG is what the browser said, which holds no complaint of a bus that is not there.
 
 One line a row: "ok NAME" or "FAIL NAME detail"; the exit status is the number of failures. test/wayland_trial.sh runs it with
 the browser in a private root (a distribution's Chromium; Canvas's own is Alpine's, run by `chrome` in a bowl).
@@ -150,10 +156,49 @@ def scale(port, width, height, displays):
             "and the page fits the screen, %dx%d pixels or less" % (width, height), json.dumps(now))
 
 
+def dark(cdp):
+    return cdp.eval("matchMedia('(prefers-color-scheme: dark)').matches")
+
+
+def theme(port, root, log):
+    cdp = Cdp(port)
+    cdp.call("Page.navigate", {"url": "about:blank"})
+    time.sleep(2)
+    for word, want in (("dark", True), ("light", False), ("dark", True), ("light", False)):
+        with open(os.path.join(root, "canvas.theme"), "w") as f:
+            f.write(word + "\n")
+        end = time.time() + 12
+        now = dark(cdp)
+        while time.time() < end and now != want:
+            time.sleep(0.4)
+            now = dark(cdp)
+        row(now == want, "with the theme %s the browser's prefers-color-scheme: dark is %s, with no restart" % (word, str(want).lower()), str(now))
+    text = open(log, errors="replace").read() if os.path.exists(log) else ""
+    # The system bus (UPower, logind) is not Moonwater's to give; the session bus is, and it is there.
+    errors = [line for line in text.splitlines() if "Failed to connect to the bus" in line and "system_bus_socket" not in line]
+    row(not errors, "and the browser's log has no complaint of a session bus that is not there", "%d lines, the first: %s" % (len(errors), errors[:1]))
+
+
+def chooser(port, trace):
+    """A click on a file input: the browser opens its file dialog (the toolkit's, not the portal's) and asks the bus for no FileChooser."""
+    cdp = Cdp(port)
+    cdp.call("Page.navigate", {"url": "data:text/html,<body style='margin:0'><input id=f type=file style='position:fixed;left:0;top:0;width:400px;height:300px'>"})
+    time.sleep(2)
+    for kind in ("mousePressed", "mouseReleased"):
+        cdp.call("Input.dispatchMouseEvent", {"type": kind, "x": 50, "y": 50, "button": "left", "clickCount": 1})
+    time.sleep(4)
+    text = open(trace, errors="replace").read() if os.path.exists(trace) else ""
+    row("FileChooser.OpenFile" not in text, "a click on a file input calls no FileChooser.OpenFile of the portal, which has none", [l for l in text.splitlines() if "FileChooser" in l][:3])
+
+
 if __name__ == "__main__":
     what = sys.argv[1]
     if what == "scale":
         scale(int(sys.argv[2]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6])
+    elif what == "chooser":
+        chooser(int(sys.argv[2]), sys.argv[3])
+    elif what == "theme":
+        theme(int(sys.argv[2]), sys.argv[3], sys.argv[4])
     else:
         raise SystemExit("unknown scenario " + what)
     sys.exit(failures)

@@ -8802,7 +8802,7 @@ static void compositor_theme_set(unsigned int theme, unsigned int accent, unsign
                         compositor.woken |= 1u << row;
 }
 
-// Whether the local clock says day: 7 to 19.
+// Whether the local clock says day (SETTING_THEME_DAY_FROM to SETTING_THEME_DAY_UNTIL).
 static unsigned int compositor_theme_day(void)
 {
         timespec real = {0, 0};
@@ -8813,7 +8813,7 @@ static unsigned int compositor_theme_day(void)
         seconds = real.tv_sec;
         if (!localtime_r(&seconds, &broken))
                 return 1;
-        return broken.tm_hour >= 7 && broken.tm_hour < 19;
+        return broken.tm_hour >= SETTING_THEME_DAY_FROM && broken.tm_hour < SETTING_THEME_DAY_UNTIL;
 }
 
 /*

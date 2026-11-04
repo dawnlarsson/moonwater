@@ -2016,7 +2016,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 10
+#define BOWL_ENV_DEFAULTS 11
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -2625,11 +2625,26 @@ static fn bowl_session_prepare_from(string_address address_to environment)
                              bowl_env_value(environment, "XDG_RUNTIME_DIR"));
 }
 
+/*
+        Moonwater's session bus (src/dbus), where the desktop's settings are served: a program of a bowl that is not
+        given a bus of its own finds this one at /run/moonwater/bus, as it finds the Wayland socket at
+        /run/moonwater/wayland-0. A program that wants no bus, or its own, has set the variable and is not asked again. It
+        is only offered where the socket is: a machine with no desktop running has none to offer.
+*/
+#define BOWL_SESSION_BUS_VARIABLE "DBUS_SESSION_BUS_ADDRESS"
+#define BOWL_SESSION_BUS_SOCKET "/run/moonwater/bus"
+
+static bool bowl_session_bus_offered(void)
+{
+        return system_access_at(AT_FDCWD, (string_address)BOWL_SESSION_BUS_SOCKET, 0) >= 0;
+}
+
 static string_address address_to bowl_environment(
     string_address address_to inherited)
 {
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
+        bool have_bus = false, offer_bus = bowl_session_bus_offered();
         positive n = 0;
         b32 skipped = false;
 
@@ -2648,6 +2663,8 @@ static string_address address_to bowl_environment(
                 which = bowl_variable_of(inherited[at]);
                 if (which < BOWL_VARS)
                         have[bowl_variables[which].counts_as] = true;
+                if (bowl_env_named(inherited[at], BOWL_SESSION_BUS_VARIABLE))
+                        have_bus = true;
 
                 /*  Out of room. Handing back the block as it
                     arrived is only safe while nothing has been
@@ -2672,6 +2689,7 @@ static string_address address_to bowl_environment(
 
                 for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                         missing += !have[at];
+                missing += offer_bus && !have_bus;
                 if (!skipped && !missing)
                         return inherited;
                 if (n + BOWL_ENV_DEFAULTS >= BOWL_ENV_ROOM)
@@ -2686,6 +2704,8 @@ static string_address address_to bowl_environment(
         for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                 if (!have[at])
                         mixed[n++] = (string_address)bowl_variables[at].fallback;
+        if (offer_bus && !have_bus)
+                mixed[n++] = (string_address)BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET;
         mixed[n] = null;
         return mixed;
 }
@@ -7964,6 +7984,9 @@ static string_address bowl_chrome_session[] = {
     "socket (" BOWL_CHROME_SOCKET "): this image was built with "
     "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
     "export WAYLAND_DISPLAY=" BOWL_CHROME_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none",
+    // GTK's settings (the file dialog's, GTK 3 inside the browser) go to memory: the session bus is Moonwater's, which has the
+    // portal's Settings and no dconf, and a dconf backend would warn at every write.
+    "export GSETTINGS_BACKEND=memory",
     "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "

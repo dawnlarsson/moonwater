@@ -1064,6 +1064,8 @@ static bool floodlight_parent_supervised;
 #endif
 // The sound server: a process of its own, and plain C that is mostly loops over floats, which the size optimisation above would not vectorise.
 #include "../audio/service.c"
+// The session bus: a process of its own too, which the programs of a bowl find at /run/moonwater/bus (src/dbus).
+#include "../dbus/service.c"
 #include "../canvas/ui/features.h"
 #if MOONWATER_UI_ANY
 #if defined(__x86_64__)

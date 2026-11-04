@@ -43,12 +43,14 @@ function moonwater_ctrl_alt_delete {
 # The compositor is the desktop. Canvas holds the card and fills it with the desktop's colour between
 # one compositor and the next; a desktop that is not the compositor's is what `desktop boot` starts.
 function moonwater_canvas_on {
+  bus_start
   desktop_start
   moonwater desktop boot
 }
 
 function moonwater_canvas_off {
   desktop_stop
+  bus_stop
 }
 
 function key_ctrl_shift_t {
@@ -59,6 +61,46 @@ function key_ctrl_shift_t {
 # PATH and shell commands. -x puts away the one that is up, so the same chord opens it and closes it.
 function key_super_space {
   desktop_asked desktop_launcher
+}
+
+# The session bus (src/dbus): where a bowl's programs ask how the desktop looks (dark or light, the accent) and are told when
+# it changes. A process of its own, under a supervisor of its own, so it outlives a compositor that ends and does not end with
+# it; it is started again at once, after half a second and after two, and given up after four short lives (the text
+# console has no use for it). /run/moonwater/bus is where programs find it.
+function bus_supervise {
+  bus_fails=0
+  while :; do
+    bus_began=$SECONDS
+    /sessionbus &
+    bus_pid=$!
+    echo $bus_pid > /run/moonwater/sessionbus.pid
+    wait $bus_pid
+    [ $((SECONDS - bus_began)) -ge 30 ] && bus_fails=0
+    bus_fails=$((bus_fails + 1))
+    if [ $bus_fails -ge 4 ]; then
+      echo "bus: the session bus ended $bus_fails times in a row and is not started again" > /dev/kmsg
+      break
+    fi
+    case $bus_fails in
+    2) sleep 0.5 ;;
+    3) sleep 2 ;;
+    esac
+  done
+  rm -f /run/moonwater/bus.pid /run/moonwater/sessionbus.pid
+}
+
+function bus_start {
+  if [ -s /run/moonwater/bus.pid ] && kill -0 $(cat /run/moonwater/bus.pid) 2> /dev/null; then
+    return
+  fi
+  (bus_supervise) > /dev/null 2>&1 &
+  echo $! > /run/moonwater/bus.pid
+}
+
+function bus_stop {
+  kill $(cat /run/moonwater/bus.pid) 2> /dev/null
+  kill $(cat /run/moonwater/sessionbus.pid) 2> /dev/null
+  rm -f /run/moonwater/bus.pid /run/moonwater/sessionbus.pid
 }
 
 # The desktop: the compositor, the kernel log and a terminal on it, under a

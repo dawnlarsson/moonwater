@@ -114,6 +114,10 @@
 #define SETTING_TASKBAR_TRAY_STANDARD "{battery}  {time.24h.hour}:{time.24h.min}"
 #define SETTING_TRAY_MOST 96 // bytes of a format
 #define SETTING_THEME_PATH "/root/canvas.theme"
+// The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
+// and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
+#define SETTING_THEME_DAY_FROM 7
+#define SETTING_THEME_DAY_UNTIL 19
 #define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
 #define SETTING_MOTION_PATH "/root/canvas.motion"
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"

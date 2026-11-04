@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland audio"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland audio dbus"
 
 describe()
 {
@@ -258,6 +258,7 @@ describe()
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
+        dbus)     echo "the session bus (src/dbus): the wire, the authentication, names, match rules, routing, the Settings portal, two dozen kinds of message that end a connection, caps and a fuzz; and sd-bus, libdbus and GDBus against the sessionbus tool" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
@@ -315,7 +316,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland audio" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -6608,6 +6609,73 @@ lane_audio()
         done
 
         [ "$audio_status" = 0 ]
+)
+
+#       The session bus of Canvas's desktop (src/dbus): the D-Bus message bus a bowl's programs find at /run/moonwater/bus,
+#       with the Settings portal that tells them how the desktop looks. dbus.c, the engine, is plain C with no library, built
+#       with gcc and clang under -Wall -Wextra -Werror, and CHECK_dbus runs it against clients that speak its wire: the
+#       authentication (EXTERNAL, ANONYMOUS, sd-bus's pipelined form, descriptors refused), Hello and the names, the
+#       match rules (by path and by namespace too), calls routed with the sender the bus says and replies passed only to
+#       the caller from the callee, a callee that goes, the Settings portal's Read, ReadOne and ReadAll and its
+#       SettingChanged, messages that are not valid in two dozen ways (each ends the connection), the caps, and a fixed-seed
+#       noise that gives every record back. Where the box has busctl (sd-bus), dbus-send (libdbus) and gdbus with Python's
+#       Gio (GDBus), test/dbus_e2e.sh runs the sessionbus tool of the shell on a private /run and /root against them:
+#       clients that are not ours reading the color-scheme, being told a change of the theme, owning a name and being
+#       called, and a bus that is as it was after noise.
+lane_dbus()
+(
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        dbus_status=0
+        dbus_compilers=${CC:-gcc}
+        command -v clang > /dev/null 2>&1 && dbus_compilers="$dbus_compilers clang"
+
+        dbus_row()
+        {
+                dbus_name=$1
+                shift
+                if "$@" > "$work/$dbus_name.out" 2>&1; then
+                        tally "dbus-$dbus_name" 1 1
+                else
+                        tally "dbus-$dbus_name" 0 1
+                        dbus_status=1
+                        note "dbus $dbus_name failed:"
+                        tail -n 8 "$work/$dbus_name.out" | sed 's/^/    /'
+                fi
+        }
+
+        for dbus_cc in $dbus_compilers; do
+                dbus_warn="-std=gnu11 -O2 -Wall -Wextra -Werror"
+                dbus_row "engine-$dbus_cc" $dbus_cc $dbus_warn -c src/dbus/dbus.c -o "$work/dbus.o"
+                dbus_row "checks-$dbus_cc" sh -c "$dbus_cc $dbus_warn -Wno-comment -D_GNU_SOURCE -DCHECK_dbus test/checks.c \
+                        -o '$work/check-dbus-$dbus_cc' && '$work/check-dbus-$dbus_cc'"
+        done
+        if [ "$(uname -s)" = Linux ] && command -v busctl > /dev/null 2>&1 && command -v dbus-send > /dev/null 2>&1 &&
+                command -v gdbus > /dev/null 2>&1 && command -v unshare > /dev/null 2>&1 && [ -z "${DBUS_E2E_SKIP:-}" ]; then
+                if freestanding programs/shell.c "$work/shell-dbus" ""; then
+                        dbus_e2e=0
+                        unshare -rm sh test/dbus_e2e.sh "$work/shell-dbus" "$work/e2e" > "$work/e2e.out" 2>&1 || dbus_e2e=$?
+                        dbus_at=0
+                        while IFS= read -r dbus_line; do
+                                case $dbus_line in
+                                "ok "*) dbus_at=$((dbus_at + 1)); tally "dbus-e2e-$dbus_at" 1 1 ;;
+                                "FAIL "*)
+                                        dbus_at=$((dbus_at + 1))
+                                        tally "dbus-e2e-$dbus_at" 0 1
+                                        dbus_status=1
+                                        note "dbus e2e: $dbus_line"
+                                        ;;
+                                esac
+                        done < "$work/e2e.out"
+                        [ "$dbus_at" -gt 0 ] || { tally dbus-e2e-ran 0 1; dbus_status=1; note "dbus e2e ran no row"; }
+                else
+                        tally dbus-e2e-build 0 1
+                        dbus_status=1
+                        note "dbus: the shell did not build"
+                fi
+        fi
+
+        [ "$dbus_status" = 0 ]
 )
 
 #       The crcs and the hash cores, whose riscv64 floor bodies also run

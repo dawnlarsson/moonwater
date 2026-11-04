@@ -31,6 +31,19 @@ chmod 700 /run/user/0
 [ -z "$TRIAL_DISPLAYS" ] || echo "$TRIAL_DISPLAYS" > /root/canvas.displays
 "$dir/bin/compositor" -H "$size" "$dir/$name.scan" $TRIAL_COMPOSITOR_ARGS > "$dir/$name.compositor" 2>&1 &
 cpid=$!
+# TRIAL_BUS=1 also runs the session bus (src/dbus), where the program in the root finds its settings: its address is in the program's
+# environment.
+if [ -n "$TRIAL_BUS" ]; then
+        ln -sf "$compositor" "$dir/bin/sessionbus"
+        "$dir/bin/sessionbus" $TRIAL_BUS_ARGS > "$dir/$name.bus" 2>&1 &
+        bpid=$!
+        TRIAL_ENV="$TRIAL_ENV DBUS_SESSION_BUS_ADDRESS=${TRIAL_BUS_ADDRESS:-unix:path=/run/moonwater/bus}"
+fi
+# TRIAL_PRE is a command to run beside them (a proxy that logs what a program says to the bus, say).
+if [ -n "$TRIAL_PRE" ]; then
+        sh -c "$TRIAL_PRE" &
+        sleep 0.5
+fi
 i=0
 while [ ! -S /run/moonwater/wayland-0 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 mount --rbind /dev "$root/dev"
@@ -38,6 +51,9 @@ mount --rbind /sys "$root/sys"
 mount -t proc proc "$root/proc"
 mount --bind /run "$root/run"
 mount -t tmpfs tmpfs "$root/tmp"
+# What the program in the root writes for the probe to read: TRIAL_DIR is /trial there.
+mkdir -p "$root/trial"
+mount --bind "$dir" "$root/trial"
 # shellcheck disable=SC2086
 chroot "$root" /usr/bin/env HOME=/tmp XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=/run/moonwater/wayland-0 MOONWATER_ASKED=1 \
         LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin $TRIAL_ENV "$@" > "$dir/$name.log" 2>&1 &
@@ -49,5 +65,5 @@ kill $client 2> /dev/null
 sleep 1
 kill -9 $client 2> /dev/null
 if kill -0 $cpid 2> /dev/null; then echo "compositor alive" >> "$dir/$name.probe"; else echo "COMPOSITOR DIED" >> "$dir/$name.probe"; status=1; fi
-kill $cpid 2> /dev/null
+kill $cpid $bpid 2> /dev/null
 exit $status
