@@ -5522,6 +5522,16 @@ static fn ui_kit_track(const struct window_event address_to event)
                 ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
 }
 
+/*
+        The kit's pass: the one monotonic read of a pass of ui_app_run, taken after the pass's events and before its popup, its
+        ticks, its frame and its wait, so ui_kit.now is the pass's time for every app and for the kit alike. An event sets it to
+        its own time (ui_event_context) and a pass sets it again; an app reads ui_kit.now and never the clock.
+*/
+static fn ui_kit_pass(void)
+{
+        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+}
+
 static fn ui_event_context(const struct window_event address_to event)
 {
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
@@ -10403,6 +10413,7 @@ static int ui_app_run(struct ui_app address_to app)
         app->ui->glass = (app->glass & WINDOW_GLASS) != 0;
         ui_kit_inks(app->ui);
         *app->focused = false;
+        ui_kit_pass();
         status = app->open();
         if (status >= 0)
         {
@@ -10431,6 +10442,7 @@ static int ui_app_run(struct ui_app address_to app)
                         if (!app->event(&event))
                                 running = false;
                 }
+                ui_kit_pass();
                 if (app->popup && app->popup->open)
                 {
                         int chosen = ui_popmenu_pump(app->popup);
@@ -10509,7 +10521,7 @@ static int ui_app_run(struct ui_app address_to app)
                 */
                 if (*app->dirty)
                 {
-                        positive period = table->period ? table->period : 16666667u, now = clock_monotonic_nanoseconds();
+                        positive period = table->period ? table->period : 16666667u, now = (positive)ui_kit.now;
 
                         if (ui_kit.busy && now < (positive)ui_kit.drawn + period)
                                 timeout = (long)((positive)ui_kit.drawn + period - now);

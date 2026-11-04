@@ -720,7 +720,7 @@ static fn editor_size(unsigned int width, unsigned int height)
 // The caret's blink and a thrown finger's scroll: the next frame they need, and none for an idle window.
 static long editor_tick(long timeout, long address_to other)
 {
-        positive now = clock_monotonic_nanoseconds();
+        positive now = (positive)ui_kit.now;
         b32 redraw = false;
 
         (void)other;

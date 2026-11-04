@@ -151883,10 +151883,10 @@ static fn check_kit_standard(void)
                 {"src/canvas/ui/launcher.c", "WINDOW_KEY_TOUCH", 3},
                 {"src/canvas/ui/terminal.c", "WINDOW_KEY_TOUCH", 0},
                 {"src/canvas/ui/settings.c", "clock_monotonic_nanoseconds", 5},
-                {"src/canvas/ui/launcher.c", "clock_monotonic_nanoseconds", 1},
-                {"src/canvas/ui/editor.c", "clock_monotonic_nanoseconds", 1},
+                {"src/canvas/ui/launcher.c", "clock_monotonic_nanoseconds", 0},
+                {"src/canvas/ui/editor.c", "clock_monotonic_nanoseconds", 0},
                 {"src/canvas/ui/terminal.c", "clock_monotonic_nanoseconds", 15},
-                {"src/canvas/ui/identify.c", "clock_monotonic_nanoseconds", 3},
+                {"src/canvas/ui/identify.c", "clock_monotonic_nanoseconds", 0},
                 {"src/canvas/ui/mixer.c", "clock_monotonic_nanoseconds", 2},
                 {"src/canvas/ui/settings.c", ".press.down", 2},
                 {"src/canvas/ui/launcher.c", ".press.down", 1},
@@ -156562,6 +156562,7 @@ static fn check_identify_timing(void)
         positive now = clock_monotonic_nanoseconds();
         long other = -1, timeout;
 
+        ui_kit.now = (b64)now; // the pass's time: the kit owns the clock, and the overlay reads it (ui_kit_pass)
         identify.until = now + (positive)IDENTIFY_SECONDS * 1000000000ull;
         timeout = identify_tick(-1, &other);
         check("identify: its wait is the three seconds left, and it is not done before them",

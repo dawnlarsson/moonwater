@@ -168,7 +168,7 @@ static int identify_open(void)
                 windows_place_set(table, row, &place); // the placement the compositor reads with the first picture
         }
         identify_size((unsigned int)identify.width, (unsigned int)identify.height);
-        identify.until = clock_monotonic_nanoseconds() + (positive)IDENTIFY_SECONDS * 1000000000ull;
+        identify.until = (positive)ui_kit.now + (positive)IDENTIFY_SECONDS * 1000000000ull;
         identify_frame();
         return -1;
 }
@@ -184,7 +184,7 @@ static b32 identify_event(const struct window_event address_to event)
 // The time left shortens the wait to it, so the window is gone when it is due.
 static long identify_tick(long timeout, long address_to other)
 {
-        positive now = clock_monotonic_nanoseconds();
+        positive now = (positive)ui_kit.now;
 
         (void)other;
         if (now < identify.until && (timeout < 0 || (long)(identify.until - now) < timeout))
@@ -194,7 +194,7 @@ static long identify_tick(long timeout, long address_to other)
 
 static b32 identify_done(void)
 {
-        return clock_monotonic_nanoseconds() >= identify.until;
+        return (positive)ui_kit.now >= identify.until;
 }
 
 static struct ui_app identify_app = {

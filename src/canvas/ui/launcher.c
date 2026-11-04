@@ -1067,7 +1067,7 @@ static int launcher_open(void)
 // The caret's blink: the next frame it needs, and none once it has stopped (a while after the last key).
 static long launcher_tick(long timeout, long address_to other)
 {
-        positive now = clock_monotonic_nanoseconds();
+        positive now = (positive)ui_kit.now;
         b32 redraw = false;
 
         (void)other;
