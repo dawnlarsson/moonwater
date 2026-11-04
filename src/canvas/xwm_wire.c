@@ -85,6 +85,7 @@
 #define XWM_EVENT_CREATE_NOTIFY 16
 #define XWM_EVENT_DESTROY_NOTIFY 17
 #define XWM_EVENT_UNMAP_NOTIFY 18
+#define XWM_EVENT_MAP_NOTIFY 19
 #define XWM_EVENT_MAP_REQUEST 20
 #define XWM_EVENT_REPARENT_NOTIFY 21
 #define XWM_EVENT_CONFIGURE_NOTIFY 22
@@ -209,6 +210,7 @@
 #define XWM_EV_FOCUS_OUT 11
 #define XWM_EV_ENTER 12
 #define XWM_EV_LEAVE 13
+#define XWM_EV_MAP_NOTIFY 14
 
 /*
         What the parsers fill in. A field a kind does not have is zero after xwm_parse_event (it clears the whole struct
@@ -1062,6 +1064,12 @@ XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct 
                 out->height = xwm_get16(buf + 22);
                 out->border = xwm_get16(buf + 24);
                 out->value_mask = xwm_get16(buf + 26);
+                break;
+        case XWM_EVENT_MAP_NOTIFY:
+                out->kind = XWM_EV_MAP_NOTIFY;
+                out->event = xwm_get32(buf + 4);
+                out->window = xwm_get32(buf + 8);
+                out->override = buf[12];
                 break;
         case XWM_EVENT_UNMAP_NOTIFY:
                 out->kind = XWM_EV_UNMAP_NOTIFY;

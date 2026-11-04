@@ -174117,6 +174117,11 @@ static void xw_test_events(void)
         XWCHECK(v.width == 640 && v.height == 480 && v.border == 0 && v.value_mask == 0x0f && v.window == 0x400001 && v.sibling == 0,
                 "ConfigureRequest: the size, the border, the mask and the window");
 
+        memset(e, 0, 32); e[0] = 19; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400003, 4); e[12] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_MAP_NOTIFY && v.event == 0x5a1 && v.window == 0x400003 && v.override == 1,
+                "MapNotify: the event, the window, and the override-redirect flag");
+
         memset(e, 0, 32); e[0] = 18; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4); e[12] = 1;
         r = xwm_parse_event(e, 32, &v);
         XWCHECK(r == XWM_OK && v.kind == XWM_EV_UNMAP_NOTIFY && v.event == 0x5a1 && v.window == 0x400001 && v.from_configure == 1,
