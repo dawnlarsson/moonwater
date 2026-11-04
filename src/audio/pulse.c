@@ -28,10 +28,24 @@
         Version 35, with no shared memory and no descriptors passed (the AUTH reply sets neither bit, so a client
         sends its data over the socket): the handshake, client names and properties, playback streams (data with
         seeks, REQUEST, UNDERFLOW, STARTED, drain, cork, flush, trigger, prebuf, latency, buffer attributes, rate
-        updates, names and properties, moving to a sink), the lists and infos of sinks, sources (the sinks' monitors),
-        clients and sink inputs (and empty lists of modules, cards and samples), subscription events, volumes and
-        mutes, the default sink. What is not served is answered with the error a client expects (NOTIMPLEMENTED,
-        NOENTITY, NOEXTENSION, ACCESS) and never ignored: a client waiting for an answer gets one.
+        updates, names and properties, moving to a sink), record streams (below), the lists and infos of sinks,
+        sources, clients, sink inputs and source outputs (and empty lists of modules, cards and samples), subscription
+        events, volumes and mutes, the default sink and the default source. What is not served is answered with the
+        error a client expects (NOTIMPLEMENTED, NOENTITY, NOEXTENSION, ACCESS) and never ignored: a client waiting for
+        an answer gets one.
+
+        RECORDING
+
+        A source is where sound comes from: the monitor of each sink (what the sink plays, after its volume and mute) or a
+        capture device the host adds (pulse_source_add). A record stream is a program that listens to one: the host feeds
+        a source blocks of a stereo float pair (pulse_source_feed, a capture device's from the card, a monitor's from
+        pulse_sink_mix), and every stream on it takes the block at the source's volume, at its own gain, resampled to its
+        rate, in its format and channels (every format but the two laws), and has it queued to its program at once as data
+        frames of its fragment size at most; a program that does not read loses data, never replies. A stream of peaks
+        (PEAK_DETECT) is the greatest sample of each window instead, the way a meter wants it. Another user's program
+        records a capture device and not what the session plays; the person's switch (pulse_capture_allow) ends every
+        record stream and refuses new ones. The host runs a capture device while pulse_source_wanted says a program
+        listens to it.
 */
 #ifndef AUDIO_PULSE_INCLUDED
 #define AUDIO_PULSE_INCLUDED
@@ -48,6 +62,11 @@
 #define PULSE_STREAMS_PER_CLIENT 16
 #define PULSE_STREAMS 64             // all clients together
 #define PULSE_SINKS 8
+#define PULSE_SOURCES (PULSE_SINKS + 8) // the first PULSE_SINKS are the sinks' monitors (a monitor has its sink's number), the rest are capture devices
+#define PULSE_RECORDS 32                // record streams, all clients together
+#define PULSE_RECORDS_PER_CLIENT 8
+#define PULSE_RECORD_CHUNK 16384        // the most of a record stream's data that one frame carries
+#define PULSE_RECORD_RESERVE 32768      // of a client's output queue kept for its replies and events: record data is dropped before they are
 #define PULSE_FRAME_COMMAND 16384    // the most a command frame may carry
 #define PULSE_FRAME_DATA 131072      // and a data frame
 #define PULSE_IN (PULSE_FRAME_DATA + 20)
@@ -127,6 +146,7 @@
 #define PULSE_COMMAND_OVERFLOW 62
 #define PULSE_COMMAND_UNDERFLOW 63
 #define PULSE_COMMAND_PLAYBACK_STREAM_KILLED 64
+#define PULSE_COMMAND_RECORD_STREAM_KILLED 65
 #define PULSE_COMMAND_SUBSCRIBE_EVENT 66
 #define PULSE_COMMAND_MOVE_SINK_INPUT 67
 #define PULSE_COMMAND_MOVE_SOURCE_OUTPUT 68
@@ -174,6 +194,7 @@
 #define PULSE_FACILITY_SINK 0
 #define PULSE_FACILITY_SOURCE 1
 #define PULSE_FACILITY_SINK_INPUT 2
+#define PULSE_FACILITY_SOURCE_OUTPUT 3
 #define PULSE_FACILITY_CLIENT 5
 #define PULSE_FACILITY_SERVER 7
 #define PULSE_EVENT_NEW 0x0000u
@@ -202,6 +223,9 @@ struct pulse_host
 #define PULSE_CHANGED_SINK_VOLUME 1
 #define PULSE_CHANGED_DEFAULT 2
 #define PULSE_CHANGED_STREAMS 3
+#define PULSE_CHANGED_SOURCE_VOLUME 4 // a capture source's volume or mute (the slot is the source's)
+#define PULSE_CHANGED_DEFAULT_SOURCE 5
+#define PULSE_CHANGED_RECORDS 6       // a record stream began or ended
 
 struct pulse_props
 {
@@ -268,18 +292,74 @@ struct pulse_sink
         struct audio_sink mix;
 };
 
+/*
+        A source is where sound comes from: the monitor of a sink (what the sink plays, after its volume; the first
+        PULSE_SINKS places, a monitor having its sink's number) or a capture device (the rest). Its bus is the block the
+        host fed it, at its own volume, which every record stream on it takes from.
+*/
+struct pulse_source
+{
+        int used, capture;
+        char name[PULSE_NAME + 16], description[PULSE_DESCRIPTION + 24];
+        long rate;
+        long sink;                      // a monitor: the slot of its sink
+        unsigned long volume[2];
+        int muted;
+        long delay_frames;              // what the device holds, as the host last read it
+        unsigned long long fed;         // frames
+        float now;                      // the gain it is at (it ramps to the volume, or to nothing when muted)
+        float peak[2];                  // the greatest sample since the page last took it
+        float bus[2][AUDIO_BLOCK];
+};
+
+/*
+        A record stream (a source output): a program that listens. What the source makes is converted to the program's
+        format, channels and rate and queued to the program's connection as data frames on its channel; a program that does
+        not read costs the sound nothing, its data is dropped before its replies are.
+*/
+struct pulse_record
+{
+        int used;
+        long client;                    // slot of the client that made it
+        unsigned long channel;          // the client's name for it, which data frames carry
+        unsigned long index;            // the source output's, which introspection and volume use
+        long source;
+        struct pulse_props props;
+        long format, channels, rate;
+        signed char map[AUDIO_CHANNELS_MAX];
+        long map_channels;
+        unsigned long volume[PULSE_CHANNEL_MAX];
+        int muted, corked, peak_detect, adjust_latency, variable_rate, early_requests, no_move, owner_set;
+        unsigned long maxlength, fragsize;
+        unsigned long long produced, sent; // bytes made, and bytes queued to the client
+        unsigned long long dropped;        // bytes made and not queued (the client did not read)
+        long uid, pid;
+        float now[2], target;           // the stream's own gain
+        float peak[2];                  // the greatest sample since the page last took it
+        float window[2];                // peak detect: the greatest of the frames of the window so far
+        long window_count;
+        struct audio_table *table;      // the resampler's, none at equal rates (and none for peak detect)
+        struct audio_resampler rs;
+};
+
 struct pulse
 {
         struct pulse_host host;
         struct pulse_client *client[PULSE_CLIENTS];
         struct pulse_stream stream[PULSE_STREAMS];
         struct pulse_sink sink[PULSE_SINKS];
-        long default_sink;
-        unsigned long next_client, next_input;
+        struct pulse_source source[PULSE_SOURCES];
+        struct pulse_record record[PULSE_RECORDS];
+        long default_sink, default_source;
+        int capture_off;                // the person has turned capture off: no program records
+        unsigned long next_client, next_input, next_output;
         unsigned long ring_total;
         unsigned char scratch[PULSE_SCRATCH];
+        float record_a[2][AUDIO_BLOCK], record_b[2][AUDIO_BLOCK];
+        unsigned char record_bytes[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4 * 2];
         // What the checks count back to nothing.
         unsigned long clients_made, clients_dropped, streams_made, streams_freed, protocol_errors;
+        unsigned long records_made, records_freed;
 };
 
 /* ---- reading a tag structure ---- */
@@ -869,9 +949,14 @@ static int pulse_ack(struct pulse *p, struct pulse_client *c, unsigned long tag)
 
 /* ---- the sinks ---- */
 
+static void pulse_monitor_set(struct pulse *p, long slot);
+static void pulse_source_retable(struct pulse *p, long slot);
+static int pulse_record_move(struct pulse *p, struct pulse_record *r, long slot);
+
 /*
         A sink for a card (or a clock): its name as clients see it, the description the person sees, and the rate the
-        card is run at. Answers its slot or a negative number. The first becomes the default.
+        card is run at. Answers its slot or a negative number. The first becomes the default. Its monitor, the source that
+        is what it plays, is made with it.
 */
 AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *description, long rate)
 {
@@ -889,6 +974,10 @@ AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *des
                         audio_sink_open(&s->mix, rate, 2);
                         if (p->default_sink < 0)
                                 p->default_sink = i;
+                        __builtin_memset(p->source + i, 0, sizeof(p->source[i]));
+                        pulse_monitor_set(p, i);
+                        if (p->default_source < 0)
+                                p->default_source = i;
                         pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_NEW, (unsigned long)i);
                         pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
                         return i;
@@ -907,6 +996,7 @@ AUDIO_API void pulse_sink_reconfigure(struct pulse *p, long slot, const char *na
 {
         struct pulse_sink *sink = p->sink + slot;
         float master = sink->mix.master_target;
+        int changed = 0;
 
         pulse_copy(sink->name, PULSE_NAME, name);
         pulse_copy(sink->description, PULSE_DESCRIPTION, description);
@@ -918,7 +1008,11 @@ AUDIO_API void pulse_sink_reconfigure(struct pulse *p, long slot, const char *na
                 for (int i = 0; i < PULSE_STREAMS; i++)
                         if (p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot && audio_voice_retarget(&p->stream[i].voice, rate) < 0)
                                 pulse_stream_end(p, p->stream + i);
+                changed = 1;
         }
+        pulse_monitor_set(p, slot);
+        if (changed)
+                pulse_source_retable(p, slot);
         pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)slot);
         pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);
         pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
@@ -1042,6 +1136,460 @@ static void pulse_stream_end(struct pulse *p, struct pulse_stream *s)
                 pulse_stream_free(p, s);
 }
 
+/* ---- the sources ---- */
+
+static float pulse_source_target(const struct pulse_source *s)
+{
+        return s->muted ? 0.0f : pulse_mean_gain(s->volume, 2);
+}
+
+// A sink's monitor: the source that is what the sink plays. It has its sink's number, and its name and description follow the sink's.
+static void pulse_monitor_set(struct pulse *p, long slot)
+{
+        struct pulse_source *m = p->source + slot;
+        const struct pulse_sink *s = p->sink + slot;
+        long n;
+
+        if (!m->used)
+        {
+                __builtin_memset(m, 0, sizeof(*m));
+                m->used = 1;
+                m->volume[0] = m->volume[1] = AUDIO_VOLUME_NORM;
+                m->now = 1.0f;
+        }
+        m->sink = slot;
+        m->rate = s->rate;
+        pulse_copy(m->name, (long)sizeof(m->name), s->name);
+        n = pulse_len(m->name);
+        pulse_copy(m->name + n, (long)sizeof(m->name) - n, ".monitor");
+        pulse_copy(m->description, (long)sizeof(m->description), "Monitor of ");
+        n = pulse_len(m->description);
+        pulse_copy(m->description + n, (long)sizeof(m->description) - n, s->description);
+}
+
+static long pulse_source_named(struct pulse *p, const char *name)
+{
+        long number;
+
+        for (long i = 0; i < PULSE_SOURCES; i++)
+                if (p->source[i].used && pulse_equal(p->source[i].name, name))
+                        return i;
+        number = pulse_number(name);
+        return number >= 0 && number < PULSE_SOURCES && p->source[number].used ? number : -1;
+}
+
+static long pulse_find_source(struct pulse *p, unsigned long index, const char *name)
+{
+        if (name && name[0])
+                return pulse_source_named(p, name);
+        if (index == PULSE_INVALID)
+                return -1;
+        return index < PULSE_SOURCES && p->source[index].used ? (long)index : -1;
+}
+
+/* ---- the record streams ---- */
+
+static struct pulse_record *pulse_record_of(struct pulse *p, long client, unsigned long channel)
+{
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && p->record[i].client == client && p->record[i].channel == channel)
+                        return p->record + i;
+        return 0;
+}
+
+static struct pulse_record *pulse_output_of(struct pulse *p, unsigned long index)
+{
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && p->record[i].index == index)
+                        return p->record + i;
+        return 0;
+}
+
+static void pulse_record_apply(struct pulse_record *r)
+{
+        r->target = r->muted ? 0.0f : pulse_mean_gain(r->volume, r->map_channels);
+}
+
+static void pulse_record_free(struct pulse *p, struct pulse_record *r)
+{
+        audio_table_give(r->table);
+        r->table = 0;
+        r->used = 0;
+        p->records_freed++;
+}
+
+// A record stream ends: the program is told (unless it is the one that went), and everyone who asked is told it is gone.
+static void pulse_record_end(struct pulse *p, struct pulse_record *r, int tell)
+{
+        struct pulse_client *c = r->client >= 0 ? p->client[r->client] : 0;
+
+        if (tell && c)
+        {
+                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+
+                pulse_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);
+                pulse_w_u32(&w, PULSE_INVALID);
+                pulse_w_u32(&w, r->channel);
+                pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
+        }
+        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index);
+        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);
+        pulse_record_free(p, r);
+}
+
+// The source runs at another rate now: the streams on it start their filters over, and one with no table for the ratio is ended.
+static void pulse_source_retable(struct pulse *p, long slot)
+{
+        for (int i = 0; i < PULSE_RECORDS; i++)
+        {
+                struct pulse_record *r = p->record + i;
+                struct audio_table *table = 0;
+
+                if (!r->used || r->source != slot || r->peak_detect)
+                        continue;
+                if (r->rate != p->source[slot].rate)
+                {
+                        table = audio_table_take(p->source[slot].rate, r->rate);
+                        if (!table)
+                        {
+                                pulse_record_end(p, r, 1);
+                                continue;
+                        }
+                }
+                audio_table_give(r->table);
+                r->table = table;
+                if (table)
+                        audio_rs_open(&r->rs, table);
+        }
+}
+
+static int pulse_record_format_ok(long format)
+{
+        return format == AUDIO_FORMAT_U8 || format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S16BE || format == AUDIO_FORMAT_F32LE ||
+               format == AUDIO_FORMAT_F32BE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_S24LE ||
+               format == AUDIO_FORMAT_S24BE || format == AUDIO_FORMAT_S24_32LE || format == AUDIO_FORMAT_S24_32BE;
+}
+
+/*
+        The pair as the program's format and channels: the library's little-endian encoders, the bytes of a sample turned over
+        for a big-endian format, and the high byte (offset) of 16 bits for U8. Answers the bytes.
+*/
+static long pulse_record_encode(unsigned char *dst, long format, long frames, long channels, const float *left, const float *right)
+{
+        long samples = frames * channels, base = format, width, bytes;
+        int swap = 0;
+
+        switch (format)
+        {
+        case AUDIO_FORMAT_S16BE:
+                base = AUDIO_FORMAT_S16LE;
+                swap = 1;
+                break;
+        case AUDIO_FORMAT_F32BE:
+                base = AUDIO_FORMAT_F32LE;
+                swap = 1;
+                break;
+        case AUDIO_FORMAT_S32BE:
+                base = AUDIO_FORMAT_S32LE;
+                swap = 1;
+                break;
+        case AUDIO_FORMAT_S24BE:
+                base = AUDIO_FORMAT_S24LE;
+                swap = 1;
+                break;
+        case AUDIO_FORMAT_S24_32BE:
+                base = AUDIO_FORMAT_S24_32LE;
+                swap = 1;
+                break;
+        default:
+                break;
+        }
+        if (format == AUDIO_FORMAT_U8)
+        {
+                // The 16 bits go behind the bytes made, each of which is read from before it is written over.
+                unsigned char *wide = dst + samples;
+
+                audio_encode(AUDIO_FORMAT_S16LE, wide, frames, channels, left, right);
+                for (long i = 0; i < samples; i++)
+                {
+                        int v = (short)(wide[2 * i] | wide[2 * i + 1] << 8);
+
+                        v = (v + 128) >> 8;
+                        dst[i] = (unsigned char)((v > 127 ? 127 : v) + 128);
+                }
+                return samples;
+        }
+        bytes = audio_encode(base, dst, frames, channels, left, right);
+        if (swap)
+        {
+                width = audio_format_bytes(base);
+                for (long i = 0; i < samples; i++)
+                        for (long k = 0; k < width / 2; k++)
+                        {
+                                unsigned char t = dst[i * width + k];
+
+                                dst[i * width + k] = dst[i * width + width - 1 - k];
+                                dst[i * width + width - 1 - k] = t;
+                        }
+        }
+        return bytes;
+}
+
+// Bytes made for a program: queued to it in frames of its fragment size at most, or dropped (and counted) when it has not read what it was sent.
+static void pulse_record_post(struct pulse *p, struct pulse_record *r, const unsigned char *data, long count)
+{
+        struct pulse_client *c = r->client >= 0 ? p->client[r->client] : 0;
+        long frame = audio_format_bytes(r->format) * r->channels, chunk = PULSE_RECORD_CHUNK;
+
+        r->produced += (unsigned long long)count;
+        if (!c)
+                return;
+        if (r->fragsize >= (unsigned long)frame && r->fragsize < (unsigned long)chunk)
+                chunk = (long)r->fragsize;
+        chunk -= chunk % frame;
+        while (count > 0)
+        {
+                long n = count < chunk ? count : chunk;
+
+                if (PULSE_OUT - pulse_out_fill(c) - 20 - n < PULSE_RECORD_RESERVE)
+                {
+                        r->dropped += (unsigned long long)count;
+                        return;
+                }
+                pulse_enqueue(c, r->channel, data, n);
+                r->sent += (unsigned long long)n;
+                data += n;
+                count -= n;
+        }
+}
+
+// n frames of the stream's own pair, at the stream's rate: at the stream's gain, in the program's format, to the program.
+static void pulse_record_emit(struct pulse *p, struct pulse_record *r, const float *a0, const float *a1, long n)
+{
+        float *g0 = p->record_b[0], *g1 = p->record_b[1], now0 = r->now[0], now1 = r->now[1];
+        long bytes;
+
+        audio_gain_run(g0, a0, n, &now0, r->target, audio_slope(r->now[0], r->target), r->peak, 0);
+        audio_gain_run(g1, a1, n, &now1, r->target, audio_slope(r->now[1], r->target), r->peak + 1, 0);
+        r->now[0] = now0;
+        r->now[1] = now1;
+        bytes = pulse_record_encode(p->record_bytes, r->format, n, r->channels, g0, g1);
+        pulse_record_post(p, r, p->record_bytes, bytes);
+}
+
+/*
+        Peak detect: the stream's frames are the greatest sample of each window of the source's frames (a window is the
+        source's rate over the stream's, in whole frames), the way PulseAudio's "peaks" resampler makes them, so that a
+        program draws a meter from a few frames a second. The stream's own volume does not take part: it measures the source.
+*/
+static void pulse_record_peaks(struct pulse *p, struct pulse_record *r, const float *left, const float *right, long frames, long source_rate)
+{
+        float *o0 = p->record_a[0], *o1 = p->record_a[1];
+        long window = source_rate / r->rate, made = 0;
+
+        if (window < 1)
+                window = 1;
+        for (long i = 0; i < frames; i++)
+        {
+                float a = left[i] < 0 ? -left[i] : left[i], b = right[i] < 0 ? -right[i] : right[i];
+
+                r->window[0] = a > r->window[0] ? a : r->window[0];
+                r->window[1] = b > r->window[1] ? b : r->window[1];
+                if (++r->window_count >= window)
+                {
+                        o0[made] = r->window[0];
+                        o1[made] = r->window[1];
+                        if (r->channels == 1)
+                                o0[made] = o1[made] = r->window[0] > r->window[1] ? r->window[0] : r->window[1];
+                        made++;
+                        r->window[0] = r->window[1] = 0;
+                        r->window_count = 0;
+                }
+        }
+        if (made)
+                pulse_record_post(p, r, p->record_bytes, pulse_record_encode(p->record_bytes, r->format, made, r->channels, o0, o1));
+}
+
+// A block of the source (its bus, at its volume): into the stream, resampled to its rate when it has a table.
+static void pulse_record_take(struct pulse *p, struct pulse_record *r, const float *left, const float *right, long frames, long source_rate)
+{
+        if (r->peak_detect)
+        {
+                pulse_record_peaks(p, r, left, right, frames, source_rate);
+                return;
+        }
+        if (!r->table)
+        {
+                pulse_record_emit(p, r, left, right, frames);
+                return;
+        }
+        {
+                struct audio_resampler *rs = &r->rs;
+                long room = audio_rs_room(rs), take = frames < room ? frames : room;
+
+                __builtin_memcpy(rs->buf[0] + rs->have, left, (unsigned long)take * sizeof(float));
+                __builtin_memcpy(rs->buf[1] + rs->have, right, (unsigned long)take * sizeof(float));
+                rs->have += take;
+                for (;;)
+                {
+                        long ready = audio_rs_ready(rs), m = ready < AUDIO_BLOCK ? ready : AUDIO_BLOCK, made;
+
+                        if (m < 1)
+                                break;
+                        made = audio_rs_run(rs, p->record_a[0], p->record_a[1], m);
+                        pulse_record_emit(p, r, p->record_a[0], p->record_a[1], made);
+                }
+        }
+}
+
+/*
+        A block (at most AUDIO_BLOCK frames, as a planar pair at the source's rate) of what a source makes: at the source's
+        volume, to every record stream on it that is not corked. A source nobody records from costs a scan of the table.
+*/
+AUDIO_API void pulse_source_feed(struct pulse *p, long slot, const float *left, const float *right, long frames)
+{
+        struct pulse_source *s = p->source + slot;
+        float target, a, b;
+        int any = 0;
+
+        if (!s->used || frames < 1)
+                return;
+        for (int i = 0; i < PULSE_RECORDS && !any; i++)
+                any = p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
+        if (!any)
+                return;
+        if (frames > AUDIO_BLOCK)
+                frames = AUDIO_BLOCK;
+        target = pulse_source_target(s);
+        a = b = s->now;
+        audio_gain_run(s->bus[0], left, frames, &a, target, audio_slope(s->now, target), s->peak, 0);
+        audio_gain_run(s->bus[1], right, frames, &b, target, audio_slope(s->now, target), s->peak + 1, 0);
+        s->now = b;
+        s->fed += (unsigned long long)frames;
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && p->record[i].source == slot && !p->record[i].corked)
+                        pulse_record_take(p, p->record + i, s->bus[0], s->bus[1], frames, s->rate);
+}
+
+// The record streams that are listening on a source: the host runs a capture device while there are any.
+AUDIO_API long pulse_source_wanted(struct pulse *p, long slot)
+{
+        long n = 0;
+
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                n += p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
+        return n;
+}
+
+AUDIO_API void pulse_source_delay(struct pulse *p, long slot, long frames)
+{
+        p->source[slot].delay_frames = frames;
+}
+
+// The person's capture switch: off ends every record stream there is, and none is made while it is off.
+AUDIO_API void pulse_capture_allow(struct pulse *p, int allowed)
+{
+        if (!p->capture_off == !!allowed)
+                return;
+        p->capture_off = !allowed;
+        if (!allowed)
+                for (int i = 0; i < PULSE_RECORDS; i++)
+                        if (p->record[i].used)
+                                pulse_record_end(p, p->record + i, 1);
+        pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+}
+
+// The source a program that does not name one is given: the first capture device, else the monitor of the default sink.
+static long pulse_source_fallback(struct pulse *p)
+{
+        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
+                if (p->source[i].used)
+                        return i;
+        return p->default_sink >= 0 && p->source[p->default_sink].used ? p->default_sink : -1;
+}
+
+/*
+        A capture device: its name as clients see it, the description the person sees, and the rate it is run at. Answers its
+        slot (a number from PULSE_SINKS up) or a negative number. A capture device is the default source over a monitor.
+*/
+AUDIO_API long pulse_source_add(struct pulse *p, const char *name, const char *description, long rate)
+{
+        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
+                if (!p->source[i].used)
+                {
+                        struct pulse_source *s = p->source + i;
+
+                        __builtin_memset(s, 0, sizeof(*s));
+                        s->used = 1;
+                        s->capture = 1;
+                        s->sink = -1;
+                        pulse_copy(s->name, (long)sizeof(s->name), name);
+                        pulse_copy(s->description, (long)sizeof(s->description), description);
+                        s->rate = rate;
+                        s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
+                        s->now = 1.0f;
+                        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
+                        if (p->default_source < 0 || p->default_source < PULSE_SINKS)
+                        {
+                                p->default_source = i;
+                                pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+                                pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, i);
+                        }
+                        return i;
+                }
+        return -1;
+}
+
+// The capture device is another now (the person chose another): its streams go on from it, at the new rate.
+AUDIO_API void pulse_source_reconfigure(struct pulse *p, long slot, const char *name, const char *description, long rate)
+{
+        struct pulse_source *s = p->source + slot;
+        int changed = rate != s->rate;
+
+        pulse_copy(s->name, (long)sizeof(s->name), name);
+        pulse_copy(s->description, (long)sizeof(s->description), description);
+        s->rate = rate;
+        if (changed)
+                pulse_source_retable(p, slot);
+        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);
+        pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+}
+
+// The capture device is gone: its streams are ended (the programs are told), and the default source is another.
+AUDIO_API void pulse_source_remove(struct pulse *p, long slot)
+{
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && p->record[i].source == slot)
+                        pulse_record_end(p, p->record + i, 1);
+        p->source[slot].used = 0;
+        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_REMOVE, (unsigned long)slot);
+        if (p->default_source == slot)
+        {
+                p->default_source = pulse_source_fallback(p);
+                pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+                pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, p->default_source);
+        }
+}
+
+/*
+        The default source is this one (the person's choice, or a program's with the right to). A record stream that did not
+        name its source follows it. Answers 0 for a place that is no source.
+*/
+AUDIO_API int pulse_source_default(struct pulse *p, long slot)
+{
+        if (slot < 0 || slot >= PULSE_SOURCES || !p->source[slot].used)
+                return 0;
+        if (slot == p->default_source)
+                return 1;
+        p->default_source = slot;
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move)
+                        pulse_record_move(p, p->record + i, slot);
+        pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+        pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, slot);
+        return 1;
+}
+
 /* ---- a client's departure ---- */
 
 static void pulse_drop(struct pulse *p, long slot)
@@ -1053,6 +1601,9 @@ static void pulse_drop(struct pulse *p, long slot)
         for (int i = 0; i < PULSE_STREAMS; i++)
                 if (p->stream[i].used && !p->stream[i].dying && p->stream[i].client == slot)
                         pulse_stream_end(p, p->stream + i);
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                if (p->record[i].used && p->record[i].client == slot)
+                        pulse_record_end(p, p->record + i, 0);
         pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_REMOVE, c->index);
         p->client[slot] = 0;
         p->clients_dropped++;
@@ -1116,40 +1667,38 @@ static void pulse_fill_sink(struct pulse *p, struct pulse_writer *w, struct puls
 
 static void pulse_fill_source(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, long slot)
 {
-        struct pulse_sink *s = p->sink + slot;
+        const struct pulse_source *s = p->source + slot;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
-        char monitor[PULSE_NAME + 16], description[PULSE_DESCRIPTION + 24];
         struct pulse_props props = {0};
-        unsigned long volume[2] = {AUDIO_VOLUME_NORM, AUDIO_VOLUME_NORM};
+        long latency = s->delay_frames * 1000000l / (s->rate ? s->rate : 1);
+        int busy = 0;
 
-        pulse_copy(monitor, sizeof(monitor), s->name);
-        pulse_copy(monitor + pulse_len(monitor), (long)sizeof(monitor) - pulse_len(monitor), ".monitor");
-        pulse_copy(description, 12, "Monitor of ");
-        pulse_copy(description + 11, (long)sizeof(description) - 11, s->description);
+        for (int i = 0; i < PULSE_RECORDS; i++)
+                busy |= p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
         pulse_w_u32(w, (unsigned long)slot);
-        pulse_w_string(w, monitor);
-        pulse_w_string(w, description);
+        pulse_w_string(w, s->name);
+        pulse_w_string(w, s->description);
         pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, s->rate);
         pulse_w_channel_map(w, stereo, 2);
         pulse_w_u32(w, PULSE_INVALID);
-        pulse_w_cvolume(w, volume, 2);
-        pulse_w_bool(w, 0);
-        pulse_w_u32(w, (unsigned long)slot);
-        pulse_w_string(w, s->name);
-        pulse_w_64(w, 'U', 0);
+        pulse_w_cvolume(w, s->volume, 2);
+        pulse_w_bool(w, s->muted);
+        pulse_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);
+        pulse_w_string(w, s->capture ? 0 : p->sink[s->sink].name);
+        pulse_w_64(w, 'U', latency);
         pulse_w_string(w, "moonwater audio");
-        pulse_w_u32(w, 0x1 | 0x2 | 0x4 | 0x8 | 0x10);
+        pulse_w_u32(w, s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10);
         if (c->version >= 13)
         {
-                pulse_props_set(&props, "device.description", (const unsigned char *)description, pulse_len(description) + 1);
-                pulse_props_set(&props, "device.class", (const unsigned char *)"monitor", 8);
+                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, pulse_len(s->description) + 1);
+                pulse_props_set(&props, "device.class", (const unsigned char *)(s->capture ? "sound" : "monitor"), s->capture ? 6 : 8);
                 pulse_w_proplist(w, &props);
                 pulse_w_64(w, 'U', 0);
         }
         if (c->version >= 15)
         {
                 pulse_w_volume(w, AUDIO_VOLUME_NORM);
-                pulse_w_u32(w, 0);
+                pulse_w_u32(w, busy ? 0 : 1); // running, or idle
                 pulse_w_u32(w, 256);
                 pulse_w_u32(w, PULSE_INVALID);
         }
@@ -1214,6 +1763,45 @@ static void pulse_fill_input(struct pulse *p, struct pulse_writer *w, struct pul
         }
         if (c->version >= 21)
                 pulse_w_format_info(w);
+}
+
+// A record stream as introspection shows it: the source output.
+static void pulse_fill_output(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, struct pulse_record *r)
+{
+        char name[PULSE_VALUE + 1];
+        const struct pulse_source *s = p->source + r->source;
+        long source_latency = s->delay_frames * 1000000l / (s->rate ? s->rate : 1), queued = 0;
+        long frame = audio_format_bytes(r->format) * r->channels;
+        unsigned long volume[PULSE_CHANNEL_MAX];
+
+        if (r->client >= 0 && p->client[r->client] && frame && r->rate)
+                queued = pulse_out_fill(p->client[r->client]) / frame * 1000000l / r->rate;
+        pulse_props_text(&r->props, "media.name", name, sizeof(name));
+        for (long i = 0; i < r->map_channels; i++)
+                volume[i] = r->volume[i];
+        pulse_w_u32(w, r->index);
+        pulse_w_string(w, name);
+        pulse_w_u32(w, PULSE_INVALID);
+        pulse_w_u32(w, r->client >= 0 && p->client[r->client] ? p->client[r->client]->index : PULSE_INVALID);
+        pulse_w_u32(w, (unsigned long)r->source);
+        pulse_w_sample_spec(w, r->format, r->channels, r->rate);
+        pulse_w_channel_map(w, r->map, r->map_channels);
+        pulse_w_64(w, 'U', queued);
+        pulse_w_64(w, 'U', source_latency);
+        pulse_w_string(w, "copy");
+        pulse_w_string(w, "protocol-native");
+        if (c->version >= 13)
+                pulse_w_proplist(w, &r->props);
+        if (c->version >= 19)
+                pulse_w_bool(w, r->corked);
+        if (c->version >= 22)
+        {
+                pulse_w_cvolume(w, volume, r->map_channels);
+                pulse_w_bool(w, r->muted);
+                pulse_w_bool(w, 1);
+                pulse_w_bool(w, 1);
+                pulse_w_format_info(w);
+        }
 }
 
 /* ---- the streams ---- */
@@ -1590,8 +2178,33 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
         }
         else if (command == PULSE_COMMAND_SET_SOURCE_VOLUME)
         {
-                if (pulse_find_sink(p, index, name) < 0)
+                long source = pulse_find_source(p, index, name);
+
+                if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                if (n != 2)
+                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+                p->source[source].volume[0] = volume[0];
+                p->source[source].volume[1] = volume[1];
+                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)source);
+                pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, source);
+        }
+        else if (command == PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME)
+        {
+                struct pulse_record *rec = pulse_output_of(p, index);
+
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!pulse_may(c, rec->uid))
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                if (n != rec->map_channels)
+                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+                for (long i = 0; i < n; i++)
+                        rec->volume[i] = volume[i];
+                pulse_record_apply(rec);
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
         }
         else
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -1644,12 +2257,436 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
         }
         else if (command == PULSE_COMMAND_SET_SOURCE_MUTE)
         {
-                if (pulse_find_sink(p, index, name) < 0)
+                long source = pulse_find_source(p, index, name);
+
+                if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                p->source[source].muted = mute;
+                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)source);
+                pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, source);
+        }
+        else if (command == PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE)
+        {
+                struct pulse_record *rec = pulse_output_of(p, index);
+
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!pulse_may(c, rec->uid))
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                rec->muted = mute;
+                pulse_record_apply(rec);
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
         }
         else
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
         return pulse_ack(p, c, tag);
+}
+
+/* ---- the commands on record streams ---- */
+
+// A record stream is listened to from another source: its table for the new ratio, or an error and nothing changed.
+static int pulse_record_move(struct pulse *p, struct pulse_record *r, long slot)
+{
+        struct audio_table *table = 0;
+
+        if (r->source == slot)
+                return 0;
+        if (!r->peak_detect && r->rate != p->source[slot].rate)
+        {
+                table = audio_table_take(p->source[slot].rate, r->rate);
+                if (!table)
+                        return -1;
+        }
+        if (!r->peak_detect)
+        {
+                audio_table_give(r->table);
+                r->table = table;
+                if (table)
+                        audio_rs_open(&r->rs, table);
+        }
+        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);
+        r->source = slot;
+        pulse_changed(p, PULSE_CHANGED_RECORDS, slot);
+        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, r->index);
+        return 0;
+}
+
+static unsigned long pulse_record_frame(const struct pulse_record *r)
+{
+        return (unsigned long)(audio_format_bytes(r->format) * r->channels);
+}
+
+// The fragment size and the longest buffer a program asked for, made what the stream can have.
+static void pulse_record_attributes(struct pulse_record *r, unsigned long maxlength, unsigned long fragsize)
+{
+        unsigned long frame = pulse_record_frame(r);
+
+        if (maxlength == PULSE_INVALID || maxlength == 0 || maxlength > PULSE_RING_MAX)
+                maxlength = PULSE_RING_MAX;
+        maxlength -= maxlength % frame;
+        if (maxlength < frame)
+                maxlength = frame;
+        if (fragsize == PULSE_INVALID || fragsize == 0)
+                fragsize = (unsigned long)r->rate / 50 * frame;
+        if (fragsize > maxlength)
+                fragsize = maxlength;
+        fragsize -= fragsize % frame;
+        if (fragsize < frame)
+                fragsize = frame;
+        r->maxlength = maxlength;
+        r->fragsize = fragsize;
+}
+
+static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+{
+        struct pulse_client *c = p->client[slot];
+        struct pulse_props props = {0};
+        long format = 0, channels = 0, rate = 0, map_channels, source, volume_channels = 0, count = 0;
+        signed char map[PULSE_CHANNEL_MAX];
+        unsigned long source_index, maxlength, fragsize, direct = PULSE_INVALID, volume[PULSE_CHANNEL_MAX];
+        const char *source_name;
+        int corked, no_move = 0, variable = 0, peak = 0, adjust = 0, early = 0, muted = 0, volume_set = 0, muted_set = 0, isnull;
+        struct pulse_record *rec = 0;
+        struct audio_table *table = 0;
+        struct pulse_writer w;
+        int err;
+
+        PULSE_NEED_AUTH();
+        if (c->version < 13)
+                pulse_r_string(r, &isnull); // the name of the stream, which version 13 put in the properties
+        pulse_r_sample_spec(r, &format, &channels, &rate);
+        map_channels = pulse_r_channel_map(r, map);
+        source_index = pulse_r_u32(r);
+        source_name = pulse_r_string(r, &isnull);
+        maxlength = pulse_r_u32(r);
+        corked = pulse_r_bool(r);
+        fragsize = pulse_r_u32(r);
+        if (c->version >= 12)
+        {
+                pulse_r_bool(r); // no remap
+                pulse_r_bool(r); // no remix
+                pulse_r_bool(r); // fix format
+                pulse_r_bool(r); // fix rate
+                pulse_r_bool(r); // fix channels
+                no_move = pulse_r_bool(r);
+                variable = pulse_r_bool(r);
+        }
+        if (c->version >= 13)
+        {
+                peak = pulse_r_bool(r);
+                adjust = pulse_r_bool(r);
+                pulse_r_proplist(r, &props);
+                direct = pulse_r_u32(r);
+        }
+        if (c->version >= 14)
+                early = pulse_r_bool(r);
+        if (c->version >= 15)
+        {
+                pulse_r_bool(r); // don't inhibit auto suspend
+                pulse_r_bool(r); // fail on suspend
+        }
+        if (c->version >= 22)
+        {
+                unsigned long formats = pulse_r_u8(r);
+
+                for (unsigned long i = 0; i < formats && !r->bad; i++)
+                {
+                        struct pulse_props ignored = {0};
+
+                        pulse_tag(r, 'f');
+                        pulse_r_u8(r);
+                        pulse_r_proplist(r, &ignored);
+                }
+                volume_channels = pulse_r_cvolume(r, volume);
+                muted = pulse_r_bool(r);
+                volume_set = pulse_r_bool(r);
+                muted_set = pulse_r_bool(r);
+                pulse_r_bool(r); // relative volume
+                pulse_r_bool(r); // passthrough
+        }
+        if (!pulse_r_eof(r))
+                return PULSE_DEAD;
+        // The person's switch comes before anything else is looked at: a program told no is told it whatever it asked.
+        if (p->capture_off)
+                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+        if (direct != PULSE_INVALID)
+                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED); // a program's own meter on another's stream: not served
+        if (!audio_format_bytes(format) || channels < 1 || channels > AUDIO_CHANNELS_MAX || rate < 1 || rate > AUDIO_RATE_MAX || map_channels != channels)
+                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+        if (!pulse_record_format_ok(format))
+                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
+        if (source_name && source_name[0] && source_index != PULSE_INVALID)
+                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+        if (source_name && source_name[0])
+                source = pulse_source_named(p, source_name);
+        else if (source_index != PULSE_INVALID)
+                source = pulse_find_source(p, source_index, 0);
+        else
+                source = p->default_source;
+        if (source < 0)
+                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        // What a sink plays is what everyone in the session plays: another user's program does not hear it.
+        if (!p->source[source].capture && !c->root)
+                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+        for (int i = 0; i < PULSE_RECORDS; i++)
+        {
+                if (p->record[i].used && p->record[i].client == slot)
+                        count++;
+                if (!p->record[i].used && !rec)
+                        rec = p->record + i;
+        }
+        if (count >= PULSE_RECORDS_PER_CLIENT || !rec)
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        audio_init();
+        if (!peak && rate != p->source[source].rate)
+        {
+                table = audio_table_take(p->source[source].rate, rate);
+                if (!table)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
+        }
+        __builtin_memset(rec, 0, __builtin_offsetof(struct pulse_record, rs));
+        rec->used = 1;
+        rec->table = table;
+        if (table)
+                audio_rs_open(&rec->rs, table);
+        rec->client = slot;
+        rec->channel = c->next_channel++;
+        rec->index = p->next_output++;
+        rec->source = source;
+        rec->props = props;
+        rec->format = format;
+        rec->channels = channels;
+        rec->rate = rate;
+        rec->map_channels = map_channels;
+        for (long i = 0; i < channels; i++)
+                rec->map[i] = map[i];
+        for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
+                rec->volume[i] = AUDIO_VOLUME_NORM;
+        if (volume_set && volume_channels == map_channels)
+                for (long i = 0; i < volume_channels; i++)
+                        rec->volume[i] = volume[i];
+        rec->muted = muted_set ? muted : 0;
+        rec->corked = corked;
+        rec->peak_detect = peak;
+        rec->adjust_latency = adjust;
+        rec->variable_rate = variable;
+        rec->early_requests = early;
+        rec->no_move = no_move;
+        rec->owner_set = (source_name && source_name[0]) || source_index != PULSE_INVALID;
+        rec->uid = c->uid;
+        rec->pid = c->pid;
+        rec->now[0] = rec->now[1] = 1.0f;
+        pulse_record_attributes(rec, maxlength, fragsize);
+        pulse_record_apply(rec);
+        rec->now[0] = rec->now[1] = rec->target;
+        {
+                char value[PULSE_VALUE + 1];
+
+                if (!pulse_props_text(&rec->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))
+                        pulse_props_set(&rec->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);
+        }
+        p->records_made++;
+        pulse_reply_begin(p, &w, tag);
+        pulse_w_u32(&w, rec->channel);
+        pulse_w_u32(&w, rec->index);
+        pulse_w_u32(&w, rec->maxlength);
+        pulse_w_u32(&w, rec->fragsize);
+        if (c->version >= 12)
+        {
+                pulse_w_sample_spec(&w, rec->format, rec->channels, rec->rate);
+                pulse_w_channel_map(&w, rec->map, rec->map_channels);
+                pulse_w_u32(&w, (unsigned long)source);
+                pulse_w_string(&w, p->source[source].name);
+                pulse_w_bool(&w, 0);
+        }
+        if (c->version >= 13)
+                pulse_w_64(&w, 'U', p->source[source].delay_frames * 1000000l / (p->source[source].rate ? p->source[source].rate : 1));
+        if (c->version >= 22)
+                pulse_w_format_info(&w);
+        err = pulse_reply_end(c, &w);
+        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_NEW, rec->index);
+        pulse_changed(p, PULSE_CHANGED_RECORDS, source);
+        return err;
+}
+
+// The commands on one record stream by its channel: delete, cork, flush, latency, name, rate, attributes, properties.
+static int pulse_command_record(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+{
+        struct pulse_client *c = p->client[slot];
+        unsigned long channel = pulse_r_u32(r);
+        struct pulse_record *rec;
+        struct pulse_writer w;
+
+        PULSE_NEED_AUTH();
+        if (command == PULSE_COMMAND_DELETE_RECORD_STREAM || command == PULSE_COMMAND_FLUSH_RECORD_STREAM)
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+        rec = r->bad ? 0 : pulse_record_of(p, slot, channel);
+        switch (command)
+        {
+        case PULSE_COMMAND_DELETE_RECORD_STREAM:
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_record_end(p, rec, 0);
+                return pulse_ack(p, c, tag);
+        case PULSE_COMMAND_CORK_RECORD_STREAM:
+        {
+                int cork = pulse_r_bool(r);
+
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (rec->corked && !cork && rec->table)
+                        audio_rs_reset(&rec->rs); // what it heard before is not what comes next
+                rec->corked = cork;
+                rec->window[0] = rec->window[1] = 0;
+                rec->window_count = 0;
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_changed(p, PULSE_CHANGED_RECORDS, rec->source);
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_FLUSH_RECORD_STREAM:
+                // Nothing waits in the server: what a stream makes is in its program's queue at once. What is flushed is the filter's tail.
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (rec->table)
+                        audio_rs_reset(&rec->rs);
+                return pulse_ack(p, c, tag);
+        case PULSE_COMMAND_GET_RECORD_LATENCY:
+        {
+                unsigned long sec = 0, usec = 0;
+                long now_sec = 0, now_usec = 0, source_latency, latency;
+                const struct pulse_source *s;
+
+                pulse_r_timeval(r, &sec, &usec);
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                s = p->source + rec->source;
+                if (p->host.real)
+                        p->host.real(p->host.context, &now_sec, &now_usec);
+                source_latency = s->delay_frames * 1000000l / (s->rate ? s->rate : 1);
+                latency = source_latency + (long)((unsigned long)pulse_out_fill(c) / pulse_record_frame(rec) * 1000000ul / (unsigned long)rec->rate);
+                pulse_reply_begin(p, &w, tag);
+                pulse_w_64(&w, 'U', latency);
+                pulse_w_64(&w, 'U', source_latency);
+                pulse_w_bool(&w, !rec->corked);
+                pulse_w_byte(&w, 'T');
+                pulse_w_be32(&w, sec);
+                pulse_w_be32(&w, usec);
+                pulse_w_byte(&w, 'T');
+                pulse_w_be32(&w, (unsigned long)now_sec);
+                pulse_w_be32(&w, (unsigned long)now_usec);
+                pulse_w_64(&w, 'r', (long long)rec->produced);
+                pulse_w_64(&w, 'r', (long long)rec->sent);
+                return pulse_reply_end(c, &w);
+        }
+        case PULSE_COMMAND_SET_RECORD_STREAM_NAME:
+        {
+                int isnull;
+                const char *name = pulse_r_string(r, &isnull);
+
+                if (!pulse_r_eof(r) || !name)
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:
+        {
+                unsigned long rate = pulse_r_u32(r);
+                struct audio_table *table = 0;
+
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!rec->variable_rate || rate < 1 || rate > AUDIO_RATE_MAX)
+                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+                if (!rec->peak_detect && (long)rate != p->source[rec->source].rate)
+                {
+                        table = audio_table_take(p->source[rec->source].rate, (long)rate);
+                        if (!table)
+                                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+                }
+                if (!rec->peak_detect)
+                {
+                        audio_table_give(rec->table);
+                        rec->table = table;
+                        if (table)
+                                audio_rs_open(&rec->rs, table);
+                }
+                rec->rate = (long)rate;
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_SET_RECORD_STREAM_BUFFER_ATTR:
+        {
+                unsigned long maxlength = pulse_r_u32(r), fragsize = pulse_r_u32(r);
+                int adjust = 0, early = 0;
+
+                if (c->version >= 13)
+                        adjust = pulse_r_bool(r);
+                if (c->version >= 14)
+                        early = pulse_r_bool(r);
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_record_attributes(rec, maxlength, fragsize);
+                rec->adjust_latency = adjust;
+                rec->early_requests = early;
+                pulse_reply_begin(p, &w, tag);
+                pulse_w_u32(&w, rec->maxlength);
+                pulse_w_u32(&w, rec->fragsize);
+                if (c->version >= 13)
+                        pulse_w_64(&w, 'U', p->source[rec->source].delay_frames * 1000000l / (p->source[rec->source].rate ? p->source[rec->source].rate : 1));
+                return pulse_reply_end(c, &w);
+        }
+        case PULSE_COMMAND_UPDATE_RECORD_STREAM_PROPLIST:
+        {
+                unsigned long mode = pulse_r_u32(r);
+                struct pulse_props props = {0};
+
+                pulse_r_proplist(r, &props);
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_props_update(&rec->props, &props, mode);
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_REMOVE_RECORD_STREAM_PROPLIST:
+        {
+                for (;;)
+                {
+                        int isnull;
+                        const char *key = pulse_r_string(r, &isnull);
+
+                        if (r->bad)
+                                return PULSE_DEAD;
+                        if (isnull)
+                                break;
+                        if (rec)
+                                pulse_props_remove(&rec->props, key);
+                }
+                if (!pulse_r_eof(r))
+                        return PULSE_DEAD;
+                if (!rec)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                return pulse_ack(p, c, tag);
+        }
+        default:
+                break;
+        }
+        return pulse_error(p, c, tag, PULSE_ERR_COMMAND);
 }
 
 // The commands on one stream by its channel: delete, cork, flush, trigger, prebuf, drain, latency, name, rate, attributes, properties.
@@ -1940,32 +2977,46 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
         {
         case PULSE_COMMAND_GET_SINK_INFO:
         case PULSE_COMMAND_GET_SINK_INFO_LIST:
-        case PULSE_COMMAND_GET_SOURCE_INFO:
-        case PULSE_COMMAND_GET_SOURCE_INFO_LIST:
-        {
-                int sources = command == PULSE_COMMAND_GET_SOURCE_INFO || command == PULSE_COMMAND_GET_SOURCE_INFO_LIST;
-
                 for (long i = 0; i < PULSE_SINKS; i++)
                 {
-                        char monitor[PULSE_NAME + 16];
-
                         if (!p->sink[i].used)
                                 continue;
-                        pulse_copy(monitor, sizeof(monitor), p->sink[i].name);
-                        pulse_copy(monitor + pulse_len(monitor), (long)sizeof(monitor) - pulse_len(monitor), ".monitor");
-                        if (!list && !((name && name[0] && pulse_equal(sources ? monitor : p->sink[i].name, name)) || (!(name && name[0]) && index == (unsigned long)i)))
+                        if (!list && !((name && name[0] && pulse_equal(p->sink[i].name, name)) || (!(name && name[0]) && index == (unsigned long)i)))
                                 continue;
-                        if (sources)
-                                pulse_fill_source(p, &w, c, i);
-                        else
-                                pulse_fill_sink(p, &w, c, i);
+                        pulse_fill_sink(p, &w, c, i);
                         if (!list)
                                 return pulse_reply_end(c, &w);
                 }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 return pulse_reply_end(c, &w);
-        }
+        case PULSE_COMMAND_GET_SOURCE_INFO:
+        case PULSE_COMMAND_GET_SOURCE_INFO_LIST:
+                for (long i = 0; i < PULSE_SOURCES; i++)
+                {
+                        if (!p->source[i].used)
+                                continue;
+                        if (!list && !((name && name[0] && pulse_equal(p->source[i].name, name)) || (!(name && name[0]) && index == (unsigned long)i)))
+                                continue;
+                        pulse_fill_source(p, &w, c, i);
+                        if (!list)
+                                return pulse_reply_end(c, &w);
+                }
+                if (!list)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                return pulse_reply_end(c, &w);
+        case PULSE_COMMAND_GET_SOURCE_OUTPUT_INFO:
+        case PULSE_COMMAND_GET_SOURCE_OUTPUT_INFO_LIST:
+                for (int i = 0; i < PULSE_RECORDS; i++)
+                        if (p->record[i].used && (list || p->record[i].index == index) && pulse_may(c, p->record[i].uid))
+                        {
+                                pulse_fill_output(p, &w, c, p->record + i);
+                                if (!list)
+                                        return pulse_reply_end(c, &w);
+                        }
+                if (!list)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                return pulse_reply_end(c, &w);
         case PULSE_COMMAND_GET_CLIENT_INFO:
         case PULSE_COMMAND_GET_CLIENT_INFO_LIST:
                 for (long i = 0; i < PULSE_CLIENTS; i++)
@@ -1990,7 +3041,6 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 return pulse_reply_end(c, &w);
-        case PULSE_COMMAND_GET_SOURCE_OUTPUT_INFO_LIST:
         case PULSE_COMMAND_GET_MODULE_INFO_LIST:
         case PULSE_COMMAND_GET_CARD_INFO_LIST:
         case PULSE_COMMAND_GET_SAMPLE_INFO_LIST:
@@ -2004,7 +3054,6 @@ static int pulse_command_server_info(struct pulse *p, struct pulse_client *c, un
 {
         struct pulse_writer w;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
-        char monitor[PULSE_NAME + 16];
 
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
@@ -2016,14 +3065,7 @@ static int pulse_command_server_info(struct pulse *p, struct pulse_client *c, un
         pulse_w_string(&w, "moonwater");
         pulse_w_sample_spec(&w, AUDIO_FORMAT_S16LE, 2, p->default_sink >= 0 ? p->sink[p->default_sink].rate : 48000);
         pulse_w_string(&w, p->default_sink >= 0 ? p->sink[p->default_sink].name : 0);
-        if (p->default_sink >= 0)
-        {
-                pulse_copy(monitor, sizeof(monitor), p->sink[p->default_sink].name);
-                pulse_copy(monitor + pulse_len(monitor), (long)sizeof(monitor) - pulse_len(monitor), ".monitor");
-                pulse_w_string(&w, monitor);
-        }
-        else
-                pulse_w_string(&w, 0);
+        pulse_w_string(&w, p->default_source >= 0 ? p->source[p->default_source].name : 0);
         pulse_w_u32(&w, 0);
         if (c->version >= 15)
                 pulse_w_channel_map(&w, stereo, 2);
@@ -2173,16 +3215,17 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
 
                 if (!pulse_r_eof(&r) || !name)
                         return PULSE_DEAD;
-                for (long i = 0; i < PULSE_SINKS && found < 0; i++)
+                if (command == PULSE_COMMAND_LOOKUP_SINK)
                 {
-                        char monitor[PULSE_NAME + 16];
-
-                        if (!p->sink[i].used)
-                                continue;
-                        pulse_copy(monitor, sizeof(monitor), p->sink[i].name);
-                        pulse_copy(monitor + pulse_len(monitor), (long)sizeof(monitor) - pulse_len(monitor), ".monitor");
-                        if (pulse_equal(command == PULSE_COMMAND_LOOKUP_SINK ? p->sink[i].name : monitor, name))
-                                found = i;
+                        for (long i = 0; i < PULSE_SINKS && found < 0; i++)
+                                if (p->sink[i].used && pulse_equal(p->sink[i].name, name))
+                                        found = i;
+                }
+                else
+                {
+                        for (long i = 0; i < PULSE_SOURCES && found < 0; i++)
+                                if (p->source[i].used && pulse_equal(p->source[i].name, name))
+                                        found = i;
                 }
                 if (found < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -2243,7 +3286,6 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         case PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE:
                 return pulse_command_set_mute(p, c, command, tag, &r);
         case PULSE_COMMAND_SET_DEFAULT_SINK:
-        case PULSE_COMMAND_SET_DEFAULT_SOURCE:
         {
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
@@ -2255,23 +3297,10 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 if (!c->root)
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (name)
-                {
-                        char base[PULSE_NAME + 16];
-
-                        pulse_copy(base, sizeof(base), name);
-                        // A source is a sink's monitor: the default source follows the sink it monitors.
-                        if (command == PULSE_COMMAND_SET_DEFAULT_SOURCE)
-                        {
-                                long n = pulse_len(base);
-
-                                if (n > 8 && pulse_equal(base + n - 8, ".monitor"))
-                                        base[n - 8] = 0;
-                        }
-                        sink = pulse_sink_named(p, base);
-                }
+                        sink = pulse_sink_named(p, name);
                 if (sink < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (command == PULSE_COMMAND_SET_DEFAULT_SINK && sink != p->default_sink)
+                if (sink != p->default_sink)
                 {
                         p->default_sink = sink;
                         // A stream that did not name its sink follows the default.
@@ -2286,9 +3315,30 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                                                 pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
                                         }
                                 }
+                        // The default source is the monitor of the default sink while it is a monitor.
+                        if (p->default_source >= 0 && p->default_source < PULSE_SINKS)
+                                pulse_source_default(p, sink);
                         pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
                         pulse_changed(p, PULSE_CHANGED_DEFAULT, sink);
                 }
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_SET_DEFAULT_SOURCE:
+        {
+                int isnull;
+                const char *name = pulse_r_string(&r, &isnull);
+                long source = -1;
+
+                if (!pulse_r_eof(&r))
+                        return PULSE_DEAD;
+                PULSE_NEED_AUTH();
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                if (name)
+                        source = pulse_source_named(p, name);
+                if (source < 0)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                pulse_source_default(p, source);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_MOVE_SINK_INPUT:
@@ -2318,8 +3368,43 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 }
                 return pulse_ack(p, c, tag);
         }
+        case PULSE_COMMAND_MOVE_SOURCE_OUTPUT:
+        {
+                unsigned long index = pulse_r_u32(&r), device = pulse_r_u32(&r);
+                int isnull;
+                const char *name = pulse_r_string(&r, &isnull);
+                struct pulse_record *rec;
+                long source;
+
+                if (!pulse_r_eof(&r))
+                        return PULSE_DEAD;
+                PULSE_NEED_AUTH();
+                rec = pulse_output_of(p, index);
+                source = pulse_find_source(p, device, name);
+                if (!rec || source < 0)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                if (!pulse_may(c, rec->uid) || (!p->source[source].capture && !c->root))
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                if (pulse_record_move(p, rec, source) < 0)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
+                rec->owner_set = 1;
+                return pulse_ack(p, c, tag);
+        }
+        case PULSE_COMMAND_CREATE_RECORD_STREAM:
+                return pulse_command_create_record(p, slot, &r, tag);
+        case PULSE_COMMAND_DELETE_RECORD_STREAM:
+        case PULSE_COMMAND_CORK_RECORD_STREAM:
+        case PULSE_COMMAND_FLUSH_RECORD_STREAM:
+        case PULSE_COMMAND_GET_RECORD_LATENCY:
+        case PULSE_COMMAND_SET_RECORD_STREAM_NAME:
+        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:
+        case PULSE_COMMAND_SET_RECORD_STREAM_BUFFER_ATTR:
+        case PULSE_COMMAND_UPDATE_RECORD_STREAM_PROPLIST:
+        case PULSE_COMMAND_REMOVE_RECORD_STREAM_PROPLIST:
+                return pulse_command_record(p, slot, command, tag, &r);
         case PULSE_COMMAND_KILL_CLIENT:
         case PULSE_COMMAND_KILL_SINK_INPUT:
+        case PULSE_COMMAND_KILL_SOURCE_OUTPUT:
         {
                 unsigned long index = pulse_r_u32(&r);
 
@@ -2328,7 +3413,15 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 PULSE_NEED_AUTH();
                 if (!c->root)
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
-                if (command == PULSE_COMMAND_KILL_SINK_INPUT)
+                if (command == PULSE_COMMAND_KILL_SOURCE_OUTPUT)
+                {
+                        struct pulse_record *rec = pulse_output_of(p, index);
+
+                        if (!rec)
+                                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                        pulse_record_end(p, rec, 1);
+                }
+                else if (command == PULSE_COMMAND_KILL_SINK_INPUT)
                 {
                         struct pulse_stream *s = pulse_input_of(p, index);
                         struct pulse_client *owner;
@@ -2377,23 +3470,11 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         case PULSE_COMMAND_SET_SOURCE_PORT:
         case PULSE_COMMAND_SET_CARD_PROFILE:
         case PULSE_COMMAND_SET_PORT_LATENCY_OFFSET:
-        case PULSE_COMMAND_MOVE_SOURCE_OUTPUT:
-        case PULSE_COMMAND_KILL_SOURCE_OUTPUT:
-        case PULSE_COMMAND_SET_RECORD_STREAM_NAME:
-        case PULSE_COMMAND_DELETE_RECORD_STREAM:
-        case PULSE_COMMAND_GET_RECORD_LATENCY:
-        case PULSE_COMMAND_CORK_RECORD_STREAM:
-        case PULSE_COMMAND_FLUSH_RECORD_STREAM:
-        case PULSE_COMMAND_SET_RECORD_STREAM_BUFFER_ATTR:
-        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:
-        case PULSE_COMMAND_UPDATE_RECORD_STREAM_PROPLIST:
-        case PULSE_COMMAND_REMOVE_RECORD_STREAM_PROPLIST:
         case PULSE_COMMAND_DELETE_UPLOAD_STREAM:
         case PULSE_COMMAND_FINISH_UPLOAD_STREAM:
         case PULSE_COMMAND_REMOVE_SAMPLE:
                 PULSE_NEED_AUTH();
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-        case PULSE_COMMAND_CREATE_RECORD_STREAM:
         case PULSE_COMMAND_CREATE_UPLOAD_STREAM:
         case PULSE_COMMAND_PLAY_SAMPLE:
         case PULSE_COMMAND_SEND_OBJECT_MESSAGE:
@@ -2581,6 +3662,7 @@ AUDIO_API void pulse_open(struct pulse *p, const struct pulse_host *host)
         __builtin_memset(p, 0, sizeof(*p));
         p->host = *host;
         p->default_sink = -1;
+        p->default_source = -1;
 }
 
 /* ---- running the sink ---- */
@@ -2664,6 +3746,7 @@ AUDIO_API long pulse_sink_mix(struct pulse *p, long slot, unsigned char *dst, lo
                         pulse_stream_play(p, p->stream + i, sink, frames);
         bytes = audio_sink_end(&sink->mix, dst, format, channels, frames);
         sink->played += (unsigned long long)frames;
+        pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);
         for (int i = 0; i < PULSE_STREAMS; i++)
                 if (p->stream[i].used && p->stream[i].sink == slot)
                         pulse_stream_request(p, p->stream + i);
