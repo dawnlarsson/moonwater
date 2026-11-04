@@ -220638,12 +220638,14 @@ static void gpu_node_rows(void)
 }
 
 /*
-        The sleep: a boot clock that ran on past the monotonic clock by more than three seconds since the last look is a sleep, and the card is started
-        again before the next present (compositor_gpu_restart_check). Last in main: the restart replaces the card's buffer.
+        The sleep and the late probe: a boot clock that ran on past the monotonic clock by more than three seconds since the last look is a sleep, and the card
+        is started again before the next present (compositor_gpu_restart_check); the late probe's deadline is none while the card is up, off or wrong, and the
+        tick of the loop starts a card that is there (the card is up after it). Last in main: the restart replaces the card's buffer.
 */
 static void gpu_resume_rows(void)
 {
         positive seen = 0;
+        positive now = 1000000000ull;
         unsigned int before;
 
         check("resume: the first look only takes the gap", !compositor_gpu_slept(100000000ull, &seen) && seen == 100000000ull);
@@ -220656,6 +220658,19 @@ static void gpu_resume_rows(void)
         compositor_gpu_resumed();
         compositor_gpu_restart_check();
         check("resume: the flag restarts the card before the next present (counted, flag cleared)", gpu_recovered == before + 1 && !compositor_gpu_state.restart_due && compositor_gpu_state.up);
+        // The late probe: nothing to wait for while the card is up or off; a missing card is looked at five seconds on, and the tick starts a card that is there.
+        compositor_gpu = 1, compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_NO_CARD;
+        compositor_gpu_state.late_first = compositor_gpu_state.late_next = 0;
+        check("late probe: a missing card is looked for five seconds on", compositor_gpu_late_at(now) == now + 5000000000ull);
+        compositor_gpu_late_tick(now + 1000000000ull);
+        check("late probe: the tick does not look before its time", compositor_gpu_state.dead && compositor_gpu_late_at(now) == now + 5000000000ull);
+        compositor_gpu_late_tick(now + 5000000000ull);
+        check("late probe: the tick looks again at its time, and the card that is there is up", compositor_gpu_state.up && !compositor_gpu_state.dead);
+        check("late probe: a card that is up waits for nothing", compositor_gpu_late_at(now) == 0);
+        compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_NO_CARD;
+        compositor_gpu = 0;
+        check("late probe: canvas gpu off waits for nothing", compositor_gpu_late_at(now) == 0);
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0;
 }
 
 static void gpu_loss_rows(void)

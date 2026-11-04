@@ -7468,8 +7468,9 @@ static struct
         unsigned int cool_steps;   // how many cool-downs in a row: each one longer, up to sixty-four seconds
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
         positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
-        b32 restart_due;     // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
-        positive slept_seen; // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
+        b32 restart_due;           // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
+        positive slept_seen;       // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
+        b64 late_first, late_next; // the late probe: when the first look that found no card was, and when the next look is due
 } compositor_gpu_state;
 
 // The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
@@ -7847,13 +7848,6 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
         compositor_gpu_restart_check(); // a machine that slept, or a gap between presents that is one, starts the card again before this present
-        if (compositor_gpu_state.dead && !compositor_gpu_state.up && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD)
-        {
-                static b64 first, next;
-
-                if (compositor_gpu_late_due(clock_monotonic_nanoseconds(), &first, &next)) // no card yet: looked for again (the late probe)
-                        compositor_gpu_state.dead = 0;
-        }
         if (compositor_gpu_state.dead)
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
         if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
@@ -8066,7 +8060,7 @@ static b32 compositor_gpu_slept(positive gap, positive *seen)
 }
 
 // The card is started again (compositor_gpu_recover: the maps let go, a new context, the self-test) when the machine slept, by the wake check's flag or by a
-// lead that grew between two looks (presents). Only a card that is up is started again; the flag waits for it otherwise.
+// lead that grew between two looks (presents, the loop). Only a card that is up is started again; the flag waits for it otherwise.
 static void compositor_gpu_restart_check(void)
 {
         if (compositor_gpu_slept(compositor_slept_clock(), &compositor_gpu_state.slept_seen))
@@ -8075,6 +8069,30 @@ static void compositor_gpu_restart_check(void)
                 return;
         compositor_gpu_state.restart_due = 0;
         compositor_gpu_recover();
+}
+
+// The late probe's deadline for the loop: 0 when there is nothing to look for (canvas gpu off, a card up, a card that drew its self-test wrong), else when
+// the next look is due: the first one five seconds after the card was found missing, then (compositor_gpu_late_due) every five seconds for a minute and every minute.
+static positive compositor_gpu_late_at(positive now)
+{
+        if (!compositor_gpu || compositor_gpu_state.up || !compositor_gpu_state.dead || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_NO_CARD)
+        {
+                compositor_gpu_state.late_first = compositor_gpu_state.late_next = 0;
+                return 0;
+        }
+        if (!compositor_gpu_state.late_first)
+                compositor_gpu_late_due(now, &compositor_gpu_state.late_first, &compositor_gpu_state.late_next);
+        return compositor_gpu_state.late_next;
+}
+
+// The loop has come to the late probe's time: the card is looked for again, and the next look is set. Started from its dead state, it is up, or dead again.
+static void compositor_gpu_late_tick(positive now)
+{
+        if (!compositor_gpu_late_at(now) || !compositor_gpu_late_due(now, &compositor_gpu_state.late_first, &compositor_gpu_state.late_next))
+                return;
+        compositor_gpu_state.dead = 0;
+        if (compositor_gpu_up())
+                compositor_gpu_lists_sync();
 }
 
 /*
@@ -18527,6 +18545,15 @@ static b32 compositor_main()
                                     : now;
                         until = !until || frame < until ? frame : until;
                 }
+#ifdef MOONWATER_GPU_C
+                // The GPU's late probe: a card that is not there is looked for again when its time comes. Nothing is waited for while the card is up or off.
+                if (compositor_gpu_late_at(clock_monotonic_nanoseconds()))
+                {
+                        positive frame = compositor_gpu_late_at(clock_monotonic_nanoseconds());
+
+                        until = !until || frame < until ? frame : until;
+                }
+#endif
 
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.
                 wait[0] = until > now ? (long)((until - now) / 1000000000ull) : 0;
@@ -18539,6 +18566,9 @@ static b32 compositor_main()
                 compositor_wake_check(clock_monotonic_nanoseconds());
                 compositor_wake_pass(clock_monotonic_nanoseconds());
                 compositor_hold_drop(clock_monotonic_nanoseconds());
+#ifdef MOONWATER_GPU_C
+                compositor_gpu_late_tick(clock_monotonic_nanoseconds());
+#endif
 
                 if (awaited < 0)
                         continue;
