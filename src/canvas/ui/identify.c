@@ -157,10 +157,16 @@ static int identify_open(void)
         identify.text[0] = (char)('0' + identify.number % 10), identify.text[1] = 0;
         identify_badge_fit(&identify.ui, width, height, &identify.badge);
         identify.width = identify.badge.width, identify.height = identify.badge.height;
-        table->place_x[row] = identify.badge.x, table->place_y[row] = identify.badge.y;
-        table->place_width[row] = (unsigned int)identify.badge.width, table->place_height[row] = (unsigned int)identify.badge.height;
-        table->place_screen[row] = identify.screen;
-        __atomic_store_n(&table->place[row], WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE, __ATOMIC_RELEASE);
+        {
+                struct window_place place;
+
+                memory_zero(&place, sizeof(place));
+                place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
+                place.x = identify.badge.x, place.y = identify.badge.y;
+                place.width = (unsigned int)identify.badge.width, place.height = (unsigned int)identify.badge.height;
+                place.screen = identify.screen;
+                windows_place_set(table, row, &place); // the placement the compositor reads with the first picture
+        }
         identify_size((unsigned int)identify.width, (unsigned int)identify.height);
         identify.until = clock_monotonic_nanoseconds() + (positive)IDENTIFY_SECONDS * 1000000000ull;
         identify_frame();
