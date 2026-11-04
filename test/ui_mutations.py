@@ -148,6 +148,7 @@ M = [
     (C, "a second device's stale place moves the pointer while a finger is down (the hold is at the tablet's place)", "                if (compositor.touch.gesture.mode == UI_TOUCH_NONE)\n", "                if (1)\n"),
     (C, "a long press is placed at the pointer, not the finger's place (the hold's place line removed)", "                                compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, compositor.touch.x, compositor.touch.y, now);\n", ""),
     (TM, "the terminal's kit has no text scratch (the bar's labels are blank)", "        ui_scratch_fit(&terminal.ui, terminal.width);\n", ""),
+    (TM, "the terminal's kit text is in the grid's mono face (the menu and the bar in mono)", "        terminal.ui.regular = ui_face_load(&terminal.ui.faces[0], terminal_ui_regular_path) ? &terminal.ui.faces[0] : terminal.plain[0];\n", "        terminal.ui.regular = terminal.plain[0];\n"),
     (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
 ]
 

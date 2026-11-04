@@ -160359,7 +160359,12 @@ b32 main()
         }
 
         paths[0] = program_argument(1);
+        // The kit's UI faces are the repository's Inter files (the arguments after the mono faces), as ui_app_run's are on a machine.
+        if (program_argument_count() > 4)
+                terminal_ui_regular_path = program_argument(3), terminal_ui_bold_path = program_argument(4);
         check("fonts: the face loads", terminal_fonts(paths, 1, program_argument_count() > 2 ? program_argument(2) : null, 16));
+        check("fonts: the kit's own text is set in the UI faces (Inter), and the grid stays in the mono face",
+              terminal.ui.regular == &terminal.ui.faces[0] && terminal.ui.bold == &terminal.ui.faces[1] && terminal.plain[0] != terminal.ui.regular);
         if (failures)
                 return test_report(null);
 

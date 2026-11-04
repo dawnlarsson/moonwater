@@ -1960,6 +1960,10 @@ static void terminal_said(b32 reading, string_address what);
         mapped for good; the engine and its atlas are mappings of their own,
         and only the pages a program draws with are ever resident.
 */
+// The kit's UI faces, the files every app's own text is set in (ui_app_run loads them); a check names its own.
+static string_address terminal_ui_regular_path = (string_address)UI_FONT_REGULAR;
+static string_address terminal_ui_bold_path = (string_address)UI_FONT_BOLD;
+
 static b32 terminal_fonts(string_address address_to paths, unsigned int count, string_address bold,
                           unsigned int size)
 {
@@ -2004,10 +2008,12 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
                         terminal.bold[terminal.bold_count++] = terminal.plain[at];
 
         terminal_painters[0].ui.engine = terminal.ui.engine;
-        // The kit's own text (the actions bar's labels, the menu) is drawn in the faces the grid is: a kit with no regular face faults
-        // in the first label it draws.
-        terminal.ui.regular = terminal.plain[0];
-        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];
+        // The kit's own text (the actions bar's labels, the menu) is set in the UI faces, as every app's is (ui_app_run loads them),
+        // and the grid keeps its mono faces. A UI font that will not load falls back to the grid's face: a kit with no face faults in
+        // the first label it draws.
+        terminal.ui.regular = ui_face_load(&terminal.ui.faces[0], terminal_ui_regular_path) ? &terminal.ui.faces[0] : terminal.plain[0];
+        terminal.ui.bold = ui_face_load(&terminal.ui.faces[1], terminal_ui_bold_path) ? &terminal.ui.faces[1]
+                           : terminal.bold_count ? terminal.bold[0] : terminal.plain[0];
         terminal.size = size << 6;
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;
