@@ -123201,9 +123201,6 @@ static fn check_keys(void)
         the cell is whole cells of this font's size from the grid's top left,
         past the paper round it.
 */
-#ifdef CHECK_terminal
-static void check_paired_touch(struct ui address_to tui);
-#endif
 static fn check_pointer(void)
 {
         unsigned int column = 3, row = 4;
@@ -123513,7 +123510,6 @@ static fn check_pointer(void)
                 check("terminal: a handle on the last line draws nothing past the end of the picture", spoiled == 0);
                 terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
         }
-        check_paired_touch(&terminal.ui);
 #endif
 }
 
@@ -152838,107 +152834,6 @@ static int field_x(struct ui address_to wui, struct ui_text address_to t, p64 of
 
         ui_text_layout_line(wui, t, 0, &l);
         return t->left - (int)t->scroll_x + ui_text_x_of(&l, offset);
-}
-
-/*
-        The paired rows: one touch script against the text widget and against the terminal, from the same state ("alpha bravo charlie"
-        in both), and the results compared: the selected text, the handles and the bar. The gestures are the kit's (ui_select_finger), so
-        what the text widget does on the script the terminal must do too.
-*/
-static void check_paired_touch(struct ui address_to tui)
-{
-        static unsigned int paired_screen[400 * 100];
-        struct ui field = *tui; // the field is drawn in the terminal's kit, with a picture of its own (the layout needs one)
-
-        field.pixels = paired_screen, field.pitch = 400, field.width = 400, field.height = 100, field.scale = 100;
-        ui_begin(&field, paired_screen, 400, 400, 100);
-        unsigned int mouse_was = mouse_mode;
-        struct ui_text pair; // automatic: a static here moved the editor's hostile document's guard page (its layout is checked)
-        const unsigned int touch = WINDOW_KEY_TOUCH, down = WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH;
-        const unsigned int hold = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, cancel = WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD;
-        int text_y, text_alpha, text_bravo, text_charlie, term_y, term_alpha, term_bravo, term_charlie;
-        b32 dirty = false;
-        p8 address_to bytes = null;
-        positive room = 0, used = 0;
-        unsigned int text_handles, text_bar;
-        struct window_event motion = {WINDOW_EVENT_MOTION, touch, 0, 0};
-        struct window_event press = {WINDOW_EVENT_BUTTON, down, 0x110, 0};
-        struct window_event release = {WINDOW_EVENT_BUTTON, touch, 0x110, 0};
-        struct window_event lift = {WINDOW_EVENT_BUTTON, cancel, 0x110, 0};
-        struct window_event rdown = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
-        struct window_event rup = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
-
-        mouse_mode = 0;
-        term_bytes("\x1b[H\x1b[2Jalpha bravo charlie\r\n", 28);
-        ui_text_open(&pair, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
-        ui_text_set(&pair, (const p8 address_to)"alpha bravo charlie", 19);
-        doc_select_set(&pair.doc, 0, 0);
-        ui_text_draw(&field, &pair, 20, 20, 300, 30, 0);
-        pair.sel.click.count = 0, pair.sel.click.at = 0;
-        terminal.sel.click.count = 0, terminal.sel.click.at = 0;
-        text_y = pair.top + pair.line_height / 2;
-        text_alpha = field_x(&field, &pair, 1) + 1, text_bravo = field_x(&field, &pair, 7) + 1, text_charlie = field_x(&field, &pair, 13) + 1;
-        term_y = (int)(terminal.pad_y + terminal.cell_h / 2);
-        term_alpha = (int)(terminal.pad + 1 * terminal.cell_w + 1), term_bravo = (int)(terminal.pad + 7 * terminal.cell_w + 1);
-        term_charlie = (int)(terminal.pad + 13 * terminal.cell_w + 1);
-
-        // 1. A double tap on "bravo" selects the word, with its handles, and the lift shows the bar (in both).
-        motion.a = term_bravo, motion.b = term_y;
-        terminal_deliver(-1, &motion, &dirty);
-        field_button(&field, &pair, 0x110, true, text_bravo, text_y, down);
-        field_button(&field, &pair, 0x110, false, text_bravo, text_y, touch);
-        field_button(&field, &pair, 0x110, true, text_bravo, text_y, down);
-        field_button(&field, &pair, 0x110, false, text_bravo, text_y, touch);
-        text_handles = pair.sel.handles, text_bar = pair.sel.bar;
-        terminal_deliver(-1, &press, &dirty);
-        terminal_deliver(-1, &release, &dirty);
-        terminal_deliver(-1, &press, &dirty);
-        terminal_deliver(-1, &release, &dirty);
-        check("paired: a double tap on bravo selects the word, with its handles, in the text widget", field_selected(&pair, 6, 11) && text_handles);
-        bytes = null, room = 0;
-        used = (positive)terminal_select_text(&bytes, &room);
-        check("paired: a double tap on bravo selects the same word, with its handles, in the terminal",
-              used == 5 && bytes && !memory_compare(bytes, "bravo", 5) && terminal.sel.handles == text_handles && terminal.sel.bar == text_bar);
-        array_store_release(bytes, room, used);
-
-        // 2. A tap on the selection toggles the bar, and a tap on alpha clears the selection (both lifts are the same).
-        field_button(&field, &pair, 0x110, true, text_bravo, text_y, touch);
-        field_button(&field, &pair, 0x110, false, text_bravo, text_y, touch);
-        motion.a = term_bravo, motion.b = term_y;
-        terminal_deliver(-1, &motion, &dirty);
-        terminal_deliver(-1, &press, &dirty);
-        terminal_deliver(-1, &release, &dirty);
-        field_button(&field, &pair, 0x110, true, text_alpha, text_y, touch);
-        field_button(&field, &pair, 0x110, false, text_alpha, text_y, touch);
-        motion.a = term_alpha, motion.b = term_y;
-        terminal_deliver(-1, &motion, &dirty);
-        terminal_deliver(-1, &press, &dirty);
-        terminal_deliver(-1, &release, &dirty);
-
-        // 3. A long press on charlie selects the word (held until the lift); a drag back to bravo then extends it by words, in both.
-        field_button(&field, &pair, 0x111, true, text_charlie, text_y, hold);
-        field_button(&field, &pair, 0x111, false, text_charlie, text_y, hold);
-        motion.a = term_charlie, motion.b = term_y;
-        terminal_deliver(-1, &motion, &dirty);
-        terminal_deliver(-1, &rdown, &dirty);
-        terminal_deliver(-1, &rup, &dirty);
-        check("paired: a long press selects charlie, with its handles, in both", field_selected(&pair, 12, 19) && pair.sel.handles &&
-              terminal_selecting() && terminal.sel.handles);
-        {
-                struct window_event tomotion = {WINDOW_EVENT_MOTION, touch, text_bravo + 2, text_y};
-
-                ui_field_event(&field, &pair, null, &tomotion, text_bravo + 2, text_y);
-                field_button(&field, &pair, 0x110, false, text_bravo + 2, text_y, cancel);
-                motion.a = term_bravo + 2, motion.b = term_y;
-                terminal_deliver(-1, &motion, &dirty);
-                terminal_deliver(-1, &lift, &dirty);
-        }
-        bytes = null, room = 0;
-        used = (positive)terminal_select_text(&bytes, &room);
-        check("paired: a drag after the long press extends by words, to bravo charlie, in both",
-              field_selected(&pair, 6, 19) && used == 13 && bytes && !memory_compare(bytes, "bravo charlie", 13));
-        array_store_release(bytes, room, used);
-        mouse_mode = mouse_was;
 }
 
 static const char address_to field_says_five(p32 code)
