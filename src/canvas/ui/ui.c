@@ -10432,8 +10432,150 @@ static int ui_lines_height(const struct ui address_to ui, int count)
         return count * ui_dev(ui, UI_LINE) + 2 * ui_dev(ui, UI_LINES_PAD);
 }
 
-static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, int left, int count,
-                        const char address_to (*line)(int at, char address_to into, positive room))
+/*
+        A page of wrapped text: the text's lines (a newline ends one), cut to the width the body takes, each a line's height apart in
+        the body role, scrolled and keyed as any page of text is. The app keeps the text and the storage of the lines (at, size: up
+        to max of them) and gives them with ui_lines_set; ui_lines_wrap cuts them again when the text, the width, the scale or the
+        text's percent changes, and ui_lines_draw draws them.
+*/
+#define UI_LINES_PROBE 512 // one line, cut: a probe of a plain line's width is at most this long
+
+struct ui_lines
+{
+        const char address_to text;
+        positive length;
+        unsigned short address_to at;   // each line's start in text
+        unsigned short address_to size; // and its length
+        int max, count;
+        int width, scale;               // what the lines were cut for
+        unsigned int percent;
+        b32 made;
+};
+
+struct ui_lines_run
+{
+        positive from, at;
+        struct ui_pen pen;
+};
+
+// The text given, to be cut again at the next wrap.
+static fn ui_lines_set(struct ui_lines address_to l, const char address_to text, positive length, unsigned short address_to at,
+                       unsigned short address_to size, int max)
+{
+        l->text = text, l->length = length, l->at = at, l->size = size, l->max = max, l->made = false;
+}
+
+// A run of the text, measured as it is drawn.
+static int ui_lines_width(struct ui address_to ui, const struct ui_lines address_to l, positive from, positive to)
+{
+        char probe[UI_LINES_PROBE] = {0};
+        positive size = to - from;
+
+        size = size >= sizeof(probe) ? sizeof(probe) - 1 : size;
+        memory_copy(probe, l->text + from, size);
+        probe[size] = 0;
+        return ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
+}
+
+// A run of the text laid on as it is measured: the pen after the bytes from its start to at, so a wider prefix costs its new
+// bytes only. Only for a plain text (ASCII): one byte is one code point there.
+static int ui_lines_run_width(struct ui address_to ui, const struct ui_lines address_to l, struct ui_lines_run address_to run,
+                              positive from, positive to)
+{
+        const font_face address_to faces[2] = {ui->regular, ui->regular};
+        p32 em = ui_em(ui, ui_types[UI_BODY_MEDIUM].size);
+
+        if (from != run->from || to < run->at)
+        {
+                run->from = from;
+                run->at = from;
+                ui_pen_start(faces, em, &run->pen);
+        }
+        while (run->at < to)
+        {
+                ui_pen_step(ui, faces, em, (unsigned char)l->text[run->at], &run->pen);
+                run->at++;
+        }
+        return ui_pen_width(&run->pen);
+}
+
+/*
+        The lines cut to the width: each of the text's lines is as many as it takes, a break at a blank where it can be and else
+        where the line has gone as far as it fits. Kept until the width, the scale, the percent or the text changes.
+*/
+static fn ui_lines_wrap(struct ui address_to ui, struct ui_lines address_to l, int width)
+{
+        int room = width - 2 * ui_px(ui, UI_PAD) - 2 * ui_px(ui, UI_INSET);
+        positive at = 0;
+
+        if (l->made && l->width == width && l->scale == ui->scale && l->percent == ui_text_percent)
+                return;
+        l->count = 0;
+        while (at <= l->length && l->count < l->max)
+        {
+                positive over = at, start = at;
+                // No run is started yet: the first width laid out starts the pen, even for a line that begins at byte 0.
+                struct ui_lines_run run = {~(positive)0, 0, {0, 0, 0, 0}};
+                b32 plain;
+
+                while (over < l->length && l->text[over] != '\n')
+                        over++;
+                plain = over - at < UI_LINES_PROBE;
+                for (positive byte = at; plain && byte < over; byte++)
+                        plain = (unsigned char)l->text[byte] < 0x80;
+                do
+                {
+                        positive fit = start, next = start;
+
+                        // As many whole words as fit.
+                        while (next < over)
+                        {
+                                positive word = next;
+
+                                while (word < over && l->text[word] == ' ')
+                                        word++;
+                                while (word < over && l->text[word] != ' ')
+                                        word++;
+                                if ((plain ? ui_lines_run_width(ui, l, &run, start, word) : ui_lines_width(ui, l, start, word)) > room)
+                                        break;
+                                fit = next = word;
+                        }
+                        // One word wider than the window: as many of its bytes as fit.
+                        if (fit == start && start < over)
+                        {
+                                fit = start + 1;
+                                while (fit < over && (plain ? ui_lines_run_width(ui, l, &run, start, fit + 1) : ui_lines_width(ui, l, start, fit + 1)) <= room)
+                                        fit++;
+                                // Not inside a character: a line ends before the continuation bytes of one that did not fit.
+                                while (fit > start + 1 && fit < over && ((unsigned char)l->text[fit] & 0xc0) == 0x80)
+                                        fit--;
+                        }
+                        if (l->count < l->max)
+                        {
+                                l->at[l->count] = (unsigned short)start;
+                                l->size[l->count++] = (unsigned short)(fit - start);
+                        }
+                        start = fit;
+                        while (start < over && l->text[start] == ' ')
+                                start++;
+                } while (start < over && l->count < l->max);
+                at = over + 1;
+        }
+        l->made = true, l->width = width, l->scale = ui->scale, l->percent = ui_text_percent;
+}
+
+// The text of line at, into room bytes (cut to them), as it is drawn.
+static const char address_to ui_lines_copy(const struct ui_lines address_to l, int at, char address_to into, positive room)
+{
+        positive size = l->size[at];
+
+        size = size >= room ? room - 1 : size;
+        memory_copy(into, l->text + l->at[at], size);
+        into[size] = 0;
+        return into;
+}
+
+static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, int left, const struct ui_lines address_to l)
 {
         UI_CALL();
         int height = ui_dev(ui, UI_LINE), top;
@@ -10444,7 +10586,7 @@ static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, 
 
         ui->top = s->y;
         ui->bottom = s->y + s->view;
-        for (int at = 0; at < count; at++)
+        for (int at = 0; at < l->count; at++)
         {
                 int y = top + at * height, drawn, span, shift;
 
@@ -10453,7 +10595,7 @@ static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, 
                 if (drawn + span <= ui->top || drawn >= ui->bottom)
                         continue;
                 shift = drawn + span / 2 - (y + height / 2);
-                ui_kit_text_flipped(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y + shift, UI_BODY_MEDIUM), (string_address)line(at, text, sizeof(text)),
+                ui_kit_text_flipped(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y + shift, UI_BODY_MEDIUM), (string_address)ui_lines_copy(l, at, text, sizeof(text)),
                                     UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
         }
         ui_scroll_draw(ui, s);

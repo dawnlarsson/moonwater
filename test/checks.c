@@ -136813,30 +136813,30 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.said_length = sizeof(said) - 1;
                         settings_card_fill();
                         check("settings: a card keeps the lines, without the label or the escapes or the blanks that end them",
-                              settings.card_length == sizeof("Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz") - 1 &&
+                              settings.card_text.length == sizeof("Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz") - 1 &&
                                   !memory_compare(settings_large->card, "Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz",
-                                                  settings.card_length));
+                                                  settings.card_text.length));
                         memory_copy(settings_large->said, wide, sizeof(wide) - 1);
                         settings.said_length = sizeof(wide) - 1;
                         settings_card_fill();
-                        settings_wrap();
+                        ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
-                        for (int at = 0; at < settings.card_lines; at++)
-                                within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
-                        check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
+                        for (int at = 0; at < settings.card_text.count; at++)
+                                within &= ui_lines_width(&settings.ui, &settings.card_text, settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
+                        check("settings: a line wider than the window is cut into more, each within it", settings.card_text.count >= 3 && within);
                         {
                                 // The same words at another text size are wrapped again: more lines at 200 percent, each within the window.
-                                int lines = settings.card_lines;
+                                int lines = settings.card_text.count;
                                 b32 big = true;
 
                                 ui_text_percent = 200;
-                                settings_wrap();
-                                for (int at = 0; at < settings.card_lines; at++)
-                                        big &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
+                                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
+                                for (int at = 0; at < settings.card_text.count; at++)
+                                        big &= ui_lines_width(&settings.ui, &settings.card_text, settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
                                 check("settings: a card is wrapped again when the text is another size, into more lines at 200 percent, each within the window",
-                                      settings.card_lines > lines && big);
+                                      settings.card_text.count > lines && big);
                                 ui_text_percent = 0;
-                                settings_wrap();
+                                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         }
                         {
                                 // A word with no blank in it, wider than the window, in wide Cyrillic capitals (a lead byte alone is a narrower mark than the letter): cut between characters.
@@ -136853,18 +136853,18 @@ static fn check_settings(string_address regular, string_address bold)
                                 for (int extra = 0; extra < 24; extra++)
                                 {
                                         settings.width = 300 + extra;
-                                        settings_wrap();
-                                        for (int at = 0; at < settings.card_lines; at++)
+                                        ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
+                                        for (int at = 0; at < settings.card_text.count; at++)
                                                 whole &= ((p8)settings_large->card[settings_large->card_at[at]] & 0xc0) != 0x80;
-                                        whole &= settings.card_lines >= 2;
+                                        whole &= settings.card_text.count >= 2;
                                 }
                                 settings.width = 300;
-                                settings_wrap();
+                                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                                 check("settings: a word wider than the window is cut between characters, never inside one, at any width", whole);
                                 memory_copy(settings_large->said, wide, sizeof(wide) - 1);
                                 settings.said_length = sizeof(wide) - 1;
                                 settings_card_fill();
-                                settings_wrap();
+                                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         }
                         settings_card_open("moonwater status");
                         settings_press(UI_KEY_DOWN);

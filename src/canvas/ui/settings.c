@@ -706,9 +706,8 @@ static struct
         unsigned int ground;
         b32 focused;
 
-        // What a command said, as a card in place of the list: lines cut to the window's width.
-        positive card_length;
-        int card_lines;
+        // What a command said, as a card in place of the list: its text and its lines cut to the window's width (the kit's).
+        struct ui_lines card_text;
         char card_title[SETTINGS_STATUS];
 
         // The press again to confirm (the kit's): a command that asks for a second Enter (its row, and what was typed), a forget.
@@ -726,12 +725,6 @@ static struct
         positive queued;
         b32 told;         // the first reading is said in the machine's log
 
-        // What the wrapped lines were made for: the card, the width and the scale.
-        unsigned int card_generation;
-        b32 wrap_made;
-        int wrap_width, wrap_scale;
-        unsigned int wrap_percent;
-        unsigned int wrap_card;
         struct settings_map map;
 } settings;
 
@@ -1520,7 +1513,7 @@ static fn settings_layout(void)
         settings.page.column_on = !settings.page.card;
         settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
-        ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, settings_map_inset, &settings.card, ui_lines_height(ui, settings.card_lines));
+        ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, settings_map_inset, &settings.card, ui_lines_height(ui, settings.card_text.count));
 }
 
 // The map's panel above the rows, placed in the page (its height is the rows' inset), or none when the map is not shown.
@@ -1830,123 +1823,7 @@ static fn settings_card_fill(void)
         }
         while (made && settings_large->card[made - 1] == '\n')
                 made--;
-        settings.card_length = made;
-        settings.card_generation++;
-}
-
-// A run of the card, measured as it is drawn.
-static int settings_card_width(positive from, positive to)
-{
-        char probe[SETTINGS_PROBE] = {0};
-        positive size = to - from;
-
-        size = size >= sizeof(probe) ? sizeof(probe) - 1 : size;
-        memory_copy(probe, settings_large->card + from, size);
-        probe[size] = 0;
-        return ui_kit_measure(&settings.ui, (string_address)probe, UI_BODY_MEDIUM);
-}
-
-/*
-        A run of the card laid on as it is measured: the pen after the bytes
-        from its start to at, so a wider prefix costs its new bytes only.
-        Only for a plain card (ASCII): one byte is one code point there.
-*/
-struct settings_run
-{
-        positive from, at;
-        struct ui_pen pen;
-};
-
-static int settings_run_width(struct ui address_to ui, struct settings_run address_to run, positive from, positive to)
-{
-        const font_face address_to faces[2] = {ui->regular, ui->regular};
-        p32 em = ui_em(ui, ui_types[UI_BODY_MEDIUM].size);
-
-        if (from != run->from || to < run->at)
-        {
-                run->from = from;
-                run->at = from;
-                ui_pen_start(faces, em, &run->pen);
-        }
-        while (run->at < to)
-        {
-                ui_pen_step(ui, faces, em, (unsigned char)settings_large->card[run->at], &run->pen);
-                run->at++;
-        }
-        return ui_pen_width(&run->pen);
-}
-
-/*
-        The card's lines cut to the window's width: each of what the verb
-        said is as many as it takes, a break at a blank where it can be and
-        else where the line has gone as far as it fits. Kept until the width,
-        the scale or the card changes.
-*/
-static fn settings_wrap(void)
-{
-        int room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, UI_INSET);
-        positive at = 0;
-
-        if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale && settings.wrap_percent == ui_text_percent &&
-            settings.wrap_card == settings.card_generation)
-                return;
-        settings.card_lines = 0;
-        while (at <= settings.card_length && settings.card_lines < SETTINGS_CARD_LINES)
-        {
-                positive over = at, start = at;
-                // No run is started yet: the first width laid out starts the pen, even for a line that begins at byte 0.
-                struct settings_run run = {~(positive)0, 0, {0, 0, 0, 0}};
-                b32 plain;
-
-                while (over < settings.card_length && settings_large->card[over] != '\n')
-                        over++;
-                plain = over - at < SETTINGS_PROBE;
-                for (positive byte = at; plain && byte < over; byte++)
-                        plain = (unsigned char)settings_large->card[byte] < 0x80;
-                do
-                {
-                        positive fit = start, next = start;
-
-                        // As many whole words as fit.
-                        while (next < over)
-                        {
-                                positive word = next;
-
-                                while (word < over && settings_large->card[word] == ' ')
-                                        word++;
-                                while (word < over && settings_large->card[word] != ' ')
-                                        word++;
-                                if ((plain ? settings_run_width(&settings.ui, &run, start, word) : settings_card_width(start, word)) > room)
-                                        break;
-                                fit = next = word;
-                        }
-                        // One word wider than the window: as many of its bytes as fit.
-                        if (fit == start && start < over)
-                        {
-                                fit = start + 1;
-                                while (fit < over && (plain ? settings_run_width(&settings.ui, &run, start, fit + 1)
-                                                            : settings_card_width(start, fit + 1)) <= room)
-                                        fit++;
-                                // Not inside a character: a line ends before the continuation bytes of one that did not fit.
-                                while (fit > start + 1 && fit < over && ((unsigned char)settings_large->card[fit] & 0xc0) == 0x80)
-                                        fit--;
-                        }
-                        if (settings.card_lines < SETTINGS_CARD_LINES)
-                        {
-                                settings_large->card_at[settings.card_lines] = (unsigned short)start;
-                                settings_large->card_size[settings.card_lines++] = (unsigned short)(fit - start);
-                        }
-                        start = fit;
-                        while (start < over && settings_large->card[start] == ' ')
-                                start++;
-                } while (start < over && settings.card_lines < SETTINGS_CARD_LINES);
-                at = over + 1;
-        }
-        settings.wrap_made = true;
-        settings.wrap_width = settings.width;
-        settings.wrap_scale = settings.ui.scale;
-        settings.wrap_percent = ui_text_percent;
-        settings.wrap_card = settings.card_generation;
+        ui_lines_set(&settings.card_text, settings_large->card, made, settings_large->card_at, settings_large->card_size, SETTINGS_CARD_LINES);
 }
 
 // The card shown with the title of the command that made it.
@@ -1956,7 +1833,7 @@ static fn settings_card_open(const char address_to title)
         string_copy_bounded((string_address)settings.card_title, (string_address)title, sizeof(settings.card_title));
         settings.page.card = true;
         settings.card.scroll = 0;
-        settings_wrap();
+        ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
         settings_layout();
         ui_page_redraw(&settings.page);
 }
@@ -4371,16 +4248,6 @@ static fn settings_press_at(void)
 
 /* ---- the picture ---- */
 
-// One line of the card.
-static const char address_to settings_card_line(int at, char address_to into, positive room)
-{
-        positive size = settings_large->card_size[at];
-
-        size = size >= room ? room - 1 : size;
-        memory_copy(into, settings_large->card + settings_large->card_at[at], size);
-        into[size] = 0;
-        return into;
-}
 
 /*
         The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): the kit's page
@@ -4398,7 +4265,7 @@ static void settings_map_paint(struct ui address_to ui)
 // The card's lines, in place of the rows when the page is a card.
 static void settings_card_paint(struct ui address_to ui)
 {
-        ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
+        ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), &settings.card_text);
 }
 
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
@@ -4461,7 +4328,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings.height = (int)(height > table->output_height ? table->output_height : height);
         ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
         if (settings.page.card)
-                settings_wrap();
+                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
         settings_layout();
         ui_page_column_show(&settings.ui, &settings.page);
         // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
