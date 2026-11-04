@@ -11,6 +11,21 @@
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned char imported_dead[8]; unsigned int address_to at; positive size, pending; } gpu;
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
+// The memory the dma-buf route may reach: the window table's memfd (fd), mapped at at (its byte 0), the picture part of it (bytes), and pin(offset, on) when a
+// map of its pages is made or let go, so that the program that owns them does not give them back while the card may read them.
+static struct { int fd; unsigned char *at; positive bytes; void (*pin)(positive offset, b32 on); } gpu_shared = {-1, 0, 0, 0};
+static b32 gpu_userptr_off, gpu_userptr_gone; // off: /run/moonwater/gpu-nouserptr says to use the dma-buf route for every map (a test); gone: the kernel refused userptr with
+                                              // ENODEV, EINVAL, EOPNOTSUPP or ENOSYS, which is not asked again (every map after goes by the dma-buf route)
+static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
+static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
+static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
+static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover starts the card again with them)
+#ifndef GPU_SUBMIT_FAKE
+#define GPU_SUBMIT_FAKE(error)
+#endif
+#ifndef GPU_OPEN_FAKE
+#define GPU_OPEN_FAKE(fd)
+#endif
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -468,7 +483,9 @@ enum gpu_req
         GPU_REQ_COUNT
 };
 // first: the required step that failed (0 none; the card is not up); route: the dma-buf route's step that failed once the card is up (0 none; the card is up)
-static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error; char driver[8], node[20]; } gpu_req;
+static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error, pick; char driver[8], node[20], bus[32]; } gpu_req;
+static char gpu_display[32]; // the display card's bus (set by the compositor before the start: "" for a headless one, or one the kernel does not name)
+#define GPU_NODES 8
 static unsigned int gpu_last_error; // the last job's refusal: the submit's errno, 62 (ETIME) for one that did not finish in time, 5 for a wait that failed
 
 // A step of the prerequisites: passed (its bit in mask) or failed (the first failure and its error kept). GPU_STEP_FAKE is the check's fake card: it may
@@ -603,7 +620,8 @@ static void gpu_route_probe(void)
                 gpu_req.mask |= 1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME;
 }
 
-// Let go of the card: its buffer unmapped, its descriptor closed (the kernel frees the buffer, the context and the maps with it). After a start that failed.
+// Let go of the card: its buffer unmapped, its descriptor closed (the kernel frees the buffer, the context and the maps with it). After a start that failed,
+// or when the card lost its state (gpu_recover).
 static void gpu_stop(void)
 {
         if (gpu.at)
@@ -616,6 +634,33 @@ static void gpu_stop(void)
 // The first card that is one the kernels are for, with bytes of pixels behind the page of commands, and one context. Every prerequisite is a step (gpu_req):
 // the node, the driver, the family, userptr, a dma-buf through udmabuf and PRIME, the buffer and context, the self-test's picture and the ring that drew it.
 // False if any step is refused, the first kept in gpu_req; a card that another driver or family has is passed over, and not hung by code that is not its own.
+// The bus of a DRM device, as DRM_IOCTL_GET_UNIQUE says it ("pci:0000:c5:00.0" for a PCI card, the same on the card and on its render node): into, NUL-ended,
+// "" when the kernel does not say.
+static b32 gpu_bus_of(int fd, char *into, unsigned int size)
+{
+        p64 unique[2] = {size - 1, (p64)into};
+
+        into[0] = 0;
+        if (gpu_raw(fd, 0xc0106401u, unique) != 0) // DRM_IOCTL_GET_UNIQUE
+                return false;
+        into[size - 1] = 0;
+        return into[0] != 0;
+}
+
+// Which candidate render node the card is (the nodes of the card's family, their buses): the one on the display's own device, else the first. why: 1 the display's
+// own device, 2 the display is on another device (the card composes only if its PRIME import of the scanout works: gpu_output says so), 0 no display's bus known.
+static int gpu_pick(char candidate[][32], unsigned int count, const char *display, unsigned int *why)
+{
+        *why = 0;
+        if (!count)
+                return -1;
+        for (unsigned int i = 0; display[0] && i < count; i++)
+                if (string_equals((string_address)candidate[i], (string_address)display))
+                        return *why = 1, (int)i;
+        *why = display[0] ? 2 : 0;
+        return 0;
+}
+
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
@@ -624,10 +669,20 @@ static b32 gpu_start(positive bytes)
         char path[] = "/dev/dri/renderD128";
         p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
         int named = 0, amd = 0, amd_named = 0;
+        unsigned int candidates = 0, candidate_node[GPU_NODES];
+        char candidate_bus[GPU_NODES][32];
         long at, made, hash;
 
         memory_zero(&gpu_req, sizeof(gpu_req));
-        gpu.fd = -1, gpu.broken = 0;
+        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0;
+        // The test's switch (/run/moonwater/gpu-nouserptr): the table's pages go by the dma-buf route, and no userptr is asked for them.
+        {
+                long off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-nouserptr", FILE_READ | O_CLOEXEC);
+
+                gpu_userptr_off = off >= 0, gpu_userptr_gone = 0;
+                if (off >= 0)
+                        system_close((int)off);
+        }
         for (unsigned int node = 0; node < 8; node++)
         {
                 // Made again for each node: the kernel writes back the whole length of the driver's name, and no 0 after what it copies, so a node after
@@ -635,37 +690,53 @@ static b32 gpu_start(positive bytes)
                 char name[8] = "";
                 p64 ver[8] = {0, 0, 7, (p64)name};
                 long fd;
+                unsigned int family_error;
+                b32 version;
 
                 path[17] = (char)('0' + (28 + node) / 10), path[18] = (char)('0' + (28 + node) % 10);
                 fd = system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
+                GPU_OPEN_FAKE(fd);
                 if (fd < 0)
                 {
                         if (node == 0)
                                 open_error = (unsigned int)-fd & 255, gpu_req_stat(path), memory_copy(gpu_req.node, path, sizeof(path));
                         continue;
                 }
-                if (!named)
+                version = gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0;
+                if (!named) // the first node that opens is the one the table names when no amdgpu node is found
                         named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                if (gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu"))
+                if (!version || !string_equals((string_address)name, (string_address)"amdgpu"))
                 {
-                        // The first amdgpu node is the card's, whether or not its family is one the kernels are for: that is what the family step says.
-                        unsigned int family_error = gpu_raw((int)fd, GPU_IO(1u, 5, 32), ask);
-
-                        if (!amd_named)
-                        {
-                                amd_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                                gpu_req.family = family_error ? 0 : (unsigned int)who[4], gpu_req.device = family_error ? 0 : (unsigned int)who[0];
-                        }
-                        amd = 1;
-                        if (!family_error && GPU_FAMILIES(who[4]))
-                        {
-                                gpu.fd = (int)fd;
-                                break;
-                        }
                         system_close((int)fd);
                         continue;
                 }
+                // An amdgpu node: the first of them is the one the table names, whether or not its family is one the kernels are for.
+                family_error = gpu_raw((int)fd, GPU_IO(1u, 5, 32), ask);
+                if (!amd_named)
+                {
+                        amd_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
+                        gpu_req.family = family_error ? 0 : (unsigned int)who[4], gpu_req.device = family_error ? 0 : (unsigned int)who[0];
+                }
+                amd = 1;
+                // The candidates are the amdgpu nodes of a family the kernels are for; the one on the display's own device is taken (gpu_pick), else the first.
+                if (!family_error && GPU_FAMILIES(who[4]) && candidates < GPU_NODES)
+                        candidate_node[candidates] = node, gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
                 system_close((int)fd);
+        }
+        if (candidates)
+        {
+                int pick = gpu_pick(candidate_bus, candidates, gpu_display, &gpu_req.pick);
+
+                path[17] = (char)('0' + (28 + candidate_node[pick]) / 10), path[18] = (char)('0' + (28 + candidate_node[pick]) % 10);
+                gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
+                if (gpu.fd >= 0 && gpu_raw(gpu.fd, GPU_IO(1u, 5, 32), ask) == 0 && GPU_FAMILIES(who[4]))
+                {
+                        gpu.family = (unsigned int)who[4], gpu.device = (unsigned int)who[0];
+                        memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.bus, candidate_bus[pick], sizeof(gpu_req.bus));
+                        gpu_req.family = gpu.family, gpu_req.device = gpu.device;
+                }
+                else if (gpu.fd >= 0)
+                        system_close(gpu.fd), gpu.fd = -1;
         }
         gpu.family = gpu_req.family, gpu.device = gpu_req.device;
         do
@@ -737,8 +808,11 @@ static b32 gpu_start(positive bytes)
 // 256 maps, so that a desktop of forty windows and their band, with a drag's and a landing's transient pictures, can be held in one tick (64 was the room a
 // present had, and a present with no room for a picture is the processor's). A map this tick does not use is not named by its job: no cost to hold it.
 #define GPU_MAPS 256
-static struct { positive from, to, va; unsigned int handle, used; b32 written; } gpu_maps[GPU_MAPS];
+static struct { positive from, to, va; unsigned int handle, used; b32 written; b32 dma; positive offset; } gpu_maps[GPU_MAPS]; // dma: made by the dma-buf route (offset: its place in the table's memfd)
 static unsigned int gpu_map_count, gpu_tick;
+#ifndef GPU_MAP_FAKE
+#define GPU_MAP_FAKE(taken)
+#endif
 // Why the last map was refused (gpu_map_as): 1 all the maps are held, 2 no address for it, 3 the kernel would not take the pages (userptr), 4 it would not give them
 // their address; for 3 and 4 the error (the kernel's, negated) is in the bits above the first byte. moonwater canvas says it with the card's refusals.
 static unsigned int gpu_map_why;
@@ -763,6 +837,19 @@ static positive gpu_place(positive bytes)
         return at + bytes <= GPU_VA_END ? at : 0;
 }
 
+// The card lost its state (gpu_run's submit said so: a reset that took the context, or a VM that is gone, a resume that left it dead): every map and
+// import let go of (the kernel frees them with the descriptor), and the card started again as at the first start: a new context, the self-test. False if it does
+// not start again; the caller gives it up for a while (the late-probe retry starts it when it is due).
+static b32 gpu_recover(void)
+{
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_maps[i].dma && gpu_shared.pin)
+                        gpu_shared.pin(gpu_maps[i].offset, 0);
+        gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS, gpu_lost = 0, gpu_recovered++;
+        gpu_stop();
+        return gpu_start(gpu_bytes);
+}
+
 // The map at i let go of: unmapped, its buffer closed, the last map in its place.
 static void gpu_drop(unsigned int i)
 {
@@ -770,6 +857,8 @@ static void gpu_drop(unsigned int i)
 
         gpu_io(1u, 8, 64, va);
         system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+        if (gpu_maps[i].dma && gpu_shared.pin)
+                gpu_shared.pin(gpu_maps[i].offset, 0);
         gpu_maps[i] = gpu_maps[--gpu_map_count];
 }
 
@@ -843,6 +932,37 @@ static void gpu_map_refused(positive from)
 
 #define gpu_map(addr, size) gpu_map_as(addr, size, 0)
 #define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
+// The dma-buf route (the fallback for a refused userptr): the pages [from, to) of the window table's memfd, made a dma-buf by udmabuf, imported into the render
+// node and mapped at at. False, with gpu_map_why: 5 the pages are not the table's (or there is no route), 6 udmabuf refused (the error above the first byte),
+// 7 the import refused, 8 the map refused. The pin goes on for the pages the card holds, and off when that map is let go of (gpu_drop).
+static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
+{
+        positive base = (positive)gpu_shared.at;
+        p64 va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, at, 0, to - from}, close[1];
+        long made;
+        unsigned int e;
+
+        if (gpu_shared.fd < 0 || !base || from < base || to > base + gpu_shared.bytes)
+                return gpu_map_why = 5, false;
+        made = gpu_dmabuf_make(gpu_shared.fd, from - base, to - from);
+        if (made < 0)
+                return gpu_map_why = 6 | (unsigned int)-made << 8, false;
+        made = gpu_dmabuf_in((int)made);
+        if (made < 0)
+                return gpu_map_why = 7 | (unsigned int)-made << 8, false;
+        va[0] = close[0] = (p64)made;
+        if ((e = gpu_raw(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
+                return gpu_raw(gpu.fd, GPU_GEM_CLOSE, close), gpu_map_why = 8 | e << 8, false;
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
+        gpu_maps[gpu_map_count].handle = (unsigned int)close[0], gpu_maps[gpu_map_count].used = gpu_tick;
+        gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - base;
+        gpu_map_count++, gpu_maps_dma++;
+        if (gpu_shared.pin)
+                gpu_shared.pin(from - base, 1);
+        gpu_map_next = at + (to - from);
+        return true;
+}
+
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
@@ -850,7 +970,7 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         // mapped read-only by the compositor, and a writable registration of them is refused (EPERM).
         p64 up[3] = {from, to - from, written ? 0xcull : 0xdull}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
-        long taken;
+        long taken = 0;
 
         // A map the card writes is the only map of its pages: one that held them for reading would be found by gpu_va_bytes and written through, and the card
         // faults on a write to a map it was given to read.
@@ -866,19 +986,32 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                 return gpu_map_why = 1, false;
         if (!(at = gpu_place(to - from)))
                 return gpu_map_why = 2, false;
-        if ((taken = system_control(gpu.fd, GPU_IO(3u, 0x11, 24), up)) != 0)
+        // The userptr, unless the kernel has refused it before or the file says not to ask: then the table's pages go by the dma-buf route, and the rest are refused.
+        if (!gpu_userptr_off && !gpu_userptr_gone)
         {
-                gpu_map_why = 3 | (unsigned int)-taken << 8;
-                gpu_map_refused(from);
-                return false;
+                taken = -(long)gpu_raw(gpu.fd, GPU_IO(3u, 0x11, 24), up);
+                GPU_MAP_FAKE(taken);
+                if (taken == 0)
+                {
+                        va[0] = close[0] = up[2] >> 32, va[2] = at;
+                        if ((taken = system_control(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
+                                return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it
+                        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
+                        gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
+                        gpu_map_count++, gpu_maps_user++;
+                        gpu_map_next = at + (to - from);
+                        return true;
+                }
+                if (taken == -19 || taken == -22 || taken == -95 || taken == -38) // ENODEV, EINVAL, EOPNOTSUPP, ENOSYS: no userptr on this kernel
+                        gpu_userptr_gone = 1;
+                else
+                {
+                        gpu_map_why = 3 | (unsigned int)-taken << 8;
+                        gpu_map_refused(from);
+                        return false;
+                }
         }
-        va[0] = close[0] = up[2] >> 32, va[2] = at;
-        if ((taken = system_control(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
-                return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it
-        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
-        gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
-        gpu_map_next = at + (to - from);
-        return true;
+        return gpu_map_dmabuf(from, to, at, written);
 }
 
 static positive gpu_va_bytes(const void *pointer, positive bytes)
@@ -1096,8 +1229,15 @@ static b32 gpu_run(void)
                                 bos[named++] = gpu_maps[i].handle;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
-                if ((gpu_last_error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs)) == 0)
+                gpu_last_error = 0;
+                GPU_SUBMIT_FAKE(gpu_last_error); // a check's fake submit answers an error before the call is made (and the call is then not made)
+                if (gpu_last_error == 0)
+                        gpu_last_error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs);
+                if (gpu_last_error == 0)
                         break;
+                // The card lost the context or its VM (ECANCELED after a reset, ENODEV, EINVAL): nothing this job can do again succeeds: the caller recovers (gpu_recover).
+                if (gpu_last_error == 125 || gpu_last_error == 19 || gpu_last_error == 22)
+                        return gpu_lost = 1, false;
                 // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
                 if (++tries == 3 || gpu_drop_unmapped())
                         return false;

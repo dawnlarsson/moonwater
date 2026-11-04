@@ -977,6 +977,10 @@ struct windows
         unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
         unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
         char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
+        unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
+        unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
+        unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
+        char gpu_node_bus[32], gpu_display_bus[32]; // the chosen node's bus and the display's ("pci:..."), "" when not known
         unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner
         char gpu_req_driver[8], gpu_req_node[20];                                                           // the first node's driver name and path
 

@@ -46,6 +46,8 @@ session()
         # repository's fonts are bound over the directory in this namespace only.
         mount --bind "$fonts" /usr/share/fonts || return 1
         mkdir -p /run/moonwater
+        # GPU_NOUSERPTR=1 (the forced route): the card maps the table's pages by the dma-buf route, not userptr (gpu.c reads this file at start)
+        [ -z "${GPU_NOUSERPTR:-}" ] || : > /run/moonwater/gpu-nouserptr
         # the faces the kit loads (ui.c), for the terminal: it draws with none and exits when it is given none
         fonts_mono=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf fonts_bold=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf
         cd "$work" || return 1

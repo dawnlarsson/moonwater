@@ -6194,6 +6194,26 @@ struct compositor_fb2
         unsigned long modifier[4];
 };
 
+// The card's pins of the table's picture pages (gpu.c's dma-buf route): a count a row, and the row's pinned flag stays set while one is held, so the program that
+// owns the row gives back no page the card may read. offset is the pages' place in the table's memfd; the pins of other rows are not counted.
+static unsigned int compositor_gpu_pins[WINDOWS];
+static void compositor_gpu_pin(positive offset, b32 on)
+{
+        positive buffers;
+        unsigned int row;
+
+        if (!compositor.table || !compositor.buffer || offset < compositor.pixels)
+                return;
+        buffers = (offset - compositor.pixels) / compositor.buffer, row = (unsigned int)(buffers / 2);
+        if (row >= WINDOWS)
+                return;
+        if (on)
+                compositor_gpu_pins[row]++;
+        else if (compositor_gpu_pins[row])
+                compositor_gpu_pins[row]--;
+        __atomic_store_n(&compositor.table->pinned[row], compositor_gpu_pins[row] ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
 // or the card refuses (a card that cannot show memory it did not make), and then none is asked for again.
 static unsigned int compositor_window_fb(int row, unsigned int which)
@@ -6285,7 +6305,7 @@ static void compositor_window_fb_drop(int row)
                         compositor.scan_fb[row][which] = compositor.scan_handle[row][which] = 0;
                 }
         compositor.patched[row][0] = compositor.patched[row][1] = 0;
-        __atomic_store_n(&compositor.table->pinned[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.table->pinned[row], compositor_gpu_pins[row] ? 1u : 0u, __ATOMIC_RELEASE); // the card's pins hold it too
 }
 
 static int compositor_shows_row(int row)
@@ -7470,6 +7490,10 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_req_first = gpu_req.first, compositor.table->gpu_req_error = gpu_req.error, compositor.table->gpu_req_mask = gpu_req.mask;
         compositor.table->gpu_req_mode = gpu_req.mode, compositor.table->gpu_req_owner = gpu_req.owner;
         compositor.table->gpu_req_route = gpu_req.route, compositor.table->gpu_req_route_error = gpu_req.route_error;
+        compositor.table->gpu_map_user = gpu_maps_user, compositor.table->gpu_map_dma = gpu_maps_dma;
+        compositor.table->gpu_recovered = gpu_recovered;
+        memory_copy(compositor.table->gpu_node_bus, gpu_req.bus, sizeof(gpu_req.bus)), memory_copy(compositor.table->gpu_display_bus, gpu_display, sizeof(gpu_display));
+        compositor.table->gpu_node_pick = gpu_req.pick;
         memory_copy(compositor.table->gpu_req_driver, gpu_req.driver, sizeof(gpu_req.driver)), memory_copy(compositor.table->gpu_req_node, gpu_req.node, sizeof(gpu_req.node));
 }
 
@@ -7510,13 +7534,43 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         compositor_gpu_publish();
 }
 
-// The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
-static int compositor_gpu_up(void)
+// The card's buffer as the compositor's scene is laid out in it (the ops, the tables): made again when the card is started again.
+static void compositor_gpu_layout(void)
 {
         struct compositor_gscene *g = &compositor_gscene;
 
+        g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
+        g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
+}
+
+// The late probe: a card that is not there yet (no render node, a driver or its firmware that loads late) is looked for again while canvas gpu is on and a present
+// wants it: at once, then every five seconds for the first minute, then every sixty. Given the times (ns, monotonic): the first look that found nothing and the
+// next one due (0 for none yet). True when the card is due now (and the next is set); the test's clock is the caller's.
+static b32 compositor_gpu_late_due(b64 now, b64 *first, b64 *next)
+{
+        if (!*first)
+                *first = now, *next = now + 5000000000ull;
+        if (now < *next)
+                return false;
+        *next = now + (now - *first < 60000000000ull ? 5000000000ull : 60000000000ull);
+        return true;
+}
+
+// The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
+static int compositor_gpu_up(void)
+{
         if (compositor_gpu_state.up || compositor_gpu_state.dead)
                 return compositor_gpu_state.up;
+        // The display's device: the render node on the same device is the card (gpu.c's gpu_pick); a headless compositor has none.
+        if (compositor.card >= 0)
+                gpu_bus_of(compositor.card, gpu_display, sizeof(gpu_display));
+        else
+                gpu_display[0] = 0;
+        // The dma-buf route's memory: the table's memfd, its pictures (the window buffers, not the lists or the table's header) and the pin of their rows.
+        gpu_shared.fd = compositor.table_memfd ? compositor.table_memfd - 1 : -1;
+        gpu_shared.at = (unsigned char *)compositor.table;
+        gpu_shared.bytes = compositor.pixels + compositor.buffer * 2 * WINDOWS;
+        gpu_shared.pin = compositor_gpu_pin;
         if (!gpu_start((2 << 20) + (16 << 20)))
         {
                 compositor_gpu_state.dead = 1;
@@ -7532,10 +7586,28 @@ static int compositor_gpu_up(void)
                 string_format(log, "compositor: the GPU is up; its dma-buf route is not (%s, error %p): %s\n", windows_gpu_req_names[gpu_req.route],
                               (positive)gpu_req.route_error, windows_gpu_req_fixes[gpu_req.route]),
                     log_flush();
-        g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
-        g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
+        compositor_gpu_layout();
         compositor_gpu_state.up = 1;
         return 1;
+}
+
+
+// The card lost its state: started again (gpu.c's gpu_recover). Everything the compositor kept of the card's addresses is forgotten with it: the scanout's
+// import and the turned screens' maps (their addresses are the old maps'). A card that does not start again is given up for now (dead, no card: the late
+// probe starts it again when it is due). The failures of a present are counted by the caller, so repeated losses cool the card down as hangs do.
+static void compositor_gpu_recover(void)
+{
+        compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
+        memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
+        memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
+        if (!gpu_recover())
+        {
+                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_NO_CARD;
+                compositor_gpu_requirements();
+                return;
+        }
+        compositor_gpu_layout();
+        compositor_gpu_requirements();
 }
 
 // The scanout's address for the GPU, made when the scanout is new.
@@ -7770,6 +7842,13 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
+        if (compositor_gpu_state.dead && !compositor_gpu_state.up && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD)
+        {
+                static b64 first, next;
+
+                if (compositor_gpu_late_due(clock_monotonic_nanoseconds(), &first, &next)) // no card yet: looked for again (the late probe)
+                        compositor_gpu_state.dead = 0;
+        }
         if (compositor_gpu_state.dead)
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
         if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
@@ -7822,6 +7901,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
                        (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
         {
+                if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
+                        compositor_gpu_recover();
                 // A hang: this present is the processor's and the next tries the card again (gpu_idle makes a new context of a card that reset). Three in a
                 // row cool the card down for two seconds, then four, eight, sixteen, thirty-two and sixty-four, each time it hangs again after one.
                 if (++compositor_gpu_state.failures >= 3)

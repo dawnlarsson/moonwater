@@ -16152,8 +16152,7 @@ fn check_offsets_of_either()
                                                 positive limit = limits[l];
                                                 positive have = 0;
                                                 positive from = 0;
-                                                bool ok = true;
-
+                                        
                                                 // Walk the whole block limit at a time, as a caller does.
                                                 for (;;)
                                                 {
@@ -18359,8 +18358,7 @@ fn check_record_scans()
                                         for (positive form = 0; form < 2; form++)
                                         {
                                                 positive have = 0, from = 0;
-                                                bool ok = true;
-
+                                        
                                                 for (;;)
                                                 {
                                                         VECTOR_FIRST_CALL(tier == 0);
@@ -18574,8 +18572,7 @@ fn check_offsets_in_set_pages()
                                         for (positive l = 0; l < array_count(limits); l++)
                                         {
                                                 positive limit = limits[l], have = 0, from = 0;
-                                                bool ok = true;
-
+                                        
                                                 for (;;)
                                                 {
                                                         bool fenced = limit + 80 <= array_count(got);
@@ -18683,8 +18680,7 @@ fn check_offsets_range_pages()
                                                 for (positive l = 0; l < array_count(limits); l++)
                                                 {
                                                         positive limit = limits[l], have = 0, from = 0;
-                                                        bool ok = true;
-
+                                                
                                                         for (;;)
                                                         {
                                                                 bool fenced = limit + 80 <= array_count(got);
@@ -18775,8 +18771,7 @@ fn check_offsets_range()
                                                 for (positive l = 0; l < array_count(limits); l++)
                                                 {
                                                         positive limit = limits[l], have = 0, from = 0;
-                                                        bool ok = true;
-
+                                                
                                                         for (;;)
                                                         {
                                                                 positive answer = outside
@@ -18825,8 +18820,7 @@ fn check_offsets_range()
                                         for (positive l = 0; l < array_count(limits); l++)
                                         {
                                                 positive limit = limits[l], have = 0, from = 0;
-                                                bool ok = true;
-
+                                        
                                                 for (;;)
                                                 {
                                                         positive answer = (memory_offsets_in_set)(
@@ -122281,6 +122275,14 @@ static int gpu_fake_busy; // the check's fake fence: while it is set, every job 
 static int gpu_fake_step = -1;
 static unsigned int gpu_fake_error;
 #define GPU_STEP_FAKE(code, failed, error) do { if (gpu_fake_step == (int)(code)) (failed) = 1, (error) = gpu_fake_error; } while (0)
+// The fake kernel's answer to a userptr (gpu_map_as): the errno it gives, 0 for the real one.
+static long gpu_fake_userptr;
+#define GPU_MAP_FAKE(taken) do { if (gpu_fake_userptr) (taken) = -gpu_fake_userptr; } while (0)
+// The fake card's losses: a submit answers ECANCELED while gpu_fake_cancel is set (and the call is not made), and a node is absent (ENOENT) while
+// gpu_fake_absent counts down.
+static int gpu_fake_cancel, gpu_fake_absent;
+#define GPU_SUBMIT_FAKE(error) do { if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; } while (0)
+#define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -220506,6 +220508,158 @@ static void terminal_gpu_rows(string_address font, string_address bold)
         string_format(log, "  gpu terminal: %p frames replayed on the card\n", (positive)tg_cases);
 }
 
+/*
+        The dma-buf route (gpu_map_as's fallback for a refused userptr): with the kernel's userptr refused (ENODEV, then the flag that says it is gone), a picture of
+        the window table's memfd is mapped by udmabuf, PRIME and GEM_VA; the card writes into it and the processor reads the memfd back exactly; the pin of its
+        page goes on, and off when the map is let go of; the refusals say which step failed (5 not the table's pages, 6 udmabuf with its error).
+*/
+// The process's resident memory in KiB (VmRSS of /proc/self/status), 0 when it cannot be read.
+static long gpu_rss_kib(void)
+{
+        static char text[4096];
+        long handle = system_open_at(AT_FDCWD, (string_address) "/proc/self/status", FILE_READ | O_CLOEXEC), got = 0;
+        char *at;
+
+        if (handle < 0)
+                return 0;
+        got = system_read_once((int)handle, text, sizeof(text) - 1);
+        system_close((int)handle);
+        if (got <= 0)
+                return 0;
+        text[got] = 0;
+        at = (char *)string_find((string_address)text, (string_address) "VmRSS:");
+        return at ? (long)string_to_number((string_address)(at + 6), null, 10) : 0;
+}
+static int gpu_pin_count;
+static long gpu_pin_sum;
+static positive gpu_pin_offset;
+static void gpu_fake_pin(positive offset, b32 on)
+{
+        gpu_pin_count++, gpu_pin_sum += on ? 1 : -1, gpu_pin_offset = offset;
+}
+static b32 gpu_route_rows(void)
+{
+        enum { BYTES = 1 << 20, W = 64 };
+        long fd = system_call_2(syscall(memfd_create), (positive) "moonwater-gpu-route", 1 | 2);
+        unsigned int address_to mem, address_to pic;
+        positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, dst;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        long mapped, other;
+
+        if (fd < 0)
+        {
+                check("gpu route: a memfd for the table's pages", false);
+                return false;
+        }
+        system_truncate_handle((int)fd, BYTES);
+        system_call_3(syscall(fcntl), (positive)fd, 1033, 2); // F_ADD_SEALS, F_SEAL_SHRINK, as the table is sealed
+        mapped = system_call_6(syscall(mmap), 0, BYTES, 3, 1, (positive)fd, 0);
+        other = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+        if ((mapped < 0 && mapped > -4096) || (other < 0 && other > -4096))
+        {
+                check("gpu route: memory for the rows", false);
+                return false;
+        }
+        mem = (unsigned int address_to)mapped, pic = mem + 1024; // the picture at byte 4096 of the table's memfd
+        for (positive i = 0; i < BYTES / 4; i++)
+                mem[i] = 0xaaaaaaaau;
+        gpu_shared.fd = (int)fd, gpu_shared.at = (unsigned char address_to)mem, gpu_shared.bytes = BYTES, gpu_shared.pin = gpu_fake_pin;
+        gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_dma = 0, gpu_pin_count = 0, gpu_pin_sum = 0;
+
+        gpu_fake_userptr = 19; // ENODEV: the kernel without CONFIG_DRM_AMDGPU_USERPTR
+        check("gpu route: a userptr refused with ENODEV maps the table's pages by dma-buf", gpu_map_written(pic, W * W * 4) && gpu_userptr_gone && gpu_maps_dma == 1);
+        check("gpu route: the map is the table's pages (the pin goes on for their offset)", gpu_pin_count == 1 && gpu_pin_sum == 1 && gpu_pin_offset == 4096);
+        dst = (positive)gpu_va_written(pic, W * W * 4);
+        check("gpu route: the card's address for the picture", dst != 0);
+        // The card writes the picture: a fill of the whole of it, then the processor reads the memfd. Not without the address: a scene with no
+        // destination would write at the start of the card's buffer.
+        if (dst)
+        {
+                unsigned int q[8] = {0, 0, 0, W, W, 0xff112233u, 0, 0};
+
+                memory_copy(ops, q, 32);
+                check("gpu route: the card writes a picture the table's memfd holds", gpu_scene(ops_at, 1, bins_at, dst, W, W, W, 0, 0, W, W));
+                for (unsigned int i = 0; i < W * W; i++)
+                        if (pic[i] != 0xff112233u)
+                                break;
+                check("gpu route: the processor reads the card's pixels back from the memfd", pic[0] == 0xff112233u && pic[W * W - 1] == 0xff112233u);
+                check("gpu route: the bytes past the picture are not the card's", mem[1024 + W * W] == 0xaaaaaaaau);
+        }
+        // Another memory of the process is not the table's: no route, and the reason says so. A refused userptr is then refused (5), not mapped.
+        check("gpu route: pages outside the table's memfd are refused with no route (5)", !gpu_map_written((void *)other, 4096) && (gpu_map_why & 255) == 5);
+        // The table's pages past the memfd's end: udmabuf refuses them (6, with EINVAL).
+        gpu_shared.bytes = BYTES + 8192;
+        check("gpu route: udmabuf refuses pages past the memfd's end (6, EINVAL)", !gpu_map_written(mem + BYTES / 4, 4096) && (gpu_map_why & 255) == 6 && (gpu_map_why >> 8) == 22);
+        gpu_shared.bytes = BYTES;
+        // What the route costs in resident memory: twelve pictures of 64 KiB as dma-buf maps of memfd pages that are already resident (the fill above touched them).
+        {
+                long before = gpu_rss_kib(), after;
+
+                for (unsigned int k = 0; k < 12; k++)
+                        if (!gpu_map_written(mem + 16384 * k, 65536))
+                                check("gpu route: twelve pictures of 64 KiB map by dma-buf", false);
+                after = gpu_rss_kib();
+                string_format(log, "gpu route: twelve 64 KiB pictures by dma-buf: resident memory %p KiB more (before %p, after %p; %p maps by dma-buf)\n",
+                              (positive)(after - before), (positive)before, (positive)after, (positive)gpu_maps_dma);
+        }
+        // Let go of the maps: their pins come off, and the row's count is back to nothing.
+        while (gpu_map_count)
+                gpu_drop(0);
+        check("gpu route: the pins are let go of when the maps are", gpu_pin_sum == 0);
+        gpu_fake_userptr = 0, gpu_userptr_gone = 0, gpu_userptr_off = 0;
+        gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
+        system_call_2(syscall(munmap), (positive)mapped, BYTES);
+        system_call_2(syscall(munmap), (positive)other, 4096);
+        system_close((int)fd);
+        return true;
+}
+
+/*
+        The card's prerequisites beyond the start: the node the card is (gpu_pick, the display's own device first), the late probe's schedule (compositor_gpu_late_due:
+        a look at once, then every five seconds for the first minute, then every minute), and the card's losses on the real card: a submit that answers ECANCELED is
+        a lost card (gpu_lost), recovered by gpu_recover (the maps let go, the card started again, its self-test drawn right), and a card whose node is absent
+        (ENOENT for every node) does not start until one is there. These run last in main (they start and stop the card).
+*/
+static void gpu_node_rows(void)
+{
+        char candidate[2][32] = {"pci:0000:c5:00.0", "pci:0000:04:00.0"};
+        unsigned int why = 9;
+        b64 first = 0, next = 0;
+
+        check("gpu node: the display's own device is the node", gpu_pick(candidate, 2, "pci:0000:04:00.0", &why) == 1 && why == 1);
+        check("gpu node: with no display on either, the first amdgpu node, and the reason says the display is elsewhere", gpu_pick(candidate, 2, "pci:0000:00:02.0", &why) == 0 && why == 2);
+        check("gpu node: with no display's bus known, the first, and no reason", gpu_pick(candidate, 2, "", &why) == 0 && why == 0);
+        check("gpu node: no candidate, no node", gpu_pick(candidate, 0, "", &why) == -1);
+        check("late probe: the first look is not due, the next is in five seconds", !compositor_gpu_late_due(10000000000ull, &first, &next) && next == 15000000000ull);
+        check("late probe: due at five seconds, then five seconds more (the first minute)", compositor_gpu_late_due(15000000000ull, &first, &next) && next == 20000000000ull);
+        check("late probe: due again at ten, then not before the next", compositor_gpu_late_due(20000000000ull, &first, &next) && !compositor_gpu_late_due(21000000000ull, &first, &next));
+        check("late probe: after the first minute, every sixty seconds", compositor_gpu_late_due(80000000000ull, &first, &next) && next == 140000000000ull);
+        check("late probe: not due before the sixty seconds are up", !compositor_gpu_late_due(100000000000ull, &first, &next) && compositor_gpu_late_due(140000000000ull, &first, &next));
+}
+
+static void gpu_loss_rows(void)
+{
+        positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, d_at = base + 8192;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0}, started;
+
+        // A submit answered ECANCELED: the card is lost (the scene is not drawn; the caller recovers), and the recovery draws the self-test right again.
+        memory_copy(ops, q, 32);
+        gpu_fake_cancel = 1;
+        check("gpu loss: a submit answered ECANCELED is a lost card, and the scene is not drawn", !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_lost);
+        gpu_fake_cancel = 0;
+        check("gpu loss: the card starts again (gpu_recover) and counts it", gpu_recover() && gpu_recovered == 1 && !gpu_lost);
+        check("gpu loss: the card draws its self-test right after the recovery", gpu_test_hash() == GPU_TEST_HASH);
+        check("gpu loss: the maps are let go with the card", gpu_map_count == 0 && gpu.imports == 0);
+        // A node that is absent (every node: ENOENT) is no card, and the start says so at the node; once it is there, the card starts.
+        gpu_stop();
+        gpu_fake_absent = 8;
+        started = gpu_start(1 << 20);
+        gpu_fake_absent = 0;
+        check("gpu loss: no render node, the start stops at the node (ENOENT)", !started && gpu_req.first == GPU_REQ_NODE && gpu_req.error == 2);
+        check("gpu loss: the node is there again, and the card starts", gpu_start(1 << 20) && gpu.fd >= 0);
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -220580,6 +220734,8 @@ b32 main(void)
                 check("gpu: the version call answers the name's whole length and ends nothing it copies",
                       system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && ver[2] == 6 && name[0] == 'a' && name[2] == 'd' && name[3] == 'x');
         }
+        gpu_route_rows();
+        gpu_node_rows();
         pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         memory_zero(&ui, sizeof(ui));
         ui.pixels = gpu_kit_want, ui.pitch = PP, ui.width = PW, ui.height = PH, ui.top = 0, ui.bottom = PH, ui.scale = 100;
@@ -222435,6 +222591,7 @@ b32 main(void)
                 while (gpu_map_count)
                         gpu_drop(0);
         }
+        gpu_loss_rows();
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */

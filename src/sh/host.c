@@ -22318,6 +22318,23 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                 host_say(log, "    %s  not reached\n", windows_gpu_req_names[step]);
                 }
         }
+        if (table->gpu_node_bus[0] || table->gpu_display_bus[0])
+        {
+                char node_bus[33], display_bus[33];
+
+                memory_copy(node_bus, table->gpu_node_bus, 32), node_bus[32] = 0;
+                memory_copy(display_bus, table->gpu_display_bus, 32), display_bus[32] = 0;
+                host_say(log, "  gpu node        the card is %s: %s (the display is on %s)\n", node_bus[0] ? (string_address)node_bus : (string_address) "-",
+                         table->gpu_node_pick == 1 ? (string_address) "the display's own device" :
+                         table->gpu_node_pick == 2 ? (string_address) "another device than the display's: it composes only if its PRIME import of the scanout works" :
+                                                     (string_address) "the first amdgpu node (no display's bus known)",
+                         display_bus[0] ? (string_address)display_bus : (string_address) "-");
+        }
+        if (table->gpu_recovered)
+                host_say(log, "  gpu recovered   %p times: the card lost its state (a reset or a resume) and was started again\n", (positive)table->gpu_recovered);
+        if (table->gpu_map_user || table->gpu_map_dma)
+                host_say(log, "  gpu maps        %p pictures mapped by userptr, %p by the dma-buf route (the table's pages, when userptr is refused or off)\n",
+                         (positive)table->gpu_map_user, (positive)table->gpu_map_dma);
         if (table->gpu_map_why && table->gpu_map_probe)
                 host_say(log, "  gpu map probes  the node answers a plain question: %s; userptr over anonymous memory: error %p; over the refused page: error %p, without validating it: error %p (0 is taken)\n",
                          table->gpu_map_probe & 1 ? (string_address) "yes" : (string_address) "no", (positive)(table->gpu_map_probe >> 8 & 255),
@@ -22335,7 +22352,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (table->gpu_map_why & 255) == 1 ? (string_address) "all the maps are held" :
                          (table->gpu_map_why & 255) == 2 ? (string_address) "no address left for it" :
                          (table->gpu_map_why & 255) == 3 ? (string_address) "the kernel would not take the pages" :
-                                                           (string_address) "the kernel would not give the pages their address",
+                         (table->gpu_map_why & 255) == 4 ? (string_address) "the kernel would not give the pages their address" :
+                         (table->gpu_map_why & 255) == 5 ? (string_address) "no dma-buf route for them (not the window table's pages)" :
+                         (table->gpu_map_why & 255) == 6 ? (string_address) "udmabuf would not make the pages a dma-buf" :
+                         (table->gpu_map_why & 255) == 7 ? (string_address) "the render node would not import the dma-buf" :
+                                                           (string_address) "the card would not map the dma-buf",
                          (positive)(table->gpu_map_why >> 8));
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {
