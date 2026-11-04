@@ -76,7 +76,7 @@ mutant) the check process dies by SIGBUS there.
 | Class | Use of a closed descriptor number (a descriptor-table use after free); one client could be handed whatever the root compositor opened next under that number |
 | Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a copy is taken only then) |
 | Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the clipboard bridge since `0a4629ac` (2026-11-03 19:44 +0100) |
-| Fixed by | the commit that adds this entry (`src/canvas/wayland.c`: `out_fd_owned`, `wayland_out_fds_let_go`; `src/canvas/wayland_host.c`: `compositor_wl_clip_pull`, the flush) |
+| Fixed by | `0976821d` (`src/canvas/wayland.c`: `out_fd_owned`, `wayland_out_fds_let_go`; `src/canvas/wayland_host.c`: `compositor_wl_clip_pull`, the flush) |
 | Tests that fail without it | `CHECK_wayland` clipboard rows "a copy ended before its send event went out leaves the pipe's end in the queue, open" and "and the shim closes it once it is sent / when its client goes"; `test/wayland_mutations.py` "the queue's own descriptors are never closed" and "a copy's pipe end is not the shim's"; `test/wayland_clip.py` row "a copy ended in the same write as it was asked is still sent its pipe's end" (its client is `test/wayland_hold.py copy`): the original compositor dropped that client |
 
 **What it was.** A copy gives the client's source the write end of a pipe the compositor makes: the shim queues it with

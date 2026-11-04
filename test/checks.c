@@ -168401,8 +168401,7 @@ static void test_scale(void)
         /* a window that follows the fractional scale, on a screen at 150 percent */
         fake.screen.scale = 150;
         wayland_screens_changed();
-        wlc_forget(w.s.c);
-        scale_open(&w, 1, 1);
+        scale_open(&w, 1, 1); // a client of its own: the one before was ended (w.s.c is that one, freed, and was forgotten here)
         c = w.s.c;
         WLCHECK(w.whole == 2, "a surface made at 150 percent is told the whole scale 2");
         WLCHECK(w.preferred == 180, "and its fractional scale is 180 as the object is made");
