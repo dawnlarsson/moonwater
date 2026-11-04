@@ -281,36 +281,6 @@ static fn mount_shm()
 }
 
 /*
-        /dev/uinput, the one game controller node the image makes itself. The
-        kernel registers uinput while its initcalls run, before this init has
-        mounted devtmpfs, and devtmpfs makes no node for a device registered
-        before it was mounted (the image's own static nodes, build.c's
-        image_nodes, are the ones made in time). So init makes it when the
-        driver is there: /sys/class/misc/uinput is the misc device, and a kernel
-        without CONFIG_INPUT_UINPUT has no such directory and gets no node.
-        The mode is given here, 0600 owned by root, and not left to the umask.
-        The joystick nodes come after boot, when a pad is made, so devtmpfs
-        makes them, at its own default for a driver that names no mode: 0600
-        as well (profile/desktop has the whole of it).
-*/
-#define SYSTEM_UINPUT_MINOR 223
-static COLD fn system_input_nodes(void)
-{
-        bipolar handle = system_open_at(AT_FDCWD, "/sys/class/misc/uinput",
-                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-
-        if (handle < 0)
-                return;
-        system_close((positive)handle);
-
-        //      The new encoding of major 10, minor 223: the minor's low byte
-        //      and the major above it.
-        system_call_4(syscall(mknodat), AT_FDCWD,
-                      (positive)(string_address)"/dev/uinput",
-                      S_IFCHR | 0600, (10 << 8) | SYSTEM_UINPUT_MINOR);
-}
-
-/*
         The names a program opens by habit for the descriptors it holds:
         /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
         not make and a machine with a udev has made for it. Bash's process
@@ -485,10 +455,10 @@ static COLD fn system_kernel_defaults(void)
         the kernel's number. The server and console images have no Canvas
         and keep it too.
 
-        The game controller nodes are not made here: system_input_nodes makes
-        /dev/uinput above, at 0600, and devtmpfs makes the joystick nodes at
-        its own 0600 default. The tier lane reads both modes back, so a
-        change to either is a red row and not a silent one.
+        The game controller nodes are not made here: devtmpfs makes
+        /dev/uinput and the joystick nodes at its own 0600 default, as it
+        makes udmabuf's at boot. The tier lane reads the uinput mode back, so
+        a change to it is a red row and not a silent one.
 */
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
 static COLD fn system_desktop_defaults(void)
@@ -509,7 +479,6 @@ static DEAD_END b32 system_init()
         mount_devpts();
         mount_shm();
         link_dev_fd();
-        system_input_nodes();
 
         bipolar settling = start_service((string_address)settle_program,
                                          settle_argv, 2);

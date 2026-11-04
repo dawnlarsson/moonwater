@@ -13,16 +13,14 @@ CONFIG_NTSYNC=y
 # Game controllers: Steam Input's virtual gamepad and its remapping write
 # events through /dev/uinput, and SDL and Proton read a pad through
 # /dev/input/js* (JOYDEV) as well as evdev. Both are a way for a program to
-# put events into the machine or to read a pad, so they are root's. Init
-# makes /dev/uinput itself, at 0600 owned by root (src/sh/system.c,
-# system_input_nodes: the driver registers before devtmpfs is mounted, so
-# devtmpfs would not make it). The joystick nodes are made later, when a pad
-# is made, by devtmpfs at its default for a driver that names no mode, which
-# is 0600 owned by root too (drivers/base/devtmpfs.c). A process that is not
-# root cannot open either node, so a desktop user's Steam Input virtual pad
-# needs a rule of its own choosing before it works. The hardened and locked
-# tiers and the server profile switch both off again (each names them with
-# #> overrides).
+# put events into the machine or to read a pad, so they are root's. devtmpfs
+# makes both nodes at mode 0600 owned by root: a driver that names no mode gets
+# that default (drivers/base/devtmpfs.c), uinput names none, and nothing in the
+# image runs a rule that changes it. The tier lane reads /dev/uinput's mode
+# back. A process that is not root cannot open either node, so a desktop
+# user's Steam Input virtual pad needs a rule of its own choosing before it
+# works. The hardened and locked tiers and the server profile switch both off
+# again (each names them with #> overrides).
 #
 # INPUT_MISC is the menu uinput sits in: without it the option is dropped
 # from the kernel on every build (allnoconfig leaves the menu off), and the
