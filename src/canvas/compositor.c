@@ -8511,6 +8511,55 @@ static void compositor_metric_publish(void)
         table->metric_presents = compositor_metric_presents_second, table->metric_lists = compositor_metric_lists_second;
 }
 
+// The loop's turns a second, and those whose ppoll had nothing to wait for (a timer already due, so the turn spun): the wake rate in moonwater debug.
+static unsigned long long compositor_loop_turns, compositor_loop_idle, compositor_loop_since, compositor_loop_then, compositor_loop_idle_then;
+
+static unsigned int compositor_loop_by[WINDOWS_LOOP_SOURCES], compositor_loop_by_second[WINDOWS_LOOP_SOURCES];
+
+// The source of a poll slot that returned events (the same order compositor_main builds the slots in).
+static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, unsigned int done_at, unsigned int card_at,
+                                           unsigned int uevents_at, unsigned int clip_at, unsigned int wayland_at)
+{
+        if (at == 0)
+                return 0;
+        if (at == 1)
+                return 1;
+        if (at < doors)
+                return 2;
+        if (at < doors + WINDOWS)
+                return 3;
+        if (done_at && at == done_at)
+                return 4;
+        if (card_at && at == card_at)
+                return 5;
+        if (uevents_at && at == uevents_at)
+                return 6;
+        if (clip_at && at == clip_at)
+                return 7;
+        if (wayland_at && at >= wayland_at)
+                return 8;
+        return 9;
+}
+
+static void compositor_loop_tick(unsigned long long now, b32 idle)
+{
+        struct windows address_to table = compositor.table;
+
+        compositor_loop_turns++, compositor_loop_idle += idle;
+        if (!compositor_loop_since)
+                compositor_loop_since = now, compositor_loop_then = compositor_loop_turns, compositor_loop_idle_then = compositor_loop_idle;
+        if (now - compositor_loop_since >= 1000000000ull)
+        {
+                if (table)
+                        table->metric_loops = windows_metric_rate(compositor_loop_turns - compositor_loop_then, now - compositor_loop_since),
+                        table->metric_loop_idle = windows_metric_rate(compositor_loop_idle - compositor_loop_idle_then, now - compositor_loop_since);
+                for (unsigned int k = 0; table && k < WINDOWS_LOOP_SOURCES; k++)
+                        table->metric_loop_by[k] = windows_metric_rate(compositor_loop_by[k] - compositor_loop_by_second[k], now - compositor_loop_since),
+                        compositor_loop_by_second[k] = compositor_loop_by[k];
+                compositor_loop_since = now, compositor_loop_then = compositor_loop_turns, compositor_loop_idle_then = compositor_loop_idle;
+        }
+}
+
 static void compositor_metric_note(unsigned long long nanoseconds)
 {
         if (compositor_present_on_card)
@@ -18998,6 +19047,7 @@ static b32 compositor_main()
                 struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32]; // 6: one more, the doors' threads
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
                 positive now = 0, until = 0;
+                b32 idle_turn = 0;
                 long awaited, wait[2];
 
                 wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
@@ -19151,8 +19201,10 @@ static b32 compositor_main()
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.
                 wait[0] = until > now ? (long)((until - now) / 1000000000ull) : 0;
                 wait[1] = until > now ? (long)((until - now) % 1000000000ull) : 0;
+                idle_turn = until && until <= now;
                 awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
                                           until ? (positive)wait : 0, 0, 0, 0);
+                compositor_loop_tick(clock_monotonic_nanoseconds(), idle_turn);
 
                 // Whatever woke the loop, a sleep may be what it woke from; and auto's theme may have turned with the clock.
                 compositor_theme_tick();
@@ -19165,6 +19217,10 @@ static b32 compositor_main()
 
                 if (awaited < 0)
                         continue;
+
+                for (unsigned int at = 0; awaited > 0 && at < count; at++)
+                        if (wanted[at].returned)
+                                compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, uevents_at, clip_at, wayland_at)]++;
 
                 if (wanted[0].returned)
                         running = 0;

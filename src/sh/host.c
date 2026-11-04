@@ -22483,6 +22483,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  (positive)table->metric_maps, (positive)table->metric_map_hits, (positive)table->metric_map_misses, (positive)table->metric_wakes,
                  (positive)table->metric_jobs, (positive)table->metric_job_mean);
         host_say(log, "  metrics         %p presents a second, %p list frames a second\n", (positive)table->metric_presents, (positive)table->metric_lists);
+        host_say(log, "  wakes           compositor loop %p turns a second, %p of them with nothing to wait for\n", (positive)table->metric_loops, (positive)table->metric_loop_idle);
+        host_say(log, "  wakes by        signals %p, watch %p, inputs %p, windows %p, done %p, card %p, uevents %p, clip %p, wayland %p, other %p\n",
+                 (positive)table->metric_loop_by[0], (positive)table->metric_loop_by[1], (positive)table->metric_loop_by[2], (positive)table->metric_loop_by[3],
+                 (positive)table->metric_loop_by[4], (positive)table->metric_loop_by[5], (positive)table->metric_loop_by[6], (positive)table->metric_loop_by[7],
+                 (positive)table->metric_loop_by[8], (positive)table->metric_loop_by[9]);
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {
                 struct windows_issues board;

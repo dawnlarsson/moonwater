@@ -778,6 +778,7 @@ struct window_place
 #define WINDOWS_REFUSED_TURN 2u
 #define WINDOWS_REFUSED_PLACE 4u
 
+#define WINDOWS_LOOP_SOURCES 10 // the compositor loop's wake sources (metric_loop_by)
 struct windows
 {
         // The output: its pixels, how many of them one drawn pixel is, a frame in nanoseconds.
@@ -1056,6 +1057,11 @@ struct windows
         unsigned int metric_card_mean, metric_card_worst, metric_processor_mean, metric_processor_worst;
         unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
         unsigned int metric_presents, metric_lists;
+        // metric_loops: the compositor's loop turns in the last second, and metric_loop_idle the turns that waited for nothing (a timer already due).
+        unsigned int metric_loops, metric_loop_idle;
+        // metric_loop_by: the same turns a second by what returned events: signals, the watch, inputs, doors, done, card, uevents, clip,
+        // wayland (xwm too), other (WINDOWS_LOOP_SOURCES of them).
+        unsigned int metric_loop_by[WINDOWS_LOOP_SOURCES];
         // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
         // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
         unsigned int kernel_dismiss;
