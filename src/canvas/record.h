@@ -453,6 +453,12 @@ static void compositor_record_classify(struct compositor_record_shot *s, const s
                         compositor_record_classed[c]++;
                         if (kept)
                                 compositor_record_write_ppm(s->pixels, width, height, s->seq, compositor_record_class_name[c]);
+                        // A tear is kept with the frames either side of it, so the splice can be read against them.
+                        if (kept && c == COMPOSITOR_RECORD_TEAR)
+                        {
+                                compositor_record_write_ppm(p->pixels, width, height, p->seq, "tear-before");
+                                compositor_record_write_ppm(n->pixels, width, height, n->seq, "tear-after");
+                        }
                         if (compositor_record_event_count < COMPOSITOR_RECORD_EVENTS)
                         {
                                 unsigned int *e = compositor_record_events[compositor_record_event_count++];
@@ -478,7 +484,8 @@ static void compositor_record_capture(unsigned long long when)
         for (unsigned int y = 0; y < height; y++)
                 memory_copy(cur->pixels + (unsigned long)y * width, compositor.scanout + (unsigned long)y * stride, (unsigned long)width * 4);
         cur->when = when;
-        cur->seq = compositor_record_taken;
+        // The frame's number is the present's (since the compositor started), so two recordings never write the same file.
+        cur->seq = (unsigned int)compositor_records_all;
         cur->sizes = compositor_record_pending_sizes;
         cur->rect_count = compositor_record_pending_count;
         memory_copy(cur->rects, compositor_record_pending, sizeof(cur->rects));

@@ -143,6 +143,9 @@ session()
         bin/moonwater debug > "$work/debug.out" 2>&1
         row "debug has the last record" grep -q "last record" "$work/debug.out"
 
+        # the record's frames, out of the session's /run, for the contact sheets and the reading of a tear
+        mkdir -p "$work/frames"
+        cp /run/moonwater/record/*.ppm "$work/frames/" 2> /dev/null
         kill "$cpid" 2> /dev/null
         wait "$cpid" 2> /dev/null
         return "$failures"
