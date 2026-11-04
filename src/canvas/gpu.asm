@@ -444,6 +444,8 @@ scene:
 	s_cbranch_scc1	.scene_mix
 	s_cmp_eq_u32	s47, 6
 	s_cbranch_scc1	.scene_close
+	s_cmp_eq_u32	s47, 7
+	s_cbranch_scc1	.scene_turn
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -526,6 +528,18 @@ scene:
 	v_cndmask_b32_e64 \o, \o, v42, \mk
 .endm
 
+; one load of a turned picture: the pixel \k places along the row from the lane's first (its index in v30 and the step in s80), into \out
+.macro turnload out, k
+	s_mul_i32	s95, s80, \k
+	v_add_nc_u32	v38, s95, v30
+	v_lshlrev_b32	v38, 2, v38
+	v_ashrrev_i32	v40, 31, v38
+	v_add_co_u32	v38, vcc, s61, v38
+	v_mov_b32	v39, s62
+	v_add_co_ci_u32	v39, vcc, v39, v40, vcc
+	global_load_dword \out, v[38:39], off
+.endm
+
 ; one pixel of a close button's halo (compositor_close_draw): the window's own pixel \under (not the picture's under it) mixed towards window_mix (under, tone, 140) by the halo \cv
 ; (0 to 255), where the mask \mk has it and the halo is not none, the result without alpha (the tone's parts in s98 and s99: the tone's red and blue, its green, times 140 and 128
 ; in both sixteen-bit lanes)
@@ -546,6 +560,53 @@ scene:
 	s_and_b64	s[90:91], s[90:91], \mk
 	v_cndmask_b32_e64 \o, \o, v48, s[90:91]
 .endm
+
+; a turned picture (7 | the step along a row of the rectangle plus 0x800000 << 8 (in pixels), x0, y0, x1, y1 in pixels, the address of the source's pixel for x0, y0 in two words, the step down
+; a row (signed, in pixels)): the pixel at x, y is the source's at base + (x - x0) * the first step + (y - y0) * the second, which is a copy of a rectangle turned a quarter,
+; a half or three quarters (or not turned: 1 and the pitch); each of the lane's four pixels has an address of its own
+.scene_turn:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	s_lshr_b32	s80, s56, 8
+	s_sub_i32	s80, s80, 0x800000
+	v_subrev_nc_u32	v30, s58, v4
+	v_mul_lo_u32	v30, v30, s63
+	v_subrev_nc_u32	v31, s57, v3
+	v_mul_lo_u32	v31, v31, s80
+	v_add_nc_u32	v30, v30, v31
+	s_mov_b64	s[92:93], exec
+	s_and_b64	exec, s[92:93], s[82:83]
+	turnload	v34, 0
+	s_and_b64	exec, s[92:93], s[84:85]
+	turnload	v35, 1
+	s_and_b64	exec, s[92:93], s[86:87]
+	turnload	v36, 2
+	s_and_b64	exec, s[92:93], s[88:89]
+	turnload	v37, 3
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	v_cndmask_b32_e64 v5, v5, v34, s[82:83]
+	v_cndmask_b32_e64 v6, v6, v35, s[84:85]
+	v_cndmask_b32_e64 v7, v7, v36, s[86:87]
+	v_cndmask_b32_e64 v8, v8, v37, s[88:89]
+	s_branch	.scene_loop
 
 ; a close button's halo (6 | the button's side << 8 | the picture's pitch << 16, x0, y0, x1, y1 the button in pixels, the place from the buffer's start of the side by side
 ; bytes of the halo's covers, the picture's address at x0, y0 in two words: the first and the high byte of the second, and the tone in the rest of it)

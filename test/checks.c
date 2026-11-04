@@ -123062,7 +123062,7 @@ static void check_compositor_turn(void)
         compositor.changed = 1;
         compositor.mirror = turn_mirror;
         compositor.mirror_pitch = TURN_SIDE;
-        compositor_turn_frame((const unsigned short (*)[4])clips, 2);
+        compositor_turn_frame((const unsigned short (*)[4])clips, 2, 0);
         for (unsigned int y = 0; y < TURN_H; y++)
             for (unsigned int x = 0; x < TURN_W; x++)
             {
@@ -123100,7 +123100,7 @@ static void check_compositor_turn(void)
             turn_scene[at] = 0x02000000u + at, turn_panel[at] = 0xdead0000u;
         compositor.scanout = turn_scene;
         compositor.scanout_pitch = TURN_SIDE * 4;
-        compositor_turn_frame((const unsigned short (*)[4])clip, 1);
+        compositor_turn_frame((const unsigned short (*)[4])clip, 1, 0);
         for (unsigned int y = 0; y < TURN_H; y++)
             for (unsigned int x = 0; x < TURN_W; x++)
                 wrong_scanout += turn_panel[turn_expected(90, TURN_W, TURN_H, x, y)] != turn_scene[y * TURN_SIDE + x];
@@ -191259,6 +191259,67 @@ b32 main(void)
                                                         string_format(log, "  FAIL gpu mixes round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                                       (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                                         }
+                        }
+                }
+                // Turns: a screen's rectangle of a picture turned a quarter, a half and three quarters into a panel's buffer (windows_rotate_u32, which Canvas turns a
+                // screen with), one op over the whole panel with a step along its rows and one down them, and a damage rectangle drawn alone: the rounded-out
+                // rectangle of it is the whole turn's and the rest of the buffer is as it was.
+                {
+                        enum { TP = 544, TH = 320, DP = 544, DH = 540, TROUNDS = 12 };
+                        positive tsrc_at = img_at + (1 << 20), tdst_at = img_at + (2 << 20);
+                        unsigned int address_to tsrc = (unsigned int address_to)((p8 address_to)gpu.at + tsrc_at), address_to tdst = (unsigned int address_to)((p8 address_to)gpu.at + tdst_at);
+                        static unsigned int turned_want[DP * DH];
+                        positive turn_bad = 0;
+
+                        for (int round = 0; round < TROUNDS; round++)
+                        {
+                                unsigned int degrees = round % 3 == 0 ? 90 : round % 3 == 1 ? 180 : 270;
+                                int lw = 4 * (60 + (int)(gpu_random() % 70)), lh = 4 * (40 + (int)(gpu_random() % 40)), ox = (int)(gpu_random() % 20), oy = (int)(gpu_random() % 10);
+                                int pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw, stepx, stepy;
+                                long first;
+                                positive at;
+                                unsigned int x0 = gpu_random() % (unsigned int)lw, y0 = gpu_random() % (unsigned int)lh, x1, y1, panel[4];
+                                unsigned int address_to q = ops;
+
+                                x1 = x0 + 1 + gpu_random() % (unsigned int)(lw - (int)x0), y1 = y0 + 1 + gpu_random() % (unsigned int)(lh - (int)y0);
+                                if (round % 4 == 3)
+                                        x0 = 0, y0 = 0, x1 = (unsigned int)lw, y1 = (unsigned int)lh;
+                                for (positive i = 0; i < (positive)TP * TH; i++)
+                                        tsrc[i] = gpu_random();
+                                for (positive i = 0; i < (positive)DP * DH; i++)
+                                        tdst[i] = turned_want[i] = 0;
+                                windows_rotate_u32(turned_want, DP, tsrc + (positive)oy * TP + (positive)ox, TP, (unsigned int)lw, (unsigned int)lh, degrees, 0, 0, (unsigned int)lw, (unsigned int)lh);
+                                if (degrees == 90)
+                                        stepx = -TP, stepy = 1, first = (long)(oy + lh - 1) * TP + ox;
+                                else if (degrees == 270)
+                                        stepx = TP, stepy = -1, first = (long)oy * TP + ox + lw - 1;
+                                else
+                                        stepx = -1, stepy = -TP, first = (long)(oy + lh - 1) * TP + ox + lw - 1;
+                                at = GPU_VA + tsrc_at + 4ull * (positive)first;
+                                q[0] = 7u | (unsigned int)(stepx + 0x800000) << 8, q[1] = 0, q[2] = 0, q[3] = (unsigned int)pw, q[4] = (unsigned int)ph;
+                                q[5] = (unsigned int)at, q[6] = (unsigned int)(at >> 32), q[7] = (unsigned int)stepy;
+                                windows_rotate_panel((unsigned int)lw, (unsigned int)lh, degrees, x0, y0, x1, y1, panel);
+                                if (!gpu_scene(ops_at, 1, bins_at, tdst_at, DP, (unsigned int)pw, (unsigned int)ph, panel[0], panel[1], panel[2], panel[3]))
+                                {
+                                        check("gpu turns: the scene finishes", false);
+                                        return test_report(null);
+                                }
+                                {
+                                        unsigned int rx0 = (panel[0] >> 6) << 6, rx1 = ((panel[2] + 63) >> 6) << 6, ry0 = (panel[1] >> 2) << 2, ry1 = ((panel[3] + 3) >> 2) << 2;
+
+                                        rx1 = rx1 > (unsigned int)pw ? (unsigned int)pw : rx1, ry1 = ry1 > (unsigned int)ph ? (unsigned int)ph : ry1;
+                                        for (unsigned int y = 0; y < (unsigned int)ph; y++)
+                                                for (unsigned int x = 0; x < (unsigned int)pw; x++)
+                                                {
+                                                        int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
+                                                        unsigned int want_pixel = inside ? turned_want[(positive)y * DP + x] : 0;
+
+                                                        checks++;
+                                                        if (tdst[(positive)y * DP + x] != want_pixel && (++failures, ++turn_bad) < 6)
+                                                                string_format(log, "  FAIL gpu turns %p (%p degrees): pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)degrees, (positive)x, (positive)y,
+                                                                              (positive)tdst[(positive)y * DP + x], (positive)want_pixel);
+                                                }
+                                }
                         }
                 }
         }

@@ -6823,10 +6823,14 @@ static int compositor_turning_software(void)
         memory is only ever written: a read of it came to about ten megabytes a second on a real card, and a frame of
         2560 by 1080 a second.
 */
-static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips)
+#ifdef MOONWATER_GPU_C
+static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1);
+#endif
+// gpu: the scene was composed by the GPU into the scanout (there is no mirror of it then), and the GPU turns it.
+static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips, int gpu)
 {
-        const unsigned int *scene = compositor.changed > 0 && compositor.mirror ? compositor.mirror : compositor.scanout;
-        unsigned long pitch = compositor.changed > 0 && compositor.mirror ? compositor.mirror_pitch : compositor.scanout_pitch / 4;
+        const unsigned int *scene = !gpu && compositor.changed > 0 && compositor.mirror ? compositor.mirror : compositor.scanout;
+        unsigned long pitch = !gpu && compositor.changed > 0 && compositor.mirror ? compositor.mirror_pitch : compositor.scanout_pitch / 4;
 
         for (unsigned int at = 0; at < compositor.outputs && clips; at++)
         {
@@ -6848,6 +6852,9 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
 
                         if (x0 >= x1 || y0 >= y1)
                                 continue;
+#ifdef MOONWATER_GPU_C
+                        if (!gpu || !compositor_gpu_rotate(at, screen, degrees, x0 - screen[0], y0 - screen[1], x1 - screen[0], y1 - screen[1]))
+#endif
                         windows_rotate_u32(compositor_turns[at].pixels, compositor_turns[at].pitch / 4,
                                            scene + (unsigned long)screen[1] * pitch + (unsigned long)screen[0], pitch,
                                            (unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
@@ -6886,6 +6893,7 @@ static struct
         int up, dead, force, told; // started; given up; headless is to use it (-G); said once that it composes
         unsigned int failures;     // hangs in a row
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
+        positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
 } compositor_gpu_state;
 
 // The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
@@ -6921,7 +6929,10 @@ static positive compositor_gpu_output(void)
                 compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
         }
         else if (compositor_gpu_state.out_key != key || !compositor_gpu_state.out)
+        {
+                gpu_unimport(compositor_gpu_state.out);
                 compositor_gpu_state.out = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes), compositor_gpu_state.out_key = key;
+        }
         return compositor_gpu_state.out;
 }
 
@@ -6979,6 +6990,41 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         compositor_gpu_state.failures = 0;
         gpu_trim();
         return 1;
+}
+
+// A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:
+// one op over the whole panel with a step along its rows and one down them): 1 when it is, 0 when the processor is to.
+static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1)
+{
+        struct compositor_turn *turn = &compositor_turns[at];
+        struct compositor_gscene *g = &compositor_gscene;
+        unsigned int lw = (unsigned int)screen[2], lh = (unsigned int)screen[3], pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw, panel[4];
+        long pitch = (long)(compositor.scanout_pitch / 4), origin = (long)screen[1] * pitch + screen[0], first, stepx, stepy;
+        unsigned int *op;
+        positive from, to;
+
+        if (!compositor_gpu_state.up || !compositor_gpu_state.out || compositor.card < 0)
+                return 0;
+        if (compositor_gpu_state.turn_key[at] != turn->handle || !compositor_gpu_state.turn_va[at])
+        {
+                gpu_unimport(compositor_gpu_state.turn_va[at]);
+                compositor_gpu_state.turn_va[at] = gpu_import(compositor.card, turn->handle, turn->bytes), compositor_gpu_state.turn_key[at] = turn->handle;
+        }
+        if (!compositor_gpu_state.turn_va[at] || (degrees != 90 && degrees != 180 && degrees != 270))
+                return 0;
+        if (degrees == 90)
+                stepx = -pitch, stepy = 1, first = origin + ((long)lh - 1) * pitch;
+        else if (degrees == 270)
+                stepx = pitch, stepy = -1, first = origin + (long)lw - 1;
+        else
+                stepx = -1, stepy = -pitch, first = origin + ((long)lh - 1) * pitch + (long)lw - 1;
+        from = compositor_gpu_state.out + 4ull * (positive)first;
+        to = compositor_gpu_state.turn_va[at];
+        op = g->ops;
+        op[0] = 7u | (unsigned int)(stepx + 0x800000) << 8, op[1] = op[2] = 0, op[3] = pw, op[4] = ph;
+        op[5] = (unsigned int)from, op[6] = (unsigned int)(from >> 32), op[7] = (unsigned int)stepy;
+        windows_rotate_panel(lw, lh, degrees, x0, y0, x1, y1, panel);
+        return gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, to, (unsigned int)(turn->pitch / 4), pw, ph, panel[0], panel[1], panel[2], panel[3]);
 }
 #endif
 
@@ -7188,10 +7234,10 @@ static void compositor_present(void)
         }
 
 #ifdef MOONWATER_GPU_C
-        int gpu = !turning && compositor_gpu_present(frames, count);
+        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu;
         int apart = !gpu && compositor_changed_ready();
 #else
-        int apart = compositor_changed_ready();
+        int apart = compositor_changed_ready(), gpu_composed = 0;
 #endif
         struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
         unsigned int clips = 0;
@@ -7243,7 +7289,7 @@ static void compositor_present(void)
                 compositor_dirty_screens((const unsigned short (*)[4])clip, clips);
         // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
         if (clips && turning)
-                compositor_turn_frame((const unsigned short (*)[4])clip, clips);
+                compositor_turn_frame((const unsigned short (*)[4])clip, clips, gpu_composed);
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.

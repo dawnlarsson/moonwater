@@ -7,7 +7,7 @@
 #define GPU_VA 0x1000000000ull
 #define GPU_DATA 40960 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024
 
-static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; unsigned int address_to at; positive size; } gpu; // broken: the card is there and drew the self-test wrong
+static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size; } gpu; // broken: the card is there and drew the self-test wrong
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -552,11 +552,27 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
                 return 0;
         system_close((int)share[2]);
         va[0] = share[0];
-        if (!gpu_io(1u, 8, 64, va) || gpu.imports == 8)
+        if (gpu.imports == 8 || !gpu_io(1u, 8, 64, va))
                 return 0;
-        gpu.imported[gpu.imports++] = share[0];
+        gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported[gpu.imports++] = share[0];
         gpu_map_next += va[4];
         return at;
+}
+
+// A buffer gpu_import made, let go of (its mode changed, it was made again): unmapped and closed.
+static void gpu_unimport(positive at)
+{
+        for (unsigned int i = 0; at && i < gpu.imports; i++)
+                if (gpu.imported_va[i] == at)
+                {
+                        p64 va[8] = {gpu.imported[i], 2, at, 0, gpu.imported_bytes[i]}, close[1] = {gpu.imported[i]};
+
+                        gpu_io(1u, 8, 64, va);
+                        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+                        gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
+                        gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imports--;
+                        return;
+                }
 }
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
