@@ -112,6 +112,55 @@ def source_digest():
     return digest.hexdigest()
 
 
+BUILTIN_RATCHET = ROOT / 'test/builtin_ratchet'
+BUILTIN_HOME = ('src/lib.c', 'src/lib.util.c')
+
+
+def builtin_counts():
+    """The compiler's __builtin_ names written outside the library, by file.
+       The library (src/lib.c, src/lib.util.c) is where a primitive is wrapped
+       once, under a name of ours; everything else calls that name, because the
+       library's assembly is the fastest body there is and a __builtin_memcpy
+       is the compiler's own, whatever it picks. Comments do not count."""
+    counts = {}
+    for path in production_sources():
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in BUILTIN_HOME:
+            continue
+        text = path.read_text(errors='replace')
+        text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+        text = re.sub(r'//[^\n]*', '', text)
+        found = len(re.findall(r'__builtin_', text))
+        if found:
+            counts[relative] = found
+    return counts
+
+
+def builtin_ratchet():
+    allowed = {}
+    if BUILTIN_RATCHET.is_file():
+        for line in BUILTIN_RATCHET.read_text().splitlines():
+            if line and not line.startswith('#'):
+                path, count = line.rsplit(None, 1)
+                allowed[path] = int(count)
+    return allowed
+
+
+def write_builtin_ratchet():
+    """Only ever down: a file's allowance becomes the smaller of what it was
+       and what it is now, and a file with none left is dropped."""
+    allowed = builtin_ratchet()
+    counts = builtin_counts()
+    lowest = {path: min(allowed.get(path, count), count)
+              for path, count in counts.items()}
+    BUILTIN_RATCHET.write_text(
+        '# __builtin_ names outside src/lib.c and src/lib.util.c, per file: a '
+        'file may not have more than this,\n# and the aim is none. Lower it '
+        'with python3 test/function_audit.py --builtins.\n' +
+        ''.join(f'{path} {count}\n' for path, count in sorted(lowest.items())))
+    return lowest
+
+
 def ordinary_definitions(path):
     """Use the compact inventory's comment/string-safe C declarator parser."""
     relative = path.relative_to(ROOT).as_posix()
@@ -329,6 +378,9 @@ def main():
     parser.add_argument('--check', action='store_true',
                         help='require the production source to match the last '
                              'complete audit')
+    parser.add_argument('--builtins', action='store_true',
+                        help='lower the __builtin_ ratchet to what the tree '
+                             'has now (it never goes up)')
     parser.add_argument('--seal', action='store_true',
                         help='write the seal from the tree as it stands, for '
                              'after a change has been accounted for')
@@ -393,7 +445,24 @@ def main():
                 print(f'function audit: {key} {before} -> {value}')
         return 0
 
+    if arguments.builtins:
+        lowest = write_builtin_ratchet()
+        print('function audit: __builtin_ outside the library: %d in %d files' %
+              (sum(lowest.values()), len(lowest)))
+        return 0
+
     if arguments.check:
+        allowed = builtin_ratchet()
+        over = [(path, count, allowed.get(path, 0))
+                for path, count in sorted(builtin_counts().items())
+                if count > allowed.get(path, 0)]
+        if over:
+            for path, count, most in over:
+                print('function audit: %s has %d __builtin_ names, the ratchet '
+                      'allows %d: call the library\'s name (src/lib.c, '
+                      'src/lib.util.c), and where it has none add one there' %
+                      (path, count, most), file=sys.stderr)
+            return 1
         if not SEAL.is_file():
             print('function audit: missing %s' % SEAL.relative_to(ROOT),
                   file=sys.stderr)
