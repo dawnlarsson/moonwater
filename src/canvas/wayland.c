@@ -393,6 +393,10 @@ struct wayland_surface
         unsigned int sub_id, cached;
         long sub_x, sub_y, pend_x, pend_y, sub_order;
         unsigned char tearing, shortcuts; // a tearing control and a shortcuts inhibitor it has
+        // An X11 window's surface (xwayland_shell_v1): whether an xwayland_surface_v1 has it, and the serial its set_serial gave.
+        // A zwp_xwayland_keyboard_grab_v1 holds the keys as a shortcuts inhibitor does (xgrab).
+        unsigned char xsurface, xserial_set, xgrab;
+        unsigned long long xserial;
         unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, shown_full, translucent;
         long translucent_x, translucent_y, translucent_w, translucent_h; // where a translucent picture was laid
         struct wayland_rect shown_rect;
@@ -990,6 +994,8 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_zwp_pointer_gestures_v1, 3},
     {WLI_ext_idle_notifier_v1, 2},
     {WLI_xdg_toplevel_icon_manager_v1, 1},
+    {WLI_xwayland_shell_v1, 1},
+    {WLI_zwp_xwayland_keyboard_grab_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -5635,6 +5641,74 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
         return WAYLAND_OK;
 }
 
+/*
+        xwayland_shell_v1 and zwp_xwayland_keyboard_grab_manager_v1, the two protocols an X server (Xwayland) uses when its X
+        windows are wl_surfaces of this compositor. get_xwayland_surface gives a surface its xwayland_surface_v1 (a surface with a
+        role of its own is refused), and set_serial gives that surface the X11 serial of its window: the X window manager, which
+        is this compositor too, names the same serial when it associates the window (wayland_serial_row). A grab of the keyboard
+        holds the keys as a shortcuts inhibitor does, and is let go by its destroy; the chords that a shortcuts inhibitor
+        suspends are the compositor's to suspend, and read through wayland_row_shortcuts.
+*/
+static int wayland_xwayland_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *surface;
+
+        if (self->iface == WLI_xwayland_shell_v1)
+        {
+                if (op == WLQ_xwayland_shell_v1_get_xwayland_surface)
+                {
+                        surface = wayland_surface_of(c, a[1].slot);
+                        if (!surface)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
+                        if (surface->xsurface || (surface->flags & WAYLAND_SURFACE_XDG) || surface->role != WAYLAND_ROLE_NONE)
+                                return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
+                        surface->xsurface = 1;
+                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                }
+                return WAYLAND_OK;
+        }
+        if (self->iface == WLI_xwayland_surface_v1)
+        {
+                if (op == WLQ_xwayland_surface_v1_set_serial)
+                {
+                        unsigned long long serial = ((unsigned long long)a[1].u << 32) | a[0].u;
+
+                        surface = wayland_surface_of(c, self - c->objects);
+                        if (!surface)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
+                        if (surface->xserial_set)
+                                return wayland_fail(c, self->id, WLN_xwayland_surface_v1_error_already_associated,
+                                                    "the surface has a serial");
+                        if (!serial)
+                                return wayland_fail(c, self->id, WLN_xwayland_surface_v1_error_invalid_serial, "the serial is zero");
+                        surface->xserial = serial;
+                        surface->xserial_set = 1;
+                }
+                return WAYLAND_OK;
+        }
+        if (self->iface == WLI_zwp_xwayland_keyboard_grab_manager_v1)
+        {
+                if (op == WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard)
+                {
+                        surface = wayland_surface_of(c, a[1].slot);
+                        if (!surface)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                        surface->xgrab = 1;
+                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                }
+                return WAYLAND_OK;
+        }
+        if (self->iface == WLI_zwp_xwayland_keyboard_grab_v1)
+        {
+                surface = wayland_surface_of(c, self - c->objects);
+                if (surface && op == WLQ_zwp_xwayland_keyboard_grab_v1_destroy)
+                        surface->xgrab = 0;
+        }
+        return WAYLAND_OK;
+}
+
 static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
@@ -6060,6 +6134,12 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_tearing_control_manager_v1:
                 case WLI_wp_tearing_control_v1:
                         status = wayland_games_request(c, o, op, a);
+                        break;
+                case WLI_xwayland_shell_v1:
+                case WLI_xwayland_surface_v1:
+                case WLI_zwp_xwayland_keyboard_grab_manager_v1:
+                case WLI_zwp_xwayland_keyboard_grab_v1:
+                        status = wayland_xwayland_request(c, o, op, a);
                         break;
                 case WLI_xdg_activation_v1:
                 case WLI_xdg_activation_token_v1:
@@ -6920,13 +7000,31 @@ WAYLAND_API long wayland_row_attention(long row)
         return s ? s->attention : 0;
 }
 
+/* The window of the surface whose xwayland_surface_v1 gave this X11 serial: its row, -1 while it has none, -2 when no surface has the serial. */
+WAYLAND_API long wayland_serial_row(unsigned long long serial)
+{
+        for (long at = 0; at < WAYLAND_CLIENTS; at++)
+        {
+                struct wayland_client *c = wayland.client[at];
+
+                for (long slot = 0; c && slot < WAYLAND_SURFACES; slot++)
+                {
+                        struct wayland_surface *s = &c->surfaces[slot];
+
+                        if (s->live && s->xserial_set && s->xserial == serial)
+                                return s->row >= 0 && s->row < WAYLAND_ROWS ? s->row : -1;
+                }
+        }
+        return -2;
+}
+
 /* Whether a window has a keyboard shortcuts inhibitor, and whether its tearing hint is asynchronous (allowed to tear). */
 WAYLAND_API long wayland_row_shortcuts(long row)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
-        return s ? s->shortcuts : 0;
+        return s ? (s->shortcuts || s->xgrab) : 0;
 }
 
 WAYLAND_API long wayland_row_async(long row)

@@ -168123,7 +168123,7 @@ static void wl_file_put(long fd, long offset, const void *bytes, long count)
 struct session
 {
         struct wlc *c;
-        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary, dmabuf, relative, constraints, idle, shortcuts, tearing;
+        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary, dmabuf, relative, constraints, idle, shortcuts, tearing, xshell, xgrab;
         long fd;
 };
 
@@ -168161,6 +168161,8 @@ static void session_open(struct session *s)
         s->idle = wl_global(s->c, s->registry, WLI_zwp_idle_inhibit_manager_v1, 1);
         s->shortcuts = wl_global(s->c, s->registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
         s->tearing = wl_global(s->c, s->registry, WLI_wp_tearing_control_manager_v1, 1);
+        s->xshell = wl_global(s->c, s->registry, WLI_xwayland_shell_v1, 1);
+        s->xgrab = wl_global(s->c, s->registry, WLI_zwp_xwayland_keyboard_grab_manager_v1, 1);
 }
 
 /* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
@@ -172523,6 +172525,8 @@ static void game_open(struct gamec *g)
         g->k.s.idle = wl_global(c, g->k.s.registry, WLI_zwp_idle_inhibit_manager_v1, 1);
         g->k.s.shortcuts = wl_global(c, g->k.s.registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
         g->k.s.tearing = wl_global(c, g->k.s.registry, WLI_wp_tearing_control_manager_v1, 1);
+        g->k.s.xshell = wl_global(c, g->k.s.registry, WLI_xwayland_shell_v1, 1);
+        g->k.s.xgrab = wl_global(c, g->k.s.registry, WLI_zwp_xwayland_keyboard_grab_manager_v1, 1);
         g->relative = 0;
 }
 
@@ -172692,6 +172696,53 @@ static void test_games(void)
         wlc_send(cd, d.k.s.shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, wlc_id(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1),
                  d.k.s.surface, d.k.s.seat);
         WLCHECK(refused_with(cd, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited), "a surface has one inhibitor");
+        wlc_end(cd);
+
+        /* what an X server asks of its windows (xwayland_shell_v1, the keyboard grab): a surface with no role gets its
+           xwayland_surface_v1 and a serial once; a second serial, a zero one and a surface with a role of its own are refused;
+           the serial is known while no window has the surface, and the grab holds the keys until its destroy */
+        game_open(&d);
+        cd = d.k.s.c;
+        WLCHECK(d.k.s.xshell && d.k.s.xgrab, "the Xwayland shell and the keyboard grab manager are offered");
+        {
+                unsigned long surface = wlc_id(cd, WLI_wl_surface, 6), xwin = wlc_id(cd, WLI_xwayland_surface_v1, 1);
+
+                wlc_send(cd, d.k.s.compositor, WLQ_wl_compositor_create_surface, surface);
+                wlc_send(cd, d.k.s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
+                WLCHECK(cd->errors == 0, "a surface with no role gets an xwayland_surface_v1 (%s)", cd->error_text);
+                wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0x1234UL, 0UL);
+                WLCHECK(cd->errors == 0 && wayland_serial_row(0x1234) == -1,
+                        "its serial is known to the window manager, with no window yet (%s)", cd->error_text);
+                wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0x5678UL, 0UL);
+                WLCHECK(refused_with(cd, WLN_xwayland_surface_v1_error_already_associated), "a surface has one serial");
+        }
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        wlc_send(cd, d.k.s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, wlc_id(cd, WLI_xwayland_surface_v1, 1), d.k.s.surface);
+        WLCHECK(refused_with(cd, WLN_xwayland_shell_v1_error_role), "a window's surface, with its role, is refused an xwayland_surface_v1");
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        {
+                unsigned long surface = wlc_id(cd, WLI_wl_surface, 6), xwin = wlc_id(cd, WLI_xwayland_surface_v1, 1);
+
+                wlc_send(cd, d.k.s.compositor, WLQ_wl_compositor_create_surface, surface);
+                wlc_send(cd, d.k.s.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, surface);
+                wlc_send(cd, xwin, WLQ_xwayland_surface_v1_set_serial, 0UL, 0UL);
+                WLCHECK(refused_with(cd, WLN_xwayland_surface_v1_error_invalid_serial), "a zero serial is refused");
+        }
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        {
+                unsigned long grab = wlc_id(cd, WLI_zwp_xwayland_keyboard_grab_v1, 1);
+
+                wlc_send(cd, d.k.s.xgrab, WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard, grab, d.k.s.surface, d.k.s.seat);
+                WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 1, "a keyboard grab holds the keys of its window (%s)", cd->error_text);
+                wlc_send(cd, grab, WLQ_zwp_xwayland_keyboard_grab_v1_destroy);
+                WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 0, "and lets them go with its destroy (%s)", cd->error_text);
+        }
         wlc_end(cd);
         game_open(&d);
         cd = d.k.s.c;

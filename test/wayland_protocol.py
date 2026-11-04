@@ -110,6 +110,9 @@ CONFIG = [
     ("protocols", "staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml", [
         "xdg_toplevel_icon_manager_v1", "xdg_toplevel_icon_v1",
     ]),
+    ("protocols", "unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml", [
+        "zwp_xwayland_keyboard_grab_manager_v1", "zwp_xwayland_keyboard_grab_v1",
+    ]),
 ]
 
 

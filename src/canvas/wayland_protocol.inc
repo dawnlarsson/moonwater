@@ -83,6 +83,8 @@ enum {
         WLI_ext_idle_notification_v1,
         WLI_xdg_toplevel_icon_manager_v1,
         WLI_xdg_toplevel_icon_v1,
+        WLI_zwp_xwayland_keyboard_grab_manager_v1,
+        WLI_zwp_xwayland_keyboard_grab_v1,
         WLI_COUNT
 };
 
@@ -166,6 +168,8 @@ enum {
 #define WLV_ext_idle_notification_v1 2
 #define WLV_xdg_toplevel_icon_manager_v1 1
 #define WLV_xdg_toplevel_icon_v1 1
+#define WLV_zwp_xwayland_keyboard_grab_manager_v1 1
+#define WLV_zwp_xwayland_keyboard_grab_v1 1
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -731,6 +735,9 @@ enum {
 #define WLN_xdg_toplevel_icon_v1_error_invalid_buffer 1
 #define WLN_xdg_toplevel_icon_v1_error_immutable 2
 #define WLN_xdg_toplevel_icon_v1_error_no_buffer 3
+#define WLQ_zwp_xwayland_keyboard_grab_manager_v1_destroy 0
+#define WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard 1
+#define WLQ_zwp_xwayland_keyboard_grab_v1_destroy 0
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1077,6 +1084,9 @@ static const unsigned char wl_e_xdg_toplevel_icon_manager_v1_done[] = {0, 0};
 static const unsigned char wl_q_xdg_toplevel_icon_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_xdg_toplevel_icon_v1_set_name[] = {'s', 0, 0, 0};
 static const unsigned char wl_q_xdg_toplevel_icon_v1_add_buffer[] = {'o', WLI_wl_buffer, 'i', 0, 0, 0};
+static const unsigned char wl_q_zwp_xwayland_keyboard_grab_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard[] = {'n', WLI_zwp_xwayland_keyboard_grab_v1, 'o', WLI_wl_surface, 'o', WLI_wl_seat, 0, 0};
+static const unsigned char wl_q_zwp_xwayland_keyboard_grab_v1_destroy[] = {0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1637,6 +1647,13 @@ static const struct wl_message wl_requests_xdg_toplevel_icon_v1[] = {
         {1, 0, wl_q_xdg_toplevel_icon_v1_set_name},
         {1, 0, wl_q_xdg_toplevel_icon_v1_add_buffer},
 };
+static const struct wl_message wl_requests_zwp_xwayland_keyboard_grab_manager_v1[] = {
+        {1, 1, wl_q_zwp_xwayland_keyboard_grab_manager_v1_destroy},
+        {1, 0, wl_q_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard},
+};
+static const struct wl_message wl_requests_zwp_xwayland_keyboard_grab_v1[] = {
+        {1, 1, wl_q_zwp_xwayland_keyboard_grab_v1_destroy},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1719,4 +1736,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_ext_idle_notification_v1] = {"ext_idle_notification_v1", 2, 1, 2, wl_requests_ext_idle_notification_v1, wl_events_ext_idle_notification_v1},
         [WLI_xdg_toplevel_icon_manager_v1] = {"xdg_toplevel_icon_manager_v1", 1, 3, 2, wl_requests_xdg_toplevel_icon_manager_v1, wl_events_xdg_toplevel_icon_manager_v1},
         [WLI_xdg_toplevel_icon_v1] = {"xdg_toplevel_icon_v1", 1, 3, 0, wl_requests_xdg_toplevel_icon_v1, 0},
+        [WLI_zwp_xwayland_keyboard_grab_manager_v1] = {"zwp_xwayland_keyboard_grab_manager_v1", 1, 2, 0, wl_requests_zwp_xwayland_keyboard_grab_manager_v1, 0},
+        [WLI_zwp_xwayland_keyboard_grab_v1] = {"zwp_xwayland_keyboard_grab_v1", 1, 1, 0, wl_requests_zwp_xwayland_keyboard_grab_v1, 0},
 };
