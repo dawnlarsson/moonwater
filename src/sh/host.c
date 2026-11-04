@@ -22332,6 +22332,287 @@ static b32 host_notices(string_address address_to arguments, positive count)
         return true;
 }
 
+/*
+        The processor's use, clocks, GPU load, heat, fans and power, read from the kernel's files on demand: moonwater sensors prints
+        them, and moonwater debug prints the same block at its end. The processor's use is two samples of /proc/stat, 250 ms apart.
+        A file that is not there is left out, and nothing is read between runs.
+*/
+#define HOST_POWER_CPUS 64
+
+struct host_power_stat
+{
+        positive total[HOST_POWER_CPUS], idle[HOST_POWER_CPUS]; // [0] the whole machine, [1 + n] processor n
+        positive count;                                          // the entries seen, the whole included
+};
+
+static b32 host_power_number(string_address path, positive address_to value)
+{
+        p8 text[32];
+        bipolar got = host_read_kernel(path, text, sizeof(text));
+        positive number = 0;
+        b32 started = false;
+
+        if (got <= 0)
+                return false;
+        for (bipolar at = 0; at < got; at++)
+        {
+                if (text[at] >= '0' && text[at] <= '9')
+                        number = number * 10 + (positive)(text[at] - '0'), started = true;
+                else if (started)
+                        break;
+        }
+        *value = number;
+        return started;
+}
+
+// The starred line of a dpm table (a level, then a star on the one in use): its text, copied out.
+static b32 host_power_starred(string_address path, char address_to out, positive room)
+{
+        p8 text[256];
+        bipolar got = host_read_kernel(path, text, sizeof(text));
+        positive at = 0, stop = 0;
+
+        if (got <= 0)
+                return false;
+        for (at = 0; at < (positive)got && text[at] != '*' && text[at] != '\n'; at++)
+                ;
+        if (at >= (positive)got || text[at] != '*')
+                return false;
+        while (at > 0 && text[at - 1] != '\n')
+                at--;
+        for (stop = at; stop < (positive)got && text[stop] != '\n' && stop - at + 1 < room; stop++)
+                out[stop - at] = (char)text[stop];
+        out[stop - at] = 0;
+        return true;
+}
+
+// /proc/stat: the whole machine's line (cpu) and each processor's (cpuN), their eight times: user nice system idle iowait irq softirq steal.
+static b32 host_power_stat(struct host_power_stat address_to stat)
+{
+        static p8 text[8192];
+        bipolar got = host_read_kernel("/proc/stat", text, sizeof(text));
+        bipolar at = 0;
+
+        stat->count = 0;
+        if (got <= 0)
+                return false;
+        while (at < got)
+        {
+                b32 cpu = at + 3 < got && text[at] == 'c' && text[at + 1] == 'p' && text[at + 2] == 'u';
+                positive index = 0, values[8] = {0, 0, 0, 0, 0, 0, 0, 0}, field = 0;
+
+                if (cpu && text[at + 3] >= '0' && text[at + 3] <= '9')
+                {
+                        for (at += 3; at < got && text[at] >= '0' && text[at] <= '9'; at++)
+                                index = index * 10 + (positive)(text[at] - '0');
+                        index++;
+                }
+                else if (cpu)
+                        at += 3;
+                while (at < got && text[at] != '\n')
+                {
+                        if (text[at] >= '0' && text[at] <= '9')
+                        {
+                                positive value = 0;
+
+                                while (at < got && text[at] >= '0' && text[at] <= '9')
+                                        value = value * 10 + (positive)(text[at] - '0'), at++;
+                                if (field < 8)
+                                        values[field] = value;
+                                field++;
+                        }
+                        else
+                                at++;
+                }
+                at++;
+                if (cpu && index < HOST_POWER_CPUS)
+                {
+                        stat->total[index] = values[0] + values[1] + values[2] + values[3] + values[4] + values[5] + values[6] + values[7];
+                        stat->idle[index] = values[3] + values[4];
+                        if (index + 1 > stat->count)
+                                stat->count = index + 1;
+                }
+        }
+        return stat->count > 0;
+}
+
+// The processor's use over 250 ms: the whole machine, then each processor when there are sixteen or fewer.
+static void host_power_use(void)
+{
+        static struct host_power_stat first, second;
+        timespec nap = {0, 250000000};
+        positive count;
+
+        if (!host_power_stat(&first))
+                return;
+        system_call_2(syscall(nanosleep), (positive)address_of nap, 0);
+        if (!host_power_stat(&second))
+                return;
+        count = first.count < second.count ? first.count : second.count;
+        for (positive at = 0; at < count && at < HOST_POWER_CPUS; at++)
+        {
+                positive all = second.total[at] - first.total[at], idle = second.idle[at] - first.idle[at];
+                positive percent = all ? (all - idle) * 100 / all : 0;
+
+                if (at == 0)
+                        host_say(log, "  power           processor %p percent busy over 250 ms, the whole machine\n", percent);
+                else if (count <= 17)
+                        host_say(log, "  power           processor %p: %p percent busy\n", at - 1, percent);
+        }
+}
+
+static positive host_power_clock_sum, host_power_clock_top, host_power_clock_count;
+
+static bool host_power_cpu_visit(string_address directory, string_address name, address_any context)
+{
+        char path[320];
+        positive khz = 0;
+
+        (void)context;
+        if (name[0] != 'c' || name[1] != 'p' || name[2] != 'u' || name[3] < '0' || name[3] > '9')
+                return true;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/cpufreq/scaling_cur_freq") || !host_power_number(path, &khz))
+                return true;
+        host_power_clock_sum += khz;
+        host_power_clock_count++;
+        if (khz > host_power_clock_top)
+                host_power_clock_top = khz;
+        return true;
+}
+
+static bool host_power_drm(string_address directory, string_address name, address_any context)
+{
+        char path[256], line[64];
+        positive busy = 0;
+
+        (void)context;
+        if (name[0] != 'c' || name[1] != 'a' || name[2] != 'r' || name[3] != 'd')
+                return true;
+        for (positive at = 4; name[at]; at++)
+                if (name[at] < '0' || name[at] > '9')
+                        return true;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/device/gpu_busy_percent"))
+                return true;
+        if (host_power_number(path, &busy))
+                host_say(log, "  power           gpu %p percent busy\n", busy);
+        for (int k = 0; k < 2; k++)
+        {
+                string_address file = k ? "/device/pp_dpm_mclk" : "/device/pp_dpm_sclk";
+
+                if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+                    !host_join(path, sizeof(path), path, file))
+                        continue;
+                if (host_power_starred(path, line, sizeof(line)))
+                        host_say(log, "  power           gpu %s clock in use: %s\n", k ? "memory" : "core", line);
+        }
+        return true;
+}
+
+// Whether name ends in suffix.
+static b32 host_power_ends(string_address name, string_address suffix)
+{
+        positive length = 0, tail = 0;
+
+        while (name[length])
+                length++;
+        while (suffix[tail])
+                tail++;
+        if (length < tail)
+                return false;
+        for (positive at = 0; at < tail; at++)
+                if (name[length - tail + at] != suffix[at])
+                        return false;
+        return true;
+}
+
+static bool host_power_file(string_address directory, string_address name, address_any context)
+{
+        char path[320];
+        positive value = 0;
+        string_address chip = (string_address)context;
+
+        if (!host_power_ends(name, "_input") && !host_power_ends(name, "_average"))
+                return true;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) || !host_power_number(path, &value))
+                return true;
+        if (name[0] == 't' && name[1] == 'e' && name[2] == 'm' && name[3] == 'p')
+                host_say(log, "  power           %s %s: %p degrees\n", chip, name, value / 1000);
+        else if (name[0] == 'f' && name[1] == 'a' && name[2] == 'n')
+                host_say(log, "  power           %s %s: %p rpm\n", chip, name, value);
+        else if (name[0] == 'f' && name[1] == 'r' && name[2] == 'e' && name[3] == 'q')
+                host_say(log, "  power           %s %s: %p MHz\n", chip, name, value / 1000000);
+        else if (name[0] == 'p' && name[1] == 'o' && name[2] == 'w' && name[3] == 'e' && name[4] == 'r')
+                host_say(log, "  power           %s %s: %p mW\n", chip, name, value / 1000);
+        return true;
+}
+
+static bool host_power_chip(string_address directory, string_address name, address_any context)
+{
+        static char chip[64];
+        char path[320], label[64];
+
+        (void)context;
+        if (name[0] != 'h' || name[1] != 'w' || name[2] != 'm' || name[3] != 'o' || name[4] != 'n')
+                return true;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/name"))
+                return true;
+        if (host_read_kernel(path, (p8 address_to)label, sizeof(label)) <= 0)
+                return true;
+        for (positive at = 0; at < sizeof(label); at++)
+                if (label[at] == '\n')
+                        label[at] = 0;
+        label[sizeof(label) - 1] = 0;
+        string_copy(chip, label);
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name))
+                return true;
+        host_each_entry(path, host_power_file, (address_any)chip);
+        return true;
+}
+
+static bool host_power_battery(string_address directory, string_address name, address_any context)
+{
+        char path[320];
+        positive current = 0, voltage = 0;
+
+        (void)context;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/current_now") || !host_power_number(path, &current))
+                return true;
+        if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) ||
+            !host_join(path, sizeof(path), path, "/voltage_now") || !host_power_number(path, &voltage))
+                return true;
+        // microamps times microvolts is picowatts: a thousand billion of them a milliwatt.
+        host_say(log, "  power           %s draws %p mW (%p mA at %p mV)\n", name, current / 1000 * voltage / 1000000,
+                 current / 1000, voltage / 1000);
+        return true;
+}
+
+// The block: moonwater sensors prints it, and moonwater debug prints it at its end.
+static void host_power_block(void)
+{
+        host_say(log, "  power           the machine as the kernel reports it, read now\n");
+        host_power_use();
+        host_power_clock_sum = host_power_clock_top = host_power_clock_count = 0;
+        host_each_entry("/sys/devices/system/cpu", host_power_cpu_visit, null);
+        if (host_power_clock_count)
+                host_say(log, "  power           processor clock: mean %p MHz, highest %p MHz, over %p processors\n",
+                         host_power_clock_sum / host_power_clock_count / 1000, host_power_clock_top / 1000, host_power_clock_count);
+        host_each_entry("/sys/class/drm", host_power_drm, null);
+        host_each_entry("/sys/class/hwmon", host_power_chip, null);
+        host_each_entry("/sys/class/power_supply", host_power_battery, null);
+}
+
+static b32 host_sensors(string_address address_to arguments, positive count)
+{
+        (void)arguments;
+        (void)count;
+        host_power_block();
+        return 0;
+}
+
 static b32 host_debug(string_address address_to arguments, positive count)
 {
         static const string_address refusals[] = {
@@ -22488,6 +22769,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  (positive)table->metric_loop_by[0], (positive)table->metric_loop_by[1], (positive)table->metric_loop_by[2], (positive)table->metric_loop_by[3],
                  (positive)table->metric_loop_by[4], (positive)table->metric_loop_by[5], (positive)table->metric_loop_by[6], (positive)table->metric_loop_by[7],
                  (positive)table->metric_loop_by[8], (positive)table->metric_loop_by[9]);
+        host_power_block();
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {
                 struct windows_issues board;
@@ -24749,6 +25031,7 @@ static const host_row host_rows[] = {
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
     {null, "notices [clear]", "the errors and warnings of the kernel the desktop has (root): clear dismisses them", 'b'},
+    {null, "sensors", "the processor use, clocks, GPU load, heat, fans and power of this machine, read now", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},
@@ -26084,6 +26367,7 @@ static b32 host_main()
             {"latency", host_latency, false},
             {"debug", host_debug, true},
             {"notices", host_notices, false, true},
+            {"sensors", host_sensors, false},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false, true},
             {"brightness", tune_brightness, false, true},
