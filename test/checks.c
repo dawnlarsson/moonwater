@@ -134575,6 +134575,18 @@ static void check_compositor_edges(void)
               compositor.swipe.state == COMPOSITOR_SWIPE_NONE && compositor.chip.kind == COMPOSITOR_CHIP_NONE && compositor.launcher_asked == 0);
     edge_at(60, 100, 1, 10000);
 
+    /* A window away from the screen's top: its own top band is where the controls come from, not the screen's. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 60, 240, 100);
+    head = table->event_head[1];
+    edge_at(100, 64, 0, 10000);
+    edge_drag(100, 64, 100, 116, 6, 10000);
+    check("edge: a swipe down from the top band of a window that is not at the screen's top shows its controls, and the window gets no touch",
+          compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == 1 && touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) == 0 &&
+              touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0);
+    edge_at(100, 116, 1, 10000);
+
     /* A swipe down from a window's top band shows its controls over the band, and the window gets no touch. */
     edge_setup(0);
     table = compositor.table;

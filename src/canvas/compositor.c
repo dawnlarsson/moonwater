@@ -16788,6 +16788,20 @@ static int compositor_swipe_landing(unsigned int at, positive now, const struct 
                 if (!compositor_swipe_screen(x, y, rect, &number))
                         return 0;
                 side = ui_edge_band_side(x, y, rect, band);
+                // A window is frameless: its top band (the band a title bar would be) is the top edge the controls come from, wherever
+                // the window is on its screen, as the screen's own top is.
+                {
+                        int tab = TASKBAR_HIT_NONE, under = compositor_under(x, y, &tab);
+
+                        if (tab == TASKBAR_HIT_NONE && under >= 0 && y >= compositor.y[under] && y - compositor.y[under] < band)
+                        {
+                                // A grip of the window (its edges and corners, which take the finger for a resize) is not its top band.
+                                compositor.touching = 1;
+                                if (!compositor_edge_zone(under, x, y))
+                                        side = UI_EDGE_TOP;
+                                compositor.touching = 0;
+                        }
+                }
                 if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
                 {
                         if ((side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right) == COMPOSITOR_SIDE_OFF)
