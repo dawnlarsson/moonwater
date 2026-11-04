@@ -9695,8 +9695,75 @@ static AUDIO_C_UNUSED int audio_c_round_wide(float v, double scale, double high)
         }
 AUDIO_C_ENCODE(audio_c_encode, )
 
+// The lane pcm_widen makes of one sample of the nine kinds it knows (see its prototype in lib.c), and a run of them.
+static AUDIO_C_UNUSED unsigned audio_c_widen_one(unsigned kind, const unsigned char *p)
+{
+        unsigned little = 0, big = 0;
+
+        if (kind == 4 || kind >= 7)
+        {
+                little = (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+                big = (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | (unsigned)p[3];
+        }
+        switch (kind)
+        {
+        case 0:
+                return (unsigned)(p[0] ^ 0x80) << 24;
+        case 1:
+        {
+                int a = p[0] ^ 0x55, t = (a & 0x0f) << 4, segment = (a & 0x70) >> 4;
+
+                if (segment == 0)
+                        t += 8;
+                else
+                {
+                        t += 0x108;
+                        if (segment > 1)
+                                t <<= segment - 1;
+                }
+                return (unsigned)((a & 0x80) ? t : -t) << 16;
+        }
+        case 2:
+        {
+                int u = ~p[0] & 0xff, t = ((u & 0x0f) << 3) + 0x84, value;
+
+                t <<= (u & 0x70) >> 4;
+                value = (u & 0x80) ? 0x84 - t : t - 0x84;
+                return (unsigned)value << 16;
+        }
+        case 3:
+                return ((unsigned)p[0] << 8 | (unsigned)p[1]) << 16;
+        case 4:
+                return big;
+        case 5:
+                return (unsigned)p[0] << 8 | (unsigned)p[1] << 16 | (unsigned)p[2] << 24;
+        case 6:
+                return (unsigned)p[2] << 8 | (unsigned)p[1] << 16 | (unsigned)p[0] << 24;
+        case 7:
+                return little << 8;
+        default:
+                return big << 8;
+        }
+}
+
+
+static AUDIO_C_UNUSED void audio_c_widen(unsigned *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
+{
+        static const unsigned char width[9] = {1, 1, 1, 2, 4, 3, 3, 4, 4};
+
+        if (kind > 8)
+                return;
+        for (unsigned long i = 0; i < samples; i++)
+                dst[i] = audio_c_widen_one((unsigned)kind, src + i * width[kind]);
+}
+
 //      A hosted check has no library: it takes this C for the routines of the library's names, which mix.c calls.
 #ifdef AUDIO_C_AS_LIBRARY
+void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
+{
+        audio_c_widen(dst, src, samples, kind);
+}
+
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
                              unsigned long phases, unsigned long pos, unsigned long step, unsigned long count)
 {
@@ -170392,6 +170459,72 @@ static void al_rows_walk(int bits, al_faults *faults)
 }
 
 /*
+        pcm_widen: the nine kinds, every count to 330 and long ones, the source put against the end of its region (a page that
+        faults after the last byte read) or at the start of one with a page that faults before it, at four byte offsets, the
+        words against the C's, the words before and after the destination untouched, and a kind past eight left alone.
+*/
+static const unsigned al_widen_width[9] = {1, 1, 1, 2, 4, 3, 3, 4, 4};
+
+static void al_widen_case(unsigned kind, unsigned long long samples, int front, unsigned phase, int sweep, al_faults *faults)
+{
+        unsigned long long bytes = samples * al_widen_width[kind < 9 ? kind : 0];
+        p8 *src = front ? (p8 *)al_low[0] + phase : (p8 *)al_high[0] - bytes;
+        unsigned *dst = front ? (unsigned *)al_low[3] + 16 : (unsigned *)al_high[3] - samples;
+        unsigned long long sum = 0;
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < bytes; i++)
+                src[i] = sweep ? (p8)(i + phase) : (p8)al_next();
+        for (unsigned long long i = 0; i < bytes; i++)
+                sum += (unsigned long long)src[i] * (i | 1);
+        for (int i = 0; i < 16; i++)
+        {
+                dst[i - 16] = 0xa5a50000u + (unsigned)i;
+                if (front)
+                        dst[samples + i] = 0x5a5a0000u + (unsigned)i;
+        }
+        for (unsigned long long i = 0; i < samples; i++)
+                dst[i] = 0xdeadbeefu;
+        VECTOR_FIRST_CALL(al_first);
+        pcm_widen(dst, src, samples, kind);
+        for (unsigned long long i = 0; i < bytes; i++)
+                sum -= (unsigned long long)src[i] * (i | 1);
+        faults->kept += sum != 0;
+        for (int i = 0; i < 16; i++)
+        {
+                faults->outside += dst[i - 16] != 0xa5a50000u + (unsigned)i;
+                if (front)
+                        faults->outside += dst[samples + i] != 0x5a5a0000u + (unsigned)i;
+        }
+        for (unsigned long long i = 0; i < samples; i++)
+                faults->bits += kind < 9 ? dst[i] != audio_c_widen_one(kind, src + i * al_widen_width[kind]) : dst[i] != 0xdeadbeefu;
+}
+
+static void al_widen_tier(void)
+{
+        static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
+        al_faults faults = {0, 0, 0, 0, 0, 0, 0};
+
+        for (unsigned kind = 0; kind < 10; kind++)
+        {
+                for (unsigned long long samples = 0; samples <= 330; samples++)
+                        for (int front = 0; front < 2; front++)
+                                al_widen_case(kind, samples, front, (unsigned)(samples & 3), (int)(samples & 1), &faults);
+                for (unsigned long i = 0; i < sizeof(longs) / sizeof(longs[0]); i++)
+                        for (int front = 0; front < 2; front++)
+                                al_widen_case(kind, longs[i], front, (unsigned)(i & 3), (int)(i & 1), &faults);
+        }
+        //      Every byte value, in every position of an eight.
+        for (unsigned kind = 0; kind < 9; kind++)
+                for (unsigned phase = 0; phase < 8; phase++)
+                        al_widen_case(kind, 256 + phase, 0, phase, 1, &faults);
+        check("pcm_widen: every kind, every count to 330 and long ones, the words the C's", faults.bits == 0);
+        check("pcm_widen: nothing read past the source or written past the words (the guard pages), the words either side untouched", faults.outside == 0);
+        check("pcm_widen: the source unchanged", faults.kept == 0);
+        check("pcm_widen: cases ran", faults.cases > 6000);
+}
+
+/*
         The mixing core with the library's loops under it: a stream of two tones at rin through a voice and a sink
         at rout, the output held to the tones at the output's own times (a filter that is centred makes an output
         frame the signal at its time). The first frames, the fade-in of the voice and the filter's lead, are left out.
@@ -171039,6 +171172,9 @@ static void al_abi_all(void)
         ((void (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 40);
         al_abi_target = (void *)resample_polyphase2_f32_rows;
         ((unsigned long long (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 3);
+        al_abi_target = (void *)pcm_widen;
+        for (unsigned long long kind = 0; kind < 9; kind++)
+                ((void (*)(unsigned *, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)((unsigned *)out0, bytes, 103, kind);
         al_abi_target = (void *)f32_scale_peak;
         ((float (*)(float *, const float *, unsigned long long, float))al_abi_call)(out0, left, 295, 0.5f);
         al_abi_target = (void *)f32_scale_add_peak;
@@ -171137,6 +171273,7 @@ b32 main(void)
                         al_decode_tier("avx2");
                         al_encode_tier("avx2");
                         al_mix2_tier();
+                        al_widen_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -171148,6 +171285,7 @@ b32 main(void)
                 al_decode_tier("sse2");
                 al_encode_tier("sse2");
                 al_mix2_tier();
+                al_widen_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -171175,6 +171313,7 @@ b32 main(void)
                         al_decode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_encode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_mix2_tier();
+                        al_widen_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -171186,6 +171325,7 @@ b32 main(void)
         al_decode_tier("neon");
         al_encode_tier("neon");
         al_mix2_tier();
+        al_widen_tier();
 #endif
         return test_report(null);
 }
@@ -171419,6 +171559,33 @@ static void au_test_formats(void)
         audio_decode(AUDIO_FORMAT_U8, bytes, 256, 1, planes);
         for (int i = 0; i < 256; i++)
                 AUCHECK(left[i] == (float)(i - 128) / 128.0f, "u8 %d", i);
+        {
+                //      More than one pass of the decoder holds (4096 lanes): two channels of 3000 frames and one of 5000 in 8 bits, two of 3000
+                //      in 16 bits big-endian; every sample its own.
+                static unsigned char run[12000];
+                static float run0[5000], run1[5000];
+                float *pair[2];
+
+                for (int i = 0; i < 12000; i++)
+                        run[i] = (unsigned char)(i * 7 + (i >> 8));
+                pair[0] = run0, pair[1] = run1;
+                audio_decode(AUDIO_FORMAT_U8, run, 3000, 2, pair);
+                for (int i = 0; i < 3000; i++)
+                        for (int c = 0; c < 2; c++)
+                                AUCHECK(pair[c][i] == (float)(run[i * 2 + c] - 128) / 128.0f, "u8 run %d/%d", i, c);
+                audio_decode(AUDIO_FORMAT_U8, run, 5000, 1, pair);
+                for (int i = 0; i < 5000; i++)
+                        AUCHECK(run0[i] == (float)(run[i] - 128) / 128.0f, "u8 long %d", i);
+                audio_decode(AUDIO_FORMAT_S16BE, run, 3000, 2, pair);
+                for (int i = 0; i < 3000; i++)
+                        for (int c = 0; c < 2; c++)
+                                AUCHECK(pair[c][i] == (float)(short)((run[i * 4 + c * 2] << 8) | run[i * 4 + c * 2 + 1]) * (1.0f / 32768.0f), "s16be run %d/%d", i, c);
+                for (int i = 0; i < 16; i++)
+                        run0[i] = 5.0f;
+                audio_decode(99, run, 16, 1, pair);
+                for (int i = 0; i < 16; i++)
+                        AUCHECK(run0[i] == 0.0f, "a format that is not one is silence %d", i);
+        }
         {
                 static const float samples[] = {0.0f, 1.0f, -1.0f, 0.5f, 1e-30f, 100.0f, -100.0f, 3.4e38f, -3.4e38f, 0.0f / 0.0f, 1.0f / 0.0f, -1.0f / 0.0f};
                 unsigned count = sizeof(samples) / sizeof(samples[0]);
@@ -189134,6 +189301,202 @@ static p64 al_mix2_run(bool assembly, positive shape, positive reps)
         return get_cpu_time() - start;
 }
 
+/*
+        The formats the decoders do not take: 512 frames of stereo and of six channels in each, pcm_widen and the library's decoder
+        (mix.c's audio_decode, a pass of 4096 lanes at a time) against the loops mix.c had, built as the service is (-O2). Kind 9
+        here is the big-endian float, which the widen reads as kind 4 and the float decoder takes.
+*/
+static float al_law[2][256];
+static const unsigned al_old_width[10] = {1, 1, 1, 2, 4, 3, 3, 4, 4, 4};
+static unsigned al_wide_lanes[4096];
+
+static unsigned al_swap(unsigned x)
+{
+        return (x >> 24) | ((x >> 8) & 0xff00u) | ((x << 8) & 0xff0000u) | (x << 24);
+}
+
+static float al_sane(float x)
+{
+        x = x > 16.0f ? 16.0f : x;
+        x = x < -16.0f ? -16.0f : x;
+        return x == x ? x : 0.0f;
+}
+
+__attribute__((noinline, noclone, optimize("O2"))) static void al_old_decode(int format, const unsigned char *src, long frames, long channels, float *const *dst)
+{
+        long bytes = al_old_width[format], stride = bytes * channels;
+
+        for (long c = 0; c < channels; c++)
+        {
+                const unsigned char *p = src + c * bytes;
+                float *d = dst[c];
+
+                switch (format)
+                {
+                case 0:
+                        for (long i = 0; i < frames; i++)
+                                d[i] = (float)((int)p[i * stride] - 128) * (1.0f / 128.0f);
+                        break;
+                case 1:
+                        for (long i = 0; i < frames; i++)
+                                d[i] = al_law[0][p[i * stride]];
+                        break;
+                case 2:
+                        for (long i = 0; i < frames; i++)
+                                d[i] = al_law[1][p[i * stride]];
+                        break;
+                case 3:
+                        for (long i = 0; i < frames; i++)
+                                d[i] = (float)(short)((p[i * stride] << 8) | p[i * stride + 1]) * (1.0f / 32768.0f);
+                        break;
+                case 9:
+                        for (long i = 0; i < frames; i++)
+                        {
+                                unsigned bits;
+                                float x;
+
+                                __builtin_memcpy(&bits, p + i * stride, 4);
+                                bits = al_swap(bits);
+                                __builtin_memcpy(&x, &bits, 4);
+                                d[i] = al_sane(x);
+                        }
+                        break;
+                case 4:
+                        for (long i = 0; i < frames; i++)
+                        {
+                                unsigned bits;
+
+                                __builtin_memcpy(&bits, p + i * stride, 4);
+                                d[i] = (float)(int)al_swap(bits) * (1.0f / 2147483648.0f);
+                        }
+                        break;
+                case 5:
+                        for (long i = 0; i < frames; i++)
+                        {
+                                const unsigned char *q = p + i * stride;
+
+                                d[i] = (float)((int)((unsigned)q[0] << 8 | (unsigned)q[1] << 16 | (unsigned)q[2] << 24) >> 8) * (1.0f / 8388608.0f);
+                        }
+                        break;
+                case 6:
+                        for (long i = 0; i < frames; i++)
+                        {
+                                const unsigned char *q = p + i * stride;
+
+                                d[i] = (float)((int)((unsigned)q[2] << 8 | (unsigned)q[1] << 16 | (unsigned)q[0] << 24) >> 8) * (1.0f / 8388608.0f);
+                        }
+                        break;
+                default:
+                        for (long i = 0; i < frames; i++)
+                        {
+                                unsigned bits;
+
+                                __builtin_memcpy(&bits, p + i * stride, 4);
+                                if (format == 8)
+                                        bits = al_swap(bits);
+                                d[i] = (float)((int)(bits << 8) >> 8) * (1.0f / 8388608.0f);
+                        }
+                        break;
+                }
+        }
+}
+
+static void al_new_decode(int format, const unsigned char *src, long frames, long channels, float *const *dst)
+{
+        long bytes = al_old_width[format], done = 0;
+
+        while (done < frames)
+        {
+                long take = 4096 / channels, c;
+                float *planes[8];
+
+                if (take > frames - done)
+                        take = frames - done;
+                for (c = 0; c < channels; c++)
+                        planes[c] = dst[c] + done;
+                pcm_widen(al_wide_lanes, src + done * channels * bytes, (unsigned long)(take * channels), format == 9 ? 4 : (unsigned long)format);
+                if (format == 9)
+                        f32_planes_from_f32(planes, (const unsigned char *)al_wide_lanes, (unsigned long)take, (unsigned long)channels);
+                else
+                        f32_planes_from_s32(planes, (const unsigned char *)al_wide_lanes, (unsigned long)take, (unsigned long)channels);
+                done += take;
+        }
+}
+
+static const char *const al_widen_names[10] = {"u8", "A-law", "mu-law", "s16 big-endian", "s32 big-endian", "s24 little-endian", "s24 big-endian", "s24_32 little-endian", "s24_32 big-endian", "f32 big-endian"};
+static int al_widen_format;
+static long al_widen_channels;
+
+static p64 al_widen_run(bool assembly, positive shape, positive reps)
+{
+        float *planes[8];
+        p64 start = get_cpu_time();
+
+        (void)shape;
+        for (int c = 0; c < 8; c++)
+                planes[c] = al_decode_out[c];
+        for (positive r = 0; r < reps; r++)
+        {
+                const unsigned char *src = al_decode_in + (r & 3) * 8192 + 4 * (r & 1);
+
+                if (assembly)
+                        al_new_decode(al_widen_format, src, 512, al_widen_channels, planes);
+                else
+                        al_old_decode(al_widen_format, src, 512, al_widen_channels, planes);
+        }
+        return get_cpu_time() - start;
+}
+
+static fn al_widen_bench(string_address tier)
+{
+        for (int byte = 0; byte < 256; byte++)
+        {
+                int a = byte ^ 0x55, t, segment, u = ~byte & 0xff, value;
+
+                t = (a & 0x0f) << 4;
+                segment = (a & 0x70) >> 4;
+                if (segment == 0)
+                        t += 8;
+                else
+                {
+                        t += 0x108;
+                        if (segment > 1)
+                                t <<= segment - 1;
+                }
+                al_law[0][byte] = (float)((a & 0x80) ? t : -t) * (1.0f / 32768.0f);
+                t = ((u & 0x0f) << 3) + 0x84;
+                t <<= (u & 0x70) >> 4;
+                value = (u & 0x80) ? 0x84 - t : t - 0x84;
+                al_law[1][byte] = (float)value * (1.0f / 32768.0f);
+        }
+        for (int format = 0; format < 10; format++)
+                for (long channels = 2; channels <= 6; channels += 4)
+                {
+                        positive reps = (1u << 20) / 512 / (positive)channels * 2 + 1, ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        al_widen_format = format;
+                        al_widen_channels = channels;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, al_widen_run(false, 0, reps), assembly, al_widen_run(true, 0, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "decode of %s, %p channels of 512 frames, %s against C -O2 as built: paired median ASM/C ", al_widen_names[format], (positive)channels, tier);
+                        al_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a call ASM ");
+                        al_hundredths((positive)(best_a * 100 / reps));
+                        string_format(log, ", C ");
+                        al_hundredths((positive)(best_c * 100 / reps));
+                        log("\n", 1);
+                }
+}
+
 static fn al_mix2_rows_run(string_address tier, bool wide)
 {
         for (positive shape = 0; shape < 3; shape++)
@@ -189354,6 +189717,7 @@ b32 main(void)
                 {
                         al_shapes_run(tier == 1 ? "avx2 fma" : "sse2");
                         al_rows_bench(tier == 1 ? "avx2 fma" : "sse2");
+                        al_widen_bench(tier == 1 ? "avx2" : "sse2");
                 }
                 al_scale_rows(tier == 0 ? "avx512" : tier == 1 ? "avx2" : "sse2", tier <= 1, tier == 0);
                 if (tier)
@@ -189376,6 +189740,7 @@ b32 main(void)
                         continue;
                 al_shapes_run(tier == 0 ? "V" : "no V");
                 al_rows_bench(tier == 0 ? "V" : "no V");
+                al_widen_bench(tier == 0 ? "V" : "no V");
                 al_scale_rows(tier == 0 ? "V" : "no V", true, false);
                 al_decode_rows(tier == 0 ? "V" : "no V", true);
                 al_encode_rows(tier == 0 ? "V" : "no V", true);
@@ -189385,6 +189750,7 @@ b32 main(void)
 #else
         al_shapes_run("neon");
         al_rows_bench("neon");
+        al_widen_bench("neon");
         al_scale_rows("neon", true, false);
         al_decode_rows("neon", true);
         al_encode_rows("neon", true);

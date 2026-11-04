@@ -114,6 +114,7 @@ void f32_pair_to_s24_32(unsigned char *dst, const float *left, const float *righ
 void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, unsigned long count);
 unsigned long f32_pair_clip(float *left, float *right, unsigned long count);
 void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, unsigned long count, unsigned long channels);
+void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind);
 #endif
 
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
@@ -211,66 +212,32 @@ AUDIO_API unsigned char audio_format_silence(long format)
         return format == AUDIO_FORMAT_U8 ? 0x80 : format == AUDIO_FORMAT_ALAW ? 0xd5 : format == AUDIO_FORMAT_ULAW ? 0xff : 0;
 }
 
-// G.711's two laws as floats, made the first time a voice needs them.
-static float audio_law[2][256];
-static int audio_law_ready;
-
+// Kept for the callers that name it: the two laws of G.711 are arithmetic in the library's pcm_widen now, and nothing is made here.
 AUDIO_API void audio_init(void)
 {
-        if (audio_law_ready)
-                return;
-        for (int byte = 0; byte < 256; byte++)
-        {
-                int a = byte ^ 0x55, t, segment, u = ~byte & 0xff, value;
-
-                // A-law: a sign, a three-bit segment and a four-bit step.
-                t = (a & 0x0f) << 4;
-                segment = (a & 0x70) >> 4;
-                if (segment == 0)
-                        t += 8;
-                else
-                {
-                        t += 0x108;
-                        if (segment > 1)
-                                t <<= segment - 1;
-                }
-                audio_law[0][byte] = (float)((a & 0x80) ? t : -t) * (1.0f / 32768.0f);
-
-                // mu-law, with its bias.
-                t = ((u & 0x0f) << 3) + 0x84;
-                t <<= (u & 0x70) >> 4;
-                value = (u & 0x80) ? 0x84 - t : t - 0x84;
-                audio_law[1][byte] = (float)value * (1.0f / 32768.0f);
-        }
-        audio_law_ready = 1;
-}
-
-// A word's bytes reversed, as the shifts say it: the compilers make the one instruction of it, and riscv64's baseline, which has
-// none, makes four shifts instead of a call to a library the programs are not linked with (__builtin_bswap32 there).
-static inline unsigned int audio_swap32(unsigned int x)
-{
-        return (x >> 24) | ((x >> 8) & 0xff00u) | ((x << 8) & 0xff0000u) | (x << 24);
-}
-
-// Samples that are not numbers or are enormous are taken for silence and a bound: a program's float is not trusted.
-static inline float audio_sane(float x)
-{
-        x = x > 16.0f ? 16.0f : x;
-        x = x < -16.0f ? -16.0f : x;
-        return x == x ? x : 0.0f;
 }
 
 /*
         frames of the format, channels of them interleaved, into one planar float array a channel. dst[c] is the channel's
-        array, written from its first element.
+        array, written from its first element. channels is 1 to AUDIO_CHANNELS_MAX.
+
+        Signed 16-bit, signed 32-bit and float samples in the machine's order are the library's decoders'. Every other format
+        goes in two library passes over a run of frames at a time: pcm_widen turns the run's samples into 32-bit lanes (8-bit
+        and the laws, the byte-swapped words, the 24-bit forms in three bytes and in four), and a decoder turns the lanes into
+        floats, the exact ones the format's C made (a lane is the sample shifted up to the top of a 32-bit integer, so the
+        integer decoder's scale gives the sample's own; a byte-swapped float is a float, held to [-16, 16] with a NaN made zero).
 */
+#define AUDIO_WIDE 4096 // lanes a pass holds
+
 AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, long channels, float *const *dst)
 {
-        long bytes = audio_format_bytes(format), stride = bytes * channels;
+        long bytes = audio_format_bytes(format), done = 0;
+        unsigned long kind;
+        static unsigned int wide[AUDIO_WIDE];
 
-        // The three formats nearly every program plays in are the library's (assembly, a plane a channel in one pass); the rest
-        // (8 bits, the laws, the other widths, the byte-swapped ones) are loops here.
-        if (frames > 0 && channels > 0 && (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
+        if (frames <= 0 || channels <= 0 || channels > AUDIO_CHANNELS_MAX)
+                return;
+        if (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE)
         {
                 if (format == AUDIO_FORMAT_S16LE)
                         f32_planes_from_s16(dst, src, (unsigned long)frames, (unsigned long)channels);
@@ -280,87 +247,30 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
                         f32_planes_from_f32(dst, src, (unsigned long)frames, (unsigned long)channels);
                 return;
         }
-        for (long c = 0; c < channels; c++)
+        kind = format == AUDIO_FORMAT_U8 ? 0 : format == AUDIO_FORMAT_ALAW ? 1 : format == AUDIO_FORMAT_ULAW ? 2 : format == AUDIO_FORMAT_S16BE ? 3 :
+               format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_F32BE ? 4 : format == AUDIO_FORMAT_S24LE ? 5 : format == AUDIO_FORMAT_S24BE ? 6 :
+               format == AUDIO_FORMAT_S24_32LE ? 7 : format == AUDIO_FORMAT_S24_32BE ? 8 : 9;
+        if (kind > 8)
         {
-                const unsigned char *p = src + c * bytes;
-                float *d = dst[c];
+                for (long c = 0; c < channels; c++)
+                        __builtin_memset(dst[c], 0, (unsigned long)frames * sizeof(float));
+                return;
+        }
+        while (done < frames)
+        {
+                long take = AUDIO_WIDE / channels, c;
+                float *planes[AUDIO_CHANNELS_MAX];
 
-                switch (format)
-                {
-                case AUDIO_FORMAT_U8:
-                        for (long i = 0; i < frames; i++)
-                                d[i] = (float)((int)p[i * stride] - 128) * (1.0f / 128.0f);
-                        break;
-                case AUDIO_FORMAT_ALAW:
-                        for (long i = 0; i < frames; i++)
-                                d[i] = audio_law[0][p[i * stride]];
-                        break;
-                case AUDIO_FORMAT_ULAW:
-                        for (long i = 0; i < frames; i++)
-                                d[i] = audio_law[1][p[i * stride]];
-                        break;
-                case AUDIO_FORMAT_S16BE:
-                        for (long i = 0; i < frames; i++)
-                                d[i] = (float)(short)((p[i * stride] << 8) | p[i * stride + 1]) * (1.0f / 32768.0f);
-                        break;
-                case AUDIO_FORMAT_F32BE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                unsigned int bits;
-                                float x;
-
-                                __builtin_memcpy(&bits, p + i * stride, 4);
-                                bits = audio_swap32(bits);
-                                __builtin_memcpy(&x, &bits, 4);
-                                d[i] = audio_sane(x);
-                        }
-                        break;
-                case AUDIO_FORMAT_S32BE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                unsigned int bits;
-
-                                __builtin_memcpy(&bits, p + i * stride, 4);
-                                d[i] = (float)(int)audio_swap32(bits) * (1.0f / 2147483648.0f);
-                        }
-                        break;
-                case AUDIO_FORMAT_S24LE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                const unsigned char *q = p + i * stride;
-                                int x = (int)((unsigned int)q[0] << 8 | (unsigned int)q[1] << 16 | (unsigned int)q[2] << 24) >> 8;
-
-                                d[i] = (float)x * (1.0f / 8388608.0f);
-                        }
-                        break;
-                case AUDIO_FORMAT_S24BE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                const unsigned char *q = p + i * stride;
-                                int x = (int)((unsigned int)q[2] << 8 | (unsigned int)q[1] << 16 | (unsigned int)q[0] << 24) >> 8;
-
-                                d[i] = (float)x * (1.0f / 8388608.0f);
-                        }
-                        break;
-                case AUDIO_FORMAT_S24_32LE:
-                case AUDIO_FORMAT_S24_32BE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                unsigned int bits;
-                                int x;
-
-                                __builtin_memcpy(&bits, p + i * stride, 4);
-                                if (format == AUDIO_FORMAT_S24_32BE)
-                                        bits = audio_swap32(bits);
-                                x = (int)(bits << 8) >> 8;
-                                d[i] = (float)x * (1.0f / 8388608.0f);
-                        }
-                        break;
-                default:
-                        for (long i = 0; i < frames; i++)
-                                d[i] = 0;
-                        break;
-                }
+                if (take > frames - done)
+                        take = frames - done;
+                for (c = 0; c < channels; c++)
+                        planes[c] = dst[c] + done;
+                pcm_widen(wide, src + done * channels * bytes, (unsigned long)(take * channels), kind);
+                if (format == AUDIO_FORMAT_F32BE)
+                        f32_planes_from_f32(planes, (const unsigned char *)wide, (unsigned long)take, (unsigned long)channels);
+                else
+                        f32_planes_from_s32(planes, (const unsigned char *)wide, (unsigned long)take, (unsigned long)channels);
+                done += take;
         }
 }
 

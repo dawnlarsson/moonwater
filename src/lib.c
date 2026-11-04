@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        449 routines (425 public, 24 local), 439 of them on all three and 10 local to one.
+        450 routines (426 public, 24 local), 440 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -357,6 +357,7 @@
           path_join                      public  yes     yes     yes
           path_split_core                local   yes     yes     yes
           path_tail_copy                 public  yes     yes     yes
+          pcm_widen                      public  yes     yes     yes
           positive_digits                public  yes     yes     yes
           positive_digits_core           local   yes     yes     yes
           positive_divide_wide           public  yes     yes     yes
@@ -43929,6 +43930,14 @@ positive f32_pair_clip(f32 address_to left, f32 address_to right, positive count
 WRITES(1, 6) WRITES(2, 6)
 fn f32_rows_mix2(f32 address_to out0, f32 address_to out1, const f32 address_to rows, positive stride, const f32 address_to matrix,
                  positive count, positive channels);
+// pcm_widen(dst, src, samples, kind): the samples of a format the decoders do not take, one to a 32-bit lane, in the form
+// f32_planes_from_s32 (or, for kind 4 read as floats, f32_planes_from_f32) turns into the floats the C made of them: kind 0 unsigned 8
+// bits (the lane (b ^ 0x80) << 24), 1 A-law and 2 mu-law (the sample's 16-bit value << 16, as G.711 decodes it), 3 signed 16 bits
+// big-endian (<< 16), 4 a 32-bit word big-endian (byte reversed), 5 and 6 signed 24 bits in three bytes little- and big-endian (<< 8),
+// 7 and 8 the low 24 bits of a 32-bit word little- and big-endian (<< 8). Exactly samples elements of the format are read and samples
+// words written; a kind past 8 is nothing. The source wants no alignment, the two do not overlap.
+WRITES(1, 3)
+fn pcm_widen(p32 address_to dst, const p8 address_to src, positive samples, positive kind);
 //      One 8-tap group of the SSE2 body: lo and hi are the byte offsets of its two vectors. rdi.. as the routine's;
 //      r15 and r13 the rows, r12 and rbx the inputs, rbp the byte offset of the turn, xmm8 f, xmm10-13 the lanes.
 #define AUDIO_POLY_SSE2_GROUP(lo, hi)                                                                    \
@@ -44393,7 +44402,7 @@ __asm__(
     ".Laudio_decode_s16_scalar_two:\n"
     ".Laudio_decode_s16_scalar_two_loop:\n   movswl (%rsi), %eax\n   xorps %xmm0, %xmm0\n   cvtsi2ss %eax, %xmm0\n   mulss .Laudio_decode_s16_scale(%rip), %xmm0\n   movss %xmm0, (%rdi)\nmovswl 2(%rsi), %eax\n   xorps %xmm0, %xmm0\n   cvtsi2ss %eax, %xmm0\n   mulss .Laudio_decode_s16_scale(%rip), %xmm0\n   movss %xmm0, (%r8)\nadd $4, %rsi\n   add $4, %rdi\n   add $4, %r8\n   dec %rdx\n   jnz .Laudio_decode_s16_scalar_two_loop\n" ASM_RET
     ".Laudio_decode_s16_multi:\n   cmp $8, %rcx\n   ja .Laudio_decode_s16_general\n"
-    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_s16_general")
+    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_s16_ms")
     ".Laudio_decode_s16_m:\n   mov $9, %eax\n   cmp $8, %ecx\n   jne .Laudio_decode_s16_m_t8\n   dec %eax\n"
     ".Laudio_decode_s16_m_t8:\n   lea (%rcx,%rcx), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_s16_m_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_s16_m_b\n.balign 64\n"
     ".Laudio_decode_s16_m_a:\n   lea (%rsi,%r8,4), %r9\n   vpmovsxwd (%rsi), %xmm0\n   vpmovsxwd (%r9), %xmm8\n   vinserti128 $1, %xmm8, %ymm0, %ymm0\n   vpmovsxwd (%rsi,%r8), %xmm1\n   vpmovsxwd (%r9,%r8), %xmm9\n"
@@ -44421,6 +44430,33 @@ __asm__(
     ".Laudio_decode_s16_m_ts:\n   movswl (%rax), %ebx\n   vxorps %xmm0, %xmm0, %xmm0\n   vcvtsi2ss %ebx, %xmm0, %xmm0\n   vmulss .Laudio_decode_s16_scale(%rip), %xmm0, %xmm0\n   vmovss %xmm0, (%r10)\n   add %r8, %rax\n"
     "   add $4, %r10\n   dec %r12\n   jnz .Laudio_decode_s16_m_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_s16_m_tc\n   pop %r12\n   pop %rbx\n"
     ".Laudio_decode_s16_m_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Laudio_decode_s16_ms:\n   mov $5, %eax\n   lea (%rcx,%rcx), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_s16_ms_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_s16_ms_b\n"
+    ".balign 64\n"
+    ".Laudio_decode_s16_ms_a:\n   movq 0(%rsi), %xmm0\n   punpcklwd %xmm0, %xmm0\n   psrad $16, %xmm0\n   movq 0(%rsi,%r8), %xmm1\n   punpcklwd %xmm1, %xmm1\n   psrad $16, %xmm1\n   movq 0(%rsi,%r8,2), %xmm2\n"
+    "   punpcklwd %xmm2, %xmm2\n   psrad $16, %xmm2\n   movq 0(%rsi,%r10), %xmm3\n   punpcklwd %xmm3, %xmm3\n   psrad $16, %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_s16_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   lea (%rsi,%r8,4), %rsi\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n"
+    "   cvtdq2ps %xmm5, %xmm5\n   mulps %xmm8, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $3, %ecx\n"
+    "   je .Laudio_decode_s16_ms_a_next\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_s16_ms_a_next:\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_s16_ms_a\n   jmp .Laudio_decode_s16_ms_tail\n.balign 64\n"
+    ".Laudio_decode_s16_ms_b:\n   movq 0(%rsi), %xmm0\n   punpcklwd %xmm0, %xmm0\n   psrad $16, %xmm0\n   movq 0(%rsi,%r8), %xmm1\n   punpcklwd %xmm1, %xmm1\n   psrad $16, %xmm1\n   movq 0(%rsi,%r8,2), %xmm2\n"
+    "   punpcklwd %xmm2, %xmm2\n   psrad $16, %xmm2\n   movq 0(%rsi,%r10), %xmm3\n   punpcklwd %xmm3, %xmm3\n   psrad $16, %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_s16_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   cvtdq2ps %xmm5, %xmm5\n"
+    "   mulps %xmm8, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n"
+    "   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n   movq 8(%rsi), %xmm0\n   punpcklwd %xmm0, %xmm0\n   psrad $16, %xmm0\n   movq 8(%rsi,%r8), %xmm1\n   punpcklwd %xmm1, %xmm1\n   psrad $16, %xmm1\n   movq 8(%rsi,%r8,2), %xmm2\n"
+    "   punpcklwd %xmm2, %xmm2\n   psrad $16, %xmm2\n   movq 8(%rsi,%r10), %xmm3\n   punpcklwd %xmm3, %xmm3\n   psrad $16, %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_s16_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 32(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   cmp $5, %ecx\n   je .Laudio_decode_s16_ms_b_next\n"
+    "   cvtdq2ps %xmm5, %xmm5\n   mulps %xmm8, %xmm5\n   mov 40(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cmp $6, %ecx\n   je .Laudio_decode_s16_ms_b_next\n   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n"
+    "   mov 48(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $7, %ecx\n   je .Laudio_decode_s16_ms_b_next\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n   mov 56(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_s16_ms_b_next:\n   lea (%rsi,%r8,4), %rsi\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_s16_ms_b\n"
+    ".Laudio_decode_s16_ms_tail:\n   add %rax, %rdx\n   jz .Laudio_decode_s16_ms_done\n   push %rbx\n   push %r12\n   xor %r9d, %r9d\n"
+    ".Laudio_decode_s16_ms_tc:\n   mov (%rdi,%r9,8), %r10\n   add %r11, %r10\n   lea (%rsi,%r9,2), %rax\n   mov %rdx, %r12\n"
+    ".Laudio_decode_s16_ms_ts:\n   movswl (%rax), %ebx\n   xorps %xmm0, %xmm0\n   cvtsi2ss %ebx, %xmm0\n   mulss .Laudio_decode_s16_scale(%rip), %xmm0\n   movss %xmm0, (%r10)\n   add %r8, %rax\n   add $4, %r10\n"
+    "   dec %r12\n   jnz .Laudio_decode_s16_ms_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_s16_ms_tc\n   pop %r12\n   pop %rbx\n"
+    ".Laudio_decode_s16_ms_done:\n"
     ASM_RET
     ".Laudio_decode_s16_general:\n   push %rbx\n   mov %rdi, %r9\n   imul $2, %rcx, %r11\n   xor %r10d, %r10d\n"
     ".Laudio_decode_s16_general_channel:\n   mov (%r9,%r10,8), %rdi\n   lea (%rsi,%r10,2), %r8\n   mov %rdx, %rbx\n"
@@ -44524,7 +44560,7 @@ __asm__(
     ".Laudio_decode_s32_scalar_two:\n"
     ".Laudio_decode_s32_scalar_two_loop:\n   mov (%rsi), %eax\n   xorps %xmm0, %xmm0\n   cvtsi2ss %eax, %xmm0\n   mulss .Laudio_decode_s32_scale(%rip), %xmm0\n   movss %xmm0, (%rdi)\nmov 4(%rsi), %eax\n   xorps %xmm0, %xmm0\n   cvtsi2ss %eax, %xmm0\n   mulss .Laudio_decode_s32_scale(%rip), %xmm0\n   movss %xmm0, (%r8)\nadd $8, %rsi\n   add $4, %rdi\n   add $4, %r8\n   dec %rdx\n   jnz .Laudio_decode_s32_scalar_two_loop\n" ASM_RET
     ".Laudio_decode_s32_multi:\n   cmp $8, %rcx\n   ja .Laudio_decode_s32_general\n"
-    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_s32_general")
+    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_s32_ms")
     ".Laudio_decode_s32_m:\n   mov $9, %eax\n   cmp $8, %ecx\n   jne .Laudio_decode_s32_m_t8\n   dec %eax\n"
     ".Laudio_decode_s32_m_t8:\n   lea 0(,%rcx,4), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_s32_m_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_s32_m_b\n.balign 64\n"
     ".Laudio_decode_s32_m_a:\n   lea (%rsi,%r8,4), %r9\n   vmovups (%rsi), %xmm0\n   vinsertf128 $1, (%r9), %ymm0, %ymm0\n   vmovups (%rsi,%r8), %xmm1\n   vinsertf128 $1, (%r9,%r8), %ymm1, %ymm1\n   vmovups (%rsi,%r8,2), %xmm2\n"
@@ -44551,6 +44587,31 @@ __asm__(
     ".Laudio_decode_s32_m_ts:\n   mov (%rax), %ebx\n   vxorps %xmm0, %xmm0, %xmm0\n   vcvtsi2ss %ebx, %xmm0, %xmm0\n   vmulss .Laudio_decode_s32_scale(%rip), %xmm0, %xmm0\n   vmovss %xmm0, (%r10)\n   add %r8, %rax\n"
     "   add $4, %r10\n   dec %r12\n   jnz .Laudio_decode_s32_m_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_s32_m_tc\n   pop %r12\n   pop %rbx\n"
     ".Laudio_decode_s32_m_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Laudio_decode_s32_ms:\n   mov $5, %eax\n   lea 0(,%rcx,4), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_s32_ms_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_s32_ms_b\n"
+    ".balign 64\n"
+    ".Laudio_decode_s32_ms_a:\n   movups 0(%rsi), %xmm0\n   movups 0(%rsi,%r8), %xmm1\n   movups 0(%rsi,%r8,2), %xmm2\n   movups 0(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_s32_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   lea (%rsi,%r8,4), %rsi\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n"
+    "   cvtdq2ps %xmm5, %xmm5\n   mulps %xmm8, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $3, %ecx\n"
+    "   je .Laudio_decode_s32_ms_a_next\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_s32_ms_a_next:\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_s32_ms_a\n   jmp .Laudio_decode_s32_ms_tail\n.balign 64\n"
+    ".Laudio_decode_s32_ms_b:\n   movups 0(%rsi), %xmm0\n   movups 0(%rsi,%r8), %xmm1\n   movups 0(%rsi,%r8,2), %xmm2\n   movups 0(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_s32_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   cvtdq2ps %xmm5, %xmm5\n"
+    "   mulps %xmm8, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n"
+    "   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n   movups 16(%rsi), %xmm0\n   movups 16(%rsi,%r8), %xmm1\n   movups 16(%rsi,%r8,2), %xmm2\n   movups 16(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n"
+    "   unpckhps %xmm1, %xmm0\n   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n"
+    "   movhlps %xmm7, %xmm2\n   movss .Laudio_decode_s32_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   cvtdq2ps %xmm4, %xmm4\n   mulps %xmm8, %xmm4\n   mov 32(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n"
+    "   cmp $5, %ecx\n   je .Laudio_decode_s32_ms_b_next\n   cvtdq2ps %xmm5, %xmm5\n   mulps %xmm8, %xmm5\n   mov 40(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cmp $6, %ecx\n   je .Laudio_decode_s32_ms_b_next\n"
+    "   cvtdq2ps %xmm0, %xmm0\n   mulps %xmm8, %xmm0\n   mov 48(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $7, %ecx\n   je .Laudio_decode_s32_ms_b_next\n   cvtdq2ps %xmm2, %xmm2\n   mulps %xmm8, %xmm2\n"
+    "   mov 56(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_s32_ms_b_next:\n   lea (%rsi,%r8,4), %rsi\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_s32_ms_b\n"
+    ".Laudio_decode_s32_ms_tail:\n   add %rax, %rdx\n   jz .Laudio_decode_s32_ms_done\n   push %rbx\n   push %r12\n   xor %r9d, %r9d\n"
+    ".Laudio_decode_s32_ms_tc:\n   mov (%rdi,%r9,8), %r10\n   add %r11, %r10\n   lea (%rsi,%r9,4), %rax\n   mov %rdx, %r12\n"
+    ".Laudio_decode_s32_ms_ts:\n   mov (%rax), %ebx\n   xorps %xmm0, %xmm0\n   cvtsi2ss %ebx, %xmm0\n   mulss .Laudio_decode_s32_scale(%rip), %xmm0\n   movss %xmm0, (%r10)\n   add %r8, %rax\n   add $4, %r10\n"
+    "   dec %r12\n   jnz .Laudio_decode_s32_ms_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_s32_ms_tc\n   pop %r12\n   pop %rbx\n"
+    ".Laudio_decode_s32_ms_done:\n"
     ASM_RET
     ".Laudio_decode_s32_general:\n   push %rbx\n   mov %rdi, %r9\n   imul $4, %rcx, %r11\n   xor %r10d, %r10d\n"
     ".Laudio_decode_s32_general_channel:\n   mov (%r9,%r10,8), %rdi\n   lea (%rsi,%r10,4), %r8\n   mov %rdx, %rbx\n"
@@ -44654,7 +44715,7 @@ __asm__(
     ".Laudio_decode_f32_scalar_two:\n"
     ".Laudio_decode_f32_scalar_two_loop:\n   movss (%rsi), %xmm0\n   movaps %xmm0, %xmm1\n   cmpeqss %xmm0, %xmm1\n   movss .Laudio_decode_f32_high(%rip), %xmm2\n   minss %xmm0, %xmm2\n   movss .Laudio_decode_f32_low(%rip), %xmm0\n   maxss %xmm2, %xmm0\n   andps %xmm1, %xmm0\n   movss %xmm0, (%rdi)\nmovss 4(%rsi), %xmm0\n   movaps %xmm0, %xmm1\n   cmpeqss %xmm0, %xmm1\n   movss .Laudio_decode_f32_high(%rip), %xmm2\n   minss %xmm0, %xmm2\n   movss .Laudio_decode_f32_low(%rip), %xmm0\n   maxss %xmm2, %xmm0\n   andps %xmm1, %xmm0\n   movss %xmm0, (%r8)\nadd $8, %rsi\n   add $4, %rdi\n   add $4, %r8\n   dec %rdx\n   jnz .Laudio_decode_f32_scalar_two_loop\n" ASM_RET
     ".Laudio_decode_f32_multi:\n   cmp $8, %rcx\n   ja .Laudio_decode_f32_general\n"
-    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_f32_general")
+    ASM_NARROW("cpu_has_avx2", ".Laudio_decode_f32_ms")
     ".Laudio_decode_f32_m:\n   mov $9, %eax\n   cmp $8, %ecx\n   jne .Laudio_decode_f32_m_t8\n   dec %eax\n"
     ".Laudio_decode_f32_m_t8:\n   lea 0(,%rcx,4), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_f32_m_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_f32_m_b\n.balign 64\n"
     ".Laudio_decode_f32_m_a:\n   lea (%rsi,%r8,4), %r9\n   vmovups (%rsi), %xmm0\n   vinsertf128 $1, (%r9), %ymm0, %ymm0\n   vmovups (%rsi,%r8), %xmm1\n   vinsertf128 $1, (%r9,%r8), %ymm1, %ymm1\n   vmovups (%rsi,%r8,2), %xmm2\n"
@@ -44686,6 +44747,40 @@ __asm__(
     "   vmaxss %xmm2, %xmm3, %xmm0\n   vandps %xmm1, %xmm0, %xmm0\n   vmovss %xmm0, (%r10)\n   add %r8, %rax\n   add $4, %r10\n   dec %r12\n   jnz .Laudio_decode_f32_m_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_f32_m_tc\n"
     "   pop %r12\n   pop %rbx\n"
     ".Laudio_decode_f32_m_done:\n   vzeroupper\n"
+    ASM_RET
+    ".Laudio_decode_f32_ms:\n   mov $5, %eax\n   lea 0(,%rcx,4), %r8\n   lea (%r8,%r8,2), %r10\n   xor %r11d, %r11d\n   sub %rax, %rdx\n   jl .Laudio_decode_f32_ms_tail\n   cmp $4, %ecx\n   ja .Laudio_decode_f32_ms_b\n"
+    ".balign 64\n"
+    ".Laudio_decode_f32_ms_a:\n   movups 0(%rsi), %xmm0\n   movups 0(%rsi,%r8), %xmm1\n   movups 0(%rsi,%r8,2), %xmm2\n   movups 0(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_f32_high(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   movss .Laudio_decode_f32_low(%rip), %xmm9\n   shufps $0, %xmm9, %xmm9\n   lea (%rsi,%r8,4), %rsi\n   movaps %xmm4, %xmm10\n"
+    "   cmpeqps %xmm4, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm4, %xmm11\n   movaps %xmm9, %xmm4\n   maxps %xmm11, %xmm4\n   andps %xmm10, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   movaps %xmm5, %xmm10\n"
+    "   cmpeqps %xmm5, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm5, %xmm11\n   movaps %xmm9, %xmm5\n   maxps %xmm11, %xmm5\n   andps %xmm10, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   movaps %xmm0, %xmm10\n"
+    "   cmpeqps %xmm0, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm0, %xmm11\n   movaps %xmm9, %xmm0\n   maxps %xmm11, %xmm0\n   andps %xmm10, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $3, %ecx\n"
+    "   je .Laudio_decode_f32_ms_a_next\n   movaps %xmm2, %xmm10\n   cmpeqps %xmm2, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm2, %xmm11\n   movaps %xmm9, %xmm2\n   maxps %xmm11, %xmm2\n   andps %xmm10, %xmm2\n"
+    "   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_f32_ms_a_next:\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_f32_ms_a\n   jmp .Laudio_decode_f32_ms_tail\n.balign 64\n"
+    ".Laudio_decode_f32_ms_b:\n   movups 0(%rsi), %xmm0\n   movups 0(%rsi,%r8), %xmm1\n   movups 0(%rsi,%r8,2), %xmm2\n   movups 0(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n"
+    "   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n"
+    "   movss .Laudio_decode_f32_high(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n   movss .Laudio_decode_f32_low(%rip), %xmm9\n   shufps $0, %xmm9, %xmm9\n   movaps %xmm4, %xmm10\n   cmpeqps %xmm4, %xmm10\n   movaps %xmm8, %xmm11\n"
+    "   minps %xmm4, %xmm11\n   movaps %xmm9, %xmm4\n   maxps %xmm11, %xmm4\n   andps %xmm10, %xmm4\n   mov 0(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   movaps %xmm5, %xmm10\n   cmpeqps %xmm5, %xmm10\n   movaps %xmm8, %xmm11\n"
+    "   minps %xmm5, %xmm11\n   movaps %xmm9, %xmm5\n   maxps %xmm11, %xmm5\n   andps %xmm10, %xmm5\n   mov 8(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   movaps %xmm0, %xmm10\n   cmpeqps %xmm0, %xmm10\n   movaps %xmm8, %xmm11\n"
+    "   minps %xmm0, %xmm11\n   movaps %xmm9, %xmm0\n   maxps %xmm11, %xmm0\n   andps %xmm10, %xmm0\n   mov 16(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   movaps %xmm2, %xmm10\n   cmpeqps %xmm2, %xmm10\n   movaps %xmm8, %xmm11\n"
+    "   minps %xmm2, %xmm11\n   movaps %xmm9, %xmm2\n   maxps %xmm11, %xmm2\n   andps %xmm10, %xmm2\n   mov 24(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n   movups 16(%rsi), %xmm0\n   movups 16(%rsi,%r8), %xmm1\n"
+    "   movups 16(%rsi,%r8,2), %xmm2\n   movups 16(%rsi,%r10), %xmm3\n   movaps %xmm0, %xmm4\n   unpcklps %xmm1, %xmm4\n   unpckhps %xmm1, %xmm0\n   movaps %xmm2, %xmm5\n   unpcklps %xmm3, %xmm5\n   unpckhps %xmm3, %xmm2\n"
+    "   movaps %xmm4, %xmm6\n   movlhps %xmm5, %xmm4\n   movhlps %xmm6, %xmm5\n   movaps %xmm0, %xmm7\n   movlhps %xmm2, %xmm0\n   movhlps %xmm7, %xmm2\n   movss .Laudio_decode_f32_high(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n"
+    "   movss .Laudio_decode_f32_low(%rip), %xmm9\n   shufps $0, %xmm9, %xmm9\n   movaps %xmm4, %xmm10\n   cmpeqps %xmm4, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm4, %xmm11\n   movaps %xmm9, %xmm4\n   maxps %xmm11, %xmm4\n"
+    "   andps %xmm10, %xmm4\n   mov 32(%rdi), %r9\n   movups %xmm4, (%r9,%r11)\n   cmp $5, %ecx\n   je .Laudio_decode_f32_ms_b_next\n   movaps %xmm5, %xmm10\n   cmpeqps %xmm5, %xmm10\n   movaps %xmm8, %xmm11\n"
+    "   minps %xmm5, %xmm11\n   movaps %xmm9, %xmm5\n   maxps %xmm11, %xmm5\n   andps %xmm10, %xmm5\n   mov 40(%rdi), %r9\n   movups %xmm5, (%r9,%r11)\n   cmp $6, %ecx\n   je .Laudio_decode_f32_ms_b_next\n   movaps %xmm0, %xmm10\n"
+    "   cmpeqps %xmm0, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm0, %xmm11\n   movaps %xmm9, %xmm0\n   maxps %xmm11, %xmm0\n   andps %xmm10, %xmm0\n   mov 48(%rdi), %r9\n   movups %xmm0, (%r9,%r11)\n   cmp $7, %ecx\n"
+    "   je .Laudio_decode_f32_ms_b_next\n   movaps %xmm2, %xmm10\n   cmpeqps %xmm2, %xmm10\n   movaps %xmm8, %xmm11\n   minps %xmm2, %xmm11\n   movaps %xmm9, %xmm2\n   maxps %xmm11, %xmm2\n   andps %xmm10, %xmm2\n"
+    "   mov 56(%rdi), %r9\n   movups %xmm2, (%r9,%r11)\n"
+    ".Laudio_decode_f32_ms_b_next:\n   lea (%rsi,%r8,4), %rsi\n   add $16, %r11\n   sub $4, %rdx\n   jge .Laudio_decode_f32_ms_b\n"
+    ".Laudio_decode_f32_ms_tail:\n   add %rax, %rdx\n   jz .Laudio_decode_f32_ms_done\n   push %rbx\n   push %r12\n   xor %r9d, %r9d\n"
+    ".Laudio_decode_f32_ms_tc:\n   mov (%rdi,%r9,8), %r10\n   add %r11, %r10\n   lea (%rsi,%r9,4), %rax\n   mov %rdx, %r12\n"
+    ".Laudio_decode_f32_ms_ts:\n   movss (%rax), %xmm0\n   movaps %xmm0, %xmm1\n   cmpeqss %xmm0, %xmm1\n   movss .Laudio_decode_f32_high(%rip), %xmm2\n   minss %xmm0, %xmm2\n   movss .Laudio_decode_f32_low(%rip), %xmm0\n"
+    "   maxss %xmm2, %xmm0\n   andps %xmm1, %xmm0\n   movss %xmm0, (%r10)\n   add %r8, %rax\n   add $4, %r10\n   dec %r12\n   jnz .Laudio_decode_f32_ms_ts\n   inc %r9\n   cmp %rcx, %r9\n   jb .Laudio_decode_f32_ms_tc\n"
+    "   pop %r12\n   pop %rbx\n"
+    ".Laudio_decode_f32_ms_done:\n"
     ASM_RET
     ".Laudio_decode_f32_general:\n   push %rbx\n   mov %rdi, %r9\n   imul $4, %rcx, %r11\n   xor %r10d, %r10d\n"
     ".Laudio_decode_f32_general_channel:\n   mov (%r9,%r10,8), %rdi\n   lea (%rsi,%r10,4), %r8\n   mov %rdx, %rbx\n"
@@ -44865,6 +44960,65 @@ __asm__(
     ".Laudio_mix2_x_tail:\n   cmp %r9, %r11\n   jae .Laudio_mix2_x_next\n   movss (%rdx,%r11), %xmm2\n   movss (%r8), %xmm3\n   mulss %xmm2, %xmm3\n   addss (%rdi,%r11), %xmm3\n   movss 32(%r8), %xmm4\n   mulss %xmm2, %xmm4\n   addss (%rsi,%r11), %xmm4\n   movss %xmm3, (%rdi,%r11)\n   movss %xmm4, (%rsi,%r11)\n   add $4, %r11\n   jmp .Laudio_mix2_x_tail\n"
     ".Laudio_mix2_x_done:\n.Laudio_mix2_none:\n" ASM_RET
     ASM_END(f32_rows_mix2)
+
+    //      pcm_widen: see the prototype. rdi dst, rsi src, rdx samples, rcx kind. AVX2 eight samples a turn (a byte shuffle for the reversed and the three-byte forms, variable shifts for the laws), a sample at a time for what is left and without AVX2.
+    ASM_FUNC(pcm_widen)
+    "test %rdx, %rdx\n   jz .Lpw_done\n   cmp $8, %rcx\n   ja .Lpw_done\n"
+    "cmp $0, %ecx\n   je .Lpw_k0\n   cmp $1, %ecx\n   je .Lpw_k1\n   cmp $2, %ecx\n   je .Lpw_k2\n   cmp $3, %ecx\n   je .Lpw_k3\n   cmp $4, %ecx\n   je .Lpw_k4\n   cmp $5, %ecx\n   je .Lpw_k5\n   cmp $6, %ecx\n   je .Lpw_k6\n   cmp $7, %ecx\n   je .Lpw_k7\n   cmp $8, %ecx\n   je .Lpw_k8\n\n   jmp .Lpw_done\n"
+    ".Lpw_k0:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k0_x")
+    "   cmp $8, %rdx\n   jb .Lpw_k0_s\n"
+    "   vmovdqa .Lpw_c80000000(%rip), %ymm7\n.balign 32\n.Lpw_k0_v:\n   vpmovzxbd (%rsi), %ymm0\n   vpslld $24, %ymm0, %ymm0\n   vpxor %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $8, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k0_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k0_s\n   jmp .Lpw_done\n"
+    ".Lpw_k0_x:\n   cmp $8, %rdx\n   jb .Lpw_k0_s\n   pxor %xmm7, %xmm7\n   movdqa .Lpw_c80000000(%rip), %xmm6\n.balign 16\n.Lpw_k0_xv:\n   movq (%rsi), %xmm0\n   punpcklbw %xmm7, %xmm0\n   movdqa %xmm0, %xmm1\n   punpcklwd %xmm7, %xmm0\n   punpckhwd %xmm7, %xmm1\n   pslld $24, %xmm0\n   pslld $24, %xmm1\n   pxor %xmm6, %xmm0\n   pxor %xmm6, %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   add $8, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k0_xv\n   test %rdx, %rdx\n   jnz .Lpw_k0_s\n   jmp .Lpw_done\n"
+    ".Lpw_k0_s:\n   movzbl (%rsi), %eax\n   xor $0x80, %eax\n   shl $24, %eax\n   mov %eax, (%rdi)\n   add $1, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k0_s\n   jmp .Lpw_done\n"
+    ".Lpw_k1:\n   lea .Lpw_law0(%rip), %r9\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k1_s")
+    "   cmp $8, %rdx\n   jb .Lpw_k1_s\n"
+    ".balign 32\n.Lpw_k1_v:\n   vpmovzxbd (%rsi), %ymm0\n   vpxor .Lpw_c55(%rip), %ymm0, %ymm0\n   vpand .Lpw_c0f(%rip), %ymm0, %ymm1\n   vpslld $4, %ymm1, %ymm1\n   vpsrld $4, %ymm0, %ymm2\n   vpand .Lpw_c07(%rip), %ymm2, %ymm2\n   vpaddd .Lpw_c108(%rip), %ymm1, %ymm3\n   vpsubd .Lpw_c01(%rip), %ymm2, %ymm4\n   vpsllvd %ymm4, %ymm3, %ymm3\n   vpaddd .Lpw_c08(%rip), %ymm1, %ymm1\n   vpxor %ymm5, %ymm5, %ymm5\n   vpcmpeqd %ymm5, %ymm2, %ymm2\n   vpblendvb %ymm2, %ymm1, %ymm3, %ymm3\n   vpand .Lpw_c80(%rip), %ymm0, %ymm0\n   vpcmpeqd %ymm5, %ymm0, %ymm0\n   vpxor %ymm0, %ymm3, %ymm3\n   vpsubd %ymm0, %ymm3, %ymm3\n   vpslld $16, %ymm3, %ymm3\n   vmovdqu %ymm3, (%rdi)\n   add $8, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k1_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k1_s\n   jmp .Lpw_done\n"
+    ".Lpw_k1_s:\n   movzbl (%rsi), %eax\n   mov (%r9,%rax,4), %eax\n   mov %eax, (%rdi)\n   add $1, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k1_s\n   jmp .Lpw_done\n"
+    ".Lpw_k2:\n   lea .Lpw_law1(%rip), %r9\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k2_s")
+    "   cmp $8, %rdx\n   jb .Lpw_k2_s\n"
+    ".balign 32\n.Lpw_k2_v:\n   vpmovzxbd (%rsi), %ymm0\n   vpxor .Lpw_cff(%rip), %ymm0, %ymm0\n   vpand .Lpw_c0f(%rip), %ymm0, %ymm1\n   vpslld $3, %ymm1, %ymm1\n   vpaddd .Lpw_c84(%rip), %ymm1, %ymm1\n   vpsrld $4, %ymm0, %ymm2\n   vpand .Lpw_c07(%rip), %ymm2, %ymm2\n   vpsllvd %ymm2, %ymm1, %ymm1\n   vpsubd .Lpw_c84(%rip), %ymm1, %ymm1\n   vpand .Lpw_c80(%rip), %ymm0, %ymm0\n   vpcmpeqd .Lpw_c80(%rip), %ymm0, %ymm0\n   vpxor %ymm0, %ymm1, %ymm1\n   vpsubd %ymm0, %ymm1, %ymm1\n   vpslld $16, %ymm1, %ymm1\n   vmovdqu %ymm1, (%rdi)\n   add $8, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k2_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k2_s\n   jmp .Lpw_done\n"
+    ".Lpw_k2_s:\n   movzbl (%rsi), %eax\n   mov (%r9,%rax,4), %eax\n   mov %eax, (%rdi)\n   add $1, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k2_s\n   jmp .Lpw_done\n"
+    ".Lpw_k3:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k3_x")
+    "   cmp $8, %rdx\n   jb .Lpw_k3_s\n"
+    "   vmovdqa .Lpw_m16be(%rip), %ymm7\n.balign 32\n.Lpw_k3_v:\n   vpmovzxwd (%rsi), %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $16, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k3_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k3_s\n   jmp .Lpw_done\n"
+    ".Lpw_k3_x:\n   cmp $8, %rdx\n   jb .Lpw_k3_s\n.balign 16\n.Lpw_k3_xv:\n   movdqu (%rsi), %xmm0\n   movdqa %xmm0, %xmm1\n   psllw $8, %xmm0\n   psrlw $8, %xmm1\n   por %xmm1, %xmm0\n   pxor %xmm1, %xmm1\n   punpcklwd %xmm0, %xmm1\n   pxor %xmm2, %xmm2\n   punpckhwd %xmm0, %xmm2\n   movdqu %xmm1, (%rdi)\n   movdqu %xmm2, 16(%rdi)\n   add $16, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k3_xv\n   test %rdx, %rdx\n   jnz .Lpw_k3_s\n   jmp .Lpw_done\n"
+    ".Lpw_k3_s:\n   movzwl (%rsi), %eax\n   rol $8, %ax\n   shl $16, %eax\n   mov %eax, (%rdi)\n   add $2, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k3_s\n   jmp .Lpw_done\n"
+    ".Lpw_k4:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k4_x")
+    "   cmp $8, %rdx\n   jb .Lpw_k4_s\n"
+    "   vmovdqa .Lpw_m32be(%rip), %ymm7\n.balign 32\n.Lpw_k4_v:\n   vmovdqu (%rsi), %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k4_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k4_s\n   jmp .Lpw_done\n"
+    ".Lpw_k4_x:\n   cmp $8, %rdx\n   jb .Lpw_k4_s\n.balign 16\n.Lpw_k4_xv:\n   movdqu 0(%rsi), %xmm0\n   movdqa %xmm0, %xmm2\n   psllw $8, %xmm0\n   psrlw $8, %xmm2\n   por %xmm2, %xmm0\n   pshuflw $0xb1, %xmm0, %xmm0\n   pshufhw $0xb1, %xmm0, %xmm0\n   movdqu %xmm0, 0(%rdi)\n   movdqu 16(%rsi), %xmm1\n   movdqa %xmm1, %xmm3\n   psllw $8, %xmm1\n   psrlw $8, %xmm3\n   por %xmm3, %xmm1\n   pshuflw $0xb1, %xmm1, %xmm1\n   pshufhw $0xb1, %xmm1, %xmm1\n   movdqu %xmm1, 16(%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k4_xv\n   test %rdx, %rdx\n   jnz .Lpw_k4_s\n   jmp .Lpw_done\n"
+    ".Lpw_k4_s:\n   mov (%rsi), %eax\n   bswap %eax\n   mov %eax, (%rdi)\n   add $4, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k4_s\n   jmp .Lpw_done\n"
+    ".Lpw_k5:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k5_s")
+    "   cmp $10, %rdx\n   jb .Lpw_k5_s\n"
+    "   vmovdqa .Lpw_m24le(%rip), %ymm7\n.balign 32\n.Lpw_k5_v:\n   vmovdqu (%rsi), %xmm0\n   vinserti128 $1, 12(%rsi), %ymm0, %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $24, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $10, %rdx\n   jae .Lpw_k5_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k5_s\n   jmp .Lpw_done\n"
+    ".Lpw_k5_s:\n   cmp $1, %rdx\n   jbe .Lpw_k5_last\n.Lpw_k5_f:\n   mov (%rsi), %eax\n   shl $8, %eax\n   mov %eax, (%rdi)\n   add $3, %rsi\n   add $4, %rdi\n   dec %rdx\n   cmp $1, %rdx\n   ja .Lpw_k5_f\n.Lpw_k5_last:\n   movzwl (%rsi), %eax\n   movzbl 2(%rsi), %r8d\n   shl $16, %r8d\n   or %r8d, %eax\n   shl $8, %eax\n   mov %eax, (%rdi)\n   jmp .Lpw_done\n"
+    ".Lpw_k6:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k6_s")
+    "   cmp $10, %rdx\n   jb .Lpw_k6_s\n"
+    "   vmovdqa .Lpw_m24be(%rip), %ymm7\n.balign 32\n.Lpw_k6_v:\n   vmovdqu (%rsi), %xmm0\n   vinserti128 $1, 12(%rsi), %ymm0, %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $24, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $10, %rdx\n   jae .Lpw_k6_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k6_s\n   jmp .Lpw_done\n"
+    ".Lpw_k6_s:\n   cmp $1, %rdx\n   jbe .Lpw_k6_last\n.Lpw_k6_f:\n   mov (%rsi), %eax\n   bswap %eax\n   and $0xffffff00, %eax\n   mov %eax, (%rdi)\n   add $3, %rsi\n   add $4, %rdi\n   dec %rdx\n   cmp $1, %rdx\n   ja .Lpw_k6_f\n.Lpw_k6_last:\n   movzbl (%rsi), %eax\n   shl $16, %eax\n   movzbl 1(%rsi), %r8d\n   shl $8, %r8d\n   or %r8d, %eax\n   movzbl 2(%rsi), %r8d\n   or %r8d, %eax\n   shl $8, %eax\n   mov %eax, (%rdi)\n   jmp .Lpw_done\n"
+    ".Lpw_k7:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k7_x")
+    "   cmp $8, %rdx\n   jb .Lpw_k7_s\n"
+    ".balign 32\n.Lpw_k7_v:\n   vmovdqu (%rsi), %ymm0\n   vpslld $8, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k7_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k7_s\n   jmp .Lpw_done\n"
+    ".Lpw_k7_x:\n   cmp $8, %rdx\n   jb .Lpw_k7_s\n.balign 16\n.Lpw_k7_xv:\n   movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   pslld $8, %xmm0\n   pslld $8, %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k7_xv\n   test %rdx, %rdx\n   jnz .Lpw_k7_s\n   jmp .Lpw_done\n"
+    ".Lpw_k7_s:\n   mov (%rsi), %eax\n   shl $8, %eax\n   mov %eax, (%rdi)\n   add $4, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k7_s\n   jmp .Lpw_done\n"
+    ".Lpw_k8:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpw_k8_x")
+    "   cmp $8, %rdx\n   jb .Lpw_k8_s\n"
+    "   vmovdqa .Lpw_m2432be(%rip), %ymm7\n.balign 32\n.Lpw_k8_v:\n   vmovdqu (%rsi), %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k8_v\n   vzeroupper\n   test %rdx, %rdx\n   jnz .Lpw_k8_s\n   jmp .Lpw_done\n"
+    ".Lpw_k8_x:\n   cmp $8, %rdx\n   jb .Lpw_k8_s\n.balign 16\n.Lpw_k8_xv:\n   movdqu 0(%rsi), %xmm0\n   movdqa %xmm0, %xmm2\n   psllw $8, %xmm0\n   psrlw $8, %xmm2\n   por %xmm2, %xmm0\n   pshuflw $0xb1, %xmm0, %xmm0\n   pshufhw $0xb1, %xmm0, %xmm0\n   pslld $8, %xmm0\n   movdqu %xmm0, 0(%rdi)\n   movdqu 16(%rsi), %xmm1\n   movdqa %xmm1, %xmm3\n   psllw $8, %xmm1\n   psrlw $8, %xmm3\n   por %xmm3, %xmm1\n   pshuflw $0xb1, %xmm1, %xmm1\n   pshufhw $0xb1, %xmm1, %xmm1\n   pslld $8, %xmm1\n   movdqu %xmm1, 16(%rdi)\n   add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae .Lpw_k8_xv\n   test %rdx, %rdx\n   jnz .Lpw_k8_s\n   jmp .Lpw_done\n"
+    ".Lpw_k8_s:\n   mov (%rsi), %eax\n   bswap %eax\n   shl $8, %eax\n   mov %eax, (%rdi)\n   add $4, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Lpw_k8_s\n   jmp .Lpw_done\n"
+    ".Lpw_done:\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 32\n.Lpw_law0:\n   .long 0xea800000, 0xeb800000, 0xe8800000, 0xe9800000, 0xee800000, 0xef800000, 0xec800000, 0xed800000\n   .long 0xe2800000, 0xe3800000, 0xe0800000, 0xe1800000, 0xe6800000, 0xe7800000, 0xe4800000, 0xe5800000\n   .long 0xf5400000, 0xf5c00000, 0xf4400000, 0xf4c00000, 0xf7400000, 0xf7c00000, 0xf6400000, 0xf6c00000\n   .long 0xf1400000, 0xf1c00000, 0xf0400000, 0xf0c00000, 0xf3400000, 0xf3c00000, 0xf2400000, 0xf2c00000\n   .long 0xaa000000, 0xae000000, 0xa2000000, 0xa6000000, 0xba000000, 0xbe000000, 0xb2000000, 0xb6000000\n   .long 0x8a000000, 0x8e000000, 0x82000000, 0x86000000, 0x9a000000, 0x9e000000, 0x92000000, 0x96000000\n   .long 0xd5000000, 0xd7000000, 0xd1000000, 0xd3000000, 0xdd000000, 0xdf000000, 0xd9000000, 0xdb000000\n   .long 0xc5000000, 0xc7000000, 0xc1000000, 0xc3000000, 0xcd000000, 0xcf000000, 0xc9000000, 0xcb000000\n   .long 0xfea80000, 0xfeb80000, 0xfe880000, 0xfe980000, 0xfee80000, 0xfef80000, 0xfec80000, 0xfed80000\n   .long 0xfe280000, 0xfe380000, 0xfe080000, 0xfe180000, 0xfe680000, 0xfe780000, 0xfe480000, 0xfe580000\n   .long 0xffa80000, 0xffb80000, 0xff880000, 0xff980000, 0xffe80000, 0xfff80000, 0xffc80000, 0xffd80000\n   .long 0xff280000, 0xff380000, 0xff080000, 0xff180000, 0xff680000, 0xff780000, 0xff480000, 0xff580000\n   .long 0xfaa00000, 0xfae00000, 0xfa200000, 0xfa600000, 0xfba00000, 0xfbe00000, 0xfb200000, 0xfb600000\n   .long 0xf8a00000, 0xf8e00000, 0xf8200000, 0xf8600000, 0xf9a00000, 0xf9e00000, 0xf9200000, 0xf9600000\n   .long 0xfd500000, 0xfd700000, 0xfd100000, 0xfd300000, 0xfdd00000, 0xfdf00000, 0xfd900000, 0xfdb00000\n   .long 0xfc500000, 0xfc700000, 0xfc100000, 0xfc300000, 0xfcd00000, 0xfcf00000, 0xfc900000, 0xfcb00000\n   .long 0x15800000, 0x14800000, 0x17800000, 0x16800000, 0x11800000, 0x10800000, 0x13800000, 0x12800000\n   .long 0x1d800000, 0x1c800000, 0x1f800000, 0x1e800000, 0x19800000, 0x18800000, 0x1b800000, 0x1a800000\n   .long 0x0ac00000, 0x0a400000, 0x0bc00000, 0x0b400000, 0x08c00000, 0x08400000, 0x09c00000, 0x09400000\n   .long 0x0ec00000, 0x0e400000, 0x0fc00000, 0x0f400000, 0x0cc00000, 0x0c400000, 0x0dc00000, 0x0d400000\n   .long 0x56000000, 0x52000000, 0x5e000000, 0x5a000000, 0x46000000, 0x42000000, 0x4e000000, 0x4a000000\n   .long 0x76000000, 0x72000000, 0x7e000000, 0x7a000000, 0x66000000, 0x62000000, 0x6e000000, 0x6a000000\n   .long 0x2b000000, 0x29000000, 0x2f000000, 0x2d000000, 0x23000000, 0x21000000, 0x27000000, 0x25000000\n   .long 0x3b000000, 0x39000000, 0x3f000000, 0x3d000000, 0x33000000, 0x31000000, 0x37000000, 0x35000000\n   .long 0x01580000, 0x01480000, 0x01780000, 0x01680000, 0x01180000, 0x01080000, 0x01380000, 0x01280000\n   .long 0x01d80000, 0x01c80000, 0x01f80000, 0x01e80000, 0x01980000, 0x01880000, 0x01b80000, 0x01a80000\n   .long 0x00580000, 0x00480000, 0x00780000, 0x00680000, 0x00180000, 0x00080000, 0x00380000, 0x00280000\n   .long 0x00d80000, 0x00c80000, 0x00f80000, 0x00e80000, 0x00980000, 0x00880000, 0x00b80000, 0x00a80000\n   .long 0x05600000, 0x05200000, 0x05e00000, 0x05a00000, 0x04600000, 0x04200000, 0x04e00000, 0x04a00000\n   .long 0x07600000, 0x07200000, 0x07e00000, 0x07a00000, 0x06600000, 0x06200000, 0x06e00000, 0x06a00000\n   .long 0x02b00000, 0x02900000, 0x02f00000, 0x02d00000, 0x02300000, 0x02100000, 0x02700000, 0x02500000\n   .long 0x03b00000, 0x03900000, 0x03f00000, 0x03d00000, 0x03300000, 0x03100000, 0x03700000, 0x03500000\n.Lpw_law1:\n   .long 0x82840000, 0x86840000, 0x8a840000, 0x8e840000, 0x92840000, 0x96840000, 0x9a840000, 0x9e840000\n   .long 0xa2840000, 0xa6840000, 0xaa840000, 0xae840000, 0xb2840000, 0xb6840000, 0xba840000, 0xbe840000\n   .long 0xc1840000, 0xc3840000, 0xc5840000, 0xc7840000, 0xc9840000, 0xcb840000, 0xcd840000, 0xcf840000\n   .long 0xd1840000, 0xd3840000, 0xd5840000, 0xd7840000, 0xd9840000, 0xdb840000, 0xdd840000, 0xdf840000\n   .long 0xe1040000, 0xe2040000, 0xe3040000, 0xe4040000, 0xe5040000, 0xe6040000, 0xe7040000, 0xe8040000\n   .long 0xe9040000, 0xea040000, 0xeb040000, 0xec040000, 0xed040000, 0xee040000, 0xef040000, 0xf0040000\n   .long 0xf0c40000, 0xf1440000, 0xf1c40000, 0xf2440000, 0xf2c40000, 0xf3440000, 0xf3c40000, 0xf4440000\n   .long 0xf4c40000, 0xf5440000, 0xf5c40000, 0xf6440000, 0xf6c40000, 0xf7440000, 0xf7c40000, 0xf8440000\n   .long 0xf8a40000, 0xf8e40000, 0xf9240000, 0xf9640000, 0xf9a40000, 0xf9e40000, 0xfa240000, 0xfa640000\n   .long 0xfaa40000, 0xfae40000, 0xfb240000, 0xfb640000, 0xfba40000, 0xfbe40000, 0xfc240000, 0xfc640000\n   .long 0xfc940000, 0xfcb40000, 0xfcd40000, 0xfcf40000, 0xfd140000, 0xfd340000, 0xfd540000, 0xfd740000\n   .long 0xfd940000, 0xfdb40000, 0xfdd40000, 0xfdf40000, 0xfe140000, 0xfe340000, 0xfe540000, 0xfe740000\n   .long 0xfe8c0000, 0xfe9c0000, 0xfeac0000, 0xfebc0000, 0xfecc0000, 0xfedc0000, 0xfeec0000, 0xfefc0000\n   .long 0xff0c0000, 0xff1c0000, 0xff2c0000, 0xff3c0000, 0xff4c0000, 0xff5c0000, 0xff6c0000, 0xff7c0000\n   .long 0xff880000, 0xff900000, 0xff980000, 0xffa00000, 0xffa80000, 0xffb00000, 0xffb80000, 0xffc00000\n   .long 0xffc80000, 0xffd00000, 0xffd80000, 0xffe00000, 0xffe80000, 0xfff00000, 0xfff80000, 0x00000000\n   .long 0x7d7c0000, 0x797c0000, 0x757c0000, 0x717c0000, 0x6d7c0000, 0x697c0000, 0x657c0000, 0x617c0000\n   .long 0x5d7c0000, 0x597c0000, 0x557c0000, 0x517c0000, 0x4d7c0000, 0x497c0000, 0x457c0000, 0x417c0000\n   .long 0x3e7c0000, 0x3c7c0000, 0x3a7c0000, 0x387c0000, 0x367c0000, 0x347c0000, 0x327c0000, 0x307c0000\n   .long 0x2e7c0000, 0x2c7c0000, 0x2a7c0000, 0x287c0000, 0x267c0000, 0x247c0000, 0x227c0000, 0x207c0000\n   .long 0x1efc0000, 0x1dfc0000, 0x1cfc0000, 0x1bfc0000, 0x1afc0000, 0x19fc0000, 0x18fc0000, 0x17fc0000\n   .long 0x16fc0000, 0x15fc0000, 0x14fc0000, 0x13fc0000, 0x12fc0000, 0x11fc0000, 0x10fc0000, 0x0ffc0000\n   .long 0x0f3c0000, 0x0ebc0000, 0x0e3c0000, 0x0dbc0000, 0x0d3c0000, 0x0cbc0000, 0x0c3c0000, 0x0bbc0000\n   .long 0x0b3c0000, 0x0abc0000, 0x0a3c0000, 0x09bc0000, 0x093c0000, 0x08bc0000, 0x083c0000, 0x07bc0000\n   .long 0x075c0000, 0x071c0000, 0x06dc0000, 0x069c0000, 0x065c0000, 0x061c0000, 0x05dc0000, 0x059c0000\n   .long 0x055c0000, 0x051c0000, 0x04dc0000, 0x049c0000, 0x045c0000, 0x041c0000, 0x03dc0000, 0x039c0000\n   .long 0x036c0000, 0x034c0000, 0x032c0000, 0x030c0000, 0x02ec0000, 0x02cc0000, 0x02ac0000, 0x028c0000\n   .long 0x026c0000, 0x024c0000, 0x022c0000, 0x020c0000, 0x01ec0000, 0x01cc0000, 0x01ac0000, 0x018c0000\n   .long 0x01740000, 0x01640000, 0x01540000, 0x01440000, 0x01340000, 0x01240000, 0x01140000, 0x01040000\n   .long 0x00f40000, 0x00e40000, 0x00d40000, 0x00c40000, 0x00b40000, 0x00a40000, 0x00940000, 0x00840000\n   .long 0x00780000, 0x00700000, 0x00680000, 0x00600000, 0x00580000, 0x00500000, 0x00480000, 0x00400000\n   .long 0x00380000, 0x00300000, 0x00280000, 0x00200000, 0x00180000, 0x00100000, 0x00080000, 0x00000000\n.Lpw_c80000000:\n   .long 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000\n.Lpw_c55:\n   .long 0x00000055, 0x00000055, 0x00000055, 0x00000055, 0x00000055, 0x00000055, 0x00000055, 0x00000055\n.Lpw_c0f:\n   .long 0x0000000f, 0x0000000f, 0x0000000f, 0x0000000f, 0x0000000f, 0x0000000f, 0x0000000f, 0x0000000f\n.Lpw_c07:\n   .long 0x00000007, 0x00000007, 0x00000007, 0x00000007, 0x00000007, 0x00000007, 0x00000007, 0x00000007\n.Lpw_c108:\n   .long 0x00000108, 0x00000108, 0x00000108, 0x00000108, 0x00000108, 0x00000108, 0x00000108, 0x00000108\n.Lpw_c01:\n   .long 0x00000001, 0x00000001, 0x00000001, 0x00000001, 0x00000001, 0x00000001, 0x00000001, 0x00000001\n.Lpw_c08:\n   .long 0x00000008, 0x00000008, 0x00000008, 0x00000008, 0x00000008, 0x00000008, 0x00000008, 0x00000008\n.Lpw_c80:\n   .long 0x00000080, 0x00000080, 0x00000080, 0x00000080, 0x00000080, 0x00000080, 0x00000080, 0x00000080\n.Lpw_cff:\n   .long 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff\n.Lpw_c84:\n   .long 0x00000084, 0x00000084, 0x00000084, 0x00000084, 0x00000084, 0x00000084, 0x00000084, 0x00000084\n.Lpw_m16be:\n   .byte 0x80, 0x80, 0x01, 0x00, 0x80, 0x80, 0x05, 0x04, 0x80, 0x80, 0x09, 0x08, 0x80, 0x80, 0x0d, 0x0c, 0x80, 0x80, 0x01, 0x00, 0x80, 0x80, 0x05, 0x04, 0x80, 0x80, 0x09, 0x08, 0x80, 0x80, 0x0d, 0x0c\n.Lpw_m32be:\n   .byte 0x03, 0x02, 0x01, 0x00, 0x07, 0x06, 0x05, 0x04, 0x0b, 0x0a, 0x09, 0x08, 0x0f, 0x0e, 0x0d, 0x0c, 0x03, 0x02, 0x01, 0x00, 0x07, 0x06, 0x05, 0x04, 0x0b, 0x0a, 0x09, 0x08, 0x0f, 0x0e, 0x0d, 0x0c\n.Lpw_m24le:\n   .byte 0x80, 0x00, 0x01, 0x02, 0x80, 0x03, 0x04, 0x05, 0x80, 0x06, 0x07, 0x08, 0x80, 0x09, 0x0a, 0x0b, 0x80, 0x00, 0x01, 0x02, 0x80, 0x03, 0x04, 0x05, 0x80, 0x06, 0x07, 0x08, 0x80, 0x09, 0x0a, 0x0b\n.Lpw_m24be:\n   .byte 0x80, 0x02, 0x01, 0x00, 0x80, 0x05, 0x04, 0x03, 0x80, 0x08, 0x07, 0x06, 0x80, 0x0b, 0x0a, 0x09, 0x80, 0x02, 0x01, 0x00, 0x80, 0x05, 0x04, 0x03, 0x80, 0x08, 0x07, 0x06, 0x80, 0x0b, 0x0a, 0x09\n.Lpw_m2432be:\n   .byte 0x80, 0x03, 0x02, 0x01, 0x80, 0x07, 0x06, 0x05, 0x80, 0x0b, 0x0a, 0x09, 0x80, 0x0f, 0x0e, 0x0d, 0x80, 0x03, 0x02, 0x01, 0x80, 0x07, 0x06, 0x05, 0x80, 0x0b, 0x0a, 0x09, 0x80, 0x0f, 0x0e, 0x0d\n.popsection\n"
+    ASM_END(pcm_widen)
 );
 #elif ARM64
 __asm__(
@@ -45186,6 +45340,41 @@ __asm__(
     "33: str s16, [x0], #4\n   str s20, [x1], #4\n   add x13, x13, #4\n   subs x12, x12, #1\n   b.ne 31b\n"
     "9:  " ASM_RET
     ASM_END(f32_rows_mix2)
+
+    //      pcm_widen: see the prototype. x0 dst, x1 src, x2 samples, x3 kind. NEON sixteen samples a turn (ushll to widen bytes, ld3 and zip for three bytes, rev16 and rev32 for the reversed words, shl and sshl for the laws), a sample at a time for what is left.
+    ASM_FUNC(pcm_widen)
+    "cbz x2, 9f\n   cmp x3, #8\n   b.hi 9f\n"
+    "cmp x3, #0\n   b.eq 100f\n   cmp x3, #1\n   b.eq 110f\n   cmp x3, #2\n   b.eq 120f\n   cmp x3, #3\n   b.eq 130f\n   cmp x3, #4\n   b.eq 140f\n   cmp x3, #5\n   b.eq 150f\n   cmp x3, #6\n   b.eq 160f\n   cmp x3, #7\n   b.eq 170f\n   cmp x3, #8\n   b.eq 180f\n   b 9f\n"
+    "100: cmp x2, #16\n   b.lo 109f\n   movi v31.16b, #0x80\n101: ld1 {v0.16b}, [x1], #16\n   eor v0.16b, v0.16b, v31.16b\n   ushll v1.8h, v0.8b, #0\n   ushll2 v2.8h, v0.16b, #0\n   ushll v4.4s, v1.4h, #0\n   ushll2 v5.4s, v1.8h, #0\n   ushll v6.4s, v2.4h, #0\n   ushll2 v7.4s, v2.8h, #0\n   shl v4.4s, v4.4s, #24\n   shl v5.4s, v5.4s, #24\n   shl v6.4s, v6.4s, #24\n   shl v7.4s, v7.4s, #24\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 101b\n"
+    "109: cbz x2, 9f\n"
+    "108: ldrb w4, [x1], #1\n   eor w4, w4, #0x80\n   lsl w4, w4, #24\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 108b\n   b 9f\n"
+    "110: cmp x2, #16\n   b.lo 119f\n   movi v20.8h, #0x55\n   movi v21.8h, #0x0f\n   movi v22.8h, #7\n   movi v23.8h, #1\n   movi v24.8h, #8\n   movi v25.8h, #0x80\n   mov w9, #0x108\n   dup v26.8h, w9\n   movi v27.8h, #0x84\n111: ld1 {v0.16b}, [x1], #16\n   ushll v1.8h, v0.8b, #0\n   ushll2 v2.8h, v0.16b, #0\n   eor v1.16b, v1.16b, v20.16b\n   and v28.16b, v1.16b, v21.16b\n   shl v28.8h, v28.8h, #4\n   ushr v29.8h, v1.8h, #4\n   and v29.16b, v29.16b, v22.16b\n   add v30.8h, v28.8h, v26.8h\n   sub v31.8h, v29.8h, v23.8h\n   sshl v30.8h, v30.8h, v31.8h\n   add v28.8h, v28.8h, v24.8h\n   cmeq v29.8h, v29.8h, #0\n   bsl v29.16b, v28.16b, v30.16b\n   and v28.16b, v1.16b, v25.16b\n   cmeq v28.8h, v28.8h, #0\n   eor v29.16b, v29.16b, v28.16b\n   sub v1.8h, v29.8h, v28.8h\n   eor v2.16b, v2.16b, v20.16b\n   and v28.16b, v2.16b, v21.16b\n   shl v28.8h, v28.8h, #4\n   ushr v29.8h, v2.8h, #4\n   and v29.16b, v29.16b, v22.16b\n   add v30.8h, v28.8h, v26.8h\n   sub v31.8h, v29.8h, v23.8h\n   sshl v30.8h, v30.8h, v31.8h\n   add v28.8h, v28.8h, v24.8h\n   cmeq v29.8h, v29.8h, #0\n   bsl v29.16b, v28.16b, v30.16b\n   and v28.16b, v2.16b, v25.16b\n   cmeq v28.8h, v28.8h, #0\n   eor v29.16b, v29.16b, v28.16b\n   sub v2.8h, v29.8h, v28.8h\n   shll v4.4s, v1.4h, #16\n   shll2 v5.4s, v1.8h, #16\n   shll v6.4s, v2.4h, #16\n   shll2 v7.4s, v2.8h, #16\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 111b\n"
+    "119: cbz x2, 9f\n"
+    "118: ldrb w4, [x1], #1\n   mov w5, #0x55\n   eor w4, w4, w5\n   and w5, w4, #15\n   lsl w5, w5, #4\n   ubfx w6, w4, #4, #3\n   cbnz w6, 1f\n   add w5, w5, #8\n   b 2f\n1: add w5, w5, #0x108\n   sub w7, w6, #1\n   lsl w5, w5, w7\n2: tbnz w4, #7, 3f\n   neg w5, w5\n3: lsl w4, w5, #16\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 118b\n   b 9f\n"
+    "120: cmp x2, #16\n   b.lo 129f\n   movi v20.8h, #0xff\n   movi v21.8h, #0x0f\n   movi v22.8h, #7\n   movi v23.8h, #1\n   movi v24.8h, #8\n   movi v25.8h, #0x80\n   mov w9, #0x108\n   dup v26.8h, w9\n   movi v27.8h, #0x84\n121: ld1 {v0.16b}, [x1], #16\n   ushll v1.8h, v0.8b, #0\n   ushll2 v2.8h, v0.16b, #0\n   eor v1.16b, v1.16b, v20.16b\n   and v28.16b, v1.16b, v21.16b\n   shl v28.8h, v28.8h, #3\n   add v28.8h, v28.8h, v27.8h\n   ushr v29.8h, v1.8h, #4\n   and v29.16b, v29.16b, v22.16b\n   sshl v28.8h, v28.8h, v29.8h\n   sub v28.8h, v28.8h, v27.8h\n   and v29.16b, v1.16b, v25.16b\n   cmeq v29.8h, v29.8h, v25.8h\n   eor v28.16b, v28.16b, v29.16b\n   sub v1.8h, v28.8h, v29.8h\n   eor v2.16b, v2.16b, v20.16b\n   and v28.16b, v2.16b, v21.16b\n   shl v28.8h, v28.8h, #3\n   add v28.8h, v28.8h, v27.8h\n   ushr v29.8h, v2.8h, #4\n   and v29.16b, v29.16b, v22.16b\n   sshl v28.8h, v28.8h, v29.8h\n   sub v28.8h, v28.8h, v27.8h\n   and v29.16b, v2.16b, v25.16b\n   cmeq v29.8h, v29.8h, v25.8h\n   eor v28.16b, v28.16b, v29.16b\n   sub v2.8h, v28.8h, v29.8h\n   shll v4.4s, v1.4h, #16\n   shll2 v5.4s, v1.8h, #16\n   shll v6.4s, v2.4h, #16\n   shll2 v7.4s, v2.8h, #16\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 121b\n"
+    "129: cbz x2, 9f\n"
+    "128: ldrb w4, [x1], #1\n   mvn w4, w4\n   and w4, w4, #0xff\n   and w5, w4, #15\n   lsl w5, w5, #3\n   add w5, w5, #0x84\n   ubfx w6, w4, #4, #3\n   lsl w5, w5, w6\n   sub w5, w5, #0x84\n   tbz w4, #7, 1f\n   neg w5, w5\n1: lsl w4, w5, #16\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 128b\n   b 9f\n"
+    "130: cmp x2, #16\n   b.lo 139f\n131: ld1 {v0.16b, v1.16b}, [x1], #32\n   rev16 v0.16b, v0.16b\n   rev16 v1.16b, v1.16b\n   shll v4.4s, v0.4h, #16\n   shll2 v5.4s, v0.8h, #16\n   shll v6.4s, v1.4h, #16\n   shll2 v7.4s, v1.8h, #16\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 131b\n"
+    "139: cbz x2, 9f\n"
+    "138: ldrh w4, [x1], #2\n   rev16 w4, w4\n   lsl w4, w4, #16\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 138b\n   b 9f\n"
+    "140: cmp x2, #16\n   b.lo 149f\n141: ld1 {v4.16b, v5.16b, v6.16b, v7.16b}, [x1], #64\n   rev32 v4.16b, v4.16b\n   rev32 v5.16b, v5.16b\n   rev32 v6.16b, v6.16b\n   rev32 v7.16b, v7.16b\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 141b\n"
+    "149: cbz x2, 9f\n"
+    "148: ldr w4, [x1], #4\n   rev w4, w4\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 148b\n   b 9f\n"
+    "150: cmp x2, #16\n   b.lo 159f\n   movi v31.16b, #0\n151: ld3 {v0.16b, v1.16b, v2.16b}, [x1], #48\n   zip1 v3.16b, v31.16b, v0.16b\n   zip2 v4.16b, v31.16b, v0.16b\n   zip1 v5.16b, v1.16b, v2.16b\n   zip2 v6.16b, v1.16b, v2.16b\n   zip1 v16.8h, v3.8h, v5.8h\n   zip2 v17.8h, v3.8h, v5.8h\n   zip1 v18.8h, v4.8h, v6.8h\n   zip2 v19.8h, v4.8h, v6.8h\n   st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 151b\n"
+    "159: cbz x2, 9f\n"
+    "158: ldrb w4, [x1]\n   ldrb w5, [x1, #1]\n   ldrb w6, [x1, #2]\n   add x1, x1, #3\n   lsl w4, w4, #8\n   orr w4, w4, w5, lsl #16\n   orr w4, w4, w6, lsl #24\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 158b\n   b 9f\n"
+    "160: cmp x2, #16\n   b.lo 169f\n   movi v31.16b, #0\n161: ld3 {v0.16b, v1.16b, v2.16b}, [x1], #48\n   zip1 v3.16b, v31.16b, v2.16b\n   zip2 v4.16b, v31.16b, v2.16b\n   zip1 v5.16b, v1.16b, v0.16b\n   zip2 v6.16b, v1.16b, v0.16b\n   zip1 v16.8h, v3.8h, v5.8h\n   zip2 v17.8h, v3.8h, v5.8h\n   zip1 v18.8h, v4.8h, v6.8h\n   zip2 v19.8h, v4.8h, v6.8h\n   st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 161b\n"
+    "169: cbz x2, 9f\n"
+    "168: ldrb w4, [x1]\n   ldrb w5, [x1, #1]\n   ldrb w6, [x1, #2]\n   add x1, x1, #3\n   lsl w6, w6, #8\n   orr w6, w6, w5, lsl #16\n   orr w4, w6, w4, lsl #24\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 168b\n   b 9f\n"
+    "170: cmp x2, #16\n   b.lo 179f\n171: ld1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x1], #64\n   shl v4.4s, v4.4s, #8\n   shl v5.4s, v5.4s, #8\n   shl v6.4s, v6.4s, #8\n   shl v7.4s, v7.4s, #8\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 171b\n"
+    "179: cbz x2, 9f\n"
+    "178: ldr w4, [x1], #4\n   lsl w4, w4, #8\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 178b\n   b 9f\n"
+    "180: cmp x2, #16\n   b.lo 189f\n181: ld1 {v4.16b, v5.16b, v6.16b, v7.16b}, [x1], #64\n   rev32 v4.16b, v4.16b\n   shl v4.4s, v4.4s, #8\n   rev32 v5.16b, v5.16b\n   shl v5.4s, v5.4s, #8\n   rev32 v6.16b, v6.16b\n   shl v6.4s, v6.4s, #8\n   rev32 v7.16b, v7.16b\n   shl v7.4s, v7.4s, #8\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 181b\n"
+    "189: cbz x2, 9f\n"
+    "188: ldr w4, [x1], #4\n   rev w4, w4\n   lsl w4, w4, #8\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 188b\n   b 9f\n"
+    "9:  "
+    ASM_RET
+    ASM_END(pcm_widen)
 );
 #elif RISCV64
 __asm__(
@@ -45530,6 +45719,39 @@ __asm__(
     "li t6, 0\n   add a2, a2, a3\n   addi a4, a4, 4\n   addi a6, a6, -1\n   bnez a6, 31b\n" ASM_RET
 #endif
     ASM_END(f32_rows_mix2)
+
+    //      pcm_widen: see the prototype. a0 dst, a1 src, a2 samples, a3 kind. With V, strips of the longest the machine gives (the bytes are widened by vzext, the three-byte forms are vlseg3e8, the reversed words are shifts and ands, the laws vector arithmetic); without V a sample at a time.
+    ASM_FUNC(pcm_widen)
+    "beqz a2, 9f\n   li t0, 8\n   bltu t0, a3, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 200f\n   bnez t3, 1f\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a3, 16(sp)\n   call cpu_vector_detect\n   ld ra, 24(sp)\n   ld a3, 16(sp)\n   addi sp, sp, 32\n   j pcm_widen\n"
+#endif
+    "1:  li t0, 1\n   beqz a3, 100f\n   beq a3, t0, 110f\n   li t0, 2\n   beq a3, t0, 120f\n   li t0, 3\n   beq a3, t0, 130f\n   li t0, 4\n   beq a3, t0, 140f\n   li t0, 5\n   beq a3, t0, 150f\n   li t0, 6\n   beq a3, t0, 160f\n   li t0, 7\n   beq a3, t0, 170f\n   j 180f\n"
+    "100: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n101: lbu t4, 0(a1)\n   xori t4, t4, 0x80\n   slliw t4, t4, 24\n   sw t4, 0(a0)\n   addi a1, a1, 1\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 101b\n   j 9f\n"
+    "110: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n111: lbu t4, 0(a1)\n   xori t4, t4, 0x55\n   andi t0, t4, 15\n   slli t0, t0, 4\n   srli t1, t4, 4\n   andi t1, t1, 7\n   bnez t1, 11f\n   addi t0, t0, 8\n   j 12f\n11: addi t0, t0, 0x108\n   addi t1, t1, -1\n   sll t0, t0, t1\n12: andi t1, t4, 0x80\n   bnez t1, 13f\n   neg t0, t0\n13: slliw t4, t0, 16\n   sw t4, 0(a0)\n   addi a1, a1, 1\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 111b\n   j 9f\n"
+    "120: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n121: lbu t4, 0(a1)\n   not t4, t4\n   andi t4, t4, 0xff\n   andi t0, t4, 15\n   slli t0, t0, 3\n   addi t0, t0, 0x84\n   srli t1, t4, 4\n   andi t1, t1, 7\n   sll t0, t0, t1\n   addi t0, t0, -0x84\n   andi t1, t4, 0x80\n   beqz t1, 11f\n   neg t0, t0\n11: slliw t4, t0, 16\n   sw t4, 0(a0)\n   addi a1, a1, 1\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 121b\n   j 9f\n"
+    "130: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n131: lbu t0, 0(a1)\n   lbu t1, 1(a1)\n   slli t0, t0, 8\n   or t4, t0, t1\n   slliw t4, t4, 16\n   sw t4, 0(a0)\n   addi a1, a1, 2\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 131b\n   j 9f\n"
+    "140: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n141: lwu t4, 0(a1)\n   srliw t0, t4, 24\n   srli t1, t4, 8\n   and t1, t1, t5\n   or t0, t0, t1\n   slli t1, t4, 8\n   and t1, t1, t6\n   or t0, t0, t1\n   slliw t4, t4, 24\n   or t4, t4, t0\n   sw t4, 0(a0)\n   addi a1, a1, 4\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 141b\n   j 9f\n"
+    "150: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n151: lbu t0, 0(a1)\n   lbu t1, 1(a1)\n   lbu t2, 2(a1)\n   slli t0, t0, 8\n   slli t1, t1, 16\n   slli t2, t2, 24\n   or t4, t0, t1\n   or t4, t4, t2\n   sw t4, 0(a0)\n   addi a1, a1, 3\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 151b\n   j 9f\n"
+    "160: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n161: lbu t0, 0(a1)\n   lbu t1, 1(a1)\n   lbu t2, 2(a1)\n   slli t2, t2, 8\n   slli t1, t1, 16\n   slli t0, t0, 24\n   or t4, t0, t1\n   or t4, t4, t2\n   sw t4, 0(a0)\n   addi a1, a1, 3\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 161b\n   j 9f\n"
+    "170: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n171: lwu t4, 0(a1)\n   slliw t4, t4, 8\n   sw t4, 0(a0)\n   addi a1, a1, 4\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 171b\n   j 9f\n"
+    "180: lui t5, 0x10\n   addi t5, t5, -256\n   lui t6, 0xff0\n181: lwu t4, 0(a1)\n   srliw t0, t4, 24\n   srli t1, t4, 8\n   and t1, t1, t5\n   or t0, t0, t1\n   slli t1, t4, 8\n   and t1, t1, t6\n   or t0, t0, t1\n   slliw t4, t4, 24\n   or t4, t4, t0\n   slliw t4, t4, 8\n   sw t4, 0(a0)\n   addi a1, a1, 4\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 181b\n   j 9f\n"
+    "9:  "
+    ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "200: li t0, 1\n   beqz a3, 300f\n   beq a3, t0, 310f\n   li t0, 2\n   beq a3, t0, 320f\n   li t0, 3\n   beq a3, t0, 330f\n   li t0, 4\n   beq a3, t0, 340f\n   li t0, 5\n   beq a3, t0, 350f\n   li t0, 6\n   beq a3, t0, 360f\n   li t0, 7\n   beq a3, t0, 370f\n   j 380f\n"
+    "300: li t2, 0x80\n301: vsetvli t0, a2, e8, m1, ta, ma\n   vle8.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf4 v12, v8\n   vxor.vx v12, v12, t2\n   vsll.vi v12, v12, 24\n   vse32.v v12, (a0)\n   add a1, a1, t0\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 301b\n   j 9b\n"
+    "310: li t2, 0x55\n   li t3, 0x108\n   li t4, 0x80\n311: vsetvli t0, a2, e8, m1, ta, ma\n   vle8.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf4 v12, v8\n   vxor.vx v12, v12, t2\n   vand.vi v16, v12, 15\n   vsll.vi v16, v16, 4\n   vsrl.vi v20, v12, 4\n   vand.vi v20, v20, 7\n   vadd.vx v24, v16, t3\n   vadd.vi v28, v20, -1\n   vsll.vv v24, v24, v28\n   vadd.vi v16, v16, 8\n   vmseq.vi v0, v20, 0\n   vmerge.vvm v24, v24, v16, v0\n   vand.vx v12, v12, t4\n   vmseq.vi v0, v12, 0\n   vrsub.vi v16, v24, 0\n   vmerge.vvm v24, v24, v16, v0\n   vsll.vi v24, v24, 16\n   vse32.v v24, (a0)\n   add a1, a1, t0\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 311b\n   j 9b\n"
+    "320: li t2, 0xff\n   li t3, 0x84\n   li t4, 0x80\n321: vsetvli t0, a2, e8, m1, ta, ma\n   vle8.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf4 v12, v8\n   vxor.vx v12, v12, t2\n   vand.vi v16, v12, 15\n   vsll.vi v16, v16, 3\n   vadd.vx v16, v16, t3\n   vsrl.vi v20, v12, 4\n   vand.vi v20, v20, 7\n   vsll.vv v16, v16, v20\n   vsub.vx v16, v16, t3\n   vand.vx v12, v12, t4\n   vmsne.vi v0, v12, 0\n   vrsub.vi v24, v16, 0\n   vmerge.vvm v16, v16, v24, v0\n   vsll.vi v16, v16, 16\n   vse32.v v16, (a0)\n   add a1, a1, t0\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 321b\n   j 9b\n"
+    "330: li t2, 0xff\n331: vsetvli t0, a2, e16, m2, ta, ma\n   vle16.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf2 v12, v8\n   vand.vx v16, v12, t2\n   vsll.vi v16, v16, 24\n   vsrl.vi v20, v12, 8\n   vsll.vi v20, v20, 16\n   vor.vv v16, v16, v20\n   vse32.v v16, (a0)\n   slli t1, t0, 1\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 331b\n   j 9b\n"
+    "340: lui t5, 0x10\n   addi t5, t5, -256\n\n341: vsetvli t0, a2, e32, m4, ta, ma\n   vle32.v v12, (a1)\n   vsll.vi v16, v12, 24\n   vsrl.vi v20, v12, 24\n   vor.vv v16, v16, v20\n   vand.vx v20, v12, t5\n   vsll.vi v20, v20, 8\n   vor.vv v16, v16, v20\n   vsrl.vi v20, v12, 8\n   vand.vx v20, v20, t5\n   vor.vv v16, v16, v20\n   vse32.v v16, (a0)\n   slli t1, t0, 2\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 341b\n   j 9b\n"
+    "350: 351: vsetvli t0, a2, e8, m1, ta, ma\n   vlseg3e8.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf4 v12, v8\n   vzext.vf4 v16, v9\n   vzext.vf4 v20, v10\n   vsll.vi v12, v12, 8\n   vsll.vi v16, v16, 16\n   vsll.vi v20, v20, 24\n   vor.vv v12, v12, v16\n   vor.vv v12, v12, v20\n   vse32.v v12, (a0)\n   slli t1, t0, 1\n   add t1, t1, t0\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 351b\n   j 9b\n"
+    "360: 361: vsetvli t0, a2, e8, m1, ta, ma\n   vlseg3e8.v v8, (a1)\n   vsetvli zero, zero, e32, m4, ta, ma\n   vzext.vf4 v12, v8\n   vzext.vf4 v16, v9\n   vzext.vf4 v20, v10\n   vsll.vi v20, v20, 8\n   vsll.vi v16, v16, 16\n   vsll.vi v12, v12, 24\n   vor.vv v12, v12, v16\n   vor.vv v12, v12, v20\n   vse32.v v12, (a0)\n   slli t1, t0, 1\n   add t1, t1, t0\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 361b\n   j 9b\n"
+    "370: 371: vsetvli t0, a2, e32, m4, ta, ma\n   vle32.v v12, (a1)\n   vsll.vi v12, v12, 8\n   vse32.v v12, (a0)\n   slli t1, t0, 2\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 371b\n   j 9b\n"
+    "380: lui t5, 0x10\n   addi t5, t5, -256\n\n381: vsetvli t0, a2, e32, m4, ta, ma\n   vle32.v v12, (a1)\n   vsll.vi v16, v12, 24\n   vsrl.vi v20, v12, 24\n   vor.vv v16, v16, v20\n   vand.vx v20, v12, t5\n   vsll.vi v20, v20, 8\n   vor.vv v16, v16, v20\n   vsrl.vi v20, v12, 8\n   vand.vx v20, v20, t5\n   vor.vv v16, v16, v20\n   vsll.vi v16, v16, 8\n   vse32.v v16, (a0)\n   slli t1, t0, 2\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 381b\n   j 9b\n"
+#endif
+    ASM_END(pcm_widen)
     ".option pop\n"
 );
 #endif

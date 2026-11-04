@@ -318,6 +318,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'resample_polyphase2_f
       'paired timing against the weighted routine it takes the place of for a ratio that reduces to p / q (44.1, 22.05 and 32 kHz '
       'into 48 with their 160, 320 and 3 rows, 96 and 192 kHz with one; 64 to 256 taps, 256 frames a call and 16), three tables '
       'rotating so the rows come from L2, with AVX2 and FMA and with SSE2; V and without on riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'pcm_widen',
+      'paired timing, with the library\'s decoder after it, against the loops of mix.c it took over (-O2, the baseline) for each of '
+      'the nine kinds and the big-endian float, 512 frames of two channels and of six, with AVX2 and SSE2; V and without on '
+      'riscv64, NEON on arm64')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
       'paired timing against the first-NaN-or-first-maximum C loop at -O3 and against '
       'the fast-math two passes the compiler vectorises, for the same instruction set, '
