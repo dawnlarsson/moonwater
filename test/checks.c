@@ -218074,6 +218074,50 @@ b32 main(void)
                 compositor.width = 696;
         }
 
+        // A busy desktop: eighty windows (more than the maps there were), each its own picture, and the band of the tabs, all held in one tick. Every picture is mapped (no room is
+        // refused), and the frames of the whole desktop are composed as records by the card's compose, with the band's tabs over them.
+        {
+                enum { WINS = 80, SIDE = 48, DW = 696, DH = 419 }; // more than the 64 maps there were, and forty windows and more are what a desktop has
+                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * SIDE * SIDE * 4, 3, 0x22, (positive)-1, 0);
+                long band = system_call_6(syscall(mmap), 0, (positive)DW * 48 * 4, 3, 0x22, (positive)-1, 0);
+                struct compositor_frame desk[WINS + 6];
+                int mapped = 1;
+                unsigned int composed = 0;
+
+                if ((pictures < 0 && pictures > -4096) || (band < 0 && band > -4096))
+                        return 1;
+                memory_fill_u32((unsigned int address_to)pictures, (positive)WINS * SIDE * SIDE, 0xff3060a0u);
+                memory_fill_u32((unsigned int address_to)band, (positive)DW * 48, 0xff202020u);
+                while (gpu_map_count)
+                        gpu_drop(0);
+                for (int k = 0; k < WINS; k++)
+                {
+                        memory_zero(&desk[k], sizeof(desk[k]));
+                        desk[k].x = (k % 10) * 68 + 4, desk[k].y = (k / 10) * 40 + 40, desk[k].width = SIDE, desk[k].height = SIDE, desk[k].scale = 100;
+                        desk[k].radius = 8, desk[k].line = 2, desk[k].edge = 0xff405060u;
+                        desk[k].pitch = SIDE, desk[k].pixels = (const unsigned int address_to)pictures + (positive)k * SIDE * SIDE;
+                        mapped &= compositor_gpu_picture(&desk[k]);
+                }
+                for (int t = 0; t < 6; t++) // six tabs of the band, each a slice of it
+                {
+                        memory_zero(&desk[WINS + t], sizeof(desk[0]));
+                        desk[WINS + t].builtin = 1, desk[WINS + t].slot = t - 2, desk[WINS + t].x = t * 110, desk[WINS + t].y = 0, desk[WINS + t].width = 100;
+                        desk[WINS + t].height = 48, desk[WINS + t].scale = 100;
+                }
+                compositor_gscene.width = DW, compositor_gscene.height = DH;
+                compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_OPS_AT), compositor_gscene.room = (1 << 20) / 32;
+                compositor_gscene.tables = (unsigned char address_to)gpu.at + COMPOSITOR_GPU_TABLES_AT, compositor_gscene.tables_at = COMPOSITOR_GPU_TABLES_AT;
+                compositor_gscene.tables_size = 1 << 20, compositor_gscene.kept = compositor_gscene.tables_used = 0;
+                composed = compositor_gpu_frames(desk, WINS + 6, compositor_ground);
+                check("gpu desktop: eighty windows and a band, each mapped in one tick, are all in the room there is", mapped && gpu_map_count >= WINS);
+                check("gpu desktop: the frames of eighty windows and the band are composed as records (no room refused)", composed && compositor_gscene.count > WINS * 4);
+                if (!composed || !mapped)
+                        string_format(log, "  gpu desktop: %s, %p maps held, the scene's why %p\n", composed ? (string_address) "composed" : (string_address) "refused",
+                                      (positive)gpu_map_count, (positive)compositor_gscene.why);
+                while (gpu_map_count)
+                        gpu_drop(0);
+        }
+
         // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
         // submission. A job of one 64 by 4 fill, best and median of 31, with no maps; the two buffers of five 1920 by 1080 windows of a 3840-wide
         // screen (the window table's rows); those and a band of 34 tabs, 48 rows of 3840, each tab a map of its own slice; and the windows and the tabs

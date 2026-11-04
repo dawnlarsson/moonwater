@@ -501,7 +501,10 @@ static b32 gpu_start(positive bytes)
 // [addr, addr + size) to pages and maps them; gpu_va_bytes answers the GPU's address of a pointer that is inside one that holds bytes from it, 0 for none, and marks
 // the map as used in this tick (a reader of more than a byte asks for all it reads: a map that holds the first is not one that holds the rest); gpu_trim lets go
 // of the maps that were not used in the last few ticks (one tick a frame).
-static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[64];
+// 256 maps, so that a desktop of forty windows and their band, with a drag's and a landing's transient pictures, can be held in one tick (64 was the room a
+// present had, and a present with no room for a picture is the processor's). A map this tick does not use is not named by its job: no cost to hold it.
+#define GPU_MAPS 256
+static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[GPU_MAPS];
 static unsigned int gpu_map_count, gpu_tick;
 #define GPU_VA_MAPS 0x2000000000ull
 #define GPU_VA_END (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it
@@ -545,11 +548,11 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
 
-        for (unsigned int i = 1; gpu_map_count == 64 && i < 64; i++)
+        for (unsigned int i = 1; gpu_map_count == GPU_MAPS && i < GPU_MAPS; i++)
                 old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
-        if (gpu_map_count == 64 && gpu_maps[old].used != gpu_tick)
+        if (gpu_map_count == GPU_MAPS && gpu_maps[old].used != gpu_tick)
                 gpu_drop(old);
-        if (gpu_map_count == 64 || !(at = gpu_place(to - from)) || !gpu_io(3u, 0x11, 24, up))
+        if (gpu_map_count == GPU_MAPS || !(at = gpu_place(to - from)) || !gpu_io(3u, 0x11, 24, up))
                 return false;
         va[0] = close[0] = up[2] >> 32, va[2] = at;
         if (!gpu_io(1u, 8, 64, va))
@@ -683,7 +686,7 @@ static b32 gpu_run(void)
             GPU_PKT(0x15, 3), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows, 1, 0x45};
         // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
-        p64 bos[1 + 8 + 64], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
+        p64 bos[1 + 8 + GPU_MAPS], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
             list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
         unsigned int named, tries = 0;
 
