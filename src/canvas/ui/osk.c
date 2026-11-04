@@ -9,8 +9,9 @@
         window.c), which the compositor reads (compositor_osk_read) only while a press of the person's is on this window. So the
         editor, the terminal, the launcher and the Settings fields take the keys unchanged.
 
-        Pages: the letters (QWERTY); the numbers and the common symbols, with Tab and the arrows on the second symbols page; and the
-        second symbols page. Shift is a latch: one tap makes the next letter a capital, two taps in a row (within OSK_SHIFT_NS) hold it
+        Pages: the letters; the numbers and the common symbols, with Tab and the arrows on the second symbols page; and the
+        second symbols page. The letters follow the keyboard layout the compositor keeps (the table's osk_layout): QWERTY, QWERTZ
+        (de) or AZERTY (fr), and QWERTY for every other layout (osk_layouts). Dvorak is not one of the layouts the setting offers. Shift is a latch: one tap makes the next letter a capital, two taps in a row (within OSK_SHIFT_NS) hold it
         for every letter, one more tap lets go. Backspace and the arrows repeat while their key is held (after OSK_HOLD_NS, every
         OSK_REPEAT_NS). A key's feedback is the kit's: its ripple, its press and its hover.
 
@@ -80,14 +81,26 @@ struct osk_key
 #define OSK_PAGE_NUMBERS 1
 #define OSK_PAGE_SYMBOLS 2
 
-// The pages: the letters, the numbers and the common symbols, the second symbols page. A row of keys is the kit's buttons in a line,
-// each as wide as its span of the row's halves says, and the row fills the keyboard's width.
-static const struct osk_key osk_letters[OSK_ROWS][OSK_COLS] = {
-    {OSK_L(16, 'q'), OSK_L(17, 'w'), OSK_L(18, 'e'), OSK_L(19, 'r'), OSK_L(20, 't'), OSK_L(21, 'y'), OSK_L(22, 'u'), OSK_L(23, 'i'), OSK_L(24, 'o'), OSK_L(25, 'p')},
-    {OSK_S(OSK_NONE, 1), OSK_L(30, 'a'), OSK_L(31, 's'), OSK_L(32, 'd'), OSK_L(33, 'f'), OSK_L(34, 'g'), OSK_L(35, 'h'), OSK_L(36, 'j'), OSK_L(37, 'k'), OSK_L(38, 'l'), OSK_S(OSK_NONE, 1)},
-    {OSK_W(OSK_SHIFT, 3, 42, "Shift"), OSK_L(44, 'z'), OSK_L(45, 'x'), OSK_L(46, 'c'), OSK_L(47, 'v'), OSK_L(48, 'b'), OSK_L(49, 'n'), OSK_L(50, 'm'),
-     OSK_W(OSK_BACK, 3, OSK_CODE_BACKSPACE, "Back")},
-    {OSK_P(3, OSK_PAGE_NUMBERS, "123"), OSK_L(51, ','), OSK_W(OSK_SPACE, 10, OSK_CODE_SPACE, "Space"), OSK_L(52, '.'), OSK_W(OSK_ENTER, 3, OSK_CODE_ENTER, "Enter")},
+// The letter rows of each keyboard layout the compositor keeps, by its name (two letters, packed: us is 'u' | 's' << 8). A row's
+// letters are in order, and the row's evdev codes are the physical keys' from the row's first code on (osk_letter_start): the key a
+// letter is on, as the layout has it. QWERTY is the default, for a layout that is not listed.
+#define OSK_LAYOUT(a, b) ((unsigned int)(a) | (unsigned int)(b) << 8)
+static const struct osk_layout
+{
+        unsigned int name;
+        const char address_to rows[3];
+} osk_layouts[] = {
+    {OSK_LAYOUT('u', 's'), {"qwertyuiop", "asdfghjkl", "zxcvbnm"}},
+    {OSK_LAYOUT('d', 'e'), {"qwertzuiop", "asdfghjkl", "yxcvbnm"}},
+    {OSK_LAYOUT('f', 'r'), {"azertyuiop", "qsdfghjklm", "wxcvbn"}},
+};
+static const unsigned short osk_letter_start[3] = {16, 30, 44};
+
+// The pages: the letters (built for the layout, osk_letters_build), the numbers and the common symbols, the second symbols page. A row
+// of keys is the kit's buttons in a line, each as wide as its span of the row's halves says, and the row fills the keyboard's width.
+static struct osk_key osk_letter_keys[OSK_ROWS][OSK_COLS];
+static const struct osk_key osk_bottom[OSK_COLS] = {
+    OSK_P(3, OSK_PAGE_NUMBERS, "123"), OSK_L(51, ','), OSK_W(OSK_SPACE, 10, OSK_CODE_SPACE, "Space"), OSK_L(52, '.'), OSK_W(OSK_ENTER, 3, OSK_CODE_ENTER, "Enter"),
 };
 
 static const struct osk_key osk_numbers[OSK_ROWS][OSK_COLS] = {
@@ -111,7 +124,38 @@ static const struct osk_key osk_symbols[OSK_ROWS][OSK_COLS] = {
      OSK_W(OSK_ARROW, 2, OSK_CODE_RIGHT, "Right"), OSK_W(OSK_ENTER, 3, OSK_CODE_ENTER, "Enter")},
 };
 
-static const struct osk_key (*osk_page_keys[OSK_PAGES])[OSK_COLS] = {osk_letters, osk_numbers, osk_symbols};
+static const struct osk_key (*osk_page_keys[OSK_PAGES])[OSK_COLS] = {osk_letter_keys, osk_numbers, osk_symbols};
+
+// The letters of a layout into the letters page: its three letter rows, the rows' spacers (a row of nine letters is centred, ten fill
+// it) and Shift and Back at the ends of the last, and the bottom row as it is. A layout that is not listed is QWERTY.
+static void osk_letters_build(unsigned int name)
+{
+        const struct osk_layout address_to layout = &osk_layouts[0];
+
+        for (unsigned int at = 0; at < sizeof(osk_layouts) / sizeof(osk_layouts[0]); at++)
+                if (osk_layouts[at].name == name)
+                        layout = &osk_layouts[at];
+        for (int row = 0; row < 3; row++)
+        {
+                const char address_to letters = layout->rows[row];
+                int count = (int)string_length((string_address)letters), at = 0;
+
+                for (int k = 0; k < OSK_COLS; k++)
+                        osk_letter_keys[row][k] = (struct osk_key){OSK_NONE, 0, 0, 0, 0, null};
+                if (row == 1 && count == 9)
+                        osk_letter_keys[row][at++] = (struct osk_key)OSK_S(OSK_NONE, 1);
+                if (row == 2)
+                        osk_letter_keys[row][at++] = (struct osk_key)OSK_W(OSK_SHIFT, 3, 42, "Shift");
+                for (int k = 0; k < count; k++, at++)
+                        osk_letter_keys[row][at] = (struct osk_key)OSK_L(osk_letter_start[row] + k, letters[k]);
+                if (row == 1 && count == 9)
+                        osk_letter_keys[row][at++] = (struct osk_key)OSK_S(OSK_NONE, 1);
+                if (row == 2)
+                        osk_letter_keys[row][at++] = (struct osk_key)OSK_W(OSK_BACK, 3, OSK_CODE_BACKSPACE, "Back");
+        }
+        for (int k = 0; k < OSK_COLS; k++)
+                osk_letter_keys[3][k] = osk_bottom[k];
+}
 
 // A row's keys in a page: the count is the keys a row has, the spacers included.
 static int osk_row_count(int page, int row)
@@ -135,6 +179,7 @@ static struct
         b32 dirty, focused;
         unsigned int ground;
         int page;
+        unsigned int layout;                // the keyboard layout the letters are built for (the table's osk_layout; ~0 before the first)
         unsigned int shift;                 // 0 off, 1 the next letter, 2 held (caps)
         b64 shift_at;                       // the last tap of Shift
         int held;                           // the key the press is on (its index), or -1
@@ -353,12 +398,20 @@ static b32 osk_event(const struct window_event address_to event)
         return true;
 }
 
+static b32 osk_layout_take(void);
+
 // The held key repeats while the keyboard is held down: a key's repeat is due at its time and the loop waits for it.
 static long osk_tick(long timeout, long address_to other)
 {
         b64 now = ui_kit.now, wait;
 
         (void)other;
+        // The layout changed (the compositor woke the keyboard for it): its letters are built again, and the picture is due.
+        if (osk_layout_take())
+        {
+                osk_relayout();
+                return 0;
+        }
         if (osk.repeat < 0)
                 return timeout;
         if (now >= osk.next)
@@ -388,6 +441,19 @@ static void osk_metrics(void)
         osk_layout();
         osk_dock(up);
         osk.dirty = true;
+}
+
+// The keyboard layout the compositor keeps (the table's osk_layout): the letters are built for it when it is not the one they are.
+// True when they changed; the caller lays the keys out again.
+static b32 osk_layout_take(void)
+{
+        unsigned int name = __atomic_load_n(&osk.own.table->osk_layout, __ATOMIC_ACQUIRE);
+
+        if (name == osk.layout)
+                return false;
+        osk.layout = name;
+        osk_letters_build(name);
+        return true;
 }
 
 // The keyboard's place: centred across the primary screen, its bottom above the panel (the panel is its own strip). It is asked with
@@ -485,6 +551,7 @@ static int osk_open(void)
         // A second keyboard lifts the one up (it is none of a person's keys): its window goes on as it is, and this one stops.
         if (ui_lift_other(&osk.own, (string_address) "osk", false))
                 return 0;
+        osk_layout_take();
         osk_metrics();
         osk_frame();
         osk_trace();
@@ -524,6 +591,7 @@ static b32 osk_main()
         string_address regular = (string_address) UI_FONT_REGULAR;
 
         memory_zero(&osk, sizeof(osk));
+        osk.layout = ~0u; // no layout yet: the first take builds the letters
         osk.shown = -1;
         osk.held = -1;
         osk.repeat = -1;

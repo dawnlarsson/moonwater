@@ -10346,7 +10346,12 @@ static void compositor_wake_pass(positive now)
 */
 #define COMPOSITOR_SETTING_OPEN (FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
 
-// The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US.
+static void compositor_osk_sync(void);
+static int compositor_osk_row(void);
+
+// The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US. A layout that
+// changes is the on-screen keyboard's too: its letters are the layout's, so the keyboard is asked again (compositor_osk_sync
+// writes the layout to the table) and woken to read it.
 static void compositor_layout_read(void)
 {
         char name[8] = {0};
@@ -10368,6 +10373,14 @@ static void compositor_layout_read(void)
         {
                 compositor.keymap.layout = (unsigned char)layout;
                 compositor.keymap.dead = 0;
+                if (compositor.table)
+                {
+                        int row = compositor_osk_row();
+
+                        compositor_osk_sync();
+                        if (row >= 0)
+                                compositor.woken |= 1u << row;
+                }
         }
 }
 
@@ -13896,6 +13909,9 @@ static void compositor_osk_publish(void)
         table->osk_shown = compositor.osk_shown;
         table->osk_input = compositor.osk_typed ? 2 : compositor.owner != COMPOSITOR_PREDICT_MOUSE ? 1 : 0;
         table->osk_physical = compositor_osk_physical();
+        // The layout's name, its two letters packed (us is 'u' | 's' << 8): the keyboard lays its letters out by it (osk.c).
+        table->osk_layout = (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[0] |
+                            (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[1] << 8;
 }
 
 static void compositor_osk_sync(void)

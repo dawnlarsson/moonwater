@@ -50,6 +50,11 @@ session()
         bin/compositor -H 800x600 "$work/after.img" -i "$work/input.fifo" > compositor.log 2>&1 &
         cpid=$!
         sleep 2
+        # a keyboard layout (the 6th argument) is the setting's file, which the compositor reads when it is written
+        if [ -n "${6:-}" ]; then
+                printf '%s\n' "$6" > /root/keyboard
+                sleep 1
+        fi
         MOONWATER_ASKED=1 bin/editor note.txt > editor.log 2>&1 &
         sleep 3
         bin/moonwater debug > debug.editor.txt 2>&1
@@ -104,7 +109,10 @@ unshare -rm sh "$self" session "$work" "$compositor" "$fonts" auto > "$work/sess
 mkdir -p "$work/off"
 unshare -rm sh "$self" session "$work/off" "$compositor" "$fonts" off > "$work/off/session.out" 2>&1 < /dev/null
 # the impostors: a copy of the keyboard's file, and the same file run under another name, each started where the keyboard is
-mkdir -p "$work/copy" "$work/renamed"
+mkdir -p "$work/copy" "$work/renamed" "$work/de" "$work/fr"
+# the letters follow the layout: QWERTZ (de) and AZERTY (fr) are the setting's files, with the setting off (the trace is the proof)
+unshare -rm sh "$self" session "$work/de" "$compositor" "$fonts" off real de > "$work/de/session.out" 2>&1 < /dev/null
+unshare -rm sh "$self" session "$work/fr" "$compositor" "$fonts" off real fr > "$work/fr/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
 
@@ -196,4 +204,22 @@ for who in copy renamed; do
         *) row FAIL "a program that asks for the keyboard's flags from $who has no keyboard role" "debug: $line" ;;
         esac
 done
+# the letters of the layout: the trace (osk -t) is the keys' rectangles and their words, so the taps follow the layout too
+for layout in de fr; do
+        letters=$(awk '$1 == 0 && $2 == 0 { printf "%s", $8 }' "$work/$layout/keys.txt" 2> /dev/null)
+        lower=$(awk '$1 == 0 && $2 == 2 && length($8) == 1 { printf "%s", $8 }' "$work/$layout/keys.txt" 2> /dev/null)
+        want=$( [ "$layout" = de ] && echo "qwertzuiop yxcvbnm" || echo "azertyuiop wxcvbn" )
+        if [ "$letters $lower" = "$want" ]; then
+                row ok "the keyboard's letters are $layout's: $letters, $lower"
+        else
+                row FAIL "the keyboard's letters are $layout's" "trace: $letters $lower, wanted $want"
+        fi
+done
+letters=$(awk '$1 == 0 && $2 == 0 { printf "%s", $8 }' "$work/keys.txt" 2> /dev/null)
+if [ "$letters" = qwertyuiop ]; then
+        row ok "with no layout kept the keyboard's letters are QWERTY"
+else
+        row FAIL "with no layout kept the keyboard's letters are QWERTY" "trace: $letters"
+fi
+
 exit "$failures"
