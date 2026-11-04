@@ -308,14 +308,21 @@ struct ctl
         never end, costs the call its budget and no more. Only a call that is made of its own sets the budget: the calls it
         makes in turn (the probe of a record stream's count, the stream's count asked before its volume) share it.
 */
+// The transport's time. A transport with no clock (now is null) has the time 0 always, so its budget never runs out: the call is
+// given its whole timeout on every wait, as a connection without a clock always had, and no null is ever called.
+static long ctl_now(struct ctl *c)
+{
+        return c->transport.now ? c->transport.now(c->transport.context) : 0;
+}
+
 static void ctl_budget(struct ctl *c)
 {
-        c->deadline = c->transport.now(c->transport.context) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);
+        c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);
 }
 
 static long ctl_left(struct ctl *c)
 {
-        long left = c->deadline - c->transport.now(c->transport.context);
+        long left = c->deadline - ctl_now(c);
 
         return left > 0 ? left : 0;
 }

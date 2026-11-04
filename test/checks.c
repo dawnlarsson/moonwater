@@ -178737,6 +178737,48 @@ static void cck_test_normal(const char *dir)
         cck_stop(pid, &c);
 }
 
+// A transport with no clock (now is null) and a fake server that answers each request with its tag: its calls are taken, and no
+// call goes through the null clock (the budget of a connection with no clock never runs out).
+static unsigned char cck_fake_reply[32];
+static long cck_fake_have, cck_fake_at;
+
+static long cck_fake_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)context, (void)count, (void)timeout_ms;
+        memset(cck_fake_reply, 0, sizeof(cck_fake_reply));
+        cck_put(cck_fake_reply, 10);
+        cck_put(cck_fake_reply + 4, 0xffffffffu);
+        cck_fake_reply[20] = 'L';
+        cck_put(cck_fake_reply + 21, 2);
+        cck_fake_reply[25] = 'L';
+        cck_put(cck_fake_reply + 26, cck_get(bytes + 26));
+        cck_fake_have = 30;
+        cck_fake_at = 0;
+        return 0;
+}
+
+static long cck_fake_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)context, (void)timeout_ms;
+        if (cck_fake_have - cck_fake_at < count)
+                return -1;
+        memcpy(bytes, cck_fake_reply + cck_fake_at, (size_t)count);
+        cck_fake_at += count;
+        return 0;
+}
+
+static void cck_test_no_clock(void)
+{
+        static struct ctl c;
+
+        memset(&c, 0, sizeof(c));
+        c.transport = (struct ctl_transport){0, cck_fake_send, cck_fake_receive, 0};
+        c.open = 1;
+        CCKCHECK(ctl_set_sink_volume(&c, "null", 0x8000) == 0, "a transport with no clock takes a volume");
+        CCKCHECK(ctl_set_sink_mute(&c, "null", 1) == 0, "and a mute, with no clock");
+        CCKCHECK(ctl_set_input_mute(&c, 3, 0) == 0, "and a stream's mute");
+}
+
 // The rest of the client, referenced here so that a build with -Werror finds no unused function: each of them is checked
 // over the engine by CHECK_audio_pulse, and this check is about the socket under them.
 static const void *cck_rest[] = {(void *)ctl_get_input, (void *)ctl_set_input_volume, (void *)ctl_set_output_volume, (void *)ctl_set_input_mute,
@@ -178758,6 +178800,7 @@ int main(void)
         }
         if (!cck_rest[0])
                 return 1;
+        cck_test_no_clock();
         cck_test_two_connections(dir);
         cck_test_normal(dir);
         cck_test_held(dir, CCK_DRIBBLE, "d");
