@@ -6,6 +6,8 @@
 #
 # A command is one of
 #     tap:LABEL          a press and a lift on a key of the page shown
+#     cell:PAGE:ROW:COL  a press and a lift on the key at that place of the trace, whatever page is shown
+#     drag:X1:Y1:X2:Y2   a press at X1, Y1, the pointer moved to X2, Y2 with the button held, and the lift
 #     hold:LABEL:SECS    a press held for SECS, then the lift
 #     text:STRING        each character as a tap: a capital is Shift and the letter, a space is Space, a newline is Enter
 #     wait:SECS          nothing, for the screen to settle
@@ -57,12 +59,14 @@ class Pointer:
 
 
 def load(path):
+    # keys by (page, word), and by ("cell", page, row, column) for a command that names a key by its place
     keys = {}
     for line in open(path):
         fields = line.rstrip("\n").split(" ", 7)
         if len(fields) == 8:
             page, row, column, x, y, w, h = map(int, fields[:7])
             keys[(page, fields[7])] = (x, y, w, h)
+            keys[("cell", page, row, column)] = (x, y, w, h)
     return keys
 
 
@@ -98,6 +102,26 @@ def main():
         kind, _, rest = command.partition(":")
         if kind == "tap":
             tap(rest)
+        elif kind == "drag":
+            # a press at X1, Y1 (on a window), the pointer moved to X2, Y2 with the button held, and the lift: a window that started a
+            # move on its press (wayland-textinput -M) follows the pointer
+            x1, y1, x2, y2 = (int(v) for v in rest.split(":"))
+            pointer.move(x1, y1)
+            pointer.press()
+            time.sleep(0.3)
+            pointer.move(x2, y2)
+            time.sleep(0.3)
+            pointer.lift()
+            time.sleep(0.5)
+        elif kind == "cell":
+            # a key by its place on the trace's page (PAGE:ROW:COLUMN), whatever its word: the page it is on is not the one shown
+            # to the script, so this is the one command that names the page itself
+            cell = tuple(int(v) for v in rest.split(":"))
+            x, y, w, h = keys[("cell",) + cell]
+            pointer.move(x + w // 2, y + h // 2)
+            pointer.press()
+            pointer.lift()
+            time.sleep(0.15)
         elif kind == "hold":
             label, _, seconds = rest.partition(":")
             tap(label, float(seconds))

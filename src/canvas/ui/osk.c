@@ -40,7 +40,7 @@
 #define OSK_REPEAT_NS 60000000ull  // and then every this
 #define OSK_SHIFT_NS 400000000ull  // two taps of Shift this close make it hold (caps)
 #define OSK_TRACE_LINE 96
-#define OSK_TRACE_MOST (OSK_PAGES * OSK_ROWS * OSK_COLS * OSK_TRACE_LINE)
+#define OSK_TRACE_MOST ((OSK_PAGES + 1) * OSK_ROWS * OSK_COLS * OSK_TRACE_LINE) // the pages, and the email page the trace writes after them
 
 // What a key does.
 #define OSK_NONE 0   // a space between keys: drawn nowhere, hit by nothing
@@ -52,6 +52,13 @@
 #define OSK_TAB 6
 #define OSK_ARROW 7  // repeats; its code is the arrow's
 #define OSK_PAGE 8   // shows the page in its alt
+#define OSK_WORD 9   // a short run of letters and dots (.com): each character is a key press and a release
+
+// The content purposes the page is picked by (the protocol's content_purpose values, the table's osk_purpose).
+#define OSK_PURPOSE_DIGITS 2
+#define OSK_PURPOSE_NUMBER 3
+#define OSK_PURPOSE_URL 5
+#define OSK_PURPOSE_EMAIL 6
 
 // The evdev codes the keys send (linux/input-event-codes.h).
 #define OSK_CODE_BACKSPACE 14
@@ -106,7 +113,7 @@ static const struct osk_key osk_bottom[OSK_COLS] = {
 static const struct osk_key osk_numbers[OSK_ROWS][OSK_COLS] = {
     {OSK_C(2, '1', 0), OSK_C(3, '2', 0), OSK_C(4, '3', 0), OSK_C(5, '4', 0), OSK_C(6, '5', 0), OSK_C(7, '6', 0), OSK_C(8, '7', 0), OSK_C(9, '8', 0),
      OSK_C(10, '9', 0), OSK_C(11, '0', 0)},
-    {OSK_C(12, '-', 0), OSK_C(53, '/', 0), OSK_C(39, ':', 0), OSK_C(39, ';', 0), OSK_C(10, '(', 0), OSK_C(11, ')', 0), OSK_C(4, '$', 0), OSK_C(8, '&', 0),
+    {OSK_C(12, '-', 0), OSK_C(53, '/', 0), OSK_C(39, ':', 0), OSK_C(39, ';', 0), OSK_C(10, '(', 0), OSK_C(11, ')', 0), OSK_C(5, '$', 0), OSK_C(8, '&', 0),
      OSK_C(3, '@', 0), OSK_C(40, '"', 0)},
     {OSK_P(3, OSK_PAGE_SYMBOLS, "#+="), OSK_C(52, '.', 0), OSK_C(51, ',', 0), OSK_C(53, '?', 0), OSK_C(2, '!', 0), OSK_C(40, '\'', 0),
      OSK_W(OSK_BACK, 3, OSK_CODE_BACKSPACE, "Back")},
@@ -124,6 +131,8 @@ static const struct osk_key osk_symbols[OSK_ROWS][OSK_COLS] = {
      OSK_W(OSK_ARROW, 2, OSK_CODE_RIGHT, "Right"), OSK_W(OSK_ENTER, 3, OSK_CODE_ENTER, "Enter")},
 };
 
+// The symbols page of an email or a url field: the same, with @ for the first key of its second row and .com for the last.
+static struct osk_key osk_symbols_mail[OSK_ROWS][OSK_COLS];
 static const struct osk_key (*osk_page_keys[OSK_PAGES])[OSK_COLS] = {osk_letter_keys, osk_numbers, osk_symbols};
 
 // The letters of a layout into the letters page: its three letter rows, the rows' spacers (a row of nine letters is centred, ten fill
@@ -180,6 +189,7 @@ static struct
         unsigned int ground;
         int page;
         unsigned int layout;                // the keyboard layout the letters are built for (the table's osk_layout; ~0 before the first)
+        unsigned int purpose;               // the content purpose the page was picked by (the table's osk_purpose; ~0 before the first)
         unsigned int shift;                 // 0 off, 1 the next letter, 2 held (caps)
         b64 shift_at;                       // the last tap of Shift
         int held;                           // the key the press is on (its index), or -1
@@ -277,10 +287,38 @@ static b32 osk_frame(void)
         return ui_app_present(&osk.own, &osk.shown, &osk.dirty, osk.width, osk.height, osk_draw, null);
 }
 
-// A key sent: a press (with the Shift the keyboard holds) or a release, to the window with the keys.
+// A capital or a symbol that is a shifted key on the US keyboard: its key is sent with Shift, so a client that makes its character from
+// the key and the modifiers (a Wayland client) makes the same one. The kit's windows take the character as it is.
+static b32 osk_shifted(unsigned int ch)
+{
+        static const char shifted[] = "!@#$%^&*()_+{}|:\"~<>?";
+
+        if (ch >= 'A' && ch <= 'Z')
+                return true;
+        for (int at = 0; shifted[at]; at++)
+                if ((unsigned int)(unsigned char)shifted[at] == ch)
+                        return true;
+        return false;
+}
+
+// A key sent: a press (with the Shift the keyboard holds, or the one its character takes) or a release, to the window with the keys.
 static void osk_send(unsigned int code, unsigned int ch, b32 down)
 {
-        windows_keyboard_send(&osk.own, (int)code, (int)ch, (down ? WINDOW_KEY_DOWN : 0) | osk_modifiers());
+        unsigned int mods = osk_modifiers();
+
+        if (down && osk_shifted(ch))
+                mods |= WINDOW_KEY_SHIFT;
+        windows_keyboard_send(&osk.own, (int)code, (int)ch, (down ? WINDOW_KEY_DOWN : 0) | mods);
+}
+
+// The evdev code of a letter or a dot on the page of letters (the layout's, so the word follows the layout), or 0 for none.
+static unsigned int osk_code_of(unsigned int ch)
+{
+        for (int row = 0; row < OSK_ROWS; row++)
+                for (int k = 0; k < OSK_COLS; k++)
+                        if (osk_letter_keys[row][k].kind == OSK_CHAR && osk_letter_keys[row][k].ch == ch)
+                                return osk_letter_keys[row][k].code;
+        return 0;
 }
 
 // The Shift latch: one tap for the next letter, a second tap soon after for every letter, a third tap, or a tap after one, off.
@@ -325,6 +363,19 @@ static void osk_press(int index)
                 osk.shift = 0;
                 osk.page = (int)key->alt;
                 osk_relayout();
+                break;
+        case OSK_WORD:
+                // Each character is a press and a release of its key, with no Shift (the latch is not the word's).
+                osk.held = -1;
+                for (int at = 0; key->word[at]; at++)
+                {
+                        unsigned int ch = (unsigned char)key->word[at], code = osk_code_of(ch);
+
+                        if (!code)
+                                continue;
+                        windows_keyboard_send(&osk.own, (int)code, (int)ch, WINDOW_KEY_DOWN);
+                        windows_keyboard_send(&osk.own, (int)code, (int)ch, 0);
+                }
                 break;
         case OSK_BACK:
         case OSK_ARROW:
@@ -399,15 +450,20 @@ static b32 osk_event(const struct window_event address_to event)
 }
 
 static b32 osk_layout_take(void);
+static b32 osk_purpose_take(void);
 
 // The held key repeats while the keyboard is held down: a key's repeat is due at its time and the loop waits for it.
 static long osk_tick(long timeout, long address_to other)
 {
         b64 now = ui_kit.now, wait;
+        b32 layout, purpose;
 
         (void)other;
-        // The layout changed (the compositor woke the keyboard for it): its letters are built again, and the picture is due.
-        if (osk_layout_take())
+        // The layout or the focus's content purpose changed (the compositor woke the keyboard for it): the letters are built again,
+        // the page is picked again, and the picture is due.
+        layout = osk_layout_take();
+        purpose = osk_purpose_take();
+        if (layout || purpose)
         {
                 osk_relayout();
                 return 0;
@@ -453,6 +509,41 @@ static b32 osk_layout_take(void)
                 return false;
         osk.layout = name;
         osk_letters_build(name);
+        return true;
+}
+
+// The symbols page the keyboard shows: the one of an email or a url field (mail, with @ and .com), or the plain one.
+static void osk_symbols_use(b32 mail)
+{
+        if (mail)
+        {
+                for (int row = 0; row < OSK_ROWS; row++)
+                        for (int k = 0; k < OSK_COLS; k++)
+                                osk_symbols_mail[row][k] = osk_symbols[row][k];
+                osk_symbols_mail[1][0] = (struct osk_key)OSK_C(3, '@', 0);
+                osk_symbols_mail[1][9] = (struct osk_key)OSK_W(OSK_WORD, 3, 0, ".com"); // the last key of the row (its ten keys are 0 to 9)
+                osk_page_keys[OSK_PAGE_SYMBOLS] = osk_symbols_mail;
+        }
+        else
+                osk_page_keys[OSK_PAGE_SYMBOLS] = osk_symbols;
+}
+
+// The focus's content purpose (the table's osk_purpose), which picks the page: a number or digits open the numbers page, an email or a
+// url the symbols page (with @ and .com), and every other purpose (a password included: the keyboard keeps nothing of what is typed, and
+// it has no suggestions) the letters. True when it changed; the caller lays the keys out again.
+static b32 osk_purpose_take(void)
+{
+        unsigned int purpose = __atomic_load_n(&osk.own.table->osk_purpose, __ATOMIC_ACQUIRE);
+        b32 mail = purpose == OSK_PURPOSE_EMAIL || purpose == OSK_PURPOSE_URL;
+
+        if (purpose == osk.purpose)
+                return false;
+        osk.purpose = purpose;
+        osk_symbols_use(mail);
+        osk.page = purpose == OSK_PURPOSE_DIGITS || purpose == OSK_PURPOSE_NUMBER ? OSK_PAGE_NUMBERS
+                   : mail                                                          ? OSK_PAGE_SYMBOLS
+                                                                                   : OSK_PAGE_LETTERS;
+        osk.shift = 0;
         return true;
 }
 
@@ -508,35 +599,45 @@ static int osk_put_number(char address_to into, int n)
 
 static void osk_trace(void)
 {
-        int x = osk.left, y = osk.top, length = 0;
+        int x = osk.left, y = osk.top, length = 0, shown = osk.page;
         bipolar handle;
 
         if (!osk.trace)
                 return;
-        // Every page is laid out in turn for the trace, and the page shown is laid out again after it.
-        for (int page = 0; page < OSK_PAGES; page++)
+        // Every page is laid out in turn for the trace, and the page shown is laid out again after it. The symbols page of an email or
+        // a url field is written after them as page OSK_PAGES (the plain one has no @ and no .com).
+        for (int variant = 0; variant < 2; variant++)
         {
-                osk.page = page;
-                osk_layout();
-                for (int row = 0; row < OSK_ROWS; row++)
-                        for (int k = 0; k < OSK_COLS; k++)
-                        {
-                                const struct ui_control address_to c = &osk.keys[row * OSK_COLS + k];
-                                int values[7] = {page, row, k, x + ui_dev(&osk.ui, c->x), y + ui_dev(&osk.ui, c->y), ui_dev(&osk.ui, c->w), ui_dev(&osk.ui, c->h)};
+                int first = variant ? OSK_PAGE_SYMBOLS : 0, last = variant ? OSK_PAGE_SYMBOLS + 1 : OSK_PAGES;
 
-                                if (!c->kind || length + OSK_TRACE_LINE > OSK_TRACE_MOST)
-                                        continue;
-                                for (int v = 0; v < 7; v++)
+                osk_symbols_use(variant);
+                for (int page = first; page < last; page++)
+                {
+                        int number = variant ? OSK_PAGES : page;
+
+                        osk.page = page;
+                        osk_layout();
+                        for (int row = 0; row < OSK_ROWS; row++)
+                                for (int k = 0; k < OSK_COLS; k++)
                                 {
-                                        length += osk_put_number(osk.trace_text + length, values[v]);
-                                        osk.trace_text[length++] = ' ';
+                                        const struct ui_control address_to c = &osk.keys[row * OSK_COLS + k];
+                                        int values[7] = {number, row, k, x + ui_dev(&osk.ui, c->x), y + ui_dev(&osk.ui, c->y), ui_dev(&osk.ui, c->w), ui_dev(&osk.ui, c->h)};
+
+                                        if (!c->kind || length + OSK_TRACE_LINE > OSK_TRACE_MOST)
+                                                continue;
+                                        for (int v = 0; v < 7; v++)
+                                        {
+                                                length += osk_put_number(osk.trace_text + length, values[v]);
+                                                osk.trace_text[length++] = ' ';
+                                        }
+                                        for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
+                                                osk.trace_text[length++] = c->label[w];
+                                        osk.trace_text[length++] = '\n';
                                 }
-                                for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
-                                        osk.trace_text[length++] = c->label[w];
-                                osk.trace_text[length++] = '\n';
-                        }
+                }
         }
-        osk.page = OSK_PAGE_LETTERS;
+        osk_symbols_use(osk.purpose == OSK_PURPOSE_EMAIL || osk.purpose == OSK_PURPOSE_URL);
+        osk.page = shown;
         osk_layout();
         handle = system_open_at_mode(AT_FDCWD, (string_address)osk.trace, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (handle >= 0)
@@ -552,6 +653,7 @@ static int osk_open(void)
         if (ui_lift_other(&osk.own, (string_address) "osk", false))
                 return 0;
         osk_layout_take();
+        osk_purpose_take();
         osk_metrics();
         osk_frame();
         osk_trace();
@@ -592,6 +694,7 @@ static b32 osk_main()
 
         memory_zero(&osk, sizeof(osk));
         osk.layout = ~0u; // no layout yet: the first take builds the letters
+        osk.purpose = ~0u; // no purpose yet: the first take picks the page
         osk.shown = -1;
         osk.held = -1;
         osk.repeat = -1;

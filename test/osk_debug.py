@@ -11,6 +11,7 @@ import sys
 WINDOW = re.compile(r"^  window\s+\d+\s+(.*?)\s+at\s+(-?\d+),(-?\d+),\s+(\d+)x(\d+)\s*$")
 KEYBOARD = re.compile(r"^  keyboard\s+setting \S+; (shown|hidden); the focus has (\d+) text fields? with the keys; "
                       r"last input (.*?); a physical keyboard (plugged in|none); the desktop starts it (yes|no)\s*$")
+TEXT = re.compile(r"^  text input\s+the focus has its field's content purpose (\d+) and cursor bottom (\d+) \(0 for none\)\s*$")
 
 
 def main():
@@ -29,6 +30,15 @@ def main():
             if found:
                 state, fields, last, physical, start = found.groups()
                 print(state, fields, last.replace(" ", "_"), physical, start)
+                return
+        print("none")
+        return
+    if mode == "text":
+        # the focus's content purpose and cursor bottom (the debug line the text input rows read)
+        for line in lines:
+            found = TEXT.match(line)
+            if found:
+                print(" ".join(found.groups()))
                 return
         print("none")
         return
