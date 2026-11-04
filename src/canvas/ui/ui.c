@@ -9627,6 +9627,99 @@ static const char address_to ui_page_menu_word(const struct ui_page address_to p
         return p->menu_row < 0 || at < 0 || at >= UI_MENU_ITEMS ? null : p->menu_word[at];
 }
 
+static fn ui_page_changed(struct ui_page address_to p);
+
+/*
+        The page's keys. The keys are the column's or the body's (p->pane: 1 the body, 0 the column of groups): Tab switches them
+        (the body's focus is put on a row when the keys come to it), Up, Down, Home, End and the pages move the body's focus or
+        the column's group, Enter and Space act on the body's focus, Delete forgets it, and Left goes back to the column from a
+        row that does not step, while Left and Right step a row that does. What a row does is the app's (the struct): whether
+        it steps, what its Enter and its steps do, the said line after a move, the group the column chose, and Delete. False for
+        a key none of these is.
+*/
+struct ui_page_keys
+{
+        b32 (*steps)(int row);          // the row steps: Left and Right move its value
+        void (*act)(int row, int way);  // Enter or Space on the row (way 1), or a step of it (-1 back, 1 on)
+        void (*said)(int before);       // the body's focus moved from before
+        void (*group)(int group);       // the column's keys chose this group
+        void (*forget)(void);           // Delete on the body
+};
+
+// The keys go to the body's rows: the focus is one of them, and the body is in sight.
+static fn ui_page_enter_rows(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
+{
+        p->pane = 1;
+        if (ui_list_at(l, l->focus) < 0 && l->count)
+                l->focus = l->id[0];
+        if (!p->card)
+                ui_list_reveal(ui, l);
+        ui_page_changed(p);
+}
+
+static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int key,
+                       const struct ui_page_keys address_to k)
+{
+        switch (key)
+        {
+        case UI_KEY_TAB:
+                p->pane = !p->pane;
+                if (p->pane)
+                        ui_page_enter_rows(ui, p, l);
+                ui_page_changed(p);
+                return true;
+        case UI_KEY_UP:
+        case UI_KEY_DOWN:
+        case UI_KEY_HOME:
+        case UI_KEY_END:
+        case UI_KEY_PAGE_UP:
+        case UI_KEY_PAGE_DOWN:
+                // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
+                if (p->pane)
+                {
+                        int before = l->focus;
+                        b32 moved = false;
+
+                        ui_list_key(ui, l, key, &moved);
+                        if (moved)
+                                k->said(before);
+                }
+                else
+                        k->group(ui_page_column_key(p, key, p->chosen));
+                return true;
+        case UI_KEY_SPACE:
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
+                if (!p->pane)
+                        ui_page_enter_rows(ui, p, l);
+                else if (ui_list_at(l, l->focus) >= 0)
+                        k->act(l->focus, 1);
+                return true;
+        case UI_KEY_DELETE:
+                if (p->pane)
+                        k->forget();
+                return true;
+        case UI_KEY_LEFT:
+        case UI_KEY_RIGHT:
+                if (ui_arrow(key) < 0)
+                {
+                        if (p->pane && k->steps(l->focus))
+                                k->act(l->focus, -1);
+                        else if (p->pane)
+                        {
+                                p->pane = 0;
+                                ui_page_changed(p);
+                        }
+                }
+                else if (!p->pane)
+                        ui_page_enter_rows(ui, p, l);
+                else if (k->steps(l->focus))
+                        k->act(l->focus, 1);
+                return true;
+        }
+        return false;
+}
+
 /*
         A page's pointer, for a mouse and a finger alike. A press is numbered by what it went down on: a row by its list id (rows
         are below UI_PAGE_GROUP), a group of the column by UI_PAGE_GROUP plus the group, the card (p->card) by UI_PAGE_CARD. What

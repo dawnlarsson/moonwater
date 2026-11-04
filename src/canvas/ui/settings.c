@@ -3421,16 +3421,6 @@ static fn settings_group_choose(int group)
         settings_dirty();
 }
 
-// The keys go to the rows of the group chosen.
-static fn settings_rows_enter(void)
-{
-        settings.page.pane = 1;
-        if (settings_pos(settings.list.focus) < 0 && settings.list.count)
-                settings.list.focus = settings.list.id[0];
-        settings_reveal();
-        settings_dirty();
-}
-
 /*
         Enter in the field a row is typed in: what it holds is done with as the row says, its blanks at either end left
         off (a passphrase's are its own, and kept). A passphrase joins the network and a name keeps the device, neither
@@ -3721,6 +3711,9 @@ static b32 settings_map_key(const struct window_event address_to event)
         return true;
 }
 
+// What the page's keys ask of the settings: a row's step and its action, the said line, the group the column chose, and Delete.
+static const struct ui_page_keys settings_page_keys = {settings_steps, settings_activate, settings_said_of, settings_group_choose, settings_forget};
+
 static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
@@ -3778,77 +3771,18 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
                 settings.map.keys = false;
         }
-        switch (event->a)
-        {
-        case UI_KEY_ESCAPE:
+        if (event->a == UI_KEY_ESCAPE)
                 return settings_stop();
-        case UI_KEY_TAB:
-                // Between the column of groups and the rows, whichever row or group is there.
-                settings.page.pane = !settings.page.pane;
-                if (settings.page.pane)
-                        settings_rows_enter();
+        // Up from the first row of the Display group goes up to the map above it, which has the keys then.
+        if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
+            settings_map_count())
+        {
+                settings.map.keys = true;
                 settings_dirty();
-                break;
-        case UI_KEY_UP:
-        case UI_KEY_DOWN:
-        case UI_KEY_HOME:
-        case UI_KEY_END:
-        case UI_KEY_PAGE_UP:
-        case UI_KEY_PAGE_DOWN:
-                // Up from the first row of the Display group goes up to the map above it, which has the keys then.
-                if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
-                    settings_map_count())
-                {
-                        settings.map.keys = true;
-                        settings_dirty();
-                        break;
-                }
-                // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
-                if (settings.page.pane)
-                {
-                        int before = settings.list.focus;
-                        b32 moved = false;
-
-                        ui_list_key(&settings.ui, &settings.list, (int)event->a, &moved);
-                        if (moved)
-                                settings_said_of(before);
-                }
-                else
-                        settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.page.chosen));
-                break;
-        case UI_KEY_SPACE:
-                // With something in the filter a blank was typed in it, above; with nothing, Space works the row as Enter does.
-        case UI_KEY_ENTER:
-        case UI_KEY_ENTER_PAD:
-                if (!settings.page.pane)
-                        settings_rows_enter();
-                else if (settings_pos(settings.list.focus) >= 0)
-                        settings_activate(settings.list.focus, 1);
-                break;
-        case UI_KEY_DELETE:
-                if (settings.page.pane)
-                        settings_forget();
-                break;
-        case UI_KEY_LEFT:
-        case UI_KEY_RIGHT:
-                // The arrow toward the start of what is read (Left, or Right where the window reads from the right) goes back: a step
-                // moves down, and on a switch and on any other row it goes back to the column, which is at the start. The other goes on.
-                if (ui_arrow((int)event->a) < 0)
-                {
-                        if (settings.page.pane && settings_steps(settings.list.focus))
-                                settings_activate(settings.list.focus, -1);
-                        else if (settings.page.pane)
-                        {
-                                settings.page.pane = 0;
-                                settings_dirty();
-                        }
-                }
-                else if (!settings.page.pane)
-                        settings_rows_enter();
-                else if (settings_steps(settings.list.focus))
-                        settings_activate(settings.list.focus, 1);
-                break;
+                return true;
         }
+        // The page's keys: Tab, the moves, Enter and Space, Delete and the arrows (what each row does is the app's, in settings_page_keys).
+        ui_page_key(&settings.ui, &settings.page, &settings.list, (int)event->a, &settings_page_keys);
         return true;
 }
 
