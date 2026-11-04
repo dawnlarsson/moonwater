@@ -164655,7 +164655,7 @@ static int wlc_pump(struct wlc *c)
                 at += size;
         }
         c->fds_seen += fd_count;
-        // a descriptor of a copy's source that has been sent is closed by the shim, in wayland_sent (MW-2026-114)
+        // a descriptor of a copy's source that has been sent is closed by the shim, in wayland_sent (0976821d)
         for (long fd_at = 0; fd_at < fd_count; fd_at++)
                 if (fake.pull_wfd > 0 && fds[fd_at] == fake.pull_wfd)
                         fake.pull_wfd = 0;
@@ -166739,7 +166739,7 @@ static void test_subsurfaces(void)
 
 /*
         What one commit of a window costs the compositor when its subsurfaces are as many as a client may make, hung in one chain
-        (the deepest tree), each with a picture of eight damaged rectangles waiting for the root's commit (MW-2026-112): every copy
+        (the deepest tree), each with a picture of eight damaged rectangles waiting for the root's commit (ab981848): every copy
         of a run made the window's rectangle again, a walk of every surface and its chain, and the root's commit took a quarter of a
         second on an M2 (424 ms at worst) for some 14 KB a client sends; made once a run, it is under 10 ms. The bound is a mean of
         three under 50 ms, which a loaded or sanitized build keeps and the walk in every copy (158 ms) does not.
@@ -167239,7 +167239,7 @@ static void test_clipboard(void)
         WLCHECK(cb->errors == 0 && ca->errors == 0, "no error (%s)", cb->error_text);
 
         /*
-                A copy ended in the same breath as it was asked (MW-2026-114): set_selection and the source's destroy in one read, so
+                A copy ended in the same breath as it was asked (0976821d): set_selection and the source's destroy in one read, so
                 the copy is aborted while its send event and the pipe's end still wait in the queue. The descriptor that waits is the
                 pipe the host made, open, and the shim closes it once it is sent; one that waits when its client goes is closed too.
                 The host closed it at the abort, and the queue then sent a number that was nothing, or whatever was opened next.

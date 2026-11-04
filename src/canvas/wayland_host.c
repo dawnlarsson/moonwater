@@ -1220,7 +1220,7 @@ static int compositor_wl_dmabuf_ready(long client, int fd)
         The reads and writes of a transfer are done on a thread of its own and never on the compositor's loop. A read or a write
         of a pipe takes the pipe's lock before it looks at O_NONBLOCK, and a program that has an end of the pipe can keep that lock
         for as long as it likes, so one call of the loop that met such a pipe held every window and the person's input with it
-        (MW-2026-113). The thread waits with poll, which takes no lock, a slice at a time, stops at the deadline or when the loop
+        (b0e0b1ce). The thread waits with poll, which takes no lock, a slice at a time, stops at the deadline or when the loop
         cancels it, says how it ended and knocks on the loop's eventfd; the loop then lets the transfer go or makes its text the
         selection (compositor_wl_transfers_done). Nothing closes a transfer's descriptors while its thread runs, so a source or a
         reader that stalls costs its place and its thread until its time is up, and one that holds a lock costs them until it
@@ -1411,7 +1411,7 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
         compositor_wl.transfer[slot].client = (int)client;
         compositor_wl.transfer[slot].row = row;
         compositor_wl.transfer[slot].in = fds[0];
-        compositor_wl.transfer[slot].out = -1; // the end the source writes is the shim's once handed over (MW-2026-114)
+        compositor_wl.transfer[slot].out = -1; // the end the source writes is the shim's once handed over (0976821d)
         compositor_wl.transfer[slot].keep = (int)keep;
         compositor_wl.transfer[slot].total = 0;
         compositor_wl.transfer[slot].limit = table->clip_limit;

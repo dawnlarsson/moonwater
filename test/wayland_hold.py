@@ -5,13 +5,13 @@ does not:
 
     MOONWATER_ASKED=1 python3 test/wayland_hold.py paste
         asks for the selection into a pipe while a thread of its own splices into the same pipe from a socket that has
-        nothing to say (MW-2026-113). A splice holds the pipe's lock while it waits, and a read or a write of the pipe takes
+        nothing to say (b0e0b1ce). A splice holds the pipe's lock while it waits, and a read or a write of the pipe takes
         that lock before it looks at O_NONBLOCK, so the compositor's write of the text waits for as long as the splice
         does; the compositor's loop must not be the one that waits. It says "ready" when it has the keys and an offer,
         "pasting" once the paste is asked, and at a line on its standard input lets go, reads the pipe and says "got N".
 
     MOONWATER_ASKED=1 python3 test/wayland_hold.py copy
-        sets a source as the selection and destroys it in the same write (MW-2026-114): the compositor has made a pipe for
+        sets a source as the selection and destroys it in the same write (0976821d): the compositor has made a pipe for
         the source and queued its write end with the source's send event, and the source's end lets the copy go before the
         event is sent. It says "ready" when it has the keys, and after the key what came: "sent fifo" for the send event
         with the pipe's end, "sent other" for one with a descriptor that is not a pipe, "dropped" when the compositor

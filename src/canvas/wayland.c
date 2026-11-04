@@ -1388,7 +1388,7 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
         The window of a root as wayland_window_rect makes it of what the root shows. A run of copies (a flatten, the copies of a
         commit) changes none of what it is made of, so the run's caller makes it once and hands it to each copy: made in every copy,
         it cost each copy a walk of every surface and its chain, and the copies of a window whose subsurfaces hang in one chain of
-        sixty three were a quarter of a second of the compositor for one commit (MW-2026-112).
+        sixty three were a quarter of a second of the compositor for one commit (ab981848).
 */
 static struct wayland_rect wayland_window_of(struct wayland_client *c, const struct wayland_surface *root)
 {
@@ -4066,7 +4066,7 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
         c->pending[which] = (unsigned char)(index + 1);
         e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
         wayland_string(&e, mime);
-        // The shim's from here (MW-2026-114): the host that ends the copy before this is sent has nothing to close.
+        // The shim's from here (0976821d): the host that ends the copy before this is sent has nothing to close.
         c->out_fd_owned[c->out_fd_count] = 1;
         c->out_fds[c->out_fd_count] = fd;
         c->out_fd_at[c->out_fd_count++] = e.start;

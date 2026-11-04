@@ -268,7 +268,7 @@ time.sleep(0.2)
 s.close()
 PY
 # More descriptors with one message than the shim takes (28) and fewer than the compositor's control buffer holds (36): the kernel
-# puts all of them in the compositor, and every one is closed again when the client is gone (8 a message stayed open, MW-2026-111).
+# puts all of them in the compositor, and every one is closed again when the client is gone (8 a message stayed open, fb6f5ae0).
 leaked=$(python3 - "$cpid" << 'PY'
 import os, socket, struct, sys, time
 fds = lambda: len(os.listdir('/proc/%s/fd' % sys.argv[1]))

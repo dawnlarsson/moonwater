@@ -90,31 +90,6 @@ line, and every other tab is untouched.
 must be zeros, the first page as it was, and the tab marked changed. With the handler's installation taken out (the
 mutant) the check process dies by SIGBUS there.
 
-### MW-2026-114: a Wayland copy ended before its send event went out sent a descriptor number the compositor had closed
-
-| | |
-|---|---|
-| Status | Fixed 2026-11-04 |
-| Class | Use of a closed descriptor number (a descriptor-table use after free); one client could be handed whatever the root compositor opened next under that number |
-| Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a copy is taken only then) |
-| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the clipboard bridge since `0a4629ac` (2026-11-03 19:44 +0100) |
-| Fixed by | `0976821d` (`src/canvas/wayland.c`: `out_fd_owned`, `wayland_out_fds_let_go`; `src/canvas/wayland_host.c`: `compositor_wl_clip_pull`, the flush) |
-| Tests that fail without it | `CHECK_wayland` clipboard rows "a copy ended before its send event went out leaves the pipe's end in the queue, open" and "and the shim closes it once it is sent / when its client goes"; `test/wayland_mutations.py` "the queue's own descriptors are never closed" and "a copy's pipe end is not the shim's"; `test/wayland_clip.py` row "a copy ended in the same write as it was asked is still sent its pipe's end" (its client is `test/wayland_hold.py copy`): the original compositor dropped that client |
-
-**What it was.** A copy gives the client's source the write end of a pipe the compositor makes: the shim queues it with
-the source's send event, and the host kept its own record of it to close once sent. When the copy was ended before the
-event went out (the source destroyed, or a second copy, in the same write), the host's abort closed that descriptor at
-once, and the queue still held the number: the next send passed a number that was closed (the client was dropped, which
-is what the row sees on the original compositor) or, when the send was held back, the number of whatever the compositor
-opened in between (a new client's connection, another client's pipe or pool), which the first client then received.
-`b0e0b1ce` (MW-2026-113) moved the close to the end of the transfer's thread, which made the window shorter, not gone.
-
-**Fix.** The write end is the shim's from the moment it is queued (`out_fd_owned`): the shim closes it after the send
-that carried it (`wayland_sent`) or when its client goes (`wayland_drop`), and the host keeps no copy of it, so no abort
-has anything to close. The end of the copy is still the source's own closing, since the compositor's copy goes when it is
-sent. Not reproduced: a client actually handed another client's descriptor (that needs the send held back across the
-compositor opening something else); reproduced: the closed number sent, on the box, as the dropped connection.
-
 ### MW-2026-153: a tray format of braces wrote past the tray's text in the compositor
 
 | | |
@@ -402,55 +377,6 @@ one) and asks for mode 0 after; the set-id row saves a 4755 file whose recorded 
 cannot chown it asks for 0755 (as root, for the other uid and 4755). Each fails with its part of the fix taken out
 (the 0644 fallback put back; the bits kept when chown fails).
 
-### MW-2026-113: a Wayland client's paste or copy pipe could hold the whole compositor
-
-| | |
-|---|---|
-| Status | Fixed 2026-11-04 |
-| Class | A root process blocked on a resource its peer controls (CWE-833 shape); denial of service of the desktop |
-| Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a paste or a copy is taken only then) |
-| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the transfers since `0a4629ac` (2026-11-03 19:44 +0100) |
-| Fixed by | `b0e0b1ce` (`src/canvas/wayland_host.c`: `compositor_wl_transfer_run` and the transfers around it) |
-| Tests that fail without it | `test/wayland_clip.py` row "a paste whose reader holds its pipe's lock does not hold the compositor" (its reader is `test/wayland_hold.py`): red on the parent, where a client could draw no frame in 5 s while the paste waited; green with the fix, and the text reaches the reader when it lets go |
-
-**What it was.** The compositor read a copy's source from a pipe it made and wrote a paste to the pipe a client gave, on its
-one loop, when poll said the pipe was ready. Poll takes no lock, but every read and write of a pipe takes the pipe's lock
-first, whatever `O_NONBLOCK` says, and a program with an end of the pipe can keep that lock as long as it likes (a splice
-into the pipe from a socket that has nothing to say holds it while it waits; checked on the box's 7.2 kernel: poll says
-the pipe can be written, a write with `RWF_NOWAIT` is refused with `EOPNOTSUPP`, a reopen through `/proc/self/fd` waits too,
-and a plain write waits for the splice). So a client the person typed into could ask for a paste into such a pipe and the
-compositor's write waited in the kernel, unkillable, with every window, the pointer and the keys, for as long as the client
-held it.
-
-**Fix.** Each transfer's reads and writes are done on a thread of its own (`thread_start`), which waits with poll in
-slices of 50 ms, ends at its deadline or when the loop cancels it, and knocks on an eventfd the loop polls; the loop lets the
-transfer go or makes its text the selection there (`compositor_wl_transfers_done`), as it did before. A transfer whose
-pipe is held costs its place and its thread until it is let go; the loop never waits on a client's pipe. Open: the native
-window doors and the compositor's other FIFOs are read on the loop the same way (not this zone's; reported).
-
-### MW-2026-112: one Wayland commit of a deep subsurface tree held the compositor for a quarter of a second
-
-| | |
-|---|---|
-| Status | Fixed 2026-11-04 |
-| Class | Work a client controls that grows faster than what it sends (CWE-407); denial of service of the desktop |
-| Attacker | any program that can connect to `/run/moonwater/wayland-0` |
-| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the walk in every copy since `4563ba64` (2026-11-03 21:09 +0100) |
-| Fixed by | `ab981848` (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
-| Tests that fail without it | `CHECK_wayland` `test_tree_cost`: a root commit of a chain of 63 subsurfaces with eight damaged rectangles each, mean of three under 50 ms; `test/wayland_mutations.py` "every copy walks the window again" puts the walk back and the row is red (158 ms) |
-
-**What it was.** Each copy of a subsurface's picture into its window (`wayland_child_copy`) made the window's
-rectangle again (`wayland_window_rect`, a walk of all 64 surfaces with each one's chain up to its root), and a commit
-lays each subsurface and everything under it once per damaged rectangle. With the 63 subsurfaces a client may have hung
-in one chain, each with eight rectangles of damage, the root's commit made about 16,000 copies and as many walks: 266 ms
-(424 at worst) of the compositor's one thread on an M2, for some 14 KB a client sends, and the host reads 64 KB of a
-client a pass, so a client that repeats it holds the desktop (input, every other window) for a second a pass.
-
-**Fix.** The rectangle is made once for a run of copies, by whoever starts the run (a flatten, a relay, a subsurface's
-apply, a commit), since a run changes nothing it is made of; what is drawn is the same (all of `CHECK_wayland`'s pixel
-rows unchanged). The same commit takes 8.7 ms. What is left is the copies themselves, one per rectangle per surface
-under it, which is what the protocol asks.
-
 ### MW-2026-130: the editor read a dangling link's target past its end
 
 | | |
@@ -473,29 +399,6 @@ bytes chose the rest of the name.
 absolute name that does not exist, and asks for that name exactly. With the terminator taken out (the mutant) the
 row fails: the path is the target with the stack's bytes after it.
 
-
-### MW-2026-111: a Wayland client's extra descriptors stayed open in the compositor
-
-| | |
-|---|---|
-| Status | Fixed 2026-11-04 |
-| Class | Descriptor leak in a root process; denial of service by descriptor exhaustion |
-| Attacker | any program that can connect to `/run/moonwater/wayland-0` (mode 0666: every local user, every bowl program) |
-| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; built in since `0a4629ac` (2026-11-03 19:44 +0100) where `CONFIG_MOONWATER_WAYLAND` was set |
-| Fixed by | `fb6f5ae0` (`src/canvas/wayland_host.c`, `compositor_wl_read`) |
-| Tests that fail without it | `test/wayland_e2e.sh` row "a client that sends more descriptors than the shim takes leaves none open in the compositor": 32 descriptors left open after four clients on the parent, 0 with the fix |
-
-**What it was.** `compositor_wl_read` receives with a control buffer of 160 bytes, so the kernel installs up to 36
-descriptors of one `SCM_RIGHTS` message in the compositor without setting `MSG_CTRUNC`. The parse loop stopped taking
-them at the shim's cap (28, `WAYLAND_FDS`) and never closed the rest: every message with 29 to 36 descriptors left up to 8
-of the client's files open in the root compositor for as long as it ran, whatever became of the client. A client that
-connects, sends one such message and goes, again and again, runs the compositor out of descriptors (it can then accept
-no client, open no pipe for the clipboard and no file at all), and keeps the files it sent alive.
-
-**Fix.** Every descriptor past the cap is closed in the parse loop, and the client is dropped as for `MSG_CTRUNC` (it sent
-more than it may, and the stream no longer lines up with what the shim was given). Reproduced first on the box against
-the parent's compositor (`unshare -rm`, a private `/run`, four connections each sending one `wl_display.sync` with 36
-descriptors of `/dev/null`): 32 more descriptors open in `/proc/PID/fd` afterwards; 0 with the fix.
 
 ### MW-2026-080: the clipboard and paste were designed against snooping and paste injection before either existed
 

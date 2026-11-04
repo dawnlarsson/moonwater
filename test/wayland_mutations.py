@@ -3,7 +3,7 @@
 
 Each mutation is one edit to a copy of the shim, built into CHECK_wayland (test/checks.c) with the compiler in CC (cc by
 default); the check must turn red. A mutation that survives is a hole in the check. The mutations are the defects the
-security pass of 2026-11-04 fixed, put back (incident_response.md names each by its MW number).
+security pass of 2026-11-04 fixed, put back (each named by the commit that fixed it).
 
     python3 test/wayland_mutations.py [NAME...]          from the tree's root; a build and a run each, a few seconds
 """
@@ -15,13 +15,13 @@ only = sys.argv[1:]
 cc = os.environ.get('CC', 'cc')
 
 M = [
-    # MW-2026-112: a copy of a run made the window's rectangle again, a walk of every surface and its chain.
+    # ab981848: a copy of a run made the window's rectangle again, a walk of every surface and its chain.
     ("every copy walks the window again",
      "        long ox, oy, wx = window->x, wy = window->y, ww = window->width, wh = window->height;\n",
      "        struct wayland_rect again = wayland_window_of(c, wayland_root_of(c, child));\n"
      "        long ox, oy, wx = again.x, wy = again.y, ww = again.width, wh = again.height;\n"
      "        (void)window;\n"),
-    # MW-2026-114: a copy's pipe end in the output queue is the shim's, closed once sent or when its client goes.
+    # 0976821d: a copy's pipe end in the output queue is the shim's, closed once sent or when its client goes.
     ("the queue's own descriptors are never closed",
      "                if (c->out_fd_owned[at])\n",
      "                if (c->out_fd_owned[at] && 0)\n"),
