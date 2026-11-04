@@ -6571,8 +6571,9 @@ lane_wayland()
 #       picked, every way a card goes wrong, the pointers across their wrap) and, where the snd-aloop module is loaded
 #       (sudo modprobe snd-aloop index=7 pcm_substreams=2), a sine mixed by the mixing core and read back from the other
 #       side of a loopback card bit for bit, with the wake and pass times printed.
-#       mix.c, the mixing core, is plain C with no library, built with
-#       gcc and clang under -Wall -Wextra -Werror, and CHECK_audio_mix runs it against references written in the check:
+#       mix.c, the mixing core, names the library's memory routines and offset_of (declared for this build by
+#       test/audio_mix_hosted.h, given with -include), built with gcc and clang under -Wall -Wextra -Werror, and
+#       CHECK_audio_mix runs it against references written in the check:
 #       every PCM format against its definition, G.711 from the standard's own formula, the ring against a model of
 #       bytes, the channel map, mixing of known sines against integer arithmetic, the volume curve, the ramps and the
 #       fade of a stream that runs out, the resampler's error, gain and rejection against the sine itself, and a
@@ -6601,7 +6602,7 @@ lane_audio()
 
         for audio_cc in $audio_compilers; do
                 audio_warn="-std=gnu11 -O2 -Wall -Wextra -Werror"
-                audio_row "mix-engine-$audio_cc" $audio_cc $audio_warn -c src/audio/mix.c -o "$work/mix.o"
+                audio_row "mix-engine-$audio_cc" $audio_cc $audio_warn -include test/audio_mix_hosted.h -c src/audio/mix.c -o "$work/mix.o"
                 audio_row "mix-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
                         -DCHECK_audio_mix test/checks.c -o '$work/check-mix-$audio_cc' -lm && '$work/check-mix-$audio_cc'"
                 audio_row "alsa-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
