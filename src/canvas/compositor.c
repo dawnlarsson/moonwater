@@ -1144,7 +1144,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
         if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->preview[0] || f->preview[1] || f->preview[2] ||
-            f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room)
+            f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room - 400)
                 return false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
@@ -2579,6 +2579,39 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
                         }
                 }
 }
+
+#ifdef MOONWATER_GPU_C
+// The pointer the compositor draws into the scene (compositor_cursor_draw): its runs of the shape's bitmap, fill then edge, as fills over everything.
+static void compositor_gpu_cursor(int x, int y, unsigned int shape, int scale, unsigned int fill, unsigned int edge)
+{
+        int left, top;
+
+        if (shape >= CP_SHAPES)
+                shape = CP_ARROW;
+        compositor_cursor_cell(&left, &top, x, y, shape, scale);
+        for (int pass = 0; pass < 2; pass++)
+                for (int row = 0; row < CP_CURSOR_H; row++)
+                {
+                        unsigned int bits = pass ? compositor_cursor_edge[shape][row] : compositor_cursor_fill[shape][row];
+
+                        for (int column = 0; column < CP_CURSOR_W;)
+                        {
+                                int run = column;
+
+                                while (run < CP_CURSOR_W && (bits & (run < 8 ? 0x80u >> run : 0x8000u >> (run - 8))))
+                                        run++;
+                                if (run == column)
+                                {
+                                        column++;
+                                        continue;
+                                }
+                                compositor_gpu_rect(0, left + column * scale, top + row * scale, left + run * scale, top + (row + 1) * scale, pass ? edge : fill, 0, 0, 0);
+                                column = run;
+                        }
+                }
+}
+
+#endif
 
 _Static_assert(COMPOSITOR_LIT_LEFT == CP_EDGE_LEFT && COMPOSITOR_LIT_RIGHT == CP_EDGE_RIGHT && COMPOSITOR_LIT_TOP == CP_EDGE_TOP &&
                    COMPOSITOR_LIT_BOTTOM == CP_EDGE_BOTTOM,
@@ -6836,10 +6869,10 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
 
 #ifdef MOONWATER_GPU_C
 /*
-        The present on the GPU (src/canvas/gpu.c): the frames of a present as the records of its scene (compositor_gpu_frames), drawn by the card straight into
-        the scanout -- the display node's dumb buffer, which the render node is given by PRIME, or a headless file's pages as a userptr buffer -- over the union of
+        The present on the GPU (src/canvas/gpu.c): the frames of a present as the records of its scene (compositor_gpu_frames) and the pointer when the scene
+        has it (software), drawn by the card straight into the scanout -- the display node's dumb buffer, which the render node is given by PRIME, or a headless file's pages as a userptr buffer -- over the union of
         the damage, and the card told what changed as it is when the processor drew it. It is for what it draws exactly as the processor does (every frame is a
-        window with a picture at its own size, a tab, a line, a close button); anything else, a software cursor, a finger's mark, a scaled landing, a turned screen, a
+        window with a picture at its own size, a tab, a line, a close button); anything else, a finger's mark, a scaled landing, a turned screen, a
         mode whose width is not a multiple of 4, a card of another family, a refusal or a hang, is the processor's, for that present, and three hangs in a row
         end the GPU's compose until the setting is read again. Headless it is for -G.
 */
@@ -6912,7 +6945,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         int x1 = compositor.width, y1 = compositor.height, x2 = 0, y2 = 0;
         positive out;
 
-        if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) || compositor.cursor.drawn ||
+        if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) ||
             compositor_spots_any(0) || (compositor.width & 3) || (compositor.scanout_pitch & 15))
                 return 0;
         if (!compositor_gpu_up() || !(out = compositor_gpu_output()))
@@ -6923,6 +6956,9 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
                         return 0;
         if (!compositor_gpu_frames(frames, count, compositor_ground))
                 return 0;
+        if (compositor.cursor.drawn)
+                compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape, compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0),
+                                      compositor_cursor_ink(1, 0));
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
                 const int *d = compositor.damage[at];

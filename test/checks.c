@@ -189819,7 +189819,7 @@ b32 main(void)
                 region = (unsigned int address_to)mapped;
                 check("gpu frames: the pictures are userptr buffers", !(mapped < 0 && mapped > -4096) && gpu_map(region, 4 << 20));
                 memory_zero(&compositor_gscene, sizeof(compositor_gscene));
-                compositor_gscene.ops = ops, compositor_gscene.room = 512, compositor_gscene.width = 696, compositor_gscene.height = PH;
+                compositor_gscene.ops = ops, compositor_gscene.room = 4096, compositor_gscene.width = 696, compositor_gscene.height = PH;
                 compositor_gscene.tables = (unsigned char address_to)((p8 address_to)gpu.at + tables_at), compositor_gscene.tables_at = (unsigned int)tables_at;
                 compositor_gscene.tables_size = 1 << 20;
                 reference = (struct compositor_target){gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
@@ -189872,6 +189872,15 @@ b32 main(void)
                         for (positive i = 0; i < (positive)PP * PH; i++)
                                 pic[i] = 0;
                         check("gpu frames: the frames are drawn by the GPU", compositor_gpu_frames(frames, (unsigned int)count, ground));
+                        // the pointer the scene carries, over everything, on two rounds in three
+                        if (round % 3)
+                        {
+                                int px = (int)(gpu_random() % (696 + 40)) - 20, py = (int)(gpu_random() % (PH + 40)) - 20, shape = (int)(gpu_random() % (CP_SHAPES + 1)), size = 1 + (int)(gpu_random() % 3);
+                                unsigned int fill = gpu_random(), edge = gpu_random();
+
+                                compositor_cursor_draw(&reference, px, py, (unsigned int)shape, size, fill, edge);
+                                compositor_gpu_cursor(px, py, (unsigned int)shape, size, fill, edge);
+                        }
                         if (!gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH))
                         {
                                 check("gpu frames: the scene finishes", false);
