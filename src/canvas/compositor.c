@@ -16228,7 +16228,9 @@ static void compositor_input_read(unsigned int at)
                         // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
                         if (compositor.touchscreen[at] || compositor.touchpad[at])
                         {
-                                if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value)
+                                // A finger down is BTN_TOUCH, or, on a screen that reports slots only (a virtio multitouch device sends no BTN_TOUCH), a tracking id.
+                                if ((event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value) ||
+                                    (event->type == COMPOSITOR_EV_ABS && event->code == COMPOSITOR_ABS_MT_TRACKING_ID && event->value >= 0))
                                         window_trace_touch();
                                 WINDOW_TRACE_START();
                                 WINDOW_TRACE_PART("compositor event: monotonic %p device %p ", (positive)clock_monotonic_nanoseconds(), now);
