@@ -9,6 +9,7 @@ bin=$1
 d=$2
 card=$3
 status=0
+sock=$(mktemp -u /tmp/mw-rates.XXXXXX)
 
 verdict()
 {
@@ -49,24 +50,24 @@ serve()
 {
         out=
         [ "$card" = -n ] && out="-o $d/out$1.raw"
-        rm -f "$d/sock"
-        $bin $card $out -S "$d/sock" -C "$d/settings" -P "$d/state" > "$d/log$1" 2>&1 &
+        rm -f "$sock"
+        $bin $card $out -S "$sock" -C "$d/settings" -P "$d/state" > "$d/log$1" 2>&1 &
         server=$!
         for _ in 1 2 3 4 5 6 7 8 9 10
         do
-                [ -S "$d/sock" ] && break
+                [ -S "$sock" ] && break
                 sleep 1
         done
-        [ -S "$d/sock" ]
+        [ -S "$sock" ]
 }
 
 # play RATE NAME: a stream of the file NAME.raw (the 2-second or 1-second one) at RATE, from the server
 play()
 {
-        paplay --raw --format=s16le --channels=2 --rate="$1" "$d/$2.raw"
+        timeout 30 paplay --raw --format=s16le --channels=2 --rate="$1" "$d/$2.raw"
 }
 
-export PULSE_SERVER="unix:$d/sock"
+export PULSE_SERVER="unix:$sock"
 
 # run 1: one stream at 44100 on its own
 serve 1 || { echo "the server did not listen"; exit 1; }

@@ -8,6 +8,7 @@ bin=$1
 d=$2
 card=$3
 status=0
+sock=$(mktemp -u /tmp/mw-load.XXXXXX)
 hogs=$(nproc)
 hogs=$((hogs - 4))
 [ "$hogs" -ge 1 ] || hogs=1
@@ -27,14 +28,14 @@ with open(sys.argv[1], "wb") as f:
     f.write(bytes(data))
 PY
 
-$bin $card -S "$d/sock" -C "$d/settings" -P "$d/state" > "$d/log" 2>&1 &
+$bin $card -S "$sock" -C "$d/settings" -P "$d/state" > "$d/log" 2>&1 &
 server=$!
 for _ in 1 2 3 4 5 6 7 8 9 10
 do
-        [ -S "$d/sock" ] && break
+        [ -S "$sock" ] && break
         sleep 1
 done
-[ -S "$d/sock" ] || { echo "the server did not listen"; kill -TERM $server; exit 1; }
+[ -S "$sock" ] || { echo "the server did not listen"; kill -TERM $server; exit 1; }
 
 # every CPU busy while the stream plays
 if command -v stress-ng > /dev/null 2>&1
@@ -52,7 +53,7 @@ else
         done
 fi
 
-PULSE_SERVER="unix:$d/sock" paplay --raw --format=s16le --channels=2 --rate=44100 --latency-msec=10 "$d/in.raw"
+PULSE_SERVER="unix:$sock" timeout 30 paplay --raw --format=s16le --channels=2 --rate=44100 --latency-msec=10 "$d/in.raw"
 play=$?
 
 [ -n "$busy" ] && kill "$busy" 2> /dev/null

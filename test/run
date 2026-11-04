@@ -6697,6 +6697,8 @@ lane_audio()
                 #       opened at the stream's rate. A row needs paplay, pactl and python3 and says so when one is missing.
                 if command -v paplay > /dev/null 2>&1 && command -v pactl > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1
                 then
+                        #       a counter stream through the file sink arrives whole at several client write sizes (test/audio_counter.sh)
+                        audio_row "counter" sh test/audio_counter.sh "$work/bin/audio" "$work/counter"
                         audio_row "rates-file" sh test/audio_rates.sh "$work/bin/audio" "$work/rates-file" -n
                         audio_loopback=$(awk '/\[Loopback/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
                         if [ -n "$audio_loopback" ]
