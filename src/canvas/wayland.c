@@ -84,7 +84,8 @@
 #define WAYLAND_SERVER_BASE 0xff000000UL
 #define WAYLAND_SCREENS 8
 #define WAYLAND_GLOBALS_MAX 32
-#define WAYLAND_SEATS 8         // pointers, and keyboards, one client holds
+#define WAYLAND_SEATS 8         // pointers, keyboards and touches, one client holds
+#define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
 #define WAYLAND_SOURCES 8       // data sources (and primary selection sources) one client holds
 #define WAYLAND_OFFERS 16       // offers made to one client and not yet destroyed by it
@@ -456,8 +457,8 @@ struct wayland_client
         unsigned long serial;
         long pool_bytes;
         long free_hint;
-        unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS];
-        unsigned char pointers, keyboards;
+        unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS], touch_id[WAYLAND_SEATS];
+        unsigned char pointers, keyboards, touches;
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
         unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
         unsigned char devices[2];
@@ -480,6 +481,18 @@ struct wayland_client
         struct wayland_pool pools[WAYLAND_POOLS];
         struct wayland_buffer buffers[WAYLAND_BUFFERS];
         struct wayland_positioner positioners[WAYLAND_POSITIONERS];
+};
+
+/*
+        A finger down on a window (wl_touch): its id (the tracking id the device gave it, unique while it is down), the row
+        and the client and surface it went down on (the surface stays the one for the whole touch, as the protocol has it), and
+        the place last sent in the row's picture, so a finger that did not move sends nothing.
+*/
+struct wayland_touch
+{
+        unsigned char live;
+        int client, row, surface;
+        long id, x, y;
 };
 
 /*
@@ -506,6 +519,7 @@ static struct
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
+        struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
 } wayland;
 
 /* ---- the wire ---- */
@@ -3307,13 +3321,31 @@ WAYLAND_API long wayland_row_grabs(long row)
         return s && s->grab;
 }
 
+/* A client's id list and count for one kind of seat object: pointer, keyboard or touch. */
+static unsigned int *wayland_seat_ids(struct wayland_client *c, long iface, unsigned char **count)
+{
+        if (iface == WLI_wl_pointer)
+        {
+                *count = &c->pointers;
+                return c->pointer_id;
+        }
+        if (iface == WLI_wl_touch)
+        {
+                *count = &c->touches;
+                return c->touch_id;
+        }
+        *count = &c->keyboards;
+        return c->keyboard_id;
+}
+
 /* The slots of a client's objects of a seat kind that are still there. */
 static long wayland_seats(struct wayland_client *c, long iface, long *slots)
 {
-        const unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
-        long count = iface == WLI_wl_pointer ? c->pointers : c->keyboards, found = 0;
+        unsigned char *count;
+        const unsigned int *ids = wayland_seat_ids(c, iface, &count);
+        long found = 0;
 
-        for (long at = 0; at < count; at++)
+        for (long at = 0; at < *count; at++)
         {
                 long slot = wayland_slot_of(c, ids[at]);
 
@@ -3326,8 +3358,8 @@ static long wayland_seats(struct wayland_client *c, long iface, long *slots)
 /* A seat object made: its id is kept, up to the room; false for no room. */
 static int wayland_seat_add(struct wayland_client *c, long iface, unsigned int id)
 {
-        unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
-        unsigned char *count = iface == WLI_wl_pointer ? &c->pointers : &c->keyboards;
+        unsigned char *count;
+        unsigned int *ids = wayland_seat_ids(c, iface, &count);
 
         if (*count >= WAYLAND_SEATS)
                 return 0;
@@ -3337,8 +3369,8 @@ static int wayland_seat_add(struct wayland_client *c, long iface, unsigned int i
 
 static void wayland_seat_remove(struct wayland_client *c, long iface, unsigned int id)
 {
-        unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
-        unsigned char *count = iface == WLI_wl_pointer ? &c->pointers : &c->keyboards;
+        unsigned char *count;
+        unsigned int *ids = wayland_seat_ids(c, iface, &count);
 
         for (long at = 0; at < *count; at++)
                 if (ids[at] == id)
@@ -3491,6 +3523,176 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
         }
         // The places the hand moved, to the client's relative pointers: as moved, the same accelerated or not.
         wayland_relative_send(c, s->scale120, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
+}
+
+/*
+        wl_touch. A finger that goes down on a window is sent to the surface under it, and its moves and its lift go to that
+        surface whatever is under it then (the protocol's implicit grab). Every event is followed by a frame, which ends it.
+        The window's coordinates come in as the window's picture (the row's), as the pointer's do, so the surface's own are
+        the picture's less the subsurface's place, at the surface's scale.
+*/
+static int wayland_touch_find(long id)
+{
+        for (int at = 0; at < WAYLAND_TOUCHES; at++)
+                if (wayland.touch[at].live && wayland.touch[at].id == id)
+                        return at;
+        return -1;
+}
+
+static void wayland_touch_frame_to(struct wayland_client *c, long slot)
+{
+        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_touch_frame);
+
+        wayland_end(&e);
+}
+
+/* A finger went down on row at (x, y) of its picture; id is its tracking id, unique while it is down. */
+WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *root, *s;
+        long sx = 0, sy = 0, time, slots[WAYLAND_SEATS], count, point = -1;
+        unsigned long serial;
+
+        if (!wayland.host || id < 0 || wayland_touch_find(id) >= 0 || !(root = wayland_row_surface(row, &c)))
+                return;
+        for (int at = 0; at < WAYLAND_TOUCHES && point < 0; at++)
+                if (!wayland.touch[at].live)
+                        point = at;
+        count = wayland_seats(c, WLI_wl_touch, slots);
+        if (point < 0 || count == 0 || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
+                return;
+        time = wayland.host->now(wayland.host->context);
+        serial = wayland_input_serial(c);
+        wayland.touch[point].live = 1;
+        wayland.touch[point].client = c->slot;
+        wayland.touch[point].row = (int)row;
+        wayland.touch[point].surface = (int)wayland_surface_index(c, s);
+        wayland.touch[point].id = id;
+        wayland.touch[point].x = x;
+        wayland.touch[point].y = y;
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_touch_down);
+
+                wayland_word(&e, serial);
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, s->id);
+                wayland_word(&e, (unsigned long)id);
+                wayland_word(&e, wayland_fixed(sx, s->scale120));
+                wayland_word(&e, wayland_fixed(sy, s->scale120));
+                wayland_end(&e);
+                wayland_touch_frame_to(c, slots[at]);
+        }
+}
+
+/* The row a finger is down on, or -1 when it is not down: the shell gives a finger's place in that row's picture. */
+WAYLAND_API long wayland_touch_row(long id)
+{
+        int at = wayland_touch_find(id);
+
+        return at < 0 ? -1 : wayland.touch[at].row;
+}
+
+/* A finger that is down moved to (x, y) of its row's picture: a motion to its surface, unless it did not move. */
+WAYLAND_API void wayland_touch_motion(long id, long x, long y)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s;
+        long ox = 0, oy = 0, time, slots[WAYLAND_SEATS], count;
+        int at = wayland_touch_find(id);
+
+        if (!wayland.host || at < 0 || (wayland.touch[at].x == x && wayland.touch[at].y == y))
+                return;
+        if (!wayland_row_surface(wayland.touch[at].row, &c) || c->slot != wayland.touch[at].client)
+                return;
+        s = &c->surfaces[wayland.touch[at].surface];
+        if (!s->live)
+                return;
+        wayland.touch[at].x = x;
+        wayland.touch[at].y = y;
+        if (s->role == WAYLAND_ROLE_SUBSURFACE)
+                wayland_sub_offset(c, s, &ox, &oy);
+        time = wayland.host->now(wayland.host->context);
+        count = wayland_seats(c, WLI_wl_touch, slots);
+        for (long n = 0; n < count; n++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_motion);
+
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, (unsigned long)id);
+                wayland_word(&e, wayland_fixed(x - ox, s->scale120));
+                wayland_word(&e, wayland_fixed(y - oy, s->scale120));
+                wayland_end(&e);
+                wayland_touch_frame_to(c, slots[n]);
+        }
+}
+
+/* A finger that was down is lifted. */
+WAYLAND_API void wayland_touch_up(long id)
+{
+        struct wayland_client *c;
+        long time, slots[WAYLAND_SEATS], count;
+        unsigned long serial;
+        int at = wayland_touch_find(id);
+
+        if (!wayland.host || at < 0)
+                return;
+        c = wayland.client[wayland.touch[at].client];
+        wayland.touch[at].live = 0;
+        if (!c)
+                return;
+        time = wayland.host->now(wayland.host->context);
+        serial = wayland_input_serial(c);
+        count = wayland_seats(c, WLI_wl_touch, slots);
+        for (long n = 0; n < count; n++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_up);
+
+                wayland_word(&e, serial);
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, (unsigned long)id);
+                wayland_end(&e);
+                wayland_touch_frame_to(c, slots[n]);
+        }
+}
+
+/*
+        The fingers' sequence is taken away (the compositor's gesture took them, or the device lost its events): each client
+        that had a finger down is sent a cancel, once, and none of its fingers is down any more.
+*/
+WAYLAND_API void wayland_touch_cancel(void)
+{
+        for (int at = 0; at < WAYLAND_TOUCHES; at++)
+        {
+                struct wayland_client *c;
+                long slots[WAYLAND_SEATS], count;
+
+                if (!wayland.touch[at].live)
+                        continue;
+                c = wayland.client[wayland.touch[at].client];
+                for (int each = 0; each < WAYLAND_TOUCHES; each++)
+                        if (wayland.touch[each].live && wayland.touch[each].client == wayland.touch[at].client)
+                                wayland.touch[each].live = 0;
+                if (!c)
+                        continue;
+                count = wayland_seats(c, WLI_wl_touch, slots);
+                for (long n = 0; n < count; n++)
+                {
+                        struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_cancel);
+
+                        wayland_end(&e);
+                        wayland_touch_frame_to(c, slots[n]);
+                }
+        }
+}
+
+/* A client that goes has no finger down: its points are let go with it, and nothing is sent to it. */
+static void wayland_touch_forget(long slot)
+{
+        for (int at = 0; at < WAYLAND_TOUCHES; at++)
+                if (wayland.touch[at].live && wayland.touch[at].client == slot)
+                        wayland.touch[at].live = 0;
 }
 
 /* A button of the pointer, by its Linux code, pressed or let go. A press is the serial a client may name to ask for a move. */
@@ -3841,7 +4043,12 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
                 }
                 return WAYLAND_OK;
         case WLQ_wl_seat_get_touch:
-                return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
+                // A seat with no touch screen has no touch to give: the client is refused, as the protocol says.
+                if (!(wayland.host->seat(wayland.host->context) & WLN_wl_seat_capability_touch))
+                        return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
+                if (!wayland_seat_add(c, WLI_wl_touch, c->objects[slot].id))
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many touches");
+                return WAYLAND_OK;
         default:
                 return WAYLAND_OK;
         }
@@ -3854,6 +4061,8 @@ static int wayland_seat_object_request(struct wayland_client *c, struct wayland_
                 wayland_seat_remove(c, WLI_wl_pointer, self->id);
         else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
                 wayland_seat_remove(c, WLI_wl_keyboard, self->id);
+        else if (op == WLQ_wl_touch_release && self->iface == WLI_wl_touch)
+                wayland_seat_remove(c, WLI_wl_touch, self->id);
         return WAYLAND_OK;
 }
 
@@ -5162,6 +5371,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                         break;
                 case WLI_wl_pointer:
                 case WLI_wl_keyboard:
+                case WLI_wl_touch:
                         status = wayland_seat_object_request(c, o, op);
                         break;
                 case WLI_xdg_wm_base:
@@ -5341,6 +5551,7 @@ WAYLAND_API void wayland_drop(long slot)
 
         if (!c)
                 return;
+        wayland_touch_forget(slot);
         for (long at = 0; at < WAYLAND_SURFACES; at++)
                 if (c->surfaces[at].live)
                 {

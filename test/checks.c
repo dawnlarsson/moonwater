@@ -167167,6 +167167,97 @@ static void test_frames(void)
 */
 static long event_at(struct wlc *c, long iface, long opcode, long from);
 
+/*
+        wl_touch: a seat with a touch screen gives touches; a finger down on a window is sent down to the surface under it, moves
+        are motions in that surface's own coordinates (its subsurface's place taken away) and go to it whatever is under them,
+        its lift is up, each followed by a frame, in that order; a cancel reaches a client once. A seat without touch refuses
+        get_touch.
+*/
+static void test_touch(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat, touch;
+        long a, b, d, count;
+
+        /* the seat has no touch screen: the request is refused */
+        wl_reset();
+        fake.caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_touch, wlc_id(c, WLI_wl_touch, 9));
+        WLCHECK(c->errors == 1, "a seat with no touch refuses get_touch");
+        wlc_end(c);
+        wayland_stop();
+
+        /* a seat with touch: a finger's down, motion, and up, in order, and a cancel to the client once */
+        wl_reset();
+        fake.caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard | WLN_wl_seat_capability_touch;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        touch = wlc_id(c, WLI_wl_touch, 9);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_touch, touch);
+        WLCHECK(c->errors == 0, "a seat with touch gives a touch object");
+        wlc_forget(c);
+
+        wayland_touch_down(0, 3, 10, 20);
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_touch, WLE_wl_touch_down, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[2] == s.surface && c->ev[a].u[3] == 3 && c->ev[a].u[4] == 10 * 256 && c->ev[a].u[5] == 20 * 256,
+                "a finger down is a down on the surface under it, with its id and its place in the surface, in fixed point");
+        WLCHECK(wayland_touch_row(3) == 0, "a finger down is kept on its window until it is lifted");
+        wayland_touch_motion(3, 20, 12);
+        wlc_pump(c);
+        b = event_at(c, WLI_wl_touch, WLE_wl_touch_motion, 0);
+        WLCHECK(b > a && c->ev[b].u[1] == 3 && c->ev[b].u[2] == 20 * 256 && c->ev[b].u[3] == 12 * 256,
+                "a move is a motion after the down, to the same surface's coordinates");
+        wayland_touch_motion(3, 20, 12);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_motion) == 1, "a finger that did not move sends nothing");
+        wayland_touch_up(3);
+        wlc_pump(c);
+        d = event_at(c, WLI_wl_touch, WLE_wl_touch_up, 0);
+        WLCHECK(d > b && c->ev[d].u[2] == 3, "a lift is an up after the motion, with its id");
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_frame) == 3, "each event is followed by a frame");
+        WLCHECK(wayland_touch_row(3) == -1, "a finger that is up is down no more");
+        wayland_touch_up(3);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_up) == 1, "a lift of a finger that is not down sends nothing");
+
+        /* two fingers: the cancel reaches the client once, and none of them is down after it */
+        wlc_forget(c);
+        wayland_touch_down(0, 4, 5, 5);
+        wayland_touch_down(0, 6, 6, 6);
+        wayland_touch_cancel();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_down) == 2, "two fingers go down");
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_cancel) == 1, "a cancel reaches the client once, not once a finger");
+        WLCHECK(wayland_touch_row(4) == -1 && wayland_touch_row(6) == -1, "after a cancel no finger is down");
+
+        /* a surface destroyed while a finger is down: its moves go nowhere, and its lift is still sent, so the client's sequence balances */
+        wlc_forget(c);
+        wayland_touch_down(0, 8, 9, 9);
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        wlc_pump(c);
+        wayland_touch_motion(8, 10, 10);
+        wayland_touch_up(8);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0, "a surface gone under a finger is no protocol error");
+        count = wlc_count(c, WLI_wl_touch, WLE_wl_touch_motion);
+        WLCHECK(count == 0, "and a move of it goes nowhere");
+        WLCHECK(wlc_count(c, WLI_wl_touch, WLE_wl_touch_up) == 1, "its lift is still sent");
+        wlc_end(c);
+        leak_check("touch");
+        wayland_stop();
+}
+
 static void test_presentation(void)
 {
         struct session s;
@@ -170911,6 +171002,7 @@ int main(int argc, char **argv)
         test_shm();
         test_frames();
         test_presentation();
+        test_touch();
         test_text();
         test_popups();
         test_surface_rules();

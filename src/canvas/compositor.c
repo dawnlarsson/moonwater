@@ -15159,6 +15159,10 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
         are, begun on the first finger down (ui_touch_begin), and each report's events are applied as they come. A report of
         another touch screen waits until this one's gesture is over.
 */
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_touch_report(unsigned int at, int dropped); // wayland_host.c: the fingers as wl_touch
+#endif
+
 static void compositor_touch_report(unsigned int at, positive now)
 {
         struct compositor_touch_screen *screen = &compositor.screen_touch[at];
@@ -15169,6 +15173,9 @@ static void compositor_touch_report(unsigned int at, positive now)
         // Events were lost: no finger is trusted, and what they were doing ends as if they were lifted, no click made.
         if (screen->dropped)
         {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_touch_report(at, 1);
+#endif
                 screen->dropped = 0;
                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 {
@@ -15221,6 +15228,9 @@ static void compositor_touch_report(unsigned int at, positive now)
         frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
         ui_touch_report(&touch->gesture, &frame, &out);
         compositor_touch_apply(at, &out, now);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_touch_report(at, 0);
+#endif
 
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }

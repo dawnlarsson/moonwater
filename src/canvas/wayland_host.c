@@ -940,10 +940,16 @@ static void compositor_wl_repeat(void *context, long *rate, long *delay)
 }
 
 // What the seat can do: a pointer and a keyboard; touch is not offered yet.
+// A touch capability while a touch screen is on the machine (the screens' fingers are sent to the windows as wl_touch).
 static long compositor_wl_seat(void *context)
 {
+        long caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
+
         (void)context;
-        return WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                if (compositor.touchscreen[at])
+                        caps |= WLN_wl_seat_capability_touch;
+        return caps;
 }
 
 // Caps Lock, as the keymap's own Lock mask.
@@ -2109,6 +2115,46 @@ static void compositor_wl_frame(void)
         if (!compositor_wl.started)
                 return;
         wayland_frame();
+        compositor_wl_flush_all();
+}
+
+/*
+        The fingers of a touch screen, as the windows' clients are told them (wl_touch): a finger that is down now and was not in
+        the last report is a touch down on the window under it, one that was down and is down still moved (a motion, when it
+        is somewhere else), and one that was down and is not is lifted. dropped: the device lost its events, so every finger
+        is cancelled instead. Called at the end of compositor_touch_report, before its ids become the last report's.
+*/
+static void compositor_wl_touch_report(unsigned int at, int dropped)
+{
+        const struct compositor_touch_screen *screen = &compositor.screen_touch[at];
+
+        if (!compositor_wl.started)
+                return;
+        if (dropped)
+        {
+                wayland_touch_cancel();
+                compositor_wl_flush_all();
+                return;
+        }
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+        {
+                int x, y, row;
+
+                if (screen->id[slot] >= 0)
+                {
+                        compositor_touch_point(at, slot, &x, &y);
+                        if (screen->was[slot] < 0)
+                        {
+                                row = compositor_picture_under(x, y);
+                                if (row >= 0)
+                                        wayland_touch_down(row, screen->id[slot], x - compositor.x[row], y - compositor.y[row]);
+                        }
+                        else if ((row = wayland_touch_row(screen->id[slot])) >= 0)
+                                wayland_touch_motion(screen->id[slot], x - compositor.x[row], y - compositor.y[row]);
+                }
+                else if (screen->was[slot] >= 0)
+                        wayland_touch_up(screen->was[slot]);
+        }
         compositor_wl_flush_all();
 }
 
