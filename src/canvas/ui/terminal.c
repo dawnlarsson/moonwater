@@ -1612,13 +1612,16 @@ static void terminal_overlay(unsigned int address_to whole, int slot);
         and the frame is painted on the processor as it always was. After a list frame neither picture matches what the processor
         last drew, so both are drawn whole by the next processor frame.
 */
-static b32 terminal_list_frame(const struct window_cell address_to now, unsigned int first, unsigned int shown, unsigned int total)
+// The frame's ops into the scene the kit's ui records into (ui_scene_begin set it): the whole grid, its margins and the bar, each
+// row through the painter. The ui's size is the picture's, which the list's header carries (ui_draw_list_publish), and its band is
+// the whole picture (the kit's dots and rings are cut to it). Nothing is written to the picture.
+static void terminal_list_draw(const struct window_cell address_to now, unsigned int first, unsigned int shown, unsigned int total)
 {
         struct windows address_to table = terminal.own.table;
         unsigned int address_to whole = windows_buffer(table, terminal.own.row, 0);
 
-        if (!ui_list_frame_begin())
-                return false;
+        terminal.ui.width = (int)terminal.width, terminal.ui.height = (int)terminal.height, terminal.ui.pitch = terminal.pitch;
+        terminal.ui.top = 0, terminal.ui.bottom = (int)terminal.height;
         terminal.rec_whole = whole;
         terminal.rec_grid = terminal_grid(whole);
         for (unsigned int row = 0; row < ROWS; row++)
@@ -1628,6 +1631,13 @@ static b32 terminal_list_frame(const struct window_cell address_to now, unsigned
         }
         terminal_bar(whole, now, first, shown, total);
         terminal.rec_whole = terminal.rec_grid = null;
+}
+
+static b32 terminal_list_frame(const struct window_cell address_to now, unsigned int first, unsigned int shown, unsigned int total)
+{
+        if (!ui_list_frame_begin())
+                return false;
+        terminal_list_draw(now, first, shown, total);
         if (!ui_list_frame_end(&terminal.own, (int)terminal.width, (int)terminal.height, null))
                 return false;
         terminal.valid[0] = terminal.valid[1] = 0;

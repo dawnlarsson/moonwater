@@ -160088,6 +160088,14 @@ b32 main()
                                 string_format(log, "  terminal list, a full %p by %p frame: %p ops, %p cover bytes; record %p us, processor's full draw %p us (min of 50)\n",
                                               (positive)COLUMNS, (positive)ROWS, (positive)measured.count, (positive)measured.cover_used,
                                               best_record / 1000, best_paint / 1000);
+                        {
+                                // The same frame's pool: its coverage copies and tone sets (each copy is its bitmap's bytes, once per distinct glyph).
+                                positive covers = 0, tones = 0;
+
+                                for (unsigned int k = 0; k < UI_SCENE_SLOTS; k++)
+                                        covers += ui_app_list.scene.cover_slots[k].used, tones += ui_app_list.scene.tone_slots[k].used;
+                                string_format(log, "  terminal list pool: %p coverage copies, %p tone sets, %p bytes\n", covers, tones, (positive)ui_app_list.scene.used);
+                        }
                 }
                 render_listing = false;
                 render_state = saved;
@@ -218359,6 +218367,200 @@ static void gpu_kit_recorded_controls(positive pic_at, positive ops_at, positive
         check("gpu controls: the input's top edge replays bit for bit over 24 random rows", bad == 0);
 }
 
+/*
+        The terminal's frames on the GPU: the cells the terminal draws into its window's list (terminal_list_draw, the kit's recorder), the list
+        drawn by the card (compositor_gpu_list_render_bytes, the list's cut and its cover bytes) into a picture of its own, and the picture held to
+        the processor's full draw of the same cells (render_reference) bit for bit, the bar included. Plain text, 256 and true colours, the
+        attributes, the cursor's three shapes, a selected range, light and dark, the scales 100, 150, 200 and 300, and the largest grid the
+        window holds. A frame the recorder lost (a wide character) is named, and not compared.
+*/
+#define TG_LIST_BYTES (4ul << 20)
+#define TG_PITCH 4096
+#define TG_ROWS 2048
+static unsigned char address_to tg_list;
+static unsigned int address_to tg_picture, address_to tg_cpu;
+static struct ui_draw_list tg_draw;
+static b32 tg_fonts;
+static positive tg_cases;
+
+static void tg_check(const char address_to label, b32 okay)
+{
+        checks++;
+        if (!okay)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", (positive)label);
+        }
+}
+
+static b32 tg_memory(void)
+{
+        if (!tg_list)
+        {
+                long lfd = system_call_2(syscall(memfd_create), (positive) "mw-terminal-list", 1);
+                long pfd = system_call_2(syscall(memfd_create), (positive) "mw-terminal-picture", 1);
+                long lm = -1, pm = -1;
+                positive picture_bytes = (positive)TG_PITCH * TG_ROWS * 4;
+
+                if (lfd >= 0 && system_call_2(syscall(ftruncate), (positive)lfd, TG_LIST_BYTES) == 0)
+                        lm = system_call_6(syscall(mmap), 0, TG_LIST_BYTES, 3, 1, (positive)lfd, 0);
+                if (pfd >= 0 && system_call_2(syscall(ftruncate), (positive)pfd, picture_bytes) == 0)
+                        pm = system_call_6(syscall(mmap), 0, picture_bytes, 3, 1, (positive)pfd, 0);
+                if (!(lm < 0 && lm > -4096) && !(pm < 0 && pm > -4096))
+                        tg_list = (unsigned char address_to)lm, tg_picture = (unsigned int address_to)pm;
+        }
+        if (!tg_cpu)
+                tg_cpu = render_map((positive)2048 * 1280 * 4);
+        compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1;
+        compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_OPS_AT), compositor_gscene.room = (1 << 20) / 32;
+        return tg_list && tg_picture && tg_cpu;
+}
+
+// One frame: the window's grid (columns by rows, the text in it), at the scale's percent, light or dark, with an optional selection. The
+// processor's full draw of its cells and the card's draw of the terminal's list are compared over the picture.
+static void tg_case(const char address_to label, unsigned int columns, unsigned int rows, const char address_to text, b32 light, int percent,
+                    b32 selected, unsigned int from_line, unsigned int from_column, unsigned int to_line, unsigned int to_column, b32 expect_lost)
+{
+        struct window_cell address_to now;
+        unsigned int first, shown, total, bad = 0;
+        int damage[4] = {0, 0, 0, 0}, drawn;
+
+        ui_kit_theme(light ? UI_THEME_LIGHT : UI_THEME_DARK, UI_ACCENT_DAWN, 1);
+        terminal.ui.scale = percent;
+        cursor_hide();
+        terminal_text_set(-1, 16 * (unsigned int)percent / 100);
+        window->columns = columns;
+        window->rows = rows;
+        regrid(-1);
+        full_reset();
+        terminal_view_clamp();
+        terminal_view_live();
+        render_surface();
+        term_bytes((const p8 address_to)text, string_length((string_address)text));
+        to_shell_length = 0;
+        cursor_show();
+        if (selected)
+                terminal_select_set(terminal_place(from_line, from_column), terminal_place(to_line, to_column));
+        else
+                terminal_select_clear();
+
+        now = terminal.frame[2];
+        terminal_view_clamp();
+        terminal_build(now);
+        terminal_caret_frame();
+        terminal_extent(&first, &shown, &total);
+        render_reference(tg_cpu, now);
+
+        ui_draw_list_init(&tg_draw, tg_list, TG_LIST_BYTES, WINDOW_LIST_ROOM);
+        if (!ui_scene_begin(&terminal.ui, &tg_draw))
+        {
+                tg_check(label, false);
+                return;
+        }
+        terminal_list_draw(now, first, shown, total);
+        if (tg_draw.scene.lost || !ui_scene_end(&terminal.ui, &tg_draw))
+        {
+                string_format(log, "  %p: the recorder lost the frame (%p ops), the processor draws it\n", (positive)label, (positive)tg_draw.scene.count);
+                tg_check(label, expect_lost);
+                return;
+        }
+        tg_check(label, !expect_lost);
+        tg_cases++;
+        {
+                // The frame's pool: the coverage copies and the tone sets its dedupe tables hold, and the bytes they take.
+                positive covers = 0, tones = 0;
+
+                for (unsigned int k = 0; k < UI_SCENE_SLOTS; k++)
+                        covers += tg_draw.scene.cover_slots[k].used, tones += tg_draw.scene.tone_slots[k].used;
+                string_format(log, "  terminal frame pool: %p ops, %p coverage copies, %p tone sets, %p bytes\n", (positive)tg_draw.scene.count,
+                              covers, tones, (positive)tg_draw.scene.used);
+        }
+        for (positive i = 0; i < (positive)TG_PITCH * TG_ROWS; i++)
+                tg_picture[i] = 0x12345678u;
+        drawn = compositor_gpu_list_render_bytes(5, tg_list, TG_LIST_BYTES, tg_picture, TG_PITCH, (int)terminal.width, (int)terminal.height, damage);
+        tg_check(label, drawn == 1);
+        for (unsigned int y = 0; y < terminal.height; y++)
+                for (unsigned int x = 0; x < terminal.width; x++)
+                {
+                        checks++;
+                        if (tg_picture[(positive)y * TG_PITCH + x] != tg_cpu[(positive)y * terminal.pitch + x] && (++failures, ++bad) < 6)
+                                string_format(log, "  FAIL %s: pixel %p,%p is %p, wanted %p\n", (positive)label, (positive)x, (positive)y,
+                                              (positive)tg_picture[(positive)y * TG_PITCH + x], (positive)tg_cpu[(positive)y * terminal.pitch + x]);
+                }
+        gpu_trim();
+}
+
+static void terminal_gpu_rows(string_address font, string_address bold)
+{
+        static const char plain[] = "The quick brown fox jumps over the lazy dog 0123456789\r\nSecond line: abc DEF ghi\r\n\r\n$ ls -la\r\n";
+        static const char colours[] = "\x1b[38;5;196mred256 \x1b[38;5;46mgreen \x1b[38;5;27mblue\x1b[0m \x1b[38;2;10;200;90mtrue\x1b[0m\r\n"
+                                      "\x1b[48;5;21mbg21 \x1b[0m\x1b[48;2;200;100;10mbgtrue \x1b[0m\x1b[38;2;255;255;0m\x1b[48;2;0;0;80myel\x1b[0m\r\n";
+        static const char styles[] = "\x1b[1mbold\x1b[0m \x1b[2mdim\x1b[0m \x1b[4munder\x1b[0m \x1b[7minverse\x1b[0m \x1b[9mstrike\x1b[0m \x1b[3mitalic\x1b[0m\r\n"
+                                     "\x1b[1;4;9mcombo\x1b[0m \x1b[7;1mrev bold\x1b[0m \x1b[2;4mdim under\x1b[0m\r\n";
+        static const char cursor_block[] = "block cursor here \x1b[2 q";
+        static const char cursor_bar[] = "bar cursor here\x1b[6 q";
+        static const char cursor_under[] = "underline cursor\x1b[4 q";
+        static const char wide[] = "wide \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e text\r\n";
+        static const char tall[] = "row 0 0123456789 abcdefghij ABCDEFGHIJ\r\n";
+        static char long_text[80 * 50 * 2];
+        unsigned int at = 0;
+
+        if (!tg_fonts)
+        {
+                string_address paths[1] = {font};
+
+                if (!terminal_fonts(paths, 1, bold, 16))
+                {
+                        tg_check("gpu terminal: the faces load", false);
+                        return;
+                }
+                tg_fonts = true;
+        }
+        for (unsigned int k = 0; k < 256; k++)
+                terminal_colour[k] = window_cell_colour(k);
+        term_palette = terminal_palette;
+        if (!window)
+                window = window_grid_open(30, 8, 80, 256);
+        if (!window || !tg_memory())
+        {
+                tg_check("gpu terminal: the window and its memory", false);
+                return;
+        }
+        // A window and its picture first, as the terminal rig's start has them: a text size is set into a grid that has its window.
+        window->columns = 50, window->rows = 14;
+        regrid(-1);
+        render_surface();
+        // The largest grid: 80 columns by 50 rows, each row not like the others.
+        for (unsigned int line = 0; line < 50; line++)
+        {
+                for (unsigned int col = 0; col < 79; col++)
+                        long_text[at++] = (char)('a' + (line * 7 + col * 3) % 26);
+                long_text[at++] = '\r', long_text[at++] = '\n';
+        }
+        long_text[at] = 0;
+
+        tg_case("gpu terminal: plain text, light, 100 percent", 50, 14, plain, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: plain text, dark, 100 percent", 50, 14, plain, 0, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: 256 and true colours, light", 50, 14, colours, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: 256 and true colours, dark", 50, 14, colours, 0, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: bold, dim, underline, inverse, strike, italic", 50, 14, styles, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: the same styles, dark", 50, 14, styles, 0, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: block cursor", 50, 14, cursor_block, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: bar cursor", 50, 14, cursor_bar, 0, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: underline cursor", 50, 14, cursor_under, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: a selected range", 50, 14, plain, 1, 100, 1, 0, 2, 1, 6, 0);
+        tg_case("gpu terminal: a selected range, dark", 50, 14, colours, 0, 100, 1, 0, 1, 1, 9, 0);
+        tg_case("gpu terminal: 150 percent", 50, 14, plain, 1, 150, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: 200 percent, dark", 50, 14, styles, 0, 200, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: 300 percent", 40, 8, tall, 1, 300, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: the largest grid, 80 by 50", 80, 50, long_text, 1, 100, 0, 0, 0, 0, 0, 0);
+        tg_case("gpu terminal: a wide character is a named loss", 50, 14, wide, 1, 100, 0, 0, 0, 0, 0, 1);
+        terminal_select_clear();
+        terminal_text_set(-1, 16);
+        window->columns = 50, window->rows = 14, regrid(-1), render_surface();
+        string_format(log, "  gpu terminal: %p frames replayed on the card\n", (positive)tg_cases);
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -218432,6 +218634,10 @@ b32 main(void)
 
                 app_rows(0, pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), 16u << 20, hundred, 1, 700);
         }
+
+        // The terminal's frames: the grid's list (terminal_list_draw) drawn by the card and held to the processor's full draw, bit for bit.
+        if (program_argument_count() > 2)
+                terminal_gpu_rows(program_argument(1), program_argument(2));
 
         // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
         // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
