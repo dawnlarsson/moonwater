@@ -102,6 +102,7 @@ struct ui_scene
         unsigned long used, size, at; // the pool of bitmaps: bytes used, its size, and where it is in the GPU's buffer
         int lost;
         int dx0, dy0, dx1, dy1;       // the damage of the ops: their union in pixels, empty when dx1 <= dx0 or dy1 <= dy0
+        int ox, oy;                   // the place of the kit origin in the picture: an op is written at its place plus this (0 for a picture's own kit)
         struct ui_scene_slot cover_slots[UI_SCENE_SLOTS], tone_slots[UI_SCENE_SLOTS];
 };
 
@@ -393,6 +394,7 @@ static void ui_scene_record(struct ui_scene address_to scene, int x0, int y0, in
                 scene->lost = 1;
                 return;
         }
+        x0 += scene->ox, x1 += scene->ox, y0 += scene->oy, y1 += scene->oy;
         op = scene->ops + 8 * scene->count++;
         op[0] = write || tone >> 24 == 255 ? 0 : 1, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0, op[3] = (unsigned int)x1, op[4] = (unsigned int)y1;
         op[5] = tone, op[6] = op[7] = 0;
@@ -866,11 +868,12 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
                         bitmap[(unsigned long)(row + 1) * (unsigned long)pitch + (unsigned long)column + 1] = (unsigned char)(light ? value : 255 - value);
                 }
         op = scene->ops + 8 * scene->count++;
-        op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(pen_x + first), op[2] = (unsigned int)from, op[3] = (unsigned int)(pen_x + last), op[4] = (unsigned int)to;
+        op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(scene->ox + pen_x + first), op[2] = (unsigned int)(scene->oy + from),
+        op[3] = (unsigned int)(scene->ox + pen_x + last), op[4] = (unsigned int)(scene->oy + to);
         op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
         op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + from - top) * (unsigned long)pitch + (unsigned long)(1 + first));
         scene->used += (bytes + 15) & ~15ul;
-        ui_scene_touch(scene, pen_x + first, from, pen_x + last, to);
+        ui_scene_touch(scene, scene->ox + pen_x + first, scene->oy + from, scene->ox + pen_x + last, scene->oy + to);
 }
 
 // The pool's copy of count bytes for a key, once per frame: the copy's place from the list's base, 16-aligned; false when the frame has no room
@@ -3035,6 +3038,7 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
         struct ui_scene address_to scene = ui->scene;
         int from = ui->top < 0 ? 0 : ui->top, to = ui->bottom > ui->height ? ui->height : ui->bottom;
         unsigned int cut, mods, address_to op;
+        int ox8, oy8;
 
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
@@ -3049,26 +3053,33 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
         }
         op = scene->ops + 8 * scene->count;
         scene->count += 1 + mods;
-        ui_scene_touch(scene, box->x0 >> 8, box->y0 >> 8 < from ? from : box->y0 >> 8, (box->x1 + 255) >> 8, (box->y1 + 255) >> 8 > to ? to : (box->y1 + 255) >> 8);
-        op[0] = 2u | mods << 8, op[1] = (unsigned int)box->x0, op[2] = (unsigned int)box->y0, op[3] = (unsigned int)box->x1, op[4] = (unsigned int)box->y1;
+        // The damage in picture pixels: the box's rows and columns cut to the rows it may draw, at the scene's origin.
+        ox8 = scene->ox << 8, oy8 = scene->oy << 8;
+        ui_scene_touch(scene, (box->x0 >> 8) + scene->ox, (box->y0 >> 8 < from ? from : box->y0 >> 8) + scene->oy, ((box->x1 + 255) >> 8) + scene->ox,
+                       ((box->y1 + 255) >> 8 > to ? to : (box->y1 + 255) >> 8) + scene->oy);
+        op[0] = 2u | mods << 8, op[1] = (unsigned int)(box->x0 + ox8), op[2] = (unsigned int)(box->y0 + oy8), op[3] = (unsigned int)(box->x1 + ox8),
+        op[4] = (unsigned int)(box->y1 + oy8);
         op[5] = argb, op[6] = (unsigned int)box->rx, op[7] = (unsigned int)box->ry;
         if (ring)
         {
                 op += 8;
-                op[0] = 8, op[1] = (unsigned int)(box->x0 + thickness), op[2] = (unsigned int)(box->y0 + thickness), op[3] = (unsigned int)(box->x1 - thickness);
-                op[4] = (unsigned int)(box->y1 - thickness), op[5] = 0, op[6] = box->rx > thickness ? (unsigned int)(box->rx - thickness) : 0;
+                op[0] = 8, op[1] = (unsigned int)(box->x0 + thickness + ox8), op[2] = (unsigned int)(box->y0 + thickness + oy8),
+                op[3] = (unsigned int)(box->x1 - thickness + ox8), op[4] = (unsigned int)(box->y1 - thickness + oy8), op[5] = 0,
+                op[6] = box->rx > thickness ? (unsigned int)(box->rx - thickness) : 0;
                 op[7] = box->ry > thickness ? (unsigned int)(box->ry - thickness) : 0;
         }
         if (clip)
         {
                 op += 8;
-                op[0] = 9, op[1] = (unsigned int)clip->x0, op[2] = (unsigned int)clip->y0, op[3] = (unsigned int)clip->x1, op[4] = (unsigned int)clip->y1;
+                op[0] = 9, op[1] = (unsigned int)(clip->x0 + ox8), op[2] = (unsigned int)(clip->y0 + oy8), op[3] = (unsigned int)(clip->x1 + ox8),
+                op[4] = (unsigned int)(clip->y1 + oy8);
                 op[5] = 0, op[6] = (unsigned int)clip->rx, op[7] = (unsigned int)clip->ry;
         }
         if (cut)
         {
                 op += 8;
-                op[0] = 9, op[1] = 0, op[2] = (unsigned int)from << 8, op[3] = (unsigned int)ui->width << 8, op[4] = (unsigned int)to << 8;
+                op[0] = 9, op[1] = (unsigned int)ox8, op[2] = (unsigned int)(from << 8) + (unsigned int)oy8, op[3] = (unsigned int)(ui->width << 8) + (unsigned int)ox8,
+                op[4] = (unsigned int)(to << 8) + (unsigned int)oy8;
                 op[5] = op[6] = op[7] = 0;
         }
 }
@@ -3122,6 +3133,7 @@ static b32 ui_scene_begin(struct ui address_to ui, struct ui_draw_list address_t
         memory_zero(list->scene.cover_slots, sizeof(list->scene.cover_slots));
         memory_zero(list->scene.tone_slots, sizeof(list->scene.tone_slots));
         list->scene.dx0 = list->scene.dy0 = list->scene.dx1 = list->scene.dy1 = 0;
+        list->scene.ox = list->scene.oy = 0;
         ui->scene = &list->scene;
         return 1;
 }

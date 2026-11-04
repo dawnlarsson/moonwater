@@ -160100,6 +160100,10 @@ b32 main()
                 render_listing = false;
                 render_state = saved;
                 ui_app_list.ready = 0, ui_app_ui = null;
+                // The list mode is the rig's own for these steps: the window it was on has no list after them, so the compositor's
+                // list path (compositor_lists_take) is not taken for the later checks' windows.
+                terminal.own.table->list_mode = 0;
+                terminal.own.table->list_state[terminal.own.row] = 0;
                 compared += listed_compared, wrong += listed_wrong;
                 string_format(log, "  terminal lists: %p frames of %p steps were taken by the list\n", (positive)render_list_frames, (positive)6000);
                 check("terminal lists: the window's list took frames, and the steps drew them", render_list_frames > 0);
@@ -218382,6 +218386,7 @@ static unsigned int address_to tg_picture, address_to tg_cpu;
 static struct ui_draw_list tg_draw;
 static b32 tg_fonts;
 static positive tg_cases;
+static b32 tg_handles; // the next case draws its selection's handles (the overlay) as well
 
 static void tg_check(const char address_to label, b32 okay)
 {
@@ -218443,6 +218448,8 @@ static void tg_case(const char address_to label, unsigned int columns, unsigned 
                 terminal_select_set(terminal_place(from_line, from_column), terminal_place(to_line, to_column));
         else
                 terminal_select_clear();
+        // The handles at the selection's ends (the bar is not held to the rows: its fade is the clock's), as the processor draws them over the grid.
+        terminal.sel.handles = selected && tg_handles;
 
         now = terminal.frame[2];
         terminal_view_clamp();
@@ -218450,6 +218457,8 @@ static void tg_case(const char address_to label, unsigned int columns, unsigned 
         terminal_caret_frame();
         terminal_extent(&first, &shown, &total);
         render_reference(tg_cpu, now);
+        if (terminal_overlay_wanted())
+                terminal_overlay(tg_cpu, 0);
 
         ui_draw_list_init(&tg_draw, tg_list, TG_LIST_BYTES, WINDOW_LIST_ROOM);
         if (!ui_scene_begin(&terminal.ui, &tg_draw))
@@ -218550,6 +218559,10 @@ static void terminal_gpu_rows(string_address font, string_address bold)
         tg_case("gpu terminal: underline cursor", 50, 14, cursor_under, 1, 100, 0, 0, 0, 0, 0, 0);
         tg_case("gpu terminal: a selected range", 50, 14, plain, 1, 100, 1, 0, 2, 1, 6, 0);
         tg_case("gpu terminal: a selected range, dark", 50, 14, colours, 0, 100, 1, 0, 1, 1, 9, 0);
+        tg_handles = true;
+        tg_case("gpu terminal: a selected range with its handles", 50, 14, plain, 1, 100, 1, 0, 2, 1, 6, 0);
+        tg_case("gpu terminal: a selected range with its handles, dark", 50, 14, colours, 0, 100, 1, 0, 1, 2, 9, 0);
+        tg_handles = false;
         tg_case("gpu terminal: 150 percent", 50, 14, plain, 1, 150, 0, 0, 0, 0, 0, 0);
         tg_case("gpu terminal: 200 percent, dark", 50, 14, styles, 0, 200, 0, 0, 0, 0, 0, 0);
         tg_case("gpu terminal: 300 percent", 40, 8, tall, 1, 300, 0, 0, 0, 0, 0, 0);

@@ -216,6 +216,10 @@ static struct
         // While a frame is recorded into the window's list (terminal_list_frame): the picture's top left and the grid's, which the
         // recorder reads a fill's origin from (a fill of the grid is offset by the paper round it; one of the picture is not).
         unsigned int address_to rec_whole, address_to rec_grid;
+        // A frame the recorder lost: what it was made of (terminal_list_key), and the frames since it was refused (TERMINAL_LIST_RETRY).
+        b32 list_lost;
+        unsigned long list_lost_key;
+        unsigned int list_lost_frames;
 } terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1, .caret_at = {~0u, ~0u}};
 
 // The caret as the frame being made draws it: its index in the frame (~0 for none), its cover, and whether it is a block
@@ -1630,7 +1634,34 @@ static void terminal_list_draw(const struct window_cell address_to now, unsigned
                 terminal_margin(whole, now, row, 0, COLUMNS);
         }
         terminal_bar(whole, now, first, shown, total);
+        // The handles and the bar: the kit draws them from the grid's origin, so the scene's ops are placed at the grid (its origin in the
+        // picture: pad right, pad_y down), as the processor draws them there.
+        if (terminal_overlay_wanted() && terminal.ui.scene)
+        {
+                terminal.ui.scene->ox = (int)terminal.pad, terminal.ui.scene->oy = (int)terminal.pad_y;
+                terminal_overlay(whole, 0);
+                terminal.ui.scene->ox = terminal.ui.scene->oy = 0;
+        }
         terminal.rec_whole = terminal.rec_grid = null;
+}
+
+// What a list is made of, as a hash: the cells, the grid's size and scale, the paper and ink of the theme. A list the recorder lost
+// is lost again for the same key (a wide character, the room, the pool's tables), so it is not recorded again while the key holds.
+#define TERMINAL_LIST_RETRY 60
+static unsigned long terminal_list_key(const struct window_cell address_to now)
+{
+        const terminal_word address_to words = (const terminal_word address_to)now;
+        unsigned long count = (unsigned long)ROWS * COLUMNS * sizeof(struct window_cell) / sizeof(terminal_word), hash = 1469598103934665603ul;
+
+        for (unsigned long at = 0; at < count; at++)
+                hash = (hash ^ (unsigned long)words[at]) * 1099511628211ul;
+        hash = (hash ^ terminal.size) * 1099511628211ul;
+        hash = (hash ^ terminal.width) * 1099511628211ul;
+        hash = (hash ^ terminal.height) * 1099511628211ul;
+        hash = (hash ^ (unsigned long)terminal_scale()) * 1099511628211ul;
+        hash = (hash ^ terminal_default_ink()) * 1099511628211ul;
+        hash = (hash ^ terminal_default_paper()) * 1099511628211ul;
+        return hash;
 }
 
 static b32 terminal_list_frame(const struct window_cell address_to now, unsigned int first, unsigned int shown, unsigned int total)
@@ -1688,11 +1719,24 @@ static b32 terminal_frame(void)
                 terminal_bar_place(first, shown, total);
         shift = terminal_grid_shift();
         full = shift != 0 || terminal.shift[slot] != 0;
-        // A frame the compositor draws from the window's list: no shift (the list has no copy within a picture) and no selection
-        // overlay (its handles and bar are not recorded yet), and the last picture taken (windows_ready), so nothing it reads is written.
-        if (!shift && !terminal_overlay_wanted() && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own) &&
-            terminal_list_frame(now, first, shown, total))
-                return true;
+        // A frame the compositor draws from the window's list: no shift (the list has no copy within a picture), and the last picture taken
+        // (windows_ready), so nothing it reads is written. The selection's handles and bar are recorded with the grid (terminal_list_draw).
+        // A list the recorder lost is not recorded again while what it was made of holds (terminal_list_key): the frames after it are
+        // the processor's until the cells, the size or the theme change, or TERMINAL_LIST_RETRY frames have gone by.
+        if (!shift && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own))
+        {
+                unsigned long key = terminal_list_key(now);
+
+                if (terminal.list_lost && key == terminal.list_lost_key && terminal.list_lost_frames < TERMINAL_LIST_RETRY)
+                        terminal.list_lost_frames++;
+                else if (terminal_list_frame(now, first, shown, total))
+                {
+                        terminal.list_lost = 0;
+                        return true;
+                }
+                else
+                        terminal.list_lost = 1, terminal.list_lost_key = key, terminal.list_lost_frames = 0;
+        }
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
         if (drawn)
