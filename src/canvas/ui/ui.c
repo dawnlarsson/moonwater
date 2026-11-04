@@ -10957,6 +10957,57 @@ static b32 ui_buffers_paint(struct ui_buffers address_to b, int slot, int spoile
 }
 
 /*
+        The window's list (ui/list.h's format, the GPU's draw list). While the compositor renders the lists its windows publish (the table's
+        list_mode is 1) and has not refused this window's last (list_state 2), a frame is recorded into the window's list instead of painted:
+        ui_app_run gives the app's kit ui and the row's list (ui_app_ui, ui_app_row, ui_app_list). The frame is begun (ui_scene_begin), drawn
+        with the picture's painter, which records its ops and writes no pixel, and published (ui_scene_end) with the picture's knock, buffer 0,
+        which the compositor renders. A frame that did not record whole (the kit lost an op, or nothing was recorded: the painter reached no
+        recorded op) is discarded, and painted as pixels as every frame is while the list is refused or the compositor has no lists.
+*/
+static struct ui address_to ui_app_ui;
+static unsigned int ui_app_row = WINDOWS;
+static struct ui_draw_list ui_app_list;
+
+// Whether this window's next frame is recorded into its list: the compositor takes lists, this row's list is the app's, and the row was not refused.
+static b32 ui_list_wanted(const struct window_row address_to own)
+{
+        struct windows address_to table = own->table;
+
+        return ui_app_list.ready && own->row == ui_app_row && ui_app_ui &&
+               __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE) == 1 &&
+               __atomic_load_n(&table->list_state[own->row], __ATOMIC_ACQUIRE) != 2;
+}
+
+// The frame begins in the list: the kit's ui records into it until ui_list_frame_end.
+static b32 ui_list_frame_begin(void)
+{
+        return ui_scene_begin(ui_app_ui, &ui_app_list);
+}
+
+// The frame recorded into the list, painted by the app: published and knocked as a picture is, from buffer 0. False when the frame did
+// not record whole, which discards it (the frame is then painted as pixels).
+static b32 ui_list_frame_end(struct window_row address_to own, int width, int height, void (*before)(void))
+{
+        struct windows address_to table = own->table;
+        unsigned int row = own->row;
+
+        if (ui_app_list.scene.lost || !ui_app_list.scene.count)
+        {
+                ui_app_ui->scene = null;
+                return false;
+        }
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        table->damage_width[row] = 0;
+        // The app's knock that comes with its picture, as in the pixel path: the size is set, and the list is not shown yet.
+        if (before)
+                before();
+        ui_scene_end(ui_app_ui, &ui_app_list);
+        windows_show(own, 0);
+        return true;
+}
+
+/*
         One picture into the buffer the compositor is not reading: paint draws its rows [top, bottom), within height. False
         while the compositor has not taken the last one (the picture is due again). True once it is done, even when no row
         changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
@@ -10972,6 +11023,18 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
 
         if (b->shown >= 0 && !windows_ready(own))
                 return false;
+        // The whole picture recorded into the window's list (ui_list_wanted): the buffers the processor paints next lack all of it.
+        if (ui_list_wanted(own) && ui_list_frame_begin())
+        {
+                paint(windows_buffer(table, row, (unsigned int)slot), 0, height);
+                if (ui_list_frame_end(own, width, height, before))
+                {
+                        b->shown = 0;
+                        b->change_all = true, b->change_top = b->change_bottom = 0;
+                        b->stale_all[0] = b->stale_all[1] = true;
+                        return true;
+                }
+        }
         if (windows_spoiled(own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
                 spoiled_top = spoiled_y, spoiled_bottom = spoiled_y + spoiled_height;
         whole = ui_buffers_paint(b, slot, spoiled_top, spoiled_bottom, height, windows_buffer(table, row, (unsigned int)slot), paint, &top, &bottom);
@@ -11106,6 +11169,16 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
 
         if (*shown >= 0 && !windows_ready(own))
                 return false;
+        if (ui_list_wanted(own) && ui_list_frame_begin())
+        {
+                draw(windows_buffer(table, row, (unsigned int)slot));
+                if (ui_list_frame_end(own, width, height, before))
+                {
+                        *shown = 0;
+                        *dirty = false;
+                        return true;
+                }
+        }
         draw(windows_buffer(table, row, (unsigned int)slot));
         table->width[row] = (unsigned int)width;
         table->height[row] = (unsigned int)height;
@@ -11168,6 +11241,11 @@ static int ui_app_run(struct ui_app address_to app)
         // The app hears of a language's change from the kit, which listens for it once, here (language_listen holds a few).
         if (app->language)
                 language_listen(app->language);
+        // The row's list, when the table has one: this window's frames may be recorded into it (ui_list_wanted).
+        ui_app_list.ready = 0;
+        ui_app_ui = app->ui, ui_app_row = row;
+        if (window_list_of(table, (int)row))
+                ui_draw_list_init(&ui_app_list, window_list_of(table, (int)row), WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
         status = app->open();
         if (status >= 0)
         {
@@ -11244,6 +11322,13 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
+                }
+                // The compositor refused this window's last list (list_state 2): the picture is painted on the processor, and due now.
+                if (ui_app_list.ready && row == ui_app_row && __atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)
+                {
+                        *app->dirty = true;
+                        if (app->buffers)
+                                ui_buffers_all(app->buffers);
                 }
                 // The screen the window is on draws it at that screen's scale (the compositor counts it into the table): the
                 // picture is laid out again at the new scale, at the size it has, as a resize lays it out.

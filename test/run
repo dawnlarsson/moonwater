@@ -7125,6 +7125,16 @@ gate_terminal()
                 fonts/inter/Inter-Bold.ttf
 }
 
+#       CHECK_draw_list: the kit's draw list (ui_scene_begin and ui_scene_end, the reader's seqlock), the window lists' table and the app's
+#       list path, with the same fonts as the terminal.
+gate_draw_list()
+{
+        freestanding_check draw_list "$work/draw-list-check" || return 1
+        "$work/draw-list-check" fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf \
+                fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf \
+                fonts/inter/Inter-Bold.ttf
+}
+
 #       CHECK_kit_frames: the kit's frames, the buffers' paint and present, three checks, the same flags and fonts as the terminal.
 gate_kit_frames()
 {
@@ -7222,6 +7232,7 @@ lane_gate()
         job maybe gate_row shell-clang gate_clang
         job hard gate_row terminal gate_terminal
         job hard gate_row kit-frames gate_kit_frames
+        job hard gate_row draw-list gate_draw_list
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row gpu-kernels gate_gpu_kernels
         job hard gate_row inventory gate_inventory
