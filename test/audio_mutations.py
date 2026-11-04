@@ -43,7 +43,7 @@ M = [
     ("mix", "remix rows not scaled", "matrix[o][c] /= sum;", "matrix[o][c] *= 1.0f;"),
     ("mix", "kaiser beta low", "double cutoff, beta = 9.84, base;", "double cutoff, beta = 6.0, base;"),
     ("mix", "phases cut to an eighth", "phases = AUDIO_PHASES / m;", "phases = AUDIO_PHASES / m / 8;"),
-    ("mix", "no phase interpolation", "coefficient[k] = a[k] + f * (b[k] - a[k]);", "coefficient[k] = a[k];"),
+    # (the resampler's row between two phases is lib.c's now: its mutations are test/audiolib_mutations.py's)
     ("mix", "filter centre one off", "long lead = rs->table->taps / 2 - 1;", "long lead = rs->table->taps / 2;"),
     ("mix", "volume not clamped", "if (volume > AUDIO_VOLUME_MAX)\n                volume = AUDIO_VOLUME_MAX;", ""),
     ("mix", "program's NaN let through", "return x == x ? x : 0.0f;", "return x;"),

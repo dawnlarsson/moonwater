@@ -9459,6 +9459,54 @@ static p32 net_filter_run(const net_filter address_to filter, p32 arch,
         return 0;
 }
 
+#elif defined(SHARED_audio_loops)
+/*
+        The loops of src/audio/mix.c that lib.c's audio routines took over, as the C they were, written once for the
+        two programs that need them: CHECK_audio_mix, which is hosted and has no library and so supplies a routine of
+        the library's name that calls these, and CHECK_audiolib, which holds the library's assembly to them. They
+        are the definitions; the assembly is checked against them to the bound each routine's comment in lib.c states,
+        and the one body that keeps their order (the SSE2 resampler) to the bit.
+*/
+#define AUDIO_C_UNUSED __attribute__((unused))
+
+// The polyphase resampler's core: the row between the two nearest phases (a multiply and an add, as the machine without a
+// fused multiply-add does them), then each plane's dot product in eight lanes folded as a tree.
+#define AUDIO_C_POLYPHASE2(name, attributes)                                                                                            \
+        attributes static AUDIO_C_UNUSED void name(float *out0, float *out1, const float *b0, const float *b1, const float *h,            \
+                                                   unsigned long taps, unsigned long phases, unsigned long pos, unsigned long step,       \
+                                                   unsigned long made)                                                                    \
+        {                                                                                                                                 \
+                for (unsigned long m = 0; m < made; m++, pos += step)                                                                    \
+                {                                                                                                                         \
+                        unsigned long index = pos >> 32, scaled = (pos & 0xffffffffu) * phases, phase = scaled >> 32;                     \
+                        float f = (float)(scaled & 0xffffffffu) * (1.0f / 4294967296.0f);                                                  \
+                        const float *a = h + phase * taps, *b = a + taps;                                                                  \
+                        const float *x0 = b0 + index, *x1 = b1 + index;                                                                    \
+                        float coefficient[512], s0[8] = {0}, s1[8] = {0};                                                                  \
+                                                                                                                                          \
+                        for (unsigned long k = 0; k < taps; k++)                                                                           \
+                                coefficient[k] = a[k] + f * (b[k] - a[k]);                                                                 \
+                        for (unsigned long k = 0; k < taps; k += 8)                                                                        \
+                                for (int j = 0; j < 8; j++)                                                                                \
+                                {                                                                                                         \
+                                        s0[j] += coefficient[k + j] * x0[k + j];                                                           \
+                                        s1[j] += coefficient[k + j] * x1[k + j];                                                           \
+                                }                                                                                                         \
+                        out0[m] = ((s0[0] + s0[4]) + (s0[1] + s0[5])) + ((s0[2] + s0[6]) + (s0[3] + s0[7]));                              \
+                        out1[m] = ((s1[0] + s1[4]) + (s1[1] + s1[5])) + ((s1[2] + s1[6]) + (s1[3] + s1[7]));                              \
+                }                                                                                                                         \
+        }
+AUDIO_C_POLYPHASE2(audio_c_polyphase2, )
+
+//      A hosted check has no library: it takes this C for the routines of the library's names, which mix.c calls.
+#ifdef AUDIO_C_AS_LIBRARY
+void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
+                             unsigned long phases, unsigned long pos, unsigned long step, unsigned long count)
+{
+        audio_c_polyphase2(out0, out1, x0, x1, table, taps, phases, pos, step, count);
+}
+#endif
+
 #else /* the sections */
 
 #ifdef CHECK_standard
@@ -165625,6 +165673,393 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_dbus */
 
+#ifdef CHECK_audiolib
+#include "../src/lib.util.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+#define SHARED_audio_loops
+#include "checks.c"
+#undef SHARED_audio_loops
+
+//      The mixing core as the service has it, with lib.c in the translation unit: the loops it calls are the assembly.
+#include "../src/audio/mix.c"
+/*
+        CHECK_audiolib: lib.c's audio routines, the loops of the sound server's mixing core (src/audio/mix.c), on the
+        three machines and on every body of each: x86_64 once for AVX2 with FMA, once for AVX2 without it and once for
+        the SSE2 floor, riscv64 under qemu with V at the vector lengths test/run gives it and without, arm64 once.
+        Each is held to the C it replaced (SHARED_audio_loops, which CHECK_audio_mix also uses) and to a sum in double,
+        over every count and every placement the routine's contract allows, with the arrays ending against a page that
+        faults and starting just after one, so that a read or a write one element out of bounds is a fault.
+
+        resample_polyphase2_f32: tables of taps 64 to 512 and phases 1 to 512, positions and steps from nothing to
+        eight inputs an output, counts to 512. Every output is within (taps / 8 + 12) eps of the exact sum of the
+        |terms| (the bound in lib.c's comment); the SSE2 body is held to the C's bits; small integers and a weight of
+        a half are exact on every body; and the weight itself is read out of the routine (rows of nothing and of one,
+        one tap of each plane one, so that an output is f and nothing else) and held to its definition to the bit.
+        Then the mixing core itself, mix.c with the assembly under it: a stereo stream of two tones through its voice
+        and sink at four ratios of rates, held to the tones the output's own times ask for.
+*/
+static unsigned long long al_state = 0x2545f4914f6cdd1dull;
+
+static unsigned long long al_next(void)
+{
+        XORSHIFT64(al_state);
+        return al_state;
+}
+
+//      A float in [-1, 1) with 24 bits.
+static float al_unit(void)
+{
+        return (float)(int)(al_next() >> 40) / 8388608.0f - 1.0f;
+}
+
+static unsigned al_bits(float value)
+{
+        unsigned bits;
+
+        __builtin_memcpy(&bits, &value, 4);
+        return bits;
+}
+
+static double al_abs(double value)
+{
+        return value < 0 ? -value : value;
+}
+
+/*
+        Five regions, each a run of floats with a page that faults at either end: the arrays are put against one end
+        or the other.
+*/
+#define AL_REGION (1u << 21)
+#define AL_REGIONS 5
+
+static p8 address_to al_low[AL_REGIONS];
+static p8 address_to al_high[AL_REGIONS];
+
+static bool al_guard(void)
+{
+        for (int at = 0; at < AL_REGIONS; at++)
+        {
+                p8 address_to pages = memory(AL_REGION + 3 * 4096);
+                positive first;
+
+                if (!pages)
+                        return false;
+                first = ((positive)pages + 4095) & ~(positive)4095;
+                if (system_call_3(syscall(mprotect), first, 4096, 0) != 0 ||
+                    system_call_3(syscall(mprotect), first + 4096 + AL_REGION, 4096, 0) != 0)
+                        return false;
+                al_low[at] = (p8 address_to)(first + 4096);
+                al_high[at] = (p8 address_to)(first + 4096 + AL_REGION);
+        }
+        return true;
+}
+
+//      A first call in a process on riscv64 asks the machine for V; the walk can make every call that first call.
+static bool al_first;
+
+typedef struct
+{
+        unsigned long long cases, bound, bits, outside, kept, exact, weight;
+} al_faults;
+
+static void al_polyphase_routine(float *o0, float *o1, const float *x0, const float *x1, const float *table, unsigned long long taps,
+                                 unsigned long long phases, unsigned long long pos, unsigned long long step, unsigned long long count)
+{
+        VECTOR_FIRST_CALL(al_first);
+        resample_polyphase2_f32(o0, o1, x0, x1, table, taps, phases, pos, step, count);
+}
+
+//      The place the inputs end: the window of the last output, taps floats from the index.
+static unsigned long long al_polyphase_need(unsigned long long taps, unsigned long long pos, unsigned long long step,
+                                            unsigned long long count)
+{
+        return (count ? (pos + (count - 1) * step) >> 32 : pos >> 32) + taps;
+}
+
+/*
+        One case through the routine: where the arrays sit (at the end of their regions or the start), what to fill
+        them with (kind 0 random, 1 small integers, 2 the weight's probe), the bits it is to answer in (bits: the C's
+        to the bit, else the bound).
+*/
+static void al_polyphase_case(unsigned long long taps, unsigned long long phases, unsigned long long count, unsigned long long pos,
+                              unsigned long long step, int front, int kind, int bits, al_faults *faults)
+{
+        static double want[2][512], unit[2][512];
+        unsigned long long need = al_polyphase_need(taps, pos, step, count), rows = (phases + 1) * taps;
+        float *x[2], *table, *out[2];
+
+        if (need * 4 > AL_REGION || rows * 4 > AL_REGION)
+                return;
+        faults->cases++;
+        x[0] = front ? (float *)al_low[0] : (float *)al_high[0] - need;
+        x[1] = front ? (float *)al_low[1] : (float *)al_high[1] - need;
+        table = front ? (float *)al_low[2] : (float *)al_high[2] - rows;
+        out[0] = front ? (float *)al_low[3] + 16 : (float *)al_high[3] - count;
+        out[1] = front ? (float *)al_low[4] + 16 : (float *)al_high[4] - count;
+        for (unsigned long long i = 0; i < need; i++)
+        {
+                x[0][i] = kind == 0 ? al_unit() : kind == 1 ? (float)(int)(al_next() % 65) - 32 : 0.0f;
+                x[1][i] = kind == 0 ? al_unit() : kind == 1 ? (float)(int)(al_next() % 65) - 32 : 0.0f;
+        }
+        if (kind == 2)
+        {
+                //      One tap of each plane is one, so an output is that tap's coefficient and nothing else.
+                x[0][(pos >> 32) + al_next() % taps] = 1.0f;
+                x[1][(pos >> 32) + al_next() % taps] = 1.0f;
+        }
+        for (unsigned long long p = 0; p <= phases; p++)
+                for (unsigned long long k = 0; k < taps; k++)
+                        table[p * taps + k] = kind == 0 ? ((al_next() & 3) ? al_unit() * (float)(1 + (p & 3)) : 0.0f)
+                                                         : kind == 1 ? (float)(int)(al_next() % 9) * 2 - 8 : (p == phases ? 1.0f : 0.0f);
+        for (int c = 0; c < 2; c++)
+                for (int i = 0; i < 16; i++)
+                        out[c][i - 16] = (float)0x1234 + (float)i;
+        {
+                //      The arrays as they were, to hold the routine to not having written them.
+                unsigned long long sum_x = 0, sum_t = 0;
+
+                for (unsigned long long i = 0; i < need; i++)
+                        sum_x += al_bits(x[0][i]) + 3 * al_bits(x[1][i]);
+                for (unsigned long long i = 0; i < rows; i++)
+                        sum_t += al_bits(table[i]) * (i | 1);
+                al_polyphase_routine(out[0], out[1], x[0], x[1], table, taps, phases, pos, step, count);
+                for (unsigned long long i = 0; i < need; i++)
+                        sum_x -= al_bits(x[0][i]) + 3 * al_bits(x[1][i]);
+                for (unsigned long long i = 0; i < rows; i++)
+                        sum_t -= al_bits(table[i]) * (i | 1);
+                faults->kept += sum_x != 0 || sum_t != 0;
+        }
+        for (int c = 0; c < 2; c++)
+                for (int i = 0; i < 16; i++)
+                        faults->outside += al_bits(out[c][i - 16]) != al_bits((float)0x1234 + (float)i);
+
+        //      The definition, in double: the same weight (the one float the contract names), the exact row, the exact sum.
+        {
+                unsigned long long at = pos;
+
+                for (unsigned long long m = 0; m < count; m++, at += step)
+                {
+                        unsigned long long index = at >> 32, scaled = (at & 0xffffffffu) * phases, phase = scaled >> 32;
+                        float f = (float)(scaled & 0xffffffffu) * (1.0f / 4294967296.0f);
+                        const float *a = table + phase * taps, *b = a + taps;
+                        double s[2] = {0, 0}, u[2] = {0, 0};
+
+                        for (unsigned long long k = 0; k < taps; k++)
+                        {
+                                double c = (double)a[k] + (double)f * ((double)b[k] - (double)a[k]);
+                                double w = al_abs((double)a[k]) + al_abs((double)b[k]);
+
+                                s[0] += c * (double)x[0][index + k];
+                                s[1] += c * (double)x[1][index + k];
+                                u[0] += w * al_abs((double)x[0][index + k]);
+                                u[1] += w * al_abs((double)x[1][index + k]);
+                        }
+                        want[0][m] = s[0], want[1][m] = s[1], unit[0][m] = u[0], unit[1][m] = u[1];
+                        if (kind == 2)
+                                want[0][m] = want[1][m] = (double)f;
+                }
+        }
+        if (bits)
+        {
+                //      The C's own, from the same inputs.
+                static float again[2][512];
+
+                audio_c_polyphase2(again[0], again[1], x[0], x[1], table, taps, phases, pos, step, count);
+                for (unsigned long long m = 0; m < count; m++)
+                {
+                        faults->bits += al_bits(out[0][m]) != al_bits(again[0][m]);
+                        faults->bits += al_bits(out[1][m]) != al_bits(again[1][m]);
+                }
+        }
+        for (unsigned long long m = 0; m < count; m++)
+                for (int c = 0; c < 2; c++)
+                {
+                        double bound = ((double)taps / 8.0 + 12.0) * 0x1p-24 * unit[c][m] + 1e-30;
+                        double error = al_abs((double)out[c][m] - want[c][m]);
+
+                        if (kind == 0)
+                                faults->bound += error > bound;
+                        else
+                        {
+                                //      Exact: integers and a half, or the weight whole.
+                                faults->exact += kind == 1 && al_bits(out[c][m]) != al_bits((float)want[c][m]);
+                                faults->weight += kind == 2 && al_bits(out[c][m]) != al_bits((float)want[c][m]);
+                        }
+                }
+}
+
+static const unsigned long long al_polyphase_steps[] = {0, 1, 0x3ffffff, 0x80000000ull, 0xeb851eb8ull, 0x100000000ull, 0x180000000ull,
+                                                  0x20000007bull, 0x7e0000000ull, 0x0000000100000001ull};
+#define AL_STEPS (sizeof(al_polyphase_steps) / sizeof(al_polyphase_steps[0]))
+
+static void al_polyphase_walk(int bits, al_faults *faults)
+{
+        static const unsigned long long taps_list[] = {64, 128, 192, 256, 320, 384, 448, 512};
+        static const unsigned long long counts[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 63, 100, 255, 256, 257, 511, 512};
+        static const unsigned long long phase_list[] = {1, 2, 3, 7, 64, 100, 255, 511, 512};
+
+        //      Every count with every tap length and a step each, on both placements.
+        for (unsigned long long ti = 0; ti < 8; ti++)
+                for (unsigned long long ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++)
+                        for (int front = 0; front < 2; front++)
+                        {
+                                unsigned long long phases = phase_list[(ti + ci) % 9];
+                                unsigned long long step = al_polyphase_steps[(ti * 3 + ci) % AL_STEPS];
+                                unsigned long long pos = front ? (al_next() & 0xffffffffu) : (al_next() % 12) << 32 | (al_next() & 0xffffffffu);
+
+                                al_polyphase_case(taps_list[ti], phases, counts[ci], pos, step, front, 0, bits, faults);
+                        }
+        //      Random shapes.
+        for (int round = 0; round < 700; round++)
+        {
+                unsigned long long taps = taps_list[al_next() % 8], phases = 1 + al_next() % 512, count = al_next() % 70;
+                unsigned long long step = (round % 4 == 0) ? al_next() % 0x800000000ull : 0xd0000000ull + al_next() % 0x40000000ull;
+                unsigned long long pos = (al_next() % 20) << 32 | (al_next() & 0xffffffffu);
+
+                if (round % 9 == 0)
+                        phases = 1 + al_next() % (512 / (taps / 64));
+                al_polyphase_case(taps, phases, count, pos, step, round & 1, 0, bits, faults);
+        }
+        //      Small integers with a weight of a half: one phase, the fraction 2^31. Every step of 1 or 0: the weight stays.
+        for (unsigned long long ti = 0; ti < 8; ti++)
+                for (int round = 0; round < 6; round++)
+                        al_polyphase_case(taps_list[ti], 1, 1 + al_next() % 40, 0x80000000ull | (unsigned long long)(al_next() % 5) << 32, round & 1 ? 0x100000000ull : 0,
+                                          round & 2, 1, bits, faults);
+        //      The weight: rows of nothing then one, one tap of each plane one, a weight at every kind of fraction.
+        for (unsigned long long ti = 0; ti < 8; ti++)
+        {
+                static const unsigned long long fractions[] = {0, 1, 0x7f, 0x800000, 0x1000001, 0x1000003, 0x7fffffff, 0x80000000ull, 0x80000001ull,
+                                                               0xfffffffeull, 0xffffffffull, 0x55555555, 0xaaaaaaaa};
+
+                for (unsigned long long fi = 0; fi < sizeof(fractions) / sizeof(fractions[0]); fi++)
+                        //      phases 1: the fraction is the weight; step 0 repeats it.
+                        for (int again = 0; again < 3; again++)
+                                al_polyphase_case(taps_list[ti], 1, 3, fractions[fi], 0, (int)(fi & 1), 2, bits, faults);
+        }
+}
+
+/*
+        The mixing core with the library's loops under it: a stream of two tones at rin through a voice and a sink
+        at rout, the output held to the tones at the output's own times (a filter that is centred makes an output
+        frame the signal at its time). The first frames, the fade-in of the voice and the filter's lead, are left out.
+*/
+static struct audio_sink al_sink;
+static struct audio_voice al_voice;
+static unsigned char al_ring[1 << 18], al_bytes[256 * 4];
+static short al_pcm[2 * 12288];
+static float al_heard[2][4096];
+
+static double al_engine(long rin, long rout)
+{
+        const double tau = 6.283185307179586, f0 = 1000.0, f1 = 3300.0;
+        long input = rin * 3584 / rout + 512, blocks = 14;
+        double error = 0;
+        long counted = 0;
+
+        for (long n = 0; n < input; n++)
+        {
+                al_pcm[2 * n] = (short)((double)16383 * audio_sin(tau * f0 * (double)n / (double)rin) + 16383.5) - 16383;
+                al_pcm[2 * n + 1] = (short)((double)8191 * audio_sin(tau * f1 * (double)n / (double)rin) + 8191.5) - 8191;
+        }
+        audio_sink_open(&al_sink, rout, 2);
+        if (audio_voice_open(&al_voice, AUDIO_FORMAT_S16LE, 2, rin, 0, rout, al_ring, sizeof(al_ring)) < 0)
+                return 1e9;
+        audio_ring_put(&al_voice.ring, (const unsigned char *)al_pcm, (unsigned long)input * 4);
+        for (long b = 0; b < blocks; b++)
+        {
+                audio_sink_begin(&al_sink, 256);
+                audio_voice_mix(&al_sink, &al_voice, 256, 0);
+                audio_sink_end(&al_sink, al_bytes, AUDIO_FORMAT_S16LE, 2, 256);
+                for (long i = 0; i < 256; i++)
+                        al_heard[0][b * 256 + i] = al_sink.mix[0][i], al_heard[1][b * 256 + i] = al_sink.mix[1][i];
+        }
+        for (long g = 160; g < blocks * 256; g++)
+        {
+                double e0 = (double)al_heard[0][g] - (16383.0 / 32768.0) * audio_sin(tau * f0 * (double)g / (double)rout);
+                double e1 = (double)al_heard[1][g] - (8191.0 / 32768.0) * audio_sin(tau * f1 * (double)g / (double)rout);
+
+                error += e0 * e0 + e1 * e1;
+                counted += 2;
+        }
+        audio_voice_close(&al_voice);
+        return audio_sqrt(error / (double)counted);
+}
+
+static void al_polyphase_tier(string_address tier, int bits)
+{
+        al_faults faults = {0, 0, 0, 0, 0, 0, 0};
+
+        string_format(log, "  %s\n", tier);
+        al_polyphase_walk(bits, &faults);
+        check("resample_polyphase2_f32: every shape and placement within (taps / 8 + 12) eps of the exact sum of the terms", faults.bound == 0);
+        check("resample_polyphase2_f32: sentinels before the outputs untouched, nothing written past count (the guard page)", faults.outside == 0);
+        check("resample_polyphase2_f32: inputs and table unchanged", faults.kept == 0);
+        check("resample_polyphase2_f32: small integers with a weight of a half exactly", faults.exact == 0);
+        check("resample_polyphase2_f32: the weight of a row is its definition to the bit", faults.weight == 0);
+        if (bits)
+                check("resample_polyphase2_f32: the C's bits", faults.bits == 0);
+        check("resample_polyphase2_f32: cases ran", faults.cases > 900);
+        check("mix.c: 44.1 kHz into 48 kHz, two tones within 2e-5 rms of the tones", al_engine(44100, 48000) < 2e-5);
+        check("mix.c: 22.05 kHz into 48 kHz, two tones within 2e-5 rms of the tones", al_engine(22050, 48000) < 2e-5);
+        check("mix.c: 96 kHz into 48 kHz, two tones within 2e-5 rms of the tones", al_engine(96000, 48000) < 2e-5);
+        check("mix.c: 32 kHz into 48 kHz, two tones within 2e-5 rms of the tones", al_engine(32000, 48000) < 2e-5);
+}
+
+b32 main(void)
+{
+        check("audiolib: guard pages", al_guard());
+        if (!al_high[AL_REGIONS - 1])
+                return test_report(null);
+#if X64
+        {
+                p8 had2 = cpu_has_avx2, hadfma = cpu_has_fma, had512 = cpu_has_avx512;
+
+                //      The floor is the C's to the bit; AVX2 with FMA is to the bound.
+                if (had2 && hadfma)
+                        al_polyphase_tier(had512 ? "avx512 machine (the AVX2 body)" : "avx2 fma", 0);
+                cpu_has_avx512 = 0;
+                cpu_has_fma = 0;
+                if (had2)
+                        al_polyphase_tier("avx2 without fma (sse2)", 1);
+                cpu_has_avx2 = 0;
+                al_polyphase_tier("sse2", 1);
+                cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
+        }
+#elif RISCV64
+        {
+                p8 vector;
+
+                cpu_has_vector = 0;
+                {
+                        float o0[1], o1[1], x[128], table[128 * 2];
+
+                        for (int i = 0; i < 128; i++)
+                                x[i] = (float)i, table[i] = 1.0f, table[64 + i] = 1.0f;
+                        al_first = false;
+                        resample_polyphase2_f32(o0, o1, x, x, table, 64, 1, 0, 0, 1);
+                        check("resample_polyphase2_f32: the first call asks for V and keeps its arguments", cpu_has_vector != 0 && o0[0] == 2016.0f && o1[0] == 2016.0f);
+                }
+                vector = cpu_has_vector;
+                for (p32 tier = 0; tier < 2; tier++)
+                {
+                        cpu_has_vector = tier ? 1 : vector;
+                        al_first = tier == 0;
+                        al_polyphase_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first", 0);
+                }
+                al_first = false;
+                cpu_has_vector = vector;
+        }
+#else
+        al_polyphase_tier("neon", 0);
+#endif
+        return test_report(null);
+}
+#endif /* CHECK_audiolib */
+
 #ifdef CHECK_audio_mix
 /*
         CHECK_audio_mix: the audio mixing core (src/audio/mix.c) against references written here, apart from it: sin and
@@ -165644,6 +166079,16 @@ int main(int argc, char **argv)
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/*
+        The loops mix.c leaves to lib.c, which this hosted check has no library for: routines of the library's names that run the C they
+        were (SHARED_audio_loops), so the engine is held to what it was with them and CHECK_audiolib holds the assembly to the same C.
+*/
+#define SHARED_audio_loops
+#define AUDIO_C_AS_LIBRARY
+#include "checks.c"
+#undef AUDIO_C_AS_LIBRARY
+#undef SHARED_audio_loops
 
 #include "../src/audio/mix.c"
 
@@ -167121,6 +167566,13 @@ int main(void)
 #define ESTRPIPE 86
 #endif
 
+// mix.c's loops that are lib.c's, which a hosted check has none of: the C they were.
+#define SHARED_audio_loops
+#define AUDIO_C_AS_LIBRARY
+#include "checks.c"
+#undef AUDIO_C_AS_LIBRARY
+#undef SHARED_audio_loops
+
 #include "../src/audio/mix.c"
 
 static long audio_sys_open(const char *path, int flags);
@@ -168311,6 +168763,13 @@ int main(void)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// mix.c's loops that are lib.c's, which a hosted check has none of: the C they were.
+#define SHARED_audio_loops
+#define AUDIO_C_AS_LIBRARY
+#include "checks.c"
+#undef AUDIO_C_AS_LIBRARY
+#undef SHARED_audio_loops
 
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
@@ -177821,6 +178280,217 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_train */
+
+#ifdef BENCH_audiolib
+/* The audio routines of lib.c against the C loops of the sound server's mixing core they replaced (src/audio/mix.c), over the
+   shapes a mixer's period has them in: resample_polyphase2_f32 at 44.1, 22.05, 96 and 192 kHz into 48 kHz, 256 frames a call as
+   the sink's period is, and 16 frames, with three tables rotating so that the rows come from L2 as a mixer's do. Two bars: the C
+   as the service is built (-O2, the baseline instruction set) and the most a compiler makes of the same loop at -O3 for the tier
+   (x86-64-v3, riscv64's V). Paired medians of ASM/C and each side's best ticks an output frame; a name on the command line
+   runs one shape alone for perf stat. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define SHARED_audio_loops
+#include "checks.c"
+#undef SHARED_audio_loops
+
+#define TRIES 9
+
+#if X64
+AUDIO_C_POLYPHASE2(al_c_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3"))))
+#elif RISCV64
+AUDIO_C_POLYPHASE2(al_c_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=+v"))))
+#else
+AUDIO_C_POLYPHASE2(al_c_wide, __attribute__((noinline, noclone, optimize("O3"))))
+#endif
+AUDIO_C_POLYPHASE2(al_c_base, __attribute__((noinline, noclone, optimize("O2"))))
+AUDIO_C_POLYPHASE2(al_c_o3, __attribute__((noinline, noclone, optimize("O3"))))
+
+typedef struct
+{
+        string_address name;
+        positive taps, phases, count, voices;
+        p64 step;
+} al_shape;
+
+static const al_shape al_shapes[] = {
+    {"44.1 kHz into 48 kHz, 64 taps", 64, 512, 256, 3, 3946001203ull},
+    {"22.05 kHz into 48 kHz, 64 taps", 64, 512, 256, 3, 1973000601ull},
+    {"96 kHz into 48 kHz, 128 taps", 128, 256, 256, 3, 8589934592ull},
+    {"192 kHz into 48 kHz, 256 taps", 256, 128, 256, 2, 17179869184ull},
+    {"44.1 kHz into 48 kHz, 16 frames", 64, 512, 16, 3, 3946001203ull},
+};
+
+#define AL_VOICES 3
+#define AL_INPUT 16384
+static f32 *al_table[AL_VOICES], *al_in[AL_VOICES][2], *al_out[2];
+static bool al_wide = true; // the tier under test has the wider instruction set the -O3 bar is built for
+static p32 al_bar; // 0 the C as the service is built, 1 -O3 for the wide tier (x86-64-v3, V), 2 -O3 for the baseline
+
+static p64 al_run(bool assembly, positive shape, positive reps)
+{
+        const al_shape *s = al_shapes + shape;
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+        {
+                positive v = r % s->voices;
+                p64 pos = (p64)(r * 2654435761u) & 0xffffffffu;
+
+                if (assembly)
+                        resample_polyphase2_f32(al_out[0], al_out[1], al_in[v][0], al_in[v][1], al_table[v], s->taps, s->phases, pos, s->step, s->count);
+                else if (al_bar == 1)
+                        al_c_wide(al_out[0], al_out[1], al_in[v][0], al_in[v][1], al_table[v], s->taps, s->phases, pos, s->step, s->count);
+                else if (al_bar == 2)
+                        al_c_o3(al_out[0], al_out[1], al_in[v][0], al_in[v][1], al_table[v], s->taps, s->phases, pos, s->step, s->count);
+                else
+                        al_c_base(al_out[0], al_out[1], al_in[v][0], al_in[v][1], al_table[v], s->taps, s->phases, pos, s->step, s->count);
+        }
+        return get_cpu_time() - start;
+}
+
+static fn al_hundredths(positive value)
+{
+        string_format(log, "%p.", value / 100);
+        positive_to_padded(log, value % 100, 2, '0', 0);
+}
+
+//      One shape on the tier set now, against the bar set now.
+static fn al_shapes_run(string_address tier)
+{
+        for (positive shape = 0; shape < sizeof(al_shapes) / sizeof(al_shapes[0]); shape++)
+                for (p32 bar = 0; bar < 2; bar++)
+                {
+                        al_bar = bar == 0 ? 0 : al_wide ? 1 : 2;
+                        positive reps = (1u << 22) / al_shapes[shape].count / (al_shapes[shape].taps / 64) + 1, ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, al_run(false, shape, reps), assembly, al_run(true, shape, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "resample_polyphase2_f32 %s, %s against C %s: paired median ASM/C ", al_shapes[shape].name, tier,
+                                      bar ? "-O3" : "-O2 as built");
+                        al_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a frame ASM ");
+                        al_hundredths((positive)(best_a * 100 / (reps * al_shapes[shape].count)));
+                        string_format(log, ", C ");
+                        al_hundredths((positive)(best_c * 100 / (reps * al_shapes[shape].count)));
+                        log("\n", 1);
+                }
+}
+
+#if X64
+static fn al_force(p32 tier)
+{
+        static p8 wide2 = 3, fused;
+
+        if (wide2 == 3)
+                wide2 = cpu_has_avx2, fused = cpu_has_fma;
+        cpu_has_avx2 = tier == 0 ? wide2 : 0;
+        cpu_has_fma = tier == 0 ? fused : 0;
+        al_wide = tier == 0;
+}
+#else
+static fn al_force(p32 tier)
+{
+        (void)tier;
+}
+#endif
+
+#define AL_NAMED(id, shape, tier, assembly, bar)                                                         \
+        static fn al_named_##id(void)                                                                    \
+        {                                                                                                \
+                al_force(tier);                                                                          \
+                al_bar = bar;                                                                            \
+                al_run(assembly, shape, (1u << 24) / al_shapes[shape].count);                             \
+        }
+AL_NAMED(poly_44k_ymm, 0, 0, true, 0)
+AL_NAMED(poly_44k_ymm_c, 0, 0, false, 0)
+AL_NAMED(poly_44k_xmm, 0, 1, true, 0)
+AL_NAMED(poly_44k_xmm_c, 0, 1, false, 0)
+AL_NAMED(poly_96k_ymm, 2, 0, true, 0)
+AL_NAMED(poly_96k_ymm_c, 2, 0, false, 0)
+
+static fn al_named_nothing(void)
+{
+}
+
+static bench_work al_named(string_address name)
+{
+        BENCH_NAME(name, "nothing", al_named_nothing);
+        BENCH_NAME(name, "poly-44k-ymm", al_named_poly_44k_ymm);
+        BENCH_NAME(name, "poly-44k-ymm-c", al_named_poly_44k_ymm_c);
+        BENCH_NAME(name, "poly-44k-xmm", al_named_poly_44k_xmm);
+        BENCH_NAME(name, "poly-44k-xmm-c", al_named_poly_44k_xmm_c);
+        BENCH_NAME(name, "poly-96k-ymm", al_named_poly_96k_ymm);
+        BENCH_NAME(name, "poly-96k-ymm-c", al_named_poly_96k_ymm_c);
+        return null;
+}
+
+b32 main(void)
+{
+        p64 state = 0x243f6a8885a308d3ull;
+
+        al_out[0] = memory(1024 * 4), al_out[1] = memory(1024 * 4);
+        for (positive v = 0; v < AL_VOICES; v++)
+        {
+                al_table[v] = memory((513 * 512 + 64) * 4), al_in[v][0] = memory(AL_INPUT * 4), al_in[v][1] = memory(AL_INPUT * 4);
+                if (!al_table[v] || !al_in[v][0] || !al_in[v][1] || !al_out[0] || !al_out[1])
+                        return 1;
+                for (positive i = 0; i < 513 * 512; i++)
+                {
+                        XORSHIFT64(state);
+                        al_table[v][i] = (f32)(int)(state >> 40) / 8388608.0f * 0.05f - 0.025f;
+                }
+                for (positive i = 0; i < AL_INPUT; i++)
+                {
+                        XORSHIFT64(state);
+                        al_in[v][0][i] = (f32)(int)(state >> 40) / 8388608.0f - 1.0f;
+                        al_in[v][1][i] = (f32)(int)(state >> 20 & 0xffffff) / 8388608.0f - 1.0f;
+                }
+        }
+        BENCH_RUN_NAMED(al_named);
+#if X64
+        p8 wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                if (tier == 0 && !(wide2 && fused))
+                        continue;
+                al_force(tier);
+                al_shapes_run(tier == 0 ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        cpu_has_vector = 0;
+        resample_polyphase2_f32(al_out[0], al_out[1], al_in[0][0], al_in[0][1], al_table[0], 64, 1, 0, 0, 1);
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+                al_shapes_run(tier == 0 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        al_shapes_run("neon");
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_audiolib */
 
 #ifdef BENCH_translate_planes
 /* memory_translate_planes_u32_rect against the C loop it replaced in

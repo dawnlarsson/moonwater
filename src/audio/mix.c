@@ -89,6 +89,19 @@
 #define AUDIO_E_INVALID (-1)
 #define AUDIO_E_NOMEM (-2)
 
+/*
+        THE LIBRARY'S LOOPS
+
+        The loops that run over every sample of every stream every period are lib.c's: assembly on the three machines,
+        one routine each, named for what they do. They are declared here only where lib.c is not (a check, a stand-alone
+        compile of this file): the includer then supplies a routine of the same name, the check its own C. Where lib.c is
+        in the translation unit its declaration stands.
+*/
+#ifndef STANDARD_MODERN_C
+void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
+                             unsigned long phases, unsigned long pos, unsigned long step, unsigned long count);
+#endif
+
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
 
 AUDIO_API double audio_sin(double x)
@@ -211,6 +224,13 @@ AUDIO_API void audio_init(void)
         audio_law_ready = 1;
 }
 
+// A word's bytes reversed, as the shifts say it: the compilers make the one instruction of it, and riscv64's baseline, which has
+// none, makes four shifts instead of a call to a library the programs are not linked with (__builtin_bswap32 there).
+static inline unsigned int audio_swap32(unsigned int x)
+{
+        return (x >> 24) | ((x >> 8) & 0xff00u) | ((x << 8) & 0xff0000u) | (x << 24);
+}
+
 // Samples that are not numbers or are enormous are taken for silence and a bound: a program's float is not trusted.
 static inline float audio_sane(float x)
 {
@@ -268,7 +288,7 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
 
                                 __builtin_memcpy(&bits, p + i * stride, 4);
                                 if (format == AUDIO_FORMAT_F32BE)
-                                        bits = __builtin_bswap32(bits);
+                                        bits = audio_swap32(bits);
                                 __builtin_memcpy(&x, &bits, 4);
                                 d[i] = audio_sane(x);
                         }
@@ -281,7 +301,7 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
 
                                 __builtin_memcpy(&bits, p + i * stride, 4);
                                 if (format == AUDIO_FORMAT_S32BE)
-                                        bits = __builtin_bswap32(bits);
+                                        bits = audio_swap32(bits);
                                 d[i] = (float)(int)bits * (1.0f / 2147483648.0f);
                         }
                         break;
@@ -312,7 +332,7 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
 
                                 __builtin_memcpy(&bits, p + i * stride, 4);
                                 if (format == AUDIO_FORMAT_S24_32BE)
-                                        bits = __builtin_bswap32(bits);
+                                        bits = audio_swap32(bits);
                                 x = (int)(bits << 8) >> 8;
                                 d[i] = (float)x * (1.0f / 8388608.0f);
                         }
@@ -643,7 +663,7 @@ struct audio_table
         long taps, phases; // taps a phase, and phases (the rows are phases + 1)
         long users;
         unsigned long used;
-        float h[AUDIO_TABLE_FLOATS];
+        float h[AUDIO_TABLE_FLOATS] __attribute__((aligned(64))); // the rows start on a cache line
 };
 
 static struct audio_table audio_tables[AUDIO_TABLES];
@@ -795,32 +815,14 @@ AUDIO_API long audio_rs_ready(const struct audio_resampler *rs)
 AUDIO_API long audio_rs_run(struct audio_resampler *rs, float *out0, float *out1, long frames)
 {
         const struct audio_table *table = rs->table;
-        long taps = table->taps, phases = table->phases, ready = audio_rs_ready(rs), made = ready < frames ? ready : frames, drop;
+        long ready = audio_rs_ready(rs), made = ready < frames ? ready : frames, drop;
         unsigned long pos = rs->pos;
 
-        for (long m = 0; m < made; m++, pos += rs->step)
-        {
-                long index = (long)(pos >> 32);
-                unsigned long scaled = (pos & 0xffffffffu) * (unsigned long)phases;
-                long phase = (long)(scaled >> 32);
-                float f = (float)(scaled & 0xffffffffu) * (1.0f / 4294967296.0f);
-                const float *a = table->h + phase * taps, *b = a + taps;
-                const float *x0 = rs->buf[0] + index, *x1 = rs->buf[1] + index;
-                float coefficient[AUDIO_TAPS * AUDIO_RATIO_MAX], s0[8] = {0}, s1[8] = {0};
-
-                // The row between the two nearest phases, then the dot product of each channel in eight lanes
-                // (a float sum in one chain waits on every add).
-                for (long k = 0; k < taps; k++)
-                        coefficient[k] = a[k] + f * (b[k] - a[k]);
-                for (long k = 0; k < taps; k += 8)
-                        for (int j = 0; j < 8; j++)
-                        {
-                                s0[j] += coefficient[k + j] * x0[k + j];
-                                s1[j] += coefficient[k + j] * x1[k + j];
-                        }
-                out0[m] = ((s0[0] + s0[4]) + (s0[1] + s0[5])) + ((s0[2] + s0[6]) + (s0[3] + s0[7]));
-                out1[m] = ((s1[0] + s1[4]) + (s1[1] + s1[5])) + ((s1[2] + s1[6]) + (s1[3] + s1[7]));
-        }
+        // Each output is the signal at its own place: the row between the two nearest phases (a + f * (b - a)) dotted with
+        // the taps of each plane. A float sum in one chain waits on every add; the library's body takes it in lanes.
+        resample_polyphase2_f32(out0, out1, rs->buf[0], rs->buf[1], table->h, (unsigned long)table->taps, (unsigned long)table->phases, pos,
+                                rs->step, (unsigned long)made);
+        pos += (unsigned long)made * rs->step;
         rs->pos = pos;
         drop = (long)(pos >> 32);
         if (drop > rs->have)

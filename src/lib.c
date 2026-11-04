@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        436 routines (412 public, 24 local), 426 of them on all three and 10 local to one.
+        437 routines (413 public, 24 local), 427 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -369,6 +369,7 @@
           program_environment            public  yes     yes     yes
           program_environment_list       public  yes     yes     yes
           program_initial_identity       public  yes     yes     yes
+          resample_polyphase2_f32        public  yes     yes     yes
           rmsnorm_backward_f32           public  yes     yes     yes
           rmsnorm_forward_f32            public  yes     yes     yes
           sha1_blocks                    public  yes     yes     yes
@@ -43787,6 +43788,211 @@ __asm__(
     ".option pop\n"
 );
 #endif
+#endif
+
+/*
+        Audio arithmetic on f32 planes.
+
+        resample_polyphase2_f32(out0, out1, x0, x1, table, taps, phases, pos, step, count) is the core of a
+        polyphase resampler for a stereo stream held as two planes: count output frames, the first at the place
+        pos in the inputs (32.32 fixed point, the integer part the index of the frame's first tap in x0 and x1)
+        and each next one step further on. The table is phases + 1 rows of taps coefficients, the row of a
+        place being the fraction's share of phases, floor(frac * phases / 2^32), and the coefficients of the
+        place the weight f = (float)(frac * phases mod 2^32) * 2^-32 of the way from that row a to the next b:
+        c[k] = a[k] + f * (b[k] - a[k]). An output is the sum over k < taps of c[k] * x[index + k], the one
+        row of c serving both planes, and the sums are taken in an order the body chooses, so a result is
+        within (taps / 8 + 12) eps (eps = 2^-24) of the sum of the |terms| from the exact one, no more; the
+        SSE2 body is the one that keeps the C's order (a row mixed by a multiply and an add, eight lanes a
+        plane, the lanes folded as ((l0 + l4) + (l1 + l5)) + ((l2 + l6) + (l3 + l7))) and answers its bits. taps is a
+        multiple of 64 and not zero, phases is not zero, count may be zero; the inputs are read from index to
+        index + taps - 1 and nowhere else, the table from row 0 to row phases, and out0 and out1 are written
+        for count floats and no more. The table wants a 64-byte start for the best speed and works from any
+        float's.
+
+        The bodies. AVX2 with FMA: 32 taps a turn, the two rows in eight ymm loads and a vsubps with the second row
+        as its memory operand, the mixed row by vfnmadd213ps (a - f * (a - b): one rounding where the C has two),
+        the products fma'd from memory into two accumulators a plane, and both planes folded to the pair of outputs
+        in one sequence (vperm2f128 and vextractf128 to bring the halves together, then unpack and add). SSE2: the
+        C's own arithmetic, taps eight a group in two xmm, which is why its answers are the C's to the bit. arm64:
+        NEON, 16 taps a turn, fsub and fmla for the row, fmla for the products, faddp to the pair. riscv64: with V,
+        strips of four registers (tail undisturbed, so the lanes of a short last strip keep their sums), vfredusum
+        at the end; without it four taps a turn. A machine with AVX-512 runs the AVX2 body: a body of four zmm a row
+        measured 24.7 ticks an output frame against AVX2's 20.4 on a 9950X (20.5 against 17.2 with the rows in L1),
+        because each of the eight 64-byte loads of the inputs a frame is off a line and a zmm load across a line
+        costs about 1.4 cycles more than one on it (ls_misal_loads.ma64 counted 8 a frame); the same body with the
+        inputs on a line ran 14.5 cycles against 19.3 for AVX2, so the loss is the splits, not the width.
+
+        Measured on the 9950X (core 2, TSC ticks an output frame, the C bar -O2 as the service is built, 44.1 kHz
+        into 48 kHz at 64 taps, 256 frames a call, three tables of 512 phases rotating so the rows come from L2):
+        AVX2 21.1 (C -O2 89.5, C -O3 for x86-64-v3 31.1), SSE2 38.4 (C -O2 89.8, C -O3 46.6); 96 kHz into 48 kHz at
+        128 taps AVX2 33.4 (167.0, 50.5), SSE2 65.2 (169.2, 79.3); 192 kHz at 256 taps AVX2 59.9 (364.1, 106.9). On
+        an M2 Pro, NEON, native: 10.7 ns an output frame at 64 taps (clang -O3 20.9), 14.8 at 128 (39.5), 32.1 at 256
+        (76.3). The floor on x86_64 is the fma pipes: 24 fma-pipe operations a frame at 64 taps (eight fnmadd, sixteen
+        fma) over two pipes is 12 cycles, about 9.5 ticks; the body runs 89 instructions a frame at about 4.1 a
+        cycle (21.5 cycles with the rows in L1), so the gap to that floor is instructions that are not fma (the
+        walk's arithmetic and the fold), not loads (32 ymm loads at four a cycle are 8 cycles).
+*/
+#ifndef KERNEL_MODE
+WRITES(1, 10) WRITES(2, 10)
+fn resample_polyphase2_f32(f32 address_to out0, f32 address_to out1, const f32 address_to x0, const f32 address_to x1,
+                           const f32 address_to table, positive taps, positive phases, positive pos, positive step,
+                           positive count);
+//      One 8-tap group of the SSE2 body: lo and hi are the byte offsets of its two vectors. rdi.. as the routine's;
+//      r15 and r13 the rows, r12 and rbx the inputs, rbp the byte offset of the turn, xmm8 f, xmm10-13 the lanes.
+#define AUDIO_POLY_SSE2_GROUP(lo, hi)                                                                    \
+    "movups " lo "(%r15,%rbp), %xmm0\n   movups " hi "(%r15,%rbp), %xmm1\n"                              \
+    "movups " lo "(%r13,%rbp), %xmm2\n   movups " hi "(%r13,%rbp), %xmm3\n"                              \
+    "subps %xmm0, %xmm2\n   subps %xmm1, %xmm3\n   mulps %xmm8, %xmm2\n   mulps %xmm8, %xmm3\n"           \
+    "addps %xmm0, %xmm2\n   addps %xmm1, %xmm3\n"                                                         \
+    "movups " lo "(%r12,%rbp), %xmm4\n   mulps %xmm2, %xmm4\n   addps %xmm4, %xmm10\n"                    \
+    "movups " hi "(%r12,%rbp), %xmm5\n   mulps %xmm3, %xmm5\n   addps %xmm5, %xmm11\n"                    \
+    "movups " lo "(%rbx,%rbp), %xmm6\n   mulps %xmm2, %xmm6\n   addps %xmm6, %xmm12\n"                    \
+    "movups " hi "(%rbx,%rbp), %xmm7\n   mulps %xmm3, %xmm7\n   addps %xmm7, %xmm13\n"
+#if X64
+__asm__(
+    ASM_SECTION
+    //      resample_polyphase2_f32: rdi out0, rsi out1, rdx x0, rcx x1, r8 table, r9 taps, and on the stack phases,
+    //      pos, step, count. Three bodies on the same walk, one output frame a turn: the integer part of pos is the
+    //      index of its first input, the fraction times phases the row, the fraction of that the weight of the
+    //      next row; the coefficients are the two rows mixed (a + f * (b - a)) and the outputs are their dot
+    //      products with the two inputs' taps, summed in an order the tier chooses.
+    ASM_FUNC(resample_polyphase2_f32)
+    "mov 32(%rsp), %r10\n   test %r10, %r10\n   jz .Laudio_poly_none\n"
+    ASM_NARROW("cpu_has_avx2", ".Laudio_poly_sse2")
+    ASM_NARROW("cpu_has_fma", ".Laudio_poly_sse2")
+    //      AVX2 and FMA: 32 taps a turn.
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov 64(%rsp), %r11\n   shl $2, %r9\n"
+    ".balign 64\n.Laudio_poly_y_frame:\n"
+    "mov %r11, %rax\n   shr $32, %rax\n   mov %r11d, %r14d\n   imul 56(%rsp), %r14\n   mov %r14, %r15\n   shr $32, %r15\n"
+    "mov %r14d, %r14d\n   imul %r9, %r15\n   add %r8, %r15\n   lea (%r15,%r9), %r13\n"
+    "vxorps %xmm9, %xmm9, %xmm9\n   vcvtsi2ssq %r14, %xmm9, %xmm9\n   vmulss .Laudio_poly_scale(%rip), %xmm9, %xmm9\n   vbroadcastss %xmm9, %ymm8\n"
+    "lea (%rdx,%rax,4), %r12\n   lea (%rcx,%rax,4), %rbx\n"
+    "vxorps %xmm10, %xmm10, %xmm10\n   vxorps %xmm11, %xmm11, %xmm11\n   vxorps %xmm12, %xmm12, %xmm12\n   vxorps %xmm13, %xmm13, %xmm13\n"
+    "xor %ebp, %ebp\n"
+    ".balign 64\n.Laudio_poly_y_tap:\n"
+    "vmovups (%r15,%rbp), %ymm0\n   vmovups 32(%r15,%rbp), %ymm1\n   vmovups 64(%r15,%rbp), %ymm2\n   vmovups 96(%r15,%rbp), %ymm3\n"
+    "vsubps (%r13,%rbp), %ymm0, %ymm4\n   vsubps 32(%r13,%rbp), %ymm1, %ymm5\n   vsubps 64(%r13,%rbp), %ymm2, %ymm6\n   vsubps 96(%r13,%rbp), %ymm3, %ymm7\n"
+    "vfnmadd213ps %ymm0, %ymm8, %ymm4\n   vfnmadd213ps %ymm1, %ymm8, %ymm5\n   vfnmadd213ps %ymm2, %ymm8, %ymm6\n   vfnmadd213ps %ymm3, %ymm8, %ymm7\n"
+    "vfmadd231ps (%r12,%rbp), %ymm4, %ymm10\n   vfmadd231ps 32(%r12,%rbp), %ymm5, %ymm11\n"
+    "vfmadd231ps 64(%r12,%rbp), %ymm6, %ymm10\n   vfmadd231ps 96(%r12,%rbp), %ymm7, %ymm11\n"
+    "vfmadd231ps (%rbx,%rbp), %ymm4, %ymm12\n   vfmadd231ps 32(%rbx,%rbp), %ymm5, %ymm13\n"
+    "vfmadd231ps 64(%rbx,%rbp), %ymm6, %ymm12\n   vfmadd231ps 96(%rbx,%rbp), %ymm7, %ymm13\n"
+    "add $128, %rbp\n   cmp %r9, %rbp\n   jb .Laudio_poly_y_tap\n"
+    "vaddps %ymm11, %ymm10, %ymm10\n   vaddps %ymm13, %ymm12, %ymm12\n"
+    "vperm2f128 $0x20, %ymm12, %ymm10, %ymm0\n   vperm2f128 $0x31, %ymm12, %ymm10, %ymm1\n   vaddps %ymm1, %ymm0, %ymm0\n"
+    "vextractf128 $1, %ymm0, %xmm1\n"
+    "vunpcklps %xmm1, %xmm0, %xmm2\n   vunpckhps %xmm1, %xmm0, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovhlps %xmm2, %xmm2, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovss %xmm2, (%rdi)\n   vextractps $1, %xmm2, (%rsi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   add 72(%rsp), %r11\n   dec %r10\n   jnz .Laudio_poly_y_frame\n"
+    "vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    //      SSE2: the C's arithmetic to the bit. The row is mixed in a multiply and an add, the products added into
+    //      eight lanes a channel (two xmm), and the lanes folded as ((l0 + l4) + (l1 + l5)) + ((l2 + l6) + (l3 + l7)).
+    ".Laudio_poly_sse2:\n"
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov 64(%rsp), %r11\n   shl $2, %r9\n"
+    ".balign 64\n.Laudio_poly_s_frame:\n"
+    "mov %r11, %rax\n   shr $32, %rax\n   mov %r11d, %r14d\n   imul 56(%rsp), %r14\n   mov %r14, %r15\n   shr $32, %r15\n"
+    "mov %r14d, %r14d\n   imul %r9, %r15\n   add %r8, %r15\n   lea (%r15,%r9), %r13\n"
+    "xorps %xmm8, %xmm8\n   cvtsi2ssq %r14, %xmm8\n   mulss .Laudio_poly_scale(%rip), %xmm8\n   shufps $0, %xmm8, %xmm8\n"
+    "lea (%rdx,%rax,4), %r12\n   lea (%rcx,%rax,4), %rbx\n"
+    "xorps %xmm10, %xmm10\n   xorps %xmm11, %xmm11\n   xorps %xmm12, %xmm12\n   xorps %xmm13, %xmm13\n"
+    "xor %ebp, %ebp\n"
+    ".balign 64\n.Laudio_poly_s_tap:\n"
+    AUDIO_POLY_SSE2_GROUP("0", "16")
+    AUDIO_POLY_SSE2_GROUP("32", "48")
+    "add $64, %rbp\n   cmp %r9, %rbp\n   jb .Laudio_poly_s_tap\n"
+    "addps %xmm11, %xmm10\n   addps %xmm13, %xmm12\n"
+    "movaps %xmm10, %xmm0\n   shufps $0xb1, %xmm0, %xmm0\n   addps %xmm0, %xmm10\n   movhlps %xmm10, %xmm0\n   addss %xmm0, %xmm10\n   movss %xmm10, (%rdi)\n"
+    "movaps %xmm12, %xmm0\n   shufps $0xb1, %xmm0, %xmm0\n   addps %xmm0, %xmm12\n   movhlps %xmm12, %xmm0\n   addss %xmm0, %xmm12\n   movss %xmm12, (%rsi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   add 72(%rsp), %r11\n   dec %r10\n   jnz .Laudio_poly_s_frame\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ".Laudio_poly_none:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 4\n.Laudio_poly_scale:\n   .long 0x2f800000\n.popsection\n"
+    ASM_END(resample_polyphase2_f32)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //      resample_polyphase2_f32: x0 out0, x1 out1, x2 x0, x3 x1, x4 table, x5 taps, x6 phases, x7 pos, and on the
+    //      stack step and count. The x86_64 block carries the contract. Sixteen taps a turn: the two rows' four
+    //      vectors each, the mixed row c = a + f * (b - a) by fsub and fmla, and the products in two accumulators
+    //      a channel; the walk's own arithmetic is x86_64's, down to the fraction's rounding (ucvtf is the
+    //      conversion of an unsigned 64-bit integer, to nearest even).
+    ASM_FUNC(resample_polyphase2_f32)
+    "ldp x8, x9, [sp]\n   cbz x9, 9f\n   lsl x5, x5, #2\n   movz w10, #0x2f80, lsl #16\n   fmov s31, w10\n"
+    ".balign 16\n1:  lsr x10, x7, #32\n   mov w11, w7\n   mul x11, x11, x6\n   lsr x12, x11, #32\n   mov w11, w11\n   ucvtf s30, x11\n   fmul s30, s30, s31\n"
+    "madd x12, x12, x5, x4\n   add x13, x12, x5\n   add x14, x2, x10, lsl #2\n   add x15, x3, x10, lsl #2\n"
+    "movi v20.4s, #0\n   movi v21.4s, #0\n   movi v22.4s, #0\n   movi v23.4s, #0\n   mov x16, x5\n"
+    ".balign 16\n2:  ldp q0, q1, [x12], #32\n   ldp q2, q3, [x12], #32\n   ldp q4, q5, [x13], #32\n   ldp q6, q7, [x13], #32\n"
+    "fsub v4.4s, v4.4s, v0.4s\n   fsub v5.4s, v5.4s, v1.4s\n   fsub v6.4s, v6.4s, v2.4s\n   fsub v7.4s, v7.4s, v3.4s\n"
+    "fmla v0.4s, v4.4s, v30.s[0]\n   fmla v1.4s, v5.4s, v30.s[0]\n   fmla v2.4s, v6.4s, v30.s[0]\n   fmla v3.4s, v7.4s, v30.s[0]\n"
+    "ldp q16, q17, [x14], #32\n   ldp q18, q19, [x14], #32\n"
+    "fmla v20.4s, v0.4s, v16.4s\n   fmla v21.4s, v1.4s, v17.4s\n   fmla v20.4s, v2.4s, v18.4s\n   fmla v21.4s, v3.4s, v19.4s\n"
+    "ldp q16, q17, [x15], #32\n   ldp q18, q19, [x15], #32\n"
+    "fmla v22.4s, v0.4s, v16.4s\n   fmla v23.4s, v1.4s, v17.4s\n   fmla v22.4s, v2.4s, v18.4s\n   fmla v23.4s, v3.4s, v19.4s\n"
+    "subs x16, x16, #64\n   b.ne 2b\n"
+    "fadd v20.4s, v20.4s, v21.4s\n   fadd v22.4s, v22.4s, v23.4s\n   faddp v20.4s, v20.4s, v22.4s\n   faddp v20.4s, v20.4s, v20.4s\n"
+    "str s20, [x0], #4\n   st1 {v20.s}[1], [x1], #4\n"
+    "add x7, x7, x8\n   subs x9, x9, #1\n   b.ne 1b\n"
+    "9:  " ASM_RET
+    ASM_END(resample_polyphase2_f32)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      resample_polyphase2_f32: a0 out0, a1 out1, a2 x0, a3 x1, a4 table, a5 taps, a6 phases, a7 pos, and on the
+    //      stack step and count. The x86_64 block carries the contract. With V, strips of as many taps as four
+    //      registers hold (tail undisturbed, so the lanes a short last strip leaves keep their sums) with the mixed
+    //      row by vfsub and vfmacc.vf and the products in one accumulator a channel, summed by vfredusum;
+    //      without it four taps a turn with four sums a channel. The fraction is fcvt.s.lu of the 32 bits, to
+    //      nearest even, as the x86_64 block has it.
+    ASM_FUNC(resample_polyphase2_f32)
+    "ld t5, 8(sp)\n   beqz t5, 9f\n   slli a5, a5, 2\n   lui t0, 0x2f800\n   fmv.w.x ft10, t0\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t0, cpu_has_vector\n   lbu t0, 0(t0)\n   li t1, 2\n   beq t0, t1, 20f\n   bnez t0, 1f\n"
+    "srli a5, a5, 2\n   addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a5, 16(sp)\n   sd a6, 8(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 24(sp)\n   ld a5, 16(sp)\n   ld a6, 8(sp)\n   addi sp, sp, 32\n   j resample_polyphase2_f32\n"
+#endif
+    ".balign 4\n"
+    "1:  srli t0, a7, 32\n   slli t0, t0, 2\n   add t1, a2, t0\n   add t2, a3, t0\n"
+    "slli t0, a7, 32\n   srli t0, t0, 32\n   mul t0, t0, a6\n   srli t3, t0, 32\n   slli t0, t0, 32\n   srli t0, t0, 32\n"
+    "fcvt.s.lu ft11, t0\n   fmul.s ft11, ft11, ft10\n   mul t3, t3, a5\n   add t3, t3, a4\n   add t4, t3, a5\n"
+    "fmv.w.x fa0, zero\n   fmv.w.x fa1, zero\n   fmv.w.x fa2, zero\n   fmv.w.x fa3, zero\n"
+    "fmv.w.x fa4, zero\n   fmv.w.x fa5, zero\n   fmv.w.x fa6, zero\n   fmv.w.x fa7, zero\n   mv t5, a5\n"
+    "2:  flw ft0, 0(t3)\n   flw ft1, 4(t3)\n   flw ft2, 8(t3)\n   flw ft3, 12(t3)\n   flw ft4, 0(t4)\n   flw ft5, 4(t4)\n   flw ft6, 8(t4)\n   flw ft7, 12(t4)\n"
+    "fsub.s ft4, ft4, ft0\n   fsub.s ft5, ft5, ft1\n   fsub.s ft6, ft6, ft2\n   fsub.s ft7, ft7, ft3\n"
+    "fmadd.s ft0, ft4, ft11, ft0\n   fmadd.s ft1, ft5, ft11, ft1\n   fmadd.s ft2, ft6, ft11, ft2\n   fmadd.s ft3, ft7, ft11, ft3\n"
+    "flw ft4, 0(t1)\n   flw ft5, 4(t1)\n   flw ft6, 8(t1)\n   flw ft7, 12(t1)\n"
+    "fmadd.s fa0, ft0, ft4, fa0\n   fmadd.s fa1, ft1, ft5, fa1\n   fmadd.s fa2, ft2, ft6, fa2\n   fmadd.s fa3, ft3, ft7, fa3\n"
+    "flw ft4, 0(t2)\n   flw ft5, 4(t2)\n   flw ft6, 8(t2)\n   flw ft7, 12(t2)\n"
+    "fmadd.s fa4, ft0, ft4, fa4\n   fmadd.s fa5, ft1, ft5, fa5\n   fmadd.s fa6, ft2, ft6, fa6\n   fmadd.s fa7, ft3, ft7, fa7\n"
+    "addi t1, t1, 16\n   addi t2, t2, 16\n   addi t3, t3, 16\n   addi t4, t4, 16\n   addi t5, t5, -16\n   bnez t5, 2b\n"
+    "fadd.s fa0, fa0, fa1\n   fadd.s fa2, fa2, fa3\n   fadd.s fa0, fa0, fa2\n   fadd.s fa4, fa4, fa5\n   fadd.s fa6, fa6, fa7\n   fadd.s fa4, fa4, fa6\n"
+    "fsw fa0, 0(a0)\n   fsw fa4, 0(a1)\n   addi a0, a0, 4\n   addi a1, a1, 4\n"
+    "ld t6, 0(sp)\n   add a7, a7, t6\n   ld t6, 8(sp)\n   addi t6, t6, -1\n   sd t6, 8(sp)\n   bnez t6, 1b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "20: srli a5, a5, 2\n   vsetvli t0, zero, e32, m4, ta, ma\n"
+    "21: srli t0, a7, 32\n   slli t0, t0, 2\n   add t1, a2, t0\n   add t2, a3, t0\n"
+    "slli t0, a7, 32\n   srli t0, t0, 32\n   mul t0, t0, a6\n   srli t3, t0, 32\n   slli t0, t0, 32\n   srli t0, t0, 32\n"
+    "fcvt.s.lu ft11, t0\n   fmul.s ft11, ft11, ft10\n   slli t4, a5, 2\n   mul t3, t3, t4\n   add t3, t3, a4\n   add t4, t3, t4\n"
+    "vsetvli t0, zero, e32, m4, ta, ma\n   vmv.v.i v16, 0\n   vmv.v.i v20, 0\n   mv t5, a5\n"
+    "22: vsetvli t0, t5, e32, m4, tu, ma\n   vle32.v v0, (t3)\n   vle32.v v4, (t4)\n   vfsub.vv v4, v4, v0\n   vfmacc.vf v0, ft11, v4\n"
+    "vle32.v v8, (t1)\n   vfmacc.vv v16, v0, v8\n   vle32.v v12, (t2)\n   vfmacc.vv v20, v0, v12\n"
+    "slli t6, t0, 2\n   add t1, t1, t6\n   add t2, t2, t6\n   add t3, t3, t6\n   add t4, t4, t6\n   sub t5, t5, t0\n   bnez t5, 22b\n"
+    "vsetvli t0, zero, e32, m4, ta, ma\n   vmv.s.x v24, zero\n   vfredusum.vs v24, v16, v24\n   vfmv.f.s ft0, v24\n"
+    "vmv.s.x v24, zero\n   vfredusum.vs v24, v20, v24\n   vfmv.f.s ft1, v24\n"
+    "fsw ft0, 0(a0)\n   fsw ft1, 0(a1)\n   addi a0, a0, 4\n   addi a1, a1, 4\n"
+    "ld t6, 0(sp)\n   add a7, a7, t6\n   ld t6, 8(sp)\n   addi t6, t6, -1\n   sd t6, 8(sp)\n   bnez t6, 21b\n" ASM_RET
+#endif
+    ASM_END(resample_polyphase2_f32)
+    ".option pop\n"
+);
+#endif
+#undef AUDIO_POLY_SSE2_GROUP
 #endif
 
 /*
