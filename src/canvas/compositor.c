@@ -3398,7 +3398,7 @@ struct compositor_poll
 #define COMPOSITOR_WAKE_FIRST_NS 500000000ull
 #define COMPOSITOR_WAKE_SECOND_NS 2000000000ull
 // A drag that ends this near the edge of the output fills it or half of it. (Double presses are the kit's click count, ui_click_again.)
-#define COMPOSITOR_TRAY (-2) // taskbar_hit's answer for the tray
+#define COMPOSITOR_TRAY TASKBAR_TRAY // taskbar_hit's answer for the tray
 
 // The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
 // a pixel short of a line one pixel wide still has it -- and the step a new window is put down and across
@@ -3720,7 +3720,7 @@ static struct
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
         struct ui_click press_click; // the presses on a window's top: a double press is the kit's click count
-        struct ui_click tray_click;  // the presses on the tray: two of a run open the settings
+        struct taskbar_cells cells;  // the panel's cells: what a press on one does (taskbar_cell_press), and the tray's double press
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         unsigned int launcher_asked; // the times the script was asked for the launcher by its button (compositor_launcher_open)
         int drag_x, drag_y;
@@ -13741,48 +13741,31 @@ static void compositor_button(unsigned int code, int down)
               compositor.pointer_y < compositor.y[compositor.focus] + (int)compositor.h[compositor.focus]))
                 compositor_close(compositor.focus);
 
-        // The launcher button takes a left press and no other: with the launcher up the press puts it away, and with none
-        // it asks the script for one beside the button (compositor_launcher_open).
-        if (tab == TASKBAR_LAUNCHER)
+        // The panel's cells (the launcher's button, the microphone, the volume and the tray) take a press by the taskbar's rule
+        // (taskbar_cell_press): what it does is the rule's action, and the compositor carries the action out. Each takes its
+        // press alone: none of them passes it on to a window.
+        if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == COMPOSITOR_TRAY)
         {
-                if (code != COMPOSITOR_BTN_LEFT)
-                        return;
-                if (up >= 0)
+                switch (taskbar_cell_press(&compositor.cells, tab, code - COMPOSITOR_BTN_LEFT, clock_monotonic_nanoseconds(),
+                                           compositor.pointer_x, compositor.pointer_y, compositor.scale))
                 {
-                        compositor_close(up);
-                        compositor_tabs_changed();
+                case TASKBAR_ACT_LAUNCHER:
+                        // with the launcher up the press puts it away, and with none it asks the script for one beside the button
+                        if (up >= 0)
+                        {
+                                compositor_close(up);
+                                compositor_tabs_changed();
+                        }
+                        else
+                                compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
+                        break;
+                case TASKBAR_ACT_VOLUME_OPEN: compositor_volume_open(compositor.pointer_x, compositor.pointer_y); break;
+                case TASKBAR_ACT_VOLUME_MUTE: compositor_volume_step(0, 1); break;
+                case TASKBAR_ACT_MIC_OPEN: compositor_mic_open(compositor.pointer_x, compositor.pointer_y); break;
+                case TASKBAR_ACT_MIC_MUTE: compositor_mic_step(); break;
+                case TASKBAR_ACT_SETTINGS: compositor_settings_open(); break;
+                default: break;
                 }
-                else
-                        compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
-                return;
-        }
-
-        // The microphone cell: a left press opens the recording strips (the script starts them), a middle one mutes the microphone.
-        if (tab == TASKBAR_MIC)
-        {
-                if (code == COMPOSITOR_BTN_LEFT)
-                        compositor_mic_open(compositor.pointer_x, compositor.pointer_y);
-                else if (code == COMPOSITOR_BTN_MIDDLE)
-                        compositor_mic_step();
-                return;
-        }
-
-        // The volume cell: a left press opens the mixer (the script starts it), a middle one mutes.
-        if (tab == TASKBAR_VOLUME)
-        {
-                if (code == COMPOSITOR_BTN_LEFT)
-                        compositor_volume_open(compositor.pointer_x, compositor.pointer_y);
-                else if (code == COMPOSITOR_BTN_MIDDLE)
-                        compositor_volume_step(0, 1);
-                return;
-        }
-
-        // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
-        if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)
-        {
-                if (ui_click_again(&compositor.tray_click, clock_monotonic_nanoseconds(), compositor.pointer_x, compositor.pointer_y,
-                                   compositor.scale) == 2)
-                        compositor_settings_open();
                 return;
         }
 
@@ -14348,7 +14331,7 @@ static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
         // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
         // no window, or to one in the room beside a shorter screen.
         compositor_pointer_clamp();
-        if (row < 0 && !horizontal && compositor_band_hit(compositor.pointer_x, compositor.pointer_y) == TASKBAR_VOLUME)
+        if (row < 0 && !horizontal && taskbar_cell_of(compositor_band_hit(compositor.pointer_x, compositor.pointer_y), TASKBAR_BUTTON_WHEEL) == TASKBAR_ACT_VOLUME_STEP)
         {
                 // The wheel over the tray's volume cell turns the volume, five percent a notch (120ths of one add up).
                 static int notch;

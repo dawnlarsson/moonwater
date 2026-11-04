@@ -15,6 +15,7 @@
 #define MOONWATER_CANVAS_TASKBAR
 
 #include "features.h"
+#include "motion.h" // the double press of a pair cell (the tray), ui_click_again
 
 // Where the band sits: the edge of the output it is along.
 #define TASKBAR_BOTTOM 0u
@@ -162,5 +163,89 @@ static inline int taskbar_mic_anchor(const struct taskbar_view *view, int *x, in
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif
+
+/*
+        The panel's cells and what a press on one does: the launcher's button, the volume and microphone cells and the tray. The
+        rule is data (taskbar_cell_rules): by the cell's hit and the button, the action the compositor carries out. The buttons are
+        the input's order (left 0, middle 2) and the wheel, a turn over the cell. A pair cell (the tray) acts on the second press of a
+        double press, which is the kit's click count (ui_click_again: within 450 ms and 4 px, scaled); its state is taskbar_cells.
+*/
+#define TASKBAR_TRAY (-2) // what a point of the tray is over (the tray as a whole, between the cells)
+#define TASKBAR_BUTTON_LEFT 0u
+#define TASKBAR_BUTTON_MIDDLE 2u
+#define TASKBAR_BUTTON_WHEEL 3u
+
+enum taskbar_cell_act
+{
+        TASKBAR_ACT_NONE,
+        TASKBAR_ACT_LAUNCHER,    // the launcher's button: put the launcher away when it is up, else start one beside the button
+        TASKBAR_ACT_VOLUME_OPEN, // the volume cell: the mixer beside it
+        TASKBAR_ACT_VOLUME_MUTE, // the volume cell's middle press: the master mute thrown
+        TASKBAR_ACT_VOLUME_STEP, // the wheel over the volume cell: a notch is five percent
+        TASKBAR_ACT_MIC_OPEN,    // the microphone cell: the recording strips beside it
+        TASKBAR_ACT_MIC_MUTE,    // the microphone cell's middle press
+        TASKBAR_ACT_SETTINGS     // the tray: a double press opens the settings
+};
+
+struct taskbar_cell_rule
+{
+        int hit;
+        unsigned int button;
+        enum taskbar_cell_act act;
+        int pair; // acts on the second press of a double press only
+};
+
+static const struct taskbar_cell_rule taskbar_cell_rules[] = {
+        {TASKBAR_LAUNCHER, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_LAUNCHER, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_VOLUME_OPEN, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_VOLUME_MUTE, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_WHEEL, TASKBAR_ACT_VOLUME_STEP, 0},
+        {TASKBAR_MIC, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_MIC_OPEN, 0},
+        {TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_MIC_MUTE, 0},
+        {TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SETTINGS, 1},
+};
+
+#define TASKBAR_CELL_RULES (sizeof(taskbar_cell_rules) / sizeof(taskbar_cell_rules[0]))
+
+struct taskbar_cells
+{
+        struct ui_click pair[TASKBAR_CELL_RULES]; // the double press of each pair rule (the tray's)
+};
+
+// The click state of a pair rule (the tray's press): its double press is kept there, and a check reads or moves its time.
+static inline struct ui_click *taskbar_cell_clicks(struct taskbar_cells *cells, int hit, unsigned int button)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+                if (taskbar_cell_rules[at].hit == hit && taskbar_cell_rules[at].button == button && taskbar_cell_rules[at].pair)
+                        return &cells->pair[at];
+        return &cells->pair[0];
+}
+
+// What a press (or a wheel turn, TASKBAR_BUTTON_WHEEL) on a cell does, for a rule that is no pair.
+static inline enum taskbar_cell_act taskbar_cell_of(int hit, unsigned int button)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+                if (taskbar_cell_rules[at].hit == hit && taskbar_cell_rules[at].button == button && !taskbar_cell_rules[at].pair)
+                        return taskbar_cell_rules[at].act;
+        return TASKBAR_ACT_NONE;
+}
+
+// What a press on a cell does now: the rule's action, or for a pair rule the action on its second press of a double press (the
+// presses of the rule's own button only are counted, and the first press of a pair is none).
+static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cells, int hit, unsigned int button, b64 now, int x, int y,
+                                                       int scale)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+        {
+                const struct taskbar_cell_rule *r = &taskbar_cell_rules[at];
+
+                if (r->hit != hit || r->button != button)
+                        continue;
+                if (!r->pair)
+                        return r->act;
+                return ui_click_again(&cells->pair[at], now, x, y, scale) == 2 ? r->act : TASKBAR_ACT_NONE;
+        }
+        return TASKBAR_ACT_NONE;
+}
 
 #endif

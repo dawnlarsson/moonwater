@@ -126409,7 +126409,7 @@ static void check_compositor_tray(void)
     compositor_button(COMPOSITOR_BTN_MIDDLE, 0);
     check("tray: nor does the middle button after it", compositor.focus == 1 && !compositor.settings_asked);
 
-    compositor.tray_click = (struct ui_click){0};
+    compositor.cells = (struct taskbar_cells){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
@@ -126417,16 +126417,16 @@ static void check_compositor_tray(void)
     check("tray: two presses bring up the settings window that is open, and ask for no other", compositor.focus == 2 && !compositor.settings_asked);
 
     compositor_focus(1);
-    compositor.tray_click = (struct ui_click){0};
+    compositor.cells = (struct taskbar_cells){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
-    compositor.tray_click.at -= UI_CLICK_NS + 1;
+    taskbar_cell_clicks(&compositor.cells, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT)->at -= UI_CLICK_NS + 1;
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     check("tray: two too far apart are two single presses", compositor.focus == 1 && !compositor.settings_asked);
 
     memory_zero((void *)table->name[2], WINDOWS_NAME);
-    compositor.tray_click = (struct ui_click){0};
+    compositor.cells = (struct taskbar_cells){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
@@ -146179,6 +146179,32 @@ static fn check_kit_anchor_flip(void)
         check("kit anchor: an exact place is clamped to the screen and not flipped", x == 800 && y == 500);
 }
 
+// The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
+static fn check_kit_cell_rules(void)
+{
+        int table = taskbar_cell_of(TASKBAR_LAUNCHER, TASKBAR_BUTTON_LEFT) == TASKBAR_ACT_LAUNCHER &&
+                    taskbar_cell_of(TASKBAR_LAUNCHER, TASKBAR_BUTTON_MIDDLE) == TASKBAR_ACT_NONE &&
+                    taskbar_cell_of(TASKBAR_VOLUME, TASKBAR_BUTTON_LEFT) == TASKBAR_ACT_VOLUME_OPEN &&
+                    taskbar_cell_of(TASKBAR_VOLUME, TASKBAR_BUTTON_MIDDLE) == TASKBAR_ACT_VOLUME_MUTE &&
+                    taskbar_cell_of(TASKBAR_VOLUME, TASKBAR_BUTTON_WHEEL) == TASKBAR_ACT_VOLUME_STEP &&
+                    taskbar_cell_of(TASKBAR_MIC, TASKBAR_BUTTON_LEFT) == TASKBAR_ACT_MIC_OPEN &&
+                    taskbar_cell_of(TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE) == TASKBAR_ACT_MIC_MUTE;
+        struct taskbar_cells c = {0}, d = {0};
+        int plain_tray = taskbar_cell_of(TASKBAR_TRAY, TASKBAR_BUTTON_LEFT) == TASKBAR_ACT_NONE;
+        int first = taskbar_cell_press(&c, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, 1000000000ll, 100, 100, 100) == TASKBAR_ACT_NONE;
+        int middle = taskbar_cell_press(&c, TASKBAR_TRAY, TASKBAR_BUTTON_MIDDLE, 1100000000ll, 100, 100, 100) == TASKBAR_ACT_NONE;
+        int second = taskbar_cell_press(&c, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, 1200000000ll, 100, 100, 100) == TASKBAR_ACT_SETTINGS;
+        int late = taskbar_cell_press(&d, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, 1000000000ll, 100, 100, 100) == TASKBAR_ACT_NONE &&
+                   taskbar_cell_press(&d, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, 1600000000ll, 100, 100, 100) == TASKBAR_ACT_NONE;
+        int far = taskbar_cell_press(&d, TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, 1700000000ll, 120, 100, 100) == TASKBAR_ACT_NONE;
+
+        check("kit cells: the launcher's button acts on the left; the volume cell opens on the left, mutes on the middle and steps on the wheel; the microphone opens on the left and mutes on the middle",
+              table);
+        check("kit cells: the tray is a pair, so one left press on it is none; and the rule of the table is the only one for each cell", plain_tray);
+        check("kit cells: two left presses on the tray open the settings, and a middle press between them is not counted into the pair", first && middle && second);
+        check("kit cells: a tray press 600 ms after the last is a first, and so is one 20 px away", late && far);
+}
+
 // ui_click_again, the one double-press rule (the text, the terminal, the tray and the windows' tops): a press within 450 ms of
 // the last and within 4 px (scaled) of it is the next of its run: double, triple, then the first again. Each row is a press.
 static fn check_kit_double_press(void)
@@ -156678,6 +156704,7 @@ b32 main()
         check_kit_wheel_near_end();
         check_kit_notch_take();
         check_kit_double_press();
+        check_kit_cell_rules();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
