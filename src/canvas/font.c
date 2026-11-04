@@ -3463,6 +3463,11 @@ static bool font_try_subtables(font_shaper address_to s, positive lookup, p32 ty
                 positive t = lookup + font_u16(face, lookup + 6 + 2 * (positive)k);
                 p32 kind = type;
 
+                //      Each subtable tried is paid for: 63 lookups of 256 subtables that cover every glyph and never
+                //      apply were 16128 tries a code point and none of them charged. Real faces try under 350 a code
+                //      point at worst (Noto Nastaliq Urdu), of a budget of FONT_OPS.
+                if (s->ops-- <= 0)
+                        return false;
                 if (type == extension)
                 {
                         if (font_u16(face, t) != 1)

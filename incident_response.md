@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-138: a font's lookups could try subtables that the shaping budget never paid for
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Denial of service: shaping work a font file chooses, outside the op budget |
+| Moonwater exposure window | 2026-11-04 00:07 +01:00 (`72ba74c80`, right to left text and shaping) to the fix, under a day |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_font_shape`, `costly lookups: a line of 4096 runs out of its budget in the costly lookups, and the last never runs` |
+
+**How it was exposed.** Arabic and Hebrew runs are shaped through a face's GSUB and GPOS lookups under a budget of
+FONT_OPS (2048) operations a code point, as HarfBuzz bounds its own; the budget was charged for rules matched, glyphs
+scanned and nested lookups, but not for the subtables a lookup tries at each glyph (up to 256), each a coverage search.
+A face whose plan is 63 lookups of 256 subtables that cover every glyph and never apply was 16128 uncharged tries a
+code point: 0.68 s to lay one line of 4096 Arabic-Indic digits, and the fuzzer met 0.6 s for a few words. Reachable
+with a font the person sets for the desktop and Arabic or Hebrew text on the screen.
+
+**The fix.** `font_try_subtables` charges one operation a subtable tried and stops when the budget is spent. Measured
+on every Arabic, Urdu and Hebrew face on the box over generated paragraphs, a real face spends at most 425 operations
+and 328 tries a code point (Noto Nastaliq Urdu; under 30 and 8 for the others), so the budget is not reached and the
+hb-shape parity rows of CHECK_font_shape are unchanged; the same line now takes 0.09 s.
+
 ### MW-2026-137: the editor opened a device to find out it was not a file
 
 | | |

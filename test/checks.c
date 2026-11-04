@@ -121709,6 +121709,95 @@ static fn check_hostile_layout(const p8 address_to font, positive size)
               shape_cases_run >= before + 12000 + 500);
 }
 
+/*
+        The work a face's lookups do is paid for by the shaping budget a subtable at a time. Noto Sans Arabic with its
+        GSUB pointed at one built here: rlig of 63 lookups of 256 subtables that cover every glyph and never apply,
+        then a 64th that turns the Arabic-Indic one into the next glyph. A subtable tried was not charged, so a line of
+        4096 of them tried 66 million (the fuzzer met 0.6 s for a few words); charged, the budget (FONT_OPS a code
+        point) ends the walk inside the costly lookups and the last is never reached.
+*/
+static p8 shape_costly[1 << 19];
+
+static fn costly_put16(p8 address_to at, p32 value)
+{
+        at[0] = (p8)(value >> 8), at[1] = (p8)value;
+}
+
+static fn check_costly_lookups(void)
+{
+        static p8 text[8192];
+        bipolar n = file_slurp_regular_at(AT_FDCWD, "fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf", shape_costly,
+                                          sizeof(shape_costly) - 40000, 0);
+        positive base = n > 0 ? ((positive)n + 3) & ~(positive)3 : 0, tables, placed, started, took;
+        p8 address_to g = shape_costly + base;
+        p32 one = font_glyph(&shape_arabic[0], 0x661), turned = 0, kept = 0;
+        font_face face;
+
+        if (n <= 0 || !one)
+        {
+                check("costly lookups: Noto Sans Arabic loads, with an Arabic-Indic one", false);
+                return;
+        }
+        //      GSUB 1.0: scripts at 10, features at 30, lookups at 172.
+        costly_put16(g, 1), costly_put16(g + 2, 0), costly_put16(g + 4, 10), costly_put16(g + 6, 30), costly_put16(g + 8, 172);
+        costly_put16(g + 10, 1), memory_copy(g + 12, "arab", 4), costly_put16(g + 16, 8);
+        costly_put16(g + 18, 4), costly_put16(g + 20, 0);
+        costly_put16(g + 22, 0), costly_put16(g + 24, 0xffff), costly_put16(g + 26, 1), costly_put16(g + 28, 0);
+        costly_put16(g + 30, 1), memory_copy(g + 32, "rlig", 4), costly_put16(g + 36, 8);
+        costly_put16(g + 38, 0), costly_put16(g + 40, 64);
+        for (p32 k = 0; k < 64; k++)
+                costly_put16(g + 42 + 2 * k, k);
+        costly_put16(g + 172, 64);
+        for (p32 k = 0; k < 64; k++)
+                costly_put16(g + 174 + 2 * k, 302 + 518 * k - 172);
+        //      Lookups 0 to 62: single substitutions of 256 subtables, every one the subtable at 32944, which covers
+        //      every glyph and has no glyph to put (so never applies). Lookup 63, at 32936: one subtable at 32960.
+        for (p32 k = 0; k < 63; k++)
+        {
+                p8 address_to lookup = g + 302 + 518 * k;
+
+                costly_put16(lookup, 1), costly_put16(lookup + 2, 0), costly_put16(lookup + 4, 256);
+                for (p32 t = 0; t < 256; t++)
+                        costly_put16(lookup + 6 + 2 * t, 32944 - (302 + 518 * k));
+        }
+        costly_put16(g + 32936, 1), costly_put16(g + 32938, 0), costly_put16(g + 32940, 1), costly_put16(g + 32942, 24);
+        costly_put16(g + 32944, 2), costly_put16(g + 32946, 6), costly_put16(g + 32948, 0);
+        costly_put16(g + 32950, 2), costly_put16(g + 32952, 1), costly_put16(g + 32954, 0), costly_put16(g + 32956, 0xffff),
+            costly_put16(g + 32958, 0);
+        costly_put16(g + 32960, 1), costly_put16(g + 32962, 6), costly_put16(g + 32964, 1);
+        costly_put16(g + 32966, 1), costly_put16(g + 32968, 1), costly_put16(g + 32970, one);
+        tables = (positive)shape_costly[4] << 8 | shape_costly[5];
+        for (positive i = 0; i < tables; i++)
+        {
+                p8 address_to record = shape_costly + 12 + 16 * i;
+
+                if (!memory_compare(record, "GSUB", 4))
+                {
+                        costly_put16(record + 8, (p32)(base >> 16)), costly_put16(record + 10, (p32)base & 0xffff);
+                        costly_put16(record + 12, 0), costly_put16(record + 14, 32972);
+                }
+        }
+        check("costly lookups: the face with the costly GSUB loads", font_load(&face, shape_costly, base + 32972, 0) == 0);
+        for (positive at = 0; at < sizeof(text); at += 2)
+                text[at] = 0xd9, text[at + 1] = 0xa1;
+        {
+                const font_face address_to chain[1] = {&face};
+
+                started = clock_monotonic_nanoseconds();
+                placed = font_layout(&engine, chain, 1, text, sizeof(text), 20 * 64, FONT_RTL, shape_places, FONT_PARA + 16);
+                took = clock_monotonic_nanoseconds() - started;
+                for (positive i = 0; i < placed; i++)
+                        turned += shape_places[i].glyph == one + 1, kept += shape_places[i].glyph == one;
+                //      A short line, under the budget's own room, is shaped whole: the last lookup does turn it.
+                placed = font_layout(&engine, chain, 1, text, 8, 20 * 64, FONT_RTL, shape_places, FONT_PARA + 16);
+        }
+        string_format(log, "  costly lookups: 4096 code points laid in %p us, %p turned by the last lookup\n", took / 1000, (positive)turned);
+        check("costly lookups: a line of 4096 runs out of its budget in the costly lookups, and the last never runs",
+              kept == 4096 && !turned);
+        check("costly lookups: four code points are shaped whole, the last lookup turning them",
+              placed == 4 && shape_places[0].glyph == one + 1 && shape_places[3].glyph == one + 1);
+}
+
 //      Texts that are hostile as texts: directional controls nested past the limit, a hundred thousand combining marks,
 //      a paragraph of ten thousand letters, five thousand paragraphs, bytes that are no UTF-8.
 static fn check_hostile_text(void)
@@ -121792,6 +121881,7 @@ b32 main()
         check_fallback();
         check_segments();
         check_render();
+        check_costly_lookups();
 
         shape_guard_pages = (sizeof(shape_arabic_bytes[0]) + 4096) / 4096 + 2;
         shape_guard = memory((shape_guard_pages + 1) * 4096);
