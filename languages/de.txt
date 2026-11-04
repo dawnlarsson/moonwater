@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	nichts eingegeben: der Wert bleibt
 settings_nothing_matches	14e9	Nichts passt zur Eingabe
 settings_nothing_typed	edce	nichts eingegeben
 settings_notices_count	8902	%1$d Meldungen
+settings_notices_dismiss	c370	alle verwerfen
 settings_notices_none	47c6	keine Kernelmeldungen
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Hz (empfohlen)

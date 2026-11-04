@@ -786,8 +786,12 @@ struct settings_sub
         int section;                 // the section of the row it is under
         b32 detail;                  // a detail line: quieter
         const char address_to words; // what its badge says (Warning, Error), or none
+        unsigned int code;           // a message line's issue code (a kernel notice's, for Delete to dismiss it), 0 for none
+        unsigned int action;         // SETTINGS_SUB_COPY (the default), or SETTINGS_SUB_DISMISS_ALL (the line that clears every kernel notice)
         char text[SETTINGS_SUB_TEXT];
 };
+#define SETTINGS_SUB_COPY 0u
+#define SETTINGS_SUB_DISMISS_ALL 1u
 static struct settings_sub settings_sub[SETTINGS_SUBS];
 static int settings_sub_count;
 static struct windows_issues settings_board;
@@ -924,7 +928,7 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
         if (settings_sub_count >= SETTINGS_SUBS || count >= UI_LIST_MOST - 1)
                 return count;
         sub = &settings_sub[settings_sub_count];
-        sub->section = section, sub->detail = detail, sub->words = words;
+        sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY;
         string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
         settings.list.id[count] = (unsigned short)(SETTINGS_ALL + (positive)settings_sub_count++);
         return count + 1;
@@ -1015,9 +1019,18 @@ static int settings_sub_rows(int row, int count)
                 settings_issue_text(issue, text, sizeof(text));
                 count = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
                                          text, count);
+                if (settings_sub_count > 0)
+                        settings_sub[settings_sub_count - 1].code = issue->code;
                 // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
                 if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_RADIO))
                         count = settings_sub_put(section, true, null, issue->detail, count);
+        }
+        // The kernel's notices row lists them with one line that dismisses every kernel notice, after the last of them.
+        if (which && which->output == SETTINGS_OUT_NOTICES && count > 0 && settings_sub_count > 0)
+        {
+                count = settings_sub_put(section, false, null, WORDS(settings_notices_dismiss), count);
+                if (settings_sub_count > 0)
+                        settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_DISMISS_ALL;
         }
         return count;
 }
@@ -3905,6 +3918,15 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_card_key(event);
                 return true;
         }
+        // Delete on a kernel notice's line dismisses its class (the feeder starts it again from nothing); a line is no row, so the keys stop there.
+        if (event->a == UI_KEY_DELETE && settings.list.focus >= (int)SETTINGS_ALL && settings.list.focus - (int)SETTINGS_ALL < settings_sub_count)
+        {
+                unsigned int code = settings_sub[settings.list.focus - (int)SETTINGS_ALL].code;
+
+                if (code >= WINDOWS_ISSUE_KERNEL_GPU && code <= WINDOWS_ISSUE_KERNEL_PROGRAM)
+                        windows_kernel_dismiss(settings.own.table, 1u << (code - WINDOWS_ISSUE_KERNEL_GPU));
+                return true;
+        }
         // Right opens the lines under the row the keys are on, and Left shuts them (an expander's keys); any other key is the row's.
         if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings.list.focus < SETTINGS_ANY && settings_editing() < 0)
         {
@@ -4302,7 +4324,12 @@ static fn settings_press_at(void)
                 return;
         if (row >= (int)SETTINGS_ALL)
         {
-                settings_copy(row - (int)SETTINGS_ALL);
+                int at = row - (int)SETTINGS_ALL;
+
+                if (at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_DISMISS_ALL)
+                        windows_kernel_dismiss(settings.own.table, (1u << KERNEL_NOTICE_CLASSES) - 1);
+                else
+                        settings_copy(at);
                 ui_page_redraw(&settings.page);
                 return;
         }

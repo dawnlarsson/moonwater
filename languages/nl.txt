@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	niets getypt: de waarde blijft
 settings_nothing_matches	14e9	Niets komt overeen met de invoer
 settings_nothing_typed	edce	niets getypt
 settings_notices_count	8902	%1$d meldingen
+settings_notices_dismiss	c370	alles wegklikken
 settings_notices_none	47c6	geen kernelmeldingen
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (aanbevolen)

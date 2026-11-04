@@ -22218,8 +22218,6 @@ static fn host_windows_unmap(const struct windows address_to table)
 /* ---- notices: the kernel's own errors and warnings the board has (moonwater notices [clear]) ---- */
 static b32 host_notices(string_address address_to arguments, positive count)
 {
-        static const unsigned int codes[] = {WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_KERNEL_BLUETOOTH,
-                                             WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_KERNEL_PROGRAM};
         bool clearing = count == 3 && string_equals(arguments[2], "clear");
         struct windows_issues board;
         unsigned int shown = 0, cleared = 0;
@@ -22230,8 +22228,7 @@ static b32 host_notices(string_address address_to arguments, positive count)
 
                 if (!table)
                         return host_refuse("moonwater notices: the board is not there (the desktop is not running)\n");
-                for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
-                        cleared += windows_issue_clear(table, kernel_notice_key[idx], codes[idx]);
+                cleared = windows_kernel_dismiss(table, (1u << KERNEL_NOTICE_CLASSES) - 1);
                 host_say(log, "moonwater notices: %p cleared\n", (positive)cleared);
                 log_flush();
                 return true;

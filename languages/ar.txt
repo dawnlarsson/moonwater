@@ -127,6 +127,7 @@ settings_nothing_kept	85a2	لا شيء مكتوب: تبقى القيمة كما 
 settings_nothing_matches	14e9	لا شيء يطابق ما كتبته
 settings_nothing_typed	edce	لا شيء مكتوب
 settings_notices_count	8902	%1$d إشعارا
+settings_notices_dismiss	c370	تجاهل الكل
 settings_notices_none	47c6	لا إشعارات من النواة
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d هرتز (موصى به)

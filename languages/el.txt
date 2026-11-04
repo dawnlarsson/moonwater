@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	δεν πληκτρολογήθηκε τίποτα: �
 settings_nothing_matches	14e9	Τίποτα δεν ταιριάζει με το κείμενο
 settings_nothing_typed	edce	δεν πληκτρολογήθηκε τίποτα
 settings_notices_count	8902	%1$d ειδοποιήσεις
+settings_notices_dismiss	c370	απόρριψη όλων
 settings_notices_none	47c6	καμία ειδοποίηση πυρήνα
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (προτεινόμενο)

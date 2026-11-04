@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	bir şey yazılmadı: değer korunur
 settings_nothing_matches	14e9	Yazılana uyan bir şey yok
 settings_nothing_typed	edce	bir şey yazılmadı
 settings_notices_count	8902	%1$d bildirim
+settings_notices_dismiss	c370	tümünü kapat
 settings_notices_none	47c6	çekirdek bildirimi yok
 settings_percent	e76a	%%%d
 settings_rate_best	7450	%d Hz (önerilen)

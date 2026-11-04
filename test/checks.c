@@ -140387,7 +140387,8 @@ static fn check_settings_groups(void)
                         }
                         break;
                 }
-                if (row->output && !string_equals((string_address)group, (string_address) "Display"))
+                // The kernel notices row is a row with an output and no screen: its group is System, not Display.
+                if (row->output && row->output != SETTINGS_OUT_NOTICES && !string_equals((string_address)group, (string_address) "Display"))
                         screens = false;
         }
         check("settings groups: every row is in the group of what its verb does (the keyboard's, the mouse's, the pointer's, the clock's)", family);
@@ -223188,8 +223189,43 @@ static void iss_rows_radio(void)
         check("radio: a block in hardware is said to be the switch", radio_blocked_detail("bluetooth", 0, 1) != null && string_length((string_address)radio_blocked_detail("bluetooth", 0, 1)) > 20);
 }
 
+// The worst issue under canvas gpu on the table, read as a copy.
+static unsigned int dz_worst(struct windows *b)
+{
+        windows_issues_read(b, &iss_copy);
+        return windows_issues_worst(&iss_copy, "canvas gpu", null);
+}
+
+// Dismissing (windows_kernel_dismiss): the class's issue leaves the board, the feeder takes the bit at its next publish and counts from nothing, and an
+// error that is not dismissed stays on the board.
+static void iss_rows_dismiss(void)
+{
+        struct windows board;
+        struct kernel_notices k;
+        char record[KERNEL_NOTICE_LINE];
+        unsigned int n;
+
+        memory_zero(&board, sizeof(board));
+        memory_zero(&k, sizeof(k));
+        k.fd = -2;
+        n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1, emitted seq=2", record, sizeof(record));
+        kernel_notices_record(&k, record, n, 1000);
+        kernel_notices_publish(&board, &k, 1000);
+        check("dismiss: an error is on the board before it is dismissed", dz_worst(&board) == WINDOWS_ISSUE_ERROR);
+        check("dismiss: dismissing its class clears its issue and leaves the bit for the feeder",
+              windows_kernel_dismiss(&board, 1u << 0) == 1 && (board.kernel_dismiss & 1u) != 0);
+        kernel_notices_publish(&board, &k, 2000);
+        check("dismiss: the feeder takes the bit at its publish and counts that class from nothing", (board.kernel_dismiss & 1u) == 0 && k.count[0] == 0);
+        check("dismiss: a class that was not dismissed keeps its issue", dz_worst(&board) == 0);
+        n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=3, emitted seq=4", record, sizeof(record));
+        kernel_notices_record(&k, record, n, 3000);
+        kernel_notices_publish(&board, &k, 3000);
+        check("dismiss: a new record after the dismissal is raised again as one record", k.count[0] == 1 && dz_worst(&board) == WINDOWS_ISSUE_ERROR);
+}
+
 b32 main(void)
 {
+        iss_rows_dismiss();
         iss_rows_basic();
         iss_rows_full();
         iss_rows_torn();

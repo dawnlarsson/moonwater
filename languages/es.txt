@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	nada escrito: se mantiene el valor
 settings_nothing_matches	14e9	Nada coincide con lo escrito
 settings_nothing_typed	edce	nada escrito
 settings_notices_count	8902	%1$d avisos
+settings_notices_dismiss	c370	descartar todo
 settings_notices_none	47c6	sin avisos del kernel
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Hz (recomendada)

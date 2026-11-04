@@ -126,6 +126,7 @@ settings_nothing_kept	85a2	nothing typed: the value is kept
 settings_nothing_matches	14e9	Nothing matches what is typed
 settings_nothing_typed	edce	nothing typed
 settings_notices_count	8902	%1$d notices
+settings_notices_dismiss	c370	dismiss all
 settings_notices_none	47c6	no kernel notices
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (recommended)

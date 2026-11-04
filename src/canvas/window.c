@@ -1054,6 +1054,9 @@ struct windows
         unsigned int metric_card_mean, metric_card_worst, metric_processor_mean, metric_processor_worst;
         unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
         unsigned int metric_presents, metric_lists;
+        // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
+        // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
+        unsigned int kernel_dismiss;
         unsigned int client_rects_card, client_rects_cpu; // the damage rectangles copied by the card, and by the processor
 };
 
@@ -1598,6 +1601,12 @@ static void kernel_notices_publish(struct windows *table, struct kernel_notices 
         {
                 unsigned int code = WINDOWS_ISSUE_KERNEL_GPU + idx;
 
+                // A class dismissed by its reader starts again from nothing, and its bit is taken.
+                if (table && (__atomic_load_n(&table->kernel_dismiss, __ATOMIC_ACQUIRE) >> idx & 1u))
+                {
+                        k->count[idx] = 0, k->severity[idx] = 0;
+                        __atomic_and_fetch(&table->kernel_dismiss, ~(1u << idx), __ATOMIC_RELEASE);
+                }
                 if (!k->count[idx])
                         continue;
                 if (k->severity[idx] == WINDOWS_ISSUE_WARNING && k->seen[idx] && now - k->seen[idx] > KERNEL_NOTICE_AGE_NS)
@@ -3748,6 +3757,24 @@ static void radio_state_tick(struct windows *table)
                 else
                         windows_issue_clear(table, key, WINDOWS_ISSUE_RADIO);
         }
+}
+
+// Dismisses the kernel notices of the classes in mask (bit i is class i): their issues leave the board now, and the feeder starts each class again
+// from nothing at its next publish (kernel_notices_publish takes the bit). An error stays on the board until it is dismissed, so this is how it goes.
+// The number of issues cleared.
+static unsigned int windows_kernel_dismiss(struct windows *table, unsigned int mask)
+{
+        unsigned int cleared = 0;
+
+        if (!table)
+                return 0;
+        for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
+                if (mask >> idx & 1u)
+                {
+                        cleared += windows_issue_clear(table, kernel_notice_key[idx], WINDOWS_ISSUE_KERNEL_GPU + idx);
+                        __atomic_or_fetch(&table->kernel_dismiss, 1u << idx, __ATOMIC_RELEASE);
+                }
+        return cleared;
 }
 
 // One tick of the feeder (once a second from the compositor): reads up to KERNEL_NOTICE_MOST records from /dev/kmsg without waiting, counts
