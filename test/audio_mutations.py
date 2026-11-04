@@ -57,6 +57,11 @@ M = [
     ("mix", "cutoff not lowered for downsampling", "cutoff = 0.5 * (rin > rout ? (double)rout / (double)rin : 1.0);", "cutoff = 0.5;"),
     ("mix", "silent voice still reads", "if (voice->now[0] == 0 && voice->now[1] == 0 && voice->target[0] == 0 && voice->target[1] == 0)\n                return 0;", ""),
     ("mix", "ring put ignores room", "unsigned long room = audio_ring_room(ring), from, first;\n\n        if (n > room)\n                n = room;\n        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        __builtin_memcpy", "unsigned long room = audio_ring_room(ring), from, first;\n\n        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        __builtin_memcpy"),
+    ("mix", "an exact step rounded down", "(((unsigned long long)table->num << 32) + table->den - 1) / table->den)", "(((unsigned long long)table->num << 32)) / table->den)"),
+    ("mix", "an exact fraction rounded down", "(unsigned long)(((unsigned long long)rs->k << 32) + table->den - 1) / table->den;", "(unsigned long)(((unsigned long long)rs->k << 32)) / table->den;"),
+    ("mix", "an exact place not carried", "rs->k = advance % table->den;", "rs->k = 0;"),
+    ("mix", "no exact tables", "if (den <= AUDIO_EXACT_MOST && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)", "if (0)"),
+    ("mix", "exact tables of any size", "if (den <= AUDIO_EXACT_MOST && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)", "if (den <= AUDIO_EXACT_MOST)"),
     # ---- alsa.c ----
     ("alsa", "sync_ptr without the read flags", "sync.flags = AUDIO_ALSA_SYNC_HWSYNC | AUDIO_ALSA_SYNC_APPL | AUDIO_ALSA_SYNC_AVAIL_MIN;", "sync.flags = AUDIO_ALSA_SYNC_HWSYNC;"),
     ("alsa", "room counted from the wrong side", "(long)sync.s.status.hw_ptr + pcm->buffer - (long)sync.c.control.appl_ptr", "(long)sync.s.status.hw_ptr - pcm->buffer - (long)sync.c.control.appl_ptr"),

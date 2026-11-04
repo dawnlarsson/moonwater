@@ -65,6 +65,7 @@
 #define AUDIO_PHASES 512
 #define AUDIO_TABLE_FLOATS (AUDIO_TAPS * AUDIO_PHASES + AUDIO_TAPS * AUDIO_RATIO_MAX)
 #define AUDIO_TABLES 12
+#define AUDIO_EXACT_MOST 4096      // the most places between two inputs an exact table has a row for
 #define AUDIO_RAMP 96              // frames a gain of one takes to ramp
 #define AUDIO_WORK (AUDIO_BLOCK * AUDIO_RATIO_MAX + 2 * AUDIO_TAPS * AUDIO_RATIO_MAX)
 #define AUDIO_VOLUME_NORM 0x10000ul
@@ -100,6 +101,8 @@
 #ifndef STANDARD_MODERN_C
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
                              unsigned long phases, unsigned long pos, unsigned long step, unsigned long count);
+unsigned long resample_polyphase2_f32_rows(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
+                                           unsigned long phases, unsigned long pos, unsigned long step, unsigned long count);
 float f32_scale_peak(float *dst, const float *x, unsigned long count, float gain);
 float f32_scale_add_peak(float *dst, const float *x, unsigned long count, float gain);
 void f32_planes_from_s16(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
@@ -685,7 +688,9 @@ AUDIO_API int audio_remix_build(float matrix[2][AUDIO_CHANNELS_MAX], long channe
 struct audio_table
 {
         long rin, rout;    // the rates it is for; 0 when the slot is free
-        long taps, phases; // taps a phase, and phases (the rows are phases + 1)
+        long taps, phases; // taps a phase, and phases (the rows are phases + 1; an exact table has exactly phases rows)
+        long exact;        // set: rin / rout is num / den in lowest terms and the table has a row for each of den places an output can be at
+        unsigned long num, den;
         long users;
         unsigned long used;
         float h[AUDIO_TABLE_FLOATS] __attribute__((aligned(64))); // the rows start on a cache line
@@ -702,7 +707,8 @@ static unsigned long audio_table_clock;
 */
 AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
 {
-        long m, taps, phases;
+        long m, taps, phases, rows, exact = 0;
+        unsigned long a, b, num, den;
         double cutoff, beta = 9.84, base;
         const double pi = 3.14159265358979323846;
 
@@ -715,7 +721,25 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         base = audio_bessel0(beta);
         taps = AUDIO_TAPS * m;
         phases = AUDIO_PHASES / m;
-        for (long p = 0; p <= phases / 2; p++)
+        // Rates that reduce to num / den: an output is at one of den places between two inputs, and if there is room for a row
+        // for each the table has exactly those, the rows are not mixed (no weight between two), and the position is counted in
+        // whole numbers, so it never drifts.
+        for (a = (unsigned long)rin, b = (unsigned long)rout; b;)
+        {
+                unsigned long t = a % b;
+
+                a = b;
+                b = t;
+        }
+        num = (unsigned long)rin / a;
+        den = (unsigned long)rout / a;
+        if (den <= AUDIO_EXACT_MOST && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)
+        {
+                exact = 1;
+                phases = (long)den;
+        }
+        rows = exact ? phases : phases + 1;
+        for (long p = 0; p <= phases / 2 && p < rows; p++)
         {
                 float *row = table->h + p * taps;
                 double sum = 0, frac = (double)p / (double)phases;
@@ -732,13 +756,16 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
                 for (long k = 0; k < taps; k++)
                         row[k] = (float)((double)row[k] / sum);
         }
-        for (long p = phases / 2 + 1; p <= phases; p++)
+        for (long p = phases / 2 + 1; p < rows; p++)
                 for (long k = 0; k < taps; k++)
                         table->h[p * taps + k] = table->h[(phases - p) * taps + taps - 1 - k];
         table->rin = rin;
         table->rout = rout;
         table->taps = taps;
         table->phases = phases;
+        table->exact = exact;
+        table->num = num;
+        table->den = den;
         return 0;
 }
 
@@ -785,8 +812,9 @@ AUDIO_API void audio_table_give(struct audio_table *table)
 struct audio_resampler
 {
         const struct audio_table *table;
-        unsigned long step; // input frames an output takes, 32.32
+        unsigned long step; // input frames an output takes, 32.32 (rounded up on an exact table)
         unsigned long pos;
+        unsigned long k;    // an exact table: the place within an input frame, in den-ths; pos's fraction is its ceiling
         long have;
         float buf[2][AUDIO_WORK];
 };
@@ -799,12 +827,15 @@ AUDIO_API void audio_rs_reset(struct audio_resampler *rs)
         __builtin_memset(rs->buf[1], 0, (unsigned long)lead * sizeof(float));
         rs->have = lead;
         rs->pos = 0;
+        rs->k = 0;
 }
 
 AUDIO_API void audio_rs_open(struct audio_resampler *rs, const struct audio_table *table)
 {
         rs->table = table;
-        rs->step = (unsigned long)(((unsigned long long)table->rin << 32) / (unsigned long long)table->rout);
+        // Rounded up on an exact table: the walk then never lands under the row it means, which the rows-only kernel relies on.
+        rs->step = table->exact ? (unsigned long)((((unsigned long long)table->num << 32) + table->den - 1) / table->den)
+                                : (unsigned long)(((unsigned long long)table->rin << 32) / (unsigned long long)table->rout);
         audio_rs_reset(rs);
 }
 
@@ -845,9 +876,23 @@ AUDIO_API long audio_rs_run(struct audio_resampler *rs, float *out0, float *out1
 
         // Each output is the signal at its own place: the row between the two nearest phases (a + f * (b - a)) dotted with
         // the taps of each plane. A float sum in one chain waits on every add; the library's body takes it in lanes.
-        resample_polyphase2_f32(out0, out1, rs->buf[0], rs->buf[1], table->h, (unsigned long)table->taps, (unsigned long)table->phases, pos,
-                                rs->step, (unsigned long)made);
-        pos += (unsigned long)made * rs->step;
+        if (table->exact)
+        {
+                // The place counted in whole numbers: made outputs are made * num den-ths on, and the fraction handed to the kernel is rounded up so
+                // that it lands on its row. Nothing is added up in the fixed point, so nothing drifts however long the stream plays.
+                unsigned long advance = rs->k + (unsigned long)made * table->num;
+
+                resample_polyphase2_f32_rows(out0, out1, rs->buf[0], rs->buf[1], table->h, (unsigned long)table->taps, (unsigned long)table->phases, pos,
+                                             rs->step, (unsigned long)made);
+                rs->k = advance % table->den;
+                pos = ((pos >> 32) + advance / table->den) << 32 | (unsigned long)(((unsigned long long)rs->k << 32) + table->den - 1) / table->den;
+        }
+        else
+        {
+                resample_polyphase2_f32(out0, out1, rs->buf[0], rs->buf[1], table->h, (unsigned long)table->taps, (unsigned long)table->phases, pos,
+                                        rs->step, (unsigned long)made);
+                pos += (unsigned long)made * rs->step;
+        }
         rs->pos = pos;
         drop = (long)(pos >> 32);
         if (drop > rs->have)
@@ -970,7 +1015,7 @@ AUDIO_API int audio_voice_rate(struct audio_voice *voice, long rate)
                 long m_now = rate > voice->out_rate ? (rate + voice->out_rate - 1) / voice->out_rate : 1;
                 long close = (rate > was ? rate - was : was - rate) * 20 <= was;
 
-                if (m_was == m_now && close)
+                if (m_was == m_now && close && !voice->table->exact)
                 {
                         voice->rs.step = (unsigned long)(((unsigned long long)rate << 32) / (unsigned long long)voice->out_rate);
                         voice->rate = rate;

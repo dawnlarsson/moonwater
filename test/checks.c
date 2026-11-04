@@ -170075,6 +170075,31 @@ static void au_test_resampler_streaming(void)
                         AUCHECK(again == 8192 && !memcmp(whole, au_out0, sizeof(float) * 8192), "input cut in pieces of %ld gives other bits", pieces[p]);
                 }
         }
+        // The place of an exact table is counted in whole numbers: after any number of outputs, cut in any pieces, it is exactly where num/den says.
+        {
+                static const long ratios[][2] = {{44100, 48000}, {48000, 44100}, {22050, 48000}, {32000, 48000}};
+
+                for (unsigned r = 0; r < sizeof(ratios) / sizeof(ratios[0]); r++)
+                {
+                        struct audio_table *e = audio_table_take(ratios[r][0], ratios[r][1]);
+                        unsigned long total = 0;
+                        static const long pieces[] = {97, 512, 1, 333, 480};
+
+                        audio_rs_open(&au_rs, e);
+                        for (int round = 0; round < 3000; round++)
+                        {
+                                long want = pieces[round % 5], need = audio_rs_need(&au_rs, want);
+
+                                for (long i = 0; i < need; i++)
+                                        au_rs.buf[0][au_rs.have + i] = au_rs.buf[1][au_rs.have + i] = 0.25f;
+                                au_rs.have += need;
+                                total += (unsigned long)audio_rs_run(&au_rs, au_out0, au_out1, want);
+                        }
+                        AUCHECK(au_rs.k == total * e->num % e->den, "%ld to %ld after %lu outputs the place is %lu of %lu, not %lu", ratios[r][0], ratios[r][1], total, au_rs.k, e->den, total * e->num % e->den);
+                        AUCHECK((au_rs.pos & 0xffffffffu) == (unsigned long)(((unsigned long long)au_rs.k << 32) + e->den - 1) / e->den, "and the fraction handed to the kernel is its ceiling");
+                        audio_table_give(e);
+                }
+        }
         audio_table_give(table);
         // A constant stays a constant.
         {
@@ -170155,7 +170180,7 @@ static void au_test_voice_resampling(void)
                 for (int t = 0; t < AUDIO_TABLES; t++)
                         taken += audio_tables[t].users;
                 AUCHECK(taken == 1, "one table in use: %d", taken);
-                AUCHECK(audio_voice_rate(au_voice, 44200) == 0 && au_voice->rate == 44200 && au_voice->rs.step == (unsigned long)(((unsigned long long)44200 << 32) / 48000), "a small change moves the step");
+                AUCHECK(audio_voice_rate(au_voice, 44200) == 0 && au_voice->rate == 44200 && au_voice->rs.step == (unsigned long)((((unsigned long long)221 << 32) + 239) / 240), "a small change takes a table of its own (221/240, exact) and its step rounded up");
                 AUCHECK(audio_voice_rate(au_voice, 22050) == 0 && au_voice->table->rin == 22050, "a large change takes another table");
                 AUCHECK(audio_voice_rate(au_voice, 48000) == 0 && au_voice->table == 0, "the sink's own rate needs none");
                 AUCHECK(audio_voice_rate(au_voice, 0) < 0 && audio_voice_rate(au_voice, 400001) < 0, "a rate out of bounds is refused");
@@ -170201,6 +170226,25 @@ static void au_test_tables(void)
         audio_table_give(a);
         AUCHECK(a->users == 0, "a table is not given back past nothing");
         AUCHECK(audio_table_take(48000, 5000) == 0, "a ratio of more than eight is refused");
+        {
+                // The ratios that reduce to few enough places are exact tables, with a row for each; the others are not.
+                static const struct
+                {
+                        long rin, rout, exact, phases, taps;
+                } kinds[] = {{44100, 48000, 1, 160, 64}, {48000, 44100, 1, 147, 128}, {22050, 48000, 1, 320, 64}, {32000, 48000, 1, 3, 64}, {8000, 48000, 1, 6, 64},
+                             {96000, 48000, 1, 1, 128}, {192000, 48000, 1, 1, 256}, {11025, 48000, 0, 512, 64}, {44117, 48000, 0, 512, 64}};
+
+                for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+                {
+                        struct audio_table *e = audio_table_take(kinds[i].rin, kinds[i].rout);
+
+                        AUCHECK(e && e->exact == kinds[i].exact && e->phases == kinds[i].phases && e->taps == kinds[i].taps, "%ld to %ld: exact %ld, %ld phases, %ld taps", kinds[i].rin, kinds[i].rout,
+                                e ? e->exact : -1, e ? e->phases : -1, e ? e->taps : -1);
+                        if (e && e->exact)
+                                AUCHECK((long)(e->num * (unsigned long)kinds[i].rout) == (long)(e->den * (unsigned long)kinds[i].rin), "%ld to %ld is %lu/%lu", kinds[i].rin, kinds[i].rout, e->num, e->den);
+                        audio_table_give(e);
+                }
+        }
         AUCHECK(audio_table_take(0, 48000) == 0 && audio_table_take(48000, 0) == 0 && audio_table_take(400000, 48000) == 0, "rates out of bounds are refused");
         for (int t = 0; t < AUDIO_TABLES; t++)
         {
@@ -170219,7 +170263,7 @@ static void au_test_tables(void)
                 {
                         const struct audio_table *table = audio_tables + t;
 
-                        for (long p = 0; p <= table->phases; p += 7)
+                        for (long p = 0; p < (table->exact ? table->phases : table->phases + 1); p += 7)
                         {
                                 double sum = 0;
 
@@ -170228,7 +170272,13 @@ static void au_test_tables(void)
                                 AUCHECK(fabs(sum - 1.0) < 2e-6, "table %d row %ld adds to %.9f", t, p, sum);
                         }
                         for (long k = 0; k < table->taps; k++)
-                                AUCHECK(table->h[k] == table->h[table->phases * table->taps + table->taps - 1 - k], "table %d turned around at %ld", t, k);
+                        {
+                                // The last row of an inexact table is the first turned around; an exact one has no such row, and its row q - p is row p turned around.
+                                if (!table->exact)
+                                        AUCHECK(table->h[k] == table->h[table->phases * table->taps + table->taps - 1 - k], "table %d turned around at %ld", t, k);
+                                else if (table->phases > 1)
+                                        AUCHECK(table->h[1 * table->taps + k] == table->h[(table->phases - 1) * table->taps + table->taps - 1 - k], "exact table %d: row 1 and row q-1 turned around at %ld", t, k);
+                        }
                 }
 }
 
