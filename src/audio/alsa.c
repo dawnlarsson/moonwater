@@ -576,10 +576,15 @@ AUDIO_API long audio_pcm_delay(struct audio_pcm *pcm)
 }
 
 // frames of the interleaved buffer to the device; the frames it took, or a negative errno (EAGAIN when it is full).
+// A negative count is refused before the card is asked: it becomes a huge byte count, and the kernel copies from or to the
+// caller's memory up to what the buffer has room for. A count past the buffer takes what fits, as the kernel does.
 AUDIO_API long audio_pcm_write(struct audio_pcm *pcm, const void *frames, long count)
 {
-        long result = audio_sys_write(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes));
+        long result;
 
+        if (count < 0)
+                return AUDIO_EINVAL;
+        result = audio_sys_write(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes));
         if (result == AUDIO_ENODEV)
                 pcm->broken = 1;
         return result < 0 ? result : result / pcm->frame_bytes;
@@ -587,8 +592,11 @@ AUDIO_API long audio_pcm_write(struct audio_pcm *pcm, const void *frames, long c
 
 AUDIO_API long audio_pcm_read(struct audio_pcm *pcm, void *frames, long count)
 {
-        long result = audio_sys_read(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes));
+        long result;
 
+        if (count < 0)
+                return AUDIO_EINVAL;
+        result = audio_sys_read(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes));
         if (result == AUDIO_ENODEV)
                 pcm->broken = 1;
         return result < 0 ? result : result / pcm->frame_bytes;

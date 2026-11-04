@@ -247,6 +247,9 @@ M = [
     ("socket", "a send waits per part again", "if (ctl_wait_until(s, 0, until) <= 0)", "if (ctl_wait(s->fd, 0, timeout_ms) <= 0)"),
     ("socket", "every part of an answer given the whole timeout", "c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0", "c->transport.receive(c->transport.context, frame, 20, c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS) < 0"),
     ("socket", "a call's budget never begun", "        c->deadline = c->transport.now(c->transport.context) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "        (void)0;"),
+    # ---- alsa.c: a negative count is refused before the card is asked (CHECK_audio_alsa) ----
+    ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write("),
+    ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read("),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}

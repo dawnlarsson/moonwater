@@ -171470,6 +171470,7 @@ static int al_opens, al_closes;
 static int al_model_of_card[AUDIO_ALSA_CARDS];
 static int al_card_present[AUDIO_ALSA_CARDS];
 static long al_next_errno; // an errno the next write answers, once
+static long al_write_calls; // the writes the card has been asked for
 static long al_small_boundary;
 
 struct al_card_fake
@@ -171851,6 +171852,7 @@ static long al_fake_write(int fd, const void *buffer, unsigned long bytes)
         struct al_pcm_fake *pcm = al_fd(fd);
         long frame, frames, room, fill;
 
+        al_write_calls++;
         if (!pcm || !pcm->configured)
                 return -EBADFD;
         if (al_next_errno)
@@ -172153,6 +172155,20 @@ static void al_test_flow(void)
         audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1);
         al_next_errno = -ENODEV;
         ALCHECK(audio_pcm_write(&pcm, frames, 10) == AUDIO_ENODEV && pcm.broken, "a write that finds the card gone marks it");
+        audio_pcm_close(&pcm);
+        // A negative count is refused before the card is asked: it would become a huge byte count for the kernel to copy from the
+        // caller's memory. A count past the buffer is not refused (the test above: it takes what fits).
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0;
+        ALCHECK(audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1) == 0, "a playback PCM opens for the count checks");
+        {
+                long asked = al_write_calls;
+
+                ALCHECK(audio_pcm_write(&pcm, frames, -1) == AUDIO_EINVAL && al_write_calls == asked, "a negative count is refused and the card not asked");
+                ALCHECK(audio_pcm_read(&pcm, frames, -3) == AUDIO_EINVAL, "and so is a negative read count");
+                ALCHECK(audio_pcm_write(&pcm, frames, 10) == 10 && al_write_calls == asked + 1, "a count the buffer holds is written");
+        }
         audio_pcm_close(&pcm);
         // A capture buffer across the wrap: the data to read is the hardware's pointer less the application's, and it is the hardware's that wraps first.
         al_reset();
