@@ -41,6 +41,36 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-132: the editor's save followed a directory swapped for a link after the file was opened
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Write redirection through a symlink race (time of check to time of use), as root; a save under a name cut short |
+| Moonwater exposure window | 2026-10-30 16:59 +01:00 (`3f919186`, the editor) to the fix, about 4 days 18 hours |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_terminal`, `editor hostile: a save after the file's directory was swapped for a link writes nothing through the link`, `... and writes the directory the file was opened in`, `editor hostile: its save is refused, and the name cut short is not written` |
+
+**How it was exposed.** The editor resolved a file's path once, at open (through /proc/self/fd), and the save wrote
+`DIR/.NAME.editing` and renamed it over `DIR/NAME` by that path. O_NOFOLLOW and O_EXCL guard only the last component,
+so a directory of the path could be replaced after the open: a user who owns `/home/u/d` gives root `d/passwd` to
+read, root opens it in the editor (the person runs as root), the user renames `d` away and makes `d` a link to `/etc`,
+and root's Ctrl+S writes the document over `/etc/passwd`. The time between the open and the save is a person's, so the
+race is not a race. A second way to the wrong name: /proc's name of a file whose real path is over 511 bytes came back
+cut by readlinkat, and the save went to the cut name (a new file beside the real one, or a second name of it).
+
+**The fix.** The directory the file is in is opened (O_PATH) when the file is, and kept with the tab; its entry for the
+name must be the file just opened (device and inode), or the tab can show the file but not save it. The save creates
+the temporary file and renames it by name in that directory (openat, renameat2 against the descriptor), so no path is
+walked at save time. A path readlinkat cut short holds no directory. A file that is not there yet holds the directory
+of the name it will be saved as.
+
+**The checks.** The swap row opens `sub/note.c`, renames `sub` away, makes `sub` a link to another directory and saves:
+nothing may appear through the link and the moved directory must hold the save. The cut row opens a file whose real
+path is 600 bytes, with a second name (a hard link) of exactly the cut length, and saves: the save must be refused and
+the cut name untouched. Mutants: the directory opened again by path at save time turns the swap rows red; the
+length guard taken out turns the cut row red.
+
 ### MW-2026-123: a copy naming a FIFO held the compositor in its open
 
 | | |

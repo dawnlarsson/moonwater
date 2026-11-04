@@ -7,7 +7,8 @@
         8 MiB or more is mapped, not read: the engine's pieces point into the mapping and only an edit is ever copied,
         so a hundred megabytes open at once. What opens is a regular file only (a FIFO, a device or a socket is refused,
         and /proc's files, which say nothing of their size, are read up to 64 MiB); the path a link names is
-        resolved when the file opens, and a save goes to that file, so the link stays a link.
+        resolved when the file opens, and a save goes to that file, so the link stays a link, in the directory the file was
+        opened in (held open, so a directory of the path swapped for a link later is not followed).
 
         Ctrl+S saves: the bytes into a new file beside the old one with the old one's mode, synced, and renamed over it,
         so a crash leaves the old file or the new one and never half of either; the byte order mark is written back if
@@ -40,6 +41,7 @@ struct editor_tab
         p64 size, mtime, mtime_nsec;
         unsigned int mode;
         p32 owner, group;         // the file's, which a save keeps; -1 for a file not there yet
+        int folder;               // the directory the file was opened in (O_PATH), which a save writes into; -1 for none
         b32 changed_on_disk;
 };
 
@@ -69,6 +71,37 @@ static struct editor_tab address_to editor_now(void)
 static fn editor_keys(void)
 {
         ui_findbar_keys(&editor.find, &editor_now()->view, editor.focused);
+}
+
+/*
+        The directory path's file is in, held from the open so that a save writes there and only there: a save by path
+        went wherever the path led at that moment, so a directory of the path swapped for a link after the open (to
+        /etc, by its owner) had the save write through it. With facts, the name in the directory must still be that
+        file. -1 when it cannot be held.
+*/
+static int editor_folder(const char address_to path, const error_stat address_to facts)
+{
+        char directory[EDITOR_PATH];
+        positive slash = string_length((string_address)path);
+        bipolar folder;
+        error_stat there;
+
+        while (slash && path[slash - 1] != '/')
+                slash--;
+        if (!path[slash] || slash >= EDITOR_PATH)
+                return -1;
+        memory_copy(directory, slash ? path : ".", slash ? slash : 1);
+        directory[slash ? slash : 1] = 0;
+        folder = system_open_at(AT_FDCWD, (string_address)directory, O_PATH | O_DIRECTORY | O_CLOEXEC);
+        if (folder < 0)
+                return -1;
+        if (facts && (fstatat((b32)folder, (string_address)path + slash, address_of there, AT_SYMLINK_NOFOLLOW) != 0 ||
+                      there.st_dev != facts->st_dev || there.st_ino != facts->st_ino))
+        {
+                system_close(folder);
+                return -1;
+        }
+        return (int)folder;
 }
 
 // A file's bytes: mapped when large, read when small, refused when it is not a regular file. False with a status.
@@ -107,6 +140,8 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 }
                 tab->mode = 0644;
                 tab->owner = tab->group = (p32)-1;
+                if (handle == -2)
+                        tab->folder = editor_folder(tab->path, null);
                 return handle == -2;
         }
         if (fstat((b32)handle, address_of facts) < 0 || (facts.st_mode & 0170000) != 0100000)
@@ -124,6 +159,8 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         tab->size = (p64)facts.st_size, tab->mtime = (p64)facts.st_mtime, tab->mtime_nsec = (p64)facts.st_mtime_nsec;
         tab->mode = facts.st_mode & 07777;
         tab->owner = facts.st_uid, tab->group = facts.st_gid;
+        // A path past the room was cut short by readlinkat: a save under the cut name would write another file.
+        tab->folder = got >= (bipolar)sizeof(resolved) - 1 ? -1 : editor_folder(tab->path, &facts);
         if (facts.st_size >= EDITOR_MAP_FROM)
         {
                 long mapped = (long)system_call_6(syscall(mmap), 0, (positive)facts.st_size, 1, 2, (positive)handle, 0);
@@ -158,10 +195,15 @@ static b32 editor_open(string_address path)
                 return false;
         tab = &editor.tabs[editor.count];
         memory_zero(tab, sizeof(*tab));
+        tab->folder = -1;
         if (path && !editor_load(tab, path))
                 return false;
         if (!ui_text_open(&tab->view, UI_TEXT_CODE, tab->bytes ? tab->bytes : (const p8 address_to) "", tab->length, ui_text_keymap()))
+        {
+                if (tab->folder >= 0)
+                        system_close(tab->folder);
                 return false;
+        }
         tab->view.own = &editor.own;
         for (string_address at = path; at && *at; at++)
                 if (*at == '/')
@@ -189,11 +231,13 @@ static b32 editor_save(struct editor_tab address_to tab)
         }
         while (slash && tab->path[slash - 1] != '/')
                 slash--;
-        memory_copy(temporary, tab->path, slash);
-        string_copy((string_address)temporary + slash, (string_address) ".");
-        string_copy_bounded((string_address)temporary + slash + 1, (string_address)tab->path + slash, EDITOR_PATH - slash - 1);
+        // Beside the file in the directory it was opened in, by name in that directory: no path is walked again.
+        string_copy((string_address)temporary, (string_address) ".");
+        string_copy_bounded((string_address)temporary + 1, (string_address)tab->path + slash, EDITOR_PATH - 1);
         string_copy((string_address)temporary + string_length((string_address)temporary), (string_address) ".editing");
-        handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        handle = tab->folder < 0 ? -1
+                                 : system_open_at_mode(tab->folder, (string_address)temporary,
+                                                       O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (handle < 0)
         {
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
@@ -225,19 +269,17 @@ static b32 editor_save(struct editor_tab address_to tab)
                 system_call_2(syscall(fchmod), (positive)handle, (positive)mode);
         }
         ok &= system_call_1(syscall(fsync), (positive)handle) == 0;
+        ok &= fstat((b32)handle, address_of facts) == 0;
         system_close(handle);
         // renameat2 with no flags: riscv64 never had renameat, and its number there is nothing (a save that always failed).
-        if (!ok || system_call_5(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)tab->path, 0) < 0)
+        if (!ok || system_call_5(syscall(renameat2), (positive)tab->folder, (positive)temporary, (positive)tab->folder,
+                                 (positive)tab->path + slash, 0) < 0)
         {
-                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0);
+                system_call_3(syscall(unlinkat), (positive)tab->folder, (positive)temporary, 0);
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_save_failed), sizeof(editor.status));
                 return false;
         }
-        handle = system_open_at(AT_FDCWD, (string_address)tab->path, FILE_READ | O_CLOEXEC);
-        if (handle >= 0 && fstat((b32)handle, address_of facts) == 0)
-                tab->size = (p64)facts.st_size, tab->mtime = (p64)facts.st_mtime, tab->mtime_nsec = (p64)facts.st_mtime_nsec;
-        if (handle >= 0)
-                system_close(handle);
+        tab->size = (p64)facts.st_size, tab->mtime = (p64)facts.st_mtime, tab->mtime_nsec = (p64)facts.st_mtime_nsec;
         doc_mark_saved(&tab->view.doc);
         tab->changed_on_disk = false;
         string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_saved), sizeof(editor.status));
@@ -270,6 +312,8 @@ static fn editor_reload(void)
         ui_text_close(&tab->view);
         if (tab->mapped)
                 system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
+        if (tab->folder >= 0)
+                system_close(tab->folder);
         editor.count--;
         memory_copy(&editor.tabs[editor.tab], &editor.tabs[editor.tab + 1], (positive)(editor.count - editor.tab) * sizeof(editor.tabs[0]));
         if (!editor_open((string_address)path))
@@ -299,6 +343,8 @@ static fn editor_close_tab(void)
         ui_text_close(&tab->view);
         if (tab->mapped)
                 system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
+        if (tab->folder >= 0)
+                system_close(tab->folder);
         editor.count--;
         memory_copy(&editor.tabs[editor.tab], &editor.tabs[editor.tab + 1], (positive)(editor.count - editor.tab) * sizeof(editor.tabs[0]));
         editor.tab = editor.tab >= editor.count ? editor.count - 1 : editor.tab;

@@ -155677,7 +155677,9 @@ static __attribute__((noinline)) fn editor_check_scribble(void)
 /*
         The editor against files another user chose: a link to nothing yet, named by an absolute path, is saved at
         exactly that path (readlinkat ends nothing, and the name was read to the stack's next NUL); a file of mode 0
-        is saved mode 0 (it was 0644); another user's set-user-id program saved stays theirs or loses the bit.
+        is saved mode 0 (it was 0644); another user's set-user-id program saved stays theirs or loses the bit; a save
+        writes the directory the file was opened in, not through a link put where that directory was, and not a name
+        cut short at 511 bytes.
 */
 static fn editor_hostile_check(struct ui address_to wui)
 {
@@ -155753,6 +155755,106 @@ static fn editor_hostile_check(struct ui address_to wui)
                       root ? facts.st_uid == other && (facts.st_mode & 07777) == 04755
                            : facts.st_uid == (p32)system_call(syscall(getuid)) && (facts.st_mode & 07777) == 0755);
                 system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)program, 0);
+        }
+
+        // The file's directory moved away after the open, and a link put where it was (by the directory's owner, to /etc
+        // say): the save writes the directory the file was opened in, and nothing through the link.
+        {
+                char sub[96], moved[96], elsewhere[96], note[128], stray[128], kept[128], got_bytes[8];
+                bipolar handle, length;
+                b32 saved;
+
+                string_copy(string_copy((string_address)sub, (string_address)dir) + string_length((string_address)dir), (string_address) "/sub");
+                string_copy(string_copy((string_address)moved, (string_address)dir) + string_length((string_address)dir), (string_address) "/moved");
+                string_copy(string_copy((string_address)elsewhere, (string_address)dir) + string_length((string_address)dir), (string_address) "/elsewhere");
+                string_copy(string_copy((string_address)note, (string_address)sub) + string_length((string_address)sub), (string_address) "/note.c");
+                string_copy(string_copy((string_address)stray, (string_address)elsewhere) + string_length((string_address)elsewhere), (string_address) "/note.c");
+                string_copy(string_copy((string_address)kept, (string_address)moved) + string_length((string_address)moved), (string_address) "/note.c");
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)sub, 0700);
+                handle = system_open_at_mode(AT_FDCWD, (string_address)note, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                system_write_all((b32)handle, "a\n", 2);
+                system_close(handle);
+                editor.count = 0;
+                check("editor hostile: a file in a directory opens", editor_open((string_address)note) && editor.count == 1);
+                doc_select_set(&editor_now()->view.doc, 0, 0);
+                doc_type(&editor_now()->view.doc, (const p8 address_to) "b", 1);
+                system_call_5(syscall(renameat2), (positive)AT_FDCWD, (positive)sub, (positive)AT_FDCWD, (positive)moved, 0);
+                system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)elsewhere, 0700);
+                system_call_3(syscall(symlinkat), (positive) "elsewhere", (positive)AT_FDCWD, (positive)sub);
+                saved = editor_save(editor_now());
+                handle = system_open_at(AT_FDCWD, (string_address)stray, FILE_READ | O_CLOEXEC);
+                if (handle >= 0)
+                        system_close(handle);
+                check("editor hostile: a save after the file's directory was swapped for a link writes nothing through the link", saved && handle < 0);
+                handle = system_open_at(AT_FDCWD, (string_address)kept, FILE_READ | O_CLOEXEC);
+                length = handle >= 0 ? system_read_once((b32)handle, got_bytes, sizeof(got_bytes)) : -1;
+                if (handle >= 0)
+                        system_close(handle);
+                check("editor hostile: and writes the directory the file was opened in", length == 3 && !memory_compare(got_bytes, "ba\n", 3));
+                editor.count = 0;
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)stray, 0);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)kept, 0);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)sub, 0);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)moved, 0x200);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)elsewhere, 0x200);
+        }
+
+        // A file whose real path is longer than the tab holds: /proc's name of it comes back cut, and a save under the
+        // cut name wrote another file beside it.
+        {
+                static char deep[1024], cut[1024];
+                positive depth = 0, at = string_length(string_copy((string_address)deep, (string_address)dir)), real = got > 0 ? (positive)got - 1 : 0;
+                positive name_length, made[8];
+                bipolar handle;
+                b32 saved;
+
+                real += 1 + at; // the absolute path's length so far: here, a slash, the directory
+                while (real + 101 < 480 && depth < 8)
+                {
+                        deep[at] = '/';
+                        for (positive k = 1; k <= 100; k++)
+                                deep[at + k] = 'd';
+                        at += 101, real += 101;
+                        deep[at] = 0;
+                        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)deep, 0700);
+                        made[depth++] = at;
+                }
+                name_length = 600 - real;
+                deep[at] = '/';
+                for (positive k = 1; k <= name_length; k++)
+                        deep[at + k] = 'n';
+                deep[at + 1 + name_length] = 0;
+                handle = system_open_at_mode(AT_FDCWD, (string_address)deep, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                system_write_all((b32)handle, "a\n", 2);
+                system_close(handle);
+                // The name /proc gives back, cut at 511 bytes: the same directory, the file's name cut short. Made a
+                // second name of the same file, which is the one case where the name in the directory is still it.
+                memory_copy(cut, deep, at + 1 + (511 - real - 1));
+                cut[at + 1 + (511 - real - 1)] = 0;
+                system_call_5(syscall(linkat), (positive)AT_FDCWD, (positive)deep, (positive)AT_FDCWD, (positive)cut, 0);
+                editor.count = 0;
+                check("editor hostile: a file with a real path of 600 bytes opens", real > 300 && real < 511 && editor_open((string_address)deep) && editor.count == 1);
+                doc_type(&editor_now()->view.doc, (const p8 address_to) "b", 1);
+                saved = editor_save(editor_now());
+                {
+                        char was[8];
+                        bipolar length;
+
+                        handle = system_open_at(AT_FDCWD, (string_address)cut, FILE_READ | O_CLOEXEC);
+                        length = handle >= 0 ? system_read_once((b32)handle, was, sizeof(was)) : -1;
+                        if (handle >= 0)
+                                system_close(handle);
+                        check("editor hostile: its save is refused, and the name cut short is not written",
+                              !saved && length == 2 && !memory_compare(was, "a\n", 2));
+                }
+                editor.count = 0;
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)cut, 0);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)deep, 0);
+                while (depth)
+                {
+                        deep[made[--depth]] = 0;
+                        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)deep, 0x200);
+                }
         }
 
         editor.count = 0;
