@@ -90,6 +90,19 @@ Done" ctrl:s > input.log 2>&1
                 sleep 3
                 bin/moonwater debug > debug.terminal.txt 2>&1
         fi
+        if [ "${7:-}" = maximised ]; then
+                # the setting off: the focused editor is maximised (Super+Up on the fifo), then the keyboard is shown by the setting and
+                # put away again; the editor's height is read at each step
+                python3 "$here/osk_input.py" input.fifo keys.txt super:up > max.input.log 2>&1
+                sleep 1
+                bin/moonwater debug > debug.max0.txt 2>&1
+                printf '%s\n' auto > /root/keyboard.onscreen
+                sleep 2
+                bin/moonwater debug > debug.max1.txt 2>&1
+                printf '%s\n' off > /root/keyboard.onscreen
+                sleep 2
+                bin/moonwater debug > debug.max2.txt 2>&1
+        fi
         cp after.img after.shot.img
         kill "$cpid" 2> /dev/null
         wait "$cpid" 2> /dev/null
@@ -109,10 +122,12 @@ unshare -rm sh "$self" session "$work" "$compositor" "$fonts" auto > "$work/sess
 mkdir -p "$work/off"
 unshare -rm sh "$self" session "$work/off" "$compositor" "$fonts" off > "$work/off/session.out" 2>&1 < /dev/null
 # the impostors: a copy of the keyboard's file, and the same file run under another name, each started where the keyboard is
-mkdir -p "$work/copy" "$work/renamed" "$work/de" "$work/fr"
+mkdir -p "$work/copy" "$work/renamed" "$work/de" "$work/fr" "$work/maximised"
 # the letters follow the layout: QWERTZ (de) and AZERTY (fr) are the setting's files, with the setting off (the trace is the proof)
 unshare -rm sh "$self" session "$work/de" "$compositor" "$fonts" off real de > "$work/de/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/fr" "$compositor" "$fonts" off real fr > "$work/fr/session.out" 2>&1 < /dev/null
+# a window maximised with the keyboard shown is made as high as the room above the keyboard, and given its height back when hidden
+unshare -rm sh "$self" session "$work/maximised" "$compositor" "$fonts" off real "" maximised > "$work/maximised/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
 
@@ -222,4 +237,20 @@ else
         row FAIL "with no layout kept the keyboard's letters are QWERTY" "trace: $letters"
 fi
 
+# maximised: made as high as the room above the keyboard (its top kept), and the height it had when the keyboard is put away
+maxh() { python3 -I "$here/osk_debug.py" place "$1" Editor | awk '{ print $4 }'; }
+maxy() { python3 -I "$here/osk_debug.py" place "$1" Editor | awk '{ print $2 }'; }
+h0=$(maxh "$work/maximised/debug.max0.txt"); h1=$(maxh "$work/maximised/debug.max1.txt"); h2=$(maxh "$work/maximised/debug.max2.txt")
+ky=$(python3 -I "$here/osk_debug.py" place "$work/maximised/debug.max1.txt" Keyboard | awk '{ print $2 }')
+y0=$(maxy "$work/maximised/debug.max0.txt"); y1=$(maxy "$work/maximised/debug.max1.txt")
+if [ -n "$h0" ] && [ -n "$h1" ] && [ -n "$ky" ] && [ "$h1" -lt "$h0" ] && [ "$((y1 + h1))" -le "$ky" ] && [ "$y1" = "$y0" ]; then
+        row ok "a maximised editor is made as high as the room above the keyboard (from $h0 to $h1, the keyboard at $ky)"
+else
+        row FAIL "a maximised editor is made as high as the room above the keyboard" "height $h0 then $h1, top $y0 then $y1, keyboard at ${ky:-none}"
+fi
+if [ -n "$h0" ] && [ "$h2" = "$h0" ]; then
+        row ok "the maximised editor gets its height back when the keyboard is put away ($h2)"
+else
+        row FAIL "the maximised editor gets its height back when the keyboard is put away" "height $h0, then $h2"
+fi
 exit "$failures"

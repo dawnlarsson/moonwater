@@ -4218,9 +4218,12 @@ static struct
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
         // The on-screen keyboard (compositor_osk_sync): its setting (COMPOSITOR_OSK_*), whether the last input was a key of a
-        // physical keyboard, whether it is shown, and how far each window was moved up for it (osk_pan), to be moved back.
+        // physical keyboard, whether it is shown, and how far each floating window was moved up for it (osk_pan), to be moved back.
+        // A window that fills its screen is made as high as the room above the keyboard instead: its height (osk_height) and its
+        // edges (osk_edges) are kept, to be given back.
         unsigned char osk_setting, osk_typed, osk_shown;
-        int osk_pan[WINDOWS];
+        int osk_pan[WINDOWS], osk_height[WINDOWS];
+        unsigned int osk_edges[WINDOWS];
         // Where the hand is, before its lead (real_x, real_y), and the class that moved the pointer last (owner). The pointer
         // itself (pointer_x, pointer_y) is where that is led to, and every consumer of motion reads it; at_real is set while a
         // press is handled, so a press is at the real place.
@@ -10347,6 +10350,7 @@ static void compositor_wake_pass(positive now)
 #define COMPOSITOR_SETTING_OPEN (FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
 
 static void compositor_osk_sync(void);
+static void compositor_osk_unpan(int row);
 static int compositor_osk_row(void);
 
 // The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US. A layout that
@@ -12113,6 +12117,7 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
         if (!compositor.showing[row])
                 return;
 
+        compositor_osk_unpan(row);
         if (compositor.arranged[row] == COMPOSITOR_FLOATING)
         {
                 compositor.saved_x[row] = compositor.x[row];
@@ -12121,6 +12126,7 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
                 compositor.saved_h[row] = compositor.h[row];
         }
         compositor_set_rect(row, how, rect);
+        compositor_osk_sync();
 }
 
 /*
@@ -12740,11 +12746,12 @@ static void compositor_fullscreen_row(int row)
 // Back to the rectangle it had, wherever it was put since.
 static void compositor_float(int row)
 {
-        int was[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+        int was[4];
 
         if (compositor.arranged[row] == COMPOSITOR_FLOATING)
                 return;
-
+        compositor_osk_unpan(row);
+        was[0] = compositor.x[row], was[1] = compositor.y[row], was[2] = (int)compositor.w[row], was[3] = (int)compositor.h[row];
         compositor_damage_row(row);
         compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.edges[row] = 0;
@@ -12752,6 +12759,7 @@ static void compositor_float(int row)
         compositor_damage_row(row);
         compositor_want(row, (int)compositor.saved_w[row], (int)compositor.saved_h[row]);
         compositor_glide_start(row, was);
+        compositor_osk_sync();
 }
 
 /*
@@ -12763,7 +12771,10 @@ static void compositor_float(int row)
 */
 static void compositor_float_for_drag(int row)
 {
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+        int least_w, least_h;
+
+        compositor_osk_unpan(row);
+        least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
         int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
         int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
         int in_x = compositor.press_x - compositor.x[row], in_y = compositor.press_y - compositor.y[row];
@@ -13737,6 +13748,7 @@ static void compositor_leave(int row)
                         2 * compositor.buffer, 9, 0, 0, 0);
 
         compositor.osk_pan[row] = 0;
+        compositor.osk_height[row] = 0;
         if (compositor.focus == row)
                 compositor_refocus();
         compositor.woken &= ~(1u << row);
@@ -13871,13 +13883,27 @@ static void compositor_osk_put_away(int row, b32 away)
 }
 
 // The focused row moved up by the overlap with the keyboard's top, as far as its own screen's top allows: nothing when it is
-// already moved or does not overlap.
+// already moved or does not overlap. A window that fills its screen (or a part of it) is not moved: it is made as high as the room
+// above the keyboard, its top kept, and the height it had is kept to be given back (too little room above, it is left as it is).
 static void compositor_osk_pan(int row, int keyboard)
 {
         int x, y, width, height, overlap, room, amount, was;
 
-        if (compositor.osk_pan[row])
+        if (compositor.osk_pan[row] || compositor.osk_height[row])
                 return;
+        if (compositor.arranged[row] != COMPOSITOR_FLOATING)
+        {
+                int above = compositor.y[keyboard] - compositor.y[row], least = WINDOW_MIN_HEIGHT * compositor.scale / 100;
+
+                if (above < least || above >= (int)compositor.h[row])
+                        return;
+                compositor.osk_height[row] = (int)compositor.h[row];
+                compositor.osk_edges[row] = compositor.edges[row];
+                // The edges are none while it is made shorter, so its top stays where it is (the size is taken off the bottom).
+                compositor.edges[row] = 0;
+                compositor_want(row, (int)compositor.w[row], above);
+                return;
+        }
         compositor_output_rect(compositor_screen_of(row), &x, &y, &width, &height);
         overlap = compositor.y[row] + (int)compositor.h[row] - compositor.y[keyboard];
         room = compositor.y[row] - y;
@@ -13890,12 +13916,20 @@ static void compositor_osk_pan(int row, int keyboard)
         compositor.osk_pan[row] = was - compositor.y[row];
 }
 
-// A row moved for the keyboard goes back where it was (it may have moved since: the amount is taken off where it is).
+// A row moved for the keyboard goes back where it was (it may have moved since: the amount is taken off where it is), and a row made
+// shorter for it gets its height and edges back.
 static void compositor_osk_unpan(int row)
 {
-        int amount = compositor.osk_pan[row];
+        int amount = compositor.osk_pan[row], height = compositor.osk_height[row];
 
         compositor.osk_pan[row] = 0;
+        compositor.osk_height[row] = 0;
+        if (height)
+        {
+                compositor.edges[row] = compositor.osk_edges[row];
+                if (compositor.showing[row])
+                        compositor_want(row, (int)compositor.w[row], height);
+        }
         if (amount && compositor.showing[row])
                 compositor_place(row, compositor.x[row], compositor.y[row] + amount);
 }
@@ -13922,7 +13956,7 @@ static void compositor_osk_sync(void)
         if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF)
                 want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_osk_physical();
         for (unsigned int row = 0; row < WINDOWS; row++)
-                if (compositor.osk_pan[row] && (!want || (int)row != focus))
+                if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
                         compositor_osk_unpan((int)row);
         if (keyboard >= 0)
         {
