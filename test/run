@@ -336,7 +336,7 @@ seam_apart()
         case $1 in
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
-        desktop) echo "desktop chrome gpulists" ;;
+        desktop) echo "desktop chrome gpulists gpuanim" ;;
         image) echo "ring0 tier input usb firewall sound" ;;
         engine) echo "gate" ;;
         *) ;;
