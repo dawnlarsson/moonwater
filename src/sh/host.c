@@ -22215,6 +22215,55 @@ static fn host_windows_unmap(const struct windows address_to table)
         anyone, and else from its path; nothing in it is written, and no
         window is taken.
 */
+/* ---- notices: the kernel's own errors and warnings the board has (moonwater notices [clear]) ---- */
+static b32 host_notices(string_address address_to arguments, positive count)
+{
+        static const unsigned int codes[] = {WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_KERNEL_BLUETOOTH,
+                                             WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_KERNEL_PROGRAM};
+        bool clearing = count == 3 && string_equals(arguments[2], "clear");
+        struct windows_issues board;
+        unsigned int shown = 0, cleared = 0;
+
+        if (clearing)
+        {
+                struct windows address_to table = windows_board_map();
+
+                if (!table)
+                        return host_refuse("moonwater notices: the board is not there (the desktop is not running)\n");
+                for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
+                        cleared += windows_issue_clear(table, kernel_notice_key[idx], codes[idx]);
+                host_say(log, "moonwater notices: %p cleared\n", (positive)cleared);
+                log_flush();
+                return true;
+        }
+        const struct windows address_to table;
+        b32 read;
+
+        if (count != 2)
+                return host_refuse("moonwater notices [clear]: the kernel's errors and warnings, or clear them (root)\n");
+        table = host_windows_header();
+        read = table && windows_issues_read(table, &board);
+        if (!read)
+        {
+                if (table)
+                        host_windows_unmap(table);
+                return host_refuse("moonwater notices: the board is not there, or busy; try again\n");
+        }
+        for (int at = 0; at < WINDOWS_ISSUES; at++)
+                if (board.issue[at].used && board.issue[at].code >= WINDOWS_ISSUE_KERNEL_GPU && board.issue[at].code <= WINDOWS_ISSUE_KERNEL_PROGRAM)
+                {
+                        shown++;
+                        host_say(log, "%s: %s, %p records, last %p s ago: %s\n", board.issue[at].key,
+                                 board.issue[at].severity == WINDOWS_ISSUE_ERROR ? (string_address) "error" : (string_address) "warning",
+                                 (positive)board.issue[at].a, (positive)board.issue[at].b, board.issue[at].detail);
+                }
+        if (!shown)
+                host_say(log, "no kernel notices\n");
+        log_flush();
+        host_windows_unmap(table);
+        return true;
+}
+
 static b32 host_debug(string_address address_to arguments, positive count)
 {
         static const string_address refusals[] = {
@@ -24589,6 +24638,7 @@ static const host_row host_rows[] = {
     {null, "clipboard watch [primary]", "a line each time something is copied, the text escaped (root)", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
+    {null, "notices [clear]", "the kernel's own errors and warnings the desktop has (root): clear dismisses them", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},
@@ -25923,6 +25973,7 @@ static b32 host_main()
             {"clipboard", host_clipboard, false},
             {"latency", host_latency, false},
             {"debug", host_debug, true},
+            {"notices", host_notices, false, true},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false, true},
             {"brightness", tune_brightness, false, true},
