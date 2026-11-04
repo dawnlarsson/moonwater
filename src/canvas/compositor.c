@@ -7015,6 +7015,11 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.table->glass[row])
                 return *why = 5, -1;
+        // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
+        // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
+        // the card, after it has drawn the pictures), so none is shown straight.
+        if (__atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+                return *why = 16, -1;
         if (compositor.landing[row])
                 return *why = 4, -1; // a window landing is drawn smaller than its picture
         if (compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
@@ -12522,6 +12527,8 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
         and the row's state 1, or refused (state 2, the whole picture, and counted in list_refused). A picture that is not a list, or a
         list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
 */
+static unsigned char compositor_listed[WINDOWS]; // the row's picture in buffer 0 is the card's drawing of its last list (so a partial list is a change over it)
+
 static int compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
 {
         struct windows *table = compositor.table;
@@ -12533,18 +12540,32 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
         gen = __atomic_load_n(&((unsigned int *)list)[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
         if (gen == table->list_seen[row] || !__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
         {
+                compositor_listed[row] = 0; // no new list with this frame, or no list mode: the frame is the program's pixels
                 table->list_seen[row] = gen;
                 if (__atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)
                         __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
                 return 0;
         }
         table->list_seen[row] = gen;
+        // A list is the frame's changes over the picture the card drew from the last one. After a frame the program painted in pixels (a refused or lost frame)
+        // buffer 0 is not that picture, so the first list after it has to be the whole frame; a partial one is refused (the program then paints that frame in
+        // pixels, whole), or buffer 0 would show the old frame with this frame's band on it, and the window would flicker between the two.
+        if (!compositor_listed[row])
+        {
+                struct ui_draw_view view;
+
+                if (ui_draw_list_open(list, WINDOW_LIST_BYTES, &view) != 1 || view.x0 > 0 || view.y0 > 0 || view.x1 < (int)width || view.y1 < (int)height)
+                        goto refused;
+        }
         if (window_list_valid(list, (int)width, (int)height) &&
             compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
         {
+                compositor_listed[row] = 1;
                 __atomic_store_n(&table->list_state[row], 1u, __ATOMIC_RELEASE);
                 return 1;
         }
+refused:
+        compositor_listed[row] = 0;
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         __atomic_store_n(&table->list_state[row], 2u, __ATOMIC_RELEASE);
         __atomic_add_fetch(&table->list_refused, 1, __ATOMIC_RELEASE);

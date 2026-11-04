@@ -709,7 +709,8 @@ struct windows
         // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
         // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
         // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed; 14 a
-        // finger's mark is drawn over it (`moonwater canvas touch on`); 15 a screen is turned (its displays line), so no window is shown straight.
+        // finger's mark is drawn over it (`moonwater canvas touch on`); 15 a screen is turned (its displays line), so no window is shown straight; 16 the windows'
+        // lists are drawn (list_mode): the card writes the pictures in place, so they are composed and none is shown straight.
         unsigned int unscanned;
         // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
         // and the overlay: 1 found, -1 none or refused, 0 not yet asked.
