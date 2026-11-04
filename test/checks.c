@@ -174308,9 +174308,12 @@ static void pt_release(void *context, void *block, long bytes)
         free(block);
 }
 
+static long pt_now_calls;
+
 static long pt_now(void *context)
 {
         (void)context;
+        pt_now_calls++;
         return pt_clock;
 }
 
@@ -179942,6 +179945,32 @@ static void pt_test_source_oracle(void)
         pulse_client_close(&pt_engine, user);
 }
 
+/* ---- a period in which no stream drains reads no clock: the host's clock is a system call in the service ---- */
+
+static void pt_test_period_clock(void)
+{
+        static unsigned char data[AUDIO_BLOCK * 4 * 8];
+        static unsigned char dst[AUDIO_BLOCK * 4];
+        unsigned long channel, index, missing, chans[4];
+        long slot, before;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 5100, 35, "Clock");
+        memset(data, 0x33, sizeof(data));
+        for (int i = 0; i < 4; i++)
+        {
+                PTCHECK(pt_create(slot, 35, 100 + (unsigned long)i, 0, 0, 0, &channel, &index, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "stream %d is made", i);
+                chans[i] = channel;
+                pt_data(slot, channel, data, sizeof(data), 0, 0);
+        }
+        pt_collect(slot);
+        before = pt_now_calls;
+        pulse_sink_mix(&pt_engine, 0, dst, AUDIO_FORMAT_S16LE, 2, AUDIO_BLOCK);
+        PTCHECK(pt_now_calls - before == 0, "a block of four playing streams that drain nothing reads the clock %ld times (want 0)", pt_now_calls - before);
+        pulse_client_close(&pt_engine, slot);
+}
+
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
 
 static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
@@ -180266,6 +180295,7 @@ int main(void)
         pt_test_remember_users();
         pt_test_event_rights();
         pt_test_source_oracle();
+        pt_test_period_clock();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();

@@ -4216,7 +4216,10 @@ AUDIO_API void pulse_open(struct pulse *p, const struct pulse_host *host)
 static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pulse_sink *sink, long frames)
 {
         unsigned long fill = audio_ring_fill(&s->voice.ring);
-        long played, now = p->host.now(p->host.context);
+        long played;
+
+        // The host's clock is read only where a drain sets its deadline: in the service it is a system call, and a period of
+        // streams that drain nothing reads none of it.
 
         if (s->dying)
         {
@@ -4247,7 +4250,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                         if (s->drain_pending && fill == 0 && !s->drained)
                         {
                                 s->drained = 1;
-                                s->drain_at = now + PULSE_DRAIN_USEC;
+                                s->drain_at = p->host.now(p->host.context) + PULSE_DRAIN_USEC;
                         }
                         return;
                 }
@@ -4270,7 +4273,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                         if (!s->drained)
                         {
                                 s->drained = 1;
-                                s->drain_at = now + PULSE_DRAIN_USEC;
+                                s->drain_at = p->host.now(p->host.context) + PULSE_DRAIN_USEC;
                         }
                 }
                 else if (!s->flushing)
