@@ -33,7 +33,7 @@ start()
 {
         rm -f /run/moonwater/wayland-0
         # shellcheck disable=SC2086
-        "$work/bin/compositor" -H 800x600 "$work/scan.img" $extra > "$work/compositor.log" 2>&1 &
+        "$work/bin/compositor" -H 800x600 $extra "$work/scan.img" > "$work/compositor.log" 2>&1 &
         cpid=$!
         i=0
         while [ ! -S /run/moonwater/wayland-0 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
