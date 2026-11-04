@@ -9482,7 +9482,7 @@ static p32 net_filter_run(const net_filter address_to filter, p32 arch,
                         float f = (float)(scaled & 0xffffffffu) * (1.0f / 4294967296.0f);                                                  \
                         const float *a = h + phase * taps, *b = a + taps;                                                                  \
                         const float *x0 = b0 + index, *x1 = b1 + index;                                                                    \
-                        float coefficient[512], s0[8] = {0}, s1[8] = {0};                                                                  \
+                        float coefficient[1024], s0[8] = {0}, s1[8] = {0};                                                                  \
                                                                                                                                           \
                         for (unsigned long k = 0; k < taps; k++)                                                                           \
                                 coefficient[k] = a[k] + f * (b[k] - a[k]);                                                                 \
@@ -174430,6 +174430,11 @@ static void al_polyphase_walk(int bits, al_faults *faults)
 
                                 al_polyphase_case(taps_list[ti], phases, counts[ci], pos, step, front, 0, bits, faults);
                         }
+        //      The longest filter the mixer makes: 1024 taps (a ratio of eight, 384 kHz into 48), at 64 phases so the table fits its region.
+        for (unsigned long long ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++)
+                for (int front = 0; front < 2; front++)
+                        al_polyphase_case(1024, 64, counts[ci], front ? (al_next() & 0xffffffffu) : (al_next() % 12) << 32 | (al_next() & 0xffffffffu),
+                                          al_polyphase_steps[(ci + front) % AL_STEPS], front, 0, bits, faults);
         //      Random shapes.
         for (int round = 0; round < 700; round++)
         {
@@ -177077,14 +177082,23 @@ static void au_measure(long rin, long rout, double f, double *snr, double *gain_
         audio_table_give(table);
 }
 
+static int au_exact_pair(long rin, long rout)
+{
+        struct audio_table *t = audio_table_take(rin, rout);
+        int exact = t && t->exact;
+
+        audio_table_give(t);
+        return exact;
+}
+
 static void au_test_resampler(void)
 {
         static const long pairs[][2] = {{44100, 48000}, {48000, 44100}, {96000, 48000}, {22050, 48000}, {8000, 48000}, {192000, 48000},
                                         {48000, 96000}, {32000, 48000}, {11025, 48000}, {88200, 44100}, {384000, 48000}, {48000, 8000 * 6}};
-        static const double fractions[] = {0.01, 0.1, 0.3, 0.6, 0.8, 0.88, 0.9};
+        static const double fractions[] = {0.01, 0.1, 0.3, 0.6, 0.8, 0.85};
         double worst_snr = 1000, worst_gain = 0;
 
-        printf("  resampler: SNR against the sine itself, at 0.01 to 0.9 of the lower Nyquist rate\n");
+        printf("  resampler: SNR against the sine itself, at 0.01 to 0.85 of the lower Nyquist rate (the passband is flat there)\n");
         for (unsigned p = 0; p < sizeof(pairs) / sizeof(pairs[0]); p++)
         {
                 long rin = pairs[p][0], rout = pairs[p][1];
@@ -177103,8 +177117,10 @@ static void au_test_resampler(void)
                         high = snr > high ? snr : high;
                         gain_low = gain < gain_low ? gain : gain_low;
                         gain_high = gain > gain_high ? gain : gain_high;
-                        AUCHECK(snr >= 96.0, "%ld to %ld at %.0f Hz: SNR %.1f dB", rin, rout, f, snr);
-                        AUCHECK(fabs(gain) <= 0.005, "%ld to %ld at %.0f Hz: gain %+.4f dB", rin, rout, f, gain);
+                        // An exact table has a row for each place, so nothing is interpolated: the 24-bit floor. The others interpolate
+                        // linearly between 512 phases, which is about 108 dB (the next step is a higher-order interpolation, in the kernel).
+                        AUCHECK(snr >= (au_exact_pair(rin, rout) ? 130.0 : 105.0), "%ld to %ld at %.0f Hz: SNR %.1f dB", rin, rout, f, snr);
+                        AUCHECK(fabs(gain) <= 0.001, "%ld to %ld at %.0f Hz: gain %+.4f dB", rin, rout, f, gain);
                 }
                 printf("    %6ld -> %6ld  SNR %5.1f to %5.1f dB, gain %+.4f to %+.4f dB\n", rin, rout, low, high, gain_low, gain_high);
                 worst_snr = low < worst_snr ? low : worst_snr;
@@ -177122,7 +177138,7 @@ static void au_test_aliasing(void)
                 long rin, rout;
                 double f;
         } tones[] = {{96000, 48000, 27000}, {96000, 48000, 30000}, {96000, 48000, 40000}, {96000, 48000, 47000}, {192000, 48000, 60000},
-                     {192000, 48000, 90000}, {48000, 44100, 23500}, {48000, 44100, 24000}, {48000, 32000, 18000}, {44100, 22050, 12500}};
+                     {192000, 48000, 90000}, {48000, 44100, 22500}, {48000, 44100, 23500}, {48000, 44100, 24000}, {48000, 32000, 18000}, {44100, 22050, 12500}};
         double worst = -1000;
 
         for (unsigned t = 0; t < sizeof(tones) / sizeof(tones[0]); t++)
@@ -177234,7 +177250,7 @@ static void au_test_voice_resampling(void)
                 in[i] = (float)(0.5 * sin(2 * M_PI * 1000.0 * (double)i / 44100.0));
         audio_sink_open(&au_sink, 48000, 2);
         AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 44100, 0, 48000, au_memory[0], sizeof(au_memory[0])) == 0, "a resampling voice opens");
-        AUCHECK(audio_voice_delay(au_voice) == 32, "its latency is half its taps: %ld", audio_voice_delay(au_voice));
+        AUCHECK(audio_voice_delay(au_voice) == AUDIO_TAPS / 2, "its latency is half its taps: %ld", audio_voice_delay(au_voice));
         au_steady(au_voice);
         audio_ring_put(&au_voice->ring, (const unsigned char *)in, (unsigned long)n * 4);
         for (;;)
@@ -177327,8 +177343,8 @@ static void au_test_tables(void)
                 static const struct
                 {
                         long rin, rout, exact, phases, taps;
-                } kinds[] = {{44100, 48000, 1, 160, 64}, {48000, 44100, 1, 147, 128}, {22050, 48000, 1, 320, 64}, {32000, 48000, 1, 3, 64}, {8000, 48000, 1, 6, 64},
-                             {96000, 48000, 1, 1, 128}, {192000, 48000, 1, 1, 256}, {11025, 48000, 0, 512, 64}, {44117, 48000, 0, 512, 64}};
+                } kinds[] = {{44100, 48000, 1, 160, 128}, {48000, 44100, 1, 147, 256}, {22050, 48000, 1, 320, 128}, {32000, 48000, 1, 3, 128}, {8000, 48000, 1, 6, 128},
+                             {96000, 48000, 1, 1, 256}, {192000, 48000, 1, 1, 512}, {11025, 48000, 0, 512, 128}, {44117, 48000, 0, 512, 128}};
 
                 for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
                 {
@@ -177582,6 +177598,243 @@ static void au_test_speed(void)
         }
 }
 
+#define AUQ_MAX_OUT (48000 * 4)
+static double AUQ_PI = 3.14159265358979323846;
+
+/* ---- client encoders (independent of mix.c: standard G.711 definitions, and the scale of each format's own range) ---- */
+static int auq_clamp(double v, double lo, double hi) { return v < lo ? (int)lo : v > hi ? (int)hi : (int)v; }
+static int auq_round(double v) { return (int)floor(v + 0.5); }
+
+static double auq_alaw_value(int byte)
+{
+        int a = byte ^ 0x55, t = (a & 0x0f) << 4, seg = (a & 0x70) >> 4;
+
+        if (seg == 0) t += 8; else { t += 0x108; if (seg > 1) t <<= seg - 1; }
+        return ((a & 0x80) ? t : -t) / 32768.0;
+}
+static double auq_ulaw_value(int byte)
+{
+        int u = ~byte & 0xff, t = (((u & 0x0f) << 3) + 0x84) << ((u & 0x70) >> 4);
+
+        return ((u & 0x80) ? 0x84 - t : t - 0x84) / 32768.0;
+}
+
+static int auq_nearest_law(double x, int ulaw)
+{
+        int best = 0;
+        double bd = 1e9;
+
+        for (int b = 0; b < 256; b++)
+        {
+                double d = fabs((ulaw ? auq_ulaw_value(b) : auq_alaw_value(b)) - x);
+                if (d < bd) { bd = d; best = b; }
+        }
+        return best;
+}
+
+/* bytes of one frame sample for a client format, x in [-1, 1] */
+static void auq_put_sample(unsigned char *q, long format, double x)
+{
+        long bytes = audio_format_bytes(format);
+        int v;
+        unsigned int u;
+
+        switch (format)
+        {
+        case AUDIO_FORMAT_U8: q[0] = (unsigned char)(auq_clamp(auq_round(x * 128) + 128, 0, 255)); break;
+        case AUDIO_FORMAT_ALAW: q[0] = (unsigned char)auq_nearest_law(x, 0); break;
+        case AUDIO_FORMAT_ULAW: q[0] = (unsigned char)auq_nearest_law(x, 1); break;
+        case AUDIO_FORMAT_S16LE: case AUDIO_FORMAT_S16BE:
+                v = auq_clamp(auq_round(x * 32768), -32768, 32767); u = (unsigned int)v & 0xffff;
+                if (format == AUDIO_FORMAT_S16LE) { q[0] = u; q[1] = u >> 8; } else { q[1] = u; q[0] = u >> 8; }
+                break;
+        case AUDIO_FORMAT_S24LE: case AUDIO_FORMAT_S24BE:
+                v = auq_clamp(auq_round(x * 8388608), -8388608, 8388607); u = (unsigned int)v & 0xffffff;
+                if (format == AUDIO_FORMAT_S24LE) { q[0] = u; q[1] = u >> 8; q[2] = u >> 16; } else { q[2] = u; q[1] = u >> 8; q[0] = u >> 16; }
+                break;
+        case AUDIO_FORMAT_S24_32LE: case AUDIO_FORMAT_S24_32BE:
+                v = auq_clamp(auq_round(x * 8388608), -8388608, 8388607); u = (unsigned int)v & 0xffffff;
+                if (format == AUDIO_FORMAT_S24_32LE) { q[0] = u; q[1] = u >> 8; q[2] = u >> 16; q[3] = 0; }
+                else { q[0] = 0; q[1] = u >> 16; q[2] = u >> 8; q[3] = u; }
+                break;
+        case AUDIO_FORMAT_S32LE: case AUDIO_FORMAT_S32BE:
+                {
+                        long long w = (long long)floor(x * 2147483648.0 + 0.5);
+                        w = w > 2147483647LL ? 2147483647LL : w < -2147483648LL ? -2147483648LL : w;
+                        u = (unsigned int)(int)w;
+                }
+                if (format == AUDIO_FORMAT_S32LE) { q[0] = u; q[1] = u >> 8; q[2] = u >> 16; q[3] = u >> 24; }
+                else { q[3] = u; q[2] = u >> 8; q[1] = u >> 16; q[0] = u >> 24; }
+                break;
+        case AUDIO_FORMAT_F32LE: case AUDIO_FORMAT_F32BE:
+                {
+                        float f = (float)x;
+
+                        memcpy(&u, &f, 4);
+                        if (format == AUDIO_FORMAT_F32LE) { q[0] = u; q[1] = u >> 8; q[2] = u >> 16; q[3] = u >> 24; }
+                        else { q[3] = u; q[2] = u >> 8; q[1] = u >> 16; q[0] = u >> 24; }
+                }
+                break;
+        }
+        (void)bytes;
+}
+
+/* ---- the pipeline: client stream -> voice -> sink -> card bytes -> decoded floats (card channel 0) ---- */
+static double auq_out[AUQ_MAX_OUT];
+
+/* signal(t) for the client's frames; returns output frames written to auq_out */
+static long auq_run(long cfmt, long cch, long crate, long card_fmt, long card_ch, long orate, double seconds, double (*signal)(double t, int ch), double volume)
+{
+        static unsigned char client[48000 * 4 * 8 * 4];
+        static unsigned char ring[48000 * 4 * 8 * 4];
+        static unsigned char card[512 * 8 * 4];
+        static float plane_store[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
+        float *planes[AUDIO_CHANNELS_MAX];
+        long bytes = audio_format_bytes(cfmt), frame = bytes * cch, frames_in = (long)(crate * seconds), frames_out = (long)(orate * seconds);
+        long fed = 0, written = 0;
+        struct audio_sink sink;
+        struct audio_voice voice;
+
+        for (long n = 0; n < frames_in; n++)
+                for (long c = 0; c < cch; c++)
+                        auq_put_sample(client + n * frame + c * bytes, cfmt, signal((double)n / crate, (int)c) * volume);
+        for (long c = 0; c < AUDIO_CHANNELS_MAX; c++)
+                planes[c] = plane_store[c];
+        audio_sink_open(&sink, orate, 2);
+        if (audio_voice_open(&voice, cfmt, cch, crate, NULL, orate, ring, sizeof(ring)) < 0)
+                return -1;
+        while (written < frames_out)
+        {
+                long period = frames_out - written < AUDIO_BLOCK ? frames_out - written : AUDIO_BLOCK;
+                long room, put;
+                int drain = fed >= frames_in;
+
+                audio_sink_begin(&sink, period);
+                room = (long)audio_ring_room(&voice.ring);
+                put = frames_in - fed < room / frame ? frames_in - fed : room / frame;
+                if (put > 0)
+                {
+                        audio_ring_put(&voice.ring, client + fed * frame, (unsigned long)(put * frame));
+                        fed += put;
+                }
+                audio_voice_mix(&sink, &voice, period, drain);
+                audio_sink_end(&sink, card, card_fmt, card_ch, period);
+                audio_decode(card_fmt, card, period, card_ch, planes);
+                for (long i = 0; i < period; i++)
+                        auq_out[written + i] = planes[0][i];
+                written += period;
+        }
+        audio_voice_close(&voice);
+        return written;
+}
+
+/* ---- metrics: least-squares fit of a cos + b sin + c over a window; SINAD = fitted tone over everything else ---- */
+static void auq_fit(const double *y, long n, double f, double rate, double *amp, double *sinad)
+{
+        double m[3][4] = {{0}}, s[3], sol[3];
+        double w = 2 * AUQ_PI * f / rate;
+
+        for (long k = 0; k < n; k++)
+        {
+                double b[3] = {cos(w * k), sin(w * k), 1};
+
+                for (int i = 0; i < 3; i++)
+                {
+                        for (int j = 0; j < 3; j++)
+                                m[i][j] += b[i] * b[j];
+                        m[i][3] += b[i] * y[k];
+                }
+        }
+        for (int i = 0; i < 3; i++) s[i] = m[i][3];
+        for (int i = 0; i < 3; i++)
+        {
+                int p = i;
+
+                for (int r = i + 1; r < 3; r++) if (fabs(m[r][i]) > fabs(m[p][i])) p = r;
+                for (int j = 0; j < 4; j++) { double t = m[i][j]; m[i][j] = m[p][j]; m[p][j] = t; }
+                for (int r = 0; r < 3; r++) if (r != i)
+                {
+                        double g = m[r][i] / m[i][i];
+                        for (int j = 0; j < 4; j++) m[r][j] -= g * m[i][j];
+                }
+        }
+        for (int i = 0; i < 3; i++) sol[i] = m[i][3] / m[i][i];
+        (void)s;
+        double sig = 0, res = 0;
+        for (long k = 0; k < n; k++)
+        {
+                double tone = sol[0] * cos(w * k) + sol[1] * sin(w * k), e = y[k] - tone - sol[2];
+
+                sig += tone * tone;
+                res += e * e;
+        }
+        *amp = sqrt(sol[0] * sol[0] + sol[1] * sol[1]);
+        *sinad = res > 0 ? 10 * log10(sig / res) : 999;
+}
+
+static double auq_sine_amp, auq_sine_freq;
+static double auq_sine(double t, int ch) { (void)ch; return auq_sine_amp * sin(2 * AUQ_PI * auq_sine_freq * t); }
+
+static const char *auq_fname(long f)
+{
+        static const char *names[] = {"U8", "ALAW", "ULAW", "S16LE", "S16BE", "F32LE", "F32BE", "S32LE", "S32BE", "S24LE", "S24BE", "S24_32LE", "S24_32BE"};
+        return names[f];
+}
+
+static double auq_ideal_bits(long fmt)
+{
+        switch (fmt)
+        {
+        case AUDIO_FORMAT_U8: case AUDIO_FORMAT_ALAW: case AUDIO_FORMAT_ULAW: return 8;
+        case AUDIO_FORMAT_S16LE: case AUDIO_FORMAT_S16BE: return 16;
+        case AUDIO_FORMAT_S24LE: case AUDIO_FORMAT_S24BE: case AUDIO_FORMAT_S24_32LE: case AUDIO_FORMAT_S24_32BE: return 24;
+        case AUDIO_FORMAT_F32LE: case AUDIO_FORMAT_F32BE: return 24;
+        default: return 31;
+        }
+}
+
+
+/* ---- the quality of the whole path: every client format into every card format, against the format's own floor ---- */
+
+static void au_test_format_matrix(void)
+{
+        static const long clients[] = {AUDIO_FORMAT_U8, AUDIO_FORMAT_ALAW, AUDIO_FORMAT_ULAW, AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S16BE, AUDIO_FORMAT_S24LE,
+                                       AUDIO_FORMAT_S24BE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S24_32BE, AUDIO_FORMAT_S32LE, AUDIO_FORMAT_S32BE, AUDIO_FORMAT_F32LE,
+                                       AUDIO_FORMAT_F32BE};
+        static const long cards[] = {AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S24LE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S32LE, AUDIO_FORMAT_F32LE};
+        double worst_margin = 1000;
+
+        printf("  quality: 1 kHz at -6 dBFS, 48000 stereo, client format (rows) into card format (columns): SINAD in dB\n");
+        for (unsigned f = 0; f < sizeof(clients) / sizeof(clients[0]); f++)
+        {
+                printf("    %-9s", auq_fname(clients[f]));
+                for (unsigned c = 0; c < sizeof(cards) / sizeof(cards[0]); c++)
+                {
+                        double amp, sinad, floor_db, bits = auq_ideal_bits(clients[f]) < auq_ideal_bits(cards[c]) ? auq_ideal_bits(clients[f]) : auq_ideal_bits(cards[c]);
+
+                        // The float bus holds 24 bits a sample, so no path is better than that however wide its ends are.
+                        bits = bits < 24.0 ? bits : 24.0;
+                        long n;
+
+                        auq_sine_amp = 0.5;
+                        auq_sine_freq = 1000;
+                        n = auq_run(clients[f], 2, 48000, cards[c], 2, 48000, 1.0, auq_sine, 1.0);
+                        auq_fit(auq_out + 4096, n - 8192, 1000, 48000, &amp, &sinad);
+                        floor_db = 6.02 * bits + 1.76 - 6.02;
+                        printf(" %6.1f", sinad);
+                        // mu-law at this level is about 38 dB, its own curve, not the 8-bit uniform floor.
+                        AUCHECK(sinad >= (clients[f] == AUDIO_FORMAT_ULAW ? 34.0 : floor_db - 3.0), "%s into %s: SINAD %.1f dB (floor %.1f)",
+                                auq_fname(clients[f]), auq_fname(cards[c]), sinad, floor_db);
+                        AUCHECK(fabs(20 * log10(amp / 0.5)) < 0.1, "%s into %s: gain %+.4f dB", auq_fname(clients[f]), auq_fname(cards[c]),
+                                20 * log10(amp / 0.5));
+                        if (sinad - floor_db < worst_margin)
+                                worst_margin = sinad - floor_db;
+                }
+                printf("\n");
+        }
+        printf("  quality: worst SINAD margin over the narrower format's floor %.1f dB\n", worst_margin);
+}
+
 /* ---- what a caller may hand the engine: a format it does not make, a gain that is not a number ---- */
 
 static void au_test_hardening(void)
@@ -177681,6 +177934,7 @@ int main(void)
         au_test_resampler();
         au_test_aliasing();
         au_test_hardening();
+        au_test_format_matrix();
         au_test_resampler_streaming();
         au_test_voice_resampling();
         au_test_fuzz();
@@ -194429,6 +194683,10 @@ static const al_shape al_shapes[] = {
     {"96 kHz into 48 kHz, 128 taps", 128, 256, 256, 3, 8589934592ull},
     {"192 kHz into 48 kHz, 256 taps", 256, 128, 256, 2, 17179869184ull},
     {"44.1 kHz into 48 kHz, 16 frames", 64, 512, 16, 3, 3946001203ull},
+    // The taps of the design of 2026-11-04 (mix.c: 128 a ratio of one or less, 256 at 2:1, 512 at 4:1; cutoff 0.95 of the lower Nyquist rate).
+    {"44.1 kHz into 48 kHz, 128 taps", 128, 512, 256, 3, 3946001203ull},
+    {"96 kHz into 48 kHz, 256 taps", 256, 256, 256, 3, 8589934592ull},
+    {"192 kHz into 48 kHz, 512 taps", 512, 128, 256, 2, 17179869184ull},
 };
 
 #define AL_VOICES 3

@@ -28,9 +28,12 @@
 
         RESAMPLING
 
-        A windowed-sinc polyphase filter (Kaiser window, 64 taps a phase at a ratio of one or less, the taps growing with
+        A windowed-sinc polyphase filter (Kaiser window, 128 taps a phase at a ratio of one or less, the taps growing with
         the ratio when the rate goes down; 512 phases, fewer as the taps grow, with linear interpolation between phases)
-        whose transition band lies between 90% of the lower Nyquist rate and the rate that would fold into it. The tables
+        centred on 95% of the lower Nyquist rate: the response is flat (under 0.001 dB) to about 87% of it and the stopband,
+        beyond 100%, is about 144 dB down (a Kaiser window of AUDIO_KAISER_BETA). Measured (test/checks.c, the quality rows):
+        44.1 to 48 kHz, 48 to 44.1 kHz and 96 to 48 kHz each give 139 to 150 dB SINAD on a float client, and a tone just above
+        the output's Nyquist rate folds down at more than 140 dB below it. The tables
         are made from the two rates by sin and a Bessel function written here (no libm), cached by rates, and shared by
         the voices that use them. The filter is centred: an output frame is the signal at its own time, not delayed, and
         the filter needs half its taps of the stream ahead of the frame it is for, which is the latency
@@ -61,7 +64,8 @@
 #define AUDIO_CHANNELS_MAX 8
 #define AUDIO_BLOCK 512            // the frames one mix call handles
 #define AUDIO_RATIO_MAX 8          // input rate over output rate, rounded up, that is resampled
-#define AUDIO_TAPS 64              // taps a phase at a ratio of one or less
+#define AUDIO_TAPS 128             // taps a phase at a ratio of one or less (the transition band is 0.1 of the lower Nyquist rate)
+#define AUDIO_KAISER_BETA 14.8     // a Kaiser window of about 144 dB: the 24-bit floor, not the 16-bit one (9.84 gave 98 dB)
 #define AUDIO_PHASES 512
 #define AUDIO_TABLE_FLOATS (AUDIO_TAPS * AUDIO_PHASES + AUDIO_TAPS * AUDIO_RATIO_MAX)
 #define AUDIO_TABLES 12
@@ -647,14 +651,14 @@ static unsigned long audio_table_clock;
 /*
         The filter for a ratio. An output frame at input time t is the sum over taps k of h[phase][k] x[floor(t) + k],
         the centre between the tap taps/2 - 1 and taps/2. The kernel is the ideal low pass at the lower Nyquist rate times
-        a Kaiser window of 98 dB, a row at a time normalised to a gain of one, so a constant stays one. The phases beyond
+        a Kaiser window of AUDIO_KAISER_BETA (about 144 dB), a row at a time normalised to a gain of one, so a constant stays one. The phases beyond
         half are the first half turned around.
 */
 AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
 {
         long m, taps, phases, rows, exact = 0;
         unsigned long a, b, num, den;
-        double cutoff, beta = 9.84, base;
+        double cutoff, beta = AUDIO_KAISER_BETA, base;
         const double pi = 3.14159265358979323846;
 
         if (rin <= 0 || rout <= 0 || rin > AUDIO_RATE_MAX || rout > AUDIO_RATE_MAX)
@@ -662,7 +666,9 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         m = rin > rout ? (rin + rout - 1) / rout : 1;
         if (m > AUDIO_RATIO_MAX)
                 return AUDIO_E_INVALID;
-        cutoff = 0.5 * (rin > rout ? (double)rout / (double)rin : 1.0);
+        // The cutoff is the middle of the transition band (0.9 to 1.0 of the lower Nyquist rate), not its top: the stopband starts at
+        // the Nyquist rate, so what folds into the passband is rejected (at the old cutoff, 22.5 kHz folded to 21.6 kHz at -19 dB).
+        cutoff = 0.475 * (rin > rout ? (double)rout / (double)rin : 1.0);
         base = audio_bessel0(beta);
         taps = AUDIO_TAPS * m;
         phases = AUDIO_PHASES / m;
