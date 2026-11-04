@@ -172470,6 +172470,18 @@ static void pt_test_info(void)
                 pt_command(slot, PULSE_COMMAND_GET_SINK_INFO, 13, &w);
                 pt_collect(slot);
                 PTCHECK(pt_expect_error(13, PULSE_ERR_NOENTITY), "no such sink");
+                w.n = 0;
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, "1");
+                pt_command(slot, PULSE_COMMAND_GET_SINK_INFO, 131, &w);
+                pt_collect(slot);
+                PTCHECK(pt_find(PULSE_COMMAND_REPLY) && pt_find(PULSE_COMMAND_REPLY)->tag == 131, "a sink named by its number is that index");
+                w.n = 0;
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, "9");
+                pt_command(slot, PULSE_COMMAND_GET_SINK_INFO, 132, &w);
+                pt_collect(slot);
+                PTCHECK(pt_expect_error(132, PULSE_ERR_NOENTITY), "and a number with no sink is no sink");
                 pt_command(slot, PULSE_COMMAND_GET_SOURCE_INFO_LIST, 14, 0);
                 pt_collect(slot);
                 f = pt_find(PULSE_COMMAND_REPLY);

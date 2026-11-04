@@ -44,12 +44,14 @@ function moonwater_ctrl_alt_delete {
 # one compositor and the next; a desktop that is not the compositor's is what `desktop boot` starts.
 function moonwater_canvas_on {
   bus_start
+  audio_start
   desktop_start
   moonwater desktop boot
 }
 
 function moonwater_canvas_off {
   desktop_stop
+  audio_stop
   bus_stop
 }
 
@@ -101,6 +103,50 @@ function bus_stop {
   kill $(cat /run/moonwater/bus.pid) 2> /dev/null
   kill $(cat /run/moonwater/sessionbus.pid) 2> /dev/null
   rm -f /run/moonwater/bus.pid /run/moonwater/sessionbus.pid
+}
+
+# The sound server (src/audio): where a program plays its sound (PULSE_SERVER=unix:/run/moonwater/pulse/native) and where
+# the mixer and the tray find the volumes. A process of its own, under a supervisor of its own, like the bus: started again
+# at once, after half a second and after two, and given up after four short lives. `moonwater audio server off` keeps it from
+# starting. With no sound card it plays to a clock, so the programs start all the same.
+function audio_supervise {
+  audio_fails=0
+  while :; do
+    audio_began=$SECONDS
+    /audio > /dev/kmsg 2>&1 &
+    audio_pid=$!
+    echo $audio_pid > /run/moonwater/audio.pid
+    wait $audio_pid
+    [ $((SECONDS - audio_began)) -ge 30 ] && audio_fails=0
+    audio_fails=$((audio_fails + 1))
+    if [ $audio_fails -ge 4 ]; then
+      echo "audio: the sound server ended $audio_fails times in a row and is not started again" > /dev/kmsg
+      break
+    fi
+    case $audio_fails in
+    2) sleep 0.5 ;;
+    3) sleep 2 ;;
+    esac
+  done
+  rm -f /run/moonwater/audio.supervisor /run/moonwater/audio.pid
+}
+
+function audio_start {
+  [ -x /audio ] || return 0
+  case $(cat /root/audio.server 2> /dev/null) in
+  off*) return 0 ;;
+  esac
+  if [ -s /run/moonwater/audio.supervisor ] && kill -0 $(cat /run/moonwater/audio.supervisor) 2> /dev/null; then
+    return
+  fi
+  (audio_supervise) > /dev/null 2>&1 &
+  echo $! > /run/moonwater/audio.supervisor
+}
+
+function audio_stop {
+  kill $(cat /run/moonwater/audio.supervisor) 2> /dev/null
+  kill $(cat /run/moonwater/audio.pid) 2> /dev/null
+  rm -f /run/moonwater/audio.supervisor /run/moonwater/audio.pid
 }
 
 # The desktop: the compositor, the kernel log and a terminal on it, under a

@@ -896,12 +896,59 @@ AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *des
         return -1;
 }
 
+/*
+        The sink is another card now (the person chose another device, or the card went and the clock took over): its name,
+        its description and its rate. The streams on it are played at the new rate, from where they were; a stream that
+        cannot be (no table for its ratio) is ended. Clients are told that the sink and the server changed.
+*/
+static void pulse_stream_end(struct pulse *p, struct pulse_stream *s);
+
+AUDIO_API void pulse_sink_reconfigure(struct pulse *p, long slot, const char *name, const char *description, long rate)
+{
+        struct pulse_sink *sink = p->sink + slot;
+        float master = sink->mix.master_target;
+
+        pulse_copy(sink->name, PULSE_NAME, name);
+        pulse_copy(sink->description, PULSE_DESCRIPTION, description);
+        if (rate != sink->rate)
+        {
+                sink->rate = rate;
+                audio_sink_open(&sink->mix, rate, 2);
+                sink->mix.master_target = sink->mix.master_now = master;
+                for (int i = 0; i < PULSE_STREAMS; i++)
+                        if (p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot && audio_voice_retarget(&p->stream[i].voice, rate) < 0)
+                                pulse_stream_end(p, p->stream + i);
+        }
+        pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)slot);
+        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);
+        pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
+}
+
+// A name that is all digits is a number, as PulseAudio reads it: `pactl set-sink-volume 0 30%` names its sink 0. -1 when it is not one.
+static long pulse_number(const char *name)
+{
+        long value = 0;
+
+        if (!name || !name[0])
+                return -1;
+        for (; *name; name++)
+        {
+                if (*name < '0' || *name > '9' || value > 100000)
+                        return -1;
+                value = value * 10 + (*name - '0');
+        }
+        return value;
+}
+
 static long pulse_sink_named(struct pulse *p, const char *name)
 {
+        long number;
+
         for (long i = 0; i < PULSE_SINKS; i++)
                 if (p->sink[i].used && pulse_equal(p->sink[i].name, name))
                         return i;
-        return -1;
+        number = pulse_number(name);
+        return number >= 0 && number < PULSE_SINKS && p->sink[number].used ? number : -1;
 }
 
 static float pulse_mean_gain(const unsigned long *volume, long n)
@@ -1882,6 +1929,12 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
         PULSE_NEED_AUTH();
+        // A sink or a source named by a number is that index.
+        if (name && pulse_number(name) >= 0 && (command == PULSE_COMMAND_GET_SINK_INFO || command == PULSE_COMMAND_GET_SOURCE_INFO))
+        {
+                index = (unsigned long)pulse_number(name);
+                name = 0;
+        }
         pulse_reply_begin(p, &w, tag);
         switch (command)
         {
