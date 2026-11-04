@@ -174,7 +174,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="gpulists gpuanim wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
 
@@ -260,6 +260,7 @@ describe()
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
         osk) echo "the on-screen keyboard: the headless compositor, a terminal with the keys and the keyboard, typed on by the pointer (a capital, the numbers page, a held Back), the shell's files are the proof (test/osk_e2e.sh)" ;;
         gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
+        gpuanim)  echo "the animations sampled as the scan image is written: the headless card's screen in three sessions (lists on, lists off, the processor), each animation step counted for torn, foreign and flipflop frames (test/gpu_anim_flicker.sh)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
         issues)   echo "the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board that says so, the seqlock a reader checks and a hostile copy" ;;
         dbus)     echo "the session bus (src/dbus): the wire, the authentication, names, match rules, routing, the Settings portal, two dozen kinds of message that end a connection, caps and a fuzz; and sd-bus, libdbus and GDBus against the sessionbus tool" ;;
@@ -6684,6 +6685,37 @@ lane_gpulists()
         else
                 tally gpulists 0 1
                 note "gpulists: $status rows failed (the rows above)"
+        fi
+        return "$status"
+)
+
+#       The animations, sampled as the scan image is written (test/gpu_anim_flicker.sh): the headless compositor composes on the card with
+#       the settings and the mixer in three sessions (the card's lists on, the lists off, the processor), the same steps driven over the
+#       evdev fifo, and a sampler that copies the image as fast as it can. Each step's distinct frames are counted for torn, foreign and
+#       flipflop frames. Information for now: the counts print, the lane passes when the sessions ran. KEEP=DIR keeps the work directory.
+lane_gpuanim()
+(
+        work=${GPU_ANIM_WORK:-$(mktemp -d)}
+        if [ -z "${GPU_ANIM_WORK:-}" ]; then trap 'rm -rf "$work"' EXIT; fi
+        trap 'exit 130' INT; trap 'exit 143' TERM
+        if [ ! -c /dev/dri/renderD128 ]; then
+                echo "gpuanim: no render node here, the card composes nothing: skipped"
+                tally gpuanim 1 1
+                return 0
+        fi
+        if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
+                note "gpuanim: the shell binary did not build"
+                tally gpuanim 0 1
+                return 1
+        fi
+        sh test/gpu_anim_flicker.sh "$work/shell" "$work/anim" > "$work/lane.out" 2>&1
+        status=$?
+        cat "$work/lane.out"
+        if [ "$status" = 0 ]; then
+                tally gpuanim 1 1
+        else
+                tally gpuanim 0 1
+                note "gpuanim: $status rows failed (the rows above)"
         fi
         return "$status"
 )
