@@ -22322,6 +22322,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
         }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
+        if (table->refused && table->refused_error)
+                host_say(log, "  refused error   %p (the kernel's, as a number: 22 is EINVAL, 12 ENOMEM, 95 EOPNOTSUPP)\n", (positive)table->refused_error);
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
                  table->unscanned < sizeof(reasons) / sizeof(reasons[0]) ? reasons[table->unscanned] : (string_address) "?");
         host_debug_inputs(table);

@@ -6055,7 +6055,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
                 int fd;
         } prime = {0, 0, -1};
         struct compositor_fb2 fb = {0};
-        long dmabuf;
+        long dmabuf, made;
 
         if (compositor.scan_fb[row][which] || !compositor.table_memfd || compositor.direct_refused)
                 return compositor.scan_fb[row][which];
@@ -6067,6 +6067,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
                 {
                         compositor.direct_refused = 1;
                         compositor.table->refused = 1;
+                        compositor.table->refused_error = (unsigned int)-handle;
                         return 0;
                 }
                 compositor.udmabuf = (int)handle + 1;
@@ -6083,14 +6084,16 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         {
                 compositor.direct_refused = 1;
                 compositor.table->refused = 2;
+                compositor.table->refused_error = (unsigned int)-dmabuf;
                 return 0;
         }
         prime.fd = (int)dmabuf;
-        if (system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime) != 0)
+        if ((made = system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime)) != 0)
         {
                 system_close(dmabuf);
                 compositor.direct_refused = 1;
                 compositor.table->refused = 3;
+                compositor.table->refused_error = (unsigned int)-made;
                 return 0;
         }
         system_close(dmabuf);
@@ -6100,13 +6103,14 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         fb.format = COMPOSITOR_XRGB8888;
         fb.handles[0] = prime.handle;
         fb.pitches[0] = (unsigned int)compositor_stride() * 4;
-        if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0)
+        if ((made = system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb)) != 0)
         {
                 unsigned int close[2] = {prime.handle, 0};
 
                 system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
                 compositor.direct_refused = 1;
                 compositor.table->refused = 4;
+                compositor.table->refused_error = (unsigned int)-made;
                 return 0;
         }
         compositor.scan_fb[row][which] = fb.fb_id;
