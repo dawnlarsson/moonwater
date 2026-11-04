@@ -173183,6 +173183,56 @@ static void al_law_tier(void)
         check("f32_planes_from_law: cases ran", faults.cases > 3000);
 }
 
+/*
+        memory_zero (bzero) and memory_fill at every size to 600 and the sizes of the rungs, the bytes put against a page that faults after
+        the last or after one before the first, at every offset of a vector, the bytes before and after untouched.
+*/
+static void al_zero_case(unsigned long long n, int front, unsigned phase, int zero, al_faults *faults)
+{
+        p8 *d = front ? (p8 *)al_low[0] + 64 + (phase & 63) : (p8 *)al_high[0] - n;
+        p8 value = zero ? 0 : (p8)(1 + (n % 250));
+
+        faults->cases++;
+        for (int i = 1; i <= 16; i++)
+        {
+                d[-i] = (p8)(0xa5 + i);
+                if (front)
+                        d[n + i - 1] = (p8)(0x5a + i);
+        }
+        for (unsigned long long i = 0; i < n; i++)
+                d[i] = 0xaa;
+        VECTOR_FIRST_CALL(al_first);
+        if (zero)
+                memory_zero(d, n);
+        else
+                memory_fill(d, value, n);
+        for (unsigned long long i = 0; i < n; i++)
+                faults->bits += d[i] != value;
+        for (int i = 1; i <= 16; i++)
+        {
+                faults->outside += d[-i] != (p8)(0xa5 + i);
+                if (front)
+                        faults->outside += d[n + i - 1] != (p8)(0x5a + i);
+        }
+}
+
+static void al_zero_tier(void)
+{
+        al_faults faults = {0, 0, 0, 0, 0, 0, 0};
+
+        for (unsigned long long n = 0; n <= 600; n++)
+                for (int zero = 0; zero < 2; zero++)
+                        al_zero_case(n, (int)(n & 1), (unsigned)(n * 7), zero, &faults);
+        for (unsigned long long n = 1; n <= 520; n += 3)
+                for (unsigned phase = 0; phase < 64; phase += 9)
+                        al_zero_case(n, 1, phase, 1, &faults);
+        for (unsigned long long n = 4090; n <= 4100; n++)
+                al_zero_case(n, (int)(n & 1), (unsigned)n, 1, &faults);
+        check("memory_zero and memory_fill: every size to 600, at every offset of a vector, the bytes the value's", faults.bits == 0);
+        check("memory_zero and memory_fill: nothing written outside the span (the guard page, the bytes either side)", faults.outside == 0);
+        check("memory_zero and memory_fill: cases ran", faults.cases > 1500);
+}
+
 static void al_widen_tier(void)
 {
         static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
@@ -173855,6 +173905,9 @@ static void al_abi_all(void)
         ((void (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 40);
         al_abi_target = (void *)resample_polyphase2_f32_rows;
         ((unsigned long long (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 3);
+        al_abi_target = (void *)memory_zero;
+        ((void (*)(unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, 136);
+        ((void (*)(unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, 300);
         al_abi_target = (void *)f32_planes_from_law;
         ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 2, 1);
         ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 3, 0);
@@ -173951,6 +174004,7 @@ b32 main(void)
                         cpu_has_avx512 = 1;
                         al_abi_tier("avx512");
                         al_scale_tier("avx512");
+                        al_zero_tier();
                 }
                 cpu_has_avx512 = 0;
                 if (had2 && hadfma)
@@ -173964,6 +174018,7 @@ b32 main(void)
                         al_widen_tier();
                         al_pack_tier();
                         al_law_tier();
+                        al_zero_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -173978,6 +174033,7 @@ b32 main(void)
                 al_widen_tier();
                 al_pack_tier();
                 al_law_tier();
+                al_zero_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -174008,6 +174064,7 @@ b32 main(void)
                         al_widen_tier();
                         al_pack_tier();
                         al_law_tier();
+                        al_zero_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -174022,6 +174079,7 @@ b32 main(void)
         al_widen_tier();
         al_pack_tier();
         al_law_tier();
+        al_zero_tier();
 #endif
         return test_report(null);
 }
@@ -193709,6 +193767,104 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_dbus */
+
+#ifdef BENCH_fill_sizes
+/* memory_fill and memory_zero from 1 to 512 bytes, in the run time size the routine gets from a call it cannot fold, against the
+   compiler's expansion of the same size as a literal (inline) and against the library's own name given the literal (which
+   lib.util.c routes to the expansion to KNOWN_FILL_MAX), and a sweep of random sizes over three ranges. Ticks a call, the least of nine
+   runs of 2^20 calls, the buffers rotating over four and two offsets. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define REPS (1u << 20)
+#define TRIES 9
+
+static p8 buffers[4][4096] __attribute__((aligned(64)));
+
+typedef fn (*call_function)(p8 *);
+
+#define SIZES(X) X(1) X(2) X(3) X(5) X(8) X(12) X(16) X(24) X(32) X(48) X(64) X(96) X(128) X(136) X(160) X(192) X(224) X(256) X(384) X(512)
+#define INLINE_FN(N) __attribute__((noinline, noclone)) static fn inl_##N(p8 *d) { __builtin_memset(d, 0, N); }
+SIZES(INLINE_FN)
+#define KNOWN_FN(N) __attribute__((noinline, noclone)) static fn kn_##N(p8 *d) { memory_zero(d, N); }
+SIZES(KNOWN_FN)
+
+static positive want;
+static fn lib_zero_call(p8 *d) { memory_zero(d, want); }
+static fn lib_fill_call(p8 *d) { memory_fill(d, 0x5a, want); }
+
+static p64 run(call_function f, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                f(buffers[r & 3] + ((r >> 2) & 1) * 64);
+        return get_cpu_time() - start;
+}
+
+static fn show(positive n, string_address what, p64 ticks)
+{
+        string_format(log, "%p bytes %s: ", n, what);
+        positive_to_padded(log, (positive)(ticks * 100 / REPS) / 100, 3, ' ', 0);
+        string_format(log, ".");
+        positive_to_padded(log, (positive)(ticks * 100 / REPS) % 100, 2, '0', 0);
+        string_format(log, " ticks\n");
+}
+
+#define ONE(N)                                                                                                                      \
+        {                                                                                                                           \
+                p64 best_inline = ~(p64)0, best_zero = ~(p64)0, best_fill = ~(p64)0, best_known = ~(p64)0;                          \
+                want = N;                                                                                                           \
+                for (positive t = 0; t < TRIES; t++)                                                                                \
+                {                                                                                                                   \
+                        p64 a = run(inl_##N, REPS), b = run(lib_zero_call, REPS), c = run(lib_fill_call, REPS), k = run(kn_##N, REPS); \
+                        best_known = k < best_known ? k : best_known;                                                               \
+                        best_inline = a < best_inline ? a : best_inline;                                                            \
+                        best_zero = b < best_zero ? b : best_zero;                                                                  \
+                        best_fill = c < best_fill ? c : best_fill;                                                                  \
+                }                                                                                                                   \
+                show(N, "inline", best_inline);                                                                                     \
+                show(N, "memory_zero", best_zero);                                                                                  \
+                show(N, "memory_fill", best_fill);                                                                                  \
+                show(N, "memory_zero(literal)", best_known);                                                                        \
+        }
+
+static positive sweep_state = 88172645463325252ull;
+static positive sweep_low, sweep_span;
+static fn sweep_zero_call(p8 *d)
+{
+        sweep_state ^= sweep_state << 13;
+        sweep_state ^= sweep_state >> 7;
+        sweep_state ^= sweep_state << 17;
+        memory_zero(d, sweep_low + sweep_state % sweep_span);
+}
+static fn sweep_report(string_address what, positive low, positive span)
+{
+        p64 best_zero = ~(p64)0;
+
+        sweep_low = low;
+        sweep_span = span;
+        for (positive t = 0; t < TRIES; t++)
+        {
+                p64 b = run(sweep_zero_call, REPS);
+
+                best_zero = b < best_zero ? b : best_zero;
+        }
+        show(low, what, best_zero);
+}
+
+b32 main(void)
+{
+        sweep_report("sweep memory_zero 129..256", 129, 128);
+        sweep_report("sweep memory_zero 1..512", 1, 512);
+        sweep_report("sweep memory_zero 33..128", 33, 96);
+        SIZES(ONE)
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_fill_sizes */
 
 #ifdef BENCH_translate_planes
 /* memory_translate_planes_u32_rect against the C loop it replaced in

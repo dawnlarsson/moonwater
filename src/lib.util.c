@@ -5219,6 +5219,24 @@ static inline fn digest_close(digest_state address_to digest, p8 address_to out)
 #define LIBRARY_SIZE_MAX KNOWN_SIZE_MAX
 #endif
 
+/*
+        The fill and the zero reach further than the rest. Past KNOWN_SIZE_MAX the routine's wide rungs are four and then eight
+        stores behind a ladder of compares and two flag loads, and the compiler's own memset of a literal size is a straight run
+        of stores and nothing else. Three million fills a size on a 9950X, the library's zero as a multiple of the compiler's
+        expansion (a loaded box, so the ratio and not the ticks): 136 bytes 2.1, 160 bytes 2.0, 192 bytes 1.7, and 224 bytes 1.0,
+        where gcc's expansion is a loop of stores and the routine's eight wide ones catch up. On an M2 Pro the expansion (stp of q
+        registers, 8 stores at 256 bytes) beats the routine at every size measured, 1.7 ns against 2.4 at 136, 2.4 against 2.7 at
+        256. So a literal size to 192 on x86_64 and to 256 on arm64 is the compiler's, from the fallback at the end of fill_known,
+        and past that the routine; the user-space builds only, which is where this was measured.
+*/
+#if X64 && !defined(KERNEL_MODE) && KNOWN_SIZE_MAX == 128
+#define KNOWN_FILL_MAX 192
+#elif ARM64 && !defined(KERNEL_MODE) && KNOWN_SIZE_MAX == 128
+#define KNOWN_FILL_MAX 256
+#else
+#define KNOWN_FILL_MAX KNOWN_SIZE_MAX
+#endif
+
 #if ARM64 && !defined(KERNEL_MODE) && defined(__OPTIMIZE__) \
     && KNOWN_SIZE_MAX >= 16
 #define KNOWN_NEON 1
@@ -8615,13 +8633,13 @@ static inline INLINE positive span_table_first(string_address source,
 //      fill-and-until
 
 #define memory_fill(destination, value, size)                                 \
-        (LIBRARY_EXPAND(FILL, (size), KNOWN_SIZE_MAX)                         \
+        (LIBRARY_EXPAND(FILL, (size), KNOWN_FILL_MAX)                         \
                  ? fill_known((destination), (value), (size),                \
                               __builtin_constant_p(value) && (b8)(value) == 0)\
                  : fill_running((destination), (b8)(value), (size)))
 
 #define memory_zero(destination, size)                                        \
-        (LIBRARY_EXPAND(FILL, (size), KNOWN_SIZE_MAX)                         \
+        (LIBRARY_EXPAND(FILL, (size), KNOWN_FILL_MAX)                         \
                  ? zero_known((destination), (size))                          \
                  : zero_running((destination), (size)))
 

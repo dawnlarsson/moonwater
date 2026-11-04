@@ -117,7 +117,8 @@ cover('specialized', 'size', 'memory_copy_apart', 'memcpy, the halves are '
       'apart, expanded up to KNOWN_SIZE_MAX',
       expansion='copy_apart_known', evidence='test/checks.c#CHECK_exact')
 cover('specialized', 'size', 'memory_fill', 'memset, expanded up to '
-      'KNOWN_SIZE_MAX with a broadcast when the byte is not folded',
+      'KNOWN_SIZE_MAX with a broadcast when the byte is not folded, and to KNOWN_FILL_MAX (192 on x86_64, 256 on arm64) by the '
+      'compiler\'s own stores',
       expansion='fill_known', evidence='test/checks.c#CHECK_exact')
 
 
@@ -203,7 +204,8 @@ cover('specialized', 'reject', 'string_span_without_set',
 cover('specialized', 'size', 'memory_zero',
       'Measured. bzero is "mov, xor, jmp memory_fill" and the expansion is '
       'fill_known with the byte already chosen: 19-48% of the routine from 1 to 128 '
-      'bytes, tracking the fill it reuses',
+      'bytes, tracking the fill it reuses, and the compiler\'s own stores to KNOWN_FILL_MAX (192 bytes on x86_64, 256 on arm64: '
+      '47% to 59% of the routine at 136 to 192 bytes on a 9950X, 62% to 79% at 136 to 256 on an M2 Pro)',
       expansion='zero_known', evidence='test/checks.c#CHECK_exact_family')
 cover('specialized', 'size', 'memory_copy_apart_end',
       'Measured. A lea, a push, a call to the copy, a pop and one terminator; '

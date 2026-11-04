@@ -21597,7 +21597,13 @@ __asm__(
     "6:  cmp x2, #32\n   b.hi 3f\n   str q0, [x0]\n   stur q0, [x4,  #-16]\n   mov x0, x3\n   ret\n"
     "3:  cmp x2, #64\n   b.hi 4f\n   stp q0, q0, [x0]\n   stp q0, q0, [x4,  #-32]\n   mov x0, x3\n   ret\n"
     "4:  cmp x2, #128\n   b.hi 2f\n   stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x4,  #-64]\n   stp q0, q0, [x4,  #-32]\n   mov x0, x3\n   ret\n"
-    "2:  cmp x2, #256\n   b.hi 5f\n   stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x0, #64]\n   stp q0, q0, [x0, #96]\n   stp q0, q0, [x4,  #-128]\n"
+    //
+    //       129 to 160 is the first 128 bytes and the last 32 wherever they fall, five stores; the eight stores that serve the rest (four at
+    //       each end) wrote 120 of the bytes of a size of 136 twice, and an M2 takes overlapping stores slowly: 3.6 ns at 136 bytes
+    //       against 2.6 at 160.
+    //
+    "2:  cmp x2, #256\n   b.hi 5f\n   cmp x2, #160\n   b.hi 22f\n   stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x0, #64]\n   stp q0, q0, [x0, #96]\n   stp q0, q0, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    "22: stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x0, #64]\n   stp q0, q0, [x0, #96]\n   stp q0, q0, [x4,  #-128]\n"
     "stp q0, q0, [x4,  #-96]\n   stp q0, q0, [x4,  #-64]\n   stp q0, q0, [x4,  #-32]\n   mov x0, x3\n   ret\n"
     //
     //       Above 128: the first 64 bytes unaligned, the destination aligned up

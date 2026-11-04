@@ -326,6 +326,9 @@ M = [
     ("riscv64", "law the index a byte (vector)", "vsll.vi v12, v12, 2\\n   vluxei32.v", "vsll.vi v12, v12, 3\\n   vluxei32.v"),
     ("riscv64", "law the source advances by a byte a sample (vector)", "mul t4, t0, a3", "mv t4, t0"),
     ("riscv64", "law the index a byte (scalar)", "lbu t0, 0(t2)\\n   slli t0, t0, 2", "lbu t0, 0(t2)\\n   slli t0, t0, 3"),
+    ("arm64", "fill neon: 129 to 160 leaves the last 32 bytes a place early", "stp q0, q0, [x4,  #-32]\\n   mov x0, x3\\n   ret\\n\"\n    \"22: stp", "stp q0, q0, [x4,  #-64]\\n   mov x0, x3\\n   ret\\n\"\n    \"22: stp"),
+    ("arm64", "fill neon: the five store rung runs to 170 and leaves a gap", "cmp x2, #160\\n   b.hi 22f", "cmp x2, #170\\n   b.hi 22f"),
+    ("arm64", "fill neon: the five store rung without its third store", "stp q0, q0, [x0, #64]\\n   stp q0, q0, [x0, #96]\\n   stp q0, q0, [x4,  #-32]\\n   mov x0, x3\\n   ret\\n\"\n    \"22: stp", "stp q0, q0, [x0, #96]\\n   stp q0, q0, [x4,  #-32]\\n   mov x0, x3\\n   ret\\n\"\n    \"22: stp"),
     # ---- the registers a routine keeps ----
     ("x86_64", "abi: rbx used by a routine that does not save it", "ASM_FUNC(f32_scale_peak)\n    \"test %rdx, %rdx\\n   jz .Laudio_scale_peak_none\\n\"", "ASM_FUNC(f32_scale_peak)\n    \"xor %ebx, %ebx\\n   test %rdx, %rdx\\n   jz .Laudio_scale_peak_none\\n\""),
     ("arm64", "abi: d14 used by a routine that does not save it", "5:  and x3, x3, #3\\n   cbz x3, 9f\\n\"\n    \"6:  ldr s0, [x1], #4\\n   ldr s1, [x2], #4", "5:  and x3, x3, #3\\n   cbz x3, 9f\\n   movi v14.4s, #0\\n\"\n    \"6:  ldr s0, [x1], #4\\n   ldr s1, [x2], #4"),
