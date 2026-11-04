@@ -90,7 +90,22 @@ struct ui_scene
         unsigned char address_to cover;
         unsigned long used, size, at; // the pool of bitmaps: bytes used, its size, and where it is in the GPU's buffer
         int lost;
+        int dx0, dy0, dx1, dy1;       // the damage of the ops: their union in pixels, empty when dx1 <= dx0 or dy1 <= dy0
 };
+
+// The damage of a recorded op: its rectangle (pixels, already cut to what may be drawn) joined to the damage so far.
+static void ui_scene_touch(struct ui_scene address_to scene, int x0, int y0, int x1, int y1)
+{
+        if (x1 <= x0 || y1 <= y0)
+                return;
+        if (scene->dx1 <= scene->dx0 || scene->dy1 <= scene->dy0)
+                scene->dx0 = x0, scene->dy0 = y0, scene->dx1 = x1, scene->dy1 = y1;
+        else
+        {
+                scene->dx0 = x0 < scene->dx0 ? x0 : scene->dx0, scene->dy0 = y0 < scene->dy0 ? y0 : scene->dy0;
+                scene->dx1 = x1 > scene->dx1 ? x1 : scene->dx1, scene->dy1 = y1 > scene->dy1 ? y1 : scene->dy1;
+        }
+}
 
 struct ui
 {
@@ -370,6 +385,7 @@ static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y
         op = scene->ops + 8 * scene->count++;
         op[0] = write || tone >> 24 == 255 ? 0 : 1, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0, op[3] = (unsigned int)x1, op[4] = (unsigned int)y1;
         op[5] = tone, op[6] = op[7] = 0;
+        ui_scene_touch(scene, x0, y0, x1, y1);
 }
 
 static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
@@ -838,6 +854,7 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
         op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
         op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + from - top) * (unsigned long)pitch + (unsigned long)(1 + first));
         scene->used += (bytes + 15) & ~15ul;
+        ui_scene_touch(scene, pen_x + first, from, pen_x + last, to);
 }
 
 static int ui_run_flagged(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
@@ -2900,6 +2917,7 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
         }
         op = scene->ops + 8 * scene->count;
         scene->count += 1 + mods;
+        ui_scene_touch(scene, box->x0 >> 8, box->y0 >> 8 < from ? from : box->y0 >> 8, (box->x1 + 255) >> 8, (box->y1 + 255) >> 8 > to ? to : (box->y1 + 255) >> 8);
         op[0] = 2u | mods << 8, op[1] = (unsigned int)box->x0, op[2] = (unsigned int)box->y0, op[3] = (unsigned int)box->x1, op[4] = (unsigned int)box->y1;
         op[5] = argb, op[6] = (unsigned int)box->rx, op[7] = (unsigned int)box->ry;
         if (ring)
@@ -2921,6 +2939,166 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
                 op[0] = 9, op[1] = 0, op[2] = (unsigned int)from << 8, op[3] = (unsigned int)ui->width << 8, op[4] = (unsigned int)to << 8;
                 op[5] = op[6] = op[7] = 0;
         }
+}
+
+/*
+        The draw list: a frame recorded for the compositor, in shared memory the app maps and the compositor maps too (a memfd). It holds the
+        ops ui.scene records, in the same format, so a list is the recording and no re-encoding. Layout, in bytes: a header of sixteen 32-bit
+        words, then two halves of one size; a half is one generation's ops (room of them, 32 bytes each) and then the cover bytes its text ops
+        index (each text op's word 7 is an offset from the list's base, so the compositor needs one mapping and no atlas). The halves ping-pong:
+        the app records into the half that is not published, and ui_scene_end publishes it, so the compositor reads the published half while
+        the app writes the other. Header words: 0 magic, 1 version, 2 the generation, a seqlock (odd while a publish writes the header, even when
+        it is whole, and it moves by two a publish), 3 the published half (0 or 1), 4 its ops, 5 the room of a half, 6 and 7 the picture's width
+        and height in device pixels, 8 its pitch in pixels, 9 to 12 the damage of the generation (x0 y0 x1 y1, empty when x1 <= x0), 13 the offset
+        from the base of the cover bytes, 14 the cover bytes used, 15 the flags (bit 0: lost, a record did not fit, so the frame is the
+        processor's). The reader maps the whole list and takes the halves' size from it, as ui_draw_list_init did. ui_draw_list_open answers 1
+        when the published half may be read, 0 when a publish is writing the header (try again later), and -1 when this is no list it can use
+        (paint the frame on the processor). After it has read the ops, ui_draw_list_still says whether the generation held: if it moved, what
+        was read is refused. Production does not record a list: ui.scene is set by a check only until the compositor consumes lists.
+*/
+#define UI_DRAW_LIST_MAGIC 0x4d574c53u // "MWLS"
+#define UI_DRAW_LIST_VERSION 1u
+#define UI_DRAW_LIST_HEADER 64ul
+#define UI_DRAW_LIST_OP 32ul
+
+enum
+{
+        UI_DRAW_LIST_MAGIC_AT, UI_DRAW_LIST_VERSION_AT, UI_DRAW_LIST_GEN, UI_DRAW_LIST_HALF, UI_DRAW_LIST_COUNT, UI_DRAW_LIST_ROOM,
+        UI_DRAW_LIST_WIDTH, UI_DRAW_LIST_HEIGHT, UI_DRAW_LIST_PITCH, UI_DRAW_LIST_DX0, UI_DRAW_LIST_DY0, UI_DRAW_LIST_DX1, UI_DRAW_LIST_DY1,
+        UI_DRAW_LIST_COVER, UI_DRAW_LIST_COVER_USED, UI_DRAW_LIST_FLAGS
+};
+
+struct ui_draw_list
+{
+        unsigned char address_to base; // the list's memory, its header first
+        unsigned long bytes;           // its size
+        unsigned long half;            // one half: its room of ops, then its cover bytes
+        unsigned int room;             // ops a half holds
+        unsigned int recording;        // the half ui_scene_begin records into
+        b32 ready;
+        struct ui_scene scene;         // the recorder ui.scene points at between a begin and an end
+};
+
+struct ui_draw_view
+{
+        const unsigned int address_to ops; // the published half's ops
+        const unsigned char address_to cover;
+        unsigned int count, room, width, height, gen, half;
+        unsigned long pitch, cover_at, cover_used;
+        int x0, y0, x1, y1;
+};
+
+// The list in memory (bytes of it, its header first): room ops a half. Answers 0 when the memory is too small for a half with its cover bytes.
+static b32 ui_draw_list_init(struct ui_draw_list address_to list, unsigned char address_to memory, unsigned long bytes, unsigned int room)
+{
+        unsigned int address_to head = (unsigned int address_to)memory;
+        unsigned long ops = (unsigned long)room * UI_DRAW_LIST_OP, half;
+
+        list->ready = 0;
+        if (!memory || !room || bytes < UI_DRAW_LIST_HEADER)
+                return 0;
+        half = (bytes - UI_DRAW_LIST_HEADER) / 2 & ~15ul;
+        if (half <= ops + 16)
+                return 0;
+        memory_zero(memory, UI_DRAW_LIST_HEADER);
+        head[UI_DRAW_LIST_MAGIC_AT] = UI_DRAW_LIST_MAGIC, head[UI_DRAW_LIST_VERSION_AT] = UI_DRAW_LIST_VERSION;
+        head[UI_DRAW_LIST_HALF] = 1, head[UI_DRAW_LIST_ROOM] = room;
+        list->base = memory, list->bytes = bytes, list->half = half, list->room = room, list->ready = 1;
+        return 1;
+}
+
+// Begins a frame: records into the half that is not published, with ui->scene set to it. Answers 0 when the list is not ready or a frame is begun.
+static b32 ui_scene_begin(struct ui address_to ui, struct ui_draw_list address_to list)
+{
+        unsigned int address_to head = (unsigned int address_to)list->base;
+        unsigned long at, ops;
+
+        if (!list->ready || ui->scene)
+                return 0;
+        list->recording = head[UI_DRAW_LIST_HALF] ^ 1u;
+        at = UI_DRAW_LIST_HEADER + (unsigned long)list->recording * list->half;
+        ops = (unsigned long)list->room * UI_DRAW_LIST_OP;
+        list->scene.ops = (unsigned int address_to)(list->base + at);
+        list->scene.count = 0, list->scene.room = list->room;
+        list->scene.cover = list->base + at + ops;
+        list->scene.used = 0, list->scene.size = list->half - ops, list->scene.at = at + ops;
+        list->scene.lost = 0;
+        list->scene.dx0 = list->scene.dy0 = list->scene.dx1 = list->scene.dy1 = 0;
+        ui->scene = &list->scene;
+        return 1;
+}
+
+// The seqlock write: the generation goes odd, the header is written, and the generation goes even again, the release order making the ops
+// (written before this) visible with the header. The published half flips to the one just recorded.
+static void ui_draw_list_publish(struct ui address_to ui, struct ui_draw_list address_to list)
+{
+        unsigned int address_to head = (unsigned int address_to)list->base;
+        struct ui_scene address_to scene = &list->scene;
+        unsigned int gen = __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED);
+
+        __atomic_store_n(&head[UI_DRAW_LIST_GEN], gen + 1, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        head[UI_DRAW_LIST_COUNT] = scene->count;
+        head[UI_DRAW_LIST_WIDTH] = (unsigned int)ui->width, head[UI_DRAW_LIST_HEIGHT] = (unsigned int)ui->height;
+        head[UI_DRAW_LIST_PITCH] = (unsigned int)ui->pitch;
+        head[UI_DRAW_LIST_DX0] = (unsigned int)scene->dx0, head[UI_DRAW_LIST_DY0] = (unsigned int)scene->dy0;
+        head[UI_DRAW_LIST_DX1] = (unsigned int)scene->dx1, head[UI_DRAW_LIST_DY1] = (unsigned int)scene->dy1;
+        head[UI_DRAW_LIST_COVER] = (unsigned int)scene->at, head[UI_DRAW_LIST_COVER_USED] = (unsigned int)scene->used;
+        head[UI_DRAW_LIST_FLAGS] = scene->lost ? 1u : 0u;
+        head[UI_DRAW_LIST_HALF] = list->recording;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        __atomic_store_n(&head[UI_DRAW_LIST_GEN], gen + 2, __ATOMIC_RELEASE);
+}
+
+// Ends a frame begun by ui_scene_begin: ui->scene is cleared and the frame published. Answers 0 when the frame is not this list's.
+static b32 ui_scene_end(struct ui address_to ui, struct ui_draw_list address_to list)
+{
+        if (!list->ready || ui->scene != &list->scene)
+                return 0;
+        ui->scene = null;
+        ui_draw_list_publish(ui, list);
+        return 1;
+}
+
+// The reader's open: 1 when the published half may be read (its view is filled), 0 when a publish is writing the header, -1 when this is no
+// list it can use. Reads nothing but the header until it answers 1.
+static int ui_draw_list_open(unsigned char address_to base, unsigned long bytes, struct ui_draw_view address_to view)
+{
+        unsigned int address_to head = (unsigned int address_to)base;
+        unsigned int gen, half_index, room, count;
+        unsigned long half, ops, at;
+
+        if (!base || bytes < UI_DRAW_LIST_HEADER)
+                return -1;
+        gen = __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
+        if (gen & 1)
+                return 0;
+        if (head[UI_DRAW_LIST_MAGIC_AT] != UI_DRAW_LIST_MAGIC || head[UI_DRAW_LIST_VERSION_AT] != UI_DRAW_LIST_VERSION || head[UI_DRAW_LIST_FLAGS] & 1)
+                return -1;
+        half_index = head[UI_DRAW_LIST_HALF], room = head[UI_DRAW_LIST_ROOM], count = head[UI_DRAW_LIST_COUNT];
+        half = (bytes - UI_DRAW_LIST_HEADER) / 2 & ~15ul;
+        ops = (unsigned long)room * UI_DRAW_LIST_OP;
+        if (half_index > 1 || !room || half <= ops + 16 || count > room)
+                return -1;
+        at = UI_DRAW_LIST_HEADER + (unsigned long)half_index * half;
+        if ((unsigned long)head[UI_DRAW_LIST_COVER] != at + ops || (unsigned long)head[UI_DRAW_LIST_COVER_USED] > half - ops)
+                return -1;
+        view->ops = (const unsigned int address_to)(base + at);
+        view->cover = base + at + ops;
+        view->count = count, view->room = room, view->gen = gen, view->half = half_index;
+        view->width = head[UI_DRAW_LIST_WIDTH], view->height = head[UI_DRAW_LIST_HEIGHT], view->pitch = head[UI_DRAW_LIST_PITCH];
+        view->x0 = (int)head[UI_DRAW_LIST_DX0], view->y0 = (int)head[UI_DRAW_LIST_DY0], view->x1 = (int)head[UI_DRAW_LIST_DX1], view->y1 = (int)head[UI_DRAW_LIST_DY1];
+        view->cover_at = head[UI_DRAW_LIST_COVER], view->cover_used = head[UI_DRAW_LIST_COVER_USED];
+        return 1;
+}
+
+// After the reader has read the ops it opened: 1 when the generation is the one it opened (what it read holds), 0 when it moved (refuse it).
+static b32 ui_draw_list_still(unsigned char address_to base, const struct ui_draw_view address_to view)
+{
+        unsigned int address_to head = (unsigned int address_to)base;
+
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        return __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED) == view->gen;
 }
 
 /*

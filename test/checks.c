@@ -121932,7 +121932,7 @@ b32 main()
 }
 #endif
 
-#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit)
+#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list)
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #include "../src/canvas/window.c"
@@ -217107,6 +217107,158 @@ b32 main(void)
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */
+
+#ifdef CHECK_draw_list
+/*
+        The draw list (ui.c's ui_draw_list, the production form of a recorded frame): a frame recorded by ui_scene_begin and ui_scene_end is read
+        back by the reader op for op, its damage is the picture or the band's rows, the halves swap, a torn read is refused, and a list that
+        outgrows its room is refused and the frame is painted on the processor. The frames are the kit's own painters (fills, a tone, a rounded
+        box, a ring, a dot, a band's clear); their reference is the same painters recorded into a scene of the check's own, so what this adds is
+        the transport alone. Nothing here may write a pixel: the picture stays as it was.
+*/
+enum { DL_W = 240, DL_H = 160, DL_ROOM = 64, DL_SMALL = 3, DL_BYTES = 64 + 2 * (64 * 32 + 4096), DL_SMALL_BYTES = 64 + 2 * (3 * 32 + 64) };
+static unsigned int dl_memory[DL_BYTES / 4], dl_small[DL_SMALL_BYTES / 4], dl_pixels[DL_W * DL_H], dl_cpu[DL_W * DL_H];
+static unsigned int dl_ref_ops[DL_ROOM * 8];
+static unsigned char dl_ref_cover[4096];
+static struct ui_scene dl_ref_scene;
+static struct ui dl_live, dl_ref;
+
+// The frame: a fill, a tone over, a rounded box and its ring, a dot, each a function of seed.
+static void dl_paint(struct ui address_to ui, int seed)
+{
+        struct ui_box box;
+
+        ui_fill(ui, 10 + seed, 10, 90, 40, 0x80ff8040u);
+        box.x0 = (20 + seed) * 256, box.y0 = 30 * 256, box.x1 = 200 * 256, box.y1 = 90 * 256, box.rx = 12 * 256, box.ry = 12 * 256;
+        ui_kit_fill(ui, &box, 0xc0336699u, null);
+        box.x0 = 40 * 256, box.y0 = 100 * 256, box.x1 = 180 * 256, box.y1 = 150 * 256, box.rx = 0, box.ry = 0;
+        ui_kit_ring(ui, &box, 2 * 256, 0xff00ff00u);
+        ui_dot(ui, 5 + seed, 5, 0x80ffffffu);
+}
+
+// A frame's ui: the picture fields and the scale, no painting yet (ui_begin comes after the recorder is set, so its clear is recorded).
+static void dl_setup(struct ui address_to ui, unsigned int address_to pixels)
+{
+        memory_zero(ui, sizeof(*ui));
+        ui->scale = 100, ui->top = 0, ui->bottom = DL_H, ui->pixels = pixels, ui->pitch = DL_W, ui->width = DL_W, ui->height = DL_H;
+}
+
+// A frame into the list: recorder set by the list, begun, painted, published. Answers 0 when the list does not take it.
+static b32 dl_frame(struct ui_draw_list address_to list, int seed)
+{
+        dl_setup(&dl_live, dl_pixels);
+        if (!ui_scene_begin(&dl_live, list))
+                return 0;
+        ui_begin(&dl_live, dl_pixels, DL_W, DL_W, DL_H);
+        dl_paint(&dl_live, seed);
+        return ui_scene_end(&dl_live, list);
+}
+
+// The reference: the same frame recorded into a scene of the check's own.
+static void dl_reference(int seed)
+{
+        dl_setup(&dl_ref, dl_pixels);
+        dl_ref_scene.ops = dl_ref_ops, dl_ref_scene.room = DL_ROOM, dl_ref_scene.cover = dl_ref_cover, dl_ref_scene.size = sizeof(dl_ref_cover);
+        dl_ref_scene.used = 0, dl_ref_scene.at = 0, dl_ref_scene.count = 0, dl_ref_scene.lost = 0;
+        dl_ref_scene.dx0 = dl_ref_scene.dy0 = dl_ref_scene.dx1 = dl_ref_scene.dy1 = 0;
+        dl_ref.scene = &dl_ref_scene;
+        ui_begin(&dl_ref, dl_pixels, DL_W, DL_W, DL_H);
+        dl_paint(&dl_ref, seed);
+        dl_ref.scene = null;
+}
+
+static int dl_same_ops(const unsigned int address_to got, unsigned int count)
+{
+        for (unsigned int i = 0; i < count * 8; i++)
+                if (got[i] != dl_ref_ops[i])
+                        return 0;
+        return 1;
+}
+
+static int dl_pixels_clear(const unsigned int address_to pixels, unsigned long count)
+{
+        for (unsigned long i = 0; i < count; i++)
+                if (pixels[i])
+                        return 0;
+        return 1;
+}
+
+static void dl_rows(void)
+{
+        static struct ui_draw_list list, small;
+        static struct ui_draw_view view, held;
+        static struct ui cpu;
+        unsigned char address_to base = (unsigned char address_to)dl_memory;
+        unsigned int address_to head = dl_memory;
+        unsigned int gen, saved;
+        int r, painted = 0;
+
+        check("draw list: the memory takes a list of its room", ui_draw_list_init(&list, base, DL_BYTES, DL_ROOM) && list.half == 6144 && list.room == DL_ROOM);
+        check("draw list: a memory too small for a half is refused", !ui_draw_list_init(&small, (unsigned char address_to)dl_small, 100, DL_ROOM));
+        check("draw list: a list of three ops takes its halves", ui_draw_list_init(&small, (unsigned char address_to)dl_small, DL_SMALL_BYTES, DL_SMALL));
+
+        // The round trip: one frame, read back op for op, its damage the picture's, the picture untouched.
+        check("draw list: a frame is recorded and published", dl_frame(&list, 1));
+        check("draw list: a recorded frame writes no pixel", dl_pixels_clear(dl_pixels, DL_W * DL_H));
+        check("draw list: the recorder is cleared when the frame ends", dl_live.scene == null);
+        r = ui_draw_list_open(base, DL_BYTES, &view);
+        dl_reference(1);
+        check("draw list: the published frame opens", r == 1 && view.gen == 2 && view.half == 0);
+        check("draw list: its ops are the frame's, count for count", r == 1 && view.count == dl_ref_scene.count && view.count >= 4);
+        check("draw list: read back op for op", r == 1 && dl_same_ops(view.ops, view.count));
+        check("draw list: the damage is the picture", r == 1 && view.x0 == 0 && view.y0 == 0 && view.x1 == DL_W && view.y1 == DL_H && view.width == DL_W && view.height == DL_H && view.pitch == DL_W);
+        check("draw list: the damage is the reference's", r == 1 && view.x0 == dl_ref_scene.dx0 && view.y0 == dl_ref_scene.dy0 && view.x1 == dl_ref_scene.dx1 && view.y1 == dl_ref_scene.dy1);
+        check("draw list: a view holds while nothing publishes", r == 1 && ui_draw_list_still(base, &view));
+        held = view;
+
+        // The band: a frame whose only op is a band's clear; its damage is the band's rows, and the halves go to the other one.
+        dl_setup(&dl_live, dl_pixels);
+        check("draw list: a band's frame begins", ui_scene_begin(&dl_live, &list));
+        dl_live.band_top = 40, dl_live.band_bottom = 60;
+        ui_clear(&dl_live);
+        check("draw list: a band's frame publishes", ui_scene_end(&dl_live, &list));
+        r = ui_draw_list_open(base, DL_BYTES, &view);
+        check("draw list: the band's damage is its rows", r == 1 && view.half == 1 && view.count == 1 && view.x0 == 0 && view.y0 == 40 && view.x1 == DL_W && view.y1 == 60);
+
+        // The halves swap: the next frame is in the first half again, and the view of the first frame is refused once that half is written over.
+        check("draw list: the next frame publishes into the first half", dl_frame(&list, 3));
+        dl_reference(3);
+        r = ui_draw_list_open(base, DL_BYTES, &view);
+        check("draw list: the halves swap, the frame in the first half", r == 1 && view.half == 0 && view.ops == held.ops && view.count == dl_ref_scene.count);
+        check("draw list: read back op for op after the swap", r == 1 && dl_same_ops(view.ops, view.count));
+        check("draw list: a view that spans a publish is refused", !ui_draw_list_still(base, &held));
+
+        // A publish in progress: an odd generation is not read, and an even one again is.
+        gen = head[UI_DRAW_LIST_GEN];
+        head[UI_DRAW_LIST_GEN] = gen | 1;
+        check("draw list: a publish in progress is not read", ui_draw_list_open(base, DL_BYTES, &view) == 0);
+        head[UI_DRAW_LIST_GEN] = gen;
+        check("draw list: the same list reads again once the publish is whole", ui_draw_list_open(base, DL_BYTES, &view) == 1);
+
+        // A header that claims more ops than its room is no list to read.
+        saved = head[UI_DRAW_LIST_COUNT];
+        head[UI_DRAW_LIST_COUNT] = DL_ROOM + 1;
+        check("draw list: a header that claims more ops than its room is refused", ui_draw_list_open(base, DL_BYTES, &view) == -1);
+        head[UI_DRAW_LIST_COUNT] = saved;
+
+        // A list that outgrows its room: the frame is lost, the list says so, and the frame is painted on the processor.
+        check("draw list: a frame that outgrows its room still publishes", dl_frame(&small, 1));
+        r = ui_draw_list_open((unsigned char address_to)dl_small, DL_SMALL_BYTES, &view);
+        check("draw list: a list that outgrows its room is refused", r == -1);
+        dl_setup(&cpu, dl_cpu);
+        ui_begin(&cpu, dl_cpu, DL_W, DL_W, DL_H);
+        dl_paint(&cpu, 1);
+        for (unsigned long i = 0; i < DL_W * DL_H; i++)
+                painted += dl_cpu[i] != 0;
+        check("draw list: the processor paints the frame the list refused", painted > 0 && cpu.scene == null);
+}
+
+b32 main(void)
+{
+        dl_rows();
+        return test_report(null);
+}
+#endif /* CHECK_draw_list */
 
 #ifdef CHECK_gpuasm
 #include "../src/lib.util.c"
