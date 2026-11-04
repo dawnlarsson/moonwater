@@ -131869,6 +131869,40 @@ static void check_throw_last_step(struct ui address_to wui)
     ui_text_close(&view);
 }
 
+/*
+        The window's pointer is the kit's: the last motion's place (ui_event_context), kept through a press and a key, and the sends
+        (ui_text_send, ui_field_send) take it, so a send is the explicit call at that place: the same answer and the same caret.
+*/
+static void check_kit_pointer_send(struct ui address_to wui)
+{
+    static struct ui_text a, b;
+    struct window_event motion = {WINDOW_EVENT_MOTION, 0, SCROLL_FIELD_LEFT + 60, SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2};
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+    struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+    int x = SCROLL_FIELD_LEFT + 60, y = SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2;
+    p32 sent, direct;
+    b32 same;
+
+    ui_field_open(&a, null, "alpha beta gamma");
+    ui_field_open(&b, null, "alpha beta gamma");
+    ui_text_draw(wui, &a, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+    ui_text_draw(wui, &b, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+    ui_event_context(&motion);
+    check("kit pointer: a motion's place is the window's", ui_kit.pointer_x == x && ui_kit.pointer_y == y);
+    ui_event_context(&press);
+    check("kit pointer: a press carries no place and the pointer stays", ui_kit.pointer_x == x && ui_kit.pointer_y == y);
+    a.focused = b.focused = true;
+    sent = ui_field_send(wui, &a, null, &press);
+    direct = ui_field_event(wui, &b, null, &press, x, y);
+    same = sent == direct && a.doc.selections[a.doc.primary].active == b.doc.selections[b.doc.primary].active;
+    ui_event_context(&release);
+    ui_field_send(wui, &a, null, &release);
+    ui_field_event(wui, &b, null, &release, x, y);
+    check("kit pointer: ui_field_send is ui_field_event at the pointer's place, press and release", same);
+    ui_text_close(&a);
+    ui_text_close(&b);
+}
+
 static void check_field_drag_drawn(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -150842,6 +150876,7 @@ static fn field_check(struct ui address_to wui)
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);
+        check_kit_pointer_send(wui);
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);
@@ -153342,7 +153377,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 editor_draw(pixels);
                 at_x = ui_tab_left(&editor.ui, &editor.strip, 2) + ui_tab_width(&editor.ui, &editor.strip, 2) / 2;
                 at_y = editor.strip.y * editor.ui.scale / 100 + editor.strip.h * editor.ui.scale / 100 / 2;
-                editor.pointer_x = at_x, editor.pointer_y = at_y;
+                ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, 0, at_x, at_y});
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
                 tabs_ok = editor.tab == 0;
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});
@@ -153373,6 +153408,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 tab->view.focused = true;
                 editor_draw(pixels);
                 x = tab->view.left + 3 * tab->view.cell, y = tab->view.top + tab->view.line_height / 2;
+                ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y});
                 editor_event(&(struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y});
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0});
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, 0x110, 0});
@@ -153850,6 +153886,7 @@ static fn inputs_event(const struct inputs_input address_to in, const struct win
                 settings_event(event);
                 break;
         case INPUTS_FIND: case INPUTS_VIEW:
+                ui_event_context(event);
                 editor_event(event);
                 break;
         }

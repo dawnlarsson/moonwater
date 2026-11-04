@@ -52,7 +52,7 @@ static struct
         int tab, count;
         b32 dirty, focused;
         unsigned int ground;
-        int width, height, shown, pointer_x, pointer_y;
+        int width, height, shown;
         // The find bar: its field, what it does (0 closed, 1 find, 2 replace, 3 go to a line), and its flags.
         struct ui_text find;
         struct ui_control find_control, strip; // the find bar's field; the file tabs, the kit's segmented tabs
@@ -538,8 +538,8 @@ static fn editor_tabs_draw(struct ui address_to ui, int height)
 static b32 editor_tabs_event(const struct window_event address_to event)
 {
         struct ui_control address_to strip = &editor.strip;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && editor.pointer_y >= 0 && editor.pointer_y < ui_px(&editor.ui, UI_TABS_H);
-        int x = event->type == WINDOW_EVENT_MOTION ? event->a : editor.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : editor.pointer_y;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && ui_kit.pointer_y >= 0 && ui_kit.pointer_y < ui_px(&editor.ui, UI_TABS_H);
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
 
         if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                 return false;
@@ -686,8 +686,6 @@ static b32 editor_event(const struct window_event address_to event)
         if ((event->flags & WINDOW_KEY_DOWN) &&
             (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
-        if (event->type == WINDOW_EVENT_MOTION)
-                editor.pointer_x = event->a, editor.pointer_y = event->b;
         if (editor_tabs_event(event))
                 return true;
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_CONTROL) &&
@@ -707,8 +705,8 @@ static b32 editor_event(const struct window_event address_to event)
         if (editor.finding && (event->type == WINDOW_EVENT_KEY ? editor.find.focused : event->type != WINDOW_EVENT_WHEEL))
         {
                 if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
-                        editor.find.focused = ui_text_reach(&editor.ui, &editor.find, editor.pointer_x, editor.pointer_y);
-                asks = ui_field_event(&editor.ui, &editor.find, &editor.menu, event, editor.pointer_x, editor.pointer_y);
+                        editor.find.focused = ui_text_reach(&editor.ui, &editor.find, ui_kit.pointer_x, ui_kit.pointer_y);
+                asks = ui_field_send(&editor.ui, &editor.find, &editor.menu, event);
                 // A press outside the find bar is the view's: the bar's answer to it (commit or cancel) changes nothing here.
                 if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
                         asks = 0;
@@ -739,7 +737,7 @@ static b32 editor_event(const struct window_event address_to event)
                         return true;
         }
         tab->view.focused = editor.focused && !editor.find.focused;
-        asks = ui_text_event(&editor.ui, &tab->view, event, editor.pointer_x, editor.pointer_y);
+        asks = ui_text_send(&editor.ui, &tab->view, event);
         if (asks & UI_TEXT_COMMAND)
                 editor_command(tab->view.command);
         if (asks & UI_TEXT_MENU)

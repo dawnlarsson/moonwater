@@ -2091,7 +2091,7 @@ static struct ui_kit
         b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
-        b64 drawn;                         // the last frame's time: the next is a display period after it
+        b64 drawn;                        // the last frame's time: the next is a display period after it
         b32 busy;                          // something moved: another frame is due
         b32 made;
         int damage_top, damage_bottom;     // the rows (device pixels) the moving controls drew this frame
@@ -2100,6 +2100,7 @@ static struct ui_kit
         // are all that is marked of it: tabs on end, whose box is one item of a column.
         b32 reached;
         int reach_top, reach_bottom;
+        int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
 
 // The caret's settings as the table holds them, taken with the wheel's: a table nobody has set is the standard.
@@ -5466,6 +5467,9 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
+        // A press or a key carries no place: the window's pointer is the last motion's, so an app asks the kit for it (ui_text_send).
+        if (event->type == WINDOW_EVENT_MOTION)
+                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
 }
 
 // The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
@@ -12483,6 +12487,20 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
         if (asks & UI_TEXT_MENU)
                 ui_text_menu_open(menu, t, ui, t->menu_x, t->menu_y, (event->flags & WINDOW_KEY_TOUCH) != 0);
         return asks;
+}
+
+/*
+        The same two, with the place the window's pointer is at (ui_kit.pointer_x/y, the last motion's, taken in ui_event_context):
+        an app forwards the event and keeps no pointer of its own. The places are the ones ui_text_event and ui_field_event take.
+*/
+static p32 ui_text_send(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
+{
+        return ui_text_event(ui, t, event, ui_kit.pointer_x, ui_kit.pointer_y);
+}
+
+static p32 ui_field_send(struct ui address_to ui, struct ui_text address_to t, struct ui_popup address_to menu, const struct window_event address_to event)
+{
+        return ui_field_event(ui, t, menu, event, ui_kit.pointer_x, ui_kit.pointer_y);
 }
 
 /* ---- drawing ---- */
