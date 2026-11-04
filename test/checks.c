@@ -132365,7 +132365,8 @@ static void check_compositor_wheel(void)
         wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
         compositor_input_read(0);
         sum = wheel_unread(1, &events, &last);
-        check("pad: lifted, the last place it says moves and turns nothing", events == 0 && compositor.pointer_x == 100 &&
+        // The lift is one stop (WINDOW_WHEEL_STOP, no turn) at most: nothing moves, and no notch turns.
+        check("pad: lifted, the last place it says moves and turns nothing (a stop at most, which turns nothing)", events <= 1 && sum == 0 && compositor.pointer_x == 100 &&
                                                                              compositor.pointer_y == 40);
     }
     compositor.touchpad[0] = 0;
@@ -133675,6 +133676,45 @@ static void check_kit_throw_dp(void)
     check("kit throw dp: a flick of 200 px a second is not thrown at 100%", !check_throw_flick(100, 8, 16, 40));
     check("kit throw dp: the cap is 8000 dp a second at any scale (Android's maximum fling velocity), and the floor is UI_DRAG_THROW dp",
           ui_throw_most(200) == 16000 && ui_throw_most(100) == 8000 && ui_throw_least(200) == 600 && ui_throw_least(100) == 300);
+}
+
+/*
+    A touchpad's precise motion stops and its fingers lift p ms after the last report (WINDOW_WHEEL_STOP). A finger still for more than
+    UI_HAND_PAUSE_NS before its lift throws nothing; one that lifts within it throws what it was doing.
+*/
+static b32 check_pause_lift(long pause_ms)
+{
+    struct ui ui;
+    struct ui_scroll region;
+    struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -20, 0};
+    struct window_event stop = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
+    b64 clock = 40000000000ll, last;
+
+    memory_zero(&ui, sizeof(ui));
+    memory_zero(&region, sizeof(region));
+    ui.scale = 100;
+    region.x = 100, region.y = 10, region.height = 400, region.view = 400, region.content = 4000, region.bounds = 1, region.scale = 100;
+    ui_kit.test_clock = clock, ui_kit.now = clock, ui_kit.busy = 0;
+    ui_scroll_set(&region, 1000);
+    for (int k = 0; k < 8; k++)
+    {
+        clock += 16000000ull, ui_kit.test_clock = ui_kit.now = clock;
+        ui_wheel_turn(&ui, &region, &report);
+    }
+    last = clock;
+    ui_kit.test_clock = ui_kit.now = last + (b64)pause_ms * 1000000ull;
+    ui_wheel_turn(&ui, &region, &stop);
+    return region.gliding != 0;
+}
+
+static void check_kit_pause_rule(void)
+{
+    b32 soon = check_pause_lift(10), later = check_pause_lift(60), longer = check_pause_lift(160);
+
+    check("kit pause rule: a pad whose fingers lift 10 ms after its last move throws (its speed is what it was doing)", soon);
+    check("kit pause rule: a pad that stops and holds 60 ms before its lift throws nothing (Android's 40 ms rule)", !later);
+    check("kit pause rule: and one that holds 160 ms throws nothing", !longer);
+    ui_kit.test_clock = 0;
 }
 
 static void check_select_scroll(struct ui address_to wui)
@@ -147056,6 +147096,17 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         rb_give(kind, &ui, &region, &finger, &down, reports[next].want, &sent);
                         next++;
                 }
+                // A touchpad's fingers lift at lift_us, and the pad says so (WINDOW_WHEEL_STOP): the region in hand lets go then, with the
+                // pause rule. A finger's lift is ui_finger_up.
+                if (kind == 0 && !lifted && next == count && tf >= lift_us)
+                {
+                        struct window_event stop = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
+
+                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now;
+                        ui_wheel_turn(&ui, &region, &stop);
+                        lifted = true;
+                        delivered_at_lift = region.scroll - first_scroll;
+                }
                 if (kind == 1 && down && !lifted && next == count && tf >= lift_us)
                 {
                         ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now;
@@ -153235,6 +153286,7 @@ static fn field_check(struct ui address_to wui)
         check_flick_retract();
     check_kit_late_lift();
     check_kit_throw_dp();
+    check_kit_pause_rule();
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);

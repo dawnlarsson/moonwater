@@ -15259,7 +15259,14 @@ static void compositor_input_read(unsigned int at)
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
                                  compositor_pad_finger_key(event->code))
+                        {
+                                // The last finger lifting ends the precise gesture: the region in hand lets go at its lift (WINDOW_WHEEL_STOP).
+                                b32 down = compositor.pad[at].touching || compositor.pad[at].fingers;
+
                                 compositor_pad_key(&compositor.pad[at], event->code, event->value);
+                                if (down && !compositor.pad[at].touching && !compositor.pad[at].fingers)
+                                        compositor_wheel_flags(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                        }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
                                  !compositor.touchpad[at] && !compositor.touchscreen[at])
                                 compositor_predict_clear(COMPOSITOR_PREDICT_PEN);

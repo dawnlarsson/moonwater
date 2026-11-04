@@ -6267,6 +6267,8 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
 #define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
+#define UI_HAND_PAUSE_NS 40000000l   // a finger still this long before its lift throws nothing (Android's ASSUME_POINTER_STOPPED_TIME, 40 ms: the tracker
+                                     // clears when the last sample is older than that at ACTION_UP); a pad's lift is exact, so this is its rule
 #define UI_NOTCH_APEX_NS 120000000l  // a wheel's pull grows this long, then springs home though the notches go on (a Mac's trackpad sends them for a second)
 #define UI_NOTCH_BURST_NS 150000000l // notches closer than this are one burst: a burst bumps an end once, and what goes on pushing there is taken
 #define UI_RUBBER_CARRY 400          // the most a release carries past an end, in px a second: the spring's first frames run on from it
@@ -6601,17 +6603,37 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
 // The hand let go (no report for UI_HAND_GAP_NS): its release is the fit over its last reports, from the last of them, and the
 // region goes on as a finger's release does. A trackpad's hand is a finger, and throws on that speed; a wheel's notches are not
 // (they are a distance each, not a place the finger is at), and a stretch they pulled springs home and a region inside its ends stops.
-static void ui_scroll_release(struct ui_scroll address_to s)
+static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
 {
-        positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0;
+        positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0, now = (positive)ui_kit_clock();
         long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
-        b32 thrown = s->precise && ui_throws(speed, s->scale);
+        b32 thrown;
 
+        // A finger that was still for UI_HAND_PAUSE_NS before it lifted throws nothing: the speed at its last report is the speed it
+        // had before it stopped (a stop carries the slope of its deceleration, which the gap release read as a throw).
+        if (lifted && last && now > last && now - last > UI_HAND_PAUSE_NS)
+                speed = 0;
+        thrown = s->precise && ui_throws(speed, s->scale);
         s->hand = 0;
         ui_scroll_let_go(s, thrown, speed);
         // A wheel's notches have no release of their own: the gap that ended the hand is not the end of the burst (a trackpad's momentum
         // goes on for a second), so what goes on pushing at the end is taken (ui_scroll_wheel) and the stretch goes home once.
         s->absorb = !s->precise && s->bounds && s->back.live;
+}
+
+// The hand let go after the gap of UI_HAND_GAP_NS (no lift was told: a wheel, or a pad that did not say it lifted).
+static void ui_scroll_release(struct ui_scroll address_to s)
+{
+        ui_scroll_release_hand(s, 0);
+}
+
+// A precise gesture ended (WINDOW_WHEEL_STOP: the pad's fingers all lifted): a region in hand lets go now, with the pause rule.
+static b32 ui_scroll_end(struct ui_scroll address_to s)
+{
+        if (!s->hand)
+                return false;
+        ui_scroll_release_hand(s, 1);
+        return true;
 }
 
 /*
@@ -6882,6 +6904,8 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
 {
         if (event->b)
                 return false;
+        if (event->flags & WINDOW_WHEEL_STOP)
+                return ui_scroll_end(s);
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || s->unit > 0)
                 return ui_scroll_wheel(ui, s, event->a);
         return ui_scroll_precise(ui, s, (int)((long)event->a * UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE / 120));
