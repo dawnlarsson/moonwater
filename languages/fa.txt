@@ -198,8 +198,11 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Airplane mode	3b8a	حالت هواپیما
 =All commands	4a42	همه فرمان‌ها
 =Allow recording	f7e5	اجازهٔ ضبط
+=Always off	48b1	همیشه خاموش
+=Always on	fab5	همیشه روشن
 =Audio	1439	صدا
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
+=Automatic	6784	خودکار
 =Background	0abd	پس‌زمینه
 =Background colour (rrggbb or default)	e2b2	رنگ پس‌زمینه (rrggbb یا default)
 =Battery	e12e	باتری

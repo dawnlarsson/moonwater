@@ -197,8 +197,11 @@ ui_field_full	fe02	больше не помещается
 =Airplane mode	3b8a	Режим полёта
 =All commands	4a42	Все команды
 =Allow recording	f7e5	Разрешить запись
+=Always off	48b1	Всегда выключена
+=Always on	fab5	Всегда включена
 =Audio	1439	Звук
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
+=Automatic	6784	Автоматически
 =Background	0abd	Фон
 =Background colour (rrggbb or default)	e2b2	Цвет фона (rrggbb или default)
 =Battery	e12e	Батарея

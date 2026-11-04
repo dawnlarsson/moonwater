@@ -156537,11 +156537,13 @@ static fn settings_words_check(void)
         for (positive at = 0; at < SETTINGS_ROWS; at++)
         {
                 english_wrong += settings_label_shown((int)at) != settings_rows[at].label;
-                // (The screen modes row says Biggest picture and Recommended for its words, in English too.)
+                // (The screen modes row says Biggest picture and Recommended for its words, in English too; the on-screen keyboard's
+                // choice says Automatic, Always off and Always on, settings_choice_said, with the verb's auto, off and on kept.)
                 if (settings_rows[at].kind == SETTINGS_CHOICE && settings_rows[at].choices && !(settings_rows[at].flags & SETTINGS_LANGUAGE) &&
                     !settings_is_modes((int)at))
                         for (positive k = 0; settings_word(settings_rows[at].choices, k, word, sizeof(word)); k++)
-                                english_wrong += !!string_compare_max((string_address)settings_label_of((int)at, word), (string_address)word, sizeof(word));
+                                english_wrong += !!string_compare_max((string_address)settings_label_of((int)at, word),
+                                                                      (string_address)settings_choice_said((int)at, word), sizeof(word));
         }
         for (int group = 0; group < settings_groups(); group++)
                 english_wrong += settings_group_text(group) != settings_group_name(group);

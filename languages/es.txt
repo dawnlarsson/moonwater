@@ -197,8 +197,11 @@ ui_field_full	fe02	no cabe más
 =Airplane mode	3b8a	Modo avión
 =All commands	4a42	Todos los comandos
 =Allow recording	f7e5	Permitir grabar
+=Always off	48b1	Siempre desactivado
+=Always on	fab5	Siempre activado
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Hora autenticada (NTS)
+=Automatic	6784	Automático
 =Background	0abd	Fondo
 =Background colour (rrggbb or default)	e2b2	Color de fondo (rrggbb o default)
 =Battery	e12e	Batería

@@ -197,8 +197,11 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Airplane mode	3b8a	Λειτουργία πτήσης
 =All commands	4a42	Όλες οι εντολές
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
+=Always off	48b1	Πάντα ανενεργό
+=Always on	fab5	Πάντα ενεργό
 =Audio	1439	Ήχος
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
+=Automatic	6784	Αυτόματο
 =Background	0abd	Φόντο
 =Background colour (rrggbb or default)	e2b2	Χρώμα φόντου (rrggbb ή default)
 =Battery	e12e	Μπαταρία

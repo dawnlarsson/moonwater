@@ -197,8 +197,11 @@ ui_field_full	fe02	mer ryms inte
 =Airplane mode	3b8a	Flygplansläge
 =All commands	4a42	Alla kommandon
 =Allow recording	f7e5	Tillåt inspelning
+=Always off	48b1	Alltid av
+=Always on	fab5	Alltid på
 =Audio	1439	Ljud
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
+=Automatic	6784	Automatiskt
 =Background	0abd	Bakgrund
 =Background colour (rrggbb or default)	e2b2	Bakgrundsfärg (rrggbb eller default)
 =Battery	e12e	Batteri

@@ -3058,6 +3058,17 @@ static b32 settings_is_modes(int row)
         return settings_rows[row].set[1] && string_equals((string_address)settings_rows[row].set[1], (string_address) "modes");
 }
 
+// The English a choice's word is shown as, before the language says it: the on-screen keyboard's three say what they do (the
+// verb and the file keep auto, off and on); any other choice says its own word.
+static const char address_to settings_choice_said(int row, const char address_to word)
+{
+        if (!settings_rows[row].path || !string_equals((string_address)settings_rows[row].path, (string_address)SETTING_ONSCREEN_PATH))
+                return word;
+        return string_equals((string_address)word, (string_address) "auto") ? "Automatic"
+               : string_equals((string_address)word, (string_address) "off") ? "Always off"
+               : string_equals((string_address)word, (string_address) "on") ? "Always on" : word;
+}
+
 // The plain word a row's verb word is read as: Screen modes says Biggest picture and Recommended, others say their word.
 static const char address_to settings_label_of(int row, const char address_to word)
 {
@@ -3065,10 +3076,11 @@ static const char address_to settings_label_of(int row, const char address_to wo
         if (settings_rows[row].flags & SETTINGS_LANGUAGE)
                 return language_name_of(word);
         if (!settings_is_modes(row))
-                // A choice's own word is English the language says; anything else a row holds is what it is.
-                return language.loaded && settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices &&
+                // A choice's own word is English the language says (language_of is English when no language is taken); anything else
+                // a row holds is what it is.
+                return settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices &&
                                setting_place(settings_rows[row].choices, (string_address)word) >= 0
-                           ? language_of(word)
+                           ? language_of(settings_choice_said(row, word))
                            : word;
         // The word is the verb's, a key; what comes back is what is shown.
         return string_equals((string_address)word, (string_address) "largest") ? WORDS(settings_mode_largest) // shown for a key
@@ -3082,13 +3094,13 @@ static void settings_word_of(int row, const char address_to label, char address_
 
         if (settings_rows[row].flags & SETTINGS_LANGUAGE)
                 word = language_code_of(label);
-        else if (language.loaded && !settings_is_modes(row) && settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices)
+        else if (!settings_is_modes(row) && settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices)
         {
                 // The word of the row's choices that the language says as label does: its menu lists the language's words.
                 char each[SETTINGS_VALUE];
 
                 for (positive k = 0; settings_word(settings_rows[row].choices, k, each, sizeof(each)); k++)
-                        if (string_equals((string_address)language_of(each), (string_address)label)) // shown against shown
+                        if (string_equals((string_address)language_of(settings_choice_said(row, each)), (string_address)label)) // shown against shown
                         {
                                 string_copy_bounded((string_address)into, (string_address)each, room);
                                 return;

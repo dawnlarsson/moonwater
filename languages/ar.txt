@@ -198,8 +198,11 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Airplane mode	3b8a	وضع الطيران
 =All commands	4a42	كل الأوامر
 =Allow recording	f7e5	السماح بالتسجيل
+=Always off	48b1	دائماً إيقاف
+=Always on	fab5	دائماً تشغيل
 =Audio	1439	الصوت
 =Authenticated time (NTS)	e533	الوقت الموثق (NTS)
+=Automatic	6784	تلقائي
 =Background	0abd	الخلفية
 =Background colour (rrggbb or default)	e2b2	لون الخلفية (rrggbb أو default)
 =Battery	e12e	البطارية

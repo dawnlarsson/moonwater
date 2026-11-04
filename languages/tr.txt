@@ -197,8 +197,11 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Airplane mode	3b8a	Uçak modu
 =All commands	4a42	Tüm komutlar
 =Allow recording	f7e5	Kayda izin ver
+=Always off	48b1	Her zaman kapalı
+=Always on	fab5	Her zaman açık
 =Audio	1439	Ses
 =Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)
+=Automatic	6784	Otomatik
 =Background	0abd	Arka plan
 =Background colour (rrggbb or default)	e2b2	Arka plan rengi (rrggbb veya default)
 =Battery	e12e	Pil

@@ -197,8 +197,11 @@ ui_field_full	fe02	that is as much as it holds
 =Airplane mode	3b8a	Airplane mode
 =All commands	4a42	All commands
 =Allow recording	f7e5	Allow recording
+=Always off	48b1	Always off
+=Always on	fab5	Always on
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Authenticated time (NTS)
+=Automatic	6784	Automatic
 =Background	0abd	Background
 =Background colour (rrggbb or default)	e2b2	Background colour (rrggbb or default)
 =Battery	e12e	Battery

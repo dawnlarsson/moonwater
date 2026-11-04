@@ -197,8 +197,11 @@ ui_field_full	fe02	meer past er niet in
 =Airplane mode	3b8a	Vliegtuigmodus
 =All commands	4a42	Alle opdrachten
 =Allow recording	f7e5	Opnemen toestaan
+=Always off	48b1	Altijd uit
+=Always on	fab5	Altijd aan
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
+=Automatic	6784	Automatisch
 =Background	0abd	Achtergrond
 =Background colour (rrggbb or default)	e2b2	Achtergrondkleur (rrggbb of default)
 =Battery	e12e	Batterij

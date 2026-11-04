@@ -198,8 +198,11 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Airplane mode	3b8a	ہوائی جہاز موڈ
 =All commands	4a42	تمام کمانڈز
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
+=Always off	48b1	ہمیشہ بند
+=Always on	fab5	ہمیشہ آن
 =Audio	1439	آڈیو
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
+=Automatic	6784	خودکار
 =Background	0abd	پس منظر
 =Background colour (rrggbb or default)	e2b2	پس منظر کا رنگ (rrggbb یا default)
 =Battery	e12e	بیٹری

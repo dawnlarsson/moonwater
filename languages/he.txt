@@ -198,8 +198,11 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Airplane mode	3b8a	מצב טיסה
 =All commands	4a42	כל הפקודות
 =Allow recording	f7e5	אפשר הקלטה
+=Always off	48b1	תמיד כבוי
+=Always on	fab5	תמיד מופעל
 =Audio	1439	שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
+=Automatic	6784	אוטומטי
 =Background	0abd	רקע
 =Background colour (rrggbb or default)	e2b2	צבע הרקע (rrggbb או default)
 =Battery	e12e	סוללה

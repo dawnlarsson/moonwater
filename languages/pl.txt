@@ -197,8 +197,11 @@ ui_field_full	fe02	więcej się nie zmieści
 =Airplane mode	3b8a	Tryb samolotowy
 =All commands	4a42	Wszystkie polecenia
 =Allow recording	f7e5	Zezwalaj na nagrywanie
+=Always off	48b1	Zawsze wyłączona
+=Always on	fab5	Zawsze włączona
 =Audio	1439	Dźwięk
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
+=Automatic	6784	Automatycznie
 =Background	0abd	Tło
 =Background colour (rrggbb or default)	e2b2	Kolor tła (rrggbb lub default)
 =Battery	e12e	Bateria

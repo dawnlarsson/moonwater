@@ -197,8 +197,11 @@ ui_field_full	fe02	більше не вміщається
 =Airplane mode	3b8a	Режим польоту
 =All commands	4a42	Усі команди
 =Allow recording	f7e5	Дозволити запис
+=Always off	48b1	Завжди вимкнено
+=Always on	fab5	Завжди увімкнено
 =Audio	1439	Звук
 =Authenticated time (NTS)	e533	Автентифікований час (NTS)
+=Automatic	6784	Автоматично
 =Background	0abd	Тло
 =Background colour (rrggbb or default)	e2b2	Колір тла (rrggbb або default)
 =Battery	e12e	Батарея
