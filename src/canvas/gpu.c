@@ -493,21 +493,40 @@ static b32 gpu_start(positive bytes)
 // of the maps that were not used in the last few ticks (one tick a frame).
 static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[64];
 static unsigned int gpu_map_count, gpu_tick;
-static positive gpu_map_next = 0x2000000000ull;
+#define GPU_VA_MAPS 0x2000000000ull
+#define GPU_VA_END (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it
+static positive gpu_map_next = GPU_VA_MAPS;
+
+// Addresses for bytes, none of a map's or an import's that is held: after the last ones handed out, or, where they would end past GPU_VA_END (a long
+// session's maps made and let go of), the first gap from the start; 0 for none.
+static positive gpu_place(positive bytes)
+{
+        positive at = gpu_map_next + bytes <= GPU_VA_END ? gpu_map_next : GPU_VA_MAPS;
+
+        for (unsigned int i = 0; i < gpu_map_count + gpu.imports; i++)
+        {
+                positive from = i < gpu_map_count ? gpu_maps[i].va : gpu.imported_va[i - gpu_map_count];
+                positive to = from + (i < gpu_map_count ? gpu_maps[i].to - gpu_maps[i].from : gpu.imported_bytes[i - gpu_map_count]);
+
+                if (at < to && from < at + bytes)
+                        at = to, i = ~0u; // past it, and each held one looked at again
+        }
+        return at + bytes <= GPU_VA_END ? at : 0;
+}
 
 static b32 gpu_map(const void *addr, positive size)
 {
-        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull;
-        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, gpu_map_next, 0, to - from};
+        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at = gpu_place(to - from);
+        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, at, 0, to - from};
 
-        if (gpu_map_count == 64 || !gpu_io(3u, 0x11, 24, up))
+        if (!at || gpu_map_count == 64 || !gpu_io(3u, 0x11, 24, up))
                 return false;
         va[0] = up[2] >> 32;
         if (!gpu_io(1u, 8, 64, va))
                 return false;
-        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = gpu_map_next;
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at;
         gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
-        gpu_map_next += to - from;
+        gpu_map_next = at + (to - from);
         return true;
 }
 
@@ -543,10 +562,10 @@ static void gpu_trim(void)
 static positive gpu_import(int node, unsigned int handle, positive bytes)
 {
         unsigned int share[3] = {handle, 2 | 0x80000, 0};
-        p64 va[8] = {0, 1 | 14ull << 32, gpu_map_next, 0, (bytes + 4095) & ~4095ull};
-        positive at = gpu_map_next;
+        positive at = gpu_place((bytes + 4095) & ~4095ull);
+        p64 va[8] = {0, 1 | 14ull << 32, at, 0, (bytes + 4095) & ~4095ull};
 
-        if (system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
+        if (!at || system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;
         share[0] = 0;
         if (system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
@@ -556,7 +575,7 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
         if (gpu.imports == 8 || !gpu_io(1u, 8, 64, va))
                 return 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported[gpu.imports++] = share[0];
-        gpu_map_next += va[4];
+        gpu_map_next = at + va[4];
         return at;
 }
 

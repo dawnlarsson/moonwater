@@ -988,8 +988,8 @@ lane has not been run on `link_group_held`.
 | Class | Out-of-bounds read by a device (CWE-125) through a range check made on one byte (CWE-1284): the compositor validated the whole picture against a map, then took the address from the first map that held the picture's first byte |
 | Attacker | (1) any program with a window: a kit program, or a Wayland client, whose buffer size sets the window's |
 | Reachable | `compositor_gpu_present` (compositor.c) for every present the GPU composes (`canvas gpu on`, the standard, on a gfx10.3 card); the records built by `compositor_gpu_rect` (pictures and the corners' picture ink) and `compositor_gpu_buttons` (the close halo) |
-| Moonwater exposure window | 2026-11-04 01:11 +01:00 (`c456b98f`, the GPU compose wired into the present) to the fixing commit, the same day |
-| Fixed by | this commit (`src/canvas/compositor.c`, `src/canvas/gpu.c`) |
+| Moonwater exposure window | 2026-11-04 01:11 +01:00 (`c456b98f`, the GPU compose wired into the present) to 2026-11-04 (`1cc932d5`) |
+| Fixed by | `1cc932d5` (`src/canvas/compositor.c`, `src/canvas/gpu.c`) |
 
 **What it was.** The GPU reads a window's picture through a userptr map of the
 compositor's pages (`gpu_map`), each map at its own GPU address, handed out one
@@ -1021,6 +1021,42 @@ picture grown to 300 rows and drawn by the GPU against `compositor_draw`. On
 the code before the fix: 56,800 pixels wrong (rows 16 to 299), every one of
 them the other window's pattern. With the fix: 0. The mutant is the old line
 (`gpu_va(frame->pixels)` in `compositor_gpu_rect`).
+
+### MW-2026-091: a close button's halo read a truncated address once a session had handed out 2^40 of GPU addresses
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Truncation of a device address (CWE-197) after a monotonic allocator ran past the width a record holds |
+| Attacker | (1) any program with a window, by making the compositor map pictures again and again (a window that grows maps again at each larger size); a long session does it alone |
+| Reachable | `compositor_gpu_buttons` (compositor.c) records the close halo's picture address as 32 bits plus one byte (`op[7] = at >> 32 \| tone << 8`; the record has no room for more), read by the scene kernel's op 6 (`gpu.asm`, `s_and_b32 s101, s63, 0xff`) |
+| Moonwater exposure window | 2026-11-04 01:11 +01:00 (`c456b98f`) to 2026-11-04 (the fixing commit) |
+| Fixed by | this commit (`src/canvas/gpu.c`) |
+
+**What it was.** `gpu_map` and `gpu_import` placed every buffer at
+`gpu_map_next` and moved it on by the buffer's size; nothing ever handed an
+address back, though `gpu_trim` lets maps go. Maps start at 2^37 (128 GiB), so
+after 896 GiB of maps over the compositor's life (27,000 maps of a whole 4K
+window's 33 MB; a window dragged larger makes a map at each new size) a
+window's address passed 2^40, and the close halo's record kept its low 40 bits:
+the card read the halo's pixels from an address 1 TiB lower, which is another
+map's (another window's pixels), the compositor's own buffer, or nothing (page
+faults). The pictures, the corners and the turned screens carry whole 64-bit
+addresses and were not affected.
+
+**Fix.** `gpu_place` hands out addresses among the maps and imports that are
+held: after the last ones while they end at or below `GPU_VA_END` (2^40), else
+the first gap from 2^37; it answers none when nothing fits below 2^40 (the
+present is then the processor's). Every map and import now ends at or below
+2^40, so the 40 bits a close op holds are the whole address.
+
+**Tests that fail without it.** `CHECK_gpu_kit`, "Hostile pictures": the next
+address set to 2^40 + 2^36 (a long session's), a window with a close button
+mapped and drawn by the GPU against `compositor_draw`. Before the fix: 120 of the
+halo's pixels wrong (read from the compositor's own buffer, 2^40 lower). With
+it: 0, and the check that every map ends at or below 2^40 holds. Mutant
+(`gpu_place` taking the next address whatever it is, never refusing): both
+checks red.
 
 ## Reviews with no exposure found
 

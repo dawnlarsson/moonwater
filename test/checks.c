@@ -206685,19 +206685,21 @@ b32 main(void)
                 positive tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
                 struct compositor_target reference = {gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
                 long grown = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0), other = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
+                long far = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
                 struct compositor_frame f;
                 unsigned int ground = 0xff102030u;
                 positive hostile_bad, leaked;
                 b32 refused;
 
-                if ((grown < 0 && grown > -4096) || (other < 0 && other > -4096))
+                if ((grown < 0 && grown > -4096) || (other < 0 && other > -4096) || (far < 0 && far > -4096))
                         return 1;
                 memory_zero(&compositor_gscene, sizeof(compositor_gscene));
                 compositor_gscene.ops = ops, compositor_gscene.room = 4096, compositor_gscene.width = 696, compositor_gscene.height = PH;
                 compositor_gscene.tables = (unsigned char address_to)((p8 address_to)gpu.at + tables_at), compositor_gscene.tables_at = (unsigned int)tables_at;
                 compositor_gscene.tables_size = 1 << 20;
                 for (positive i = 0; i < (1 << 18); i++)
-                        ((unsigned int address_to)grown)[i] = gpu_random() | 0xff000000u, ((unsigned int address_to)other)[i] = 0xff5a5a5au;
+                        ((unsigned int address_to)grown)[i] = gpu_random() | 0xff000000u, ((unsigned int address_to)other)[i] = 0xff5a5a5au,
+                        ((unsigned int address_to)far)[i] = gpu_random() | 0xff000000u;
 #define GPU_HOSTILE(what, pixels_at, pitch_of, close_of)                                                                                                                     \
         memory_zero(&f, sizeof(f));                                                                                                                                         \
         f.x = 40, f.y = 40, f.width = 200, f.height = 300, f.scale = 100, f.pitch = (pitch_of), f.pixels = (const unsigned int address_to)(pixels_at), f.close = (close_of);     \
@@ -206720,6 +206722,11 @@ b32 main(void)
                 check("gpu hostile: the picture's first rows are mapped", gpu_map((const void address_to)grown, 4 * 256 * 16));
                 check("gpu hostile: another window's pages are mapped after them", gpu_map((const void address_to)other, 1 << 20));
                 GPU_HOSTILE("a window grown past its first map is read from its own pages", grown, 256, 0);
+                // A long session: the addresses handed out have come past what a close op's record holds of one (40 bits, GPU_VA_END), and a window with a
+                // close button is mapped next; its map is placed below that, in the first gap.
+                gpu_map_next = GPU_VA_END + GPU_VA;
+                GPU_HOSTILE("a close button's halo is read from its own window after 2^40 of addresses", far, 256, 1);
+                check("gpu hostile: every map ends at or below 2^40", gpu_maps[gpu_map_count - 1].va + (gpu_maps[gpu_map_count - 1].to - gpu_maps[gpu_map_count - 1].from) <= GPU_VA_END);
 #undef GPU_HOSTILE
         }
         return test_report(null);
