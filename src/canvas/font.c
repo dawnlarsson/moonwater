@@ -9460,6 +9460,72 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
                                           font_tones(e, colour, background, font_strength(e, size, flags)));
 }
 
+/*
+        The plan of font_cell's known-ground branch, drawn by nobody: what font_cell
+        would write, as the rectangles and the translate it makes, so a frame can
+        record the cell (fill the cell's rectangle with the ground, then translate the
+        glyph's box through the tones) and the GPU can draw it. Its numbers are the
+        ones font_cell takes, in the same order: the same cell, the same clip to the
+        target, the same box, the same tones (font_tones), so filling the ground and
+        translating the box gives font_cell's pixels. unknown: the background is
+        FONT_UNKNOWN, and font_cell blends it (font_blend): no plan. empty: the cell is
+        off the target. translate: the glyph's box is not empty, and the translate is
+        drawn; when it is not, the whole clipped cell is the ground.
+*/
+typedef struct
+{
+        b32 unknown, empty, translate;
+        b32 left, top, right, bottom;  // the cell's rectangle on the target, cut to it
+        b32 from, above, to, below;    // the glyph's box inside it
+        const p8 address_to coverage;  // the coverage of the box's first pixel
+        positive stride;               // of the coverage: bytes a row
+        const p32 address_to tones;    // the 256 tones (translate only)
+        p32 ground, strength;          // background & 0xffffff, and the strength the tones were made at
+} font_cell_plan_t;
+
+fn font_cell_plan(font_engine address_to e, const font_face address_to const address_to faces, p32 count, p32 code, p32 cells,
+                  const font_metrics address_to grid, p32 size, p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
+                  p32 background, font_cell_plan_t address_to plan)
+{
+        b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
+        b32 dx, dy;
+        b16 ink[2];
+
+        memory_zero(plan, sizeof(*plan));
+        plan->ground = background & 0xffffff;
+        if (background & FONT_UNKNOWN)
+        {
+                plan->unknown = true;
+                return;
+        }
+        flags = font_polarity(flags, colour, background);
+        p64 chain = font_chain(faces, count, cells);
+        p32 ident = chain ? font_identify(e, chain, font_cell_shape(grid, count, cells), cells << 3 | count) : 0;
+        font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags, font_cell_base(faces, count, size, flags), ident, &dx, &dy, ink);
+        b32 gx = x + dx, gy = y + dy;
+
+        //      The same arithmetic as font_cell's known branch (its comments are there).
+        plan->left = x < 0 ? 0 : x, plan->right = x + width > target->width ? target->width : x + width;
+        plan->top = y < 0 ? 0 : y, plan->bottom = y + height > target->height ? target->height : y + height;
+        plan->from = gx > plan->left ? gx : plan->left, plan->to = gx + box.width < plan->right ? gx + box.width : plan->right;
+        plan->above = gy > plan->top ? gy : plan->top, plan->below = gy + box.height < plan->bottom ? gy + box.height : plan->bottom;
+        if (plan->left >= plan->right || plan->top >= plan->bottom)
+        {
+                plan->empty = true;
+                return;
+        }
+        if (plan->from >= plan->to || plan->above >= plan->below)
+                plan->from = plan->to = plan->left, plan->above = plan->below = plan->top;
+        if (plan->from < plan->to)
+        {
+                plan->translate = true;
+                plan->coverage = box.coverage + (positive)(plan->above - gy) * box.stride + (plan->from - gx);
+                plan->stride = box.stride;
+                plan->strength = font_strength(e, size, flags);
+                plan->tones = font_tones(e, colour, background, plan->strength);
+        }
+}
+
 //      Rows from to from + rows of one cell's coverage, width bytes each,
 //      into the strip at into, stride bytes a row. A cell's own bitmap that
 //      is the whole cell is a copy a row: one 16-byte word for cells up to

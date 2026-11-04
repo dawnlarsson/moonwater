@@ -219761,6 +219761,66 @@ static void dl_replay_ops(const struct ui_scene address_to scene, unsigned int a
         }
 }
 
+/*
+        font_cell's known-ground branch against its plan (font_cell_plan) interpreted on the processor: the cell's rectangle filled with the ground, and
+        the glyph's box translated through the tones. Random cells of one and two cells, sizes, colours and grounds, and the target cut at its edges
+        (a cell past the left, the right, the top or the bottom); both start from the same noise, so the cells' pixels and the noise outside them must
+        match. CPU only: this is the reference the recording (ui.c) is built on.
+*/
+static unsigned int dlc_seed = 2463534242u;
+
+static unsigned int dlc_rand(void)
+{
+        dlc_seed ^= dlc_seed << 13, dlc_seed ^= dlc_seed >> 17, dlc_seed ^= dlc_seed << 5;
+        return dlc_seed;
+}
+
+static void dl_cell_plan_rows(void)
+{
+        static unsigned int want[DL_W * DL_H], got[DL_W * DL_H];
+        const font_face address_to faces[1] = {&dl_face};
+        const p32 codes[6] = {'A', 'g', 'W', '@', 0xe9, 0x4e2d};
+        long bad = 0, translates = 0, plans = 0;
+
+        for (int round = 0; round < 600; round++)
+        {
+                p32 code = codes[dlc_rand() % 6], em = (10 + dlc_rand() % 30) << 6, colour = dlc_rand() & 0xffffffu, background = dlc_rand() & 0xffffffu;
+                p32 cells = 1 + dlc_rand() % 2;
+                font_metrics grid = font_metrics_at(faces[0], em);
+                font_target ref = {want, DL_W, 20 + (int)(dlc_rand() % (DL_W - 20)), 10 + (int)(dlc_rand() % (DL_H - 10))};
+                font_target plan_target = {got, DL_W, ref.width, ref.height};
+                b32 x = (b32)(dlc_rand() % (unsigned int)(ref.width + 40)) - 20, y = (b32)(dlc_rand() % (unsigned int)(ref.height + 20)) - 10;
+                font_cell_plan_t plan;
+
+                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                        want[i] = got[i] = dlc_rand();
+                font_cell(&dl_engine, faces, 1, code, cells, &grid, em, 0, &ref, x, y, colour, background);
+                font_cell_plan(&dl_engine, faces, 1, code, cells, &grid, em, 0, &plan_target, x, y, colour, background, &plan);
+                plans++;
+                if (!plan.unknown && !plan.empty)
+                {
+                        for (int yy = plan.top; yy < plan.bottom; yy++)
+                                for (int xx = plan.left; xx < plan.right; xx++)
+                                        got[(positive)yy * DL_W + xx] = plan.ground;
+                        if (plan.translate)
+                        {
+                                translates++;
+                                for (int yy = plan.above; yy < plan.below; yy++)
+                                        for (int xx = plan.from; xx < plan.to; xx++)
+                                                got[(positive)yy * DL_W + xx] = plan.tones[plan.coverage[(positive)(yy - plan.above) * plan.stride + (xx - plan.from)]];
+                        }
+                }
+                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                        if (want[i] != got[i])
+                        {
+                                bad++;
+                                break;
+                        }
+        }
+        check("font plan: the cells of 600 random glyphs, sizes, colours, grounds and clips are font_cell's pixels", bad == 0 && plans == 600);
+        check("font plan: translates were planned (the test has glyphs to translate)", translates > 300);
+}
+
 static void dl_probes(void)
 {
         static struct ui probe;
@@ -219775,6 +219835,7 @@ static void dl_probes(void)
 
         if (fonts)
                 font_start(&dl_engine, dl_atlas, 512, 512);
+        dl_cell_plan_rows();
 
         // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted.
         dl_probe_reset();
