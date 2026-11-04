@@ -6556,6 +6556,42 @@ lane_wayland()
                         wayland_status=1
                         note "wayland: the compositor with the shim did not build"
                 fi
+                # The X clients (test/wayland_xwayland.sh): Xwayland as a client of the shim, an Xlib client in it. Xwayland is the
+                # host's, or the one in the root MW_XWAYLAND_ROOT names (an Arch or Alpine root with xorg-xwayland and xorg-xprop, whose
+                # X11 headers and libX11 the client is built against). A machine with neither says so and runs no X row.
+                wayland_xroot=
+                if command -v Xwayland > /dev/null 2>&1; then
+                        wayland_xroot=/
+                elif [ -n "${MW_XWAYLAND_ROOT:-}" ] && [ -x "$MW_XWAYLAND_ROOT/usr/bin/Xwayland" ]; then
+                        wayland_xroot=$MW_XWAYLAND_ROOT
+                fi
+                if [ -z "$wayland_xroot" ]; then
+                        note "wayland: no Xwayland here, and MW_XWAYLAND_ROOT names no root with one: the X rows are not run"
+                elif [ -x "$work/shell-wayland" ] && [ -r "$wayland_xroot/usr/include/X11/Xlib.h" ] &&
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -Werror -I"$wayland_xroot/usr/include" test/wayland_xclient.c \
+                                -L"$wayland_xroot/usr/lib" -lX11 -Wl,-rpath-link,"$wayland_xroot/usr/lib" -o "$work/xclient" > "$work/xclient.out" 2>&1 &&
+                        { ! command -v clang > /dev/null 2>&1 || clang -std=gnu11 -O2 -Wall -Wextra -Werror -I"$wayland_xroot/usr/include" test/wayland_xclient.c \
+                                -L"$wayland_xroot/usr/lib" -lX11 -Wl,-rpath-link,"$wayland_xroot/usr/lib" -o "$work/xclient-clang" > "$work/xclient-clang.out" 2>&1; }; then
+                        unshare -rm sh test/wayland_xwayland.sh "$work/shell-wayland" "$wayland_xroot" "$work/xclient" "$work/x" \
+                                > "$work/x.out" 2>&1
+                        wayland_at=0
+                        while IFS= read -r wayland_line; do
+                                case $wayland_line in
+                                "ok "*) wayland_at=$((wayland_at + 1)); tally "wayland-x-$wayland_at" 1 1 ;;
+                                "FAIL "*)
+                                        wayland_at=$((wayland_at + 1))
+                                        tally "wayland-x-$wayland_at" 0 1
+                                        wayland_status=1
+                                        note "wayland x: $wayland_line"
+                                        ;;
+                                esac
+                        done < "$work/x.out"
+                        [ "$wayland_at" -gt 0 ] || { tally wayland-x-ran 0 1; wayland_status=1; note "wayland x ran no row"; }
+                else
+                        tally wayland-x-build 0 1
+                        wayland_status=1
+                        note "wayland: the X client did not build against $wayland_xroot (test/wayland_xclient.c)"
+                fi
         fi
 
         [ "$wayland_status" = 0 ]
