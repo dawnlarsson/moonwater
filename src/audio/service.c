@@ -154,6 +154,7 @@ static struct
         float in_planes[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
         unsigned char in_block[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
         unsigned char block[AUDIO_BLOCK * 8 * 4];
+        long block_at, block_left;      // the mixed block for the card: frames from block_at not yet taken by the card
         unsigned char read[AUDIO_READ];
         unsigned char file_block[AUDIO_BLOCK * 4];
 } audio_service; // zeroes only: an initialiser with a -1 in it would put its 4 MiB in the file
@@ -1151,33 +1152,71 @@ static int audio_client_write(long slot, positive now)
 
 /* ---- the sound ---- */
 
-// Mixes frames of the sink and plays them: to the card, or the clock's file.
+// The clock's file, every byte of it: a write that is short is written again, and a file that cannot be written is let go (with a line
+// in the log), so a full disk stops the file and not the sound.
+static void audio_file_put(const unsigned char *bytes, long count)
+{
+        while (count > 0)
+        {
+                long put = audio_call(syscall(write), (positive)audio_service.file, (positive)bytes, (positive)count, 0, 0, 0);
+
+                if (put == -4) // EINTR
+                        continue;
+                if (put <= 0)
+                {
+                        audio_say("the output file cannot be written, error", put ? put : -5);
+                        audio_call(syscall(close), (positive)audio_service.file, 0, 0, 0, 0, 0);
+                        audio_service.file = -1;
+                        return;
+                }
+                bytes += put;
+                count -= put;
+        }
+}
+
+// Mixes frames of the sink and plays them: to the card, or the clock's file. A block the card does not take in full is kept (block_at,
+// block_left) and its rest is written first, before anything more is mixed: a short write is the card being full, so it delays the sound
+// and does not lose any of it.
 static void audio_produce(long frames)
 {
         struct audio_pcm *pcm = &audio_service.pcm;
 
-        while (frames > 0)
+        if (pcm->fd < 0)
+                audio_service.block_left = 0; // what was kept was for a card that is gone
+        while (frames > 0 || audio_service.block_left > 0)
         {
-                long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
-
                 if (pcm->fd >= 0)
                 {
                         long written;
 
-                        pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.block, pcm->format, pcm->channels, n);
-                        written = audio_pcm_write(pcm, audio_service.block, n);
+                        if (audio_service.block_left == 0)
+                        {
+                                long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
+
+                                pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.block, pcm->format, pcm->channels, n);
+                                audio_service.block_at = 0;
+                                audio_service.block_left = n;
+                                frames -= n;
+                        }
+                        written = audio_pcm_write(pcm, audio_service.block + audio_service.block_at * pcm->frame_bytes, audio_service.block_left);
                         if (written < 0)
+                        {
+                                audio_service.block_left = 0; // refused (an underrun): what was mixed for it is dropped, not played late
                                 return;
+                        }
                         audio_service.frames_played += (unsigned long long)written;
-                        frames -= written;
-                        if (written < n)
-                                return;
+                        audio_service.block_at += written;
+                        audio_service.block_left -= written;
+                        if (audio_service.block_left > 0)
+                                return; // the card is full: the rest waits for the next wake
                 }
                 else
                 {
+                        long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
+
                         pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.file_block, AUDIO_FORMAT_S16LE, 2, n);
                         if (audio_service.file >= 0)
-                                audio_call(syscall(write), (positive)audio_service.file, (positive)audio_service.file_block, (positive)n * 4, 0, 0, 0);
+                                audio_file_put(audio_service.file_block, (long)n * 4);
                         audio_service.frames_played += (unsigned long long)n;
                         frames -= n;
                 }

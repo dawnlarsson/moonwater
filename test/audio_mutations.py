@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mutation proofs for the audio engines, src/audio/mix.c (the mixing core), src/audio/alsa.c (the sound card layer) and src/audio/pulse.c (the protocol).
+"""Mutation proofs for the audio engines, src/audio/mix.c (the mixing core), src/audio/alsa.c (the sound card layer), src/audio/pulse.c (the protocol)
+and src/audio/service.c (the server's loop, CHECK_audio_service: Linux only, so run on the box).
 
 Each mutation is one edit to a copy of one of them (a coefficient, an exponent, a bound, a flag, a byte order, a constant),
 built into CHECK_audio_mix, CHECK_audio_alsa or CHECK_audio_pulse with gcc; the check must turn red.  A mutation that survives is a hole
@@ -14,7 +15,7 @@ import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c'),
-           'control': os.path.join(root, 'src/audio/control.c'), 'socket': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c')}
+           'control': os.path.join(root, 'src/audio/control.c'), 'socket': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c'), 'service': os.path.join(root, 'src/audio/service.c'), 'state': os.path.join(root, 'src/audio/state.c')}
 # 'socket' is control.c's own socket transport, built into CHECK_audio_control (which takes the system's socket, not the engine's).
 target_file = {'socket': 'control'}
 check_of = {'control': 'pulse', 'socket': 'control'}
@@ -303,6 +304,15 @@ M = [
     # ---- alsa.c: a negative count is refused before the card is asked (CHECK_audio_alsa) ----
     ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write("),
     ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read("),
+    # ---- service.c: the server's loop and settings, CHECK_audio_service (Linux, the box) ----
+    ("service", 'clock pass scales its frames by the rate', 'audio_produce((long)expirations * AUDIO_PERIOD);', 'audio_produce((long)expirations * (AUDIO_PERIOD * audio_service.rate / 48000));'),
+    ("service", "a saved volume is the exact one, not the file's percent", 'audio_service.applied_volume = percent * AUDIO_VOLUME_NORM / 100;', 'audio_service.applied_volume = sink->volume[0];'),
+    ("service", 'an update stays where it was in the table', '                audio_service.apps[audio_service.app_count - 1] = kept;\n                at = audio_service.app_count - 1;', '                (void)kept;\n                at = at;'),
+    ("service", 'a socket path too long is cut short', '        if (audio_service.socket_path[length])', '        if (0)'),
+    ("service", 'the rest of a short card write is dropped', '                        if (audio_service.block_left > 0)\n                                return; // the card is full: the rest waits for the next wake', '                        audio_service.block_left = 0;'),
+    ("service", 'an output file that cannot be written is kept', '                        audio_service.file = -1;\n                        return;', '                        return;'),
+    ("service", "the state page's sequence steps by four", '__atomic_store_n(&page->seq, seq + 2, __ATOMIC_RELEASE);', '__atomic_store_n(&page->seq, seq + 4, __ATOMIC_RELEASE);'),
+    ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}

@@ -6607,6 +6607,8 @@ lane_audio()
                         -DCHECK_audio_alsa test/checks.c -o '$work/check-alsa-$audio_cc' -lm && '$work/check-alsa-$audio_cc'"
                 audio_row "pulse-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
                         -DCHECK_audio_pulse test/checks.c -o '$work/check-pulse-$audio_cc' -lm && '$work/check-pulse-$audio_cc'"
+                audio_row "service-checks-$audio_cc" sh -c "$audio_cc -std=gnu11 -O2 -w -D_GNU_SOURCE \
+                        -DCHECK_audio_service test/checks.c -o '$work/check-service-$audio_cc' -lm && '$work/check-service-$audio_cc'"
         done
 
         [ "$audio_status" = 0 ]

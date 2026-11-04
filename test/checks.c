@@ -180055,6 +180055,433 @@ int main(void)
 }
 #endif /* CHECK_audio_pulse */
 
+#ifdef CHECK_audio_service
+/*
+        CHECK_audio_service: the sound server's loop (src/audio/service.c) with the library and the real kernel calls, Linux only:
+        the clock-driven pass at the rates the server runs at, the settings files (a volume that is not a whole percent is kept,
+        and a file that is written is read back as the same), the table of programs' volumes (an update is the newest, and the
+        oldest goes when it is full), a socket path that does not fit (refused), the card's partial write (the rest of a
+        mixed block is kept and written first), the clock's file that cannot be written (let go), and the state page's
+        sequence (even after each write, and two more for each). `bench` prints the ticks of the state page writer and of the
+        idle settings look, median over pinned runs.
+
+            cc -std=gnu11 -O2 -Wall -DCHECK_audio_service test/checks.c -lm
+*/
+#include <errno.h>
+#include <fcntl.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+// mix.c's loops that are lib.c's, which a hosted check has none of: the C they were.
+#define SHARED_audio_loops
+#define AUDIO_C_AS_LIBRARY
+#include "checks.c"
+#undef AUDIO_C_AS_LIBRARY
+#undef SHARED_audio_loops
+
+// The library's names the server calls, as a hosted build spells them (the shell has the library's own): its types, the address
+// spellings, the kernel call with the library's convention (a negative errno), and the log, which a check does not read.
+typedef unsigned long positive;
+typedef long bipolar;
+typedef int b32;
+typedef void fn;
+typedef void *address_any;
+typedef unsigned char *string_address;
+typedef unsigned long thread;
+typedef struct timespec timespec;
+#define address_to *
+#define address_of &
+#define null ((address_any)0)
+#define string_format(where, ...) ((void)0)
+#define log_flush() ((void)0)
+static long program_argument_count(void) { return 0; }
+static string_address program_argument(long at) { (void)at; return (string_address)""; }
+static int string_equals(string_address a, string_address b) { return strcmp((const char *)a, (const char *)b) == 0; }
+static positive clock_monotonic_nanoseconds(void)
+{
+        struct timespec now;
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return (positive)now.tv_sec * 1000000000ull + (positive)now.tv_nsec;
+}
+static void memory_zero(void *block, unsigned long size) { memset(block, 0, size); }
+static b32 system_close(int fd) { return close(fd); }
+static thread sv_thread;
+static thread *thread_start(fn (*entry)(address_any), address_any argument) { (void)entry; (void)argument; return &sv_thread; }
+static void thread_join(thread *handle) { (void)handle; }
+static b32 system_signal_install(int sig, int a, int b, int c, address_any d) { (void)sig; (void)a; (void)b; (void)c; (void)d; return 0; }
+static void claim_standard_descriptors(void) {}
+#define syscall(name) SYS_##name
+static long system_call_6(long number, long a, long b, long c, long d, long e, long f)
+{
+        long r = (syscall)(number, a, b, c, d, e, f);
+
+        return r < 0 ? -(long)errno : r;
+}
+
+#include "../src/audio/mix.c"
+#include "../src/audio/pulse.c"
+// The library's names control.c calls, as the libc has them for a hosted build.
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#define string_length(text) strlen((const char *)(text))
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
+#include "../src/audio/control.c"
+#include "../src/audio/service.c"
+
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ 1031
+#endif
+
+static unsigned sv_checks, sv_failures;
+
+#define SVCHECK(condition, ...)                                                                                          \
+        do                                                                                                               \
+        {                                                                                                                \
+                sv_checks++;                                                                                             \
+                if (!(condition))                                                                                        \
+                {                                                                                                        \
+                        sv_failures++;                                                                                   \
+                        if (sv_failures < 60)                                                                            \
+                        {                                                                                                \
+                                printf("  FAIL: ");                                                                      \
+                                printf(__VA_ARGS__);                                                                     \
+                                printf(" (line %d)\n", __LINE__);                                                        \
+                        }                                                                                                \
+                }                                                                                                        \
+        } while (0)
+
+static char sv_dir[256];
+
+// The server as the applet starts it, minus what would touch the person's machine: no signals blocked, no real-time priority, no
+// /run, no card. The clock is the server's own (a fake one is set by the tests that need it).
+static void sv_start(void)
+{
+        struct pulse_host host = {0};
+
+        host.alloc = audio_host_alloc;
+        host.release = audio_host_release;
+        host.now = audio_host_now;
+        host.real = audio_host_real;
+        host.recall = audio_host_recall;
+        host.remember = audio_host_remember;
+        host.changed = audio_host_changed;
+        pulse_open(&audio_service.pulse, &host);
+        for (long at = 0; at < PULSE_CLIENTS; at++)
+                audio_service.fd[at] = -1;
+        audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
+        audio_service.card = audio_service.device = -1;
+        audio_service.sink = -1;
+        audio_service.applied_in_volume = AUDIO_VOLUME_NORM;
+        audio_service.applied_capture = 1;
+        audio_service.wake[0] = audio_service.wake[1] = -1;
+        for (int k = 0; k < AUDIO_INPUTS; k++)
+                audio_service.input[k].pcm.fd = -1;
+        audio_service.pcm.fd = -1;
+        audio_service.no_card = 1;
+        audio_service.rate = 48000;
+        audio_output_open(48000);
+}
+
+static void sv_setup(void)
+{
+        char *base = getenv("TMPDIR");
+
+        snprintf(sv_dir, sizeof sv_dir, "%s/mw-audio-service-XXXXXX", base ? base : "/tmp");
+        if (!mkdtemp(sv_dir))
+        {
+                printf("  FAIL: no directory\n");
+                exit(1);
+        }
+        audio_service.settings = sv_dir;
+        audio_service.socket_path = "/tmp/unused";
+        sv_start();
+}
+
+static void sv_path(char *to, long room, const char *name)
+{
+        snprintf(to, (size_t)room, "%s/%s", sv_dir, name);
+}
+
+static void sv_write_file(const char *name, const char *text)
+{
+        char path[300];
+        FILE *f;
+
+        sv_path(path, sizeof path, name);
+        f = fopen(path, "w");
+        if (f)
+        {
+                fputs(text, f);
+                fclose(f);
+        }
+}
+
+static long sv_size(int fd)
+{
+        struct stat st;
+
+        return fstat(fd, &st) == 0 ? (long)st.st_size : -1;
+}
+
+/* ---- the clock pass: one tick is one period at the rate ---- */
+static void sv_test_clock(void)
+{
+        static const long rates[3] = {48000, 96000, 44100};
+        static const unsigned long long ticks[3] = {1, 1, 1};
+
+        for (int r = 0; r < 3; r++)
+        {
+                int pipe_fds[2], file;
+                char path[300];
+                unsigned long long expirations = ticks[r];
+                long before, after;
+
+                sv_path(path, sizeof path, "clock.raw");
+                file = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                SVCHECK(file >= 0, "the clock's file opens");
+                if (file < 0)
+                        continue;
+                SVCHECK(pipe(pipe_fds) == 0, "a pipe for the tick");
+                write(pipe_fds[1], &expirations, 8);
+                audio_service.rate = rates[r];
+                audio_service.file = file;
+                audio_service.timer = pipe_fds[0];
+                before = sv_size(file);
+                audio_clock_pass();
+                after = sv_size(file);
+                SVCHECK((after - before) / 4 == AUDIO_PERIOD, "one tick at %ld Hz is %d frames, not %ld (got %ld)", rates[r], AUDIO_PERIOD,
+                        (long)(AUDIO_PERIOD * rates[r] / 48000), (after - before) / 4);
+                /* sixteen ticks at once are sixteen periods, the most one pass takes */
+                expirations = 20;
+                write(pipe_fds[1], &expirations, 8);
+                before = sv_size(file);
+                audio_clock_pass();
+                after = sv_size(file);
+                SVCHECK((after - before) / 4 == 16 * AUDIO_PERIOD, "twenty ticks at %ld Hz are sixteen periods (got %ld frames)", rates[r],
+                        (after - before) / 4);
+                close(pipe_fds[0]);
+                close(pipe_fds[1]);
+                close(file);
+                audio_service.file = -1;
+                audio_service.timer = -1;
+        }
+}
+
+/* ---- the settings: a volume that is not a whole percent is what the program set, and what is written is read back as the same ---- */
+static void sv_test_settings(void)
+{
+        struct pulse_sink *sink;
+        char text[64];
+
+        sv_setup();
+        sink = audio_service.pulse.sink + audio_service.sink;
+        sink->volume[0] = sink->volume[1] = 21845; // a third of full volume: 33 percent in the file, and 33 percent is not a third
+        sink->muted = 0;
+        audio_settings_write();
+        sv_path(text, sizeof text, "audio.volume");
+        SVCHECK(access(text, F_OK) == 0, "the volume is written");
+        audio_settings_read(0);
+        SVCHECK(sink->volume[0] == 21845 && sink->volume[1] == 21845, "a read a half second later does not change the volume (got %lu)",
+                (unsigned long)sink->volume[0]);
+        /* and a file a person writes is read: 50 percent */
+        sv_write_file("audio.volume", "50\n");
+        audio_settings_read(0);
+        SVCHECK(sink->volume[0] == 32768, "a file that says 50 sets the volume (got %lu)", (unsigned long)sink->volume[0]);
+        sv_write_file("audio.mute", "on\n");
+        audio_settings_read(0);
+        SVCHECK(sink->muted == 1, "a mute file that says on mutes");
+}
+
+/* ---- a settings file that is a FIFO is not waited for: the read answers at once (a server that waits here never serves) ---- */
+static void sv_test_fifo(void)
+{
+        char path[300];
+        struct pulse_sink *sink;
+
+        sv_setup();
+        sink = audio_service.pulse.sink + audio_service.sink;
+        sink->volume[0] = sink->volume[1] = 40000;
+        sv_path(path, sizeof path, "audio.volume");
+        unlink(path);
+        SVCHECK(mkfifo(path, 0600) == 0, "a FIFO in the settings directory");
+        alarm(5);
+        audio_settings_read(0);
+        alarm(0);
+        SVCHECK(sink->volume[0] == 40000, "the read of a FIFO answers and changes nothing (volume %lu)", (unsigned long)sink->volume[0]);
+        unlink(path);
+}
+
+/* ---- the table of programs' volumes: the update is the newest, and the oldest goes when it is full ---- */
+static void sv_test_table(void)
+{
+        char name[32];
+        unsigned long volume = 0;
+        int mute = 0;
+
+        audio_service.app_count = 0;
+        for (int i = 0; i < AUDIO_APPS; i++)
+        {
+                snprintf(name, sizeof name, "app%02d", i);
+                audio_host_remember(0, name, (unsigned long)i + 1, 0);
+        }
+        SVCHECK(audio_service.app_count == AUDIO_APPS, "the table is full at %d", AUDIO_APPS);
+        audio_host_remember(0, "app00", 999, 1);
+        audio_host_remember(0, "fresh", 5, 0);
+        SVCHECK(audio_host_recall(0, "app00", &volume, &mute) && volume == 999 && mute == 1, "the updated program is kept (volume %lu)", volume);
+        SVCHECK(!audio_host_recall(0, "app01", &volume, &mute), "the program changed least recently is the one let go");
+        SVCHECK(audio_host_recall(0, "app02", &volume, &mute) && volume == 3, "the next one is still there");
+        SVCHECK(audio_host_recall(0, "fresh", &volume, &mute) && volume == 5, "the new program is remembered");
+        SVCHECK(audio_service.app_count == AUDIO_APPS, "the table stays at its size");
+        /* the file is what the table was, and it is read back as that */
+        audio_apps_save();
+        audio_service.app_count = 0;
+        audio_apps_load();
+        SVCHECK(audio_service.app_count == AUDIO_APPS, "the saved table reads back whole (%d)", audio_service.app_count);
+        SVCHECK(audio_host_recall(0, "fresh", &volume, &mute) && volume == 5, "a saved program reads back");
+}
+
+/* ---- a socket path that does not fit sun_path is refused, not cut short ---- */
+static void sv_test_socket(void)
+{
+        char path[256];
+        char *cut;
+
+        sv_setup();
+        sv_path(path, sizeof path, "sock");
+        audio_service.socket_path = path;
+        audio_listen();
+        SVCHECK(audio_service.listen >= 0, "a path that fits is listened on");
+        if (audio_service.listen >= 0)
+                close(audio_service.listen);
+        audio_service.listen = -1;
+        unlink(path);
+        /* a path of 104 bytes: longer than the 100 the address copies, shorter than the kernel's 107 */
+        snprintf(path, sizeof path, "%s/", sv_dir);
+        cut = path + strlen(path);
+        while ((long)(cut - path) < 104)
+                *cut++ = 'x';
+        *cut = 0;
+        audio_listen();
+        SVCHECK(audio_service.listen < 0, "a path of 104 bytes is refused");
+        SVCHECK(access(path, F_OK) != 0, "and no socket is made under a shorter name");
+        audio_service.socket_path = "/tmp/unused";
+}
+
+/* ---- the card's partial write: what the card did not take is kept and written first ---- */
+static void sv_test_card(void)
+{
+        int q[2];
+        unsigned char sink_bytes[8192];
+        long total = 0, got;
+        static unsigned char filler[4096];
+
+        sv_setup();
+        SVCHECK(pipe(q) == 0, "a pipe for the card");
+        fcntl(q[0], F_SETFL, O_NONBLOCK);
+        fcntl(q[1], F_SETFL, O_NONBLOCK);
+        fcntl(q[1], F_SETPIPE_SZ, 8192); // two slots: the first holds the filler, the second takes what a write of a block can
+        memset(filler, 7, sizeof filler);
+        SVCHECK(write(q[1], filler, sizeof filler) == (ssize_t)sizeof filler, "the card has 4096 bytes in it");
+        audio_service.pcm.fd = q[1];
+        // eight channels of sixteen bits: a block of 512 frames is 8192 bytes, more than a pipe takes atomically, so the card takes what
+        // a free slot holds (256 frames of 4096 bytes) and the rest of the block waits
+        audio_service.pcm.frame_bytes = 16;
+        audio_service.pcm.channels = 8;
+        audio_service.pcm.format = AUDIO_FORMAT_S16LE;
+        audio_service.pcm.broken = 0;
+        audio_service.frames_played = 0;
+        audio_service.block_left = 0;
+        audio_produce(AUDIO_BLOCK);
+        SVCHECK(audio_service.frames_played == 256, "the card takes 256 frames of 512 (took %llu)", audio_service.frames_played);
+        SVCHECK(audio_service.block_left == AUDIO_BLOCK - 256, "the other 256 are kept (kept %ld)", audio_service.block_left);
+        /* the card drains; the kept frames go before anything is mixed */
+        while ((got = read(q[0], sink_bytes, sizeof sink_bytes)) > 0)
+                total += got;
+        for (int round = 0; round < 64 && audio_service.block_left > 0; round++)
+        {
+                audio_produce(0);
+                while ((got = read(q[0], sink_bytes, sizeof sink_bytes)) > 0)
+                        total += got;
+        }
+        SVCHECK(audio_service.block_left == 0, "the kept frames are written (left %ld)", audio_service.block_left);
+        SVCHECK(audio_service.frames_played == AUDIO_BLOCK, "every frame of the block is played (%llu)", audio_service.frames_played);
+        SVCHECK(total - (long)sizeof filler == AUDIO_BLOCK * 16, "and they reach the card whole: %ld bytes after the filler", total - (long)sizeof filler);
+        close(q[0]);
+        close(q[1]);
+        audio_service.pcm.fd = -1;
+}
+
+/* ---- the clock's file that cannot be written: let go, and the sound goes on ---- */
+static void sv_test_file(void)
+{
+        char path[300];
+        int readonly;
+
+        sv_setup();
+        sv_path(path, sizeof path, "ro.raw");
+        sv_write_file("ro.raw", "");
+        readonly = open(path, O_RDONLY);
+        audio_service.file = readonly;
+        audio_service.pcm.fd = -1;
+        audio_service.frames_played = 0;
+        audio_produce(128);
+        SVCHECK(audio_service.file < 0, "a file that cannot be written is let go");
+        SVCHECK(audio_service.frames_played == 128, "and the frames are still counted as played (%llu)", audio_service.frames_played);
+}
+
+/* ---- the state page: an even sequence after each write, and two more per write ---- */
+static void sv_test_page(void)
+{
+        char path[300];
+        struct audio_state copy;
+        unsigned int before, after;
+
+        sv_setup();
+        sv_path(path, sizeof path, "state");
+        audio_service.page_path = path;
+        audio_page_open();
+        SVCHECK(audio_service.page != 0, "the page is mapped");
+        if (!audio_service.page)
+                return;
+        before = audio_service.page->seq;
+        audio_page_write();
+        after = audio_service.page->seq;
+        SVCHECK(!(after & 1u) && after == before + 2, "one write takes the sequence from %u to %u", before, after);
+        SVCHECK(audio_state_read(audio_service.page, &copy) && copy.volume == 65536, "the copy reads back whole (volume %u)", copy.volume);
+        audio_service.page_path = "/tmp/unused";
+}
+
+static int sv_main_checks(void)
+{
+        sv_setup();
+        sv_test_clock();
+        sv_test_settings();
+        sv_test_fifo();
+        sv_test_table();
+        sv_test_socket();
+        sv_test_card();
+        sv_test_file();
+        sv_test_page();
+        printf("CHECK_audio_service: %u checks, %u failures\n", sv_checks, sv_failures);
+        return sv_failures != 0;
+}
+
+int main(int argc, char **argv)
+{
+        (void)argc;
+        (void)argv;
+        return sv_main_checks();
+}
+#endif /* CHECK_audio_service */
+
 #ifdef CHECK_audio_control
 /*
         CHECK_audio_control: the control client (src/audio/control.c) over its real Unix socket, against servers of its own
