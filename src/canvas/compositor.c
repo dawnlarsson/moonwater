@@ -6321,6 +6321,74 @@ static int compositor_shows_row(int row)
 }
 
 // A flip to fb, done at the next vertical blank, with its event; false when the card refuses it.
+/*
+        The second scanout (compositor_plate_make, compositor_plate_swap): the buffer the screen is not showing is the one composed into,
+        and the screen is flipped to it. The display never scans a buffer that is being drawn: an animation drawn in place tore at the line
+        the write had reached, every frame. compositor_spare is that buffer; compositor.fb, scanout, scanout_handle, scanout_bytes and
+        scanout_pitch are the one composed into (the target) once swapped in, and the one shown once flipped to. stale is what a buffer
+        misses: the damage of every present since it was last composed, the whole screen when that is not known. Headless (-G, a file),
+        the flip exchanges the two files' names (renameat2), so the scan image is always a whole frame.
+*/
+struct compositor_plate
+{
+        unsigned int fb, handle;
+        unsigned int *pixels;
+        unsigned long bytes, pitch;
+        int stale[4], stale_any; // x1 y1 x2 y2 of what is not current, and whether there is any
+};
+static struct compositor_plate compositor_spare;      // the buffer the screen is not showing (fb 0: none; headless, the scan image's other name, 2)
+static int compositor_front_stale[4], compositor_front_stale_any; // the stale of the buffer in compositor.* (the target, or the one shown)
+static int compositor_plate_refused;                  // the card would not make the second buffer: none until the scanout changes
+static char compositor_scan_name[512], compositor_spare_name[512]; // headless: the scan image's file and its spare
+static int compositor_headless_flip(void);
+static void compositor_flip_done(void);
+static void compositor_plate_make(void);
+
+// What is missed of a buffer, joined with more: the bounding rectangle, and whether there is any.
+static void compositor_stale_join(int *rect, int *any, const int *add)
+{
+        if (!*any)
+        {
+                memory_copy(rect, add, 4 * sizeof(int));
+                *any = 1;
+                return;
+        }
+        rect[0] = add[0] < rect[0] ? add[0] : rect[0];
+        rect[1] = add[1] < rect[1] ? add[1] : rect[1];
+        rect[2] = add[2] > rect[2] ? add[2] : rect[2];
+        rect[3] = add[3] > rect[3] ? add[3] : rect[3];
+}
+
+// The screen's buffer and the spare trade places: the one composed into is the scanout (compositor.*), with its stale; the spare is the one
+// shown before. The screen's output 0 follows its framebuffer, which a crtc set or a plane would name.
+static void compositor_plate_swap(void)
+{
+        unsigned int fb = compositor.fb, handle = compositor.scanout_handle, *pixels = compositor.scanout;
+        unsigned long bytes = compositor.scanout_bytes, pitch = compositor.scanout_pitch;
+        int stale[4], stale_any = compositor_front_stale_any;
+
+        memory_copy(stale, compositor_front_stale, sizeof(stale));
+        compositor.fb = compositor_spare.fb, compositor.scanout_handle = compositor_spare.handle, compositor.scanout = compositor_spare.pixels;
+        compositor.scanout_bytes = compositor_spare.bytes, compositor.scanout_pitch = compositor_spare.pitch;
+        memory_copy(compositor_front_stale, compositor_spare.stale, sizeof(stale));
+        compositor_front_stale_any = compositor_spare.stale_any;
+        compositor_spare.fb = fb, compositor_spare.handle = handle, compositor_spare.pixels = pixels;
+        compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
+        memory_copy(compositor_spare.stale, stale, sizeof(stale));
+        compositor_spare.stale_any = stale_any;
+        if (compositor.outputs && compositor.output[0].fb == fb)
+                compositor.output[0].fb = compositor.fb;
+}
+
+// Headless: the scan image and its spare exchange names. The compositor's mappings follow the names (compositor_plate_swap made them so).
+static int compositor_headless_flip(void)
+{
+        if (!compositor_scan_name[0] || !compositor_spare_name[0])
+                return 0;
+        return compositor_call(syscall(renameat2), (positive)AT_FDCWD, (positive)compositor_scan_name, (positive)AT_FDCWD,
+                               (positive)compositor_spare_name, 2, 0) == 0;
+}
+
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
 {
         struct
@@ -6329,6 +6397,15 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 unsigned long user_data;
         } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
 
+        // Headless: the file's names are exchanged now, so the flip is done at once (only the compositor's own buffers flip).
+        if (compositor.card < 0)
+        {
+                if (row >= 0 || fb != compositor.fb || !compositor_spare.fb || !compositor_headless_flip())
+                        return 0;
+                compositor.on_screen = fb;
+                compositor_flip_done();
+                return 1;
+        }
         if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
                 return 0;
         compositor.flip_pending = 1;
@@ -7473,7 +7550,9 @@ static struct
         unsigned int failures;     // hangs in a row (three cool the card down)
         b64 cool_until;            // the card is not tried again before this monotonic time (0: it is)
         unsigned int cool_steps;   // how many cool-downs in a row: each one longer, up to sixty-four seconds
-        positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
+        positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer): the one drawn into now
+        positive cache[2], cache_key[2]; // the card's imports of the two scanouts (compositor_plate_swap trades them), and the one to make next
+        int cache_next;
         positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
         b32 restart_due;           // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
         positive slept_seen;       // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
@@ -7610,6 +7689,7 @@ static int compositor_gpu_up(void)
 static void compositor_gpu_recover(void)
 {
         compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
+        compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
         memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
         memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
         if (!gpu_recover())
@@ -7635,10 +7715,20 @@ static positive compositor_gpu_output(void)
                         at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
                 compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
         }
-        else if (compositor_gpu_state.out_key != key || !compositor_gpu_state.out)
+        else
         {
-                gpu_unimport(compositor_gpu_state.out);
-                compositor_gpu_state.out = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes), compositor_gpu_state.out_key = key;
+                int at = compositor_gpu_state.cache[0] && compositor_gpu_state.cache_key[0] == key ? 0 :
+                         compositor_gpu_state.cache[1] && compositor_gpu_state.cache_key[1] == key ? 1 : -1;
+
+                if (at < 0)
+                {
+                        at = compositor_gpu_state.cache_next, compositor_gpu_state.cache_next ^= 1;
+                        if (compositor_gpu_state.cache[at])
+                                gpu_unimport(compositor_gpu_state.cache[at]);
+                        compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
+                        compositor_gpu_state.cache_key[at] = key;
+                }
+                compositor_gpu_state.out = compositor_gpu_state.cache[at], compositor_gpu_state.out_key = key;
         }
         return compositor_gpu_state.out;
 }
@@ -8602,14 +8692,34 @@ static void compositor_present_frames(void)
                 }
         }
 
+        // The frame goes into the buffer the screen is not showing, which is then shown (compositor_plate_swap): when the screens are one and no window
+        // is on a plane. Its stale is composed with this present's damage, the damage is what the one shown does not have.
+        int flip_own = 0;
+
+        if (!turning && compositor_output_count() < 2 && compositor.plane_row < 0)
+        {
+                if (compositor.card >= 0)
+                        compositor_plate_make();
+                if (compositor_spare.fb)
+                {
+                        if (compositor.flip_pending)
+                                return;
+                        compositor_plate_swap();
+                        flip_own = 1;
+                        if (compositor_front_stale_any)
+                                compositor_damage(compositor_front_stale[0], compositor_front_stale[1], compositor_front_stale[2] - compositor_front_stale[0],
+                                                  compositor_front_stale[3] - compositor_front_stale[1]);
+                }
+        }
+
 #ifdef MOONWATER_GPU_C
         int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3);
 
         if (gpu)
                 compositor_wl_count_card(rows, windows); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
-        int apart = !gpu && compositor_changed_ready();
+        int apart = !gpu && !flip_own && compositor_changed_ready();
 #else
-        int apart = compositor_changed_ready(), gpu_composed = 0;
+        int apart = !flip_own && compositor_changed_ready(), gpu_composed = 0;
 #endif
         struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
         unsigned int clips = 0;
@@ -8672,7 +8782,20 @@ static void compositor_present_frames(void)
         compositor.mirror_stale = 0;
         compositor_runs_learn(frames, rows, windows);
 
+        // The buffer composed into is whole now; the one the screen does not show misses this present's damage (every rectangle of it, the stale too).
+        if (compositor_spare.fb)
+        {
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                {
+                        const int *d = compositor.damage[at];
+                        int r[4] = {d[0], d[1], d[2], d[3]};
+
+                        compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, r);
+                }
+        }
+        compositor_front_stale_any = 0;
         // No clips at all would tell the card everything changed.
+        dirty.fb_id = compositor.fb;
         dirty.clip_count = clips;
         if (clips && compositor_output_count() < 2 && !turning)
                 system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
@@ -8686,7 +8809,29 @@ static void compositor_present_frames(void)
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
         if (back && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
                 compositor_overlay_off();
-        if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
+        if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
+        {
+                if (compositor.card < 0)
+                {
+                        // The scan image was not exchanged: the composed frame is not shown, so the buffers are both whole again from the next present.
+                        compositor_plate_swap();
+                        compositor_front_stale[0] = compositor_front_stale[1] = 0, compositor_front_stale[2] = compositor.width;
+                        compositor_front_stale[3] = compositor.height, compositor_front_stale_any = 1;
+                        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width;
+                        compositor_spare.stale[3] = compositor.height, compositor_spare.stale_any = 1;
+                }
+                else
+                {
+                        // The card refused the flip: the crtc is set to the buffer composed into (the screen shows it at once, as the flips did before).
+                        struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
+                                                      0, 0, 0, 1, compositor.mode};
+
+                        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                        compositor.on_screen = compositor.fb;
+                        compositor_flip_done();
+                }
+        }
+        else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
                 struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
                                               0, 0, 0, 1, compositor.mode};
@@ -9233,8 +9378,14 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
 #ifdef MOONWATER_GPU_C
         // The GPU's import of it goes with it: the card hands a buffer made later the lowest free handle, this one's, and the import (which keeps this
         // buffer alive) is known by the handle, so the GPU would go on drawing into this one while the screen shows that.
-        if (compositor_gpu_state.out_key == handle && compositor_gpu_state.out)
-                gpu_unimport(compositor_gpu_state.out), compositor_gpu_state.out = 0;
+        for (unsigned int at = 0; at < 2; at++)
+                if (compositor_gpu_state.cache[at] && compositor_gpu_state.cache_key[at] == handle)
+                {
+                        gpu_unimport(compositor_gpu_state.cache[at]);
+                        compositor_gpu_state.cache[at] = compositor_gpu_state.cache_key[at] = 0;
+                        if (compositor_gpu_state.out_key == handle)
+                                compositor_gpu_state.out = compositor_gpu_state.out_key = 0;
+                }
         for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
                 if (compositor_gpu_state.turn_key[at] == handle && compositor_gpu_state.turn_va[at])
                         gpu_unimport(compositor_gpu_state.turn_va[at]), compositor_gpu_state.turn_va[at] = 0;
@@ -9242,6 +9393,38 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
         compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
         system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+}
+
+// The spare: a dumb buffer as the scanout is (compositor_scanout_make), all stale until it has been composed into. Made when a present wants it.
+static void compositor_plate_make(void)
+{
+        unsigned int fb, handle, *pixels;
+        unsigned long bytes, pitch;
+
+        if (compositor.card < 0 || compositor_spare.fb || compositor_plate_refused || !compositor.scanout_pitch)
+                return;
+        if (compositor_scanout_make(compositor.width, compositor.height, &fb, &handle, &pixels, &bytes, &pitch) != 0 || pitch != compositor.scanout_pitch)
+        {
+                if (!compositor_plate_refused)
+                        compositor_kmsg((string_address) "compositor: no second scanout: the frames are composed in place", 0, (string_address) "");
+                compositor_plate_refused = 1;
+                if (fb)
+                        compositor_scanout_free(fb, handle, pixels, bytes);
+                return;
+        }
+        compositor_spare.fb = fb, compositor_spare.handle = handle, compositor_spare.pixels = pixels;
+        compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
+        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width, compositor_spare.stale[3] = compositor.height;
+        compositor_spare.stale_any = 1;
+}
+
+// The spare given back (the scanout is replaced: a space of another size, or the second screen). Not shown: no flip is in flight then.
+static void compositor_plate_drop(void)
+{
+        if (compositor_spare.fb && compositor.card >= 0)
+                compositor_scanout_free(compositor_spare.fb, compositor_spare.handle, compositor_spare.pixels, compositor_spare.bytes);
+        memory_zero(&compositor_spare, sizeof(compositor_spare));
+        compositor_plate_refused = 0;
 }
 
 // Another framebuffer of the scanout, as large and over the same buffer, for a screen of its own; 0 when the card will
@@ -9521,6 +9704,7 @@ static b32 compositor_space_take(int first)
                 // A space of another size is another scanout; the one before is given back once no crtc shows it.
                 if (first || box[2] != compositor.width || box[3] != compositor.height)
                 {
+                        compositor_plate_drop();
                         status = compositor_scanout_make(box[2], box[3], &fb, &handle, &pixels, &bytes, &pitch);
                         if (status < 0 && lit > 1)
                         {
@@ -18226,6 +18410,36 @@ static void compositor_hand_back(void)
         reads the picture out of, and the card's calls fail on a descriptor
         that is not there and are not looked at. -H WIDTHxHEIGHT FILE.
 */
+// Headless: the scan image's spare beside it, <path>.spare, of the same size: the frames are composed into the spare and the two names are exchanged
+// at each flip, so the image is whole at every moment (compositor_headless_flip). 0 when the names do not fit or the file does not make.
+static b32 compositor_headless_plate(string_address path, long bytes)
+{
+        unsigned long length = 0, at;
+        long handle, mapped;
+        static const char suffix[] = ".spare";
+
+        while (path[length])
+                length++;
+        if (length + sizeof(suffix) > sizeof(compositor_spare_name))
+                return 0;
+        for (at = 0; at <= length; at++)
+                compositor_scan_name[at] = path[at], compositor_spare_name[at] = path[at];
+        for (at = 0; suffix[at]; at++)
+                compositor_spare_name[length + at] = suffix[at];
+        compositor_spare_name[length + sizeof(suffix) - 1] = 0;
+        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)compositor_spare_name, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
+        if (handle < 0 || compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+                return 0;
+        mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        compositor_spare.fb = 2, compositor_spare.handle = 0, compositor_spare.pixels = (unsigned int *)mapped; // 2: the other name, as a framebuffer is
+        compositor_spare.bytes = (unsigned long)bytes, compositor_spare.pitch = compositor.scanout_pitch;
+        compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width, compositor_spare.stale[3] = compositor.height;
+        compositor_spare.stale_any = 1;
+        return 1;
+}
+
 static b32 compositor_headless(string_address size, string_address path)
 {
         long width = 0, height = 0, handle, bytes;
@@ -18255,6 +18469,11 @@ static b32 compositor_headless(string_address size, string_address path)
         compositor.width = (int)width;
         compositor.height = (int)height;
         compositor.period = 1000000000ull / 60;
+        // The scan image is the buffer shown (1: its name for the flips, as a card's framebuffer is), its spare the one composed into.
+        compositor.fb = 1;
+        compositor_plate_refused = 0;
+        if (!compositor_headless_plate(path, bytes))
+                compositor_spare.fb = 0;
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_present();
         return 0;

@@ -11,9 +11,11 @@
  *
  *          gpu_scan_sample SCAN WIDTH HEIGHT LOG [SECONDS]
  *
- *      Runs until SECONDS have passed (default: until SIGTERM). With
- *      SCAN_FRAMES=DIR in the environment, every distinct frame's pixels are
- *      also written to DIR/frame-NNNNNN.raw, for looking at a torn one.
+ *      Runs until SECONDS have passed (default: until SIGTERM). The path is
+ *      looked at on every copy: a compositor that flips its scan image swaps
+ *      two files' names, and the image shown is then the other file, which
+ *      is mapped from then on. With SCAN_FRAMES=DIR in the environment, every
+ *      distinct frame's pixels are also written to DIR/frame-NNNNNN.raw.
  *      Built by gcc and clang as a hosted helper: libc only.
  */
 #include <errno.h>
@@ -69,8 +71,9 @@ int main(int argc, char **argv)
         size_t bytes;
         unsigned char *cur, *last;
         uint64_t *hashes;
-        const unsigned char *map;
-        int fd, have = 0;
+        const unsigned char *map = NULL;
+        int fd = -1, have = 0;
+        ino_t ino = 0;
         uint32_t seq = 0;
         double seconds = 0;
         uint64_t start, waited = 0;
@@ -98,30 +101,6 @@ int main(int argc, char **argv)
         sigaction(SIGTERM, &act, NULL);
         sigaction(SIGINT, &act, NULL);
 
-        // The compositor makes the scan image before it draws; wait for it (a minute at most).
-        for (;;)
-        {
-                struct stat st;
-
-                fd = open(scan, O_RDONLY | O_CLOEXEC);
-                if (fd >= 0 && fstat(fd, &st) == 0 && (size_t)st.st_size >= bytes)
-                        break;
-                if (fd >= 0)
-                        close(fd);
-                if (stop || waited > 60000000000ull)
-                {
-                        fprintf(stderr, "gpu_scan_sample: no scan image %s of %zu bytes\n", scan, bytes);
-                        return 1;
-                }
-                usleep(1000);
-                waited += 1000000ull;
-        }
-        map = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
-        if (map == MAP_FAILED)
-        {
-                fprintf(stderr, "gpu_scan_sample: mmap %s: %s\n", scan, strerror(errno));
-                return 1;
-        }
         cur = malloc(bytes);
         last = malloc(bytes);
         hashes = malloc(rows * sizeof(uint64_t));
@@ -136,10 +115,39 @@ int main(int argc, char **argv)
         start = now_ns();
         while (!stop)
         {
-                uint64_t t0 = now_ns();
+                uint64_t t0;
                 uint32_t n = (uint32_t)rows;
                 uint32_t w = (uint32_t)(bytes / rows);
+                struct stat st;
 
+                // The image shown: the path's file, mapped again when the names were exchanged (or it was not there yet).
+                if (stat(scan, &st) != 0 || (size_t)st.st_size < bytes)
+                {
+                        if (waited > 60000000000ull || (stop && !map))
+                                break;
+                        usleep(1000);
+                        waited += 1000000ull;
+                        continue;
+                }
+                if (!map || st.st_ino != ino)
+                {
+                        int next = open(scan, O_RDONLY | O_CLOEXEC);
+                        const unsigned char *mapped;
+
+                        if (next < 0)
+                                continue;
+                        mapped = mmap(NULL, bytes, PROT_READ, MAP_SHARED, next, 0);
+                        if (mapped == MAP_FAILED)
+                        {
+                                close(next);
+                                fprintf(stderr, "gpu_scan_sample: mmap %s: %s\n", scan, strerror(errno));
+                                return 1;
+                        }
+                        if (map)
+                                munmap((void *)map, bytes), close(fd);
+                        map = mapped, fd = next, ino = st.st_ino;
+                }
+                t0 = now_ns();
                 if (seconds > 0 && (double)(t0 - start) / 1e9 >= seconds)
                         break;
                 memcpy(cur, map, bytes);
@@ -166,8 +174,8 @@ int main(int argc, char **argv)
                 seq++;
         }
         fclose(out);
-        munmap((void *)map, bytes);
-        close(fd);
+        if (map)
+                munmap((void *)map, bytes), close(fd);
         printf("gpu_scan_sample: %u distinct frames in %.1f s\n", (unsigned)seq, (double)(now_ns() - start) / 1e9);
         return 0;
 }
