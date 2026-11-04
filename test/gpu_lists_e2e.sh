@@ -50,7 +50,9 @@ session()
         else
                 : > /run/moonwater/lists # the lists are off without it (the compositor looks for it)
         fi
-        bin/compositor -H 800x600 "$work/$mode.img" -G > "$work/$mode.compositor.log" 2>&1 &
+        # the input: the evdev fifo (-i), written by the flicker detector as a device would write it
+        mkfifo "$work/input.fifo"
+        bin/compositor -H 800x600 "$work/$mode.img" -G -i "$work/input.fifo" > "$work/$mode.compositor.log" 2>&1 &
         cpid=$!
         sleep 2
         # the same three applets, the same way, in the same order
@@ -70,6 +72,9 @@ session()
         settle "$work/$mode.img"
         bin/moonwater debug > "$work/$mode.canvas.txt" 2>&1
         cp "$work/$mode.img" "$work/$mode.settled.img"
+        # the flicker detector: input over the fifo (hover, click, wheel, typing), every distinct screen kept in order; the card session
+        # with its lists on and the off session (the processor paints) are the same input and the same reference
+        python3 "$(dirname "$fonts")/test/gpu_lists_flicker.py" "$work/$mode.img" "$work/input.fifo" "$work/flicker-$mode" > "$work/flicker-$mode.txt" 2>&1
         if [ "$mode" = card ]; then
                 # canvas gpu off, then on, while the apps run: each repaints in the new mode, and the screen is the one before
                 bin/moonwater canvas gpu off > /dev/null 2>&1
