@@ -161,7 +161,7 @@ static void sessionbus_scheme_file(long dark)
                 return;
         sessionbus_call(syscall(write), (positive)handle, (positive)(dark ? "dark\n" : "light\n"), dark ? 5 : 6, 0, 0, 0);
         system_close(handle);
-        if (sessionbus_call(syscall(renameat), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) >= 0)
+        if (sessionbus_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) >= 0)
                 written = dark;
 }
 
