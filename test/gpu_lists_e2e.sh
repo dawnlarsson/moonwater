@@ -12,12 +12,18 @@
 # settle IMG: wait until the screen file stops changing (two equal checksums a second apart), at most 40 seconds
 settle()
 {
+        # the apps' first paints come after their windows: four equal readings in a row, a second apart, and at least five seconds
         last=
+        same=0
         i=0
+        sleep 5
         while [ $i -lt 40 ]; do
                 sum=$(cksum < "$1" 2> /dev/null)
                 if [ -n "$sum" ] && [ "$sum" = "$last" ]; then
-                        return 0
+                        same=$((same + 1))
+                        [ $same -ge 4 ] && return 0
+                else
+                        same=0
                 fi
                 last=$sum
                 sleep 1
