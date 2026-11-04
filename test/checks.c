@@ -216123,6 +216123,35 @@ b32 main(void)
                                                         string_format(log, "  FAIL gpu text round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                                       (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
                                         }
+                                // The same runs with their bitmaps named by a base of the table (a list's memfd is mapped at an address of its own): the text op's word 6 holds the
+                                // base's number and its word 7 the place from that base, which is the buffer's start plus 4096 here, so the place is 4096 less than it was.
+                                {
+                                        positive address_to bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT);
+
+                                        bases[1] = GPU_VA + 4096, bases[2] = GPU_VA + 1000000;
+                                        for (unsigned int k = 0; k < scene.count; k++)
+                                        {
+                                                unsigned int address_to q = tops + 8 + 8 * k;
+
+                                                if ((q[0] & 255) == 3)
+                                                        q[6] |= (k & 1 ? 2u : 1u) << 16, q[7] -= k & 1 ? 1000000u : 4096u;
+                                        }
+                                        for (positive i = 0; i < (positive)TP * TH; i++)
+                                                tpic[i] = 0x12345678u;
+                                        if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
+                                        {
+                                                check("gpu text bases: the scene finishes", false);
+                                                break;
+                                        }
+                                        for (int y = 0; y < TH; y++)
+                                                for (int x = 0; x < TW; x++)
+                                                {
+                                                        checks++;
+                                                        if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++failures, ++text_bad) < 6)
+                                                                string_format(log, "  FAIL gpu text bases round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                              (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                }
+                                }
                         }
                 }
         }

@@ -799,7 +799,8 @@ scene:
 	v_cndmask_b32_e64 v8, v8, v37, s[88:89]
 	s_branch	.scene_loop
 
-; a text run (3 | the pitch << 8, x0, y0, x1, y1, the ink, alpha | stroke << 8, the bitmap's place from the buffer's start): the cover of each pixel is
+; a text run (3 | the pitch << 8, x0, y0, x1, y1, the ink, alpha | stroke << 8 | a base's number << 16, the bitmap's place from that base: the buffer's start for none, else
+; the 64-bit address at that number in the table the arguments name at 0x40): the cover of each pixel is
 ; a byte of the bitmap, with a border of nothing round it; each lane reads its four bytes and the ones beside and above and below by unaligned dwords
 .scene_text:
 	s_cmp_le_u32	s59, s28
@@ -827,16 +828,28 @@ scene:
 	s_and_b64	s[76:77], s[76:77], vcc
 	s_and_saveexec_b64 s[92:93], s[76:77]
 	s_cbranch_execz	.text_done
+	s_mov_b64	s[98:99], s[102:103]
+	s_bfe_u32	s100, s62, 0x80010
+	s_cmp_eq_u32	s100, 0
+	s_cbranch_scc1	.text_based
+	s_load_dwordx2	s[98:99], s[4:5], 0x40
+	s_lshl_b32	s100, s100, 3
+	s_waitcnt	lgkmcnt(0)
+	s_add_u32	s98, s98, s100
+	s_addc_u32	s99, s99, 0
+	s_load_dwordx2	s[98:99], s[98:99], 0x0
+	s_waitcnt	lgkmcnt(0)
+.text_based:
 	v_subrev_nc_u32	v30, s58, v4
 	v_mad_u32_u24	v30, v30, s81, s63
 	v_subrev_nc_u32	v31, s57, v3
 	v_add_nc_u32	v30, v30, v31
 	v_subrev_nc_u32	v32, s81, v30
 	v_add_nc_u32	v33, s81, v30
-	global_load_dword v34, v30, s[102:103] offset:-1
-	global_load_dword v35, v30, s[102:103] offset:3
-	global_load_dword v36, v32, s[102:103]
-	global_load_dword v37, v33, s[102:103]
+	global_load_dword v34, v30, s[98:99] offset:-1
+	global_load_dword v35, v30, s[98:99] offset:3
+	global_load_dword v36, v32, s[98:99]
+	global_load_dword v37, v33, s[98:99]
 	s_waitcnt	vmcnt(0)
 	v_bfe_u32	v74, v34, 0, 8
 	v_bfe_u32	v70, v34, 8, 8

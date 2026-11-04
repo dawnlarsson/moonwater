@@ -5,7 +5,8 @@
 #define GPU_IO(dir, n, size) ((dir) << 30 | (size) << 16 | 0x6400u | (0x40 + (n)))
 #define GPU_PKT(op, n) (0xc0000002u | (op) << 8 | (n) << 16) // type 3, for the compute shader type
 #define GPU_VA 0x1000000000ull
-#define GPU_DATA 40960 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024
+#define GPU_BASES_AT 40960 // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
+#define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024, the bases from GPU_BASES_AT
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
@@ -437,7 +438,7 @@ static const struct { const unsigned int *words; unsigned int size; } gpu_kernel
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + 256 * 7 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + 256 * 7 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 #ifndef GPU_WAIT_CS
@@ -637,7 +638,7 @@ static void gpu_unimport(positive at)
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
 // s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene, 5 with boxes (both by clang, any width), 6 by hand with or without boxes for a width and a pitch of a multiple of 4 (gpu_scene picks).
-struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows; };
+struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab; };
 #define GPU_ARGS ((struct gpu_args address_to)(gpu.at + 128))
 
 /*
@@ -760,7 +761,7 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         if (bins_at + 8ull * cw * ch + 32ull * at > gpu.size) // the lists must fit what the buffer has left
                 return false;
         GPU_SQUARES(unsigned int address_to r = list + 8 * (tab[2 * c] + tab[2 * c + 1]); int j; tab[2 * c + 1] += 1 + m; memory_copy(r, q, 32 * (1 + m)); if (e) for (j = 0; j <= m; j++) gpu_radii(r + 8 * j);)
-        a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
+        a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
         for (i = 0; i < n; i++)
                 if ((ops[8 * i] & 255) == 2)
                         a->op = 5, hand |= ops[8 * i] > 2;
