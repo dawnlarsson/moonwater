@@ -60,7 +60,7 @@ moonwater clipboard clear              empty both selections and the history (ro
 moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel
-moonwater notices [clear]              the kernel's own errors and warnings the desktop has (root): clear dismisses them
+moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater language [CODE|default]      the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it ar il ir [us]

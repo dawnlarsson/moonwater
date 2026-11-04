@@ -126,6 +126,8 @@ settings_not_here	4e20	غير موجود على هذا الحاسوب
 settings_nothing_kept	85a2	لا شيء مكتوب: تبقى القيمة كما هي
 settings_nothing_matches	14e9	لا شيء يطابق ما كتبته
 settings_nothing_typed	edce	لا شيء مكتوب
+settings_notices_count	8902	%1$d إشعارا
+settings_notices_none	47c6	لا إشعارات من النواة
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d هرتز (موصى به)
 settings_rate_plain	743a	%d هرتز
@@ -288,6 +290,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب
 =Storage	df06	التخزين
+=System	84bc	النظام
+=System notices	fa89	إشعارات النظام
 =Taskbar	d759	شريط المهام
 =Taskbar display	042b	شاشة شريط المهام
 =Taskbar launcher button	dd4d	زر المشغل في شريط المهام

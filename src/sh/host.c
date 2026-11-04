@@ -24638,7 +24638,7 @@ static const host_row host_rows[] = {
     {null, "clipboard watch [primary]", "a line each time something is copied, the text escaped (root)", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
-    {null, "notices [clear]", "the kernel's own errors and warnings the desktop has (root): clear dismisses them", 'b'},
+    {null, "notices [clear]", "the errors and warnings of the kernel the desktop has (root): clear dismisses them", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},

@@ -794,6 +794,7 @@ static struct windows_issues settings_board;
 static unsigned char settings_expanded[SETTINGS_ALL]; // each row's expander: 1 when the lines under it show (the GPU's, or a row with an issue)
 static positive settings_board_due;
 static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SUB_TEXT];
+static char settings_notices_text[SETTINGS_SUB_TEXT];
 static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
 static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
 static unsigned int settings_gpu_shown_total;
@@ -809,6 +810,12 @@ static b32 settings_key_of(int row, char address_to key, positive room)
         const struct settings_row address_to which = row >= 0 && row < SETTINGS_ANY ? &settings_rows[row] : null;
 
         key[0] = 0;
+        // The kernel's notices row has no verb: its key is the one the feeder files them under.
+        if (which && which->output == SETTINGS_OUT_NOTICES)
+        {
+                string_copy_bounded((string_address)key, (string_address)"system notices", room);
+                return true;
+        }
         if (!which || !which->read[0])
                 return false;
         for (positive k = 0; k < SETTING_WORDS && which->read[k]; k++)
@@ -3183,6 +3190,24 @@ static void settings_describe_output(int id, struct ui_row address_to row)
         unsigned char output = settings_rows[id].output;
 
         row->kind = UI_ROW_CHOICE;
+        if (output == SETTINGS_OUT_NOTICES)
+        {
+                // The kernel's notices on the board (the classes the feeder raises, which the row lists): their count, and no word when none.
+                unsigned int count = 0;
+
+                for (int at = 0; at < WINDOWS_ISSUES; at++)
+                        if (settings_board.issue[at].used && settings_board.issue[at].code >= WINDOWS_ISSUE_KERNEL_SYSTEM && settings_board.issue[at].code <= WINDOWS_ISSUE_KERNEL_PROGRAM)
+                                count++;
+                row->kind = UI_ROW_PLAIN, row->dim = count == 0;
+                if (!count)
+                        row->value = WORDS(settings_notices_none);
+                else
+                {
+                        language_format(settings_notices_text, sizeof(settings_notices_text), WORDS(settings_notices_count), (long)count);
+                        row->value = settings_notices_text;
+                }
+                return;
+        }
         if (output == SETTINGS_OUT_NOTE)
         {
                 row->kind = UI_ROW_PLAIN, row->dim = true;

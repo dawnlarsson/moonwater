@@ -126,6 +126,8 @@ settings_not_here	4e20	לא קיים במחשב הזה
 settings_nothing_kept	85a2	לא הוקלד דבר: הערך נשמר
 settings_nothing_matches	14e9	אין התאמה למה שהוקלד
 settings_nothing_typed	edce	לא הוקלד דבר
+settings_notices_count	8902	%1$d הודעות
+settings_notices_none	47c6	אין הודעות מהליבה
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d הרץ (מומלץ)
 settings_rate_plain	743a	%d הרץ
@@ -288,6 +290,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Sound server	84bf	שרת השמע
 =Start the desktop	be4c	הפעל את שולחן העבודה
 =Storage	df06	אחסון
+=System	84bc	מערכת
+=System notices	fa89	הודעות המערכת
 =Taskbar	d759	שורת המשימות
 =Taskbar display	042b	מסך שורת המשימות
 =Taskbar launcher button	dd4d	כפתור המשגר בשורת המשימות

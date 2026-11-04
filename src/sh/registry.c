@@ -62,6 +62,7 @@
 #define SETTINGS_OUT_REFRESH 3u
 #define SETTINGS_OUT_NOTE 4u
 #define SETTINGS_OUT_SCALE 5u
+#define SETTINGS_OUT_NOTICES 6u // the kernel's own notices: the value is their count, and the row's lines are each one (settings.c)
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -517,6 +518,10 @@ static const struct settings_row settings_rows[] = {
      null, 0, null, .usage = "bind init canvas [on|off]", .help = "start Canvas at boot [on]"},
     {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
      0, null, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
+    //  The kernel's own notices (the feeder puts the errors and warnings of the kernel's log under the key system notices): no verb of its
+    //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
+    {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, null, .output = SETTINGS_OUT_NOTICES,
+     .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
 };
 
 #define SETTINGS_ROWS (sizeof(settings_rows) / sizeof(settings_rows[0]))

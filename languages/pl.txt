@@ -125,6 +125,8 @@ settings_not_here	4e20	nie ma tego na tej maszynie
 settings_nothing_kept	85a2	nic nie wpisano: wartość pozostaje
 settings_nothing_matches	14e9	Nic nie pasuje do wpisanego tekstu
 settings_nothing_typed	edce	nic nie wpisano
+settings_notices_count	8902	%1$d powiadomień
+settings_notices_none	47c6	brak powiadomień jądra
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (zalecana)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =Sound server	84bf	Serwer dźwięku
 =Start the desktop	be4c	Uruchom pulpit
 =Storage	df06	Pamięć masowa
+=System	84bc	System
+=System notices	fa89	Powiadomienia systemu
 =Taskbar	d759	Pasek zadań
 =Taskbar display	042b	Ekran paska zadań
 =Taskbar launcher button	dd4d	Przycisk uruchamiania na pasku zadań

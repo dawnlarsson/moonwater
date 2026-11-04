@@ -125,6 +125,8 @@ settings_not_here	4e20	нет на этом компьютере
 settings_nothing_kept	85a2	ничего не введено: значение сохраняется
 settings_nothing_matches	14e9	Ничего не найдено по запросу
 settings_nothing_typed	edce	ничего не введено
+settings_notices_count	8902	уведомлений: %1$d
+settings_notices_none	47c6	нет уведомлений ядра
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Гц (рекомендуется)
 settings_rate_plain	743a	%d Гц
@@ -287,6 +289,8 @@ ui_field_full	fe02	больше не помещается
 =Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
 =Storage	df06	Накопители
+=System	84bc	Система
+=System notices	fa89	Уведомления системы
 =Taskbar	d759	Панель задач
 =Taskbar display	042b	Экран панели задач
 =Taskbar launcher button	dd4d	Кнопка запуска на панели задач

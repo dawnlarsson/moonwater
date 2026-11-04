@@ -126,6 +126,8 @@ settings_not_here	4e20	در این رایانه نیست
 settings_nothing_kept	85a2	چیزی تایپ نشد: مقدار حفظ می‌شود
 settings_nothing_matches	14e9	هیچ موردی با متن واردشده مطابقت ندارد
 settings_nothing_typed	edce	چیزی تایپ نشد
+settings_notices_count	8902	%1$d اعلان
+settings_notices_none	47c6	اعلان هسته‌ای نیست
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d هرتز (پیشنهادی)
 settings_rate_plain	743a	%d هرتز
@@ -288,6 +290,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Sound server	84bf	کارساز صدا
 =Start the desktop	be4c	اجرای رومیزی
 =Storage	df06	ذخیره‌سازی
+=System	84bc	سیستم
+=System notices	fa89	اعلان‌های سیستم
 =Taskbar	d759	نوار وظیفه
 =Taskbar display	042b	نمایشگر نوار وظیفه
 =Taskbar launcher button	dd4d	دکمه راه‌انداز در نوار وظیفه

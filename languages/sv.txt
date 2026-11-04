@@ -125,6 +125,8 @@ settings_not_here	4e20	finns inte på den här maskinen
 settings_nothing_kept	85a2	inget skrivet: värdet behålls
 settings_nothing_matches	14e9	Inget matchar det som skrivits
 settings_nothing_typed	edce	inget skrivet
+settings_notices_count	8902	%1$d meddelanden
+settings_notices_none	47c6	inga kärnmeddelanden
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Hz (rekommenderad)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	mer ryms inte
 =Sound server	84bf	Ljudserver
 =Start the desktop	be4c	Starta skrivbordet
 =Storage	df06	Lagring
+=System	84bc	System
+=System notices	fa89	Systemmeddelanden
 =Taskbar	d759	Aktivitetsfält
 =Taskbar display	042b	Aktivitetsfältets skärm
 =Taskbar launcher button	dd4d	Startarknapp i aktivitetsfältet

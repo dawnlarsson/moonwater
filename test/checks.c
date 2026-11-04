@@ -140318,7 +140318,7 @@ static int settings_groups_named(const char address_to name)
 static fn check_settings_groups(void)
 {
         static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Sound", "Taskbar", "Time",
-                                                "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot"};
+                                                "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot", "System"};
         static const struct
         {
                 const char address_to words[3];

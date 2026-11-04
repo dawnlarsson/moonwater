@@ -125,6 +125,8 @@ settings_not_here	4e20	non presente su questa macchina
 settings_nothing_kept	85a2	niente digitato: il valore resta
 settings_nothing_matches	14e9	Nessuna corrispondenza con il testo
 settings_nothing_typed	edce	niente digitato
+settings_notices_count	8902	%1$d avvisi
+settings_notices_none	47c6	nessun avviso del kernel
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (consigliata)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	non ce ne sta di più
 =Sound server	84bf	Server audio
 =Start the desktop	be4c	Avvia il desktop
 =Storage	df06	Archiviazione
+=System	84bc	Sistema
+=System notices	fa89	Avvisi di sistema
 =Taskbar	d759	Barra delle applicazioni
 =Taskbar display	042b	Schermo della barra delle applicazioni
 =Taskbar launcher button	dd4d	Pulsante dell'avviatore nella barra delle applicazioni

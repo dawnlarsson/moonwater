@@ -125,6 +125,8 @@ settings_not_here	4e20	no está en este equipo
 settings_nothing_kept	85a2	nada escrito: se mantiene el valor
 settings_nothing_matches	14e9	Nada coincide con lo escrito
 settings_nothing_typed	edce	nada escrito
+settings_notices_count	8902	%1$d avisos
+settings_notices_none	47c6	sin avisos del kernel
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Hz (recomendada)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	no cabe más
 =Sound server	84bf	Servidor de sonido
 =Start the desktop	be4c	Iniciar el escritorio
 =Storage	df06	Almacenamiento
+=System	84bc	Sistema
+=System notices	fa89	Avisos del sistema
 =Taskbar	d759	Barra de tareas
 =Taskbar display	042b	Pantalla de la barra de tareas
 =Taskbar launcher button	dd4d	Botón del lanzador en la barra de tareas

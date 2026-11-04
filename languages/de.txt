@@ -125,6 +125,8 @@ settings_not_here	4e20	nicht auf diesem Gerät
 settings_nothing_kept	85a2	nichts eingegeben: der Wert bleibt
 settings_nothing_matches	14e9	Nichts passt zur Eingabe
 settings_nothing_typed	edce	nichts eingegeben
+settings_notices_count	8902	%1$d Meldungen
+settings_notices_none	47c6	keine Kernelmeldungen
 settings_percent	e76a	%d %%
 settings_rate_best	7450	%d Hz (empfohlen)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Sound server	84bf	Tonserver
 =Start the desktop	be4c	Desktop starten
 =Storage	df06	Speicher
+=System	84bc	System
+=System notices	fa89	Systemmeldungen
 =Taskbar	d759	Taskleiste
 =Taskbar display	042b	Bildschirm der Taskleiste
 =Taskbar launcher button	dd4d	Starter-Schaltfläche in der Taskleiste

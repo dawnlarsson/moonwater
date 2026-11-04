@@ -125,6 +125,8 @@ settings_not_here	4e20	δεν υπάρχει σε αυτό το μηχάνημα
 settings_nothing_kept	85a2	δεν πληκτρολογήθηκε τίποτα: η τιμή διατηρείται
 settings_nothing_matches	14e9	Τίποτα δεν ταιριάζει με το κείμενο
 settings_nothing_typed	edce	δεν πληκτρολογήθηκε τίποτα
+settings_notices_count	8902	%1$d ειδοποιήσεις
+settings_notices_none	47c6	καμία ειδοποίηση πυρήνα
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (προτεινόμενο)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Sound server	84bf	Διακομιστής ήχου
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
 =Storage	df06	Αποθήκευση
+=System	84bc	Σύστημα
+=System notices	fa89	Ειδοποιήσεις συστήματος
 =Taskbar	d759	Γραμμή εργασιών
 =Taskbar display	042b	Οθόνη της γραμμής εργασιών
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών

@@ -125,6 +125,8 @@ settings_not_here	4e20	not on this machine
 settings_nothing_kept	85a2	nothing typed: the value is kept
 settings_nothing_matches	14e9	Nothing matches what is typed
 settings_nothing_typed	edce	nothing typed
+settings_notices_count	8902	%1$d notices
+settings_notices_none	47c6	no kernel notices
 settings_percent	e76a	%d%%
 settings_rate_best	7450	%d Hz (recommended)
 settings_rate_plain	743a	%d Hz
@@ -287,6 +289,8 @@ ui_field_full	fe02	that is as much as it holds
 =Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop
 =Storage	df06	Storage
+=System	84bc	System
+=System notices	fa89	System notices
 =Taskbar	d759	Taskbar
 =Taskbar display	042b	Taskbar display
 =Taskbar launcher button	dd4d	Taskbar launcher button
