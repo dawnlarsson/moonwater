@@ -166517,13 +166517,16 @@ static void fake_row_title(void *context, int row, const char *text, long length
         snprintf(fake.row[row].title, sizeof fake.row[row].title, "%s", text);
 }
 
+static long fake_cursor[WAYLAND_ROWS]; // the cursor code the last WAYLAND_DO_CURSOR gave each row (-1 none)
+
 static void fake_row_do(void *context, int row, long what, long a, long b)
 {
         struct fake_row *r = &fake.row[row];
 
         (void)context;
-        (void)a;
         (void)b;
+        if (what == WAYLAND_DO_CURSOR)
+                fake_cursor[row] = a;
         if (r->did_count < 16)
                 r->did[r->did_count++] = what;
         if (what == WAYLAND_DO_MAXIMIZE)
@@ -168060,6 +168063,57 @@ static void test_activation(void)
         WLCHECK(fake.row[0].did_count == before && c->errors == 0, "an unknown token is nothing, and no error");
         wlc_end(c);
         leak_check("activation");
+        wayland_stop();
+}
+
+/*
+        wp_cursor_shape: the shape a client asks for is given to the window it is over, when its serial is one of its recent inputs
+        (a stale one is nothing); a shape the compositor lacks is the arrow; the shape is none again on enter and on leave.
+*/
+static void test_cursor_shape(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat, pointer, manager, device;
+        long a, serial;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        manager = wl_global(c, s.registry, WLI_wp_cursor_shape_manager_v1, 2);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_pointer, pointer);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_enter, 0);
+        serial = a >= 0 ? (long)c->ev[a].u[0] : 0;
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, pointer);
+        WLCHECK(manager && serial, "the cursor shape manager is offered, and the enter gives a serial");
+        WLCHECK(fake_cursor[0] == -1, "a window that the pointer enters has no shape of its client's yet");
+
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_text);
+        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_TEXT, "an I-beam asked for over the window is the text shape");
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)(serial - 500),
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_crosshair);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_TEXT, "a shape with a serial that is not a recent input of the client is nothing");
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_grab);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_ARROW, "a shape the compositor does not draw is the arrow");
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_nwse_resize);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_RESIZE_NWSE, "a diagonal resize is the diagonal resize");
+
+        wayland_pointer_to(-1, 0, 0);
+        WLCHECK(fake_cursor[0] == -1, "a shape is none again when the pointer leaves the window");
+        WLCHECK(c->errors == 0, "none of it is a protocol error");
+        wlc_end(c);
+        leak_check("cursor shape");
         wayland_stop();
 }
 
@@ -171862,6 +171916,7 @@ int main(int argc, char **argv)
         test_inhibit_state();
         test_activation();
         test_pacing();
+        test_cursor_shape();
         test_text();
         test_popups();
         test_surface_rules();

@@ -2761,7 +2761,10 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 #define CP_RESIZE_V 2
 #define CP_RESIZE_NWSE 3
 #define CP_RESIZE_NESW 4
-#define CP_SHAPES 5
+#define CP_TEXT 5               // the I-beam (text), and the two shapes a client may ask for that the compositor draws too
+#define CP_CROSS 6              // the crosshair
+#define CP_MOVE 7               // four arrows (move, all scroll)
+#define CP_SHAPES 8
 // The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
 #define CP_PLANE 64
 
@@ -2776,6 +2779,12 @@ static const unsigned short compositor_cursor_edge[CP_SHAPES][CP_CURSOR_H] = {
      0x6400, 0x4400, 0x8400, 0xfc01, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0xfc01, 0x8400, 0x4400, 0x6400, 0xb400, 0x4c01, 0x8442, 0x0065, 0x005a,
      0x004c, 0x0044, 0x0042, 0x007f, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x07f0, 0x01b0, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140,
+     0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x01b0, 0x07f0},
+    {0x0100, 0x0100, 0x0100, 0x0280, 0x0280, 0x0280, 0x0100, 0x0100, 0x0100, 0x01ff,
+     0x0101, 0x01ff, 0x0100, 0x0100, 0x0100, 0x0280, 0x0280, 0x0280, 0x0100, 0x0100},
+    {0x0080, 0x0140, 0x0220, 0x0410, 0x0080, 0x0080, 0x0080, 0x4081, 0x5f7d, 0x8001,
+     0x5f7d, 0x4081, 0x0080, 0x0080, 0x0080, 0x0410, 0x0220, 0x0140, 0x0080, 0x0000},
 };
 
 static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
@@ -2789,9 +2798,15 @@ static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
      0x1800, 0x3800, 0x7800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0x0000, 0x7800, 0x3800, 0x1800, 0x4800, 0x8000, 0x0001, 0x0002, 0x0024,
      0x0030, 0x0038, 0x003c, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    {0x0000, 0x0040, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080,
+     0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080, 0x0040, 0x0000},
+    {0x0000, 0x0000, 0x0000, 0x0100, 0x0100, 0x0100, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x00fe, 0x0000, 0x0000, 0x0000, 0x0000, 0x0100, 0x0100, 0x0100, 0x0000, 0x0000},
+    {0x0000, 0x0080, 0x01c0, 0x03e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0080, 0x7ffe,
+     0x0080, 0x0000, 0x0000, 0x0000, 0x0000, 0x03e0, 0x01c0, 0x0080, 0x0000, 0x0000},
 };
 
-static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7};
+static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7, 7, 7, 7};
 
 // The edges of a window a hand has hold of, and the shape that says so.
 #define CP_EDGE_LEFT 1u
@@ -14064,6 +14079,10 @@ static void compositor_pointer_to(int row)
         compositor.told_y = y;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_asked_shape(int row); // wayland_host.c: the CP_ shape the row's client asked for, or -1
+#endif
+
 static void compositor_motion(void)
 {
         int under, tab;
@@ -14071,12 +14090,23 @@ static void compositor_motion(void)
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
-        // The shape of what the hand has hold of or is over: the edges it could take.
-        compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
-                                  : compositor.drag >= 0 || under < 0
-                                      ? CP_ARROW
-                                      : compositor_cursor_by_edges[compositor_edge_zone(under, compositor.pointer_x,
-                                                                                         compositor.pointer_y) & 15];
+        // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
+        // the shape its client asked for with wp_cursor_shape (the arrow when it asked for none).
+        {
+                unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 ? 0
+                                    : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                int asked = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? compositor_wl_asked_shape(under) : -1;
+#else
+                int asked = -1;
+#endif
+
+                compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
+                                          : compositor.drag >= 0 || under < 0 ? CP_ARROW
+                                          : zone ? compositor_cursor_by_edges[zone & 15]
+                                          : asked >= 0 ? (unsigned int)asked
+                                          : CP_ARROW;
+        }
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());
         compositor_cursor_move();

@@ -162,6 +162,15 @@ struct wayland_rect
 #define WAYLAND_DO_RESIZE 7
 #define WAYLAND_DO_CLOSE 8
 #define WAYLAND_DO_FOCUS 9      // raise and focus the window: an xdg-activation token that the person's input vouches for
+#define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
+#define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
+#define WAYLAND_CURSOR_TEXT 1
+#define WAYLAND_CURSOR_CROSS 2
+#define WAYLAND_CURSOR_MOVE 3
+#define WAYLAND_CURSOR_RESIZE_H 4
+#define WAYLAND_CURSOR_RESIZE_V 5
+#define WAYLAND_CURSOR_RESIZE_NWSE 6
+#define WAYLAND_CURSOR_RESIZE_NESW 7
 
 #define WAYLAND_STATE_MAXIMIZED 1
 #define WAYLAND_STATE_FULLSCREEN 2
@@ -3533,6 +3542,12 @@ WAYLAND_API void wayland_pointer_to(long row, long x, long y)
                 was = &old->surfaces[wayland.pointer_surface];
         if (was)
                 wayland_pointer_leave_all(old, was);
+        // The cursor shape a window's client asked for is its own while the pointer is on it: none on leave, none on enter
+        // until the client asks again (the arrow is the compositor's).
+        if (wayland.pointer_row >= 0 && wayland.pointer_row != (is ? row : -1))
+                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, -1, 0);
+        if (is)
+                wayland.host->row_do(wayland.host->context, row, WAYLAND_DO_CURSOR, -1, 0);
         wayland.pointer_row = is ? row : -1;
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
         wayland_constraints_update();
@@ -4662,6 +4677,48 @@ static int wayland_fractional_request(struct wayland_client *c, struct wayland_o
         return WAYLAND_OK;
 }
 
+/* The compositor's shape for a protocol shape: the ones it draws, and the arrow for the rest (a hand, a wait, a move it lacks). */
+static long wayland_cursor_code(unsigned long shape)
+{
+        switch (shape)
+        {
+        case WLN_wp_cursor_shape_device_v1_shape_text:
+        case WLN_wp_cursor_shape_device_v1_shape_vertical_text:
+                return WAYLAND_CURSOR_TEXT;
+        case WLN_wp_cursor_shape_device_v1_shape_crosshair:
+                return WAYLAND_CURSOR_CROSS;
+        case WLN_wp_cursor_shape_device_v1_shape_move:
+        case WLN_wp_cursor_shape_device_v1_shape_all_scroll:
+                return WAYLAND_CURSOR_MOVE;
+        case WLN_wp_cursor_shape_device_v1_shape_e_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_w_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_ew_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_col_resize:
+                return WAYLAND_CURSOR_RESIZE_H;
+        case WLN_wp_cursor_shape_device_v1_shape_n_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_s_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_ns_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_row_resize:
+                return WAYLAND_CURSOR_RESIZE_V;
+        case WLN_wp_cursor_shape_device_v1_shape_nw_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_se_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_nwse_resize:
+                return WAYLAND_CURSOR_RESIZE_NWSE;
+        case WLN_wp_cursor_shape_device_v1_shape_ne_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_sw_resize:
+        case WLN_wp_cursor_shape_device_v1_shape_nesw_resize:
+                return WAYLAND_CURSOR_RESIZE_NESW;
+        default:
+                return WAYLAND_CURSOR_ARROW;
+        }
+}
+
+/*
+        wp_cursor_shape: a client names the shape it wants under the pointer, when its window has the pointer (the serial is one
+        of its recent inputs, as the protocol asks). The compositor draws the pointer, so the shape is handed to the host for that
+        window, which draws it inside the window and not on its edges; a shape the compositor lacks is its arrow. The shape is
+        reset when the pointer enters a window and when it leaves one (wayland_pointer_to).
+*/
 static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         if (self->iface == WLI_wp_cursor_shape_manager_v1)
@@ -4673,6 +4730,9 @@ static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland
         if (op == WLQ_wp_cursor_shape_device_v1_set_shape &&
             (a[1].u < WLN_wp_cursor_shape_device_v1_shape_default || a[1].u > WLN_wp_cursor_shape_device_v1_shape_all_resize))
                 return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
+        if (op == WLQ_wp_cursor_shape_device_v1_set_shape && wayland.pointer_row >= 0 &&
+            wayland.row_client[wayland.pointer_row] == c->slot && wayland_input_serial_ok(c, a[0].u))
+                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, wayland_cursor_code(a[1].u), 0);
         return WAYLAND_OK;
 }
 
