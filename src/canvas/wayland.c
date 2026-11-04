@@ -6487,7 +6487,7 @@ WAYLAND_API void wayland_frame(void)
         destroyed by its event, so it is let go with it.
 */
 static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
-                                     unsigned long seq)
+                                     unsigned long seq, unsigned long flags)
 {
         unsigned long seconds = when / 1000000000ul, nanoseconds = when % 1000000000ul;
 
@@ -6507,7 +6507,7 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                         wayland_word(&e, refresh);
                         wayland_word(&e, (unsigned long)(seq >> 32));
                         wayland_word(&e, (unsigned long)(seq & 0xffffffffu));
-                        wayland_word(&e, 0); // flags: none. The time is the compositor's clock at the flip, a vblank it did not see
+                        wayland_word(&e, flags); // the presentation flags the compositor can vouch for (vsync, hw_clock, hw_completion)
                         wayland_end(&e);
                         wayland_object_delete(c, slot);
                 }
@@ -6520,7 +6520,7 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
         commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
         a timer's frame with nothing new answers none.
 */
-WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq)
+WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
 {
         if (!wayland.host)
                 return;
@@ -6534,10 +6534,10 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
                         continue;
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
-                wayland_presentings_done(c, s, when, refresh, seq);
+                wayland_presentings_done(c, s, when, refresh, seq, flags);
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
-                                wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq);
+                                wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq, flags);
         }
 }
 

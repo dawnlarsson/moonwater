@@ -3856,6 +3856,9 @@ static struct
                 kept there with what they covered (under, a buffer's worth of the band each, patched when it is).
         */
         int table_memfd, table_giver, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
+        positive flip_when;  // the last flip-complete event's time (its vblank, on the monotonic clock), and its sequence
+        unsigned int flip_seq;
+        int flip_stamped;    // whether flip_when came with the event (a card that stamps its vblanks)
         /*
                 The tabs over a window shown straight, on an overlay plane where the card has one
                 (compositor_overlay_ready: overlay_state 0 not yet asked, 1 found, -1 none or refused): the
@@ -6127,6 +6130,10 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 }
 
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
+#endif
+
 static void compositor_flip_done(void)
 {
         compositor.flip_pending = 0;
@@ -6147,6 +6154,10 @@ static void compositor_flip_done(void)
                         compositor_window_fb_drop(row);
                         compositor.dropping &= ~(1u << row);
                 }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // The feedbacks of the frame this flip showed are answered with the card's time for it.
+        compositor_wl_flip_presented();
+#endif
 }
 
 // The card's events, read when its descriptor is readable: a flip's completion is the one asked for.
@@ -6164,7 +6175,22 @@ static void compositor_card_read(void)
                 if (length < 8)
                         break;
                 if (type == COMPOSITOR_EVENT_FLIP_COMPLETE)
+                {
+                        // The card's stamp of the vblank: struct drm_event_vblank is user data, then tv_sec, tv_usec and sequence.
+                        unsigned int sec, usec, sequence;
+
+                        if (length >= 28)
+                        {
+                                memory_copy(address_of sec, events + at + 16, 4);
+                                memory_copy(address_of usec, events + at + 20, 4);
+                                memory_copy(address_of sequence, events + at + 24, 4);
+                                compositor.flip_when = (positive)sec * 1000000000ull + (positive)usec * 1000ull;
+                                compositor.flip_seq = sequence;
+                                compositor.flip_stamped = 1;
+                        }
                         compositor_flip_done();
+                        compositor.flip_stamped = 0;
+                }
                 at += length;
         }
 }

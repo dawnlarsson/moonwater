@@ -168364,13 +168364,13 @@ static void test_presentation(void)
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 0,
                 "a feedback waits for the frame its commit is drawn in, and a timer's frame answers none");
         wlc_forget(c);
-        wayland_presented(5000000123ul, 16666667ul, 7);
+        wayland_presented(5000000123ul, 16666667ul, 7, 0ul);
         wlc_pump(c);
         a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
         WLCHECK(a >= 0 && c->ev[a].u[0] == 0 && c->ev[a].u[1] == 5 && c->ev[a].u[2] == 123 && c->ev[a].u[3] == 16666667 &&
                     c->ev[a].u[4] == 0 && c->ev[a].u[5] == 7 && c->ev[a].u[6] == 0,
                 "a drawn frame presents it: the seconds split in two, the nanoseconds, the period, the count, no flags");
-        wayland_presented(6000000000ul, 16666667ul, 8);
+        wayland_presented(6000000000ul, 16666667ul, 8, 7ul);
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1,
                 "the object is let go by its event: a later frame answers no one");

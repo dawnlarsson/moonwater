@@ -88,6 +88,8 @@ static struct
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
         unsigned char cursor_asked[WINDOWS]; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
+        int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
+        positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
         unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
         positive slow_until[WAYLAND_CLIENTS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
@@ -2209,9 +2211,39 @@ static void compositor_wl_touch_report(unsigned int at, int dropped)
 */
 static void compositor_wl_presented(void)
 {
+        positive now = clock_monotonic_nanoseconds();
+
         if (!compositor_wl.started)
                 return;
-        wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++);
+        // A frame whose flip is in flight waits for the card's completion (the time the card stamps it with). A flip that does not
+        // complete is answered by the clock once two frames have gone by, so no feedback waits for ever.
+        if (compositor.flip_pending && !compositor_wl.presenting_waiting)
+        {
+                compositor_wl.presenting_waiting = 1;
+                compositor_wl.presenting_since = now;
+                return;
+        }
+        if (compositor_wl.presenting_waiting && now - compositor_wl.presenting_since < 2 * compositor.period)
+                return;
+        compositor_wl.presenting_waiting = 0;
+        wayland_presented((unsigned long)now, (unsigned long)compositor.period, compositor_wl.presents++, 0);
+        compositor_wl_flush_all();
+}
+
+/*
+        The card completed a flip: the frame it showed is answered with the card's own stamp (the vblank the card read), flagged
+        as the hardware's: vsync, hw_clock and hw_completion. A flip whose stamp did not come is answered by the clock, flagless.
+        The sequence is the card's, when it sent one.
+*/
+static void compositor_wl_flip_presented(void)
+{
+        if (!compositor_wl.started || !compositor_wl.presenting_waiting)
+                return;
+        compositor_wl.presenting_waiting = 0;
+        if (compositor.flip_stamped && compositor.flip_when)
+                wayland_presented((unsigned long)compositor.flip_when, (unsigned long)compositor.period, compositor.flip_seq, 7);
+        else
+                wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++, 0);
         compositor_wl_flush_all();
 }
 
