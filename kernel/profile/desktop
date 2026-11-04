@@ -30,6 +30,15 @@ CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 CONFIG_INPUT_JOYDEV=y
 
+# The input device nodes are mode 0660 in the input group, so a bowl's user
+# (every bowl's, and Steam's among them) can open the pad and its events.
+# Every process of that group reads every key and pointer event of the
+# machine: this is the posture the desktop image takes for game controllers,
+# and SECURITY.md says what it costs. See kernel/patch/apply and
+# src/moonwater/Kconfig (MOONWATER_INPUT_GROUP, MOONWATER_INPUT_GID).
+CONFIG_MOONWATER_INPUT_GROUP=y
+CONFIG_MOONWATER_INPUT_GID=104
+
 #
 # Rendering Vendors
 #

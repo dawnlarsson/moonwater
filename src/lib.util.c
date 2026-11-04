@@ -190,6 +190,9 @@
 #ifndef MOONWATER_STRICT_BOWL
 #define MOONWATER_STRICT_BOWL MOONWATER_STRICT
 #endif
+#ifndef MOONWATER_INPUT_GID
+#define MOONWATER_INPUT_GID 104
+#endif
 
 /* C varargs adapters shared by the standard compatibility families. */
 #define var_list_entry(name, returned, parameters, last, call)               \

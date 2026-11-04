@@ -4223,6 +4223,11 @@ static bool build_moon_gpu;
 //      exception (SHELL_NO_CANVAS). A desktop image is the one that has it, and only that image gets the settings a game
 //      needs (system.c's desktop defaults).
 static bool build_moon_canvas;
+//      The input group (CONFIG_MOONWATER_INPUT_GROUP), on unless the .config says =n, and its number
+//      (CONFIG_MOONWATER_INPUT_GID, 104 unless it says otherwise). The header carries the exception
+//      (SHELL_NO_INPUT_GROUP) and the number, for init's chown of /dev/uinput and the bowls' group file.
+static bool build_moon_input_group;
+static positive build_moon_input_gid;
 static string_address build_floodlight_policy;
 static string_address const build_floodlight_switches[] = {
     "AWK_SPAWN", "SHELL_ESCAPES", "FIND_EXEC", "FIND_DELETE", "FIND_WRITE",
@@ -4293,6 +4298,8 @@ static fn build_components(string_address config)
         build_moon_wayland = true;
         build_moon_gpu = true;
         build_moon_canvas = true;
+        build_moon_input_group = true;
+        build_moon_input_gid = 104;
         build_floodlight_policy = null;
         build_switch_count = 0;
 
@@ -4332,6 +4339,25 @@ static fn build_components(string_address config)
 
                         if (used == pair.value_length && level <= STRICT_LOCKED)
                                 build_moon_strict = level;
+
+                        continue;
+                }
+
+                //      The input group's number. A value that is not a number in
+                //      1 to 65534 leaves the default standing.
+                if (memory_is_word(name, length, "INPUT_GID"))
+                {
+                        positive used = 0;
+                        positive gid;
+
+                        if (!pair.value)
+                                continue;
+
+                        gid = string_digits_max(pair.value, pair.value_length,
+                                                address_of used);
+
+                        if (used == pair.value_length && gid >= 1 && gid <= 65534)
+                                build_moon_input_gid = gid;
 
                         continue;
                 }
@@ -4423,6 +4449,8 @@ static fn build_components(string_address config)
                         build_moon_gpu = on;
                 else if (memory_is_word(name, length, "CANVAS"))
                         build_moon_canvas = on;
+                else if (memory_is_word(name, length, "INPUT_GROUP"))
+                        build_moon_input_group = on;
                 else if ((string_has_prefix(name, "TOOL_") ||
                           string_has_prefix(name, "BUILTIN_") ||
                           string_has_prefix(name, "FLOODLIGHT_")) &&
@@ -4570,6 +4598,10 @@ static string_address build_config_header(string_address from,
                 text = build_join(text, "#define SHELL_NO_GPU 1\n", null);
         if (!build_moon_canvas)
                 text = build_join(text, "#define SHELL_NO_CANVAS 1\n", null);
+        if (!build_moon_input_group)
+                text = build_join(text, "#define SHELL_NO_INPUT_GROUP 1\n", null);
+        text = build_join(text, "#define MOONWATER_INPUT_GID ",
+                          build_number(build_moon_input_gid), "\n", null);
 
         if (build_moon_floodlight)
         {

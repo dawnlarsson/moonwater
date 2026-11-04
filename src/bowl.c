@@ -2396,6 +2396,19 @@ static fn bowl_session_hosts(void)
         bowl_hosts_write(name);
 }
 
+/*
+        The input group's line in the machine's /etc/group, with the bowl user in
+        it: the group the input device nodes are owned by on a build with
+        CONFIG_MOONWATER_INPUT_GROUP, and nothing on one without.
+*/
+#ifndef SHELL_NO_INPUT_GROUP
+#define BOWL_STRINGIFY_(number) #number
+#define BOWL_STRINGIFY(number) BOWL_STRINGIFY_(number)
+#define BOWL_INPUT_GROUP_LINE "input:x:" BOWL_STRINGIFY(MOONWATER_INPUT_GID) ":" BOWL_USER_NAME "\n"
+#else
+#define BOWL_INPUT_GROUP_LINE ""
+#endif
+
 static fn bowl_session_identity(void)
 {
         static const struct { string_address path; string_address text; } files[] = {
@@ -2404,7 +2417,7 @@ static fn bowl_session_identity(void)
                             BOWL_USER_ID_TEXT ":" BOWL_USER_NAME ":"
                             BOWL_SESSION_HOME ":/bin/sh\n"},
             {"/etc/group", "root:x:0:\n" BOWL_USER_NAME ":x:" BOWL_USER_ID_TEXT
-                           ":\nnogroup:x:65534:\n"},
+                           ":\n" BOWL_INPUT_GROUP_LINE "nogroup:x:65534:\n"},
         };
         static const p8 digits[] = "0123456789abcdef";
         p8 raw[16];
@@ -3228,6 +3241,19 @@ static fn bowl_become_user(void)
                 bowl_become_user_hardened();
                 return;
         }
+
+#ifndef SHELL_NO_INPUT_GROUP
+        /*  The input group is a supplementary group the bowl keeps. Groups are
+            the kernel's ids, not the namespace's, so the input device nodes (mode
+            0660 in that group) stay open to the bowl's user after the unshare.
+            It is set before the unshare: the namespace maps no group but the
+            user's own, and setgroups inside it would be refused. */
+        {
+                p32 input_group[1] = {MOONWATER_INPUT_GID};
+
+                system_call_2(syscall(setgroups), 1, (positive)input_group);
+        }
+#endif
 
         /*  The maps are written through /proc, and a process that has
             unshared and cannot be mapped is nobody. */

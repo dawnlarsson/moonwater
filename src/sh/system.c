@@ -281,6 +281,26 @@ static fn mount_shm()
 }
 
 /*
+        /dev/uinput in the input group, on a build with CONFIG_MOONWATER_INPUT_GROUP
+        (SHELL_NO_INPUT_GROUP is the other). The kernel makes it at boot with devtmpfs's
+        default, 0600 root: a misc device names no owner, and the input core's device
+        type (kernel/patch/apply) does not reach it. So init sets it, 0660 in the group
+        MOONWATER_INPUT_GID: the group the input device nodes are owned by, the same
+        number the kernel is built with. Without the node (a kernel with no uinput, as
+        in the hardened and locked profiles) there is nothing to set.
+*/
+#ifndef SHELL_NO_INPUT_GROUP
+static COLD fn system_input_group(void)
+{
+        if (system_access_at(AT_FDCWD, "/dev/uinput", 0) < 0)
+                return;
+
+        system_change_owner_at(AT_FDCWD, "/dev/uinput", 0, MOONWATER_INPUT_GID, 0);
+        system_change_mode_at(AT_FDCWD, "/dev/uinput", 0660);
+}
+#endif
+
+/*
         The names a program opens by habit for the descriptors it holds:
         /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
         not make and a machine with a udev has made for it. Bash's process
@@ -479,6 +499,9 @@ static DEAD_END b32 system_init()
         mount_devpts();
         mount_shm();
         link_dev_fd();
+#ifndef SHELL_NO_INPUT_GROUP
+        system_input_group();
+#endif
 
         bipolar settling = start_service((string_address)settle_program,
                                          settle_argv, 2);

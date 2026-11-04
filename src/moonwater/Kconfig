@@ -337,6 +337,28 @@ menu "Moonwater"
 
     endmenu
 
+    config MOONWATER_INPUT_GROUP
+        bool "Input devices in the input group (game controllers)"
+        depends on MOONWATER_CORE
+        default n
+        help
+          The event and joystick nodes of the input devices are mode 0660 in
+          the input group, MOONWATER_INPUT_GID, rather than 0600 root, and
+          /dev/uinput is made so at boot by init. Every process of that group
+          can read every key and pointer event of the machine, and write events
+          into it through uinput: that is what Steam Input's virtual pad and its
+          remapping need from a bowl. The bowls' users are in the group. The
+          hardened, locked and server profiles leave this off.
+
+    config MOONWATER_INPUT_GID
+        int "The input group's number, which the input device nodes are owned by"
+        depends on MOONWATER_INPUT_GROUP
+        range 1 65534
+        default 104
+        help
+          The group id a bowl's own /etc/group gives the input group, and the
+          one bowl_device_groups in src/bowl.c hands every bowl process.
+
     config MOONWATER_MACHINE_SCRIPT
         string "Default machine script"
         depends on MOONWATER_CORE

@@ -987,6 +987,80 @@ line_add_padded "linux/kernel/Makefile" "obj-y += canvas/" ||
 #       one, and the two halves of the image disagree without
 #       a word said about it.
 #
+settings_work=$(mktemp -d)
+input_work=$settings_work
+#       The input group, which is the one edit that changes which nodes a
+#       device gets rather than what a name resolves to. devtmpfs gives a node
+#       the mode and owner its device names: the input class names only the
+#       path, so an event or joystick node is 0600 root whatever a desktop
+#       needs. A device type that names 0660 and the input group is the one
+#       place it can be said (drivers/base/core.c, device_get_devnode). The
+#       three kinds of input node get it: event (evdev), joystick (joydev) and
+#       the node made when a device is added. uinput is a misc device, whose
+#       class names no owner at all, so init chowns its node instead
+#       (src/sh/system.c, system_input_group). CONFIG_MOONWATER_INPUT_GROUP
+#       turns all of it on, and off it is the kernel's own 0600.
+#
+cat > "$input_work/input-type" <<'INPUTTYPE'
+
+/*
+ * Moonwater: with CONFIG_MOONWATER_INPUT_GROUP the input device nodes are
+ * mode 0660 in the input group (CONFIG_MOONWATER_INPUT_GID). See
+ * kernel/patch/apply; the device type is what a node's owner is set by.
+ */
+#if IS_ENABLED(CONFIG_MOONWATER_INPUT_GROUP)
+static char *input_node_devnode(const struct device *dev, umode_t *mode,
+				kuid_t *uid, kgid_t *gid)
+{
+	/* devtmpfs asks for the name alone when it removes a node (NULLs). */
+	if (mode)
+		*mode = 0660;
+	if (uid)
+		*uid = GLOBAL_ROOT_UID;
+	if (gid)
+		*gid = make_kgid(&init_user_ns, CONFIG_MOONWATER_INPUT_GID);
+	return input_devnode(dev, mode);
+}
+
+const struct device_type input_node_type = {
+	.devnode = input_node_devnode,
+};
+EXPORT_SYMBOL_GPL(input_node_type);
+#endif
+INPUTTYPE
+settings_insert linux/drivers/input/input.c "input_node_devnode(" \
+        "EXPORT_SYMBOL_GPL(input_class);" after "$input_work/input-type" \
+        "input group"
+
+cat > "$input_work/input-extern" <<'INPUTEXTERN'
+#if IS_ENABLED(CONFIG_MOONWATER_INPUT_GROUP)
+extern const struct device_type input_node_type;
+#endif
+INPUTEXTERN
+settings_insert linux/include/linux/input.h "extern const struct device_type input_node_type;" \
+        "extern const struct class input_class;" after "$input_work/input-extern" \
+        "input group"
+
+cat > "$input_work/input-evdev" <<'INPUTEVDEV'
+#if IS_ENABLED(CONFIG_MOONWATER_INPUT_GROUP)
+	evdev->dev.type = &input_node_type;
+#endif
+INPUTEVDEV
+settings_insert linux/drivers/input/evdev.c "	evdev->dev.type = &input_node_type;" \
+        "	evdev->dev.class = &input_class;" after "$input_work/input-evdev" \
+        "input group"
+
+cat > "$input_work/input-joydev" <<'INPUTJOYDEV'
+#if IS_ENABLED(CONFIG_MOONWATER_INPUT_GROUP)
+	joydev->dev.type = &input_node_type;
+#endif
+INPUTJOYDEV
+settings_insert linux/drivers/input/joydev.c "	joydev->dev.type = &input_node_type;" \
+        "	joydev->dev.class = &input_class;" after "$input_work/input-joydev" \
+        "input group"
+
+rm -rf "$settings_work"
+
 #       So: where does it actually point, and is that here.
 #       The core and Canvas are two directories, so it is asked twice.
 #
