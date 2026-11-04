@@ -7355,7 +7355,9 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
         if (compositor.card < 0 && !compositor_gpu_state.force)
                 return COMPOSITOR_GPU_WHY_HEADLESS;
-        if ((compositor.width & 3) || (compositor.scanout_pitch & 15))
+        // A width not a multiple of 4 is drawn to the multiple below it, the columns past it by the processor (compositor_present's strip); a pitch
+        // that is not 16 bytes is the card's to refuse, its rows would start unaligned.
+        if (compositor.scanout_pitch & 15)
                 return COMPOSITOR_GPU_WHY_ALIGN;
         if (!compositor_gpu_up())
                 return compositor_gpu_state.dead_why;
@@ -7366,7 +7368,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         gpu_trim();
         if (!(out = compositor_gpu_output()))
                 return COMPOSITOR_GPU_WHY_OUTPUT;
-        g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
+        g->width = (unsigned int)(compositor.width & ~3), g->height = (unsigned int)compositor.height; // the card's columns: a multiple of 4
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_picture(&frames[k]))
                         return COMPOSITOR_GPU_WHY_PICTURE;
@@ -7385,7 +7387,12 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         }
         if (x2 <= x1 || y2 <= y1)
                 return COMPOSITOR_GPU_WHY_OTHER;
-        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), (unsigned int)compositor.width,
+        // The card draws the columns below g->width; a damage wholly past them is the processor's strip alone (compositor_present), and drawn.
+        if (x2 > (int)g->width)
+                x2 = (int)g->width;
+        if (x2 <= x1)
+                return COMPOSITOR_GPU_WHY_DRAWN;
+        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
                        (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
         {
                 if (++compositor_gpu_state.failures >= 3)
@@ -7655,7 +7662,7 @@ static void compositor_present(void)
         }
 
 #ifdef MOONWATER_GPU_C
-        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu;
+        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
         int apart = !gpu && compositor_changed_ready();
 #else
         int apart = compositor_changed_ready(), gpu_composed = 0;
@@ -7672,10 +7679,28 @@ static void compositor_present(void)
                 int rows[2];
 
 #ifdef MOONWATER_GPU_C
+                // The GPU drew the damage's columns below a multiple of 4 (compositor_gpu_draw), with the fingers' marks and the pointer over them, as records.
+                // The columns past it are the processor's, with those over them; nothing of the scene or the pointer is drawn twice.
                 if (gpu)
-                        rows[0] = rectangle[1], rows[1] = rectangle[3] - 1; // the GPU drew it all
+                {
+                        struct compositor_target strip = target;
+
+                        rows[0] = rectangle[1], rows[1] = rectangle[3] - 1;
+                        strip.x1 = rectangle[0] > (compositor.width & ~3) ? rectangle[0] : compositor.width & ~3;
+                        if (strip.x1 < strip.x2)
+                        {
+                                compositor_scene_banded(&strip, frames, count, 0, rows);
+                                if (compositor_spots_any(0))
+                                        compositor_spots_compose(&strip, frames, count);
+                                if (compositor.cursor.drawn)
+                                        compositor_cursor_draw(&strip, compositor.cursor.x, compositor.cursor.y,
+                                                               compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
+                                                               compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+                        }
+                }
                 else
 #endif
+                {
                 compositor_scene_banded(&target, frames, count, apart ? &slices : 0, rows);
 
                 // Composed apart, each slice had the fingers' marks; on a scanout only written, they are composed aside.
@@ -7685,6 +7710,7 @@ static void compositor_present(void)
                         compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
                                                compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
                                                compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+                }
 
                 compositor.painted += (unsigned long)compositor_area(rectangle);
                 // Composed apart, the card is told only the rows that changed on it, and nothing where none did.

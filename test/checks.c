@@ -217889,7 +217889,7 @@ b32 main(void)
                 // The card is taken as started when the rows above started it (gpu.at is its buffer); with none, the present at the width the card draws is
                 // not asked of it, and the refusal above is still the processor's.
                 compositor_gpu_state.up = gpu.at != 0, compositor_gpu_state.force = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1, compositor.card = -1;
-                compositor.width = WW, compositor.height = WH, compositor.scanout = (unsigned int address_to)screen_mem, compositor.scanout_pitch = 2784;
+                compositor.width = WW, compositor.height = WH, compositor.scanout = (unsigned int address_to)screen_mem, compositor.scanout_pitch = 2780;
                 compositor.scanout_bytes = (positive)WW * WH * 4, compositor.cursor.drawn = 0, compositor.damages = 1;
                 compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = WW, compositor.damage[0][3] = WH;
                 memory_zero(&why_table, sizeof(why_table));
@@ -217902,7 +217902,7 @@ b32 main(void)
                 align0 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
                 processor0 = why_table.gpu_processor;
                 drawn0 = why_table.gpu_drawn;
-                check("gpu why: a width the card does not draw is refused", refused_wide);
+                check("gpu why: a scanout pitch that is not 16 bytes is refused", refused_wide);
                 check("gpu why: the refusal is counted as an alignment reason", align0 == 1);
                 check("gpu why: and as the processor's present, not the card's", processor0 == 1 && drawn0 == 0);
                 check("gpu why: the table's counts are the compositor's", why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN] == compositor_gpu_counts.why[COMPOSITOR_GPU_WHY_ALIGN] && why_table.gpu_processor == compositor_gpu_counts.processor);
@@ -217925,15 +217925,62 @@ b32 main(void)
                 }
                 if (gpu.at) // a card: the same present at the width it draws is the card's, and counted so
                 {
-                        compositor.width = 696, compositor.scanout_pitch = 2784;
+                        compositor.width = WW, compositor.scanout_pitch = 2784; // 695 wide: the card draws 692 of it, the processor the rest
                         drew_now = compositor_gpu_present(&f, 1);
                         align1 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
-                        check("gpu why: a width the card draws is composed by it, and counted as its present", drew_now == 1 && why_table.gpu_drawn == 1 && why_table.gpu_processor == 1 && align1 == 1);
+                        check("gpu why: a width of 695 is drawn by the card to 692, and counted as its present", drew_now == 1 && why_table.gpu_drawn == 1 && why_table.gpu_processor == 1 && align1 == 1);
                 }
                 else
                         string_format(log, "  gpu why: no amdgpu card, the present at the width it draws is not asked of it\n");
                 compositor.table = 0;
                 compositor.damages = 0;
+        }
+
+        // A width that is not a multiple of 4 (695): the card draws the columns below 692, and the processor the three past them (compositor_present's strip),
+        // which together are the whole picture the processor draws. The picture is a window with a line and round corners over the ground.
+        {
+                enum { SW = 695, SH = 60, STRIDE = 696, PAGE = 256 };
+                long screen_mem = system_call_6(syscall(mmap), 0, (positive)STRIDE * SH * 4, 3, 0x22, (positive)-1, 0);
+                long picture_mem = system_call_6(syscall(mmap), 0, (positive)PAGE * 64 * 4, 3, 0x22, (positive)-1, 0);
+                struct compositor_target reference = {gpu_kit_want, PP, SW, SH, 0, 0, SW, SH, 0, 0, 0};
+                struct compositor_frame f;
+                int rows[2], drew = 0;
+                positive wrong = 0;
+
+                if ((screen_mem < 0 && screen_mem > -4096) || (picture_mem < 0 && picture_mem > -4096))
+                        return 1;
+                for (positive i = 0; i < (positive)PAGE * 64; i++)
+                        ((unsigned int address_to)picture_mem)[i] = gpu_random() | 0xff000000u;
+                if (gpu_map((const void address_to)picture_mem, (positive)PAGE * 64 * 4) == 0)
+                        return 1;
+                memory_zero(&f, sizeof(f));
+                f.x = 40, f.y = 10, f.width = 200, f.height = 40, f.scale = 100, f.radius = 8, f.line = 2, f.edge = 0xff405060u;
+                f.pitch = PAGE, f.pixels = (const unsigned int address_to)picture_mem;
+                memory_fill_u32_rect(gpu_kit_want, PP, SW, SH, compositor_ground);
+                compositor_draw(&reference, &f);
+                compositor_gpu_state.up = gpu.at != 0, compositor_gpu_state.force = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1, compositor.card = -1;
+                compositor.width = SW, compositor.height = SH, compositor.scanout = (unsigned int address_to)screen_mem, compositor.scanout_pitch = STRIDE * 4;
+                compositor.scanout_bytes = (positive)STRIDE * SH * 4, compositor.cursor.drawn = 0, compositor.damages = 1;
+                compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = SW, compositor.damage[0][3] = SH;
+                memory_zero(compositor.scanout, (positive)STRIDE * SH * 4);
+                if (gpu.at)
+                {
+                        struct compositor_target strip = {(unsigned int address_to)screen_mem, STRIDE, SW, SH, SW & ~3, 0, SW, SH, 0, 0, 0};
+
+                        drew = compositor_gpu_present(&f, 1);
+                        rows[0] = 0, rows[1] = SH - 1;
+                        compositor_scene_banded(&strip, &f, 1, 0, rows);
+                        for (positive y = 0; drew && y < SH; y++)
+                                for (positive x = 0; x < SW; x++)
+                                        wrong += ((unsigned int address_to)screen_mem)[y * STRIDE + x] != gpu_kit_want[y * PP + x];
+                        if (!drew || wrong)
+                                string_format(log, "  gpu strip: %s, %p pixels wrong\n", drew ? (string_address) "drawn" : (string_address) "not drawn", wrong);
+                        check("gpu strip: a width of 695, the card's columns and the processor's strip, is the processor's picture", drew && !wrong);
+                }
+                else
+                        string_format(log, "  gpu strip: no amdgpu card, skipped\n");
+                compositor.damages = 0;
+                compositor.width = 696;
         }
 
         // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
