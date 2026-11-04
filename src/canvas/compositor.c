@@ -12113,6 +12113,65 @@ static void compositor_move(int row)
 static void compositor_reveal(int row);
 
 /*
+        WINDOW LISTS. A window that publishes its frame as a list (window.c's
+        window_list_of, ui/list.h's format) is drawn by the compositor into its
+        picture, buffer 0, when the list is new and valid, and the picture is shown
+        as any picture is. compositor_gpu_list_render draws it: the list (checked by
+        window_list_valid; it reads the ops with ui_draw_list_open and checks them
+        with ui_draw_list_still, a torn read answered 0), the picture, its pitch in
+        pixels, the picture's width and height, and the damage it sets (x0 y0 x1 y1,
+        device pixels). It answers 1 when the picture is drawn, or 0 when it cannot
+        draw the list: the program's next frame is then its pixels.
+
+        STUB: the renderer is the GPU's and is not written yet (it goes in the GPU
+        section next to compositor_gpu_present), so every list is answered 0. A check
+        that draws its own renderer defines COMPOSITOR_LIST_RENDER_EXTERNAL first.
+*/
+static int compositor_gpu_list_render(int row, const unsigned int *list, unsigned int *picture, unsigned long pitch_words, int width,
+                                      int height, int *damage);
+#ifndef COMPOSITOR_LIST_RENDER_EXTERNAL
+static int compositor_gpu_list_render(int row, const unsigned int *list, unsigned int *picture, unsigned long pitch_words, int width,
+                                      int height, int *damage)
+{
+        (void)row, (void)list, (void)picture, (void)pitch_words, (void)width, (void)height, (void)damage;
+        return 0;
+}
+#endif
+
+/*
+        A row's list at a new picture (its generation is not the one taken last, and the table is in list mode): drawn into the picture
+        and the row's state 1, or refused (state 2, the whole picture, and counted in list_refused). A picture that is not a list, or a
+        list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
+*/
+static void compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
+{
+        struct windows *table = compositor.table;
+        unsigned char *list = window_list_of(table, row);
+        unsigned int gen;
+
+        if (!list)
+                return;
+        gen = __atomic_load_n(&((unsigned int *)list)[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
+        if (gen == table->list_seen[row] || !__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
+        {
+                table->list_seen[row] = gen;
+                if (__atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)
+                        __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
+                return;
+        }
+        table->list_seen[row] = gen;
+        if (window_list_valid(list, (int)width, (int)height) &&
+            compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
+        {
+                __atomic_store_n(&table->list_state[row], 1u, __ATOMIC_RELEASE);
+                return;
+        }
+        damage[0] = damage[1] = damage[2] = damage[3] = 0;
+        __atomic_store_n(&table->list_state[row], 2u, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&table->list_refused, 1, __ATOMIC_RELEASE);
+}
+
+/*
         A knock: what the row says now, read once into the compositor's own
         columns and clamped there. A new title goes to its tab. A new picture
         is damaged and said to be taken; the first puts the window on the
@@ -12158,6 +12217,8 @@ static void compositor_take(int row)
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
         height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
+        // A window's list (window_list_of) is drawn into its picture here, before the picture is shown, or refused; the damage it sets stands.
+        compositor_lists_take(row, width, height, damage);
         // A window the card shows straight is told the picture was taken once the card has let go of the buffer
         // it showed before, at the flip's event; any other at once.
         if (row == compositor.direct_row)

@@ -122089,6 +122089,9 @@ static int gpu_fake_busy; // the check's fake fence: while it is set, every job 
 static bipolar card_fake_control(positive handle, positive request, positive argument);
 #undef system_control
 #define system_control(handle, request, argument) card_fake_control((positive)(handle), (positive)(request), (positive)(argument))
+#ifdef CHECK_draw_list
+#define COMPOSITOR_LIST_RENDER_EXTERNAL // the list rows below draw their own renderer (compositor_gpu_list_render, after this file)
+#endif
 #include "../src/canvas/compositor.c"
 #undef system_control
 #define system_control(handle, request, argument)                            \
@@ -219060,6 +219063,9 @@ static void dl_app_rows(void)
         table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
         table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
         table->list_mode = 1;
+        // The pictures start clear: the list rows before these wrote a marker into buffer 0.
+        memory_zero(windows_buffer(table, 0, 0), DL_BUFFER);
+        memory_zero(windows_buffer(table, 0, 1), DL_BUFFER);
         ui_app_ui = &dl_app_ui, ui_app_row = 0;
         dl_setup(&dl_app_ui, dl_pixels);
         check("app list: the row's list takes its room", ui_draw_list_init(&ui_app_list, window_list_of(table, 0), WINDOW_LIST_BYTES, WINDOW_LIST_ROOM));
@@ -219098,8 +219104,109 @@ static void dl_app_rows(void)
         table->list_mode = 1;
 }
 
+/*
+        The compositor's side of a list: a renderer the check draws (the stub of compositor.c is the GPU's, not written yet). It records what it was
+        given, marks the picture's first pixel and sets a damage when its answer is 1, and answers dl_render_answer.
+*/
+static int dl_render_calls, dl_render_answer;
+static const unsigned int address_to dl_render_list;
+static int dl_render_width, dl_render_height;
+static unsigned long dl_render_pitch;
+
+static int compositor_gpu_list_render(int row, const unsigned int address_to list, unsigned int address_to picture, unsigned long pitch_words,
+                                      int width, int height, int address_to damage)
+{
+        (void)row;
+        dl_render_calls++;
+        dl_render_list = list, dl_render_width = width, dl_render_height = height, dl_render_pitch = pitch_words;
+        if (dl_render_answer != 1)
+                return 0;
+        picture[0] = 0xff00ff00u;
+        damage[0] = 5, damage[1] = 6, damage[2] = 40, damage[3] = 50;
+        return 1;
+}
+
+// A list published from the kit's app ui (the frame ui_app_present would publish, without the knock).
+static void dl_publish(void)
+{
+        dl_setup(&dl_app_ui, dl_pixels);
+        ui_scene_begin(&dl_app_ui, &ui_app_list);
+        ui_begin(&dl_app_ui, dl_pixels, DL_W, DL_W, DL_H);
+        dl_paint(&dl_app_ui, 1);
+        ui_scene_end(&dl_app_ui, &ui_app_list);
+}
+
+static void dl_list_rows(void)
+{
+        struct windows address_to table = (struct windows address_to)dl_span;
+        unsigned int address_to head;
+        int damage[4] = {0, 0, 0, 0};
+        int calls;
+
+        table->pixels = WINDOWS_HEADER, table->buffer = DL_BUFFER;
+        table->lists = WINDOWS_HEADER + 2 * WINDOWS * DL_BUFFER, table->list_bytes = WINDOW_LIST_BYTES;
+        head = (unsigned int address_to)window_list_of(table, 0);
+        compositor.table = table, compositor.pixels = WINDOWS_HEADER, compositor.buffer = DL_BUFFER;
+        compositor.front[0] = 0;
+        table->stride = DL_W, table->list_mode = 1, table->list_refused = 0;
+        table->list_state[0] = 0, table->list_seen[0] = 0;
+        ui_draw_list_init(&ui_app_list, (unsigned char address_to)head, WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
+        dl_publish();
+
+        // A new list the renderer draws: the picture is its, the damage is its, and the row's state is 1.
+        dl_render_answer = 1, dl_render_calls = 0;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a new list is drawn by the renderer, once",
+              dl_render_calls == 1 && dl_render_list == (const unsigned int address_to)head && dl_render_width == DL_W && dl_render_height == DL_H &&
+                  dl_render_pitch == DL_W);
+        check("compositor list: the renderer's picture is buffer 0 and its damage stands",
+              windows_buffer(table, 0, 0)[0] == 0xff00ff00u && damage[0] == 5 && damage[1] == 6 && damage[2] == 40 && damage[3] == 50);
+        check("compositor list: the row is rendered from its list, and that generation is seen", table->list_state[0] == 1 && table->list_seen[0] == 2);
+
+        // The renderer refuses: the row is refused, its whole picture damaged, and counted.
+        dl_publish();
+        dl_render_answer = 0, dl_render_calls = 0;
+        damage[0] = damage[1] = damage[2] = damage[3] = 9;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a refused list is refused, counted, and the whole picture damaged",
+              dl_render_calls == 1 && table->list_state[0] == 2 && table->list_refused == 1 && damage[2] == 0);
+
+        // A picture that is not a list (its generation seen already) clears the refusal: the next frame is tried as a list.
+        calls = dl_render_calls;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a picture of the program's clears the refusal, and no list is drawn for it",
+              dl_render_calls == calls && table->list_state[0] == 0 && table->list_refused == 1);
+
+        // A torn list (an odd generation) is refused without the renderer.
+        dl_publish();
+        head[UI_DRAW_LIST_GEN] |= 1;
+        calls = dl_render_calls;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a torn list is refused without the renderer", dl_render_calls == calls && table->list_state[0] == 2);
+        head[UI_DRAW_LIST_GEN] &= ~1u;
+
+        // A list whose count is past its room is refused without the renderer.
+        dl_publish();
+        head[UI_DRAW_LIST_COUNT] = WINDOW_LIST_ROOM + 1;
+        calls = dl_render_calls;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a list past its room is refused without the renderer", dl_render_calls == calls && table->list_state[0] == 2);
+
+        // List mode 0: a new list is not drawn, its generation is taken as seen, and the refusal is over; with the mode back on it is not drawn again.
+        dl_publish();
+        table->list_mode = 0;
+        calls = dl_render_calls;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: with list mode 0 a new list is not drawn", dl_render_calls == calls && table->list_state[0] == 0);
+        table->list_mode = 1;
+        compositor_lists_take(0, DL_W, DL_H, damage);
+        check("compositor list: a list taken in list mode 0 is not drawn when the mode is on", dl_render_calls == calls);
+        table->list_mode = 1;
+}
+
 b32 main(void)
 {
+        dl_list_rows();
         dl_app_rows();
         dl_rows();
         dl_probes();
