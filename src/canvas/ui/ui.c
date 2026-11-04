@@ -10401,6 +10401,7 @@ struct ui_app
         b32 dismiss;                    // a popup: the loop ends when the keys go elsewhere after they have been its (had_keys is the kit's)
         b32 had_keys;
         void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_page), the one a tab press would show
+        void (*language)(void);         // optional: run when the language changes; the kit listens for it, once, as the app starts
 };
 
 // The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
@@ -10443,6 +10444,30 @@ static fn ui_app_moved(struct ui_app address_to app, int top, int bottom, b32 al
                 ui_buffers_all(app->buffers);
         else if (app->buffers && bottom > top)
                 ui_buffers_rows(app->buffers, top, bottom);
+}
+
+/*
+        An app's frame, the same for every window: the buffer the window does not show is drawn at the app's size (draw), the table
+        takes that size, the buffer is shown and the picture is no longer due. False while the window still shows a buffer the
+        compositor has not read (windows_ready), and the picture stays due.
+*/
+static b32 ui_app_present(struct window_row address_to own, int address_to shown, b32 address_to dirty, int width, int height,
+                          void (*draw)(unsigned int address_to pixels))
+{
+        struct windows address_to table = own->table;
+        unsigned int row = own->row;
+        int slot = *shown < 0 ? 0 : 1 - *shown;
+
+        if (*shown >= 0 && !windows_ready(own))
+                return false;
+        draw(windows_buffer(table, row, (unsigned int)slot));
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        table->damage_width[row] = 0;
+        windows_show(own, (unsigned int)slot);
+        *shown = slot;
+        *dirty = false;
+        return true;
 }
 
 static int ui_app_run(struct ui_app address_to app)
@@ -10491,6 +10516,9 @@ static int ui_app_run(struct ui_app address_to app)
         ui_kit_inks(app->ui);
         *app->focused = false;
         ui_kit_pass();
+        // The app hears of a language's change from the kit, which listens for it once, here (language_listen holds a few).
+        if (app->language)
+                language_listen(app->language);
         status = app->open();
         if (status >= 0)
         {

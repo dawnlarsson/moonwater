@@ -671,20 +671,7 @@ static fn editor_draw(unsigned int address_to pixels)
 
 static b32 editor_frame(void)
 {
-        struct windows address_to table = editor.own.table;
-        unsigned int row = editor.own.row;
-        int slot = editor.shown < 0 ? 0 : 1 - editor.shown;
-
-        if (editor.shown >= 0 && !windows_ready(&editor.own))
-                return false;
-        editor_draw(windows_buffer(table, row, (unsigned int)slot));
-        table->width[row] = (unsigned int)editor.width;
-        table->height[row] = (unsigned int)editor.height;
-        table->damage_width[row] = 0;
-        windows_show(&editor.own, (unsigned int)slot);
-        editor.shown = slot;
-        editor.dirty = false;
-        return true;
+        return ui_app_present(&editor.own, &editor.shown, &editor.dirty, editor.width, editor.height, editor_draw);
 }
 
 // A command the view answered the app's: the files, the find bar, the tabs.
@@ -801,7 +788,6 @@ static int editor_start(void)
                         break;
         if (!editor.count)
                 editor_open(null);
-        language_listen(editor_language);
         editor.tab = 0;
         editor.dirty = true;
         return -1;
@@ -820,6 +806,7 @@ static struct ui_app editor_app = {
     .ground = &editor.ground,
     .open = editor_start,
     .frame = editor_frame,
+    .language = editor_language,
     .event = editor_event,
     .focus = editor_focus,
     .size = editor_size,
