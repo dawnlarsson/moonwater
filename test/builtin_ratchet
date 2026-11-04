@@ -7,7 +7,6 @@ src/audio/pulse.c 24
 src/audio/service.c 6
 src/audio/state.c 1
 src/canvas/font.c 24
-src/canvas/ui/ui.c 6
 src/net/net.c 2
 src/sh/builtin.c 2
 src/sh/file.c 45

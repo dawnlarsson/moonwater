@@ -2394,7 +2394,7 @@ static p64 ui_arc(p64 u)
         // 2^32 less u squared is at most 2^32, well inside a double's 53 bits, and a root just short of a whole number k
         // is short of it by 1/2k at least (k at most 65536), far past a double's last place, so the root truncated is
         // ui_isqrt's for every u -- one instruction for its bit loop's 33 turns.
-        return (unsigned int)__builtin_sqrt((f64)((1ull << 32) - u * u));
+        return (unsigned int)square_root((f64)((1ull << 32) - u * u));
 }
 
 // One line's span of a box, at y (256ths): false when the line misses it.
@@ -7877,7 +7877,7 @@ static fn ui_speaker(struct ui address_to ui, int left, int top, int size, int w
                         if (lo * 100.0 > radius * 72.0)
                                 continue;
                         hi = hi > radius ? radius : hi;
-                        xa = __builtin_sqrt(radius * radius - lo * lo), xb = __builtin_sqrt(radius * radius - hi * hi);
+                        xa = square_root(radius * radius - lo * lo), xb = square_root(radius * radius - hi * hi);
                         ui_speaker_span(ui, left, size, top + row, 12.0 + xb - 1.0, 12.0 + xa + 1.0, argb);
                 }
                 // The cross of a struck speaker: two diagonals of two wide, over x 14 to 22 and y -4 to 4.
@@ -7906,13 +7906,13 @@ static fn ui_microphone(struct ui address_to ui, int left, int top, int size, b3
 
                 if (y >= -10.0 && y <= 2.0)
                 {
-                        f64 beyond = y < -7.0 ? y + 7.0 : y > -1.0 ? y + 1.0 : 0.0, half = __builtin_sqrt(9.0 - beyond * beyond);
+                        f64 beyond = y < -7.0 ? y + 7.0 : y > -1.0 ? y + 1.0 : 0.0, half = square_root(9.0 - beyond * beyond);
 
                         ui_speaker_span(ui, left, size, top + row, 12.0 - half, 12.0 + half, argb);
                 }
                 if (y >= -4.0 && y <= 5.5)
                 {
-                        f64 down = y + 1.0, outer = y < -1.0 ? 6.5 : __builtin_sqrt(6.5 * 6.5 - down * down), inner = y < -1.0 ? 4.5 : down < 4.5 ? __builtin_sqrt(4.5 * 4.5 - down * down) : 0.0;
+                        f64 down = y + 1.0, outer = y < -1.0 ? 6.5 : square_root(6.5 * 6.5 - down * down), inner = y < -1.0 ? 4.5 : down < 4.5 ? square_root(4.5 * 4.5 - down * down) : 0.0;
 
                         if (inner > 0.0)
                         {
