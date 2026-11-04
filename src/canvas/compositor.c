@@ -6367,6 +6367,7 @@ struct compositor_plate
 };
 static struct compositor_plate compositor_spare;      // the buffer the screen is not showing (fb 0: none; headless, the scan image's other name, 2)
 static int compositor_front_stale[4], compositor_front_stale_any; // the stale of the buffer in compositor.* (the target, or the one shown)
+static unsigned int compositor_flip_refused; // presents the card refused a flip in a row (three: a modeset)
 static int compositor_plate_refused;                  // the card would not make the second buffer: none until the scanout changes
 static char compositor_scan_name[512], compositor_spare_name[512]; // headless: the scan image's file and its spare
 static int compositor_headless_flip(void);
@@ -6437,6 +6438,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         }
         if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
                 return 0;
+        compositor_flip_refused = 0;
         compositor.flip_pending = 1;
         compositor.flip_row = row;
         compositor.flip_buffer = which;
@@ -8851,15 +8853,23 @@ static void compositor_present_frames(void)
                         compositor_spare.stale[0] = compositor_spare.stale[1] = 0, compositor_spare.stale[2] = compositor.width;
                         compositor_spare.stale[3] = compositor.height, compositor_spare.stale_any = 1;
                 }
-                else
+                else if (++compositor_flip_refused >= 3)
                 {
-                        // The card refused the flip: the crtc is set to the buffer composed into (the screen shows it at once, as the flips did before).
+                        // Refused three presents running: the crtc is set to the buffer composed into, which shows it at once (a modeset, so it tears).
                         struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
                                                       0, 0, 0, 1, compositor.mode};
 
                         system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
                         compositor.on_screen = compositor.fb;
+                        compositor_flip_refused = 0;
                         compositor_flip_done();
+                }
+                else
+                {
+                        // Refused once (the card is still on the flip before, EBUSY): the screen keeps the buffer it shows and the frame is
+                        // composed again into the other from the next present. Each buffer's stale holds what it misses (the damage of this
+                        // present is in the one the screen shows), so nothing is lost; a modeset on every refusal would flicker the screen.
+                        compositor_plate_swap();
                 }
         }
         else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))

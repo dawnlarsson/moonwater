@@ -35,7 +35,10 @@ session()
         bin/compositor -H 800x600 "$work/$mode.img" -G -i "$work/input.fifo" > "$work/$mode.compositor.log" 2>&1 &
         cpid=$!
         # the sampler starts before the first frame: it waits for the image (a minute at most)
+        # ANIM_FRAMES=1 keeps every distinct frame's pixels (MODE.frames/frame-NNNNNN.raw) for the contact sheets (test/gpu_anim_sheets.py)
+        if [ -n "${ANIM_FRAMES:-}" ]; then mkdir -p "$work/$mode.frames"; export SCAN_FRAMES="$work/$mode.frames"; fi
         "$work/gpu_scan_sample" "$work/$mode.img" 800 600 "$work/$mode.samples" > "$work/$mode.sampler.out" 2>&1 &
+        unset SCAN_FRAMES
         spid=$!
         sleep 2
         for app in $APPS; do
