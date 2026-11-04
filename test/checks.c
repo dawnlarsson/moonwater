@@ -176858,6 +176858,47 @@ static void al_abi_tier(string_address tier)
         check("every routine returns the registers its machine's convention keeps (the callee-saved set)", al_abi_bad == 0);
 }
 
+/*
+        The frames of a call are the one-frame walk's to the bit: an even count's pairs (the x86 bodies take two frames a turn,
+        with a frame's accumulators apart from the next's) answer what the same frames answer one call at a time, count 1 being
+        the one-frame walk. Every output of both is compared, and so is the frame each call starts at (pos + k * step).
+*/
+static float al_pairs_in[2][16384], al_pairs_table[513 * 512], al_pairs_two[2][512], al_pairs_one[2][512];
+
+static unsigned long long al_polyphase_pairs(void)
+{
+        unsigned long long bad = 0;
+        static bool filled;
+
+        if (!filled)
+        {
+                for (int plane = 0; plane < 2; plane++)
+                        for (int i = 0; i < 16384; i++)
+                                al_pairs_in[plane][i] = al_unit();
+                for (int i = 0; i < 513 * 512; i++)
+                        al_pairs_table[i] = al_unit();
+                filled = true;
+        }
+        for (int round = 0; round < 400; round++)
+        {
+                unsigned long long taps = 64ull << (al_next() % 4), phases = 1 + al_next() % 512, count = 2 * (1 + al_next() % 128);
+                unsigned long long pos = al_next() & 0xffffffffffull, step = al_next() % (4ull << 32);
+
+                for (int plane = 0; plane < 2; plane++)
+                        for (int i = 0; i < 512; i++)
+                                al_pairs_two[plane][i] = al_pairs_one[plane][i] = 1234.5f;
+                al_polyphase_routine(al_pairs_two[0], al_pairs_two[1], al_pairs_in[0], al_pairs_in[1], al_pairs_table, taps, phases, pos, step, count);
+                for (unsigned long long k = 0; k < count; k++)
+                        al_polyphase_routine(al_pairs_one[0] + k, al_pairs_one[1] + k, al_pairs_in[0], al_pairs_in[1], al_pairs_table, taps, phases,
+                                             pos + k * step, step, 1);
+                for (int plane = 0; plane < 2; plane++)
+                        for (int i = 0; i < 512; i++)
+                                if (al_bits(al_pairs_two[plane][i]) != al_bits(al_pairs_one[plane][i]))
+                                        bad++;
+        }
+        return bad;
+}
+
 static void al_polyphase_tier(string_address tier, int bits)
 {
         al_faults faults = {0, 0, 0, 0, 0, 0, 0};
@@ -176872,6 +176913,9 @@ static void al_polyphase_tier(string_address tier, int bits)
         if (bits)
                 check("resample_polyphase2_f32: the C's bits", faults.bits == 0);
         check("resample_polyphase2_f32: cases ran", faults.cases > 900);
+#if X64
+        check("resample_polyphase2_f32: an even count is its frames one call at a time, to the bit (the frames of a pair are the one-frame walk's)", al_polyphase_pairs() == 0);
+#endif
         {
                 al_faults rows = {0, 0, 0, 0, 0, 0, 0};
 

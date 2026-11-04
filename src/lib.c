@@ -43907,7 +43907,7 @@ __asm__(
         for count floats and no more. The table wants a 64-byte start for the best speed and works from any
         float's.
 
-        The bodies. AVX2 with FMA: 32 taps a turn, the two rows in eight ymm loads and a vsubps with the second row
+        The bodies. AVX2 with FMA: two frames a turn, 32 taps a frame (eight accumulators, each frame's four summed in the one-frame walk's order, so the bits are that walk's; an odd count's last frame is the one-frame walk), the two rows in eight ymm loads and a vsubps with the second row
         as its memory operand, the mixed row by vfnmadd213ps (a - f * (a - b): one rounding where the C has two),
         the products fma'd from memory into two accumulators a plane, and both planes folded to the pair of outputs
         in one sequence (vperm2f128 and vextractf128 to bring the halves together, then unpack and add). SSE2: the
@@ -43925,10 +43925,14 @@ __asm__(
         AVX2 21.1 (C -O2 89.5, C -O3 for x86-64-v3 31.1), SSE2 38.4 (C -O2 89.8, C -O3 46.6); 96 kHz into 48 kHz at
         128 taps AVX2 33.4 (167.0, 50.5), SSE2 65.2 (169.2, 79.3); 192 kHz at 256 taps AVX2 59.9 (364.1, 106.9). On
         an M2 Pro, NEON, native: 10.7 ns an output frame at 64 taps (clang -O3 20.9), 14.8 at 128 (39.5), 32.1 at 256
-        (76.3). The floor on x86_64 is the fma pipes: 24 fma-pipe operations a frame at 64 taps (eight fnmadd, sixteen
-        fma) over two pipes is 12 cycles, about 9.5 ticks; the body runs 89 instructions a frame at about 4.1 a
-        cycle (21.5 cycles with the rows in L1), so the gap to that floor is instructions that are not fma (the
-        walk's arithmetic and the fold), not loads (32 ymm loads at four a cycle are 8 cycles).
+        (76.3).
+        The floor on x86_64 is the loads. A frame reads its two rows and its two inputs, four 256-bit loads an eight taps, so
+        half a load a tap, and this core sustains about 1.7 of them a cycle (0.58 cycles each, perf-counted on a 9950X), which
+        is 0.29 cycles a tap; the fma pipes (two, 0.54 cycles an op) are at 0.2 a tap, and the accumulators' chains at 0.25.
+        Two frames a turn (eight accumulators, each frame's order kept) takes about three of the eight cycles a frame that
+        the one-frame body spent beyond the loads, and its slope is the same 0.29 a tap. Measured with TSC ticks, which are
+        core cycles on this machine: 64 taps 31.2 a frame (loads 18.6), 128 taps 46.5 (37.2), 256 taps 83.5 (74.4), 512 taps
+        156 (148.8), so about eight cycles a frame sit on top of the load floor, in the walk's setup and the fold.
 */
 #ifndef KERNEL_MODE
 WRITES(1, 10) WRITES(2, 10)
@@ -44083,11 +44087,78 @@ __asm__(
     "mov 32(%rsp), %r10\n   test %r10, %r10\n   jz .Laudio_poly_none\n"
     ASM_NARROW("cpu_has_avx2", ".Laudio_poly_sse2")
     ASM_NARROW("cpu_has_fma", ".Laudio_poly_sse2")
-    //      AVX2 and FMA: 32 taps a turn.
+    //      AVX2 and FMA: two frames a turn, 32 taps a frame a turn. Frame A's row a, row b and inputs are in r15, r13, r12 and rbx,
+    //      frame B's in r14, rax, rdx and rcx, and each frame keeps the four accumulators the one-frame walk keeps (plane 0 in
+    //      ymm10 and ymm11, plane 1 in ymm12 and ymm13 for A; ymm4 to ymm7 for B), so every accumulator takes its frame's products
+    //      in the one-frame walk's order and its sum is that walk's bits. The folds are the one-frame walk's, one per frame. The
+    //      locals under the six pushes: 0 the x0 base, 8 the x1 base, 16 the table, 24 the row's bytes; the arguments are phases
+    //      at 104, pos at 112 and step at 120. The last frame of an odd count is the one-frame walk, which is what this body was
+    //      before, with its own locals.
     "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
-    "mov 64(%rsp), %r11\n   shl $2, %r9\n"
+    "sub $48, %rsp\n"
+    "mov %rdx, (%rsp)\n   mov %rcx, 8(%rsp)\n   mov %r8, 16(%rsp)\n   shl $2, %r9\n   mov %r9, 24(%rsp)\n"
+    "mov 112(%rsp), %r11\n"
+    "cmp $2, %r10\n   jb .Laudio_poly_y_tail\n"
+    ".balign 64\n.Laudio_poly_y_pair:\n"
+    "mov %r11, %r8\n   shr $32, %r8\n"
+    "mov %r11d, %r9d\n   imul 104(%rsp), %r9\n"
+    "mov %r9, %rbp\n   shr $32, %rbp\n"
+    "mov %r9d, %r9d\n"
+    "vxorps %xmm0, %xmm0, %xmm0\n   vcvtsi2ssq %r9, %xmm0, %xmm0\n   vmulss .Laudio_poly_scale(%rip), %xmm0, %xmm0\n   vbroadcastss %xmm0, %ymm8\n"
+    "imul 24(%rsp), %rbp\n   add 16(%rsp), %rbp\n"
+    "mov %rbp, %r15\n   add 24(%rsp), %rbp\n   mov %rbp, %r13\n"
+    "mov (%rsp), %r12\n   lea (%r12,%r8,4), %r12\n"
+    "mov 8(%rsp), %rbx\n   lea (%rbx,%r8,4), %rbx\n"
+    "mov %r11, %rbp\n   add 120(%rsp), %rbp\n"
+    "mov %rbp, %r8\n   shr $32, %r8\n"
+    "mov %ebp, %r9d\n   imul 104(%rsp), %r9\n"
+    "mov %r9, %rax\n   shr $32, %rax\n"
+    "mov %r9d, %r9d\n"
+    "vxorps %xmm1, %xmm1, %xmm1\n   vcvtsi2ssq %r9, %xmm1, %xmm1\n   vmulss .Laudio_poly_scale(%rip), %xmm1, %xmm1\n   vbroadcastss %xmm1, %ymm9\n"
+    "imul 24(%rsp), %rax\n   add 16(%rsp), %rax\n"
+    "mov %rax, %r14\n   add 24(%rsp), %rax\n"
+    "mov (%rsp), %rdx\n   lea (%rdx,%r8,4), %rdx\n"
+    "mov 8(%rsp), %rcx\n   lea (%rcx,%r8,4), %rcx\n"
+    "add 120(%rsp), %rbp\n   mov %rbp, %r11\n"
+    "vxorps %xmm4, %xmm4, %xmm4\n   vxorps %xmm5, %xmm5, %xmm5\n   vxorps %xmm6, %xmm6, %xmm6\n   vxorps %xmm7, %xmm7, %xmm7\n"
+    "vxorps %xmm10, %xmm10, %xmm10\n   vxorps %xmm11, %xmm11, %xmm11\n   vxorps %xmm12, %xmm12, %xmm12\n   vxorps %xmm13, %xmm13, %xmm13\n"
+    "xor %ebp, %ebp\n"
+    ".balign 64\n.Laudio_poly_y_pair_tap:\n"
+    "vmovups (%r15,%rbp), %ymm0\n   vsubps (%r13,%rbp), %ymm0, %ymm1\n   vfnmadd231ps %ymm1, %ymm8, %ymm0\n"
+    "vmovups (%r14,%rbp), %ymm2\n   vsubps (%rax,%rbp), %ymm2, %ymm3\n   vfnmadd231ps %ymm3, %ymm9, %ymm2\n"
+    "vfmadd231ps (%r12,%rbp), %ymm0, %ymm10\n   vfmadd231ps (%rbx,%rbp), %ymm0, %ymm12\n"
+    "vfmadd231ps (%rdx,%rbp), %ymm2, %ymm4\n   vfmadd231ps (%rcx,%rbp), %ymm2, %ymm6\n"
+    "vmovups 32(%r15,%rbp), %ymm0\n   vsubps 32(%r13,%rbp), %ymm0, %ymm1\n   vfnmadd231ps %ymm1, %ymm8, %ymm0\n"
+    "vmovups 32(%r14,%rbp), %ymm2\n   vsubps 32(%rax,%rbp), %ymm2, %ymm3\n   vfnmadd231ps %ymm3, %ymm9, %ymm2\n"
+    "vfmadd231ps 32(%r12,%rbp), %ymm0, %ymm11\n   vfmadd231ps 32(%rbx,%rbp), %ymm0, %ymm13\n"
+    "vfmadd231ps 32(%rdx,%rbp), %ymm2, %ymm5\n   vfmadd231ps 32(%rcx,%rbp), %ymm2, %ymm7\n"
+    "vmovups 64(%r15,%rbp), %ymm0\n   vsubps 64(%r13,%rbp), %ymm0, %ymm1\n   vfnmadd231ps %ymm1, %ymm8, %ymm0\n"
+    "vmovups 64(%r14,%rbp), %ymm2\n   vsubps 64(%rax,%rbp), %ymm2, %ymm3\n   vfnmadd231ps %ymm3, %ymm9, %ymm2\n"
+    "vfmadd231ps 64(%r12,%rbp), %ymm0, %ymm10\n   vfmadd231ps 64(%rbx,%rbp), %ymm0, %ymm12\n"
+    "vfmadd231ps 64(%rdx,%rbp), %ymm2, %ymm4\n   vfmadd231ps 64(%rcx,%rbp), %ymm2, %ymm6\n"
+    "vmovups 96(%r15,%rbp), %ymm0\n   vsubps 96(%r13,%rbp), %ymm0, %ymm1\n   vfnmadd231ps %ymm1, %ymm8, %ymm0\n"
+    "vmovups 96(%r14,%rbp), %ymm2\n   vsubps 96(%rax,%rbp), %ymm2, %ymm3\n   vfnmadd231ps %ymm3, %ymm9, %ymm2\n"
+    "vfmadd231ps 96(%r12,%rbp), %ymm0, %ymm11\n   vfmadd231ps 96(%rbx,%rbp), %ymm0, %ymm13\n"
+    "vfmadd231ps 96(%rdx,%rbp), %ymm2, %ymm5\n   vfmadd231ps 96(%rcx,%rbp), %ymm2, %ymm7\n"
+    "add $128, %rbp\n   cmp 24(%rsp), %rbp\n   jb .Laudio_poly_y_pair_tap\n"
+    "vaddps %ymm11, %ymm10, %ymm10\n   vaddps %ymm13, %ymm12, %ymm12\n"
+    "vperm2f128 $0x20, %ymm12, %ymm10, %ymm0\n   vperm2f128 $0x31, %ymm12, %ymm10, %ymm1\n   vaddps %ymm1, %ymm0, %ymm0\n"
+    "vextractf128 $1, %ymm0, %xmm1\n"
+    "vunpcklps %xmm1, %xmm0, %xmm2\n   vunpckhps %xmm1, %xmm0, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovhlps %xmm2, %xmm2, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovss %xmm2, (%rdi)\n   vextractps $1, %xmm2, (%rsi)\n"
+    "vaddps %ymm5, %ymm4, %ymm4\n   vaddps %ymm7, %ymm6, %ymm6\n"
+    "vperm2f128 $0x20, %ymm6, %ymm4, %ymm14\n   vperm2f128 $0x31, %ymm6, %ymm4, %ymm15\n   vaddps %ymm15, %ymm14, %ymm14\n"
+    "vextractf128 $1, %ymm14, %xmm15\n"
+    "vunpcklps %xmm15, %xmm14, %xmm2\n   vunpckhps %xmm15, %xmm14, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovhlps %xmm2, %xmm2, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
+    "vmovss %xmm2, 4(%rdi)\n   vextractps $1, %xmm2, 4(%rsi)\n"
+    "add $8, %rdi\n   add $8, %rsi\n   sub $2, %r10\n   cmp $2, %r10\n   jae .Laudio_poly_y_pair\n"
+    ".Laudio_poly_y_tail:\n"
+    "test %r10, %r10\n   jz .Laudio_poly_y_done\n"
+    "mov 16(%rsp), %r8\n   mov (%rsp), %rdx\n   mov 8(%rsp), %rcx\n   mov 24(%rsp), %r9\n"
     ".balign 64\n.Laudio_poly_y_frame:\n"
-    "mov %r11, %rax\n   shr $32, %rax\n   mov %r11d, %r14d\n   imul 56(%rsp), %r14\n   mov %r14, %r15\n   shr $32, %r15\n"
+    "mov %r11, %rax\n   shr $32, %rax\n   mov %r11d, %r14d\n   imul 104(%rsp), %r14\n   mov %r14, %r15\n   shr $32, %r15\n"
     "mov %r14d, %r14d\n   imul %r9, %r15\n   add %r8, %r15\n   lea (%r15,%r9), %r13\n"
     "vxorps %xmm9, %xmm9, %xmm9\n   vcvtsi2ssq %r14, %xmm9, %xmm9\n   vmulss .Laudio_poly_scale(%rip), %xmm9, %xmm9\n   vbroadcastss %xmm9, %ymm8\n"
     "lea (%rdx,%rax,4), %r12\n   lea (%rcx,%rax,4), %rbx\n"
@@ -44108,8 +44179,9 @@ __asm__(
     "vunpcklps %xmm1, %xmm0, %xmm2\n   vunpckhps %xmm1, %xmm0, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
     "vmovhlps %xmm2, %xmm2, %xmm3\n   vaddps %xmm3, %xmm2, %xmm2\n"
     "vmovss %xmm2, (%rdi)\n   vextractps $1, %xmm2, (%rsi)\n"
-    "add $4, %rdi\n   add $4, %rsi\n   add 72(%rsp), %r11\n   dec %r10\n   jnz .Laudio_poly_y_frame\n"
-    "vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    "add $4, %rdi\n   add $4, %rsi\n   add 120(%rsp), %r11\n   dec %r10\n   jnz .Laudio_poly_y_frame\n"
+    ".Laudio_poly_y_done:\n"
+    "vzeroupper\n   add $48, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     //      SSE2: the C's arithmetic to the bit. The row is mixed in a multiply and an add, the products added into
     //      eight lanes a channel (two xmm), and the lanes folded as ((l0 + l4) + (l1 + l5)) + ((l2 + l6) + (l3 + l7)).
     ".Laudio_poly_sse2:\n"
