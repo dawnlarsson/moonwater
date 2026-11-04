@@ -40,10 +40,14 @@ session()
         fonts=$3
         mount -t tmpfs tmpfs /run
         mount -t tmpfs tmpfs /root
+        # the terminal's shell is on a pty: a devpts of this namespace, its ptmx over /dev/ptmx (the host's ptmx would name the host's pts)
+        mkdir -p /dev/pts && mount -t devpts -o newinstance,ptmxmode=0666 devpts /dev/pts && mount --bind /dev/pts/ptmx /dev/ptmx || echo "no pty for the terminal" >&2
         # the kit's faces are /usr/share/fonts/inter and ibm-plex-mono (ui.c); a machine without them loads none, and an app with no font exits. The
         # repository's fonts are bound over the directory in this namespace only.
         mount --bind "$fonts" /usr/share/fonts || return 1
         mkdir -p /run/moonwater
+        # the faces the kit loads (ui.c), for the terminal: it draws with none and exits when it is given none
+        fonts_mono=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf fonts_bold=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf
         cd "$work" || return 1
         if [ "$mode" = off ]; then
                 echo off > /root/canvas.gpu
@@ -58,7 +62,12 @@ session()
         # set, so it is not in the strict comparison; LAUNCHER=1 adds it, as its own comparison)
         napps=0
         for app in $APPS; do
-                bin/$app > "$work/$mode.$app.log" 2>&1 &
+                case $app in
+                terminal) # the launcher's words: its mono face and bold, then the program (a shell that prints a long output, so the window scrolls)
+                        bin/terminal -f "$fonts_mono" -b "$fonts_bold" -x /bin/sh -c "seq 1 400; sleep 900" > "$work/$mode.$app.log" 2>&1 & ;;
+                editor) bin/editor ${LANE_EDITOR_FILE:-} > "$work/$mode.$app.log" 2>&1 & ;;
+                *) bin/$app > "$work/$mode.$app.log" 2>&1 & ;;
+                esac
                 lpid=$!
                 napps=$((napps + 1))
         done
@@ -111,7 +120,7 @@ napps_parent=$(echo $APPS | wc -w)
 failures=0
 mkdir -p "$work/bin"
 compositor_path=$(cd "$(dirname "$compositor")" && pwd)/$(basename "$compositor")
-for name in compositor settings launcher mixer moonwater; do
+for name in compositor settings launcher mixer moonwater editor terminal identify; do
         ln -sf "$compositor_path" "$work/bin/$name"
 done
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
