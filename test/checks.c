@@ -170651,6 +170651,85 @@ static void au_test_speed(void)
         }
 }
 
+/* ---- what a caller may hand the engine: a format it does not make, a gain that is not a number ---- */
+
+static void au_test_hardening(void)
+{
+        static unsigned char out[64], wide[4096];
+        static float left[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+        static const long formats[] = {AUDIO_FORMAT_U8, AUDIO_FORMAT_ALAW, AUDIO_FORMAT_ULAW, AUDIO_FORMAT_S16BE, AUDIO_FORMAT_F32BE,
+                                       AUDIO_FORMAT_S32BE, AUDIO_FORMAT_S24BE, AUDIO_FORMAT_S24_32BE};
+        static float dc[AUDIO_BLOCK];
+        static unsigned char ring[4096 * 4];
+        static struct audio_sink sink;
+        static struct audio_voice voice;
+
+        // An encoder writes what it answers and no more: a format it does not make is refused, and nothing is written.
+        for (unsigned f = 0; f < sizeof(formats) / sizeof(formats[0]); f++)
+        {
+                long wrote;
+                int touched = 0;
+
+                memset(out, 0xa5, sizeof(out));
+                wrote = audio_encode(formats[f], out, 4, 2, left, left);
+                for (unsigned i = 0; i < sizeof(out); i++)
+                        touched += out[i] != 0xa5;
+                AUCHECK(wrote == 0 && !touched, "format %ld: answered %ld bytes and wrote %d", formats[f], wrote, touched);
+        }
+        // A negative count answers nothing.
+        {
+                audio_sink_open(&sink, 48000, 2);
+                AUCHECK(audio_sink_end(&sink, wide, AUDIO_FORMAT_F32LE, 2, -3) == 0, "a sink of -3 frames answers bytes");
+        }
+        // A gain that is not a number is silence, and one past 200% is 200%: a voice's gain and the master's.
+        for (long i = 0; i < AUDIO_BLOCK; i++)
+                dc[i] = 0.5f;
+        audio_sink_open(&sink, 48000, 2);
+        AUCHECK(audio_voice_open(&voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, ring, sizeof(ring)) == 0, "a voice of floats does not open");
+        for (int block = 0; block < 4; block++)
+        {
+                audio_sink_begin(&sink, AUDIO_BLOCK);
+                audio_ring_put(&voice.ring, (const unsigned char *)dc, AUDIO_BLOCK * 4);
+                audio_voice_mix(&sink, &voice, AUDIO_BLOCK, 0);
+                if (block == 0)
+                        AUCHECK(sink.bus[0][AUDIO_BLOCK - 1] == 0.5f, "a voice at unity is not 0.5 at the end of its block");
+        }
+        audio_voice_gain(&voice, NAN, NAN);
+        for (int block = 0; block < 3; block++)
+        {
+                audio_sink_begin(&sink, AUDIO_BLOCK);
+                audio_ring_put(&voice.ring, (const unsigned char *)dc, AUDIO_BLOCK * 4);
+                audio_voice_mix(&sink, &voice, AUDIO_BLOCK, 0);
+                if (block == 2)
+                        AUCHECK(sink.bus[0][AUDIO_BLOCK - 1] == 0 && sink.bus[1][AUDIO_BLOCK - 1] == 0, "a voice at a gain of NaN is not silence (%g)", (double)sink.bus[0][AUDIO_BLOCK - 1]);
+        }
+        audio_voice_gain(&voice, 1e30f, 1e30f);
+        for (int block = 0; block < 3; block++)
+        {
+                audio_sink_begin(&sink, AUDIO_BLOCK);
+                audio_ring_put(&voice.ring, (const unsigned char *)dc, AUDIO_BLOCK * 4);
+                audio_voice_mix(&sink, &voice, AUDIO_BLOCK, 0);
+                if (block == 2)
+                        AUCHECK(sink.bus[0][AUDIO_BLOCK - 1] == 4.0f, "a voice at a gain of 1e30 is %g, not 200%% (4)", (double)sink.bus[0][AUDIO_BLOCK - 1]);
+        }
+        audio_voice_close(&voice);
+        // A voice that moves to another rate far from its own takes the table for it (a near one keeps its own).
+        AUCHECK(audio_voice_open(&voice, AUDIO_FORMAT_F32LE, 1, 94001, 0, 48000, ring, sizeof(ring)) == 0, "a voice of 94001 does not open");
+        AUCHECK(audio_voice_rate(&voice, 50001) == 0 && voice.table && voice.table->rin == 50001, "a voice moved from 94001 to 50001 keeps the table for 94001");
+        audio_voice_close(&voice);
+        // The master gain: NaN is silence too.
+        audio_sink_open(&sink, 48000, 2);
+        for (int block = 0; block < 2; block++)
+        {
+                audio_sink_begin(&sink, AUDIO_BLOCK);
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                        sink.bus[0][i] = sink.bus[1][i] = 0.5f;
+                audio_sink_gain(&sink, NAN);
+                audio_sink_end(&sink, wide, AUDIO_FORMAT_F32LE, 2, AUDIO_BLOCK);
+        }
+        AUCHECK(sink.mix[0][AUDIO_BLOCK - 1] == 0, "a master gain of NaN is not silence (%g)", (double)sink.mix[0][AUDIO_BLOCK - 1]);
+}
+
 int main(void)
 {
         au_test_numbers();
@@ -170670,6 +170749,7 @@ int main(void)
         au_test_open();
         au_test_resampler();
         au_test_aliasing();
+        au_test_hardening();
         au_test_resampler_streaming();
         au_test_voice_resampling();
         au_test_fuzz();

@@ -189,6 +189,13 @@ AUDIO_API float audio_volume_gain(unsigned long volume)
         return x * x * x;
 }
 
+// A gain asked for by a caller: not a number is silence, nothing is below silence, and nothing is past 200% (a gain of eight).
+#define AUDIO_GAIN_MAX 8.0f
+static inline float audio_gain_clean(float g)
+{
+        return g != g || g < 0.0f ? 0.0f : g > AUDIO_GAIN_MAX ? AUDIO_GAIN_MAX : g;
+}
+
 /* ---- the formats ---- */
 
 AUDIO_API long audio_format_bytes(long format)
@@ -395,6 +402,10 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
 {
         long bytes = audio_format_bytes(format);
 
+        // Only the card's formats are made: any other would be written four bytes a sample and answered as its own width.
+        if (frames < 1 || channels < 1 || !(format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S24LE || format == AUDIO_FORMAT_S24_32LE ||
+                                             format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
+                return 0;
         // A card of two channels, which is what is asked for whenever it can be, in the formats it is asked in: the library's.
         if (channels == 2 && frames > 0 && (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_S24_32LE || format == AUDIO_FORMAT_F32LE))
         {
@@ -988,8 +999,8 @@ AUDIO_API void audio_voice_close(struct audio_voice *voice)
 // The gain of the two bus channels the voice is going to (it gets there by a ramp).
 AUDIO_API void audio_voice_gain(struct audio_voice *voice, float left, float right)
 {
-        voice->target[0] = left;
-        voice->target[1] = right;
+        voice->target[0] = audio_gain_clean(left);
+        voice->target[1] = audio_gain_clean(right);
 }
 
 // Changes the rate the stream is read at, as a program's own rate update does: the same table for a small change, else a new one.
@@ -1248,7 +1259,7 @@ AUDIO_API void audio_sink_begin(struct audio_sink *sink, long frames)
 
 AUDIO_API void audio_sink_gain(struct audio_sink *sink, float gain)
 {
-        sink->master_target = gain;
+        sink->master_target = audio_gain_clean(gain);
 }
 
 /*
