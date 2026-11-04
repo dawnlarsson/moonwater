@@ -7555,7 +7555,9 @@ static void compositor_rate_add(unsigned int *hz, unsigned int *count, const str
 
 #define COMPOSITOR_OBJECT_CONNECTOR 0xc0c0c0c0u // DRM_MODE_OBJECT_CONNECTOR
 #define COMPOSITOR_GETPROPBLOB COMPOSITOR_DRM(0xacu, 16u)
-#define COMPOSITOR_EDID_SIZE 256
+// An EDID is a block of 128 bytes and its extensions, 128 each, 255 of them at the most.
+#define COMPOSITOR_EDID_BLOCK 128u
+#define COMPOSITOR_EDID_MOST (COMPOSITOR_EDID_BLOCK * 256u)
 
 /*
         The monitor's name from an EDID block of length bytes: the descriptor (18 bytes, at 54, 72, 90 or 108) tagged 0xFC,
@@ -7603,7 +7605,7 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
                 unsigned long props, values;
                 unsigned int count, object, type;
         } got = {(unsigned long)ids, (unsigned long)values, 64, connector, COMPOSITOR_OBJECT_CONNECTOR};
-        unsigned char edid[COMPOSITOR_EDID_SIZE];
+        static unsigned char edid[COMPOSITOR_EDID_MOST]; // 32 KiB: off the stack
 
         if (room)
                 name[0] = 0;
@@ -7629,10 +7631,23 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
                         continue;
                 if (!values[at])
                         return;
-                memory_zero(edid, sizeof(edid));
-                blob.blob_id = (unsigned int)values[at], blob.length = sizeof(edid), blob.data = (unsigned long)edid;
-                if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0)
-                        compositor_edid_name(edid, blob.length < sizeof(edid) ? blob.length : sizeof(edid), name, room);
+                /*
+                        The kernel copies a blob only when the length asked is the blob's own (drm_mode_getblob_ioctl), so a
+                        length of 256 read only a monitor whose EDID is one extension long: its length first, then all of
+                        it, when it is whole blocks and no more than a base block and 255 extensions.
+                */
+                blob.blob_id = (unsigned int)values[at], blob.length = 0, blob.data = 0;
+                if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 || !blob.length ||
+                    blob.length % COMPOSITOR_EDID_BLOCK || blob.length > COMPOSITOR_EDID_MOST)
+                        return;
+                {
+                        unsigned int length = blob.length;
+
+                        memory_zero(edid, length);
+                        blob.data = (unsigned long)edid;
+                        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0 && blob.length == length)
+                                compositor_edid_name(edid, length, name, room);
+                }
                 return;
         }
 }

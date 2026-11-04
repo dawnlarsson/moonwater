@@ -129001,6 +129001,44 @@ static void check_compositor_card_lists(void)
 }
 
 /*
+        A monitor's name from its EDID, whatever its length: the blob was asked for at 256 bytes, and the kernel copies a blob
+        only when the length asked is its own, so a monitor with no extension (128) or with two or more (384 and up) had no
+        name. Every length of whole blocks up to a base block and 255 extensions is read; one that is not whole blocks, or
+        is longer, is none.
+*/
+static void check_compositor_card_edid(void)
+{
+    static const unsigned int lengths[6] = {128, 256, 384, 32768, 200, 32896};
+    static const unsigned char named[6] = {1, 1, 1, 1, 0, 0};
+    unsigned int right = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    if (!card_fake_open(1920, 1080))
+    {
+        check("card edid: the fake card is made", false);
+        return;
+    }
+    for (unsigned int at = 0; at < 6; at++)
+    {
+        static const unsigned char header[8] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
+        static const char model[13] = {'P', 'a', 'n', 'e', 'l', '\n', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+        char name[WINDOWS_OUTPUT_MODEL];
+
+        memory_zero(card_fake.edid, sizeof(card_fake.edid));
+        memory_copy(card_fake.edid, header, sizeof(header));
+        card_fake.edid[54 + 3] = 0xfc;
+        memory_copy(card_fake.edid + 54 + 5, model, sizeof(model));
+        card_fake.edid[126] = (unsigned char)(lengths[at] / 128 - 1);
+        card_fake.edid_length = lengths[at];
+        compositor_connector_model(CARD_FAKE_CONNECTOR, name, sizeof(name));
+        right += named[at] ? !memory_compare(name, "Panel", 6) : !name[0];
+    }
+    check("card edid: a monitor's name is read from an EDID of any whole number of blocks, and none from one that is not, or too long",
+          right == 6);
+    card_fake_close();
+}
+
+/*
         A screen its displays line turns a quarter (a panel built portrait, the Steam Deck's), on a card whose primary plane can
         turn: the plane's rotation property was asked for with the count of its values the first call left and a null pointer
         for them, which the kernel faults on, so no card's turn was ever found and every turned screen was turned in software;
@@ -158358,6 +158396,7 @@ b32 main()
         check_compositor_touch_hold_gone();
         check_compositor_card_lists();
         check_compositor_card_turn();
+        check_compositor_card_edid();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
