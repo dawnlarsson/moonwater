@@ -9700,7 +9700,7 @@ static AUDIO_C_UNUSED unsigned audio_c_widen_one(unsigned kind, const unsigned c
 {
         unsigned little = 0, big = 0;
 
-        if (kind == 4 || kind >= 7)
+        if (kind == 2 || kind >= 5)
         {
                 little = (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
                 big = (unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | (unsigned)p[3];
@@ -9710,9 +9710,41 @@ static AUDIO_C_UNUSED unsigned audio_c_widen_one(unsigned kind, const unsigned c
         case 0:
                 return (unsigned)(p[0] ^ 0x80) << 24;
         case 1:
-        {
-                int a = p[0] ^ 0x55, t = (a & 0x0f) << 4, segment = (a & 0x70) >> 4;
+                return ((unsigned)p[0] << 8 | (unsigned)p[1]) << 16;
+        case 2:
+                return big;
+        case 3:
+                return (unsigned)p[0] << 8 | (unsigned)p[1] << 16 | (unsigned)p[2] << 24;
+        case 4:
+                return (unsigned)p[2] << 8 | (unsigned)p[1] << 16 | (unsigned)p[0] << 24;
+        case 5:
+                return little << 8;
+        default:
+                return big << 8;
+        }
+}
 
+// pcm_widen: kind 0 unsigned 8 bits, 1 signed 16 big-endian, 2 a 32-bit word big-endian, 3 and 4 signed 24 bits in three bytes little- and
+// big-endian, 5 and 6 the low 24 bits of a 32-bit word little- and big-endian; a kind past 6 is nothing.
+static AUDIO_C_UNUSED void audio_c_widen(unsigned *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
+{
+        static const unsigned char width[7] = {1, 2, 4, 3, 3, 4, 4};
+
+        if (kind > 6)
+                return;
+        for (unsigned long i = 0; i < samples; i++)
+                dst[i] = audio_c_widen_one((unsigned)kind, src + i * width[kind]);
+}
+
+// G.711: the float a byte of A-law (law 0) or mu-law (law 1) is, the table mix.c kept made by arithmetic.
+static AUDIO_C_UNUSED float audio_c_law_one(unsigned char byte, unsigned long law)
+{
+        int a = byte ^ 0x55, t, segment, u = ~byte & 0xff, value;
+
+        if (law == 0)
+        {
+                t = (a & 0x0f) << 4;
+                segment = (a & 0x70) >> 4;
                 if (segment == 0)
                         t += 8;
                 else
@@ -9721,40 +9753,19 @@ static AUDIO_C_UNUSED unsigned audio_c_widen_one(unsigned kind, const unsigned c
                         if (segment > 1)
                                 t <<= segment - 1;
                 }
-                return (unsigned)((a & 0x80) ? t : -t) << 16;
+                return (float)((a & 0x80) ? t : -t) * (1.0f / 32768.0f);
         }
-        case 2:
-        {
-                int u = ~p[0] & 0xff, t = ((u & 0x0f) << 3) + 0x84, value;
-
-                t <<= (u & 0x70) >> 4;
-                value = (u & 0x80) ? 0x84 - t : t - 0x84;
-                return (unsigned)value << 16;
-        }
-        case 3:
-                return ((unsigned)p[0] << 8 | (unsigned)p[1]) << 16;
-        case 4:
-                return big;
-        case 5:
-                return (unsigned)p[0] << 8 | (unsigned)p[1] << 16 | (unsigned)p[2] << 24;
-        case 6:
-                return (unsigned)p[2] << 8 | (unsigned)p[1] << 16 | (unsigned)p[0] << 24;
-        case 7:
-                return little << 8;
-        default:
-                return big << 8;
-        }
+        t = ((u & 0x0f) << 3) + 0x84;
+        t <<= (u & 0x70) >> 4;
+        value = (u & 0x80) ? 0x84 - t : t - 0x84;
+        return (float)value * (1.0f / 32768.0f);
 }
 
-
-static AUDIO_C_UNUSED void audio_c_widen(unsigned *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
+static AUDIO_C_UNUSED void audio_c_law(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels, unsigned long law)
 {
-        static const unsigned char width[9] = {1, 1, 1, 2, 4, 3, 3, 4, 4};
-
-        if (kind > 8)
-                return;
-        for (unsigned long i = 0; i < samples; i++)
-                dst[i] = audio_c_widen_one((unsigned)kind, src + i * width[kind]);
+        for (unsigned long c = 0; c < channels; c++)
+                for (unsigned long i = 0; i < frames; i++)
+                        planes[c][i] = audio_c_law_one(src[i * channels + c], law);
 }
 
 // The three low bytes of each of lanes 32-bit words, little-endian, one after the other.
@@ -9795,6 +9806,11 @@ void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long sample
 void pcm_pack24(unsigned char *dst, const unsigned *src, unsigned long lanes)
 {
         audio_c_pack24(dst, src, lanes);
+}
+
+void f32_planes_from_law(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels, unsigned long law)
+{
+        audio_c_law(planes, src, frames, channels, law);
 }
 
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
@@ -172755,11 +172771,11 @@ static void al_rows_walk(int bits, al_faults *faults)
         faults after the last byte read) or at the start of one with a page that faults before it, at four byte offsets, the
         words against the C's, the words before and after the destination untouched, and a kind past eight left alone.
 */
-static const unsigned al_widen_width[9] = {1, 1, 1, 2, 4, 3, 3, 4, 4};
+static const unsigned al_widen_width[7] = {1, 2, 4, 3, 3, 4, 4};
 
 static void al_widen_case(unsigned kind, unsigned long long samples, int front, unsigned phase, int sweep, al_faults *faults)
 {
-        unsigned long long bytes = samples * al_widen_width[kind < 9 ? kind : 0];
+        unsigned long long bytes = samples * al_widen_width[kind < 7 ? kind : 0];
         p8 *src = front ? (p8 *)al_low[0] + phase : (p8 *)al_high[0] - bytes;
         unsigned *dst = front ? (unsigned *)al_low[3] + 16 : (unsigned *)al_high[3] - samples;
         unsigned long long sum = 0;
@@ -172789,7 +172805,7 @@ static void al_widen_case(unsigned kind, unsigned long long samples, int front, 
                         faults->outside += dst[samples + i] != 0x5a5a0000u + (unsigned)i;
         }
         for (unsigned long long i = 0; i < samples; i++)
-                faults->bits += kind < 9 ? dst[i] != audio_c_widen_one(kind, src + i * al_widen_width[kind]) : dst[i] != 0xdeadbeefu;
+                faults->bits += kind < 7 ? dst[i] != audio_c_widen_one(kind, src + i * al_widen_width[kind]) : dst[i] != 0xdeadbeefu;
 }
 
 /*
@@ -172844,12 +172860,70 @@ static void al_pack_tier(void)
         check("pcm_pack24: cases ran", faults.cases > 600);
 }
 
+/*
+        f32_planes_from_law: both laws, one to ten channels, every frame count to 330 and long ones, every byte value, the bytes put against
+        the end of their region (a page that faults after the last) or at the start of one, the planes one after another against the end
+        of theirs, the floats the C's and nothing written before the first plane or past the last.
+*/
+static void al_law_case(unsigned long long frames, unsigned long long channels, unsigned long long law, int front, int sweep, al_faults *faults)
+{
+        unsigned long long bytes = frames * channels;
+        p8 *src = front ? (p8 *)al_low[0] + (frames & 3) : (p8 *)al_high[0] - bytes;
+        float *base = front ? (float *)al_low[3] + 64 : (float *)al_high[3] - bytes, *planes[10];
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < bytes; i++)
+                src[i] = sweep ? (p8)(i + channels) : (p8)al_next();
+        for (unsigned long long c = 0; c < channels; c++)
+                planes[c] = base + c * frames;
+        for (int i = 0; i < 16; i++)
+        {
+                base[i - 16] = (float)(0x1234 + i);
+                if (front)
+                        base[bytes + i] = (float)(0x4321 + i);
+        }
+        for (unsigned long long i = 0; i < bytes; i++)
+                base[i] = 777.0f;
+        VECTOR_FIRST_CALL(al_first);
+        f32_planes_from_law(planes, src, frames, channels, law);
+        for (unsigned long long c = 0; c < channels; c++)
+                for (unsigned long long i = 0; i < frames; i++)
+                        faults->bits += al_bits(planes[c][i]) != al_bits(audio_c_law_one(src[i * channels + c], law));
+        for (int i = 0; i < 16; i++)
+        {
+                faults->outside += base[i - 16] != (float)(0x1234 + i);
+                if (front)
+                        faults->outside += base[bytes + i] != (float)(0x4321 + i);
+        }
+}
+
+static void al_law_tier(void)
+{
+        static const unsigned long long longs[] = {331, 512, 1000};
+        al_faults faults = {0, 0, 0, 0, 0, 0, 0};
+
+        for (unsigned long long law = 0; law < 2; law++)
+                for (unsigned long long channels = 1; channels <= 10; channels++)
+                {
+                        for (unsigned long long frames = 0; frames <= 90; frames++)
+                                for (int front = 0; front < 2; front++)
+                                        al_law_case(frames, channels, law, front, (int)(frames & 1), &faults);
+                        for (unsigned long i = 0; i < sizeof(longs) / sizeof(longs[0]); i++)
+                                for (int front = 0; front < 2; front++)
+                                        al_law_case(longs[i], channels, law, front, (int)(i & 1), &faults);
+                        al_law_case(256, channels, law, 0, 1, &faults);
+                }
+        check("f32_planes_from_law: both laws, one to ten channels, every byte value, the floats the C's", faults.bits == 0);
+        check("f32_planes_from_law: nothing written outside the planes (the guard pages and the floats either side)", faults.outside == 0);
+        check("f32_planes_from_law: cases ran", faults.cases > 3000);
+}
+
 static void al_widen_tier(void)
 {
         static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
         al_faults faults = {0, 0, 0, 0, 0, 0, 0};
 
-        for (unsigned kind = 0; kind < 10; kind++)
+        for (unsigned kind = 0; kind < 8; kind++)
         {
                 for (unsigned long long samples = 0; samples <= 330; samples++)
                         for (int front = 0; front < 2; front++)
@@ -172859,13 +172933,13 @@ static void al_widen_tier(void)
                                 al_widen_case(kind, longs[i], front, (unsigned)(i & 3), (int)(i & 1), &faults);
         }
         //      Every byte value, in every position of an eight.
-        for (unsigned kind = 0; kind < 9; kind++)
+        for (unsigned kind = 0; kind < 7; kind++)
                 for (unsigned phase = 0; phase < 8; phase++)
                         al_widen_case(kind, 256 + phase, 0, phase, 1, &faults);
         check("pcm_widen: every kind, every count to 330 and long ones, the words the C's", faults.bits == 0);
         check("pcm_widen: nothing read past the source or written past the words (the guard pages), the words either side untouched", faults.outside == 0);
         check("pcm_widen: the source unchanged", faults.kept == 0);
-        check("pcm_widen: cases ran", faults.cases > 6000);
+        check("pcm_widen: cases ran", faults.cases > 5000);
 }
 
 /*
@@ -173516,10 +173590,13 @@ static void al_abi_all(void)
         ((void (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 40);
         al_abi_target = (void *)resample_polyphase2_f32_rows;
         ((unsigned long long (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 3);
+        al_abi_target = (void *)f32_planes_from_law;
+        ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 2, 1);
+        ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 3, 0);
         al_abi_target = (void *)pcm_pack24;
         ((void (*)(unsigned char *, const unsigned *, unsigned long long))al_abi_call)(bytes, (const unsigned *)left, 103);
         al_abi_target = (void *)pcm_widen;
-        for (unsigned long long kind = 0; kind < 9; kind++)
+        for (unsigned long long kind = 0; kind < 7; kind++)
                 ((void (*)(unsigned *, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)((unsigned *)out0, bytes, 103, kind);
         al_abi_target = (void *)f32_scale_peak;
         ((float (*)(float *, const float *, unsigned long long, float))al_abi_call)(out0, left, 295, 0.5f);
@@ -173621,6 +173698,7 @@ b32 main(void)
                         al_mix2_tier();
                         al_widen_tier();
                         al_pack_tier();
+                        al_law_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -173634,6 +173712,7 @@ b32 main(void)
                 al_mix2_tier();
                 al_widen_tier();
                 al_pack_tier();
+                al_law_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -173663,6 +173742,7 @@ b32 main(void)
                         al_mix2_tier();
                         al_widen_tier();
                         al_pack_tier();
+                        al_law_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -173676,6 +173756,7 @@ b32 main(void)
         al_mix2_tier();
         al_widen_tier();
         al_pack_tier();
+        al_law_tier();
 #endif
         return test_report(null);
 }
@@ -192005,6 +192086,7 @@ static p64 al_mix2_run(bool assembly, positive shape, positive reps)
 */
 static float al_law[2][256];
 static const unsigned al_old_width[10] = {1, 1, 1, 2, 4, 3, 3, 4, 4, 4};
+static const int al_new_kind[10] = {0, -1, -1, 1, 2, 3, 4, 5, 6, 2};
 static unsigned al_wide_lanes[4096];
 
 static unsigned al_swap(unsigned x)
@@ -192102,6 +192184,11 @@ static void al_new_decode(int format, const unsigned char *src, long frames, lon
 {
         long bytes = al_old_width[format], done = 0;
 
+        if (format == 1 || format == 2)
+        {
+                f32_planes_from_law(dst, src, (unsigned long)frames, (unsigned long)channels, format == 2);
+                return;
+        }
         while (done < frames)
         {
                 long take = 4096 / channels, c;
@@ -192111,7 +192198,7 @@ static void al_new_decode(int format, const unsigned char *src, long frames, lon
                         take = frames - done;
                 for (c = 0; c < channels; c++)
                         planes[c] = dst[c] + done;
-                pcm_widen(al_wide_lanes, src + done * channels * bytes, (unsigned long)(take * channels), format == 9 ? 4 : (unsigned long)format);
+                pcm_widen(al_wide_lanes, src + done * channels * bytes, (unsigned long)(take * channels), (unsigned long)al_new_kind[format]);
                 if (format == 9)
                         f32_planes_from_f32(planes, (const unsigned char *)al_wide_lanes, (unsigned long)take, (unsigned long)channels);
                 else

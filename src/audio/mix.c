@@ -115,6 +115,7 @@ void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, 
 unsigned long f32_pair_clip(float *left, float *right, unsigned long count);
 void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, unsigned long count, unsigned long channels);
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind);
+void f32_planes_from_law(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels, unsigned long law);
 void pcm_pack24(unsigned char *dst, const unsigned int *src, unsigned long lanes);
 #endif
 
@@ -222,9 +223,10 @@ AUDIO_API void audio_init(void)
         frames of the format, channels of them interleaved, into one planar float array a channel. dst[c] is the channel's
         array, written from its first element. channels is 1 to AUDIO_CHANNELS_MAX.
 
-        Signed 16-bit, signed 32-bit and float samples in the machine's order are the library's decoders'. Every other format
-        goes in two library passes over a run of frames at a time: pcm_widen turns the run's samples into 32-bit lanes (8-bit
-        and the laws, the byte-swapped words, the 24-bit forms in three bytes and in four), and a decoder turns the lanes into
+        Signed 16-bit, signed 32-bit and float samples in the machine's order are the library's decoders', and the two laws of
+        G.711 are the library's table lookup (f32_planes_from_law). Every other format goes in two library passes over a run of
+        frames at a time: pcm_widen turns the run's samples into 32-bit lanes (8-bit, the byte-swapped words, the 24-bit forms
+        in three bytes and in four), and a decoder turns the lanes into
         floats, the exact ones the format's C made (a lane is the sample shifted up to the top of a 32-bit integer, so the
         integer decoder's scale gives the sample's own; a byte-swapped float is a float, held to [-16, 16] with a NaN made zero).
 */
@@ -249,10 +251,14 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
                         f32_planes_from_f32(dst, src, (unsigned long)frames, (unsigned long)channels);
                 return;
         }
-        kind = format == AUDIO_FORMAT_U8 ? 0 : format == AUDIO_FORMAT_ALAW ? 1 : format == AUDIO_FORMAT_ULAW ? 2 : format == AUDIO_FORMAT_S16BE ? 3 :
-               format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_F32BE ? 4 : format == AUDIO_FORMAT_S24LE ? 5 : format == AUDIO_FORMAT_S24BE ? 6 :
-               format == AUDIO_FORMAT_S24_32LE ? 7 : format == AUDIO_FORMAT_S24_32BE ? 8 : 9;
-        if (kind > 8)
+        if (format == AUDIO_FORMAT_ALAW || format == AUDIO_FORMAT_ULAW)
+        {
+                f32_planes_from_law(dst, src, (unsigned long)frames, (unsigned long)channels, format == AUDIO_FORMAT_ULAW);
+                return;
+        }
+        kind = format == AUDIO_FORMAT_U8 ? 0 : format == AUDIO_FORMAT_S16BE ? 1 : format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_F32BE ? 2 :
+               format == AUDIO_FORMAT_S24LE ? 3 : format == AUDIO_FORMAT_S24BE ? 4 : format == AUDIO_FORMAT_S24_32LE ? 5 : format == AUDIO_FORMAT_S24_32BE ? 6 : 7;
+        if (kind > 6)
         {
                 for (long c = 0; c < channels; c++)
                         memory_fill(dst[c], 0, (unsigned long)frames * sizeof(float));

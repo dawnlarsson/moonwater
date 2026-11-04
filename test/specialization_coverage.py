@@ -396,6 +396,9 @@ cover('folds_already', 'count', 'pcm_widen',
 cover('folds_already', 'count', 'pcm_pack24',
       'the encoder hands it a pass of up to 2048 lanes of the sink\'s period, which the card\'s period and the service\'s set at run time; '
       'a literal count would remove one compare from a loop of dozens of vector turns')
+cover('folds_already', 'count', 'f32_planes_from_law',
+      'the decoder hands it the frames a voice\'s ring holds for a pass (up to 512) and the stream\'s channel count, which the program '
+      'chose at run time; a literal count would remove one compare from a loop of lookups')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '
