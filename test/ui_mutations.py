@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Mutation proofs for the mixer's pieces of the kit (src/canvas/ui/ui.c: the level meter, the vertical slider, the strips) and the mixer program
+"""Mutation proofs for the UI kit's pieces checked in CHECK_terminal: the mixer's pieces of the kit (src/canvas/ui/ui.c: the level meter, the vertical slider, the strips) and the mixer program
 (src/canvas/ui/mixer.c), and the terminal's kit faces (src/canvas/ui/terminal.c).
 
 Each mutation is one edit to a copy of one of those files, built into CHECK_terminal with gcc and run from the tree's root; the check must turn red.
 A mutation that survives is a hole in the check. The mutant's tree is the real one with the one file changed (symbolic links for every other),
 so a build costs the check's compile and nothing else.
 
-    python3 test/audio_ui_mutations.py [NAME...]       from the tree's root; 6 builds at a time, about 5 minutes
+    python3 test/ui_mutations.py [NAME...]       from the tree's root; 6 builds at a time, about 5 minutes
 
 The control client's mutations (src/audio/control.c) are test/audio_mutations.py's, checked in CHECK_audio_pulse.
 """
@@ -144,6 +144,7 @@ M = [
     (X, "the off message missing", "ui_strips_message(ui, strips, WORDS(mixer_off), false);", "(void)strips;"),
     # ---- the terminal's kit: its faces are the grid's, so the actions bar's labels measure and draw ----
     (TM, "terminal overlay's kit is the whole window (a knob hung below the last line writes past the picture)", "        kit.width = (int)terminal.width - (int)terminal.pad;\n        kit.height = kit.bottom = (int)terminal.height - (int)terminal.pad_y;\n", ""),
+    (TM, "terminal's touch lift is never the controller's (the tap on the selection, the tap elsewhere)", "                if (!(event->flags & WINDOW_KEY_DOWN) && !s->finger && !(event->flags & WINDOW_KEY_HOLD))\n                        return false;\n", "                if (!(event->flags & WINDOW_KEY_DOWN))\n                        return false;\n"),
     (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
 ]
 
