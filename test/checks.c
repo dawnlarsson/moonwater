@@ -175843,7 +175843,7 @@ static void pt_test_policy(void)
         pt_vol(&w, 2, 0);
         pt_command(user_a, PULSE_COMMAND_SET_SINK_INPUT_VOLUME, 32, &w);
         pt_collect(user_a);
-        PTCHECK(pt_expect_error(32, PULSE_ERR_ACCESS), "A cannot set B's volume");
+        PTCHECK(pt_expect_error(32, PULSE_ERR_NOENTITY), "A cannot set B's volume (as a stream that is not there)");
         w.n = 0;
         pt_u32(&w, index_b);
         pt_command(user_a, PULSE_COMMAND_GET_SINK_INPUT_INFO, 33, &w);
@@ -175855,7 +175855,7 @@ static void pt_test_policy(void)
         pt_str(&w, 0);
         pt_command(user_a, PULSE_COMMAND_MOVE_SINK_INPUT, 34, &w);
         pt_collect(user_a);
-        PTCHECK(pt_expect_error(34, PULSE_ERR_ACCESS), "A cannot move B's stream");
+        PTCHECK(pt_expect_error(34, PULSE_ERR_NOENTITY), "A cannot move B's stream (as one that is not there)");
         w.n = 0;
         pt_u32(&w, index_b);
         pt_command(user_a, PULSE_COMMAND_KILL_SINK_INPUT, 35, &w);
@@ -176758,7 +176758,7 @@ static void pt_test_record_policy(void)
                 pt_bool(&w, 1);
                 pt_command(third, PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE, 30, &w);
                 pt_collect(third);
-                PTCHECK(pt_expect_error(30, PULSE_ERR_ACCESS), "another user cannot mute a stream that is not theirs");
+                PTCHECK(pt_expect_error(30, PULSE_ERR_NOENTITY), "another user cannot mute a stream that is not theirs (as one that is not there)");
                 pt_command(root, PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE, 31, &w);
                 pt_collect(root);
                 PTCHECK(pt_expect_ack(31), "root can");
@@ -176767,7 +176767,7 @@ static void pt_test_record_policy(void)
                 pt_vol(&w, 2, 0x8000);
                 pt_command(third, PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME, 34, &w);
                 pt_collect(third);
-                PTCHECK(pt_expect_error(34, PULSE_ERR_ACCESS), "nor set its volume");
+                PTCHECK(pt_expect_error(34, PULSE_ERR_NOENTITY), "nor set its volume (as one that is not there)");
                 pt_command(root, PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME, 35, &w);
                 pt_collect(root);
                 PTCHECK(pt_expect_ack(35), "which root can");
@@ -178824,10 +178824,10 @@ static void pt_test_samples_policy(void)
         PTCHECK(pt_upload(root, 35, 50, "root3", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == 0 && pt_upload_send(root, 51, channel, big, 4 << 20, 100000) == 0, "and 4 more");
         PTCHECK(pt_upload(root, 35, 52, "root4", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == PULSE_ERR_TOOLARGE, "and the cache is full at 16 MiB: %lu", pt_engine.sample_total);
         // Who can take out and who can replace what.
-        PTCHECK(pt_remove_sample(other, 53, "root1") == PULSE_ERR_ACCESS, "another user cannot take out root's");
+        PTCHECK(pt_remove_sample(other, 53, "root1") == PULSE_ERR_NOENTITY, "another user cannot take out root's (as one that is not there)");
         PTCHECK(pt_upload(other, 35, 54, "root2", AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0 && pt_upload_send(other, 55, channel, big, 400, 400) == PULSE_ERR_ACCESS, "nor replace it");
         PTCHECK(pt_remove_sample(root, 56, "big") == 0, "root can take out a user's");
-        PTCHECK(pt_remove_sample(user, 57, "root3") == PULSE_ERR_ACCESS, "and a user not root's");
+        PTCHECK(pt_remove_sample(user, 57, "root3") == PULSE_ERR_NOENTITY, "and a user not root's");
         // The sink input of a sample belongs to its player.
         played = pt_play(other, 35, 58, PULSE_INVALID, 0, PULSE_INVALID, "root1");
         PTCHECK(played >= 0, "another user may play root's sample");
@@ -179522,7 +179522,7 @@ static void pt_test_control_client(void)
         other = pt_ctl_join(1001);
         PTCHECK(other >= 0, "another user joins");
         PTCHECK(ctl_get_input(&pt_ctl, index, &info) == CTL_NOENTITY, "another user's stream is not found by it");
-        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == CTL_ACCESS && !pt_stream_of(index)->muted, "a mute of it is refused: CTL_ACCESS");
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == CTL_NOENTITY && !pt_stream_of(index)->muted, "a mute of it is refused as one that is not there: CTL_NOENTITY");
         PTCHECK(ctl_set_input_volume(&pt_ctl, index, 0x2000) != 0 && pt_stream_of(index)->volume[0] == 0xc000, "and a volume is not changed");
         PTCHECK(ctl_set_sink_volume(&pt_ctl, "null", 0x2000) == CTL_ACCESS && pt_engine.sink[0].volume[0] == CTL_VOLUME_MAX, "the master volume is not another user's to change");
         PTCHECK(ctl_set_sink_mute(&pt_ctl, "null", 1) == CTL_ACCESS && !pt_engine.sink[0].muted, "nor its mute");
@@ -179648,8 +179648,8 @@ static void pt_test_control_input(void)
         // Who may: the person's session, and a program its own record streams only.
         other = pt_ctl_join(1001);
         PTCHECK(other >= 0, "another user joins");
-        PTCHECK(ctl_set_output_mute(&pt_ctl, mono, 1) == CTL_ACCESS && pulse_output_of(&pt_engine, mono)->muted == 0, "a mute of another user's record stream is refused: CTL_ACCESS");
-        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x1000) == CTL_ACCESS && pulse_output_of(&pt_engine, mono)->volume[0] == 0x4000, "and a volume");
+        PTCHECK(ctl_set_output_mute(&pt_ctl, mono, 1) == CTL_NOENTITY && pulse_output_of(&pt_engine, mono)->muted == 0, "a mute of another user's record stream is refused as one that is not there: CTL_NOENTITY");
+        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x1000) == CTL_NOENTITY && pulse_output_of(&pt_engine, mono)->volume[0] == 0x4000, "and a volume");
         PTCHECK(ctl_set_source_volume(&pt_ctl, "alsa_input.test.00", 0x1000) == CTL_ACCESS && pt_engine.source[mic].volume[0] == CTL_VOLUME_MAX, "the microphone is not another user's to change");
         PTCHECK(ctl_set_source_mute(&pt_ctl, "alsa_input.test.00", 1) == CTL_ACCESS && !pt_engine.source[mic].muted, "nor its mute");
         pulse_client_close(&pt_engine, other);
@@ -179894,6 +179894,52 @@ static void pt_test_event_rights(void)
         pulse_client_close(&pt_engine, person);
         pulse_client_close(&pt_engine, other);
         pulse_client_close(&pt_engine, owner);
+}
+
+/* ---- a program that is not root gets the same answer for a sink or source that is there and one that is not ---- */
+
+static void pt_test_source_oracle(void)
+{
+        struct pt_w w;
+        struct pt_rec_args a;
+        long user;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        user = pt_connect(1000, 4950, 35, "Probe");
+        // The monitor of the sink is there; the other name is not. The volume, the mute and the record stream each answer the
+        // same for both (ACCESS: a program that is not root changes none of them).
+        for (int which = 0; which < 2; which++)
+        {
+                const char *name = which ? "nothere" : "null.monitor";
+                unsigned long tag = 60 + (unsigned long)which * 10;
+
+                memset(&w, 0, sizeof(w));
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, name);
+                pt_vol(&w, 2, 0x8000);
+                pt_command(user, PULSE_COMMAND_SET_SOURCE_VOLUME, tag, &w);
+                pt_collect(user);
+                PTCHECK(pt_expect_error(tag, PULSE_ERR_ACCESS), "a source volume of %s is ACCESS for a program that is not root", name);
+                memset(&w, 0, sizeof(w));
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, name);
+                pt_bool(&w, 1);
+                pt_command(user, PULSE_COMMAND_SET_SOURCE_MUTE, tag + 1, &w);
+                pt_collect(user);
+                PTCHECK(pt_expect_error(tag + 1, PULSE_ERR_ACCESS), "a source mute of %s is ACCESS for a program that is not root", name);
+                memset(&w, 0, sizeof(w));
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, name);
+                pt_vol(&w, 2, 0x8000);
+                pt_command(user, PULSE_COMMAND_SET_SINK_VOLUME, tag + 2, &w);
+                pt_collect(user);
+                PTCHECK(pt_expect_error(tag + 2, PULSE_ERR_ACCESS) || which == 0, "a sink volume of %s is ACCESS for a program that is not root", name);
+                a = pt_rec_args();
+                a.source_name = name;
+                PTCHECK(pt_rec_create(user, 35, 80 + (unsigned long)which, &a) == PULSE_ERR_ACCESS, "a record stream of %s is ACCESS for a program that is not root", name);
+        }
+        pulse_client_close(&pt_engine, user);
 }
 
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
@@ -180219,6 +180265,7 @@ int main(void)
         pt_test_no_move();
         pt_test_remember_users();
         pt_test_event_rights();
+        pt_test_source_oracle();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();

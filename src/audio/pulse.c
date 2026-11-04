@@ -2273,7 +2273,7 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (!pulse_may(c, s->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
                 if (n != s->map_channels)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
                 for (long i = 0; i < n; i++)
@@ -2291,12 +2291,13 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
         }
         else if (command == PULSE_COMMAND_SET_SINK_VOLUME)
         {
-                long sink = pulse_find_sink(p, index, name);
+                long sink;
 
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a sink that is not there
+                sink = pulse_find_sink(p, index, name);
                 if (sink < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (n != 2)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
                 p->sink[sink].volume[0] = volume[0];
@@ -2306,12 +2307,13 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
         }
         else if (command == PULSE_COMMAND_SET_SOURCE_VOLUME)
         {
-                long source = pulse_find_source(p, index, name);
+                long source;
 
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there
+                source = pulse_find_source(p, index, name);
                 if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (n != 2)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
                 p->source[source].volume[0] = volume[0];
@@ -2326,7 +2328,7 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (!pulse_may(c, rec->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
                 if (n != rec->map_channels)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
                 for (long i = 0; i < n; i++)
@@ -2358,7 +2360,7 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (!pulse_may(c, s->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
                 s->muted = mute;
                 pulse_stream_apply(s);
                 if (p->host.remember)
@@ -2373,24 +2375,26 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
         }
         else if (command == PULSE_COMMAND_SET_SINK_MUTE)
         {
-                long sink = pulse_find_sink(p, index, name);
+                long sink;
 
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a sink that is not there
+                sink = pulse_find_sink(p, index, name);
                 if (sink < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 p->sink[sink].muted = mute;
                 pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)sink);
                 pulse_changed(p, PULSE_CHANGED_SINK_VOLUME, sink);
         }
         else if (command == PULSE_COMMAND_SET_SOURCE_MUTE)
         {
-                long source = pulse_find_source(p, index, name);
+                long source;
 
+                if (!c->root)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there
+                source = pulse_find_source(p, index, name);
                 if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 p->source[source].muted = mute;
                 pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)source);
                 pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, source);
@@ -2402,7 +2406,7 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (!pulse_may(c, rec->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
                 rec->muted = mute;
                 pulse_record_apply(rec);
                 pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
@@ -2553,11 +2557,12 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 source = pulse_find_source(p, source_index, 0);
         else
                 source = p->default_source;
+        // What a sink plays is what everyone in the session plays: another user's program does not hear it, and a source it may
+        // not hear (a monitor, or one that is not there) is refused alike.
+        if (!c->root && (source < 0 || !p->source[source].capture))
+                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         if (source < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-        // What a sink plays is what everyone in the session plays: another user's program does not hear it.
-        if (!p->source[source].capture && !c->root)
-                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         for (int i = 0; i < PULSE_RECORDS; i++)
         {
                 if (p->record[i].used && p->record[i].client == slot)
@@ -3064,7 +3069,7 @@ static int pulse_command_remove_sample(struct pulse *p, long slot, struct pulse_
         if (!s)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
         if (!pulse_may(c, s->uid))
-                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
         s->condemned = 1;
         pulse_event_to(p, PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_REMOVE, s->index, s->uid);
         pulse_sample_release(p, s);
@@ -3866,7 +3871,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 if (!s || sink < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (!pulse_may(c, s->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
                 if (s->sink != sink)
                 {
                         // A stream that asked not to be moved is not moved by its program: the person (root) still may.
@@ -3893,10 +3898,13 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 PULSE_NEED_AUTH();
                 rec = pulse_output_of(p, index);
                 source = pulse_find_source(p, device, name);
-                if (!rec || source < 0)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!pulse_may(c, rec->uid) || (!p->source[source].capture && !c->root))
+                if (!rec || !pulse_may(c, rec->uid))
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
+                // A source that is not a capture device, or is not there, is refused a program that is not root alike.
+                if (!c->root && (source < 0 || !p->source[source].capture))
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                if (source < 0)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (pulse_record_move(p, rec, source) < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
                 rec->owner_set = 1;
