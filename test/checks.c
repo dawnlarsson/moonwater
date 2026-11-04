@@ -179753,6 +179753,36 @@ static void pt_test_reference_loops(void)
                 }
         }
         PTCHECK(bad == 0, "the peak window is the specification at 25, 7, 1000 and 96000 Hz, mono and stereo: %d differ", bad);
+
+        // A string of the tag structure: PULSE_STRING bytes are read and one more is refused, and a frame that ends before the
+        // terminator is refused (the search for the terminator stops at the frame and at PULSE_STRING + 1 bytes).
+        {
+                static unsigned char frame[PULSE_STRING + 8];
+                struct pulse_reader rd;
+                const char *s;
+                int exact, too_long, unfinished;
+
+                memset(frame, 'a', sizeof(frame));
+                frame[0] = 't';
+                frame[PULSE_STRING + 1] = 0;
+                rd = (struct pulse_reader){frame, PULSE_STRING + 2, 0, 0};
+                s = pulse_r_string(&rd, 0);
+                exact = s != 0 && !rd.bad && rd.at == PULSE_STRING + 2;
+
+                memset(frame, 'a', sizeof(frame));
+                frame[0] = 't';
+                frame[PULSE_STRING + 2] = 0;
+                rd = (struct pulse_reader){frame, PULSE_STRING + 3, 0, 0};
+                s = pulse_r_string(&rd, 0);
+                too_long = s == 0 && rd.bad;
+
+                memset(frame, 'a', 11);
+                frame[0] = 't';
+                rd = (struct pulse_reader){frame, 11, 0, 0};
+                s = pulse_r_string(&rd, 0);
+                unfinished = s == 0 && rd.bad;
+                PTCHECK(exact && too_long && unfinished, "a string of %d bytes is read, one more is refused, and an unterminated frame is refused", PULSE_STRING);
+        }
 }
 
 int main(void)

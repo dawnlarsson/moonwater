@@ -258,7 +258,8 @@ M = [
     ("pulse", "big-endian: all but the last byte pair reversed", "for (long k = 0; k < width / 2; k++)", "for (long k = 0; k < width / 2 - 1; k++)"),
     ("pulse", "U8: clip at 126", "v > 127 ? 127 : v", "v > 126 ? 126 : v"),
     ("pulse", "U8: rounding at 127 not 128", "v = (v + 128) >> 8;", "v = (v + 127) >> 8;"),
-    ("pulse", "peak window one frame long", "++r->window_count >= window", "++r->window_count > window"),
+    ("pulse", "string terminator searched one byte past the limit", "r->length - start < PULSE_STRING + 1 ? r->length - start : PULSE_STRING + 1;", "r->length - start < PULSE_STRING + 1 ? r->length - start : PULSE_STRING + 2;"),
+    ("pulse", "peak window one frame long","++r->window_count >= window", "++r->window_count > window"),
     ("pulse", "mono peaks never joined", "if (r->channels == 1)", "if (r->channels == 3)"),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),

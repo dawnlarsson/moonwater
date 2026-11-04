@@ -468,7 +468,8 @@ static int pulse_r_bool(struct pulse_reader *r)
 // A string of the tag structure: NULL for the null string (and *isnull set), else a pointer into the frame, whose limit is checked.
 static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
 {
-        long start, limit;
+        long start, avail;
+        const unsigned char *nul;
 
         if (isnull)
                 *isnull = 0;
@@ -489,15 +490,17 @@ static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
                 r->bad = 1;
                 return 0;
         }
+        // The terminator is searched for within the frame and within PULSE_STRING + 1 bytes (one more than a string may be): found,
+        // the string is the bytes before it; not found, the frame or the string ran out first.
         start = r->at + 1;
-        for (limit = start; limit < r->length && limit - start <= PULSE_STRING && r->p[limit]; limit++)
-                ;
-        if (limit >= r->length || limit - start > PULSE_STRING)
+        avail = r->length - start < PULSE_STRING + 1 ? r->length - start : PULSE_STRING + 1;
+        nul = avail > 0 ? __builtin_memchr(r->p + start, 0, (unsigned long)avail) : 0;
+        if (!nul)
         {
                 r->bad = 1;
                 return 0;
         }
-        r->at = limit + 1;
+        r->at = (long)(nul - r->p) + 1;
         return (const char *)(r->p + start);
 }
 
