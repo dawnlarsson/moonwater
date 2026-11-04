@@ -172,6 +172,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Clock format	70d0	Format czasu
 =Cursor look	34ce	Wygląd wskaźnika
 =Cursor size	65d4	Rozmiar wskaźnika
+=Date format	7a44	Format daty
 =Display	d9b5	Ekran
 =Editor	bf98	Edytor
 =GPU rendering	d4d5	Renderowanie przez GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar position	81b8	Położenie paska zadań
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
 =The internet prefers	3dbe	Internet preferuje
 =Theme	7c92	Motyw
 =Time	e404	Czas
@@ -256,6 +258,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =default	5bde	domyślny
 =deny	6367	odmów
 =desktop	87b3	pulpit
+=dmy	2a79	dmy
 =edge	d83c	krawędź
 =fast	02af	szybko
 =forest	2a60	leśny
@@ -268,6 +271,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =light	1e2f	jasny
 =light-grey	ed41	jasnoszary
 =lock	7842	zablokuj
+=mdy	3697	mdy
 =midnight-blue	4008	granatowy
 =normal	9c52	normalnie
 =off	8a0a	wyłączone
@@ -292,3 +296,4 @@ ui_field_full	fe02	więcej się nie zmieści
 =white	0766	biały
 =wifi	6448	Wi-Fi
 =wired	bfb4	przewodowa
+=ymd	faad	ymd

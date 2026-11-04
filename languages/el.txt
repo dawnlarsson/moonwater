@@ -172,6 +172,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Clock format	70d0	Μορφή ώρας
 =Cursor look	34ce	Εμφάνιση δείκτη
 =Cursor size	65d4	Μέγεθος δείκτη
+=Date format	7a44	Μορφή ημερομηνίας
 =Display	d9b5	Οθόνη
 =Editor	bf98	Επεξεργαστής
 =GPU rendering	d4d5	Απόδοση με GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Τερματικό
+=Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =Theme	7c92	Θέμα
 =Time	e404	Ώρα
@@ -256,6 +258,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =default	5bde	προεπιλογή
 =deny	6367	άρνηση
 =desktop	87b3	επιφάνεια εργασίας
+=dmy	2a79	dmy
 =edge	d83c	άκρη
 =fast	02af	γρήγορα
 =forest	2a60	δάσος
@@ -268,6 +271,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =light	1e2f	φωτεινό
 =light-grey	ed41	ανοιχτό γκρι
 =lock	7842	κλείδωμα
+=mdy	3697	mdy
 =midnight-blue	4008	μεσονύχτιο μπλε
 =normal	9c52	κανονικά
 =off	8a0a	ανενεργό
@@ -292,3 +296,4 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =white	0766	λευκό
 =wifi	6448	Wi-Fi
 =wired	bfb4	ενσύρματη
+=ymd	faad	ymd

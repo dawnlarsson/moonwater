@@ -159,6 +159,30 @@ for _ in range(100):
         break
 row(any(s[1] == "clock-format" and s[2] == "12h" for s in seen), "the clock read in 12 hours is clock-format 12h to a GNOME program", str(seen))
 
+seen.clear()
+setting("canvas.text.scale", "150")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "text-scaling-factor" and abs(s[2] - 1.5) < 1e-9 for s in seen), "a text size of 150 is a text-scaling-factor of 1.5", str(seen))
+
+seen.clear()
+setting("canvas.text.scale", "900")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "text-scaling-factor" and abs(s[2] - 1.0) < 1e-9 for s in seen), "a text size past its range is a factor of 1", str(seen))
+
+seen.clear()
+setting("time.date", "dmy")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "clock-show-date" and s[2] is True for s in seen), "a date format kept is clock-show-date true to a GNOME program", str(seen))
+
 # two programs: one owns a name and answers, the other calls it by the name
 methods = Gio.DBusNodeInfo.new_for_xml(
     "<node><interface name='org.example.Server'><method name='Echo'><arg type='s' direction='in'/><arg type='s' direction='out'/></method>"

@@ -172,6 +172,7 @@ ui_field_full	fe02	meer past er niet in
 =Clock format	70d0	Tijdnotatie
 =Cursor look	34ce	Uiterlijk van de aanwijzer
 =Cursor size	65d4	Grootte van de aanwijzer
+=Date format	7a44	Datumnotatie
 =Display	d9b5	Scherm
 =Editor	bf98	Editor
 =GPU rendering	d4d5	GPU-rendering
@@ -230,6 +231,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar position	81b8	Positie van de taakbalk
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
 =The internet prefers	3dbe	Internet verkiest
 =Theme	7c92	Thema
 =Time	e404	Tijd
@@ -256,6 +258,7 @@ ui_field_full	fe02	meer past er niet in
 =default	5bde	standaard
 =deny	6367	weigeren
 =desktop	87b3	bureaublad
+=dmy	2a79	dmy
 =edge	d83c	rand
 =fast	02af	snel
 =forest	2a60	woud
@@ -268,6 +271,7 @@ ui_field_full	fe02	meer past er niet in
 =light	1e2f	licht
 =light-grey	ed41	lichtgrijs
 =lock	7842	vergrendelen
+=mdy	3697	mdy
 =midnight-blue	4008	middernachtblauw
 =normal	9c52	normaal
 =off	8a0a	uit
@@ -292,3 +296,4 @@ ui_field_full	fe02	meer past er niet in
 =white	0766	wit
 =wifi	6448	wifi
 =wired	bfb4	bekabeld
+=ymd	faad	ymd

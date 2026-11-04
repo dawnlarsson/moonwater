@@ -173,6 +173,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Clock format	70d0	وقت کی شکل
 =Cursor look	34ce	پوائنٹر کی شکل
 =Cursor size	65d4	پوائنٹر کا سائز
+=Date format	7a44	تاریخ کی شکل
 =Display	d9b5	اسکرین
 =Editor	bf98	ایڈیٹر
 =GPU rendering	d4d5	GPU رینڈرنگ
@@ -231,6 +232,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Taskbar position	81b8	ٹاسک بار کی جگہ
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ٹاسک بار کی ٹرے ({names} والا متن: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	ٹرمینل
+=Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
 =Theme	7c92	تھیم
 =Time	e404	وقت
@@ -257,6 +259,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =default	5bde	ڈیفالٹ
 =deny	6367	انکار
 =desktop	87b3	ڈیسک ٹاپ
+=dmy	2a79	dmy
 =edge	d83c	کنارہ
 =fast	02af	تیز
 =forest	2a60	جنگلی سبز
@@ -269,6 +272,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =light	1e2f	روشن
 =light-grey	ed41	ہلکا خاکستری
 =lock	7842	لاک
+=mdy	3697	mdy
 =midnight-blue	4008	رات کا نیلا
 =normal	9c52	عام
 =off	8a0a	آف
@@ -293,3 +297,4 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =white	0766	سفید
 =wifi	6448	Wi-Fi
 =wired	bfb4	وائرڈ
+=ymd	faad	ymd

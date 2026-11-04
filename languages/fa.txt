@@ -173,6 +173,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Clock format	70d0	قالب زمان
 =Cursor look	34ce	ظاهر نشانگر
 =Cursor size	65d4	اندازه نشانگر
+=Date format	7a44	قالب تاریخ
 =Display	d9b5	نمایشگر
 =Editor	bf98	ویرایشگر
 =GPU rendering	d4d5	رندر با GPU
@@ -231,6 +232,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Taskbar position	81b8	موقعیت نوار وظیفه
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	پایانه
+=Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
 =Theme	7c92	تم
 =Time	e404	زمان
@@ -257,6 +259,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =default	5bde	پیش‌فرض
 =deny	6367	رد
 =desktop	87b3	رومیزی
+=dmy	2a79	dmy
 =edge	d83c	لبه
 =fast	02af	سریع
 =forest	2a60	سبز جنگلی
@@ -269,6 +272,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =light	1e2f	روشن
 =light-grey	ed41	خاکستری روشن
 =lock	7842	قفل
+=mdy	3697	mdy
 =midnight-blue	4008	آبی نیمه‌شب
 =normal	9c52	عادی
 =off	8a0a	خاموش
@@ -293,3 +297,4 @@ ui_field_full	fe02	بیش از این جا ندارد
 =white	0766	سفید
 =wifi	6448	Wi-Fi
 =wired	bfb4	سیمی
+=ymd	faad	ymd

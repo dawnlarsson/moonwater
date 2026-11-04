@@ -172,6 +172,7 @@ ui_field_full	fe02	no cabe más
 =Clock format	70d0	Formato de hora
 =Cursor look	34ce	Aspecto del puntero
 =Cursor size	65d4	Tamaño del puntero
+=Date format	7a44	Formato de fecha
 =Display	d9b5	Pantalla
 =Editor	bf98	Editor
 =GPU rendering	d4d5	Renderizado por GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar position	81b8	Posición de la barra de tareas
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja de la barra de tareas (texto con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Tamaño del texto (porcentaje o default)
 =The internet prefers	3dbe	Internet prefiere
 =Theme	7c92	Tema
 =Time	e404	Hora
@@ -256,6 +258,7 @@ ui_field_full	fe02	no cabe más
 =default	5bde	predeterminado
 =deny	6367	denegar
 =desktop	87b3	escritorio
+=dmy	2a79	dmy
 =edge	d83c	borde
 =fast	02af	rápido
 =forest	2a60	bosque
@@ -268,6 +271,7 @@ ui_field_full	fe02	no cabe más
 =light	1e2f	claro
 =light-grey	ed41	gris claro
 =lock	7842	bloquear
+=mdy	3697	mdy
 =midnight-blue	4008	azul medianoche
 =normal	9c52	normal
 =off	8a0a	desactivado
@@ -292,3 +296,4 @@ ui_field_full	fe02	no cabe más
 =white	0766	blanco
 =wifi	6448	Wi-Fi
 =wired	bfb4	cableada
+=ymd	faad	ymd

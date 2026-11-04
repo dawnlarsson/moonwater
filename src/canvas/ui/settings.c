@@ -750,6 +750,7 @@ static struct
         unsigned int card_generation;
         b32 wrap_made;
         int wrap_width, wrap_scale;
+        unsigned int wrap_percent;
         unsigned int wrap_card;
         struct settings_map map;
 } settings;
@@ -1910,7 +1911,7 @@ struct settings_run
 static int settings_run_width(struct ui address_to ui, struct settings_run address_to run, positive from, positive to)
 {
         const font_face address_to faces[2] = {ui->regular, ui->regular};
-        p32 em = ((p32)(ui_types[UI_BODY_MEDIUM].size * ui->scale) << 6) / 100;
+        p32 em = ui_em(ui, ui_types[UI_BODY_MEDIUM].size);
 
         if (from != run->from || to < run->at)
         {
@@ -1937,7 +1938,7 @@ static fn settings_wrap(void)
         int room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, UI_INSET);
         positive at = 0;
 
-        if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale &&
+        if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale && settings.wrap_percent == ui_text_percent &&
             settings.wrap_card == settings.card_generation)
                 return;
         settings.card_lines = 0;
@@ -1995,6 +1996,7 @@ static fn settings_wrap(void)
         settings.wrap_made = true;
         settings.wrap_width = settings.width;
         settings.wrap_scale = settings.ui.scale;
+        settings.wrap_percent = ui_text_percent;
         settings.wrap_card = settings.card_generation;
 }
 

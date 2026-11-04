@@ -50,10 +50,24 @@
 #define UI_KEEP(x, y, w, h) ((void)0)
 #endif
 
-#define UI_ROW 40      // a row of a list or a column
+#define UI_ROW (ui_row_height()) // a row of a list or a column: 40, and more as the text grows past its size
+#define UI_ROW_LEAST 40
 #define UI_PAD 16      // the window's margin
 #define UI_INSET 14    // a row's text in from its edges
 #define UI_SCRATCH_ROWS 96
+
+/*
+        The text's size, as a percent of what every role's size says (canvas text scale, 50 to 300): taken from the table with the
+        theme, 0 until one is, which is 100. It is multiplied into the text only (ui_em, and so what a run is drawn and measured at),
+        so a label wider than before makes its button wider and a list's rows are as tall as the text needs: a row is 40 logical
+        pixels at 100 and below, and grows with the text above it, which everything laid out in rows follows.
+*/
+static unsigned int ui_text_percent;
+
+static inline int ui_row_height(void)
+{
+        return ui_text_percent > 100 ? (int)(UI_ROW_LEAST * ui_text_percent / 100) : UI_ROW_LEAST;
+}
 
 /*
         A frame recorded for the GPU (src/canvas/gpu.c) in place of being painted, when ui.scene is set: ops of 8 words, and the cover
@@ -96,6 +110,13 @@ struct ui
         b32 glass;                      // a glass window (WINDOW_GLASS): its pieces are the ground's inks, ui_text_colour and ui_well
         struct ui_scene address_to scene; // when set, a text run is recorded into it and not painted
 };
+
+// The em of a logical size at the window's scale and the text's, in the font engine's 26.6: the size at the scale alone (bit for bit
+// what it always was) while the text's percent is 100.
+static inline p32 ui_em(const struct ui address_to ui, int size)
+{
+        return (p32)((((b64)size * (b64)ui->scale * (b64)(ui_text_percent ? ui_text_percent : 100)) << 6) / 10000);
+}
 
 /*
         x / 255 for x below 65535, exact: x plus its high byte, plus one, shifted. The blends
@@ -816,7 +837,7 @@ static int ui_run_flagged(struct ui address_to ui, const font_face address_to co
                           string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                           unsigned int stroke, p32 flags)
 {
-        p32 em = ((p32)(size * ui->scale) << 6) / 100;
+        p32 em = ui_em(ui, size);
         positive length = string_length(text);
         int width = ui_advance_flagged(ui, faces, text, length, em, flags);
         font_metrics metrics = font_metrics_at(faces[0], em);
@@ -962,7 +983,7 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
 // A run's capital height at size, in whole pixels: font.c's metrics are 16.16.
 static int ui_capital(struct ui address_to ui, int size)
 {
-        font_metrics metrics = font_metrics_at(ui->regular, ((p32)(size * ui->scale) << 6) / 100);
+        font_metrics metrics = font_metrics_at(ui->regular, ui_em(ui, size));
 
         return (int)((metrics.cap_height + 32768) >> 16);
 }
@@ -2131,6 +2152,18 @@ static fn ui_kit_language_take(const struct windows address_to table)
         }
 }
 
+// The text's size the table says, taken wherever the theme is: a size out of its range is the standard. Every control is placed again
+// when it changes, as if it had just appeared: its text is another width, and a list's rows another height.
+static fn ui_kit_text_take(const struct windows address_to table)
+{
+        unsigned int percent = table->text_scale >= 50 && table->text_scale <= 300 ? table->text_scale : 0;
+
+        if (percent == ui_text_percent)
+                return;
+        ui_text_percent = percent;
+        ui_kit_settle();
+}
+
 // Rows top to bottom (logical pixels) of the control being drawn move this frame.
 static fn ui_kit_reach(int top, int bottom)
 {
@@ -3157,7 +3190,7 @@ static fn ui_kit_text_in(struct ui address_to ui, int x, int baseline, string_ad
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
-        font_metrics metrics = font_metrics_at(face, ((p32)(t->size * ui->scale) << 6) / 100);
+        font_metrics metrics = font_metrics_at(face, ui_em(ui, t->size));
         int rows = metrics.cell_height + 4 * ui->scale / 100, top = baseline - metrics.baseline - 2 * ui->scale / 100;
 
         rows = rows > UI_SCRATCH_ROWS * ui->scale / 100 ? UI_SCRATCH_ROWS * ui->scale / 100 : rows;
@@ -3212,7 +3245,7 @@ static int ui_kit_baseline(struct ui address_to ui, int top, int type)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
-        font_metrics metrics = font_metrics_at(face, ((p32)(t->size * ui->scale) << 6) / 100);
+        font_metrics metrics = font_metrics_at(face, ui_em(ui, t->size));
 
         return top + (t->line * ui->scale / 100 - metrics.cell_height) / 2 + metrics.baseline;
 }
@@ -7013,7 +7046,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -7407,6 +7440,7 @@ struct ui_cut
         char text[UI_CUT_TEXT];
         positive length, cut, capacity;
         int type, room, scale;
+        unsigned int percent; // the text's percent when it was cut: the same words are another width at another size
         unsigned char kind; // 1 whole, 2 the first cut bytes and the dots, 3 the first cut bytes alone
         unsigned char rtl;  // the window read from the right when it was cut: the same words are another width there
 };
@@ -7498,9 +7532,11 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                         hash = (hash ^ (unsigned char)text[at]) * 16777619u;
                 hash = (((hash ^ (unsigned int)type) * 16777619u ^ (unsigned int)room) * 16777619u ^ (unsigned int)ui->scale) * 16777619u;
                 hash = (hash ^ (unsigned int)ui_rtl()) * 16777619u;
+                hash = (hash ^ ui_text_percent) * 16777619u;
                 memo = &ui_cuts[(hash ^ hash >> 15) & (UI_CUTS - 1)];
                 if (memo->kind && memo->length == length && memo->type == type && memo->room == room && memo->scale == ui->scale &&
-                    memo->rtl == (unsigned char)ui_rtl() && memo->capacity == capacity && !memory_compare(memo->text, text, length))
+                    memo->percent == ui_text_percent && memo->rtl == (unsigned char)ui_rtl() && memo->capacity == capacity &&
+                    !memory_compare(memo->text, text, length))
                         kind = memo->kind, cut = memo->cut;
         }
         if (!kind)
@@ -7511,7 +7547,7 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
-                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->rtl = (unsigned char)ui_rtl();
+                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->percent = ui_text_percent, memo->rtl = (unsigned char)ui_rtl();
                         memo->capacity = capacity, memo->cut = cut, memo->kind = kind;
                 }
         }
@@ -8693,7 +8729,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -8771,7 +8807,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                         // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
                         // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)
@@ -9284,7 +9320,7 @@ static p32 ui_text_em(const struct ui address_to ui, const struct ui_text addres
         int size = t->size + t->zoom;
 
         size = size < 6 ? 6 : size > 72 ? 72 : size;
-        return ((p32)(size * ui->scale) << 6) / 100;
+        return ui_em(ui, size);
 }
 
 // The flags a text widget's lines are laid out and drawn with: the first strong letter's direction, the window's where there is none.

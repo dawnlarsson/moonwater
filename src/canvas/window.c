@@ -757,6 +757,9 @@ struct windows
         // The compositor's: the language the windows Canvas draws itself speak, `moonwater language` as /root/language keeps it,
         // packed by windows_language_code (0 for English, which "en" is too). A change counts themed up, as a theme's does.
         unsigned int language;
+        // The compositor's: the text's size in percent, `moonwater canvas text scale` as /root/canvas.text.scale keeps it (50 to 300); 0
+        // when none is kept, which is 100. A change counts themed up, as a theme's does.
+        unsigned int text_scale;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING

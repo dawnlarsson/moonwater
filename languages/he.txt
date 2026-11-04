@@ -173,6 +173,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Clock format	70d0	תבנית שעה
 =Cursor look	34ce	מראה המצביע
 =Cursor size	65d4	גודל המצביע
+=Date format	7a44	תבנית תאריך
 =Display	d9b5	מסך
 =Editor	bf98	עורך
 =GPU rendering	d4d5	רינדור ב-GPU
@@ -231,6 +232,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Taskbar position	81b8	מיקום שורת המשימות
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	מסוף
+=Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
 =The internet prefers	3dbe	האינטרנט מעדיף
 =Theme	7c92	ערכת נושא
 =Time	e404	זמן
@@ -257,6 +259,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =default	5bde	ברירת מחדל
 =deny	6367	חסום
 =desktop	87b3	שולחן עבודה
+=dmy	2a79	dmy
 =edge	d83c	קצה
 =fast	02af	מהיר
 =forest	2a60	ירוק יער
@@ -269,6 +272,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =light	1e2f	בהיר
 =light-grey	ed41	אפור בהיר
 =lock	7842	נעל
+=mdy	3697	mdy
 =midnight-blue	4008	כחול חצות
 =normal	9c52	רגיל
 =off	8a0a	כבוי
@@ -293,3 +297,4 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =white	0766	לבן
 =wifi	6448	Wi-Fi
 =wired	bfb4	קווי
+=ymd	faad	ymd

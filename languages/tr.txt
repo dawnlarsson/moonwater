@@ -172,6 +172,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Clock format	70d0	Saat biçimi
 =Cursor look	34ce	İşaretçi görünümü
 =Cursor size	65d4	İşaretçi boyutu
+=Date format	7a44	Tarih biçimi
 =Display	d9b5	Ekran
 =Editor	bf98	Düzenleyici
 =GPU rendering	d4d5	GPU ile oluşturma
@@ -230,6 +231,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Taskbar position	81b8	Görev çubuğu konumu
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Metin boyutu (yüzde veya default)
 =The internet prefers	3dbe	İnternet şunu tercih eder
 =Theme	7c92	Tema
 =Time	e404	Saat
@@ -256,6 +258,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =default	5bde	varsayılan
 =deny	6367	reddet
 =desktop	87b3	masaüstü
+=dmy	2a79	dmy
 =edge	d83c	kenar
 =fast	02af	hızlı
 =forest	2a60	orman
@@ -268,6 +271,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =light	1e2f	açık
 =light-grey	ed41	açık gri
 =lock	7842	kilitle
+=mdy	3697	mdy
 =midnight-blue	4008	gece mavisi
 =normal	9c52	normal
 =off	8a0a	kapalı
@@ -292,3 +296,4 @@ ui_field_full	fe02	daha fazlası sığmaz
 =white	0766	beyaz
 =wifi	6448	Wi-Fi
 =wired	bfb4	kablolu
+=ymd	faad	ymd

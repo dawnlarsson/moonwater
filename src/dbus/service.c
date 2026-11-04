@@ -204,9 +204,20 @@ static void sessionbus_settings(void)
         dbus_setting_set("org.gnome.desktop.interface", "gtk-theme", 's', 0, 0, dark ? "Adwaita-dark" : "Adwaita");
         sessionbus_word(SETTING_MOTION_PATH, word, sizeof word);
         dbus_setting_set("org.gnome.desktop.interface", "enable-animations", 'b', !string_equals((string_address)word, (string_address) "reduced"), 0, 0);
+        // The text's size, a percent from 50 to 300 in /root/canvas.text.scale: GNOME's factor is that over 100.
+        sessionbus_word(SETTING_TEXT_SCALE_PATH, word, sizeof word);
+        {
+                long percent = 0;
+
+                for (char *digit = word; *digit >= '0' && *digit <= '9' && percent < 1000; digit++)
+                        percent = percent * 10 + (*digit - '0');
+                scale[0] = sessionbus_bits(percent >= 50 && percent <= 300 ? (double)percent / 100.0 : 1.0);
+        }
         dbus_setting_set("org.gnome.desktop.interface", "text-scaling-factor", 'd', 0, scale, 0);
         sessionbus_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof word);
         dbus_setting_set("org.gnome.desktop.interface", "clock-format", 's', 0, 0, string_equals((string_address)word, (string_address) "12h") ? "12h" : "24h");
+        sessionbus_word(SETTING_DATE_FORMAT_PATH, word, sizeof word);
+        dbus_setting_set("org.gnome.desktop.interface", "clock-show-date", 'b', word[0] == 'y' || word[0] == 'd' || word[0] == 'm', 0, 0);
         // The pointer is the compositor's; this is the size a program that draws one of its own (a drag, a popup) takes.
         sessionbus_word(SETTING_CURSOR_SIZE_PATH, word, sizeof word);
         dbus_setting_set("org.gnome.desktop.interface", "cursor-size", 'i', word[0] >= '1' && word[0] <= '4' && !word[1] ? 24 * (word[0] - '0') : 24, 0, 0);

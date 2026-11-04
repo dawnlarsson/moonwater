@@ -173,6 +173,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Clock format	70d0	تنسيق الوقت
 =Cursor look	34ce	شكل المؤشر
 =Cursor size	65d4	حجم المؤشر
+=Date format	7a44	تنسيق التاريخ
 =Display	d9b5	الشاشة
 =Editor	bf98	المحرر
 =GPU rendering	d4d5	التصيير على GPU
@@ -231,6 +232,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Taskbar position	81b8	موضع شريط المهام
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	الطرفية
+=Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
 =The internet prefers	3dbe	يفضل الإنترنت
 =Theme	7c92	السمة
 =Time	e404	الوقت
@@ -257,6 +259,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =default	5bde	افتراضي
 =deny	6367	منع
 =desktop	87b3	سطح المكتب
+=dmy	2a79	dmy
 =edge	d83c	الحافة
 =fast	02af	سريع
 =forest	2a60	أخضر الغابة
@@ -269,6 +272,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =light	1e2f	فاتح
 =light-grey	ed41	رمادي فاتح
 =lock	7842	قفل
+=mdy	3697	mdy
 =midnight-blue	4008	أزرق منتصف الليل
 =normal	9c52	عادي
 =off	8a0a	إيقاف
@@ -293,3 +297,4 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =white	0766	أبيض
 =wifi	6448	Wi-Fi
 =wired	bfb4	سلكي
+=ymd	faad	ymd

@@ -172,6 +172,7 @@ ui_field_full	fe02	більше не вміщається
 =Clock format	70d0	Формат часу
 =Cursor look	34ce	Вигляд вказівника
 =Cursor size	65d4	Розмір вказівника
+=Date format	7a44	Формат дати
 =Display	d9b5	Екран
 =Editor	bf98	Редактор
 =GPU rendering	d4d5	Рендеринг на GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	більше не вміщається
 =Taskbar position	81b8	Розташування панелі завдань
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Термінал
+=Text size (percent, or default)	51d7	Розмір тексту (відсотки або default)
 =The internet prefers	3dbe	Інтернет надає перевагу
 =Theme	7c92	Тема
 =Time	e404	Час
@@ -256,6 +258,7 @@ ui_field_full	fe02	більше не вміщається
 =default	5bde	типовий
 =deny	6367	заборонити
 =desktop	87b3	робочий стіл
+=dmy	2a79	dmy
 =edge	d83c	край
 =fast	02af	швидко
 =forest	2a60	лісовий
@@ -268,6 +271,7 @@ ui_field_full	fe02	більше не вміщається
 =light	1e2f	світла
 =light-grey	ed41	світло-сірий
 =lock	7842	заблокувати
+=mdy	3697	mdy
 =midnight-blue	4008	опівнічно-синій
 =normal	9c52	нормально
 =off	8a0a	вимкнено
@@ -292,3 +296,4 @@ ui_field_full	fe02	більше не вміщається
 =white	0766	білий
 =wifi	6448	Wi-Fi
 =wired	bfb4	дротова
+=ymd	faad	ymd

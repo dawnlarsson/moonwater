@@ -172,6 +172,7 @@ ui_field_full	fe02	that is as much as it holds
 =Clock format	70d0	Clock format
 =Cursor look	34ce	Cursor look
 =Cursor size	65d4	Cursor size
+=Date format	7a44	Date format
 =Display	d9b5	Display
 =Editor	bf98	Editor
 =GPU rendering	d4d5	GPU rendering
@@ -230,6 +231,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar position	81b8	Taskbar position
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Text size (percent, or default)
 =The internet prefers	3dbe	The internet prefers
 =Theme	7c92	Theme
 =Time	e404	Time
@@ -256,6 +258,7 @@ ui_field_full	fe02	that is as much as it holds
 =default	5bde	default
 =deny	6367	deny
 =desktop	87b3	desktop
+=dmy	2a79	dmy
 =edge	d83c	edge
 =fast	02af	fast
 =forest	2a60	forest
@@ -268,6 +271,7 @@ ui_field_full	fe02	that is as much as it holds
 =light	1e2f	light
 =light-grey	ed41	light-grey
 =lock	7842	lock
+=mdy	3697	mdy
 =midnight-blue	4008	midnight-blue
 =normal	9c52	normal
 =off	8a0a	off
@@ -292,3 +296,4 @@ ui_field_full	fe02	that is as much as it holds
 =white	0766	white
 =wifi	6448	wifi
 =wired	bfb4	wired
+=ymd	faad	ymd

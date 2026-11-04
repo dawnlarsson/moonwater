@@ -172,6 +172,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Clock format	70d0	Format de l'heure
 =Cursor look	34ce	Apparence du pointeur
 =Cursor size	65d4	Taille du pointeur
+=Date format	7a44	Format de la date
 =Display	d9b5	Écran
 =Editor	bf98	Éditeur
 =GPU rendering	d4d5	Rendu par GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar position	81b8	Position de la barre des tâches
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Zone d'état de la barre des tâches (texte avec {names} : {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Taille du texte (pourcentage ou default)
 =The internet prefers	3dbe	Internet préfère
 =Theme	7c92	Thème
 =Time	e404	Heure
@@ -256,6 +258,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =default	5bde	par défaut
 =deny	6367	refuser
 =desktop	87b3	bureau
+=dmy	2a79	dmy
 =edge	d83c	bord
 =fast	02af	rapide
 =forest	2a60	forêt
@@ -268,6 +271,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =light	1e2f	clair
 =light-grey	ed41	gris clair
 =lock	7842	verrouiller
+=mdy	3697	mdy
 =midnight-blue	4008	bleu nuit
 =normal	9c52	normal
 =off	8a0a	désactivé
@@ -292,3 +296,4 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =white	0766	blanc
 =wifi	6448	Wi-Fi
 =wired	bfb4	filaire
+=ymd	faad	ymd

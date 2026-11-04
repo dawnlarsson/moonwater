@@ -172,6 +172,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Clock format	70d0	Uhrzeitformat
 =Cursor look	34ce	Aussehen des Mauszeigers
 =Cursor size	65d4	Größe des Mauszeigers
+=Date format	7a44	Datumsformat
 =Display	d9b5	Anzeige
 =Editor	bf98	Editor
 =GPU rendering	d4d5	GPU-Rendering
@@ -230,6 +231,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Taskbar position	81b8	Position der Taskleiste
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskleisten-Infobereich (Text mit {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Textgröße (Prozent oder default)
 =The internet prefers	3dbe	Internet bevorzugt
 =Theme	7c92	Design
 =Time	e404	Zeit
@@ -256,6 +258,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =default	5bde	Standard
 =deny	6367	Verweigern
 =desktop	87b3	Desktop
+=dmy	2a79	dmy
 =edge	d83c	Rand
 =fast	02af	Schnell
 =forest	2a60	Wald
@@ -268,6 +271,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =light	1e2f	Hell
 =light-grey	ed41	Hellgrau
 =lock	7842	Sperren
+=mdy	3697	mdy
 =midnight-blue	4008	Mitternachtsblau
 =normal	9c52	Normal
 =off	8a0a	Aus
@@ -292,3 +296,4 @@ ui_field_full	fe02	mehr passt nicht hinein
 =white	0766	Weiß
 =wifi	6448	WLAN
 =wired	bfb4	Kabelgebunden
+=ymd	faad	ymd

@@ -115,6 +115,11 @@
 // What the standard tray says when the clock is read in 12 hours (`time format 12h`): the hour as a 12 hour clock shows it, the minute, and am or pm.
 #define SETTING_TASKBAR_TRAY_STANDARD_12H "{battery}  {time.12h.hour}:{time.24h.min} {time.ampm}"
 #define SETTING_CLOCK_FORMAT_PATH "/root/time.format"
+// The date beside the standard tray's clock (`time date ymd|dmy|mdy`; off, the standard, shows none): what each order adds to the format.
+#define SETTING_DATE_FORMAT_PATH "/root/time.date"
+#define SETTING_TASKBAR_TRAY_DATE_YMD "  {date.year}-{date.month}-{date.day}"
+#define SETTING_TASKBAR_TRAY_DATE_DMY "  {date.day}.{date.month}.{date.year}"
+#define SETTING_TASKBAR_TRAY_DATE_MDY "  {date.month}/{date.day}/{date.year}"
 #define SETTING_TRAY_MOST 96 // bytes of a format
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
@@ -126,6 +131,8 @@
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
 #define SETTING_CARET_BLINK_PATH "/root/canvas.caret.blink"
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
+// The text's size, in percent of what every role's size says: ui.c's ui_em multiplies it in, and the portal says it as text-scaling-factor.
+#define SETTING_TEXT_SCALE_PATH "/root/canvas.text.scale"
 // The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/language.c reads it).
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
 #define SETTING_LANGUAGE_PATH "/root/language"
@@ -233,6 +240,13 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "caret thickness is thin, normal or thick, not %s\n",
                       .usage = "canvas caret thickness [thin|normal|thick]",
                       .help = "how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]"),
+    //  The text of every window Canvas draws (ui.c's ui_em): its size as a percent of what each role says. A list's rows grow
+    //  with it above 100, and a label wider than before makes its button wider; the terminal keeps the size of its own.
+    SETTING_PLAIN_ROW(null, "Text size (percent, or default)", SETTINGS_FIELD, 0, ("canvas", "text", "scale"), "scale ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TEXT_SCALE_PATH, .standard = "100",
+                      .unit = "percent", .low = 50, .high = 300, .need = "how Canvas draws",
+                      .usage = "canvas text scale [PERCENT|default]",
+                      .help = "how large the text of the windows Canvas draws is, 50 to 300 percent [100]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
@@ -372,6 +386,12 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLOCK_FORMAT_PATH, .standard = "24h", .need = "how Canvas draws",
                       .refusal = "clock format is 24h or 12h, not %s\n", .usage = "time format [24h|12h]",
                       .help = "the hours the clock is read in, on the tray and in GNOME programs [24h]"),
+    //  The date the standard tray says beside the clock, in the order a person reads it: year first (2026-11-04), day first
+    //  (04.11.2026) or month first (11/04/2026). A tray format of the person's own says its date itself with {date.*}.
+    SETTING_PLAIN_ROW(null, "Date format", SETTINGS_CHOICE, 0, ("time", "date"), "date ", "off ymd dmy mdy",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_DATE_FORMAT_PATH, .standard = "off", .need = "how Canvas draws",
+                      .refusal = "date format is off, ymd, dmy or mdy, not %s\n", .usage = "time date [off|ymd|dmy|mdy]",
+                      .help = "the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]"),
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
      null, .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null,

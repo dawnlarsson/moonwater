@@ -172,6 +172,7 @@ ui_field_full	fe02	mer ryms inte
 =Clock format	70d0	Tidsformat
 =Cursor look	34ce	Pekarens utseende
 =Cursor size	65d4	Pekarens storlek
+=Date format	7a44	Datumformat
 =Display	d9b5	Skärm
 =Editor	bf98	Redigerare
 =GPU rendering	d4d5	GPU-rendering
@@ -230,6 +231,7 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar position	81b8	Aktivitetsfältets plats
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
+=Text size (percent, or default)	51d7	Textstorlek (procent eller default)
 =The internet prefers	3dbe	Internet föredrar
 =Theme	7c92	Tema
 =Time	e404	Tid
@@ -256,6 +258,7 @@ ui_field_full	fe02	mer ryms inte
 =default	5bde	standard
 =deny	6367	neka
 =desktop	87b3	skrivbord
+=dmy	2a79	dmy
 =edge	d83c	kant
 =fast	02af	snabb
 =forest	2a60	skog
@@ -268,6 +271,7 @@ ui_field_full	fe02	mer ryms inte
 =light	1e2f	ljust
 =light-grey	ed41	ljusgrå
 =lock	7842	lås
+=mdy	3697	mdy
 =midnight-blue	4008	midnattsblå
 =normal	9c52	normal
 =off	8a0a	av
@@ -292,3 +296,4 @@ ui_field_full	fe02	mer ryms inte
 =white	0766	vit
 =wifi	6448	Wi-Fi
 =wired	bfb4	trådbundet
+=ymd	faad	ymd

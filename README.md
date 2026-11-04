@@ -76,6 +76,7 @@ moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change
 moonwater canvas wheel smooth [on|off]  a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
+moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
@@ -97,6 +98,7 @@ moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater time [sync]                  the clock; sync sets it and the zone now
 moonwater time format [24h|12h]        the hours the clock is read in, on the tray and in GNOME programs [24h]
+moonwater time date [off|ymd|dmy|mdy]  the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
 moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]

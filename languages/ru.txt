@@ -172,6 +172,7 @@ ui_field_full	fe02	больше не помещается
 =Clock format	70d0	Формат времени
 =Cursor look	34ce	Вид указателя
 =Cursor size	65d4	Размер указателя
+=Date format	7a44	Формат даты
 =Display	d9b5	Экран
 =Editor	bf98	Редактор
 =GPU rendering	d4d5	Отрисовка на GPU
@@ -230,6 +231,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar position	81b8	Положение панели задач
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Терминал
+=Text size (percent, or default)	51d7	Размер текста (проценты или default)
 =The internet prefers	3dbe	Интернет предпочитает
 =Theme	7c92	Тема
 =Time	e404	Время
@@ -256,6 +258,7 @@ ui_field_full	fe02	больше не помещается
 =default	5bde	по умолчанию
 =deny	6367	запретить
 =desktop	87b3	рабочий стол
+=dmy	2a79	dmy
 =edge	d83c	край
 =fast	02af	быстро
 =forest	2a60	лесной
@@ -268,6 +271,7 @@ ui_field_full	fe02	больше не помещается
 =light	1e2f	светлая
 =light-grey	ed41	светло-серый
 =lock	7842	заблокировать
+=mdy	3697	mdy
 =midnight-blue	4008	полуночно-синий
 =normal	9c52	нормально
 =off	8a0a	выключено
@@ -292,3 +296,4 @@ ui_field_full	fe02	больше не помещается
 =white	0766	белый
 =wifi	6448	Wi-Fi
 =wired	bfb4	проводная
+=ymd	faad	ymd

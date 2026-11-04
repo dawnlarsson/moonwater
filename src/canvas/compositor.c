@@ -8996,10 +8996,21 @@ static void compositor_language_publish(unsigned int code)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// The text's size in percent (ui.c's ui_em), as the table keeps it, 0 for 100: a change knocks every window, as a theme change does.
+static void compositor_text_publish(unsigned int percent)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || table->text_scale == percent)
+                return;
+        table->text_scale = percent;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
-        long accent = -1, smooth = 0, blink = 0, thick = 0;
+        long accent = -1, smooth = 0, blink = 0, thick = 0, text = 100;
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
@@ -9022,6 +9033,10 @@ static void compositor_theme_read(void)
         // English when nothing is kept, and when what is kept is not a code (default).
         compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
         compositor_language_publish(windows_language_code(word, string_length((string_address)word)));
+        // 100 percent when nothing is kept (the table says 0 then, as every window takes it).
+        compositor_word(SETTING_TEXT_SCALE_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_TEXT_SCALE_PATH, word, &text);
+        compositor_text_publish(text == 100 ? 0 : (unsigned int)text);
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);
@@ -9157,12 +9172,26 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
         compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
-        // The standard tray in 12 hours is a format of its own; a format of the person's own says its hours itself.
-        compositor_word(SETTING_CLOCK_FORMAT_PATH, text, sizeof(text));
-        if (string_equals((string_address)text, (string_address) "12h") &&
-            (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default") ||
-             string_equals((string_address)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD)))
-                string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD_12H, sizeof(tray));
+        // The standard tray in 12 hours, or with the date beside the clock, is a format of its own; a format of the person's own says
+        // its hours and its date itself.
+        if (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default") ||
+            string_equals((string_address)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD))
+        {
+                compositor_word(SETTING_CLOCK_FORMAT_PATH, text, sizeof(text));
+                if (string_equals((string_address)text, (string_address) "12h"))
+                        string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD_12H, sizeof(tray));
+                compositor_word(SETTING_DATE_FORMAT_PATH, text, sizeof(text));
+                if (text[0] == 'y' || text[0] == 'd' || text[0] == 'm')
+                {
+                        if (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default"))
+                                string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD, sizeof(tray));
+                        string_append_bounded((string_address)tray,
+                                              (string_address)(text[0] == 'y'   ? SETTING_TASKBAR_TRAY_DATE_YMD
+                                                               : text[0] == 'd' ? SETTING_TASKBAR_TRAY_DATE_DMY
+                                                                                : SETTING_TASKBAR_TRAY_DATE_MDY),
+                                              sizeof(tray));
+                }
+        }
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
         compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));

@@ -132331,6 +132331,15 @@ static int settings_row_named(const char address_to label)
         return 0;
 }
 
+// Whether the row to ask is the one named and no other: the rows are as many bits as the words hold, which is more than one word.
+static b32 settings_unread_only(positive row)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_unread_is(at) != (at == row))
+                        return false;
+        return true;
+}
+
 // One key as the window sends it: a character as its code point, in b.
 static b32 settings_type_code(unsigned int code)
 {
@@ -134364,6 +134373,20 @@ static fn check_settings(string_address regular, string_address bold)
                                 within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
                         check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
                         {
+                                // The same words at another text size are wrapped again: more lines at 200 percent, each within the window.
+                                int lines = settings.card_lines;
+                                b32 big = true;
+
+                                ui_text_percent = 200;
+                                settings_wrap();
+                                for (int at = 0; at < settings.card_lines; at++)
+                                        big &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
+                                check("settings: a card is wrapped again when the text is another size, into more lines at 200 percent, each within the window",
+                                      settings.card_lines > lines && big);
+                                ui_text_percent = 0;
+                                settings_wrap();
+                        }
+                        {
                                 // A word with no blank in it, wider than the window, in wide Cyrillic capitals (a lead byte alone is a narrower mark than the letter): cut between characters.
                                 char tall[160];
                                 positive length = 0;
@@ -134945,12 +134968,12 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.group = settings_group_of(battery);
                                 settings_feed_rows();
                                 check("settings: a rows feed asks again the rows of its group that change by themselves, and those only",
-                                      settings.unread[0] == ((positive)1 << battery) && !settings.unread[1]);
+                                      settings_unread_only((positive)battery));
                                 memory_zero(settings.unread, sizeof(settings.unread));
                                 settings.group = settings_group_of(clock_row);
                                 settings_feed_rows();
                                 check("settings: the clock is such a row, and the time server beside it is not",
-                                      settings.unread[0] == ((positive)1 << clock_row) && !settings.unread[1]);
+                                      settings_unread_only((positive)clock_row));
                                 memory_zero(settings.unread, sizeof(settings.unread));
                         }
                         settings.own.table = table;
@@ -136451,7 +136474,7 @@ static fn check_settings_groups(void)
                 const char address_to group;
         } families[] = {
             {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
-            {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
+            {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"},
@@ -136471,7 +136494,8 @@ static fn check_settings_groups(void)
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Time zone", "Time"},
             {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
-            {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Open windows where they were last put", "Canvas"},
+            {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
+            {"Open windows where they were last put", "Canvas"},
             {"Clipboard", "Canvas"}, {"GPU rendering", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
             {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
         const int count = (int)(sizeof(names) / sizeof(names[0]));
@@ -137528,6 +137552,167 @@ static b32 rtl_view(string_address name, int group, int scale)
         return !wrong;
 }
 
+/*
+        The text's size (canvas text scale, ui_text_percent). The block face makes a run of n letters exactly n ems wide and a
+        capital 0.7 em tall, so the size a run is drawn and measured at is read off its width and its capital. Held: the
+        size at 100 percent (and with none taken) is what it was before there was a setting, bit for bit, at every scale; at any
+        other it is the size times the percent, in a run's width and a capital's height; a list's row is 40 up to 100 percent
+        and grows with the text above it; the table's number is taken in its range and nothing outside it; the two views are
+        still each other's mirror at 150 and at 300 percent (the layout believes the width the pen makes, or the mirror fails)
+        and a press is on the same thing at the mirrored place.
+*/
+static fn check_text_scale(void)
+{
+        static const unsigned int percents[] = {50, 100, 150, 200, 300};
+        static const int scales[] = {100, 150, 200, 300};
+        static struct windows taken;
+        b32 same = true, wide = true, tall = true, rows = true, range = true, mirrored = true, pressed = true, published = false;
+        b32 placed = false, lines = true, field = true, cut = false;
+        unsigned int kept_percent = ui_text_percent;
+        int kept_scale = settings.ui.scale;
+
+        for (int scale = 0; scale < 4; scale++)
+        {
+                settings.ui.scale = scales[scale];
+                for (int size = 8; size <= 40; size++)
+                {
+                        ui_text_percent = 0;
+                        same &= ui_em(&settings.ui, size) == ((p32)(size * settings.ui.scale) << 6) / 100;
+                        ui_text_percent = 100;
+                        same &= ui_em(&settings.ui, size) == ((p32)(size * settings.ui.scale) << 6) / 100;
+                }
+                for (int at = 0; at < 5; at++)
+                {
+                        // The kit's body text is 14, the label 12, the title 22: four letters of each.
+                        static const int roles[] = {UI_BODY_MEDIUM, UI_LABEL_MEDIUM, UI_TITLE_LARGE};
+                        ui_text_percent = percents[at];
+                        for (int role = 0; role < 3; role++)
+                        {
+                                int size = ui_types[roles[role]].size;
+                                int em = size * settings.ui.scale * (int)percents[at] / 10000;
+                                int measured = ui_kit_measure(&settings.ui, (string_address) "XXXX", roles[role]);
+                                int capital = ui_capital(&settings.ui, size);
+
+                                wide &= measured >= 4 * em - 4 && measured <= 4 * em + 4;
+                                tall &= capital >= em * 7 / 10 - 1 && capital <= em * 7 / 10 + 2;
+                        }
+                }
+        }
+        settings.ui.scale = kept_scale;
+        for (int at = 0; at < 5; at++)
+        {
+                ui_text_percent = percents[at];
+                rows &= ui_row_height() == (percents[at] > 100 ? 40 * (int)percents[at] / 100 : 40);
+        }
+        ui_text_percent = 0;
+        rows &= ui_row_height() == 40;
+        for (unsigned int value = 0; value < 400; value++)
+        {
+                taken.text_scale = value;
+                ui_kit_text_take(&taken);
+                range &= ui_text_percent == (value >= 50 && value <= 300 ? value : 0);
+        }
+        // A size taken that is another places every control again, once; the same size again does not.
+        {
+                b64 epoch;
+
+                taken.text_scale = 0;
+                ui_kit_text_take(&taken);
+                epoch = ui_kit.epoch;
+                taken.text_scale = 150;
+                ui_kit_text_take(&taken);
+                placed = ui_kit.epoch == epoch + 1;
+                ui_kit_text_take(&taken);
+                placed = placed && ui_kit.epoch == epoch + 1;
+                taken.text_scale = 0;
+                ui_kit_text_take(&taken);
+                placed = placed && ui_kit.epoch == epoch + 2;
+        }
+        // A line box's baseline is the face's own at the size the text is drawn at, and a text field's em is the size and its zoom at it.
+        for (int at = 0; at < 3; at++)
+        {
+                static const int roles[] = {UI_BODY_MEDIUM, UI_LABEL_MEDIUM, UI_TITLE_LARGE};
+                static struct ui_text probe;
+
+                for (int size = 0; size < 3; size++)
+                {
+                        const struct ui_type address_to t = &ui_types[roles[at]];
+                        font_metrics m;
+
+                        ui_text_percent = percents[size * 2];
+                        m = font_metrics_at(settings.ui.regular, ui_em(&settings.ui, t->size));
+                        lines &= ui_kit_baseline(&settings.ui, 10, roles[at]) == 10 + (t->line * settings.ui.scale / 100 - (int)m.cell_height) / 2 + (int)m.baseline;
+                        probe.size = t->size, probe.zoom = at;
+                        field &= ui_text_em(&settings.ui, &probe) == ui_em(&settings.ui, t->size + at);
+                }
+        }
+        // The same words are cut again for another size: whole at 100 percent in a room a tenth wider than they are, and cut at 300.
+        {
+                char fitted[64];
+                string_address text = (string_address) "XXXXXXXXXX";
+                string_address one, other;
+                int room;
+
+                ui_text_percent = 100;
+                room = 11 * ui_kit_measure(&settings.ui, text, UI_BODY_MEDIUM) / 10;
+                one = ui_fit(&settings.ui, text, UI_BODY_MEDIUM, room, fitted, sizeof(fitted));
+                ui_text_percent = 300;
+                other = ui_fit(&settings.ui, text, UI_BODY_MEDIUM, room, fitted, sizeof(fitted));
+                cut = one == text && other == (string_address)fitted && string_length(other) < 10 + 3;
+                ui_text_percent = 100;
+                cut = cut && ui_fit(&settings.ui, text, UI_BODY_MEDIUM, room, fitted, sizeof(fitted)) == text;
+        }
+        ui_text_percent = 0;
+        check("text size: at 100 percent, and with none taken, a run is drawn at the size and scale alone, as it was before there was a setting, at four scales and every size from 8 to 40",
+              same);
+        check("text size: a run of four letters is four ems wide and a capital 0.7 em tall at the size times the percent, at 50, 100, 150, 200 and 300 percent and four scales, for the body, the label and the title",
+              wide && tall);
+        check("text size: a list's row is 40 logical pixels up to 100 percent and grows with the text above it", rows);
+        check("text size: the table's number is taken from 50 to 300 and 0 (100) otherwise", range);
+        check("text size: a size that is another places the controls again, once, and the same size does not", placed);
+        check("text size: a line box's baseline is the face's at the size the text is drawn at, and a text field's em is its size and zoom at it", lines && field);
+        check("text size: a label is cut again for another size, and not given the cut of the one before", cut);
+        // The compositor's side: a change of the size counts the table's theme up once, the same size not at all, and 100 is 0.
+        {
+                struct windows address_to saved = compositor.table;
+                unsigned int before;
+
+                memory_zero(&taken, sizeof(taken));
+                compositor.table = &taken;
+                before = taken.themed;
+                compositor_text_publish(150);
+                compositor_text_publish(150);
+                published = taken.text_scale == 150 && taken.themed == before + 1;
+                compositor_text_publish(0);
+                published = published && taken.text_scale == 0 && taken.themed == before + 2;
+                compositor.table = saved;
+        }
+        check("text size: the compositor publishes the size into the table and knocks the windows once for a change", published);
+        // The pages, mirrored, at 150 and at 300 percent: a width the layout believes is not the one the pen makes is a mirror that fails.
+        // (Not the kit's gallery: it is a showcase of controls at places of its own, which text wider than they were made for runs over.)
+        for (int size = 0; size < 2; size++)
+        {
+                ui_text_percent = size ? 300 : 150;
+                ui_kit_settle();
+                if (ui_cuts)
+                        memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+                rtl_pressed_wrong = 0;
+                string_format(log, "  text size %b percent: the pages, mirrored\n", (bipolar)ui_text_percent);
+                mirrored &= rtl_view("a card", -2, 1) && rtl_view("a menu", -3, 1) && rtl_view("the launcher", -4, 1);
+                for (int scale = 1; scale <= (size ? 1 : 2); scale++)
+                        for (int group = 0; group < settings_groups(); group++)
+                                mirrored &= rtl_view(settings_group_name(group), group, scale);
+                pressed &= !rtl_pressed_wrong;
+        }
+        ui_text_percent = kept_percent;
+        ui_kit_settle();
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        check("text size: at 150 and 300 percent every group of the Settings window, a card, a menu and the launcher, right to left, are their pictures left to right flipped",
+              mirrored);
+        check("text size: and a press at the mirrored place is on the same thing at 150 and 300 percent", pressed);
+}
+
 static fn check_rtl_mirror(void)
 {
         static font_face face;
@@ -137587,6 +137772,7 @@ static fn check_rtl_mirror(void)
         check("rtl mirror: every group of the Settings window, its card, a menu and the launcher, right to left is its picture left to right flipped", groups);
         check("rtl mirror: a press at a place of the Settings window right to left is on what a press at the mirrored place left to right is on, every group at scales 1 and 2",
               !rtl_pressed_wrong);
+        check_text_scale();
         // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.
         {
                 static struct windows language_table;
