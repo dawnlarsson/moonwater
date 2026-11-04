@@ -10,7 +10,8 @@
             ID TAB STAMP TAB TEXT         a word of the table, by its id
             =ENGLISH TAB STAMP TAB TEXT   a word of a data table (a Settings row's label), by its English
 
-        and its header lines start with @ (@language, @name, @translated). The stamp is for the checks
+        and its header lines start with @ (@language, @name, @translated, and @direction rtl for a language that reads from
+        the right; English and the rest have no @direction line). The stamp is for the checks
         alone: a hash of the English the line was made from, so an English edit shows every translation of
         it as old. The text is one line of UTF-8 with no escapes, and the line's two tabs and its end are
         turned to NULs in place, so a word asked for is a pointer into the buffer and the file is never
@@ -63,6 +64,7 @@ static struct language
 {
         unsigned int code; // the language taken, 0 for English
         b32 loaded;        // a file is read: asking goes to it
+        b32 rtl;           // its file says @direction rtl: it reads from the right (Arabic, Hebrew, Persian, Urdu)
         unsigned int keyed_count;
         const char address_to text[LANGUAGE_COUNT];
         struct
@@ -91,6 +93,12 @@ static inline const char address_to language_text(unsigned int id)
 }
 
 #define WORDS(id) language_text(LANGUAGE_##id)
+
+// Whether the language taken reads from the right to the left: the kit's layout direction (ui_kit.rtl) is this.
+static inline b32 language_rtl(void)
+{
+        return language.rtl;
+}
 
 static unsigned int language_hash(const char address_to text)
 {
@@ -177,7 +185,12 @@ static fn language_parse(char address_to at, char address_to stop)
                 while (at < stop && *at != '\n')
                         at++;
                 *at++ = 0;
-                if (!line[0] || line[0] == '@' || line[0] == '#')
+                if (line[0] == '@')
+                {
+                        language.rtl |= string_equals((string_address)line, (string_address) "@direction rtl");
+                        continue;
+                }
+                if (!line[0] || line[0] == '#')
                         continue;
                 for (tab = line; *tab && *tab != '\t'; tab++)
                         ;
@@ -253,7 +266,7 @@ static fn language_take(unsigned int code)
                 code = 0;
         if (code == language.code)
                 return;
-        language.code = code, language.loaded = 0, language.keyed_count = 0;
+        language.code = code, language.loaded = 0, language.keyed_count = 0, language.rtl = 0;
         memory_zero(language.text, sizeof(language.text));
         memory_zero(language.keyed, sizeof(language.keyed));
         if (code)
