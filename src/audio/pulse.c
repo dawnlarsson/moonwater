@@ -3381,6 +3381,14 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
         return pulse_error(p, c, tag, PULSE_ERR_COMMAND);
 }
 
+// A list is built in the scratch. One that did not fit is refused as too large, rather than dropping the client that asked.
+static int pulse_list_end(struct pulse *p, struct pulse_client *c, unsigned long tag, struct pulse_writer *w)
+{
+        if (w->bad)
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        return pulse_reply_end(c, w);
+}
+
 static int pulse_command_info(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
 {
         struct pulse_client *c = p->client[slot];
@@ -3429,11 +3437,11 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                                 continue;
                         pulse_fill_sink(p, &w, c, i);
                         if (!list)
-                                return pulse_reply_end(c, &w);
+                                return pulse_list_end(p, c, tag, &w);
                 }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_SOURCE_INFO:
         case PULSE_COMMAND_GET_SOURCE_INFO_LIST:
                 for (long i = 0; i < PULSE_SOURCES; i++)
@@ -3444,11 +3452,11 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                                 continue;
                         pulse_fill_source(p, &w, c, i);
                         if (!list)
-                                return pulse_reply_end(c, &w);
+                                return pulse_list_end(p, c, tag, &w);
                 }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_SOURCE_OUTPUT_INFO:
         case PULSE_COMMAND_GET_SOURCE_OUTPUT_INFO_LIST:
                 for (int i = 0; i < PULSE_RECORDS; i++)
@@ -3456,11 +3464,11 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                         {
                                 pulse_fill_output(p, &w, c, p->record + i);
                                 if (!list)
-                                        return pulse_reply_end(c, &w);
+                                        return pulse_list_end(p, c, tag, &w);
                         }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_CLIENT_INFO:
         case PULSE_COMMAND_GET_CLIENT_INFO_LIST:
                 for (long i = 0; i < PULSE_CLIENTS; i++)
@@ -3468,11 +3476,11 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                         {
                                 pulse_fill_client(p, &w, c, p->client[i]);
                                 if (!list)
-                                        return pulse_reply_end(c, &w);
+                                        return pulse_list_end(p, c, tag, &w);
                         }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_SINK_INPUT_INFO:
         case PULSE_COMMAND_GET_SINK_INPUT_INFO_LIST:
                 for (int i = 0; i < PULSE_STREAMS; i++)
@@ -3480,11 +3488,11 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                         {
                                 pulse_fill_input(p, &w, c, p->stream + i);
                                 if (!list)
-                                        return pulse_reply_end(c, &w);
+                                        return pulse_list_end(p, c, tag, &w);
                         }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_SAMPLE_INFO:
         case PULSE_COMMAND_GET_SAMPLE_INFO_LIST:
                 for (int i = 0; i < PULSE_SAMPLES; i++)
@@ -3492,14 +3500,14 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                         {
                                 pulse_fill_sample(&w, c, p->sample + i);
                                 if (!list)
-                                        return pulse_reply_end(c, &w);
+                                        return pulse_list_end(p, c, tag, &w);
                         }
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         case PULSE_COMMAND_GET_MODULE_INFO_LIST:
         case PULSE_COMMAND_GET_CARD_INFO_LIST:
-                return pulse_reply_end(c, &w);
+                return pulse_list_end(p, c, tag, &w);
         default:
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
         }

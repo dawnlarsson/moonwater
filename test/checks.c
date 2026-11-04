@@ -177920,6 +177920,76 @@ static void pt_test_control_input(void)
         pulse_client_close(&pt_engine, owner);
 }
 
+/* ---- an info list too large for the engine's scratch is refused, and nothing is written past the scratch ---- */
+
+static void pt_big_props(struct pt_w *w)
+{
+        unsigned char value[PULSE_VALUE];
+
+        memset(value, 'v', sizeof(value));
+        pt_byte(w, 'P');
+        for (int k = 0; k < PULSE_PROPS; k++)
+        {
+                char key[PULSE_KEY];
+
+                snprintf(key, sizeof(key), "moonwater.test.%02d.abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrs", k);
+                pt_str(w, key);
+                pt_u32(w, sizeof(value));
+                pt_arb(w, value, sizeof(value));
+        }
+        pt_byte(w, 'N');
+}
+
+static void pt_test_list_bounds(void)
+{
+        static unsigned char before[sizeof(pt_engine.record_a)];
+        static struct pt_w w;
+        unsigned long channels[PULSE_STREAMS_PER_CLIENT], index, missing, channel;
+        long slot, made = 0;
+        int answered = 0;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 4300, 35, "lister");
+        PTCHECK(slot >= 0, "a client that lists its streams connects");
+        for (int i = 0; slot >= 0 && i < PULSE_STREAMS_PER_CLIENT; i++)
+        {
+                if (pt_create(slot, 35, 100 + i, 0, 0, 0, &channel, &index, &missing, 1, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) != 0)
+                        break;
+                channels[made++] = channel;
+                w.n = 0;
+                pt_u32(&w, channel);
+                pt_u32(&w, 2);
+                pt_big_props(&w);
+                pt_command(slot, PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST, 200 + i, &w);
+                pt_collect(slot);
+        }
+        PTCHECK(made == PULSE_STREAMS_PER_CLIENT, "%ld streams with full property lists are made", made);
+        pt_collect(slot);
+        // Sixteen such streams make a list of about 160 KB: more than the 128 KB scratch it is built in. The writer is bounded, so
+        // nothing lands past the scratch (the mixer's record buffers are kept as they were), and the list is refused as too
+        // large with the client kept: the old reply was dropped with the client, which a program listing its own streams hits.
+        memcpy(before, pt_engine.record_a, sizeof(before));
+        PTCHECK(pt_command(slot, PULSE_COMMAND_GET_SINK_INPUT_INFO_LIST, 300, 0) == PULSE_DONE, "the list of them does not drop the client");
+        pt_collect(slot);
+        PTCHECK(memcmp(before, pt_engine.record_a, sizeof(before)) == 0, "a list of them writes nothing past the scratch");
+        PTCHECK(pt_expect_error(300, PULSE_ERR_TOOLARGE), "and the list is refused as too large");
+        // Two of them fit, and are answered.
+        for (long i = 2; i < made; i++)
+        {
+                w.n = 0;
+                pt_u32(&w, channels[i]);
+                pt_command(slot, PULSE_COMMAND_DELETE_PLAYBACK_STREAM, 400 + (unsigned long)i, &w);
+        }
+        pt_collect(slot);
+        pt_command(slot, PULSE_COMMAND_GET_SINK_INPUT_INFO_LIST, 301, 0);
+        pt_collect(slot);
+        for (int i = 0; i < pt_logged; i++)
+                answered |= pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].tag == 301;
+        PTCHECK(answered, "two streams with full property lists are listed");
+        pulse_client_close(&pt_engine, slot);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -177927,6 +177997,7 @@ int main(void)
         pt_test_text();
         pt_test_handshake();
         pt_test_info();
+        pt_test_list_bounds();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();

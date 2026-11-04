@@ -214,6 +214,7 @@ M = [
     ("pulse", "string copy cut one byte short", "if (n > room - 1)\n                n = room - 1;", "if (n > room - 1)\n                n = room - 2;"),
     ("pulse", "string copy cut one byte short", "if (n > room - 1)\n                n = room - 1;", "if (n > room - 1)\n                n = room - 2;"),
     ("pulse", "output ring wrap copy dropped", "if (first < n)\n                __builtin_memcpy(c->out, from + first, (unsigned long)(n - first));", "if (0)\n                __builtin_memcpy(c->out, from + first, (unsigned long)(n - first));"),
+    ("pulse", 'a list too large drops its client', 'if (w->bad)\n                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);\n        return pulse_reply_end(c, w);', 'return pulse_reply_end(c, w);'),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
     ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),
