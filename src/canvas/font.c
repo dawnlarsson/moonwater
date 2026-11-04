@@ -4457,8 +4457,8 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                         {
                                 f64 sx = (f64)xx * xx + (f64)xy * xy, sy = (f64)yy * yy + (f64)yx * yx;
 
-                                dx = (b64)((f64)dx * __builtin_sqrt(sx) / 16384);
-                                dy = (b64)((f64)dy * __builtin_sqrt(sy) / 16384);
+                                dx = (b64)((f64)dx * square_root(sx) / 16384);
+                                dy = (b64)((f64)dy * square_root(sy) / 16384);
                         }
                 }
                 else
@@ -4634,7 +4634,7 @@ static fn font_embolden(font_engine address_to e, f32 strength, bool across)
                         font_point after = i == last ? start : e->points[i + 1];
                         f32 ix = (f32)(here.x - before.x), iy = (f32)(here.y - before.y);
                         f32 ox = (f32)(after.x - here.x), oy = (f32)(after.y - here.y);
-                        f32 in = __builtin_sqrtf(ix * ix + iy * iy), out = __builtin_sqrtf(ox * ox + oy * oy);
+                        f32 in = narrow_square_root(ix * ix + iy * iy), out = narrow_square_root(ox * ox + oy * oy);
                         f32 sx = 0, sy = 0;
 
                         if (in > 0 && out > 0)
@@ -6327,7 +6327,7 @@ static fn font_conic(font_engine address_to e, b32 cx, b32 cy, b32 x, b32 y)
                 return;
         }
 
-        b64 n = (b64)__builtin_sqrt((f64)bow / FONT_FLAT);
+        b64 n = (b64)square_root((f64)bow / FONT_FLAT);
         while (n * n * FONT_FLAT < bow)
                 n++;
         n = n < 2 ? 2 : n;
@@ -7362,7 +7362,7 @@ static const f32 font_drawn_centre[8][3] = {
 //      way whatever the direction, so strokes that cross add.
 static fn font_stroke(font_engine address_to e, f32 ax, f32 ay, f32 bx, f32 by, f32 t, b32 height)
 {
-        f32 dx = bx - ax, dy = by - ay, length = __builtin_sqrtf(dx * dx + dy * dy);
+        f32 dx = bx - ax, dy = by - ay, length = narrow_square_root(dx * dx + dy * dy);
         f32 nx = -dy / length * t / 2, ny = dx / length * t / 2;
 
         font_put(e, ax - nx, ay - ny, height, true);
@@ -7413,8 +7413,8 @@ static bool font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 h
                 if (shape == SHAPE_CIRCLE)
                 {
                         //      In a box of whole pixels, so its edge is the same grey all round.
-                        f32 left = __builtin_roundf(cx - size), right = __builtin_roundf(cx + size);
-                        f32 top = __builtin_roundf(cy - size);
+                        f32 left = narrow_rounded(cx - size), right = narrow_rounded(cx + size);
+                        f32 top = narrow_rounded(cy - size);
 
                         size = (right - left) / 2;
                         cx = left + size;
@@ -7451,8 +7451,8 @@ static bool font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 h
 
                         for (p32 k = 0; k < n; k++)
                         {
-                                corner[k][0] = __builtin_roundf(cx + size * v[k][0]);
-                                corner[k][1] = __builtin_roundf(cy + size * v[k][1]);
+                                corner[k][0] = narrow_rounded(cx + size * v[k][0]);
+                                corner[k][1] = narrow_rounded(cy + size * v[k][1]);
                                 font_put(e, corner[k][0], corner[k][1], height, true);
                         }
                         font_close(e);
@@ -7499,7 +7499,7 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
         if (code >= 0x2800 && code <= 0x28ff)
         {
                 f32 radius = (width < height / 2 ? width : height / 2) * 0.15f;
-                b32 across = (b32)__builtin_roundf(2 * radius);
+                b32 across = (b32)narrow_rounded(2 * radius);
 
                 across = across < 1 ? 1 : across;
                 radius = (f32)across / 2;
@@ -7509,8 +7509,8 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
                                 continue;
 
                         p32 column = dot >= 3 && dot != 6, row = dot >= 6 ? 3 : dot % 3;
-                        b32 left = (b32)__builtin_roundf(width * (1 + 2 * column) / 4.0f - radius);
-                        b32 top = (b32)__builtin_roundf(height * (1 + 2 * row) / 8.0f - radius);
+                        b32 left = (b32)narrow_rounded(width * (1 + 2 * column) / 4.0f - radius);
+                        b32 top = (b32)narrow_rounded(height * (1 + 2 * row) / 8.0f - radius);
                         f32 cx = (f32)left + radius, cy = (f32)top + radius;
 
                         if (across <= 3)
@@ -7613,7 +7613,7 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
                 //      Corner to corner, carried a stroke past each corner so
                 //      the clip makes the cell's edge, and wound alike so the
                 //      cross's middle stays filled.
-                f32 length = __builtin_sqrtf((f32)width * width + (f32)height * height);
+                f32 length = narrow_square_root((f32)width * width + (f32)height * height);
 
                 for (p32 k = 0; k < 2; k++)
                 {
@@ -8490,7 +8490,7 @@ static inline p32 font_plain(const p8 address_to text, positive length)
         {
                 p64 word;
 
-                __builtin_memcpy(&word, text + at, 8);
+                memory_copy(&word, text + at, 8);
                 if (font_bytes_from(word, 0xd6))
                         return font_plain_from(text, length, at);
         }
@@ -8943,9 +8943,9 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
         positive placed = 0, at = 0;
         b64 pen = 0;
 
-        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+        if (font_complex(text, length, flags) || (unlikely(e->fallbacks != 0) && font_slots_synthetic(e, flags)))
                 return font_layout_flow(e, faces, count, text, length, size, flags, out, room);
-        if (__builtin_expect(e->fallbacks != 0, 0))
+        if (unlikely(e->fallbacks != 0))
         {
                 p32 total = font_extend(e, faces, count, flags, extended);
 
@@ -8992,10 +8992,10 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
         //      14 px fell across two grey columns at most phases.
         style |= style & 1 ? 4 : 0;
 
-        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+        if (font_complex(text, length, flags) || (unlikely(e->fallbacks != 0) && font_slots_synthetic(e, flags)))
                 return font_draw_flow(e, faces, count, text, length, size, flags, 0, style, strength, target, x, baseline,
                                       colour, background);
-        if (__builtin_expect(e->fallbacks != 0, 0))
+        if (unlikely(e->fallbacks != 0))
         {
                 p32 total = font_extend(e, faces, count, flags, extended);
 
@@ -9058,10 +9058,10 @@ b64 font_draw_turned(font_engine address_to e, const font_face address_to const 
         p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
 
         style |= style & 1 ? 4 : 0;
-        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+        if (font_complex(text, length, flags) || (unlikely(e->fallbacks != 0) && font_slots_synthetic(e, flags)))
                 return font_draw_flow(e, faces, count, text, length, size, flags, turn, style, strength, target, x, baseline,
                                       colour, background);
-        if (__builtin_expect(e->fallbacks != 0, 0))
+        if (unlikely(e->fallbacks != 0))
         {
                 p32 total = font_extend(e, faces, count, flags, extended);
 
@@ -9115,9 +9115,9 @@ b64 font_extent(font_engine address_to e, const font_face address_to const addre
         b64 pen = 0;
         p32 last_glyph = 0, last_face = FONT_DRAWN;
 
-        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+        if (font_complex(text, length, flags) || (unlikely(e->fallbacks != 0) && font_slots_synthetic(e, flags)))
                 return font_extent_flow(e, faces, count, text, length, size, flags);
-        if (__builtin_expect(e->fallbacks != 0, 0))
+        if (unlikely(e->fallbacks != 0))
         {
                 p32 total = font_extend(e, faces, count, flags, extended);
 
