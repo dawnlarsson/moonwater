@@ -174433,6 +174433,19 @@ static void pt_test_text(void)
         }
         PTCHECK(props.count == PULSE_PROPS, "the list is capped: %d", props.count);
         PTCHECK(!pulse_props_set(&props, "key0", (const unsigned char *)"v", PULSE_VALUE + 1), "a value past the cap is not kept");
+        // A string copied into a field is cut to fit it, one byte kept for the terminator, and is terminated whatever the room.
+        {
+                char field[8];
+
+                pulse_copy(field, sizeof(field), "abcdefghijk");
+                PTCHECK(!strcmp(field, "abcdefg"), "a long string is cut to seven bytes and terminated: %s", field);
+                pulse_copy(field, sizeof(field), "abcdefg");
+                PTCHECK(!strcmp(field, "abcdefg"), "a string of exactly seven bytes fits: %s", field);
+                pulse_copy(field, sizeof(field), "");
+                PTCHECK(field[0] == 0, "the empty string copies as empty");
+                pulse_copy(field, 1, "abc");
+                PTCHECK(field[0] == 0, "a field of one byte holds only the terminator");
+        }
 }
 
 /* ---- record streams ---- */

@@ -211,6 +211,7 @@ M = [
     ("pulse", 'sample played from its start only at the fade', '        s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size;\n        s->used = 1;\n        s->client = -1;', '        s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size / 2;\n        s->used = 1;\n        s->client = -1;'),
     ("pulse", "overlong four-byte UTF-8 taken as text","if (good && extra == 3 && c == 0xf0 && v[at + 1] < 0x90)\n                                                good = 0;", ""),
     ("pulse", "four-byte UTF-8 past U+10FFFF taken as text", "if (good && extra == 3 && c == 0xf4 && v[at + 1] >= 0x90)\n                                                good = 0;", ""),
+    ("pulse", "string copy cut one byte short", "if (n > room - 1)\n                n = room - 1;", "if (n > room - 1)\n                n = room - 2;"),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
     ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),
