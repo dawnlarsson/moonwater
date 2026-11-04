@@ -5515,15 +5515,20 @@ static struct ui_control address_to ui_kit_held;
         least UI_TARGET each way, in every control and every scrollbar, ui_hit) and the time it is handled at, which is what
         the animations an event starts are stamped with (the frame's clock is the last frame's, and an idle window's is old).
 */
+// The window's pointer is the last motion's place: a press or a key carries none, so an app asks the kit for it (ui_text_send).
+static fn ui_kit_track(const struct window_event address_to event)
+{
+        if (event->type == WINDOW_EVENT_MOTION)
+                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
+}
+
 static fn ui_event_context(const struct window_event address_to event)
 {
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
         ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
-        // A press or a key carries no place: the window's pointer is the last motion's, so an app asks the kit for it (ui_text_send).
-        if (event->type == WINDOW_EVENT_MOTION)
-                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
+        ui_kit_track(event);
 }
 
 // The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
@@ -9405,7 +9410,6 @@ struct ui_page
         struct ui_control column;          // the column: the kit's tabs on end
         struct ui_scroll column_scroll;
         char names[UI_ITEMS][UI_WORD];
-        int pointer_x, pointer_y;          // the last pointer position (ui_page_track)
         struct ui_press press;             // a mouse's press on the page: what it went down on, done on its release (ui_page_pointer)
         struct ui_finger finger;           // a finger on the page: its press and the region it drags
         b32 card;                          // the body is a card, not a list: no row is hit and a press on it is its one target
@@ -9564,7 +9568,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->row_x = p->width * 100 / ui->scale - c->row_w;
         c->disabled = disabled;
         c->focused = keys;
-        c->item = ui_control_hit(ui, c, p->pointer_x, p->pointer_y);
+        c->item = ui_control_hit(ui, c, ui_kit.pointer_x, ui_kit.pointer_y);
         c->hover = c->item >= 0;
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
@@ -9603,7 +9607,7 @@ static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to
 // The wheel on the page: it turns the region under the pointer.
 static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, const struct window_event address_to event)
 {
-        struct ui_scroll address_to region = ui_page_region(ui, p, p->pointer_x, p->pointer_y);
+        struct ui_scroll address_to region = ui_page_region(ui, p, ui_kit.pointer_x, ui_kit.pointer_y);
 
         ui_drag_stop(&p->finger.drag);
 
@@ -9629,7 +9633,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                         continue;
                 lit = bars[k]->hover;
                 held = bars[k]->held;
-                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down);
+                scroll = ui_scroll_pointer(ui, bars[k], type, ui_kit.pointer_x, ui_kit.pointer_y, down);
                 if (scroll >= 0)
                 {
                         taken = true;
@@ -9832,13 +9836,6 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
 #define UI_PAGE_GROUP 0x1000
 #define UI_PAGE_CARD 0x2000
 
-// The last pointer position, from a motion (the pointer is the page's: a button's event does not carry it).
-static fn ui_page_track(struct ui_page address_to p, const struct window_event address_to event)
-{
-        if (event->type == WINDOW_EVENT_MOTION)
-                p->pointer_x = event->a, p->pointer_y = event->b;
-}
-
 // A key or a turn of the wheel takes a finger's drag from the page.
 static fn ui_page_stop(struct ui_page address_to p)
 {
@@ -9893,17 +9890,17 @@ static fn ui_page_press_show(const struct ui address_to ui, struct ui_page addre
 static fn ui_page_press_done(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, void (*done)(void),
                              int press_x, int press_y, int x, int y)
 {
-        p->pointer_x = press_x, p->pointer_y = press_y;
+        ui_kit.pointer_x = press_x, ui_kit.pointer_y = press_y;
         done();
         ui_list_let_go(ui, l);
         ui_kit_ripples_exit(&p->column);
-        p->pointer_x = x, p->pointer_y = y;
+        ui_kit.pointer_x = x, ui_kit.pointer_y = y;
 }
 
 // A mouse's press began: its target shows pressed. False when it went down on nothing (the action is then done at once).
 static b32 ui_page_press_begin(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
 {
-        int x = p->pointer_x, y = p->pointer_y, target = ui_page_target(ui, p, l, x, y);
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
 
         if (target < 0)
                 return false;
@@ -9925,7 +9922,7 @@ static fn ui_page_press_slide(const struct ui address_to ui, struct ui_page addr
 static fn ui_page_press_up(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, void (*done)(void),
                            b32 cancelled)
 {
-        int clicked = ui_press_end(&p->press, cancelled), x = p->pointer_x, y = p->pointer_y;
+        int clicked = ui_press_end(&p->press, cancelled), x = ui_kit.pointer_x, y = ui_kit.pointer_y;
 
         ui_list_let_go(ui, l);
         ui_page_changed(p);
@@ -9952,7 +9949,7 @@ static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page addr
 static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                                 const struct window_event address_to event, void (*done)(void))
 {
-        int x = p->pointer_x, y = p->pointer_y;
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
 
         if (event->flags & WINDOW_KEY_DOWN)
         {
@@ -10008,7 +10005,7 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
         if (!(event->flags & WINDOW_KEY_DOWN))
         {
                 ui_kit_ripples_exit(&p->column);
-                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, p->pointer_x, p->pointer_y, false);
+                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false);
                 ui_page_changed(p);
                 if (!(event->flags & WINDOW_KEY_TOUCH) && p->press.down)
                         ui_page_press_up(ui, p, l, done, (event->flags & WINDOW_KEY_CANCEL) != 0);

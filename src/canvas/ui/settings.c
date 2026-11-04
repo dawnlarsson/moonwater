@@ -4124,17 +4124,17 @@ static b32 settings_gallery_event(const struct window_event address_to event)
 
         settings_gallery_place();
         if (event->type == WINDOW_EVENT_MOTION)
-                settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
         // The fields are the kit's: the one a press focused has the keys first (Escape gives them back to the page),
         // and each takes the pointer on its well, the drag it began and the clipboard's answer to its paste.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 for (int k = 0; k < 2; k++)
-                        settings_gallery.field[k].focused = ui_text_inside(&settings_gallery.field[k], settings.page.pointer_x, settings.page.pointer_y);
+                        settings_gallery.field[k].focused = ui_text_inside(&settings_gallery.field[k], ui_kit.pointer_x, ui_kit.pointer_y);
         for (int k = 0; k < 2; k++)
         {
                 struct ui_text address_to t = &settings_gallery.field[k];
                 p32 asks = t->doc.selections && (event->type != WINDOW_EVENT_KEY || t->focused)
-                               ? ui_field_event(&settings.ui, t, &settings.popup, event, settings.page.pointer_x, settings.page.pointer_y)
+                               ? ui_field_event(&settings.ui, t, &settings.popup, event, ui_kit.pointer_x, ui_kit.pointer_y)
                                : 0;
 
                 // A press outside a gallery field is the page's: the field's answer to it (commit or cancel) changes nothing here.
@@ -4162,7 +4162,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                 moved = ui_wheel_turn(&settings.ui, s, event);
         else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
-                int x = settings.page.pointer_x, y = settings.page.pointer_y, bar;
+                int x = ui_kit.pointer_x, y = ui_kit.pointer_y, bar;
 
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                         return true;
@@ -4263,7 +4263,6 @@ static b32 settings_event(const struct window_event address_to event)
 {
         if (settings_gallery.on)
                 return settings_gallery_event(event);
-        ui_page_track(&settings.page, event);
         /*
                 The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its
                 release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
@@ -4273,12 +4272,12 @@ static b32 settings_event(const struct window_event address_to event)
         {
                 if (event->type == WINDOW_EVENT_MOTION && settings.map.drag >= 0)
                 {
-                        settings_map_drag_to(settings.page.pointer_x, settings.page.pointer_y);
+                        settings_map_drag_to(ui_kit.pointer_x, ui_kit.pointer_y);
                         return true;
                 }
                 if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
                 {
-                        if ((event->flags & WINDOW_KEY_DOWN) && settings_map_press(settings.page.pointer_x, settings.page.pointer_y))
+                        if ((event->flags & WINDOW_KEY_DOWN) && settings_map_press(ui_kit.pointer_x, ui_kit.pointer_y))
                                 return true;
                         if (!(event->flags & WINDOW_KEY_DOWN) && settings.map.drag >= 0)
                         {
@@ -4303,7 +4302,7 @@ static b32 settings_event(const struct window_event address_to event)
         */
         if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.page.card && settings.page.menu_row < 0)
         {
-                int x = settings.page.pointer_x, y = settings.page.pointer_y;
+                int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
                 p32 asks;
 
                 /*
@@ -4355,7 +4354,7 @@ static b32 settings_event(const struct window_event address_to event)
 // A press at the pointer, a mouse's at once and a finger's as it comes up where it went down: what it is on is done.
 static fn settings_press_at(void)
 {
-        int x = settings.page.pointer_x, y = settings.page.pointer_y, row, before = settings.list.focus;
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y, row, before = settings.list.focus;
 
         // A press on the card of what a command said is done with it.
         if (settings.page.card)

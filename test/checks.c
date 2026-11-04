@@ -133478,6 +133478,14 @@ static b32 settings_type_code(unsigned int code)
 }
 
 // One key as the window sends it: a key in a, none in b.
+// An event as the loop delivers it to the settings: the window's pointer is the last motion's place (the kit's ui_kit_track), so a
+// motion is recorded before the settings take it. The clock is the check's own, so this is not ui_event_context.
+static b32 settings_event_at(const struct window_event address_to event)
+{
+        ui_kit_track(event);
+        return settings_event(event);
+}
+
 // The filter's key is the word given (the kit's key of the field, folded and trimmed).
 static b32 check_filter_says(const char address_to word)
 {
@@ -135680,13 +135688,13 @@ static fn check_settings(string_address regular, string_address bold)
 
                                 over.a = (settings.page.left + settings.page.right) / 2;
                                 over.b = ui_list_row_y(&settings.list, pos) + ui_px(&settings.ui, UI_ROW) / 2;
-                                settings_event(&over);
-                                settings_event(&land);
-                                settings_event(&taken);
+                                settings_event_at(&over);
+                                settings_event_at(&land);
+                                settings_event_at(&taken);
                                 check("settings: a mouse's press the compositor takes back opens nothing, and is no click",
                                       settings.page.menu_row < 0 && settings.queued == 0 && !settings.page.press.down);
-                                settings_event(&land);
-                                settings_event(&lift);
+                                settings_event_at(&land);
+                                settings_event_at(&lift);
                                 check("settings: a mouse's press and lift on a choice row, unmoved, opens its list", settings.page.menu_row == kb);
                                 settings_menu_gone();
                         }
@@ -135704,11 +135712,11 @@ static fn check_settings(string_address regular, string_address bold)
 
                                 finger.a = (settings.page.left + settings.page.right) / 2;
                                 finger.b = ui_list_row_y(&settings.list, pos) + ui_px(&settings.ui, UI_ROW) / 2;
-                                settings_event(&finger);
-                                settings_event(&land);
+                                settings_event_at(&finger);
+                                settings_event_at(&land);
                                 check("settings: a finger on a choice row shows it pressed at once and opens nothing yet",
                                       settings.page.menu_row < 0 && ui_pressed(&settings.page.finger.press, kb));
-                                settings_event(&lift);
+                                settings_event_at(&lift);
                                 check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
                                       settings.page.menu_row == kb && settings.popup.menu.touch && !ui_pressed(&settings.page.finger.press, kb) &&
                                           settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > settings.height
@@ -135749,7 +135757,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 check("settings: let go while moving, the rows are thrown, and a press stops them",
                                       settings.list.scroll.gliding && (settings_event_real(&land), !settings.list.scroll.gliding));
                                 lift.flags |= WINDOW_KEY_CANCEL;
-                                settings_event(&lift);
+                                settings_event_at(&lift);
                                 lift.flags &= ~WINDOW_KEY_CANCEL;
                                 check("settings: a finger's press the compositor took back does nothing", settings.queued == 0 && settings.page.menu_row < 0);
                                 settings.height = SETTINGS_HEIGHT;
@@ -136582,7 +136590,7 @@ static fn settings_frames_event(unsigned int type, unsigned int flags, int a, in
         struct window_event event = {type, flags, a, b};
 
         ui_kit_touch = (flags & WINDOW_KEY_TOUCH) != 0; // the loop's context for the event (the clock is the harness's own)
-        settings_event(&event);
+        settings_event_at(&event);
 }
 
 static fn settings_frames_play(string_address name, int group, const struct settings_frames_step address_to steps, int count)
@@ -136877,7 +136885,7 @@ static fn settings_column_check(void)
         ui_kit.now += 1000000000ll, ui_kit.busy = 0;
         most = ui_scroll_most(col);
         x = ui_dev(&settings.ui, UI_PAD) + 10, y = settings.page.top + 30;
-        settings.page.pointer_x = x, settings.page.pointer_y = y;
+        ui_kit.pointer_x = x, ui_kit.pointer_y = y;
 #ifdef UI_LIST_STRETCH
         ui_scroll_set(col, most);
         {
@@ -137329,15 +137337,15 @@ static fn check_display_section(void)
                 settings_gallery.on = 0, settings.page.menu_row = -1, settings.editing = -1, settings.page.card = false, settings_filter_clear();
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
-                settings_event(&touch);
+                settings_event_at(&touch);
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
-                taken = settings_event(&touch);
+                taken = settings_event_at(&touch);
                 check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and starts its drag",
                       taken && settings.map.display == 1 && settings.map.drag == 1);
                 check("display section: a finger's press on the map starts no press of the page, so a drag there never scrolls",
                       settings.list.down < 0);
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2 + 200, ty + th / 2};
-                settings_event(&touch);
+                settings_event_at(&touch);
                 check("display section: a finger dragged on the map moves the screen it took, to the place it is over",
                       settings.map.drag == 1 && settings.map.target_x != grid[1].x && settings.list.down < 0);
                 settings.map.display = settings.map.drag = -1;
@@ -137346,10 +137354,10 @@ static fn check_display_section(void)
                 // is no press of the identify button (which would run the verb, a child process; none is started).
                 settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
                 touch = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
-                settings_event(&touch);
+                settings_event_at(&touch);
                 child_before = settings.child;
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
-                taken = settings_event(&touch);
+                taken = settings_event_at(&touch);
                 check("display section: a mouse's press on a screen of the map chooses it and starts its drag, and runs no verb",
                       taken && settings.map.display == 2 && settings.map.drag == 2 && settings.child == child_before);
                 settings.map.display = settings.map.drag = -1;
@@ -137406,14 +137414,14 @@ static fn check_display_section(void)
                 settings.popup.open = 0, settings.editing = -1, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
                 settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
-                settings_event(&event);
+                settings_event_at(&event);
                 event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
-                settings_event(&event);
+                settings_event_at(&event);
                 check("display section: at scale 2 a press on a screen of the map chooses it and starts its drag",
                       settings.map.display == 2 && settings.map.drag == 2);
                 before_x = settings.map.target_x, before_y = settings.map.target_y;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2 + 300, ty + th / 2 + 40};
-                settings_event(&event);
+                settings_event_at(&event);
                 check("display section: at scale 2 a motion over the map drags the screen it took, its target moves",
                       settings.map.drag == 2 && (settings.map.target_x != before_x || settings.map.target_y != before_y));
                 settings.map.display = settings.map.drag = -1;
@@ -144748,9 +144756,9 @@ static fn check_kit_place(void)
                 y = top + length / 2;
                 memory_zero(&page, sizeof(page));
                 page.body = &held.scroll;
-                page.pointer_x = x, page.pointer_y = y;
+                ui_kit.pointer_x = x, ui_kit.pointer_y = y;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, true);
-                page.pointer_y = y + 60 * ui.scale / 100;
+                ui_kit.pointer_y = y +60 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
 #ifdef UI_LIST_STRETCH
                 stretched = ui_scroll_stretched(&held.scroll, &edge) > 0 && edge > 0;
@@ -144761,7 +144769,7 @@ static fn check_kit_place(void)
                         ui_scroll_glide(&ui, &held.scroll);
                         kept = kept && held.scroll.scroll == most;
                 }
-                page.pointer_y = y + 90 * ui.scale / 100;
+                ui_kit.pointer_y = y +90 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
                 kept = kept && held.scroll.scroll == most;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, false);
@@ -145679,7 +145687,7 @@ static fn check_kit_page_pointer(void)
         memory_zero(&p, sizeof(p));
         p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
         p.card = 1;
-        ui_page_track(&p, &motion);
+        ui_kit_track(&motion);
         ui_event_context(&down);
         ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
         card_held = p.press.down && kit_pointer_done == 0;
@@ -145690,7 +145698,7 @@ static fn check_kit_page_pointer(void)
 
         memory_zero(&p, sizeof(p));
         p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
-        ui_page_track(&p, &motion);
+        ui_kit_track(&motion);
         kit_pointer_done = 0;
         ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
         nothing_done = kit_pointer_done == 1 && !p.press.down;
@@ -145701,7 +145709,7 @@ static fn check_kit_page_pointer(void)
         memory_zero(&p, sizeof(p));
         p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
         p.card = 1;
-        ui_page_track(&p, &motion);
+        ui_kit_track(&motion);
         kit_pointer_done = 0;
         ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
         ui_page_pointer(&ui, &p, &l, &cancel, check_kit_pointer_done);
@@ -149109,13 +149117,13 @@ b32 main()
                                         {
                                                 struct window_event over = {WINDOW_EVENT_MOTION, 0, 450, 200};
 
-                                                settings_event(&over);
+                                                settings_event_at(&over);
                                         }
                                         if (frame % 20 == 0)
                                         {
                                                 struct window_event turn = {WINDOW_EVENT_WHEEL, 0, frame % 40 ? -120 : 120, 0};
 
-                                                settings_event(&turn);
+                                                settings_event_at(&turn);
                                         }
                                         ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                         ui_kit_turn();
@@ -149130,7 +149138,7 @@ b32 main()
                                 {
                                         struct window_event over = {WINDOW_EVENT_MOTION, 0, 450, 100 + (int)(frame % 9) * 40};
 
-                                        settings_event(&over);
+                                        settings_event_at(&over);
                                 }
                                 settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
                         }
@@ -154159,9 +154167,9 @@ static fn check_field_hands(string_address regular)
                                             release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                         check("settings: Enter on the name opens its field on the name", settings.editing == name && settings_holds("patient-cricket"));
-                        settings_event(&move);
-                        settings_event(&press);
-                        settings_event(&release);
+                        settings_event_at(&move);
+                        settings_event_at(&press);
+                        settings_event_at(&release);
                         settings_type_code('-');
                         settings_type_code('x');
                         check("settings: a click in the name's field puts the caret there, and a key types there",
@@ -154173,12 +154181,12 @@ static fn check_field_hands(string_address regular)
                                                     taken = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0}, right = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_DOWN, UI_POINTER_RIGHT, 0},
                                                     right_up = {WINDOW_EVENT_BUTTON, held, UI_POINTER_RIGHT, 0};
 
-                                settings_event(&at);
-                                settings_event(&down);
-                                settings_event(&taken);
-                                settings_event(&right);
-                                settings_event(&right_up);
-                                settings_event(&taken);
+                                settings_event_at(&at);
+                                settings_event_at(&down);
+                                settings_event_at(&taken);
+                                settings_event_at(&right);
+                                settings_event_at(&right_up);
+                                settings_event_at(&taken);
                                 settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                                 check("settings: a finger's long press in the name's field selects a word, and the picture shows its handles and the actions bar",
                                       settings.editing == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
@@ -154220,9 +154228,9 @@ static fn check_field_hands(string_address regular)
                         check("settings: Escape keeps the value as it was", settings.editing < 0 && settings.queued == 0);
                         settings_press(UI_KEY_ENTER);
                         settings_type_code('y');
-                        settings_event(&move);
-                        settings_event(&press);
-                        settings_event(&release);
+                        settings_event_at(&move);
+                        settings_event_at(&press);
+                        settings_event_at(&release);
                         check("settings: a click outside a value sets what its field holds",
                               settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-crickety"));
@@ -154239,16 +154247,16 @@ static fn check_field_hands(string_address regular)
                         settings_edit_end();
                         settings.state[name] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
-                        settings_event(&on);
-                        settings_event(&press);
+                        settings_event_at(&on);
+                        settings_event_at(&press);
                         check("settings: a mouse press on a row is not done until it is let go", settings.editing < 0);
-                        settings_event(&release);
+                        settings_event_at(&release);
                         check("settings: a mouse's release on the row does it", settings.editing == name);
                         settings_edit_end();
-                        settings_event(&on);
-                        settings_event(&press);
-                        settings_event(&off);
-                        settings_event(&release);
+                        settings_event_at(&on);
+                        settings_event_at(&press);
+                        settings_event_at(&off);
+                        settings_event_at(&release);
                         check("settings: a press let go off its row does nothing", settings.editing < 0 && settings.queued == 0);
                 }
                 settings.queued = 0, settings.child = 0;
@@ -154429,7 +154437,7 @@ static fn inputs_event(const struct inputs_input address_to in, const struct win
                 launcher_send(event);
                 break;
         case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY:
-                settings_event(event);
+                settings_event_at(event);
                 break;
         case INPUTS_FIND: case INPUTS_VIEW:
                 ui_event_context(event);
