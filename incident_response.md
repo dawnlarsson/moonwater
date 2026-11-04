@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-130: the editor read a dangling link's target past its end
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | C memory safety: a string read past an unterminated buffer (stack over-read), a save written to a wrong name |
+| Moonwater exposure window | 2026-11-01 21:58 +01:00 (`67ab3242`) to the fix, about 2 days 12 hours |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_terminal`, `editor hostile: a link to nothing yet, by an absolute name, opens a new file of exactly that name` |
+
+**How it was exposed.** `editor FILE` where FILE is a symbolic link to a file that does not exist yet opens a new
+file at the link's target (`editor_load`). readlinkat writes the target and no terminator, and an absolute target was
+then copied with `string_copy_bounded`, which takes the source's length first: it read on through the stack after
+the 512-byte buffer to the first zero, and the tab's path became the target with whatever the stack held after it
+(cut at 511 bytes). A save then created that file instead of the one the link names. Anyone who can leave a link
+where the person opens files (a shared directory, an archive, a project checkout) chooses the target; the stack's
+bytes chose the rest of the name.
+
+**The check.** The row writes the stack the editor's next call uses with bytes that are not a zero, opens a link to an
+absolute name that does not exist, and asks for that name exactly. With the terminator taken out (the mutant) the
+row fails: the path is the target with the stack's bytes after it.
+
 ### MW-2026-111: a Wayland client's extra descriptors stayed open in the compositor
 
 | | |

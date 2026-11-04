@@ -149007,6 +149007,7 @@ static fn menu_defaults_check(struct ui address_to wui);
 static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
 static fn editor_close_check(struct ui address_to wui);
+static fn editor_hostile_check(struct ui address_to wui);
 static fn editor_tabs_check(struct ui address_to wui);
 static fn editor_disk_check(struct ui address_to wui);
 static fn editor_edge_check(struct ui address_to wui);
@@ -149524,6 +149525,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         kit_composites_check(&wui);
         editor_check(&wui);
         editor_close_check(&wui);
+        editor_hostile_check(&wui);
         editor_tabs_check(&wui);
         editor_disk_check(&wui);
         editor_edge_check(&wui);
@@ -155095,6 +155097,48 @@ static fn editor_close_check(struct ui address_to wui)
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)later, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
+}
+
+// The stack the editor's next call lands on, written over with bytes that are not a NUL.
+static __attribute__((noinline)) fn editor_check_scribble(void)
+{
+        volatile p8 junk[16384];
+
+        for (positive at = 0; at < sizeof(junk); at++)
+                junk[at] = 'x';
+}
+
+/*
+        The editor against files another user chose: a link to nothing yet, named by an absolute path, is saved at
+        exactly that path (readlinkat ends nothing, and the name was read to the stack's next NUL).
+*/
+static fn editor_hostile_check(struct ui address_to wui)
+{
+        char dir[48], here[256], target[512], link_path[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-hostile."));
+        bipolar got;
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        got = system_call_2(syscall(getcwd), (positive)here, sizeof(here));
+        here[got > 0 ? got - 1 : 0] = 0;
+        string_copy(string_copy(string_copy(string_copy((string_address)target, (string_address)here) + string_length((string_address)here),
+                                            (string_address) "/") + 1, (string_address)dir) + string_length((string_address)dir),
+                    (string_address) "/far.c");
+        string_copy(string_copy((string_address)link_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/far-link.c");
+        system_call_3(syscall(symlinkat), (positive)target, (positive)AT_FDCWD, (positive)link_path);
+        editor.ui = *wui;
+        editor.count = 0;
+        editor_check_scribble();
+        check("editor hostile: a link to nothing yet, by an absolute name, opens a new file of exactly that name",
+              target[0] == '/' && editor_open((string_address)link_path) && editor.count == 1 &&
+                  !memory_compare(editor_now()->path, target, string_length((string_address)target) + 1));
+
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 

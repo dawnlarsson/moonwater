@@ -97,6 +97,9 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                         long named_length = (long)system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)named, sizeof(named) - 1);
                         positive directory = string_length((string_address)path);
 
+                        // readlinkat ends nothing: the copy below reads to a NUL, which was the stack's after the name.
+                        named[named_length > 0 ? named_length : 0] = 0;
+
                         while (directory && path[directory - 1] != '/')
                                 directory--;
                         if (named_length > 0 && named[0] == '/')
