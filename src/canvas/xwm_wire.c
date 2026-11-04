@@ -59,7 +59,7 @@
 #define XWM_FORMATS_MAX 32           /* the pixmap formats the server lists */
 #define XWM_SCREENS_MAX 4            /* the screens the server lists */
 #define XWM_DEPTHS_MAX 32            /* the depths one screen lists */
-#define XWM_VISUALS_MAX 256          /* the visuals one screen lists, over all its depths */
+#define XWM_VISUALS_MAX 4096         /* the visuals one screen lists, over all its depths: a GLX server lists more than 256, and a visual is 24 bytes of the setup reply, which XWM_SETUP_MAX bounds */
 #define XWM_UNIT 4                   /* a length field counts four-byte units */
 #define XWM_UNITS_MAX 65535          /* the most units a request's length field can hold */
 #define XWM_HEADER 32                /* a reply, an error or an event: its fixed part, and the whole of an event */

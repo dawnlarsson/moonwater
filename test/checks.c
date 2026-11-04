@@ -174415,6 +174415,9 @@ static void xw_test_caps(void)
         XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a screen with one depth over the depth cap is refused");
         xw_sample_setup(s);
         xw_u(s, 106, 300, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_LENGTH, "a depth with 300 visuals (over the old cap of 256, a GLX server's count) is not refused for its count");
+        xw_sample_setup(s);
+        xw_u(s, 106, XWM_VISUALS_MAX + 1, 2);
         XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a depth with more visuals than the visual cap is refused");
         xw_sample_setup(s);
         xw_u(s, 16, 0, 4);
