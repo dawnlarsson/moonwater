@@ -133695,7 +133695,7 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
 static positive settings_held(char address_to into, positive room)
 {
         into[0] = 0;
-        return settings.editing >= 0 ? ui_text_string(&settings.edit, (p8 address_to)into, room) : 0;
+        return settings_editing() >= 0 ? ui_text_string(&settings.edit, (p8 address_to)into, room) : 0;
 }
 
 static fn settings_hold(int row, const char address_to text)
@@ -133707,7 +133707,7 @@ static fn settings_hold(int row, const char address_to text)
 
 static p64 settings_caret(void)
 {
-        return settings.editing >= 0 ? settings.edit.doc.selections[settings.edit.doc.primary].active : 0;
+        return settings_editing() >= 0 ? settings.edit.doc.selections[settings.edit.doc.primary].active : 0;
 }
 #else
 static positive settings_held(char address_to into, positive room)
@@ -133718,7 +133718,7 @@ static positive settings_held(char address_to into, positive room)
 
 static fn settings_hold(int row, const char address_to text)
 {
-        settings.editing = row;
+        ui_field_begin(&settings.edit, &settings.own, (const char address_to) "", row);
         string_copy_bounded((string_address)settings.typed, (string_address)text, sizeof(settings.typed));
 }
 
@@ -133732,7 +133732,7 @@ static p64 settings_caret(void)
 static b32 settings_kept_nothing(void)
 {
 #ifdef UI_TEXT_REFUSED
-        return settings.editing < 0 && !settings.edit.doc.added && !settings.edit.doc.selections && !settings.edit.preedit_length;
+        return settings_editing() < 0 && !settings.edit.doc.added && !settings.edit.doc.selections && !settings.edit.preedit_length;
 #else
         b32 wiped = true;
 
@@ -134973,7 +134973,7 @@ static fn check_settings(string_address regular, string_address bold)
         // Changes made through the rows, with a verb running: each waits for it, and no verb is started (child is a stand-in).
         settings.child = 1;
         settings.queued = 0;
-        settings.editing = -1;
+        ui_field_close(&settings.edit);
         settings.job = clock;
         settings.job_sets = false;
         settings.state[wifi] = SETTINGS_READ;
@@ -135312,28 +135312,28 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.queued = 0;
                 settings.job = clock;
                 settings.job_sets = false;
-                settings.editing = -1;
+                ui_field_close(&settings.edit);
                 ui_confirm_drop(&settings.confirm);
                 settings_activate(wipe, 1);
-                check("settings: Enter on a command with words to type opens its field", settings.editing == wipe && settings_holds(""));
+                check("settings: Enter on a command with words to type opens its field", settings_editing() == wipe && settings_holds(""));
                 settings_type_code('y');
                 settings_type_code('e');
                 settings_type_code('s');
                 settings_press(UI_KEY_ENTER);
                 check("settings: a command that ends what a person has is not run by the first Enter, which says what would run",
-                      settings.queued == 0 && settings.editing == wipe &&
+                      settings.queued == 0 && settings_editing() == wipe &&
                           string_equals((string_address)settings.status, (string_address) "press again to confirm: moonwater wipe yes"));
                 settings_type_code('x');
                 settings_press(UI_KEY_BACKSPACE);
                 settings_press(UI_KEY_ENTER);
-                check("settings: a key between the two Enters asks again", settings.queued == 0 && settings.editing == wipe);
+                check("settings: a key between the two Enters asks again", settings.queued == 0 && settings_editing() == wipe);
                 settings_press(UI_KEY_ENTER);
                 check("settings: and the second Enter runs it, words and all",
                       settings.queued == 1 && settings.queue[0].row == wipe && string_equals((string_address)settings.queue[0].value, (string_address) "yes") &&
-                          settings.editing < 0);
+                          settings_editing() < 0);
                 settings.queued = 0;
                 settings_activate(sleep, 1);
-                check("settings: a command with no words to type asks on its own Enter", settings.queued == 0 && settings.editing < 0 &&
+                check("settings: a command with no words to type asks on its own Enter", settings.queued == 0 && settings_editing() < 0 &&
                                                                                           settings.confirm.armed && settings.confirm.what == sleep + 1);
                 settings_activate(sleep, 1);
                 check("settings: and runs on the second", settings.queued == 1 && settings.queue[0].row == sleep);
@@ -135345,21 +135345,21 @@ static fn check_settings(string_address regular, string_address bold)
 
                 // The any row: the verb is in what is typed, and nothing typed is no command.
                 settings_activate(any, 1);
-                check("settings: the any row opens a field", settings.editing == any);
+                check("settings: the any row opens a field", settings_editing() == any);
                 settings_press(UI_KEY_ENTER);
-                check("settings: and nothing typed in it runs nothing and says so", settings.queued == 0 && settings.editing == any &&
+                check("settings: and nothing typed in it runs nothing and says so", settings.queued == 0 && settings_editing() == any &&
                           string_equals((string_address)settings.status, (string_address) "type a command: its verb, then what follows it"));
                 for (const char address_to letter = "name lane-any"; *letter; letter++)
                         settings_type_code((unsigned int)*letter);
                 settings_press(UI_KEY_ENTER);
                 check("settings: a command typed in it runs", settings.queued == 1 && settings.queue[0].row == any &&
-                          string_equals((string_address)settings.queue[0].value, (string_address) "name lane-any") && settings.editing < 0);
+                          string_equals((string_address)settings.queue[0].value, (string_address) "name lane-any") && settings_editing() < 0);
                 settings.queued = 0;
                 settings.child = 0;
 
                 // The filter: letters typed with no field open, Backspace, and Escape clearing before it closes.
                 settings.ui.scale = 100;
-                settings.editing = -1;
+                ui_field_close(&settings.edit);
                 settings_filter_clear();
                 settings.page.chosen = 0;
                 settings.page.pane = 1;
@@ -135411,7 +135411,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.height = SETTINGS_HEIGHT;
                 settings.page.chosen = 0;
                 settings.page.pane = 1;
-                settings.editing = -1;
+                ui_field_close(&settings.edit);
                 settings.child = 1;
                 settings.queued = 0;
                 settings_refilter();
@@ -135535,7 +135535,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.status[0] = 0;
                 settings_press(UI_KEY_ENTER);
                 check("settings: Enter on an empty name says so and keeps the old one",
-                      settings.editing < 0 && string_equals((string_address)settings.status, (string_address) "nothing typed: the value is kept"));
+                      settings_editing() < 0 && string_equals((string_address)settings.status, (string_address) "nothing typed: the value is kept"));
                 settings_hold(name, "");
                 settings_type_code(0xe9);
                 check("settings: a name takes letters, digits and hyphens only, and says so",
@@ -135574,7 +135574,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_chord(FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
                 check("settings: Control-Z gives it back", settings_holds("patient-moh"));
                 settings_press(FIELD_KEY_ESCAPE);
-                check("settings: Escape leaves the field as it was", settings.editing < 0);
+                check("settings: Escape leaves the field as it was", settings_editing() < 0);
                 settings_hold(zone, "");
                 settings_type_code(0xe9);
                 settings_type_code(0xfc);
@@ -135591,7 +135591,7 @@ static fn check_settings(string_address regular, string_address bold)
                 string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Stockholm", SETTINGS_VALUE);
                 settings_hold(zone, "Europe/Stockholm");
                 settings_press(UI_KEY_ENTER);
-                check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings.editing < 0);
+                check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings_editing() < 0);
                 // Opened on what the value is (nothing to start from), then typed to Berlin: that is what the field holds.
                 settings_hold(zone, "");
                 for (const char address_to letter = "Europe/Berlin"; *letter; letter++)
@@ -135607,12 +135607,12 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_type_code(' ');
                 settings_press(UI_KEY_ENTER);
                 check("settings: blanks typed at either end of a value are typed, and are no part of the value it is set to",
-                      settings.queued == 0 && settings.editing < 0);
+                      settings.queued == 0 && settings_editing() < 0);
                 settings.child = 0;
                 settings.queued = 0;
                 settings_hold(zone, "");
                 settings_press(FIELD_KEY_ESCAPE);
-                settings.editing = -1;
+                ui_field_close(&settings.edit);
                 settings.page.dirty = false;
 
                 // A field's text stays in its well: a name longer than the well is shown from its end, not drawn past it. The
@@ -135765,7 +135765,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.width = SETTINGS_WIDTH;
                         settings.height = SETTINGS_HEIGHT;
                         settings.page.card = false;
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
                         settings_filter_clear();
                         settings.page.chosen = settings_group_of(kb);
                         settings.page.pane = 1;
@@ -135852,7 +135852,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_menu_gone();
                         check("settings: a press outside the list asks it to go: no change, no group chosen, nothing activated",
                               settings.page.menu_row < 0 && settings.queued == 0 && settings.page.chosen == settings_group_of(kb) && settings.page.pane == 1 &&
-                                  settings.editing < 0);
+                                  settings_editing() < 0);
                         // A mouse's press on a row that the compositor takes back (a release with WINDOW_KEY_CANCEL) is no click: the
                         // row's list does not open. Let go unmoved, the same press opens it.
                         {
@@ -135928,7 +135928,7 @@ static fn check_settings(string_address regular, string_address bold)
                                         settings_event_real(&finger);
                                 }
                                 check("settings: a finger dragged up the rows moves them its way, and opens nothing",
-                                      settings.page.menu_row < 0 && settings.queued == 0 && settings.editing < 0);
+                                      settings.page.menu_row < 0 && settings.queued == 0 && settings_editing() < 0);
                                 settings_event_real(&lift);
                                 check("settings: let go while moving, the rows are thrown, and a press stops them",
                                       settings.list.scroll.gliding && (settings_event_real(&land), !settings.list.scroll.gliding));
@@ -135993,9 +135993,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 string_copy_bounded((string_address)settings.value[colour], (string_address) "#1e1e1e", SETTINGS_VALUE);
                                 settings_press(UI_KEY_ENTER);
                                 check("settings: Enter on the colour field opens it on the colour as the verb says it",
-                                      settings.editing == colour && settings_holds("#1e1e1e"));
+                                      settings_editing() == colour && settings_holds("#1e1e1e"));
                                 settings_press(UI_KEY_ENTER);
-                                check("settings: and Enter on what it already is sends nothing", settings.editing < 0 && settings.queued == 0);
+                                check("settings: and Enter on what it already is sends nothing", settings_editing() < 0 && settings.queued == 0);
                                 settings_press(UI_KEY_ENTER);
                                 for (positive at = 0; at < 7; at++)
                                         settings_press(UI_KEY_BACKSPACE);
@@ -136003,7 +136003,7 @@ static fn check_settings(string_address regular, string_address bold)
                                         settings_type_code((unsigned char)address_to c);
                                 settings_press(UI_KEY_ENTER);
                                 check("settings: a colour typed is kept on Enter, as typed, for the verb to refuse or take",
-                                      settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == colour &&
+                                      settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == colour &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "20ff00"));
                                 settings.queued = 0;
 
@@ -136122,7 +136122,7 @@ static fn check_settings(string_address regular, string_address bold)
                         // Read again: the keys stay on the network by its name, the view stays, an unchanged list draws nothing.
                         settings.item_count[0] = 0;
                         settings.page.pane = 1;
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
                         settings.page.menu_row = -1;
                         settings.feed_list = 0;
                         settings.value[wifi][0] = 0;
@@ -136158,14 +136158,14 @@ static fn check_settings(string_address regular, string_address bold)
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
                         settings.said_length = sizeof(air) - 1;
                         settings_feed_read(false, false);
-                        settings.editing = (int)SETTINGS_LIST + 2;
+                        ui_field_begin(&settings.edit, &settings.own, (const char address_to) "", (int)SETTINGS_LIST + 2);
                         settings.page.dirty = false;
                         memory_copy(settings_large->said, again, sizeof(again) - 1);
                         settings.said_length = sizeof(again) - 1;
                         settings_feed_read(false, false);
                         check("settings: nothing is changed under a passphrase being typed", settings.item_count[0] == 5 &&
                                   string_equals((string_address)items[1].label, (string_address) "Guest") && !settings.page.dirty);
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
 
                         // What a person does to a row of the list.
                         settings.child = 1;
@@ -136178,18 +136178,18 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter on an open network joins it, by the verb's own words and no passphrase",
                               settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
-                                  string_equals((string_address)settings.queue[0].value, (string_address) "j\nGuest") && settings.editing < 0);
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "j\nGuest") && settings_editing() < 0);
                         settings.queued = 0;
                         settings.list.focus = (int)SETTINGS_LIST; // HomeNet, joined
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter on the one joined sends nothing and says so", settings.queued == 0 && settings.status[0]);
                         settings.list.focus = (int)SETTINGS_LIST + 3; // Corp, 802.1X
                         settings_press(UI_KEY_ENTER);
-                        check("settings: Enter on a network moonwater cannot join sends nothing and says so", settings.queued == 0 && settings.editing < 0 &&
+                        check("settings: Enter on a network moonwater cannot join sends nothing and says so", settings.queued == 0 && settings_editing() < 0 &&
                                   string_length((string_address)settings.status) > 10);
                         settings.list.focus = (int)SETTINGS_LIST + 2; // Old Cafe, WPA2/3, saved
                         settings_press(UI_KEY_ENTER);
-                        check("settings: Enter on a network that asks for a passphrase opens a field for it", settings.editing == (int)SETTINGS_LIST + 2 &&
+                        check("settings: Enter on a network that asks for a passphrase opens a field for it", settings_editing() == (int)SETTINGS_LIST + 2 &&
                                   settings.queued == 0 && string_equals((string_address)settings.joining, (string_address) "Old Cafe"));
                         for (const char address_to letter = "hunter22"; *letter; letter++)
                                 settings_type_code((unsigned int)*letter);
@@ -136197,7 +136197,7 @@ static fn check_settings(string_address regular, string_address bold)
                         {
                                 b32 wiped = settings_kept_nothing();
 
-                                check("settings: Escape leaves it: nothing is sent and nothing typed is kept", settings.editing < 0 && settings.queued == 0 && wiped);
+                                check("settings: Escape leaves it: nothing is sent and nothing typed is kept", settings_editing() < 0 && settings.queued == 0 && wiped);
                         }
                         settings_press(UI_KEY_ENTER);
                         for (const char address_to letter = "hunter22"; *letter; letter++)
@@ -136207,7 +136207,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 b32 wiped = settings_kept_nothing();
 
                                 check("settings: Enter in it joins with the passphrase, and keeps none of it here",
-                                      settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                                      settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "j\nOld Cafe\nhunter22") && wiped);
                         }
                         settings.queued = 0;
@@ -136274,7 +136274,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_type_code((unsigned int)*letter);
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter on it opens a field, and the name typed is kept by bluetooth add", settings.queued == 1 &&
-                                  string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings.editing < 0);
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings_editing() < 0);
                         settings.queued = 0;
                         settings.list.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 1;
                         settings_press(UI_KEY_DELETE);
@@ -136312,7 +136312,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.own.table = table;
                         settings.page.chosen = bt_group;
                         settings.page.card = false;
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
                         settings_filter_clear();
                         settings.queued = 0;
                         settings.help = 2;
@@ -136333,9 +136333,9 @@ static fn check_settings(string_address regular, string_address bold)
                         ui_text_set(settings_filter_field(), (const p8 address_to) "x", 1), ui_text_search_changed(settings_filter_field());
                         check("settings: nor while what is typed filters the rows of every group", settings_feed_tick() == -1);
                         settings_filter_clear();
-                        settings.editing = 0;
+                        ui_field_begin(&settings.edit, &settings.own, (const char address_to) "", 0);
                         check("settings: nor while a field is typed in", settings_feed_tick() == -1);
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
                         settings.page.card = true;
                         check("settings: nor while a card fills the window", settings_feed_tick() == -1);
                         settings.page.card = false;
@@ -136404,7 +136404,7 @@ static fn check_settings_edges(void)
         settings.width = SETTINGS_WIDTH;
         settings.height = SETTINGS_HEIGHT;
         settings.page.pane = 1;
-        settings.editing = -1;
+        ui_field_close(&settings.edit);
         settings.page.menu_row = -1;
         settings.page.card = 0;
         settings.child = 1;
@@ -136419,11 +136419,11 @@ static fn check_settings_edges(void)
         string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Oslo", SETTINGS_VALUE);
 
         settings_activate(zone, 1);
-        check("settings edge: Enter on a plain value opens its field", settings.editing == zone);
+        check("settings edge: Enter on a plain value opens its field", settings_editing() == zone);
         string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Paris", SETTINGS_VALUE);
         settings_press(UI_KEY_ENTER);
         check("settings edge: Enter in a field nothing was typed in sends nothing, and the value that changed under it stays",
-              settings.queued == 0 && settings.editing < 0 && string_equals((string_address)settings.value[zone], (string_address) "Europe/Paris"));
+              settings.queued == 0 && settings_editing() < 0 && string_equals((string_address)settings.value[zone], (string_address) "Europe/Paris"));
         settings.queued = 0;
 
         settings_hold(zone, "");
@@ -136447,7 +136447,7 @@ static fn check_settings_edges(void)
               settings.queued == 0 && string_equals((string_address)settings.value[wired], (string_address) "off"));
         settings_press(UI_KEY_ESCAPE);
 
-        settings.editing = -1;
+        ui_field_close(&settings.edit);
         settings.queued = 0;
         settings.child = 0;
         settings_filter_clear();
@@ -136463,7 +136463,7 @@ static fn check_settings_keys(void)
         settings.height = SETTINGS_HEIGHT;
         settings.page.pane = 1;
         settings_filter_clear();
-        settings.editing = -1;
+        ui_field_close(&settings.edit);
         settings.page.menu_row = -1;
         settings.page.card = 0;
         //      A feed left running by an earlier check would be finished by a change: this one is not a feed.
@@ -136661,7 +136661,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].kind == SETTINGS_SWITCH)
@@ -136775,7 +136775,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         settings.page.chosen = group;
@@ -136982,7 +136982,7 @@ static fn settings_fit_check(void)
         int group = 0, fewest = 1 << 30, thumb_top = 0, thumb_length = 0, seen = 0;
         b32 still = true;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -137015,7 +137015,7 @@ static fn settings_column_fit_check(void)
         int heights[2] = {520, 560};
         b32 ends = true;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         for (int k = 0; k < 2; k++)
         {
@@ -137035,7 +137035,7 @@ static fn settings_group_glide_check(void)
         struct ui_scroll address_to list = &settings.list.scroll;
         int other;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         settings_size(SETTINGS_WIDTH, 300);
         other = settings.page.chosen == 0 ? 1 : 0;
@@ -137053,7 +137053,7 @@ static fn settings_column_check(void)
         int most, edge = 0, x, y, at_bottom = 0, at_top = 0;
         b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.ui.scale = 100;
         ui_kit_settle();
@@ -137095,7 +137095,7 @@ static fn settings_end_check(void)
         int group = 0, best = -1, expected = 0, track_top = 0, track_height = 0, last = 0;
         b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -137183,7 +137183,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         int most, group = 0, best = -1;
         b32 settled;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -137229,7 +137229,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
         int most, group = 0, best = -1, x, y;
 
-        settings_filter_clear(), (void)0, settings.editing = -1, settings.page.menu_row = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -137510,7 +137510,7 @@ static fn check_display_section(void)
 
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
-                settings_gallery.on = 0, settings.page.menu_row = -1, settings.editing = -1, settings.page.card = false, settings_filter_clear();
+                settings_gallery.on = 0, settings.page.menu_row = -1, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear();
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event_at(&touch);
@@ -137587,7 +137587,7 @@ static fn check_display_section(void)
                 grid_count = settings_map_load(grid, grid_number);
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
-                settings.popup.open = 0, settings.editing = -1, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
+                settings.popup.open = 0, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
                 settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event_at(&event);
@@ -137620,7 +137620,7 @@ static fn check_display_section(void)
                 memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
                 memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
-                settings.page.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.page.card = false;
+                settings.page.pane = 1, settings.list.focus = screen_row, ui_field_close(&settings.edit), (void)0, settings.page.card = false;
                 settings_filter_clear(), (void)0, settings.page.menu_row = -1;
                 key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_UP, 0};
                 settings_key(&key);
@@ -137871,7 +137871,7 @@ static fn check_settings_groups(void)
         check("settings groups: no row of the display options is listed under Machine, or anywhere but Display", screens);
 
         settings.ui.scale = 100;
-        settings.page.card = 0, settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1;
+        settings.page.card = 0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.pane = 1;
         settings_filter_clear(), (void)0;
         for (positive at = 0; at < sizeof(placed) / sizeof(placed[0]); at++)
         {
@@ -137977,7 +137977,7 @@ static fn check_settings_seam(void)
         unsigned int paper;
         b32 geometry, hits, joined, ring_ends, bar_over, margins;
 
-        settings.focused = 1, settings.page.pane = 1, settings.editing = -1, settings.page.menu_row = -1, settings_filter_clear(), (void)0;
+        settings.focused = 1, settings.page.pane = 1, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings_filter_clear(), (void)0;
         settings_group_choose(0);
         ui_scroll_set(&list->scroll, 0);
         ui_scroll_set(&page->column_scroll, 0);
@@ -138805,7 +138805,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
                 settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
                 settings.page.chosen = group;
                 settings_filter_clear(), (void)0;
-                settings.page.card = 0, settings.editing = -1, settings.page.menu_row = -1;
+                settings.page.card = 0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1;
                 settings.focused = 0;
                 settings_refilter();
         }
@@ -149216,7 +149216,7 @@ b32 main()
                         if (!settings_map())
                                 return 1;
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1, settings.focused = 1;
+                        ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1, settings.focused = 1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];
@@ -149463,7 +149463,7 @@ b32 main()
                         unsigned int glass = dark ? 0x2b2b2eu : 0xb4b4b4u;
 
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1;
+                        ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];
@@ -149513,7 +149513,7 @@ b32 main()
 
                 for (int state = 0; state < 4; state++)
                 {
-                        settings.focused = 1, settings.page.pane = 1, settings.editing = -1, settings.page.menu_row = -1;
+                        settings.focused = 1, settings.page.pane = 1, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1;
                         settings_group_choose(state == 3 ? settings_group_of((int)SETTINGS_LIST) : 0);
                         if (state == 1)
                                 settings_hold(SETTINGS_NAME_ROW, "patient-cricket");
@@ -149564,7 +149564,7 @@ b32 main()
                         settings_menu_close();
                         if (state == 1)
                                 settings_edit_end();
-                        settings.editing = -1;
+                        ui_field_close(&settings.edit);
                 }
         }
         // The launcher, dark, with ls typed: the kit's field, and the kit's list under it with the pointer over its third row.
@@ -154342,14 +154342,14 @@ static fn check_field_hands(string_address regular)
                         struct window_event move = {WINDOW_EVENT_MOTION, 0, x, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
                                             release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
-                        check("settings: Enter on the name opens its field on the name", settings.editing == name && settings_holds("patient-cricket"));
+                        check("settings: Enter on the name opens its field on the name", settings_editing() == name && settings_holds("patient-cricket"));
                         settings_event_at(&move);
                         settings_event_at(&press);
                         settings_event_at(&release);
                         settings_type_code('-');
                         settings_type_code('x');
                         check("settings: a click in the name's field puts the caret there, and a key types there",
-                              settings.editing == name && settings_holds("patient-x-cricket") && settings_caret() == 9);
+                              settings_editing() == name && settings_holds("patient-x-cricket") && settings_caret() == 9);
                         // A finger's long press in the name's field selects its word, and the picture has its handles and bar over the rows.
                         {
                                 const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
@@ -154365,7 +154365,7 @@ static fn check_field_hands(string_address regular)
                                 settings_event_at(&taken);
                                 settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                                 check("settings: a finger's long press in the name's field selects a word, and the picture shows its handles and the actions bar",
-                                      settings.editing == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
+                                      settings_editing() == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
                                 {
                                         int hx, htop;
                                         const unsigned int address_to shown = (const unsigned int address_to)pixels;
@@ -154378,7 +154378,7 @@ static fn check_field_hands(string_address regular)
                         }
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter sets the name to what the field holds",
-                              settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
+                              settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-x-cricket"));
                 }
                 // A value typed in: a field on the row with no band behind it, its status says what Enter, Escape and a click
@@ -154396,19 +154396,19 @@ static fn check_field_hands(string_address regular)
                         settings.list.focus = name;
                         settings_press(UI_KEY_ENTER);
                         settings_draw_rows((unsigned int address_to)pixels, 0, 0);
-                        check("settings: a value typed in is a field on the row, with no band behind it", settings.editing == name && !settings.list.lit);
+                        check("settings: a value typed in is a field on the row, with no band behind it", settings_editing() == name && !settings.list.lit);
                         check("settings: a value typed in says what Enter, Escape and a click outside do",
                               string_equals((string_address)settings.status, (string_address) "Enter sets it, Escape keeps it, a click outside sets it too"));
                         settings_type_code('y');
                         settings_press(FIELD_KEY_ESCAPE);
-                        check("settings: Escape keeps the value as it was", settings.editing < 0 && settings.queued == 0);
+                        check("settings: Escape keeps the value as it was", settings_editing() < 0 && settings.queued == 0);
                         settings_press(UI_KEY_ENTER);
                         settings_type_code('y');
                         settings_event_at(&move);
                         settings_event_at(&press);
                         settings_event_at(&release);
                         check("settings: a click outside a value sets what its field holds",
-                              settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
+                              settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-crickety"));
                 }
                 // A row is done on its mouse's release, where the press went down: the press alone opens nothing, the release on
@@ -154425,15 +154425,15 @@ static fn check_field_hands(string_address regular)
                         string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
                         settings_event_at(&on);
                         settings_event_at(&press);
-                        check("settings: a mouse press on a row is not done until it is let go", settings.editing < 0);
+                        check("settings: a mouse press on a row is not done until it is let go", settings_editing() < 0);
                         settings_event_at(&release);
-                        check("settings: a mouse's release on the row does it", settings.editing == name);
+                        check("settings: a mouse's release on the row does it", settings_editing() == name);
                         settings_edit_end();
                         settings_event_at(&on);
                         settings_event_at(&press);
                         settings_event_at(&off);
                         settings_event_at(&release);
-                        check("settings: a press let go off its row does nothing", settings.editing < 0 && settings.queued == 0);
+                        check("settings: a press let go off its row does nothing", settings_editing() < 0 && settings.queued == 0);
                 }
                 settings.queued = 0, settings.child = 0;
                 settings_group_choose(0);

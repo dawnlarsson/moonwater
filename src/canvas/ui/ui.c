@@ -10834,6 +10834,8 @@ struct ui_text
         p64 box_line, box_column;
         p8 search_last[UI_TEXT_SEARCH];         // the search key ui_text_search_changed last answered, and its length
         positive search_length;
+        b32 open;                               // a field opened for an owner (ui_field_begin), until ui_field_close
+        int owner;                              // the app's row (or item) the field was opened for
         int finger_left;                        // the finger's or throw's pixels not yet a line, up positive
         unsigned int caret_fade;                // how far the caret has faded: 0 solid, UI_CARET_FULL gone (0 new, so drawn)
         p32 asks, command;
@@ -10932,6 +10934,28 @@ static const char address_to ui_field_digits(p32 code)
 
 // The widget let go; a masked field's text (every byte ever typed into it is in the added buffer) and composition are
 // wiped first, so no passphrase outlives its field in memory handed back.
+static fn ui_text_close(struct ui_text address_to t);
+
+/*
+        A field opened for an owner the app names (a row of its list, which the field knows): open until ui_field_close, the
+        owner kept. The text is the field's own first text; the rules (accept, most, masked) are the app's, set after.
+*/
+static fn ui_field_begin(struct ui_text address_to t, const struct window_row address_to own, const char address_to text, int owner)
+{
+        ui_field_open(t, own, text);
+        t->open = true;
+        t->owner = owner;
+}
+
+// The field closed: an open passphrase is wiped (ui_text_close) and the field owns nothing; a field not open is left as it is.
+static fn ui_field_close(struct ui_text address_to t)
+{
+        if (t->open)
+                ui_text_close(t);
+        t->open = false;
+        t->owner = -1;
+}
+
 static fn ui_text_close(struct ui_text address_to t)
 {
         if (t->masked && t->doc.added)

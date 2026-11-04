@@ -689,7 +689,6 @@ static struct
         struct ui_page page;
         struct ui_list list;
         struct ui_scroll card;
-        int editing;             // the row typed in, -1 none
         char head[SETTINGS_VALUE]; // the verb of a command being typed, as its row's label
         char accents[SETTINGS_VALUE]; // the accents' colours, a blank apart, as the swatches' words
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
@@ -930,6 +929,12 @@ static int settings_group_of(int row)
 static int settings_pos(int row)
 {
         return ui_list_at(&settings.list, row);
+}
+
+// The row typed in, or -1: the kit's field is open for it (the field knows its owner).
+static int settings_editing(void)
+{
+        return settings.edit.open ? settings.edit.owner : -1;
 }
 
 // Whether text has what is typed in the filter, whatever the case.
@@ -2558,7 +2563,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
 
         settings.feed_due = clock_monotonic_nanoseconds() + (positive)settings_feeds[feed].every * 1000000ull;
         // What is being typed for a row of the list is for the row as it was: nothing is changed under it.
-        if (killed || settings.editing >= (int)SETTINGS_LIST)
+        if (killed || settings_editing() >= (int)SETTINGS_LIST)
                 return;
         if (owner >= 0)
         {
@@ -2605,7 +2610,7 @@ static fn settings_feed_rows(void)
 {
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if ((settings_rows[at].flags & SETTINGS_TICK) && settings_group_of((int)at) == settings.page.chosen &&
-                    settings.editing != (int)at)
+                    settings_editing() != (int)at)
                         settings_unread_set(at, 1);
 }
 
@@ -2623,7 +2628,7 @@ static long settings_feed_tick(void)
         string_address words[SETTINGS_WORDS];
         positive count = 1;
 
-        if (feed < 0 || settings.page.card || settings.editing >= 0 || settings_filter_length() ||
+        if (feed < 0 || settings.page.card || settings_editing() >= 0 || settings_filter_length() ||
             (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued ||
             settings_unread_any() || settings.help == 1)
                 return -1;
@@ -3235,11 +3240,9 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
 {
         struct ui_text address_to t = &settings.edit;
 
-        if (settings.editing >= 0)
-                ui_text_close(t);
         // What it opens on is the document's own first text (kept here while it is open), so undo goes back to it and no further.
         string_copy_bounded((string_address)settings.edit_from, (string_address)text, sizeof(settings.edit_from));
-        ui_field_open(t, &settings.own, settings.edit_from);
+        ui_field_begin(t, &settings.own, settings.edit_from, row);
         t->masked = masked;
         // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
         // a press outside it cancels (the kit's rule), where a plain value is kept.
@@ -3249,23 +3252,20 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
                                                                                         : SETTINGS_VALUE - 1;
         if (row == SETTINGS_NAME_ROW)
                 t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = WORDS(settings_name_long);
-        settings.editing = row;
         ui_page_redraw(&settings.page);
 }
 
-// A field typed in is done with: closed, and a passphrase typed in it wiped (ui_text_close).
+// A field typed in is done with: closed, and a passphrase typed in it wiped (the kit's field close).
 static fn settings_edit_end(void)
 {
-        if (settings.editing >= 0)
-                ui_text_close(&settings.edit);
-        settings.editing = -1;
+        ui_field_close(&settings.edit);
         ui_page_redraw(&settings.page);
 }
 
 // Whether the row typed in is in view, so that the well its field was last drawn in is where it is.
 static b32 settings_edit_shown(void)
 {
-        int at = settings_pos(settings.editing), top = at >= 0 ? ui_list_row_y(&settings.list, at) : 0;
+        int at = settings_pos(settings_editing()), top = at >= 0 ? ui_list_row_y(&settings.list, at) : 0;
 
         return at >= 0 && top + ui_px(&settings.ui, UI_ROW) > settings.list.y && top < settings.list.y + settings.list.h;
 }
@@ -3427,9 +3427,9 @@ static fn settings_edit_commit(void)
                 length--;
         typed[length] = 0;
         length -= start;
-        if (settings.editing >= (int)SETTINGS_LIST)
+        if (settings_editing() >= (int)SETTINGS_LIST)
         {
-                const struct settings_item address_to item = settings_item(settings.editing);
+                const struct settings_item address_to item = settings_item(settings_editing());
 
                 if (!length)
                         settings_say((string_address)WORDS(settings_nothing_typed));
@@ -3441,9 +3441,9 @@ static fn settings_edit_commit(void)
                 settings_edit_end();
                 return;
         }
-        if (settings.editing >= SETTINGS_ANY)
+        if (settings_editing() >= SETTINGS_ANY)
         {
-                if (settings_run(settings.editing, typed + start))
+                if (settings_run(settings_editing(), typed + start))
                         settings_edit_end();
                 return;
         }
@@ -3451,8 +3451,8 @@ static fn settings_edit_commit(void)
         if (!length)
                 settings_say((string_address)WORDS(settings_nothing_kept));
         else if (!string_equals((string_address)typed + start, (string_address)settings.edit_from) &&
-                 !string_equals((string_address)typed + start, (string_address)settings.value[settings.editing]))
-                settings_change(settings.editing, typed + start);
+                 !string_equals((string_address)typed + start, (string_address)settings.value[settings_editing()]))
+                settings_change(settings_editing(), typed + start);
         settings_edit_end();
 }
 
@@ -3713,7 +3713,7 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
         }
-        if (settings.editing >= 0)
+        if (settings_editing() >= 0)
         {
                 settings_type(event);
                 return true;
@@ -3828,7 +3828,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
         row->section = settings_section_start(id);
         row->header = language_of(settings_section(id));
         row->label = settings_label_shown(id);
-        if (id == settings.editing)
+        if (id == settings_editing())
         {
                 const struct settings_generic address_to generic = settings_generic_of(id);
 
@@ -4310,11 +4310,11 @@ static b32 settings_event(const struct window_event address_to event)
                         UI_TEXT_COMMIT for a plain value, UI_TEXT_CANCEL for a command): the press then goes on to the row it is on,
                         unless that is the row typed in, whose label a press only leaves.
                 */
-                if (settings.editing >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.dragging) &&
+                if (settings_editing() >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.dragging) &&
                     (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
                 {
                         b32 outside = event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL);
-                        b32 own = outside && ui_page_target(&settings.ui, &settings.page, &settings.list, x, y) == settings.editing;
+                        b32 own = outside && ui_page_target(&settings.ui, &settings.page, &settings.list, x, y) == settings_editing();
 
                         settings_edit_asked(asks);
                         if (!outside || own)
@@ -4374,7 +4374,7 @@ static fn settings_press_at(void)
         }
         // A row: the kit gives it the keys, shows it pressed and ripples it from the press.
         row = ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true);
-        if (settings.editing >= 0 && row != settings.editing)
+        if (settings_editing() >= 0 && row != settings_editing())
                 settings_edit_end();
         if (row < 0)
                 return;
@@ -4396,7 +4396,7 @@ static fn settings_press_at(void)
                         settings_change(row, word);
                 return;
         }
-        if (settings.editing != row)
+        if (settings_editing() != row)
                 settings_activate(row, settings.list.way);
 }
 
@@ -4443,7 +4443,7 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         // clipboard, its caret), with the keys while the window has them and no row is typed in.
         settings.page.search.items[0] = settings.page.card ? null : WORDS(settings_filter_hint);
         settings.page.search.edit = settings.page.card ? null : settings_filter_field();
-        ui_page_draw(ui, &settings.page, settings.editing < 0 && settings.focused);
+        ui_page_draw(ui, &settings.page, settings_editing() < 0 && settings.focused);
         if (settings.page.card)
                 ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
         else
@@ -4454,13 +4454,13 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                         settings_map_draw(ui);
                 // A row typed in is a field on the page, not a band: its well is the only thing lit there.
                 // The map has the keys while it is focused, so no row is lit or has the focus then.
-                settings.list.lit = (settings.page.pane || settings_filter_length()) && settings.editing < 0 && !settings.map.keys;
+                settings.list.lit = (settings.page.pane || settings_filter_length()) && settings_editing() < 0 && !settings.map.keys;
                 settings.list.keys = settings.focused && settings.page.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
                 ui_page_column_bar(ui, &settings.page);
         }
         // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
-        if (settings.editing >= 0 && settings_edit_shown())
+        if (settings_editing() >= 0 && settings_edit_shown())
                 ui_text_overlay(ui, &settings.edit);
         if (settings.filter_open && !settings.page.card)
                 ui_text_overlay(ui, &settings.filter_edit);
@@ -4560,9 +4560,9 @@ static fn settings_chose(int id)
                         settings_menu_close();
                 return;
         }
-        if (t == &settings.edit && settings.editing >= 0)
+        if (t == &settings.edit && settings_editing() >= 0)
                 settings_edit_asked(ui_text_menu_do(&settings.ui, t, id));
-        else if (t == &settings.filter_edit && settings.editing < 0)
+        else if (t == &settings.filter_edit && settings_editing() < 0)
         {
                 p32 asks = ui_text_menu_do(&settings.ui, t, id);
 
@@ -4581,10 +4581,10 @@ static fn settings_chose(int id)
 static long settings_tick(long timeout, long address_to other)
 {
         // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
-        if (!settings.page.card && (settings_gallery.on || settings.editing >= 0 || settings.filter_open))
+        if (!settings.page.card && (settings_gallery.on || settings_editing() >= 0 || settings.filter_open))
         {
                 struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
-                                              : settings.editing >= 0 ? &settings.edit : &settings.filter_edit;
+                                              : settings_editing() >= 0 ? &settings.edit : &settings.filter_edit;
                 positive now = clock_monotonic_nanoseconds();
                 b32 redraw = false;
 
@@ -4668,7 +4668,6 @@ static b32 settings_main()
 {
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
-        settings.editing = -1;
         ui_buffers_start(&settings.page.buffers);
         settings.output = -1;
         settings.page.pane = 1; // the keys start in the rows, on the first of them
