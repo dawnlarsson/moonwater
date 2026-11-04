@@ -906,7 +906,7 @@ static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned
 
                 if (pixels != terminal.rec_grid && pixels != terminal.rec_whole)
                 {
-                        terminal.ui.scene->lost = 1;
+                        terminal.ui.scene->lost = UI_LOST_TERM_GRID;
                         return;
                 }
                 ui_scene_record(terminal.ui.scene, ox + x, oy + y, ox + (int)x2, oy + (int)y2, colour, true);
@@ -1020,7 +1020,7 @@ static void terminal_rec_glyphs(struct terminal_painter address_to painter, unsi
 
         if (pixels != terminal.rec_grid)
         {
-                terminal.ui.scene->lost = 1;
+                terminal.ui.scene->lost = UI_LOST_TERM_FONT;
                 return;
         }
         painter->ui.scene = terminal.ui.scene;
@@ -1267,7 +1267,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         ink = terminal_mix(ink, paper);
 
                 if (pair && terminal_recording())
-                        terminal.ui.scene->lost = 1; // a wide character is two cells: the recorder does not draw one yet
+                        terminal.ui.scene->lost = UI_LOST_TERM_WIDE; // a wide character is two cells: the recorder does not draw one yet
 
                 if (glyph && terminal_recording())
                 {

@@ -33,6 +33,27 @@ enum
         UI_DRAW_LIST_COVER, UI_DRAW_LIST_COVER_USED, UI_DRAW_LIST_FLAGS
 };
 
+/*
+        Why a frame the kit recorded did not record whole (ui_list_frame_end discards it and the program paints it as pixels). The scene's lost
+        is one of these (the one set last), and each window counts its lost frames by cause in the window table (list_lost, shown by moonwater debug).
+*/
+enum ui_list_lost
+{
+        UI_LOST_NONE,
+        UI_LOST_NOTHING,   // the painter recorded no op: a direct pixel writer the recorder does not see, or nothing was drawn
+        UI_LOST_ROOM,      // the ops of a half are full
+        UI_LOST_POOL,      // the cover bytes are full, or a bitmap or table does not fit
+        UI_LOST_GROUND,    // a cell's ground is not one colour (font_blend)
+        UI_LOST_CELL,      // a cell's plan or its box does not fit
+        UI_LOST_CELL_TEXT, // proportional text in a cell (ui_cell_line, ui_cell_turned): font_draw on the picture
+        UI_LOST_MARKS,     // a cell of marks, wide or emoji in a code view: font_draw on the ground
+        UI_LOST_TERM_GRID, // the terminal: a fill that is neither in the grid nor in the picture
+        UI_LOST_TERM_FONT, // the terminal: a font draw outside the grid
+        UI_LOST_TERM_WIDE, // the terminal: a wide character
+        UI_LOST_GLASS,     // the taskbar's glass (never a window: the band is the compositor's)
+        UI_LOST_COUNT
+};
+
 struct ui_draw_view
 {
         const unsigned int address_to ops; // the published half's ops

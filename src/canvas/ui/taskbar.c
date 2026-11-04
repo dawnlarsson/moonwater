@@ -446,7 +446,7 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
 {
         // The glass is painted on the band, not recorded (R3 in the note): the frame is the picture's, and this paints it.
         if (view->scene)
-                view->scene->lost = 1;
+                view->scene->lost = UI_LOST_GLASS;
         unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
         // The tray (-2) is never lit; a tab with the keys is, and so is the launcher button while the launcher is up.
         b32 lit = (slot >= 0 || slot == TASKBAR_LAUNCHER) && (mark & COMPOSITOR_TAB_LIT);

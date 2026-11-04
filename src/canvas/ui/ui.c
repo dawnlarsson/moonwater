@@ -391,7 +391,7 @@ static void ui_scene_record(struct ui_scene address_to scene, int x0, int y0, in
                 return;
         if (scene->count >= scene->room)
         {
-                scene->lost = 1;
+                scene->lost = UI_LOST_ROOM;
                 return;
         }
         x0 += scene->ox, x1 += scene->ox, y0 += scene->oy, y1 += scene->oy;
@@ -855,7 +855,7 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
                 return;
         if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
         {
-                scene->lost = 1;
+                scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
                 return;
         }
         bitmap = scene->cover + scene->used;
@@ -923,7 +923,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
 
         if (background & FONT_UNKNOWN)
         {
-                scene->lost = 1;
+                scene->lost = UI_LOST_GROUND;
                 return;
         }
         if (left < right && top < bottom)
@@ -938,7 +938,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 font_cell_plan(ui->engine, faces, count, codes[i], 1, grid, em, flags, target, x + (b32)i * width, y, colour, background, &plan);
                 if (plan.unknown || scene->count >= scene->room)
                 {
-                        scene->lost = 1;
+                        scene->lost = plan.unknown ? UI_LOST_GROUND : UI_LOST_ROOM;
                         return;
                 }
                 if (!plan.translate)
@@ -946,7 +946,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 w = plan.to - plan.from, h = plan.below - plan.above;
                 if (w <= 0 || h <= 0 || (unsigned long)w * (unsigned long)h > sizeof(rows))
                 {
-                        scene->lost = 1;
+                        scene->lost = UI_LOST_CELL;
                         return;
                 }
                 for (b32 r = 0; r < h; r++)
@@ -956,7 +956,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                     !ui_scene_copy(scene, scene->cover_slots, (p64)(unsigned long)plan.coverage, (p64)w << 40 | (p64)h << 20 | plan.stride, 0, rows,
                                    (unsigned long)w * (unsigned long)h, &cover_at))
                 {
-                        scene->lost = 1;
+                        scene->lost = UI_LOST_POOL;
                         return;
                 }
                 op = scene->ops + 8 * scene->count++;
@@ -3048,7 +3048,7 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
         mods = (ring != 0) + (clip != 0) + cut;
         if (scene->count + 1 + mods > scene->room)
         {
-                scene->lost = 1;
+                scene->lost = UI_LOST_ROOM;
                 return;
         }
         op = scene->ops + 8 * scene->count;
@@ -8481,7 +8481,7 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
 {
         // A cell's text is not recorded (the font blend on a ground, R4 in the note): the frame is the picture's, painted here.
         if (ui->scene)
-                ui->scene->lost = 1;
+                ui->scene->lost = UI_LOST_CELL_TEXT;
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(height * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -8508,7 +8508,7 @@ static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int
 {
         // A turned cell's text is not recorded either (R4): the frame is the picture's.
         if (ui->scene)
-                ui->scene->lost = 1;
+                ui->scene->lost = UI_LOST_CELL_TEXT;
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(width * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -11230,8 +11230,12 @@ static b32 ui_list_frame_end(struct window_row address_to own, int width, int he
         struct windows address_to table = own->table;
         unsigned int row = own->row;
 
-        if (ui_app_list.scene.lost || !ui_app_list.scene.count)
+        unsigned int why = ui_app_list.scene.lost ? (unsigned int)ui_app_list.scene.lost : ui_app_list.scene.count ? 0u : UI_LOST_NOTHING;
+
+        table->list_tried[row]++;
+        if (why)
         {
+                table->list_lost[row][why]++;
                 ui_app_ui->scene = null;
                 return false;
         }
@@ -11483,6 +11487,8 @@ static int ui_app_run(struct ui_app address_to app)
         // The row's list, when the table has one: this window's frames may be recorded into it (ui_list_wanted).
         ui_app_list.ready = 0;
         ui_app_ui = app->ui, ui_app_row = row;
+        table->list_tried[row] = 0;
+        memory_zero(table->list_lost[row], sizeof(table->list_lost[row]));
         if (window_list_of(table, (int)row))
                 ui_draw_list_init(&ui_app_list, window_list_of(table, (int)row), WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
         status = app->open();
@@ -14886,7 +14892,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                         {
                                                 // A cell of marks, wide or emoji is font_draw on the ground: font_blend, not recorded (lost).
                                                 if (ui->scene)
-                                                        ui->scene->lost = 1;
+                                                        ui->scene->lost = UI_LOST_MARKS;
                                                 font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
                                                           (b32)((b64)(origin + l->x[k] - t->left) * 65536), baseline - t->top, ink & 0xffffffu,
                                                           FONT_UNKNOWN);

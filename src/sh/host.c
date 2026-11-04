@@ -22319,6 +22319,32 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                          why == 7 ? (string_address) "the cover bytes or the picture could not be mapped" :
                                          why == 8 ? (string_address) "the card did not finish the scene" :
                                                     (string_address) "frames painted in pixels by a window the card drew from its list");
+                //      The frames each window recorded into its list that did not record whole (the program paints them as pixels), by cause.
+                for (unsigned int row = 0; row < WINDOWS; row++)
+                {
+                        unsigned int lost = 0;
+
+                        if (!table->pid[row] || !table->list_tried[row])
+                                continue;
+                        for (unsigned int why = 1; why < UI_LOST_COUNT; why++)
+                                lost += table->list_lost[row][why];
+                        host_say(log, "  lost frames     window %p: %p of %p recorded frames did not record whole\n", (positive)row, (positive)lost,
+                                 (positive)table->list_tried[row]);
+                        for (unsigned int why = 1; why < UI_LOST_COUNT; why++)
+                                if (table->list_lost[row][why])
+                                        host_say(log, "                  %p, %s\n", (positive)table->list_lost[row][why],
+                                                 why == UI_LOST_NOTHING ? (string_address) "nothing recorded (a painter the recorder does not see)" :
+                                                 why == UI_LOST_ROOM ? (string_address) "the ops of a half are full" :
+                                                 why == UI_LOST_POOL ? (string_address) "the cover bytes are full, or a bitmap does not fit" :
+                                                 why == UI_LOST_GROUND ? (string_address) "a cell's ground is not one colour" :
+                                                 why == UI_LOST_CELL ? (string_address) "a cell's plan or box does not fit" :
+                                                 why == UI_LOST_CELL_TEXT ? (string_address) "proportional text in a cell (font_draw on the picture)" :
+                                                 why == UI_LOST_MARKS ? (string_address) "a cell of marks, wide or emoji (font_draw on the ground)" :
+                                                 why == UI_LOST_TERM_GRID ? (string_address) "terminal: a fill outside the grid and the picture" :
+                                                 why == UI_LOST_TERM_FONT ? (string_address) "terminal: a font draw outside the grid" :
+                                                 why == UI_LOST_TERM_WIDE ? (string_address) "terminal: a wide character" :
+                                                                            (string_address) "the glass (taskbar)");
+                }
         }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");

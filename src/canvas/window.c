@@ -914,6 +914,9 @@ struct windows
         unsigned int list_seen[WINDOWS];
         unsigned int list_refused;
         unsigned int list_why[16]; // the compositor's: the lists drawn (0) and the lists refused by reason (compositor_list_why), for moonwater debug
+        // The app's: the frames it recorded into its list (list_tried) and, of them, the ones that did not record whole, by cause (enum ui_list_lost).
+        unsigned int list_tried[WINDOWS];
+        unsigned int list_lost[WINDOWS][UI_LOST_COUNT];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
