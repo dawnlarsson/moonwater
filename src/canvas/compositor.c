@@ -126,6 +126,25 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "../audio/control.c" // and its socket, which the keys and the wheel tell the volume to at once
 #if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
 #include "gpu.c" // GPU rendering, on unless the build's header says SHELL_NO_GPU (CONFIG_MOONWATER_GPU=n); the build tool, which makes its kernels, is without it
+#else
+// Without the GPU a client's dma-buf is never imported (no card to read it), so no picture is one the card reads.
+static int gpu_ready(void)
+{
+        return 0;
+}
+static positive gpu_import_fd(int fd, positive bytes)
+{
+        (void)fd, (void)bytes;
+        return 0;
+}
+static void gpu_release_import(positive at)
+{
+        (void)at;
+}
+static void gpu_forget(const void *addr, positive bytes)
+{
+        (void)addr, (void)bytes;
+}
 #endif
 
 static struct taskbar_view compositor_taskbar_view(void);
@@ -241,6 +260,8 @@ struct compositor_frame
         // A window's picture composed from its runs (compositor_runs_note): each row of it, the stretches that are one colour
         // filled and the rest copied; none for a frame whose runs are not known, which is copied whole.
         const struct compositor_run_row *runs;
+        // The card's address of the first pixel, for a picture the card reads by an import of a client's dma-buf (0 for one its pages map).
+        positive gpu_base;
 };
 
 /*
@@ -1037,7 +1058,7 @@ typedef char compositor_gpu_why_fits[COMPOSITOR_GPU_WHY_COUNT <= WINDOWS_GPU_REA
 
 // A frame's picture's address for the GPU: in the map that holds all of it, 0 for none. A map that holds only its first byte (made when the window was
 // smaller) would have the card read its rows below from the addresses after that map's end, which are another buffer's: another window's pixels.
-#define compositor_gpu_va(f) gpu_va_bytes((f)->pixels, 4 * ((f)->pitch * (positive)((f)->height - 1) + (positive)(f)->width))
+#define compositor_gpu_va(f) ((f)->gpu_base ? (f)->gpu_base : gpu_va_bytes((f)->pixels, 4 * ((f)->pitch * (positive)((f)->height - 1) + (positive)(f)->width)))
 struct compositor_gscene
 {
         unsigned int *ops;                  // the records, in the GPU's buffer
@@ -4923,9 +4944,54 @@ static void compositor_preview_keep(void)
         }
 }
 
-// The buffer a window's picture is in, where the compositor made it: every row of it the output's width.
+// A row's picture the client's own buffer, read in place (wayland_host.c): its pixels and pitch, the card's address of them for a dma-buf, and
+// whether the row's picture is one at all. A row that is not one has its picture in the table.
+#ifdef CONFIG_MOONWATER_WAYLAND
+static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch);
+static positive compositor_lent_va(int row);
+static int compositor_lent(int row);
+static void compositor_wl_settle(int row);
+static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows);
+static void compositor_wl_lent_sync(int start);
+#else
+static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
+{
+        (void)row, (void)pitch;
+        return 0;
+}
+static positive compositor_lent_va(int row)
+{
+        (void)row;
+        return 0;
+}
+static int compositor_lent(int row)
+{
+        (void)row;
+        return 0;
+}
+static void compositor_wl_settle(int row)
+{
+        (void)row;
+}
+static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows)
+{
+        (void)rows, (void)windows;
+}
+static void compositor_wl_lent_sync(int start)
+{
+        (void)start;
+}
+#endif
+
+// The buffer a window's picture is in, where the compositor made it: every row of it the output's width; a client's own buffer for a row that
+// shows one (compositor_lent_pixels).
 static unsigned int *compositor_pixels(int row)
 {
+        unsigned long lent_pitch;
+        const unsigned int *lent = compositor_lent_pixels(row, &lent_pitch);
+
+        if (lent)
+                return (unsigned int *)lent;
         return (unsigned int *)((char *)compositor.table + compositor.pixels +
                                 ((unsigned long)row * 2 + compositor.front[row]) * compositor.buffer);
 }
@@ -4999,7 +5065,7 @@ static void compositor_learn_band(address_any context, positive index)
 // Whether a frame is a window's own picture at its own size, composed as it is in the table's buffer, and large enough to count.
 static int compositor_runs_eligible(int row, const struct compositor_frame *frame)
 {
-        return !frame->builtin && frame->pixels && frame->pixels == compositor_pixels(row) && !compositor_scaled(frame) &&
+        return !frame->builtin && frame->pixels && frame->pixels == compositor_pixels(row) && !compositor_scaled(frame) && !compositor_lent(row) &&
                frame->width >= 64 && frame->width <= COMPOSITOR_RUNS_WIDTH && frame->height >= 16 &&
                (unsigned long)frame->width * (unsigned long)frame->height * 4 >= PARALLEL_MINIMUM_BYTES;
 }
@@ -5091,7 +5157,8 @@ static void compositor_stretch(int row)
         unsigned int width = compositor.w[row], height = compositor.h[row];
         unsigned long stride = (unsigned long)compositor_stride();
 
-        if (!drawn_w || !drawn_h)
+        // A client's picture is never written: its window is the picture's size (compositor_wl_settle).
+        if (!drawn_w || !drawn_h || compositor_lent(row))
                 return;
         compositor_runs_forget(row);
 
@@ -5107,7 +5174,12 @@ static int compositor_output_scale(int at);
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
-        int line = compositor_frame_line(row), scale = compositor_row_scale(row);
+        int line, scale;
+        unsigned long lent_pitch;
+
+        // A client's picture is the size the window is, or it is let go of into the table first (its size changed).
+        compositor_wl_settle(row);
+        line = compositor_frame_line(row), scale = compositor_row_scale(row);
 
         // The corners are the window's own: UI_RADIUS at its scale, whatever the line comes to (it is a pixel at the least).
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
@@ -5115,6 +5187,8 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            (unsigned long)compositor_stride(), 0, null, 0,
                                            compositor_rounded(row) ? UI_RADIUS * scale / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
+        if (compositor_lent_pixels(row, &lent_pitch))
+                frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
         if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)frame->scale)
@@ -6398,6 +6472,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
+        if (compositor_lent(row))
+                return -1; // its picture is the client's buffer, not the table's that a plane would show
         if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
@@ -7118,6 +7194,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.table->glass[row])
                 return *why = 5, -1;
+        if (compositor_lent(row))
+                return *why = 18, -1; // its picture is the client's buffer, read in place: no table picture to scan out
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
         // the card, after it has drawn the pictures), so none is shown straight.
@@ -7489,6 +7567,8 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         if (f->builtin || f->width <= 0 || f->height <= 0) // no area: no picture to map
                 return 1;
         if (!f->pixels) // a frame with no picture is its line and corners only (a grid's border), and nothing to map
+                return 1;
+        if (f->gpu_base) // a client's dma-buf, imported to the card (compositor_wl_lend): its address is there already
                 return 1;
         if (f->pitch >= 1ull << 29)
                 return 0;
@@ -8123,7 +8203,18 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
 
         The windows go bottom to top, and the tabs over all of them.
 */
+static void compositor_present_frames(void);
+
+// A present: a dma-buf a window shows is read by the card or the processor, and its reads are bracketed by the kernel's sync for the
+// processor's (compositor_wl_lent_sync: the bracket for each window's dma-buf picture read in place, as a copy of one is).
 static void compositor_present(void)
+{
+        compositor_wl_lent_sync(1);
+        compositor_present_frames();
+        compositor_wl_lent_sync(0);
+}
+
+static void compositor_present_frames(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
         unsigned short clip[COMPOSITOR_DAMAGE][4];
@@ -8317,7 +8408,10 @@ static void compositor_present(void)
         }
 
 #ifdef MOONWATER_GPU_C
-        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
+        int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3);
+
+        if (gpu)
+                compositor_wl_count_card(rows, windows); // a width not a multiple of 4: the processor turns it (its strip is the processor's)
         int apart = !gpu && compositor_changed_ready();
 #else
         int apart = compositor_changed_ready(), gpu_composed = 0;

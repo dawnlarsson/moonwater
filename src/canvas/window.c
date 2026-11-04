@@ -1016,6 +1016,9 @@ struct windows
                 and gpu_steps the cool-downs in a row.
         */
         unsigned int gpu_on, gpu_able, gpu_state, gpu_steps;
+        // A client's (Wayland) picture: the committed pictures the compositor read where the client's buffer is (client_in_place) and the
+        // ones it copied into the table (client_copied), and the presents the card drew with such a picture in place (client_card).
+        unsigned int client_in_place, client_copied, client_card;
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u

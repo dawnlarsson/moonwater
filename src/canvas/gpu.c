@@ -9,7 +9,7 @@
 #define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024, the bases from GPU_BASES_AT
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
-static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned char imported_dead[8]; unsigned int address_to at; positive size, pending; } gpu;
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
@@ -846,7 +846,9 @@ static void gpu_map_refused(positive from)
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
-        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
+        // A map to read is registered read-only (AMDGPU_GEM_USERPTR_READONLY, 1, with the REGISTER and VALIDATE flags, 0xc): the pages of a client's pool are
+        // mapped read-only by the compositor, and a writable registration of them is refused (EPERM).
+        p64 up[3] = {from, to - from, written ? 0xcull : 0xdull}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
         long taken;
 
@@ -903,13 +905,20 @@ static positive gpu_va_written(const void *pointer, positive bytes)
         return 0;
 }
 
-// A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed.
+static b32 gpu_idle(void);
+static void gpu_unimport(positive at);
+
+// A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed, and the maps and imports let go of while
+// a job might still read them (gpu_forget, gpu_release_import) are dropped once the card is idle.
 static void gpu_trim(void)
 {
         gpu_tick++;
         for (unsigned int i = 0; i < gpu_map_count; i++)
-                if (gpu_tick - gpu_maps[i].used > 120)
+                if (gpu_tick - gpu_maps[i].used > 120 || (!gpu_maps[i].from && !gpu_maps[i].to && gpu_idle()))
                         gpu_drop(i--);
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                if (gpu.imported_dead[i] && gpu_idle())
+                        gpu_unimport(gpu.imported_va[i]), i = ~0u; // the list has moved: looked at again from the start
 }
 
 // The maps whose pages are not all there any more (the compositor let go of what one was made over: a glass window's backdrop, a band made again at another size)
@@ -925,15 +934,29 @@ static b32 gpu_drop_unmapped(void)
         return used;
 }
 
+// The GEM handle of a buffer on the GPU's own node, mapped read and never run at the address for bytes: its address, 0 for a refusal (the handle
+// closed then, unless an import holds it already). The handle is the GPU's: gpu_import and gpu_import_fd make it, and gpu_unimport closes it.
+static positive gpu_import_at(unsigned int handle, positive bytes, positive at)
+{
+        p64 va[8] = {handle, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}, close[1] = {handle};
+        b32 held = false;
+
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                held |= gpu.imported[i] == handle; // the same buffer again: the kernel answers the handle it gave before
+        if (!gpu_io(1u, 8, 64, va))
+                return held || system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), 0;
+        gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported_dead[gpu.imports] = 0, gpu.imported[gpu.imports++] = handle;
+        gpu_map_next = at + va[4];
+        return at;
+}
+
 // A buffer of another node of the card (the scanout's dumb buffer on the display node, by its handle on that node's descriptor), made reachable here: its address, 0 for none.
 // bytes is its size; the address is the one it keeps while the buffer lives.
 // A refusal lets go of what it took (the compositor asks again each present): the shared descriptor always, the handle unless an import held already has it.
 static positive gpu_import(int node, unsigned int handle, positive bytes)
 {
         unsigned int share[3] = {handle, 2 | 0x80000, 0};
-        positive at = gpu.imports == 8 ? 0 : gpu_place((bytes + 4095) & ~4095ull);
-        p64 va[8] = {0, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}, close[1]; // read and written, never run
-        b32 held = false;
+        positive at = gpu.imports == 8 ? 0 : gpu_place((bytes + 4095) & ~4095ull), got;
 
         if (!at || system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;
@@ -941,14 +964,43 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
         if (system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
                 return system_close((int)share[2]), 0;
         system_close((int)share[2]);
-        va[0] = close[0] = share[0];
+        got = gpu_import_at(share[0], bytes, at);
+        return got;
+}
+
+// A client's dma-buf (a descriptor the caller keeps, which is not closed here), made reachable to the GPU as gpu_import makes a buffer: the
+// card's handle is the buffer's on the GPU's own node (the same device the client allocates on). 0 for a refusal, and for a buffer the GPU
+// already has an import of (its handle would be the one held: a second import is refused, not made).
+static positive gpu_import_fd(int fd, positive bytes)
+{
+        unsigned int share[3] = {0, 0, (unsigned int)fd};
+        positive at = gpu.imports == 8 ? 0 : gpu_place((bytes + 4095) & ~4095ull), got;
+
+        if (gpu.broken || gpu.fd < 0 || !at || system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
+                return 0;
         for (unsigned int i = 0; i < gpu.imports; i++)
-                held |= gpu.imported[i] == share[0]; // the same buffer again: the kernel answers the handle it gave before
-        if (!gpu_io(1u, 8, 64, va))
-                return held || system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), 0;
-        gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported[gpu.imports++] = share[0];
-        gpu_map_next = at + va[4];
-        return at;
+                if (gpu.imported[i] == share[0])
+                        return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, share), 0;
+        got = gpu_import_at(share[0], bytes, at);
+        return got;
+}
+
+// Whether the GPU is up to be given a buffer (the card's node is open and it has not been broken).
+static b32 gpu_ready(void)
+{
+        return !gpu.broken && gpu.fd >= 0;
+}
+
+// The maps over [from, from + bytes) let go of, as the compositor unmaps or moves the pages (a client's pool, cut, shrunk, remapped): a map's
+// pages are the old ones, which the card would read where the processor reads the new. A map is taken out of every address now (its from and to
+// are 0, its va kept for the unmap) and dropped by gpu_trim once the card is idle: a job of this present may still name it.
+static void gpu_forget(const void *addr, positive bytes)
+{
+        positive from = (positive)addr, to = from + bytes;
+
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (from < gpu_maps[i].to && gpu_maps[i].from < to)
+                        gpu_maps[i].from = gpu_maps[i].to = 0;
 }
 
 // A buffer gpu_import made, let go of (its mode changed, it was made again): unmapped and closed.
@@ -962,7 +1014,18 @@ static void gpu_unimport(positive at)
                         gpu_io(1u, 8, 64, va);
                         system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
-                        gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imports--;
+                        gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1], gpu.imports--;
+                        return;
+                }
+}
+
+// An import let go of: unmapped by the gpu_trim after the card is idle (a job of this present may still name it, so not now).
+static void gpu_release_import(positive at)
+{
+        for (unsigned int i = 0; at && i < gpu.imports; i++)
+                if (gpu.imported_va[i] == at)
+                {
+                        gpu.imported_dead[i] = 1;
                         return;
                 }
 }

@@ -468,6 +468,52 @@ if [ "$?" != 2 ]; then
         fi
 fi
 
+# A window's picture the card reads where the client's buffer is, and the processor reads the same: one window composed on the card and then by the
+# processor (the same client, still), the screen the same byte for byte. Without a card there is one composition and nothing to compare.
+case $extra in
+*-G*)
+        "$client" -n 1000000 -s -w 320 -h 240 -q > /dev/null 2>&1 &
+        held=$!
+        sleep 1
+        cp "$work/scan.img" "$work/card.img"
+        kill "$held" 2> /dev/null
+        wait "$held" 2> /dev/null
+        stop
+        extra=
+        if start; then
+                "$client" -n 1000000 -s -w 320 -h 240 -q > /dev/null 2>&1 &
+                held=$!
+                sleep 1
+                cp "$work/scan.img" "$work/processor.img"
+                kill "$held" 2> /dev/null
+                wait "$held" 2> /dev/null
+                if cmp -s "$work/card.img" "$work/processor.img"; then
+                        row ok "the card's picture of a client's window is the processor's, byte for byte"
+                else
+                        row FAIL "the card's picture of a client's window is the processor's, byte for byte" "the screens differ"
+                fi
+                stop
+        else
+                row FAIL "the compositor starts without the card for the comparison" "$(tail -3 "$work/compositor.log")"
+        fi
+        extra=-G
+        start || row FAIL "the compositor starts again after the comparison" "$(tail -3 "$work/compositor.log")" ;;
+esac
+
+# A client that cuts the files of its buffers under the compositor once five frames are drawn, and goes: the compositor reads a picture that is
+# gone (zeros over the pool, the read that faulted goes on), goes on, and shows the next client.
+out=$("$client" -T -n 30 -w 200 -h 120 2>&1)
+sleep 1
+if alive; then
+        out=$("$client" -n 5 -w 200 -h 120 2>&1)
+        case $out in
+        *"frames 5"*) row ok "a client that cuts its buffers' files under the compositor leaves it running, and the next client is shown" ;;
+        *) row FAIL "a client that cuts its buffers' files under the compositor leaves it running, and the next client is shown" "$out" ;;
+        esac
+else
+        row FAIL "a client that cuts its buffers' files under the compositor leaves it running" "$(tail -3 "$work/compositor.log")"
+fi
+
 # The compositor ends when asked, and takes its socket with it.
 stop
 if [ ! -S /run/moonwater/wayland-0 ]; then

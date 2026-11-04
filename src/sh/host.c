@@ -22228,7 +22228,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
             "it is not wholly on the screen", "it is too short past its corners and close button", "it meets the tabs",
             "the card has no overlay for it", "the card refused its framebuffer", "the card refused the overlay",
             "the desktop spans more than one screen", "a finger's mark is drawn", "a screen is turned",
-            "it is drawn from its list (the card writes its picture)"};
+            "it is drawn from its list (the card writes its picture)", "its picture is a client's buffer, read in place"};
         const struct windows address_to table;
         char driver[17];
         unsigned int screens;
@@ -22428,6 +22428,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->wl_input_ms)
                 host_say(log, "  shortcuts       %p windows have an active keyboard shortcuts inhibitor: the compositor's chords are off for them, and Super with Escape held a second gives the keys back\n",
                          (positive)table->wl_shortcuts);
+        //      The client pictures (the Wayland shim): committed pictures read where the client's buffer is, copied, and the card's presents that read one.
+        if (table->client_in_place || table->client_copied)
+                host_say(log, "  client frames   %p read in place, %p copied into the table; the card drew %p presents with one in place\n",
+                         (positive)table->client_in_place, (positive)table->client_copied, (positive)table->client_card);
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)

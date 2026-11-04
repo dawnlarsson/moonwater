@@ -7,7 +7,7 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-T] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
         -L lock the pointer and say each relative motion (built with -DHAVE_GAMES: the relative pointer and pointer constraints
@@ -17,6 +17,7 @@
         a client that knows whole scales only, with no fractional scale or viewport), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
         there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
+        -T cut the files of its buffers to nothing once five frames are drawn, and exit: the compositor reads the pool it was shown in.
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
         compiled by libxkbcommon and each key says its keysym and its text).
         Exit 0 once the frames are drawn, 1 on a protocol error or a connection that ends, 2 when it cannot start.
@@ -58,6 +59,7 @@ struct buffer
 {
         struct wl_buffer *buffer;
         void *data;
+        int fd;     // the pool's file, kept for -T
         int busy;
         int stride; // pixels a row
         int dmabuf; // the descriptor when the buffer is a dma-buf, else -1
@@ -128,7 +130,7 @@ static struct xdg_toplevel *toplevel;
 static struct wl_callback *frame_callback;
 static struct buffer buffers[2];
 
-static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only;
+static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only, cut_files;
 static int child_wanted, maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
 static const char *title = "wayland-shm", *app_id = "wayland-shm";
 
@@ -190,11 +192,13 @@ static int make_shm_buffer(struct buffer *b, int w, int h)
         if (b->data == MAP_FAILED)
                 return -1;
         b->size = (size_t)size;
+        b->fd = fd;
         pool = wl_shm_create_pool(shm, fd, size);
         b->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_XRGB8888);
         wl_buffer_add_listener(b->buffer, &buffer_listener, b);
         wl_shm_pool_destroy(pool);
-        close(fd);
+        if (!cut_files)
+                close(fd);
         b->busy = 0;
         return 0;
 }
@@ -265,6 +269,15 @@ static void redraw(void)
 #endif
         if (!b || !ready)
                 return;
+        // -T: the files cut under the compositor once it has shown five frames, and this client gone
+        if (cut_files && frames == 5)
+        {
+                for (int at = 0; at < 2; at++)
+                        if (buffers[at].fd > 0)
+                                ftruncate(buffers[at].fd, 0);
+                wl_display_flush(display);
+                _exit(0);
+        }
         paint(b, frames);
         wl_surface_attach(surface, b->buffer, 0, 0);
         if (damage_only)
@@ -943,7 +956,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLSIC:Pqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLSIC:PqvT")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -964,6 +977,7 @@ int main(int argc, char **argv)
                 case 'P': paste_wanted = 1; break;
                 case 'q': quiet = 1; break;
                 case 'v': verbose = 1; break;
+                case 'T': cut_files = 1; break;
                 default: return 2;
                 }
         display = wl_display_connect(0);

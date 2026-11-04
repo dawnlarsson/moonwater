@@ -95,6 +95,7 @@
 #define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
 #define WAYLAND_CLIP_CLIPBOARD 0
 #define WAYLAND_CLIP_PRIMARY 1
+#define WAYLAND_PICTURE_LENT 2                 // row_picture's answer: the host reads the buffer in place and keeps it (see struct wayland_host)
 #define WAYLAND_DMABUF_ENTRIES 32    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
 #define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
@@ -227,6 +228,10 @@ struct wayland_picture
         // A picture whose pixels are a dma-buf's: its descriptor, which the host brackets its reads with (and waits on the
         // buffer's writer through) and may skip, answering 1 where the buffer is not ready; -1 for pixels that are plain memory.
         long sync_fd;
+        // The mapping the pixels are in (a pool's, or a dma-buf's CPU mapping) and its size: a picture the host may read where it is
+        // (WAYLAND_PICTURE_LENT) names the whole of it, and is 0 and 0 for a picture of pixels that are not a client's buffer.
+        const unsigned char *map;
+        long map_bytes;
 };
 
 struct wayland_facts
@@ -258,6 +263,9 @@ struct wayland_host
         void (*close)(void *context, long fd);
         int (*row_open)(void *context, long client, long kind, int parent_row, long x, long y);
         void (*row_close)(void *context, int row);
+        // row_picture: 0 for a picture copied into the row (the buffer is released by the commit), WAYLAND_PICTURE_LENT when the host reads
+        // the buffer where it is and keeps it: the shim holds the buffer until the picture is replaced and the frame that shows the
+        // replacement is drawn (wayland_presented), 1 for a buffer not read yet, -1 for a refusal.
         int (*row_picture)(void *context, int row, const struct wayland_picture *picture);
         void (*row_title)(void *context, int row, const char *text, long length);
         void (*row_do)(void *context, int row, long what, long a, long b);
@@ -382,6 +390,9 @@ struct wayland_surface
         long geometry_x, geometry_y, geometry_width, geometry_height;
         unsigned char geometry_set;
         long window_x, window_y, window_w, window_h; // the part of the picture last shown as the window, in pixels
+        // The buffers this window's picture is read in place from (WAYLAND_PICTURE_LENT): the one that is the picture, and the one it
+        // replaced, held until the frame that shows the replacement is drawn (buffer index + 1, 0 for none).
+        unsigned short lent, lent_gone;
         // A toplevel.
         char title[WAYLAND_TEXT];
         char app_id[WAYLAND_TEXT];
@@ -1298,8 +1309,12 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
 static void wayland_constraints_update(void);
 static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
 
+static void wayland_let_go(struct wayland_client *c, long index);
+
 static void wayland_row_release(struct wayland_client *c, struct wayland_surface *s)
 {
+        long lent = s->lent, gone = s->lent_gone;
+
         if (s->row < 0)
                 return;
         wayland.row_client[s->row] = wayland.row_surface[s->row] = -1;
@@ -1309,6 +1324,12 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         if (wayland.keyboard_row == s->row)
                 wayland.keyboard_row = -1;
         wayland.host->row_close(wayland.host->context, s->row);
+        // The window is gone, so the host has let go of what it read in place: the buffers its picture was are the client's again.
+        s->lent = s->lent_gone = 0;
+        if (lent)
+                wayland_let_go(c, lent - 1);
+        if (gone)
+                wayland_let_go(c, gone - 1);
         wayland.rows--;
         s->row = -1;
         s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
@@ -1419,15 +1440,11 @@ static int wayland_sub_synced(struct wayland_client *c, struct wayland_surface *
         return 0;
 }
 
-// A held buffer let go: its record is freed if its object was destroyed while it was held, else its client is told.
-static void wayland_unhold(struct wayland_client *c, struct wayland_surface *s)
+// A buffer held by a surface let go of (buffer index): its record is freed if its object was destroyed while it was held, else its client is told.
+static void wayland_let_go(struct wayland_client *c, long index)
 {
-        struct wayland_buffer *b;
+        struct wayland_buffer *b = &c->buffers[index];
 
-        if (!s->held)
-                return;
-        b = &c->buffers[s->held - 1];
-        s->held = 0;
         b->held--;
         if (b->zombie && b->held <= 0)
         {
@@ -1444,6 +1461,31 @@ static void wayland_unhold(struct wayland_client *c, struct wayland_surface *s)
                 if (slot >= 0)
                         wayland_release_buffer(c, slot);
         }
+}
+
+// The buffer a surface replaced while it was lent, let go of: unless it is the one the commit attaches (now), whose release the commit makes
+// itself, so it is only given up here (its hold is the commit's to end).
+static void wayland_gone_let(struct wayland_client *c, struct wayland_surface *s, struct wayland_buffer *now)
+{
+        long index = s->lent_gone - 1;
+
+        s->lent_gone = 0;
+        if (&c->buffers[index] == now)
+                c->buffers[index].held--;
+        else
+                wayland_let_go(c, index);
+}
+
+// A held buffer let go: its record is freed if its object was destroyed while it was held, else its client is told.
+static void wayland_unhold(struct wayland_client *c, struct wayland_surface *s)
+{
+        long index;
+
+        if (!s->held)
+                return;
+        index = s->held - 1;
+        s->held = 0;
+        wayland_let_go(c, index);
 }
 
 static int wayland_has_children(struct wayland_client *c, long parent)
@@ -1530,6 +1572,8 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
                 return;
         wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         none.pixels = 0;
+        none.map = 0;
+        none.map_bytes = 0;
         none.stride = 0;
         none.width = none.height = 0;
         none.format = 0;
@@ -1590,6 +1634,8 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         b = &c->buffers[child->held - 1];
         wayland_sub_offset(c, child, &ox, &oy);
         picture.pixels = (const unsigned char *)c->pools[b->pool].at + b->offset;
+        picture.map = 0;
+        picture.map_bytes = 0;
         picture.stride = b->stride;
         picture.width = b->width;
         picture.height = b->height;
@@ -2306,6 +2352,8 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.row_height = wh;
         picture.blend = 0;
         picture.sync_fd = p->dmabuf ? p->fd : -1;
+        picture.map = (const unsigned char *)p->at;
+        picture.map_bytes = p->size;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
         picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale120 != s->scale120 || !s->damages ||
                        s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;
@@ -2337,6 +2385,35 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 picture.damage[picture.damages++] = r;
         }
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
+        // A picture the host reads in place keeps its buffer: it is the surface's lent buffer, and the one it replaced is let go of when
+        // the frame that shows this one is drawn. Any other picture (copied) lets the replaced buffer go then too.
+        if (status == WAYLAND_PICTURE_LENT)
+        {
+                unsigned short now = (unsigned short)((b - c->buffers) + 1);
+
+                if (s->lent != now)
+                {
+                        if (s->lent_gone == now)
+                                s->lent_gone = 0; // its hold is the picture's now
+                        else
+                        {
+                                b->held++;
+                                if (s->lent_gone)
+                                        wayland_gone_let(c, s, b);
+                        }
+                        if (s->lent)
+                                s->lent_gone = s->lent;
+                        s->lent = now;
+                }
+                status = 0;
+        }
+        else if (s->lent && status == 0) // copied: the picture is the table's now (a buffer not read yet leaves the lent picture as it was)
+        {
+                if (s->lent_gone)
+                        wayland_gone_let(c, s, b);
+                s->lent_gone = s->lent;
+                s->lent = 0;
+        }
         c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
         for (long at = 0; !picture.full && at < picture.damages; at++)
                 c->budget_used += picture.damage[at].width * picture.damage[at].height;
@@ -2512,8 +2589,12 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 }
                 else
                 {
+                        unsigned short now = (unsigned short)(c->objects[buffer].link + 1);
+
                         wayland_unhold(c, s);
-                        wayland_release_buffer(c, buffer);
+                        // A buffer the surface still holds as its picture, or as the one it replaced, is let go of by the shim later.
+                        if (s->lent != now && s->lent_gone != now)
+                                wayland_release_buffer(c, buffer);
                 }
         }
         else if (s->attach_made && !s->attached)
@@ -6852,6 +6933,12 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
                         continue;
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
+                // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
+                if (s->lent_gone)
+                {
+                        wayland_let_go(c, s->lent_gone - 1);
+                        s->lent_gone = 0;
+                }
                 wayland_presentings_done(c, s, when, refresh, seq, flags);
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)

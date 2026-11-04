@@ -98,7 +98,19 @@ static struct
                 volatile unsigned long at, size;
                 volatile int bad;
         } map[WAYLAND_CLIENTS * WAYLAND_POOLS];
-} compositor_wl = {.listen = -1, .wake = -1};
+        // The client's own pictures the row shows, read in place (compositor_wl_lend): the first pixel of the picture in the client's
+        // buffer, its pitch in pixels and its size, the card's address of that pixel when it is a dma-buf (its import's address, let go
+        // of when the picture is) and the mapping the buffer is in. pixels 0 for a row whose picture is the table's.
+        struct
+        {
+                const unsigned int *pixels;
+                unsigned long pitch;
+                long width, height;
+                positive va, import;
+                const unsigned char *map;
+                long fd;
+        } lent[WINDOWS];
+} compositor_wl = {.listen = -1, .wake = -1, .lent = {{0}}};
 
 /* ---- the keymap a client reads ---- */
 
@@ -378,9 +390,12 @@ static void *compositor_wl_map(void *context, long fd, long size)
 
 static void *compositor_wl_remap(void *context, void *at, long old_size, long new_size)
 {
-        long got = compositor_call(syscall(mremap), (positive)at, (positive)old_size, (positive)new_size, 1, 0, 0);
+        long got;
 
         (void)context;
+        // The card's maps of the old pages are let go of: the pages move (a map of them would be the old ones).
+        gpu_forget(at, (positive)old_size);
+        got = compositor_call(syscall(mremap), (positive)at, (positive)old_size, (positive)new_size, 1, 0, 0);
         if (got < 0 && got > -4096)
                 return 0;
         for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
@@ -395,6 +410,7 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
 static void compositor_wl_unmap(void *context, void *at, long size)
 {
         (void)context;
+        gpu_forget(at, (positive)size);
         for (long slot = 0; slot < WAYLAND_CLIENTS * WAYLAND_POOLS; slot++)
                 if (compositor_wl.map[slot].at == (unsigned long)at)
                 {
@@ -534,11 +550,13 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         return -1;
 }
 
+static void compositor_wl_unlend(int row);
+
 static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
         if (row >= 0 && row < WINDOWS)
-                compositor_wl.laying[row].open = 0;
+                compositor_wl.laying[row].open = 0, compositor_wl_unlend(row);
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
@@ -589,6 +607,160 @@ static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
 static int compositor_wl_dmabuf_ready(long client, int fd);
 static int compositor_wl_sync_start(long client, int fd);
 
+/*
+        A row's picture the client's own buffer (compositor_wl_lend): the table is not written for it at all. The card reads the buffer's pages
+        (a pool is a file, mapped for it as a window's picture is; a dma-buf is imported to the GPU and its address kept), and the processor the
+        same pixels, through the pitch given here. It holds while the picture is the row's: a commit that replaces it, a copy the row takes, a
+        size the window grows to (compositor_wl_settle) and the row's close each let it go, and what it needed is let go with it (the import).
+*/
+static int compositor_lent(int row)
+{
+        return row >= 0 && row < WINDOWS && compositor_wl.lent[row].pixels != 0;
+}
+
+static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
+{
+        if (!compositor_lent(row))
+                return 0;
+        *pitch = compositor_wl.lent[row].pitch;
+        return compositor_wl.lent[row].pixels;
+}
+
+// The card's address of a lent picture's first pixel, for a dma-buf (0 for a pool, which the card maps by its pages).
+static positive compositor_lent_va(int row)
+{
+        return compositor_lent(row) ? compositor_wl.lent[row].va : 0;
+}
+
+// The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's.
+static void compositor_wl_unlend(int row)
+{
+        if (!compositor_lent(row))
+                return;
+        if (compositor_wl.lent[row].import)
+                gpu_release_import(compositor_wl.lent[row].import);
+        memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
+}
+
+// The lent picture copied into a table buffer, whole, and then let go of: the row's picture is that buffer's from here on. Its size is the
+// picture's, which the table's buffers hold (a lend is only for a picture of the table's size at most).
+static void compositor_wl_seed(int row, unsigned int which)
+{
+        unsigned int *to;
+        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END, as a copy of a dma-buf is bracketed
+
+        if (!compositor_lent(row))
+                return;
+        to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
+        if (compositor_wl.lent[row].fd >= 0)
+                compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        if (compositor_wl.lent[row].fd >= 0)
+                memory_copy_rect_stream_u32(to, (unsigned long)compositor_stride(), compositor_wl.lent[row].pixels, compositor_wl.lent[row].pitch,
+                                            (unsigned long)compositor_wl.lent[row].width, (unsigned long)compositor_wl.lent[row].height);
+        else
+                memory_copy_rect_u32(to, (unsigned long)compositor_stride(), compositor_wl.lent[row].pixels, compositor_wl.lent[row].pitch,
+                                     (unsigned long)compositor_wl.lent[row].width, (unsigned long)compositor_wl.lent[row].height);
+        if (compositor_wl.lent[row].fd >= 0)
+        {
+                sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+                compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        }
+        compositor_wl_unlend(row);
+}
+
+/*
+        The lent picture of a row whose window is not the size of the picture (it grew or shrank since the commit, and the compositor is to
+        draw the picture stretched, or a picture of another size is the one shown): the picture is copied into the table, which can be
+        stretched there, and the row is the table's. A lent picture that the pool was cut under is drawn from the zero pages the SIGBUS
+        handler maps over it, and its card maps are let go of, so the card maps the zero pages too.
+*/
+static void compositor_wl_settle(int row)
+{
+        if (!compositor_lent(row))
+                return;
+        if (compositor_wl_cut(compositor_wl.lent[row].pixels))
+                gpu_forget(compositor_wl.lent[row].pixels, (positive)compositor_wl.lent[row].height * compositor_wl.lent[row].pitch * 4);
+        if (compositor.w[row] != (unsigned int)compositor_wl.lent[row].width || compositor.h[row] != (unsigned int)compositor_wl.lent[row].height)
+                compositor_wl_seed(row, compositor.front[row]);
+}
+
+// The dma-buf reads of the pictures shown in place are bracketed for a present: started before the frames are built and ended after (the
+// kernel's sync, which is what makes a processor read of a dma-buf coherent on the architectures that need it).
+static void compositor_wl_lent_sync(int start)
+{
+        unsigned long sync = start ? 1 : 5; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, then END
+
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor_lent(row) && compositor_wl.lent[row].fd >= 0)
+                        compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+}
+
+// A present the card drew: counted once when it read a client's picture in place.
+static void compositor_wl_count_card(const unsigned char *rows, unsigned int windows)
+{
+        for (unsigned int at = 0; at < windows && compositor.table; at++)
+                if (compositor_lent(rows[at]))
+                {
+                        compositor.table->client_card++;
+                        return;
+                }
+}
+
+// A picture the card or the processor can read where it is: the whole window's, or the part of its buffer the window is (the picture's
+// offset is minus its destination), of the size the window is, from a buffer that holds it. A dma-buf's card address is its import's,
+// which is made here, and is refused (no lend) when the card is not up or has no room for it.
+static int compositor_wl_lend(int row, const struct wayland_picture *picture, long width, long height)
+{
+        long x = -picture->dest_x, y = -picture->dest_y;
+        unsigned long stride = (unsigned long)picture->stride;
+        const unsigned char *at;
+        positive va = 0, import = 0;
+        int same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd;
+
+        // Only a picture the client says is all changed is the buffer's: a partial damage is a change over what the window showed, which a
+        // client that reuses its buffers (Xwayland's root) does not keep whole in the buffer (the copy lays the damage over the window).
+        if (!picture->pixels || !picture->map || picture->blend || !picture->last || !(picture->full || !picture->damages) || x < 0 || y < 0 ||
+            width <= 0 || height <= 0)
+                return 0;
+        if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
+                return 0;
+        if (stride & 3 || stride < (unsigned long)picture->width * 4)
+                return 0;
+        at = picture->pixels + (unsigned long)y * stride + (unsigned long)x * 4;
+        // The pool's file cut under the read: the window's first and last pixel are read here, as a copy would read them, so a pool cut before
+        // this commit is found now (the SIGBUS handler maps zeros over it and marks it), and the picture is refused as a copy is refused.
+        {
+                volatile unsigned int probe;
+
+                probe = *(const volatile unsigned int *)at;
+                probe = probe + *(const volatile unsigned int *)(at + (unsigned long)(height - 1) * stride + (unsigned long)(width - 1) * 4);
+                (void)probe;
+        }
+        if (compositor_wl_cut(picture->pixels))
+                return 0;
+        if (picture->sync_fd >= 0)
+        {
+                if (!gpu_ready())
+                        return 0;
+                // The import is the buffer's, from its start: the same one while the buffer is the same, else a new one.
+                import = same ? compositor_wl.lent[row].import : gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                if (!import)
+                        return 0;
+                va = import + (positive)(at - picture->map);
+        }
+        if (compositor_lent(row) && !same && compositor_wl.lent[row].import)
+                gpu_release_import(compositor_wl.lent[row].import);
+        compositor_wl.lent[row].pixels = (const unsigned int *)at;
+        compositor_wl.lent[row].pitch = stride / 4;
+        compositor_wl.lent[row].width = width;
+        compositor_wl.lent[row].height = height;
+        compositor_wl.lent[row].va = va;
+        compositor_wl.lent[row].import = import;
+        compositor_wl.lent[row].map = picture->map;
+        compositor_wl.lent[row].fd = picture->sync_fd;
+        return 1;
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -609,6 +781,22 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
+        // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
+        // drawn whole from it. Its dma-buf's reads are bracketed as a copy's are (the writer waited for above), and ended here.
+        if (picture->pixels && picture->last && !compositor_wl.laying[row].open && compositor_wl_lend(row, picture, width, height))
+        {
+                unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ: nothing is read here, the card and the processor read it later
+
+                if (picture->sync_fd >= 0)
+                        compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                table->width[row] = (unsigned int)width;
+                table->height[row] = (unsigned int)height;
+                table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0; // the whole picture
+                table->client_in_place++;
+                __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
+                compositor_take(row);
+                return WAYLAND_PICTURE_LENT;
+        }
         if (!compositor_wl.laying[row].open)
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
@@ -627,6 +815,16 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                              (const unsigned int *)((char *)table + compositor.pixels +
                                                                     ((unsigned long)row * 2 + shown) * compositor.buffer),
                                              pitch, (unsigned long)width, (unsigned long)height);
+                // A row that was shown in place: the table's buffer is made the picture's first (a copy of the whole of it, unless this picture
+                // covers the window), so the copies below lay over what the window showed, and the window is drawn whole.
+                if (compositor_lent(row))
+                {
+                        if (!covers)
+                                compositor_wl_seed(row, compositor_wl.laying[row].which);
+                        else
+                                compositor_wl_unlend(row);
+                        compositor_wl.laying[row].full = 1;
+                }
         }
         to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer);
         if (picture->pixels)
@@ -695,6 +893,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         }
         if (!picture->last)
                 return 0;
+        table->client_copied++;
         if (width != (long)table->width[row] || height != (long)table->height[row] || !compositor_wl.laying[row].touched)
                 compositor_wl.laying[row].full = 1;
         table->width[row] = (unsigned int)width;
