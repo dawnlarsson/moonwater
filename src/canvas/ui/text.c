@@ -3406,6 +3406,20 @@ static fn doc_move(struct doc address_to doc, p64 (address_to step)(const struct
         doc->closer_count = 0;
 }
 
+// Every selection collapsed to its end (to_end) or its start, the caret there; a horizontal key also forgets its goal column
+// (reset_goal). The caller normalizes and seals: a vertical key does its walk over the collapsed carets first.
+static fn doc_collapse(struct doc address_to doc, b32 to_end, b32 reset_goal)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+
+                sel->anchor = sel->active = to_end ? doc_sel_end(sel) : doc_sel_start(sel);
+                if (reset_goal)
+                        sel->goal = -1;
+        }
+}
+
 /*
         Left and Right: a caret steps a cluster; without Shift a selection collapses to the end the key points at
         rather than stepping.
@@ -3414,13 +3428,7 @@ static fn doc_move_horizontal(struct doc address_to doc, b32 right, b32 word, b3
 {
         if (!extend && !word && doc_any_selected(doc))
         {
-                for (positive s = 0; s < doc->selection_count; s++)
-                {
-                        struct doc_selection address_to sel = &doc->selections[s];
-
-                        sel->anchor = sel->active = right ? doc_sel_end(sel) : doc_sel_start(sel);
-                        sel->goal = -1;
-                }
+                doc_collapse(doc, right, true);
                 doc_normalize(doc);
                 doc_seal(doc);
                 return;
@@ -3463,12 +3471,7 @@ static fn doc_move_vertical(struct doc address_to doc, b64 lines, b32 extend)
         p64 count = doc_line_count(doc);
 
         if (!extend && doc_any_selected(doc) && (lines == 1 || lines == -1))
-                for (positive s = 0; s < doc->selection_count; s++)
-                {
-                        struct doc_selection address_to sel = &doc->selections[s];
-
-                        sel->active = sel->anchor = lines < 0 ? doc_sel_start(sel) : doc_sel_end(sel);
-                }
+                doc_collapse(doc, lines > 0, false);
         for (positive s = 0; s < doc->selection_count; s++)
         {
                 struct doc_selection address_to sel = &doc->selections[s];

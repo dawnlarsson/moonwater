@@ -132353,6 +132353,33 @@ static void check_kit_pointer_send(struct ui address_to wui)
         the pixels of item 1 and nowhere else (the editor's file tabs with changes are this).
 */
 /*
+        A selection collapses on a key that does not extend it: a horizontal key to the end or the start the key points at (and forgets
+        the caret's goal column), and a vertical key from the start or the end, and then it walks a line from there (doc_collapse).
+*/
+static void check_doc_collapse(void)
+{
+    static unsigned char text[] = "abc\ndef\n";
+    struct doc doc;
+    struct doc_selection address_to primary;
+
+    doc_open(&doc, text, 8);
+    doc_select_set(&doc, 1, 5);
+    doc_move_horizontal(&doc, 0, 0, 0);
+    primary = &doc.selections[doc.primary];
+    check("doc collapse: a left key with a selection collapses it to its start, its goal forgotten",
+          doc.selection_count == 1 && primary->active == 1 && primary->anchor == 1 && primary->goal == -1);
+    doc_select_set(&doc, 1, 5);
+    doc_move_horizontal(&doc, 1, 0, 0);
+    primary = &doc.selections[doc.primary];
+    check("doc collapse: a right key with a selection collapses it to its end", doc.selection_count == 1 && primary->active == 5 && primary->anchor == 5);
+    doc_select_set(&doc, 1, 5);
+    doc_move_vertical(&doc, -1, 0);
+    primary = &doc.selections[doc.primary];
+    check("doc collapse: an up key with a selection walks from its start, the line above the start's line", primary->active == 0 && primary->anchor == 0);
+    doc_close(&doc);
+}
+
+/*
         The columns of a line are one walk (doc_cluster_measure): a wide character takes two, a column in its first half is the
         boundary before it and in its second half the one after, and past the line's end the line's end. Both directions agree.
 */
@@ -151863,6 +151890,7 @@ static fn field_check(struct ui address_to wui)
         check_kit_pointer_send(wui);
         check_tabs_marks(wui);
         check_doc_columns();
+        check_doc_collapse();
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);
