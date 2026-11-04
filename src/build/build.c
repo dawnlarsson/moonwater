@@ -6931,6 +6931,35 @@ static b32 build_boot(string_address image, bool console, string_address arch,
                 words[count++] = "host";
         }
 
+        //      Sound: an HDA controller with an output-only codec on the host's own audio backend (coreaudio on a Mac, else the
+        //      first of pipewire, pa, alsa and sdl this QEMU has), so the guest has a card to play to; output only, so a VM never
+        //      opens the host's microphone. With no device the guest's sound server had nothing to open: its mixer showed a volume
+        //      and a device, and nothing was heard. No backend here, no device.
+        {
+                string_address ask[4];
+                string_address drivers[5] = {"coreaudio", "pipewire", "pa", "alsa", "sdl"};
+                string_address arguments[5] = {"coreaudio,id=snd0", "pipewire,id=snd0", "pa,id=snd0", "alsa,id=snd0", "sdl,id=snd0"};
+
+                ask[0] = emulator;
+                ask[1] = "-audiodev";
+                ask[2] = "help";
+                ask[3] = null;
+
+                if (build_capture_words((string_address address_to)ask,
+                                        build_file_one, BUILD_FILE_ROOM) >= 0)
+                        for (positive at = 0; at < 5; at++)
+                                if (build_word_listed((string_address)build_file_one, drivers[at]))
+                                {
+                                        words[count++] = "-audiodev";
+                                        words[count++] = arguments[at];
+                                        words[count++] = "-device";
+                                        words[count++] = "intel-hda";
+                                        words[count++] = "-device";
+                                        words[count++] = "hda-output,audiodev=snd0";
+                                        break;
+                                }
+        }
+
         words[count++] = "-append";
         words[count++] = build_boot_setting("kernel_cmdline", arch);
 

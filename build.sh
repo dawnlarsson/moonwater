@@ -891,6 +891,23 @@ set -- "$@" \
         -device virtio-rng-pci \
         -no-reboot
 
+#       Sound: a card for the guest to play to, an HDA controller with an output-only codec on the host's own audio backend
+#       (coreaudio on a Mac, otherwise the first of pipewire, pa, alsa and sdl this QEMU has). Output only, so the VM never opens
+#       the host's microphone. The line before this one had no audio device at all, and the guest's sound server had nothing to
+#       open: its mixer showed a volume and a device, and nothing was heard. No backend here, no device, as before.
+audio_drivers=$("$emulator" -audiodev help 2>/dev/null || true)
+if [ "$(uname)" = Darwin ]; then
+        audio_wanted="coreaudio"
+else
+        audio_wanted="pipewire pa alsa sdl"
+fi
+for candidate in $audio_wanted; do
+        if echo "$audio_drivers" | grep -qw "$candidate"; then
+                set -- "$@" -audiodev "$candidate,id=snd0" -device intel-hda -device hda-output,audiodev=snd0
+                break
+        fi
+done
+
 # Hardware acceleration where this QEMU has it and the guest is this
 # machine's own architecture: hvf on macOS, kvm on Linux. -cpu host
 # replaces the model above, which is what you want when the guest is running
