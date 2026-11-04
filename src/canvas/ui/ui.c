@@ -370,9 +370,8 @@ static unsigned int ui_tone_cover(unsigned int tone, unsigned int cover)
 
 // A rectangle (pixels, already cut to what may be drawn) recorded for the GPU: the colour as it is when it is opaque or when it is to be written (a
 // fill), laid over what is there when it is not (a tone over; none at all when it has no alpha).
-static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
+static void ui_scene_record(struct ui_scene address_to scene, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
 {
-        struct ui_scene address_to scene = ui->scene;
         unsigned int address_to op;
 
         if (!write && !(tone >> 24))
@@ -386,6 +385,11 @@ static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y
         op[0] = write || tone >> 24 == 255 ? 0 : 1, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0, op[3] = (unsigned int)x1, op[4] = (unsigned int)y1;
         op[5] = tone, op[6] = op[7] = 0;
         ui_scene_touch(scene, x0, y0, x1, y1);
+}
+
+static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
+{
+        ui_scene_record(ui->scene, x0, y0, x1, y1, tone, write);
 }
 
 static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
@@ -5121,6 +5125,23 @@ static void ui_edge_row_c(struct ui_edge_row address_to e)
 }
 #endif
 
+// The edge row recorded (R2 in the note): ui_edge_row_c's running sums and clears, each column the light reaches a tone rect of the picture's
+// pixel (first + x on row y), which is what e->put lays on it. The two cover rows are cleared the same way.
+static void ui_edge_record(struct ui address_to ui, struct ui_edge_row address_to e, int y, int first)
+{
+        for (b32 x = 0, face_run = 0, low_run = 0; x < e->width; x++)
+        {
+                int cover;
+
+                face_run = (unsigned short)(face_run + e->face[x]);
+                low_run = (unsigned short)(low_run + e->low[x]);
+                cover = (int)face_run - (int)low_run;
+                e->face[x] = e->low[x] = 0;
+                if (cover > 0 && x >= e->lo && x < e->hi)
+                        ui_scene_record(ui->scene, first + x, y, first + x + 1, y + 1, ui_premultiplied(e->highlight, (unsigned int)cover), false);
+        }
+}
+
 static inline void ui_edge_row(struct ui_edge_row address_to e)
 {
 #ifdef UI_EDGE_ASM
@@ -5217,7 +5238,10 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                                         edge.lo = lo, edge.hi = hi;
                                         edge.at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(first + lo);
                                 }
-                                ui_edge_row(&edge);
+                                if (ui->scene)
+                                        ui_edge_record(ui, &edge, y, first);
+                                else
+                                        ui_edge_row(&edge);
                         }
                 }
         }
@@ -5395,6 +5419,13 @@ static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c
         }
 }
 
+// A run of columns of one cover on row y, recorded as one tone rect: what ui_kit_put lays on each of them (R2 in the note).
+static void ui_spinner_flush(struct ui address_to ui, int from, int to, int y, unsigned int cover)
+{
+        if (cover && to > from)
+                ui_scene_record(ui->scene, from, y, to, y + 1, ui_premultiplied(ui_role(UI_PRIMARY), cover > UI_FULL ? UI_FULL : cover), false);
+}
+
 static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
@@ -5415,6 +5446,10 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
         {
                 if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
                         continue;
+                // Recorded, equal covers along the row are one run (run_from to run_to, of run_cover).
+                b32 run_from = -1, run_to = 0;
+                unsigned int run_cover = 0;
+
                 for (b32 x = first < 0 ? 0 : first; x < last && x < ui->width; x++)
                 {
                         unsigned int hits = 0;
@@ -5431,13 +5466,25 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
 
                                 hits += r2 <= (b64)outer * outer && r2 >= (b64)inner * inner && uy < 0 && (ux < 0 ? -ux : ux) <= -uy;
                         }
-                        if (hits)
+                        if (ui->scene)
+                        {
+                                unsigned int cover = hits * UI_FULL / 16;
+
+                                if (run_from >= 0 && cover != run_cover)
+                                        ui_spinner_flush(ui, run_from, x, y, run_cover), run_from = -1;
+                                if (cover && run_from < 0)
+                                        run_from = x, run_cover = cover;
+                                run_to = x + 1;
+                        }
+                        else if (hits)
                         {
                                 unsigned int address_to at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)x;
 
                                 ui_kit_put(at, 0, hits * UI_FULL / 16, ui_role(UI_PRIMARY));
                         }
                 }
+                if (run_from >= 0)
+                        ui_spinner_flush(ui, run_from, run_to, y, run_cover);
         }
         if (!ui_kit.motion)
                 ui_kit.busy = 1;
@@ -8276,6 +8323,9 @@ static positive ui_cell_fit(struct ui address_to ui, const font_face address_to 
 
 static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int ink, unsigned int ground)
 {
+        // A cell's text is not recorded (the font blend on a ground, R4 in the note): the frame is the picture's, painted here.
+        if (ui->scene)
+                ui->scene->lost = 1;
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(height * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -8300,6 +8350,9 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
 static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int turn, unsigned int ink,
                            unsigned int ground)
 {
+        // A turned cell's text is not recorded either (R4): the frame is the picture's.
+        if (ui->scene)
+                ui->scene->lost = 1;
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(width * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -14486,6 +14539,9 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0, ui_text_flags(t));
         else
         {
+                // The cells are not recorded (R4 in the note): the frame is the picture's, and this branch paints it.
+                if (ui->scene)
+                        ui->scene->lost = 1;
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
                 // with font_cells, any other (marks, wide, emoji) a font_draw of its own at its cell.
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};

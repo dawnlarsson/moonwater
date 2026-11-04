@@ -444,6 +444,9 @@ static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by,
 static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, int gy, int gw, int bx, int by, int bw,
                                       int x, int y, int width, int height, int slot, unsigned int mark)
 {
+        // The glass is painted on the band, not recorded (R3 in the note): the frame is the picture's, and this paints it.
+        if (view->scene)
+                view->scene->lost = 1;
         unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
         // The tray (-2) is never lit; a tab with the keys is, and so is the launcher button while the launcher is up.
         b32 lit = (slot >= 0 || slot == TASKBAR_LAUNCHER) && (mark & COMPOSITOR_TAB_LIT);
@@ -794,7 +797,9 @@ static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct
                 {
                         int line = top + at * step + row;
 
-                        if (line >= y && line < y + height)
+                        if (line >= y && line < y + height && view->scene)
+                                ui_scene_record(view->scene, left - lay->bx, line - lay->by, left - lay->bx + bar, line - lay->by + 1, ink, true);
+                        else if (line >= y && line < y + height)
                                 memory_fill_u32(view->pixels + (long)(line - lay->by) * lay->bw + (left - lay->bx), (positive)bar, ink);
                 }
 }
@@ -833,6 +838,7 @@ static void taskbar_volume_cell(const struct taskbar_view *view, const struct ta
         }
         memory_zero(&ui, sizeof(ui));
         ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.scene = view->scene;
         ui_speaker(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, waves, taskbar.volume_muted, ink | 0xff000000u);
 }
 
@@ -847,6 +853,7 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
 
         memory_zero(&ui, sizeof(ui));
         ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.scene = view->scene;
         ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, ui_role(UI_ERROR) | 0xff000000u);
 }
 

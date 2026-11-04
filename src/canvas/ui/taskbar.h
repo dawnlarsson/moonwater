@@ -73,6 +73,7 @@ struct taskbar_view
         int x, y;                        // where that output is in the desktop's space: its screen's top left
         unsigned int position;           // TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT or TASKBAR_RIGHT
         unsigned int *pixels;            // the band's pixels, or none
+        struct ui_scene *scene;          // when set, the launcher's bars and the speaker and microphone are recorded into it, not painted (the rig's)
         unsigned long band_bytes;        // how much memory pixels has
         unsigned int *glass;             // the blurred scene under the tabs
         font_face *face;                 // the face the tabs are written in

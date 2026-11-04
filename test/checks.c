@@ -217461,9 +217461,144 @@ static void dl_rows(void)
         check("draw list: the processor paints the frame the list refused", painted > 0 && cpu.scene == null);
 }
 
+/*
+        The painters that record (R2 and step 2): each probe paints with a scene set and counts the pixels it wrote, which must be none, and
+        whether the frame was given up to the processor (scene->lost, R3 and R4: those painters write the picture and say so, and their rows are
+        printed as named known diffs, not failures, until the kernel records them). The launcher's bars are also replayed bit for bit against
+        the processor's paint at four scales.
+*/
+static font_face dl_face;
+static font_engine dl_engine;
+static p8 dl_atlas[512 * 512];
+static unsigned int dl_scratch[1200 * UI_SCRATCH_ROWS], dl_probe_pixels[DL_W * DL_H], dl_replay[DL_W * DL_H];
+static unsigned int dl_probe_ops[DL_ROOM * 8];
+static unsigned char dl_probe_cover[4096];
+static struct ui_scene dl_probe_scene;
+
+static void dl_probe_reset(void)
+{
+        memory_zero(dl_probe_pixels, sizeof(dl_probe_pixels));
+        memory_zero(&dl_probe_scene, sizeof(dl_probe_scene));
+        dl_probe_scene.ops = dl_probe_ops, dl_probe_scene.room = DL_ROOM, dl_probe_scene.cover = dl_probe_cover, dl_probe_scene.size = sizeof(dl_probe_cover);
+}
+
+static unsigned long dl_probe_writes(void)
+{
+        unsigned long n = 0;
+
+        for (unsigned long i = 0; i < DL_W * DL_H; i++)
+                n += dl_probe_pixels[i] != 0;
+        return n;
+}
+
+// A kit ui on the probe picture; with fonts (when the check was given them) the text painters are usable.
+static void dl_probe_ui(struct ui address_to ui, b32 scene)
+{
+        memory_zero(ui, sizeof(*ui));
+        ui->pixels = dl_probe_pixels, ui->pitch = DL_W, ui->width = DL_W, ui->height = DL_H, ui->top = 0, ui->bottom = DL_H, ui->scale = 100;
+        ui->regular = ui->bold = &dl_face, ui->engine = &dl_engine;
+        ui->scratch = dl_scratch, ui->scratch_width = 1200;
+        ui->scene = scene ? &dl_probe_scene : null;
+}
+
+// The recorded ops replayed the way the kit's records mean: a fill writes its colour, a tone lays itself over (ui_over).
+static void dl_replay_ops(const struct ui_scene address_to scene, unsigned int address_to into)
+{
+        for (unsigned int k = 0; k < scene->count; k++)
+        {
+                const unsigned int address_to op = scene->ops + 8 * k;
+
+                for (int y = (int)op[2]; y < (int)op[4]; y++)
+                        for (int x = (int)op[1]; x < (int)op[3]; x++)
+                                into[(unsigned long)y * DL_W + (unsigned long)x] = (op[0] & 255) == 0 ? op[5] : ui_over(op[5], into[(unsigned long)y * DL_W + (unsigned long)x]);
+        }
+}
+
+static void dl_probes(void)
+{
+        static struct ui probe;
+        static struct ui_control control;
+        static struct taskbar_view view;
+        static struct taskbar_layout lay;
+        static unsigned int cpu[DL_W * DL_H];
+        const unsigned int scales[4] = {100, 150, 200, 300};
+        int failed = 0;
+        positive font_size = 0, font_bytes = program_argument_count() > 1 ? compositor_map_file(program_argument(1), &font_size) : 0;
+        b32 fonts = font_bytes && font_load(&dl_face, (const p8 address_to)font_bytes, font_size, 0) == 0;
+
+        if (fonts)
+                font_start(&dl_engine, dl_atlas, 512, 512);
+
+        // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted.
+        dl_probe_reset();
+        dl_probe_ui(&probe, 1);
+        memory_zero(&control, sizeof(control));
+        control.x = 20, control.y = 20, control.w = 28;
+        ui_spinner_draw(&probe, &control);
+        check("draw list: the spinner records its ring and arc, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
+
+        // The launcher's bars at four scales: the processor's paint and the replay of the recorded fills agree, and nothing was painted.
+        for (int k = 0; k < 4; k++)
+        {
+                unsigned int s = scales[k];
+                int x = (int)(s / 10), y = (int)(s / 10), w = (int)(6 * s / 10), h = (int)(4 * s / 10);
+
+                memory_zero(&view, sizeof(view));
+                memory_zero(&lay, sizeof(lay));
+                view.scale = (int)s, view.pixels = cpu, lay.bx = 0, lay.by = 0, lay.bw = DL_W, lay.bh = DL_H;
+                memory_zero(cpu, sizeof(cpu));
+                taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
+                dl_probe_reset();
+                view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene;
+                taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
+                memory_zero(dl_replay, sizeof(dl_replay));
+                dl_replay_ops(&dl_probe_scene, dl_replay);
+                failed += dl_probe_writes() != 0 || dl_probe_scene.count == 0;
+                failed += memory_compare(dl_replay, cpu, sizeof(cpu)) != 0;
+        }
+        check("draw list: the launcher's bars at 100, 150, 200 and 300 percent replay bit for bit and paint nothing", failed == 0);
+
+        // The speaker and the microphone cells: their rings and boxes are recorded (kit boxes, proven on the GPU by CHECK_gpu_kit).
+        memory_zero(&view, sizeof(view));
+        memory_zero(&lay, sizeof(lay));
+        dl_probe_reset();
+        view.scale = 100, view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene, lay.bx = 0, lay.by = 0, lay.bw = DL_W, lay.bh = DL_H;
+        taskbar.volume_flash = 0, taskbar.volume_muted = 0, taskbar.volume_percent = 60, taskbar.mic_muted = 0;
+        taskbar_volume_cell(&view, &lay, 10, 10, 40, 40, 0xffffffffu, 0xff000000u);
+        check("draw list: the speaker cell records, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
+        dl_probe_reset();
+        taskbar_mic_cell(&view, &lay, 60, 10, 40, 40);
+        check("draw list: the microphone cell records, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
+
+        // The painters that are still the processor's (R3 and R4): named known diffs. Their frames fall back to the processor.
+        static unsigned int glass[64 * 64];
+
+        dl_probe_reset();
+        view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene, view.glass = glass, view.scale = 100;
+        taskbar_glass_tab(&view, 0, 0, 64, 0, 0, DL_W, 5, 5, 20, 20, 0, 0);
+        string_format(log, "  known diff: taskbar_glass_tab (R3): the frame is the picture's, lost=%p, writes=%p\n", (positive)dl_probe_scene.lost,
+                      (positive)dl_probe_writes());
+        if (fonts)
+        {
+        dl_probe_reset();
+        dl_probe_ui(&probe, 1);
+        ui_cell_line(&probe, 5, 5, 100, 20, "Terminal", 0xffffffffu, 0xff000000u);
+        string_format(log, "  known diff: ui_cell_line (R4): the frame is the picture's, lost=%p, writes=%p\n", (positive)dl_probe_scene.lost,
+                      (positive)dl_probe_writes());
+        dl_probe_reset();
+        dl_probe_ui(&probe, 1);
+        ui_cell_turned(&probe, 5, 5, 20, 100, "Terminal", FONT_TOPS_LEFT, 0xffffffffu, 0xff000000u);
+        string_format(log, "  known diff: ui_cell_turned (R4): the frame is the picture's, lost=%p, writes=%p\n", (positive)dl_probe_scene.lost,
+                      (positive)dl_probe_writes());
+        }
+        else
+                string_format(log, "  the cell text and input probes need the regular font as argument 1 (skipped)\n");
+}
+
 b32 main(void)
 {
         dl_rows();
+        dl_probes();
         return test_report(null);
 }
 #endif /* CHECK_draw_list */
