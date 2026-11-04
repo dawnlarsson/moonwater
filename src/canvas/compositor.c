@@ -12513,32 +12513,33 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
         and the row's state 1, or refused (state 2, the whole picture, and counted in list_refused). A picture that is not a list, or a
         list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
 */
-static void compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
+static int compositor_lists_take(int row, unsigned int width, unsigned int height, int *damage)
 {
         struct windows *table = compositor.table;
         unsigned char *list = window_list_of(table, row);
         unsigned int gen;
 
         if (!list)
-                return;
+                return 0;
         gen = __atomic_load_n(&((unsigned int *)list)[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
         if (gen == table->list_seen[row] || !__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
         {
                 table->list_seen[row] = gen;
                 if (__atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)
                         __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
-                return;
+                return 0;
         }
         table->list_seen[row] = gen;
         if (window_list_valid(list, (int)width, (int)height) &&
             compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
         {
                 __atomic_store_n(&table->list_state[row], 1u, __ATOMIC_RELEASE);
-                return;
+                return 1;
         }
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         __atomic_store_n(&table->list_state[row], 2u, __ATOMIC_RELEASE);
         __atomic_add_fetch(&table->list_refused, 1, __ATOMIC_RELEASE);
+        return 0;
 }
 
 /*
@@ -12588,7 +12589,8 @@ static void compositor_take(int row)
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
         height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
         // A window's list (window_list_of) is drawn into its picture here, before the picture is shown, or refused; the damage it sets stands.
-        compositor_lists_take(row, width, height, damage);
+        if (compositor_lists_take(row, width, height, damage))
+                front = 0, table->buffer_index[row] = 0;
         // A window the card shows straight is told the picture was taken once the card has let go of the buffer
         // it showed before, at the flip's event; any other at once.
         if (row == compositor.direct_row)
