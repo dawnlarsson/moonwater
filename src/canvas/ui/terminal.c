@@ -2578,7 +2578,7 @@ static int terminal_op_where(struct ui address_to ui, void address_to self, p64 
                                 if (row >= ROWS)
                                         return 1;
                                 *x = (int)((want_column - fold * COLUMNS) * terminal.cell_w);
-                                *top = (int)(row * terminal.cell_h);
+                                *top = (int)(row * terminal.cell_h) + terminal_grid_shift(); // the grid's slide, which the cells move by too
                                 return 0;
                         }
                 skip = 0;
