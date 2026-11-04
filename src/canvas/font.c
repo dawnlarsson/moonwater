@@ -5831,9 +5831,13 @@ static fn font_dots(font_engine address_to e, const b64 address_to sizes, const 
         first = 0;
         for (p32 c = 0; c < e->contour_count && c < FONT_DOTS; first = e->contour[c++].last + 1u)
         {
+                //      A contour that is no dot has no box: the first loop wrote none for it.
+                if (!sizes[2 * c])
+                        continue;
+
                 b64 width = box[c][2] - box[c][0], height = box[c][3] - box[c][1];
 
-                if (!sizes[2 * c] || width <= 0 || height <= 0)
+                if (width <= 0 || height <= 0)
                         continue;
                 for (p32 i = first; i <= e->contour[c].last; i++)
                 {

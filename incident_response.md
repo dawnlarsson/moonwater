@@ -41,6 +41,23 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-134: the text engine's dot pass did arithmetic on stack words it never wrote
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 (hardening: undefined behaviour, no memory written) |
+| Class | C undefined behaviour: a read of uninitialised automatic storage and a signed overflow on it |
+| Moonwater exposure window | 2026-10-30 13:03 +01:00 (`b1727b531`) to the fix, about 5 days |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | the font fuzzer's clang trap build (`font_dots`, font.c's last loop, seed 7 case 24); `CHECK_font`'s new row `arithmetic: the dot pass over a stem and a dot, its stack full of extremes, ...` runs the pass on a scribbled stack, but a plain build answers the same either way and gcc's trap build folds the read |
+
+**What it was.** `font_dots` keeps a box for each contour that is a dot and none for the others, then in its last
+loop took `box[c][2] - box[c][0]` for every contour before asking whether it was a dot. For a stem (every dotted
+letter has one) those were whatever the stack held, and a difference of two of them could overflow, which a
+compiler may treat as impossible. The value was never used, so nothing wrong was drawn, and nothing past an array
+was read: this is undefined behaviour removed, not an exposure. Found by this pass's fuzzer (clang, UBSan trap at
+the line), and by the compositor's reviewer through a window title.
+
 ### MW-2026-163: a program under a seccomp filter or a tracer could start programs neither saw, through /dev/spark
 
 | | |

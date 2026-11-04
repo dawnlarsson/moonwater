@@ -117870,6 +117870,73 @@ static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
         check("hostile: most mutations still load and are drawn", hostile_loaded - loaded > mutations / 2);
 }
 
+//      The stack the next call lands on, written over with the words most likely to overflow the difference of two
+//      of them: in every phase of four words, words two apart are the least and the greatest there are.
+static __attribute__((noinline)) fn font_check_scribble(void)
+{
+        volatile b64 junk[8192];
+
+        for (positive at = 0; at < 8192; at++)
+                junk[at] = at % 4 < 2 ? (b64)((p64)1 << 63) : (b64)(~(p64)0 >> 1);
+}
+
+//      The dot pass alone, in a frame of its own at the depth the scribble wrote.
+static __attribute__((noinline)) fn font_check_dots(font_engine address_to e, const b64 address_to sizes, const p32 address_to inner)
+{
+        static const b64 kept[4] = {0}, lines[3] = {0};
+
+        font_dots(e, sizes, inner, kept, 0, lines, 0);
+}
+
+/*
+        Arithmetic a hostile face, or a stack, steers. The dot pass read the box of every contour, a stem's never
+        written, before it asked whether the contour was a dot, and the difference of two such words overflowed: it
+        is run here alone straight after the stack is written with extremes, a stem and a dot, and the trap build
+        (MW_UBSAN=1) stopped there; a plain build answers the same either way. Then a dotted letter, hinted.
+*/
+static fn check_hostile_arithmetic(void)
+{
+        {
+                static b64 sizes[2 * FONT_DOTS];
+                static p32 inner[FONT_DOTS];
+                static const b64 square[8][2] = {{0, 0}, {4096, 0}, {4096, 8192}, {0, 8192},
+                                                 {1024, 10240}, {3072, 10240}, {3072, 12288}, {1024, 12288}};
+                b32 sane = 1;
+
+                engine.point_count = 8, engine.contour_count = 2;
+                engine.contour[0].last = 3, engine.contour[1].last = 7;
+                for (p32 i = 0; i < 8; i++)
+                        engine.points[i] = (font_point){square[i][0], square[i][1], 1};
+                sizes[2] = sizes[3] = 2048;
+                font_check_scribble();
+                font_check_dots(&engine, sizes, inner);
+                for (p32 i = 0; i < 8; i++)
+                        sane = sane && engine.points[i].x >= 0 && engine.points[i].x <= 8192 && engine.points[i].y >= 0 &&
+                               engine.points[i].y <= 16384;
+                check("arithmetic: the dot pass over a stem and a dot, its stack full of extremes, moves only the dot, and sanely",
+                      sane && engine.points[0].x == 0 && engine.points[2].y == 8192);
+                engine.point_count = engine.contour_count = 0;
+        }
+        static p8 file[1 << 20];
+        bipolar got = file_slurp_regular_at(AT_FDCWD, "fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf", file, sizeof(file), 0);
+        font_face face;
+        font_bitmap box;
+        b32 drawn = -1;
+
+        check("arithmetic: the mono face this tree ships loads", got > 0 && font_load(&face, file, (positive)got, 0) == 0);
+        if (got <= 0)
+                return;
+        for (p32 size = 9 * 64; size <= 15 * 64; size += 64)
+        {
+                font_check_scribble();
+                drawn = font_render(&engine, &face, font_glyph(&face, 'i'), size, 0, FONT_DARKEN, coverage, 256, sizeof(coverage), &box);
+                if (drawn != 0 || !box.width)
+                        break;
+        }
+        check("arithmetic: a dotted letter hinted over a stack of extremes is drawn (no difference of words never written)",
+              drawn == 0 && box.width > 0);
+}
+
 /*
         Edge cases of the cache's keys. A face id is 16 bits, so a process
         loads 65535 faces at most and the load after them is refused, never
@@ -118076,6 +118143,7 @@ b32 main()
               guarded && system_call_3(syscall(mprotect), (positive)(guarded + 8 * 4096), 4096, 0) == 0);
         check_hostile(font_one, font_one_size, 20000);
         check_hostile(font_two, font_two_size, 20000);
+        check_hostile_arithmetic();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
 
