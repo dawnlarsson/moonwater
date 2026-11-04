@@ -182729,6 +182729,41 @@ static void pt_test_period_clock(void)
         pulse_client_close(&pt_engine, slot);
 }
 
+/* ---- a record stream that asked not to be moved is not moved by its program; the person (root) may move it ---- */
+
+static void pt_test_record_no_move(void)
+{
+        struct pt_rec_args a;
+        struct pt_w w;
+        long owner, person, mic1, mic2;
+        unsigned long index;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        mic1 = pulse_source_add(&pt_engine, "alsa_input.nm1.00", "One", 48000);
+        mic2 = pulse_source_add(&pt_engine, "alsa_input.nm2.00", "Two", 48000);
+        owner = pt_connect(1000, 5200, 35, "Recorder");
+        person = pt_connect(0, 5201, 35, "Person");
+        a = pt_rec_args();
+        a.source_name = "alsa_input.nm1.00";
+        a.no_move = 1;
+        PTCHECK(pt_rec_create(owner, 35, 10, &a) == 0, "a record stream that asked not to be moved is made");
+        index = pt_rec_reply.index;
+        memset(&w, 0, sizeof(w));
+        pt_u32(&w, index);
+        pt_u32(&w, (unsigned long)mic2);
+        pt_str(&w, 0);
+        pt_command(owner, PULSE_COMMAND_MOVE_SOURCE_OUTPUT, 11, &w);
+        pt_collect(owner);
+        PTCHECK(pt_expect_error(11, PULSE_ERR_ACCESS), "its program cannot move it (ACCESS)");
+        PTCHECK(pulse_output_of(&pt_engine, index)->source == mic1, "and it stays on its source");
+        pt_command(person, PULSE_COMMAND_MOVE_SOURCE_OUTPUT, 12, &w);
+        pt_collect(person);
+        PTCHECK(pt_expect_ack(12) && pulse_output_of(&pt_engine, index)->source == mic2, "the person moves it");
+        pulse_client_close(&pt_engine, person);
+        pulse_client_close(&pt_engine, owner);
+}
+
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
 
 static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
@@ -183050,6 +183085,7 @@ int main(void)
         pt_test_feed_cut();
         pt_test_samples_full();
         pt_test_no_move();
+        pt_test_record_no_move();
         pt_test_remember_users();
         pt_test_event_rights();
         pt_test_source_oracle();

@@ -3910,6 +3910,9 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (source < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                // A record stream that asked not to be moved is not moved by its program: the person (root) still may.
+                if (rec->no_move && !c->root && source != rec->source)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 if (pulse_record_move(p, rec, source) < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
                 rec->owner_set = 1;
