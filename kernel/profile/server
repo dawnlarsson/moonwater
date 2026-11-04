@@ -10,6 +10,7 @@
 #
 #   sh build.sh arch/x64 debug_none limbo desktop serial server
 #
+#> overrides CONFIG_MOONWATER_CANVAS
 CONFIG_MOONWATER_CANVAS=n
 
 # The gpu profile's Canvas-first command line must not leave a local server
@@ -22,5 +23,14 @@ CONFIG_VT=y
 CONFIG_VT_CONSOLE=y
 #> cmdline -drm_client_lib.active=
 
+#
+# Game controllers are off. /dev/uinput lets a program put events into the
+# machine, and a joystick node reads a pad: the desktop profile turns both
+# on, and this tier does not run games. See profile/desktop.
+#> overrides CONFIG_INPUT_UINPUT CONFIG_INPUT_JOYDEV
+CONFIG_INPUT_UINPUT=n
+CONFIG_INPUT_JOYDEV=n
+
 # Servers may exceed the desktop's single-word cpumask limit.
+#> overrides CONFIG_NR_CPUS
 CONFIG_NR_CPUS=128

@@ -43,3 +43,11 @@ CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT=n
 CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS=n
 CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES=n
 CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH=n
+
+#
+# Game controllers are off. /dev/uinput lets a program put events into the
+# machine, and a joystick node reads a pad: the desktop profile turns both
+# on, and this tier does not run games. See profile/desktop.
+#> overrides CONFIG_INPUT_UINPUT CONFIG_INPUT_JOYDEV
+CONFIG_INPUT_UINPUT=n
+CONFIG_INPUT_JOYDEV=n

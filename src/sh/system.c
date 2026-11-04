@@ -281,6 +281,36 @@ static fn mount_shm()
 }
 
 /*
+        /dev/uinput, the one game controller node the image makes itself. The
+        kernel registers uinput while its initcalls run, before this init has
+        mounted devtmpfs, and devtmpfs makes no node for a device registered
+        before it was mounted (the image's own static nodes, build.c's
+        image_nodes, are the ones made in time). So init makes it when the
+        driver is there: /sys/class/misc/uinput is the misc device, and a kernel
+        without CONFIG_INPUT_UINPUT has no such directory and gets no node.
+        The mode is given here, 0600 owned by root, and not left to the umask.
+        The joystick nodes come after boot, when a pad is made, so devtmpfs
+        makes them, at its own default for a driver that names no mode: 0600
+        as well (profile/desktop has the whole of it).
+*/
+#define SYSTEM_UINPUT_MINOR 223
+static COLD fn system_input_nodes(void)
+{
+        bipolar handle = system_open_at(AT_FDCWD, "/sys/class/misc/uinput",
+                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        system_close((positive)handle);
+
+        //      The new encoding of major 10, minor 223: the minor's low byte
+        //      and the major above it.
+        system_call_4(syscall(mknodat), AT_FDCWD,
+                      (positive)(string_address)"/dev/uinput",
+                      S_IFCHR | 0600, (10 << 8) | SYSTEM_UINPUT_MINOR);
+}
+
+/*
         The names a program opens by habit for the descriptors it holds:
         /dev/fd and the three that stand for 0, 1 and 2, which devtmpfs does
         not make and a machine with a udev has made for it. Bash's process
@@ -354,9 +384,11 @@ static fn link_dev_fd()
         quietly: there is no unprivileged_bpf_disabled because the image has
         no bpf(2), and user namespaces stay as the kernel has them, because
         bowls need them. The reference tier (STRICT_REFERENCE) writes
-        nothing: the kernel's own values are what it is for.
+        nothing of these: the kernel's own values are what it is for. The
+        desktop's max_map_count is written below, on every tier that is not
+        hardened or locked, reference included.
 */
-#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
 static COLD fn system_sysctl(string_address path, string_address value)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
@@ -368,6 +400,9 @@ static COLD fn system_sysctl(string_address path, string_address value)
                          string_length(value));
         system_close((positive)handle);
 }
+#endif
+
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
 
 //      The widest address space randomisation the kernel allows: bits are
 //      tried from the most any architecture has (33 on arm64 with a 48-bit
@@ -439,15 +474,42 @@ static COLD fn system_kernel_defaults(void)
 }
 #endif
 
+/*
+        What a desktop image asks of the kernel beyond the above. The
+        kernel's vm.max_map_count is 65530, a small machine's count of memory
+        mappings a process may hold, and a game's allocator and Proton's
+        compatibility layer map more than that; Steam documents 1048576. The
+        limit caps a count and reserves nothing, so a process that maps no
+        more than before costs nothing. It is written on the desktop image at
+        the two levels below the hardened tier, which runs no games and keeps
+        the kernel's number. The server and console images have no Canvas
+        and keep it too.
+
+        The game controller nodes are not made here: system_input_nodes makes
+        /dev/uinput above, at 0600, and devtmpfs makes the joystick nodes at
+        its own 0600 default. The tier lane reads both modes back, so a
+        change to either is a red row and not a silent one.
+*/
+#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
+static COLD fn system_desktop_defaults(void)
+{
+        system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
+}
+#endif
+
 static DEAD_END b32 system_init()
 {
         system_call(syscall(setsid));
 #if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE
         system_kernel_defaults();
 #endif
+#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
+        system_desktop_defaults();
+#endif
         mount_devpts();
         mount_shm();
         link_dev_fd();
+        system_input_nodes();
 
         bipolar settling = start_service((string_address)settle_program,
                                          settle_argv, 2);

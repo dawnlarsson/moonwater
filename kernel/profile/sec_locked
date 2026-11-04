@@ -126,3 +126,11 @@ CONFIG_MOONWATER_BUILTIN_MOUNTPOINT=y
 CONFIG_MOONWATER_BUILTIN_BLKID=y
 CONFIG_MOONWATER_BUILTIN_POWEROFF=y
 CONFIG_MOONWATER_BUILTIN_REBOOT=y
+
+#
+# Game controllers are off. /dev/uinput lets a program put events into the
+# machine, and a joystick node reads a pad: the desktop profile turns both
+# on, and this tier does not run games. See profile/desktop.
+#> overrides CONFIG_INPUT_UINPUT CONFIG_INPUT_JOYDEV
+CONFIG_INPUT_UINPUT=n
+CONFIG_INPUT_JOYDEV=n
