@@ -222215,6 +222215,171 @@ b32 main(void)
 #endif /* CHECK_gpu_kit */
 
 
+#ifdef CHECK_issues
+#include "../src/lib.util.c"
+#include "../src/canvas/window.c"
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+/*
+        The issue board (window.c's windows_issue_set, windows_issue_clear and windows_issues_read): a set is one issue, a set again with the
+        same key and code updates it in place, a clear takes one code or all of a key and no other key, a board with no slot free refuses
+        the set and counts it until a clear frees one. A reader is held to the seqlock (a writer inside it is a torn read, retried and then
+        given up) and to nothing the table says of itself: a count it does not match, a severity that is none, a key or a detail with no
+        null, a lock held by a writer that is gone.
+*/
+static struct windows iss_table;
+static struct windows_issues iss_copy;
+
+// The slot of a key on a copy, or -1 (the reader keeps each issue in its slot, so a test finds it by its key).
+static int iss_at(const struct windows_issues *all, const char *key)
+{
+        for (int i = 0; i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && string_equals((string_address)all->issue[i].key, (string_address)key))
+                        return i;
+        return -1;
+}
+
+// 1 when a copy has an issue whose key and detail are at their rooms, each with its null (the reader ended them).
+static int iss_long(const struct windows_issues *all)
+{
+        for (int i = 0; i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && string_length((string_address)all->issue[i].key) == WINDOWS_ISSUE_KEY - 1 &&
+                    string_length((string_address)all->issue[i].detail) == WINDOWS_ISSUE_DETAIL - 1)
+                        return 1;
+        return 0;
+}
+
+static void iss_rows_basic(void)
+{
+        unsigned int slots[WINDOWS_ISSUES];
+
+        memory_zero(&iss_table, sizeof(iss_table));
+        check("issues: a set on the board is one issue", windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 3, 22, "pictures refused") == 1);
+        check("issues: the set is read back, its key, severity, code, numbers and detail whole",
+              windows_issues_read(&iss_table, &iss_copy) == 1 && iss_copy.count == 1 && string_equals((string_address)iss_copy.issue[0].key, (string_address)"canvas gpu") &&
+                  iss_copy.issue[0].severity == WINDOWS_ISSUE_ERROR && iss_copy.issue[0].code == WINDOWS_ISSUE_GPU_MAP && iss_copy.issue[0].a == 3 &&
+                  iss_copy.issue[0].b == 22 && string_equals((string_address)iss_copy.issue[0].detail, (string_address)"pictures refused"));
+        check("issues: the same key and code is updated in place, not added to",
+              windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_MAP, 4, 12, "again") == 1 && iss_table.issue_count == 1);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: the update changes the severity, numbers and detail it was set with",
+              iss_copy.count == 1 && iss_copy.issue[0].severity == WINDOWS_ISSUE_WARNING && iss_copy.issue[0].a == 4 && iss_copy.issue[0].b == 12 &&
+                  string_equals((string_address)iss_copy.issue[0].detail, (string_address)"again"));
+        check("issues: the same key with another code is a second issue", windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 1 && iss_table.issue_count == 2);
+        check("issues: another key is an issue of its own", windows_issue_set(&iss_table, "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 5, 0, "") == 1);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: worst severity is per key", windows_issues_worst(&iss_copy, "canvas gpu", null) == WINDOWS_ISSUE_WARNING &&
+              windows_issues_worst(&iss_copy, "audio device", null) == WINDOWS_ISSUE_ERROR && windows_issues_worst(&iss_copy, "wifi", null) == 0);
+        check("issues: the count of a key is its issues", windows_issues_worst(&iss_copy, "canvas gpu", slots) == WINDOWS_ISSUE_WARNING && slots[0] == 2);
+        check("issues: a clear of one code leaves the others of the key", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_GPU_LISTS) == 1 && iss_table.issue_count == 2);
+        check("issues: a clear of every code takes the key's issues and no other key's", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 1 && iss_table.issue_count == 1);
+        check("issues: a clear of a key that has none changes nothing", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && iss_table.issue_count == 1);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: after the clears the copy holds the other key's one issue", iss_copy.count == 1 && iss_at(&iss_copy, "audio device") >= 0);
+        check("issues: a set with no key, a bad severity or no code is refused",
+              windows_issue_set(&iss_table, null, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(&iss_table, "", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(&iss_table, "canvas gpu", 0, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(&iss_table, "canvas gpu", 3, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+                  windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_NONE, 0, 0, null) == 0 &&
+                  windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_COUNT, 0, 0, null) == 0 && iss_table.issue_count == 1);
+        {
+                char wide[WINDOWS_ISSUE_DETAIL * 2];
+
+                memory_fill(wide, 'w', sizeof(wide) - 1);
+                wide[sizeof(wide) - 1] = 0;
+                check("issues: a key past its room is cut to it, and the detail to its room",
+                      windows_issue_set(&iss_table, "a key that is far longer than the room it has", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 0, 0, wide) == 1);
+        }
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: the long key is cut to the key's room, the long detail to the detail's, both ended",
+              iss_copy.count == 2 && iss_long(&iss_copy) == 1);
+}
+
+static void iss_rows_full(void)
+{
+        char key[WINDOWS_ISSUE_KEY];
+
+        memory_zero(&iss_table, sizeof(iss_table));
+        for (int i = 0; i < WINDOWS_ISSUES; i++)
+        {
+                key[0] = 'k', key[1] = (char)('a' + i / 26), key[2] = (char)('a' + i % 26), key[3] = 0;
+                if (windows_issue_set(&iss_table, key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, (unsigned int)i, 0, null) != 1)
+                        break;
+        }
+        check("issues: a board takes as many issues as it has slots", iss_table.issue_count == WINDOWS_ISSUES);
+        check("issues: a full board refuses the next set, counted, and holds the others",
+              windows_issue_set(&iss_table, "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 0 && iss_table.issue_refused == 1 &&
+                  iss_table.issue_count == WINDOWS_ISSUES);
+        check("issues: an update of an issue the full board holds is still made", windows_issue_set(&iss_table, "kaa", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_LISTS, 9, 0, null) == 1);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: the reader sees the refusals and the full count", iss_copy.count == WINDOWS_ISSUES && iss_copy.refused == 1);
+        check("issues: a clear frees a slot, and the refusals are counted again from zero",
+              windows_issue_clear(&iss_table, "kab", WINDOWS_ISSUE_ANY) == 1 && iss_table.issue_refused == 0);
+        check("issues: a refused key takes the freed slot the next time it is set",
+              windows_issue_set(&iss_table, "kzz", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, 0, 0, null) == 1 && iss_table.issue_count == WINDOWS_ISSUES);
+}
+
+static void iss_rows_torn(void)
+{
+        memory_zero(&iss_table, sizeof(iss_table));
+        windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "x");
+        memory_zero(&iss_copy, sizeof(iss_copy));
+        iss_table.issue_seq |= 1u;
+        check("issues: a writer inside the board is a torn read, given up after its tries, and the copy is empty",
+              windows_issues_read(&iss_table, &iss_copy) == 0 && iss_copy.count == 0);
+        iss_table.issue_seq += 1u;
+        check("issues: a board the writer left whole is read again", windows_issues_read(&iss_table, &iss_copy) == 1 && iss_copy.count == 1);
+        iss_table.issue_lock = 1;
+        check("issues: a set while a dead writer holds the lock is refused, and nothing is written",
+              windows_issue_set(&iss_table, "canvas wifi", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, null) == 0 && iss_table.issue_count == 1);
+        check("issues: a clear while the lock is held does nothing", windows_issue_clear(&iss_table, "canvas gpu", WINDOWS_ISSUE_ANY) == 0 && iss_table.issue_count == 1);
+        iss_table.issue_lock = 0;
+}
+
+static void iss_rows_hostile(void)
+{
+        memory_zero(&iss_table, sizeof(iss_table));
+        windows_issue_set(&iss_table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "fine");
+        iss_table.issue_count = 0xffffffffu;
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a count the table claims that the slots do not hold is not trusted", iss_copy.count == 1);
+        iss_table.issues[5].used = 1, iss_table.issues[5].severity = 7, iss_table.issues[5].code = WINDOWS_ISSUE_GPU_MAP;
+        memory_copy(iss_table.issues[5].key, "canvas wifi", 12);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a slot whose severity is none is no issue", iss_copy.count == 1);
+        iss_table.issues[6].used = 1, iss_table.issues[6].severity = WINDOWS_ISSUE_WARNING, iss_table.issues[6].code = WINDOWS_ISSUE_GPU_MAP;
+        memory_zero(iss_table.issues[6].key, sizeof(iss_table.issues[6].key));
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a slot with an empty key is no issue", iss_copy.count == 1);
+        for (int i = 0; i < WINDOWS_ISSUE_KEY; i++)
+                iss_table.issues[7].key[i] = 'q';
+        iss_table.issues[7].used = 1, iss_table.issues[7].severity = WINDOWS_ISSUE_WARNING, iss_table.issues[7].code = WINDOWS_ISSUE_GPU_LISTS;
+        for (int i = 0; i < WINDOWS_ISSUE_DETAIL; i++)
+                iss_table.issues[7].detail[i] = 'd';
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a key or a detail with no null is ended by the reader",
+              iss_copy.count == 2 && iss_long(&iss_copy) == 1);
+        iss_table.issues[8].used = 1, iss_table.issues[8].severity = WINDOWS_ISSUE_ERROR, iss_table.issues[8].code = 9999u;
+        memory_copy(iss_table.issues[8].key, "canvas odd", 11);
+        windows_issues_read(&iss_table, &iss_copy);
+        check("issues: a code past the list is kept as the code it is, and no crash", iss_copy.count == 3 && iss_copy.issue[8].code == 9999u);
+        check("issues: a worst severity of a key with a bad slot is the good one's", windows_issues_worst(&iss_copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
+        check("issues: a null table or copy is refused", windows_issue_set(null, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 0, 0, null) == 0 &&
+              windows_issues_read(null, &iss_copy) == 0 && windows_issues_read(&iss_table, null) == 0);
+}
+
+b32 main(void)
+{
+        iss_rows_basic();
+        iss_rows_full();
+        iss_rows_torn();
+        iss_rows_hostile();
+        return test_report(null);
+}
+#endif /* CHECK_issues */
+
 #ifdef CHECK_draw_list
 /*
         The draw list (ui.c's ui_draw_list, the production form of a recorded frame): a frame recorded by ui_scene_begin and ui_scene_end is read

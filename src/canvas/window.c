@@ -516,6 +516,46 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
     "other frames, or empty damage"};
+/*
+        The issue board: the problems a Settings option has, which any program that holds the table may raise and clear, and which Settings and
+        moonwater debug read. An issue is its key (the words of the option's row, "canvas gpu", NUL-ended), a severity (WINDOWS_ISSUE_WARNING or
+        WINDOWS_ISSUE_ERROR), a code (the message: WINDOWS_ISSUE_* below, which Settings words in the reader's language), two numbers the
+        message formats (a, b) and a detail string, the kernel's own words say, bounded and NUL-ended. Each slot holds its own detail, so the
+        board's memory is fixed and no write allocates. An issue is one key with one code: setting it again updates it in place.
+*/
+#define WINDOWS_ISSUES 32         // the board's slots; a set that finds none free is refused and counted (issue_refused)
+#define WINDOWS_ISSUE_KEY 24      // a key's bytes, its null with them
+#define WINDOWS_ISSUE_DETAIL 192  // a detail's bytes kept, its null with them
+#define WINDOWS_ISSUE_WARNING 1u
+#define WINDOWS_ISSUE_ERROR 2u
+#define WINDOWS_ISSUE_ANY 0u      // windows_issue_clear's code: every issue of the key
+// The messages (Settings words each in the reader's language, language.inc's WINDOWS_ISSUE_* ids). a and b are the numbers the message
+// formats, and detail is shown after it, copyable. The numbers are per code: see the comment on each.
+enum windows_issue_code
+{
+        WINDOWS_ISSUE_NONE,
+        WINDOWS_ISSUE_GPU_MAP,       // the kernel refused to map window pictures for the card: a the step, b the kernel's error number
+        WINDOWS_ISSUE_GPU_REFUSED,   // the card refused presents: a the count, b the reason (WINDOWS_GPU_REASONS' index)
+        WINDOWS_ISSUE_GPU_LISTS,     // the lists are off: the card is not composing in earnest (a and b 0)
+        WINDOWS_ISSUE_GPU_COOLING,   // the card is cooling down after hangs (a the cool-downs in a row)
+        WINDOWS_ISSUE_GPU_UNTRUSTED, // the card's self-test drew wrong (a the family)
+        WINDOWS_ISSUE_GPU_FAMILY,    // this GPU family is not supported (a the family)
+        WINDOWS_ISSUE_GPU_LOST,      // apps lost frames to the processor: a the lost frames, b the frames tried
+        WINDOWS_ISSUE_GPU_SCANOUT,   // the card refused a window's framebuffer for direct scan-out: a the kernel's error number
+        WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
+        WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
+        WINDOWS_ISSUE_COUNT
+};
+typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
+
+struct windows_issue
+{
+        char key[WINDOWS_ISSUE_KEY];
+        unsigned int severity, code, a, b;
+        unsigned int used;
+        char detail[WINDOWS_ISSUE_DETAIL];
+};
+
 #define WINDOWS_DOOR "/run/moonwater/window."
 /*      A door is read by the compositor, which runs as root, and the row it
         names is freed when every writer of the door has closed (the program
@@ -926,6 +966,13 @@ struct windows
         unsigned long wl_input_ms;
         unsigned int wl_inhibitors, wl_idled, wl_bells, wl_icons, wl_shortcuts;
         unsigned char wl_content[WINDOWS], wl_modal[WINDOWS], wl_icon[WINDOWS];
+        /*
+                The issue board (windows_issue_set, windows_issues_read): issue_seq is a seqlock, odd while a writer is in the board; issue_lock is
+                the writers' lock (a compare and swap, held for one write); issue_count the slots in use; issue_refused the sets that found no slot
+                free, counted until a slot is freed. A reader takes a copy only when issue_seq was even and the same at both ends of it.
+        */
+        unsigned int issue_seq, issue_lock, issue_count, issue_refused;
+        struct windows_issue issues[WINDOWS_ISSUES];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -990,6 +1037,177 @@ static inline int window_list_valid(unsigned char *list, int width, int height)
         if (view.x1 > view.x0 && view.y1 > view.y0 && (view.x0 < 0 || view.y0 < 0 || view.x1 > width || view.y1 > height))
                 return 0;
         return 1;
+}
+
+/*
+        The issue board's functions (the struct's comment says what the board is). Writers are any holders of the table: a write takes
+        issue_lock for its one change (a bounded wait, so a writer that died in the lock refuses writes and never hangs the others) and
+        brackets it in the seqlock. A reader copies the board, and takes the copy only when the sequence was even and unchanged across the
+        copy; whatever it copied is then checked on its own terms: a count is not trusted (the used slots are counted), each string is ended,
+        a severity that is neither warning nor error is no issue, and a code past the list is kept as a code the reader does not name.
+*/
+#define WINDOWS_ISSUE_SPINS 100000u
+#define WINDOWS_ISSUE_TRIES 16
+
+struct windows_issues
+{
+        unsigned int count, refused; // the used slots, and the sets refused for want of a slot (until one is freed)
+        struct windows_issue issue[WINDOWS_ISSUES];
+};
+
+static int windows_issue_same(const char *a, const char *b)
+{
+        for (unsigned int i = 0; i < WINDOWS_ISSUE_KEY; i++)
+        {
+                if (a[i] != b[i])
+                        return 0;
+                if (!a[i])
+                        return 1;
+        }
+        return 1;
+}
+
+static int windows_issue_lock(struct windows *table)
+{
+        for (unsigned int spin = 0; spin < WINDOWS_ISSUE_SPINS; spin++)
+        {
+                unsigned int empty = 0;
+
+                if (__atomic_compare_exchange_n(&table->issue_lock, &empty, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                        return 1;
+        }
+        return 0;
+}
+
+static unsigned int windows_issue_begin(struct windows *table)
+{
+        unsigned int seq = __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED) | 1u;
+
+        __atomic_store_n(&table->issue_seq, seq, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        return seq;
+}
+
+static void windows_issue_end(struct windows *table, unsigned int seq)
+{
+        __atomic_store_n(&table->issue_seq, seq + 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->issue_lock, 0u, __ATOMIC_RELEASE);
+}
+
+// Raises an issue, or updates the one with its key and code in place. 1 when it is on the board; 0 when it is not: a key or a severity or a
+// code that is none of ours, a board with no slot free (counted in issue_refused), or a lock a dead writer left held.
+static int windows_issue_set(struct windows *table, const char *key, unsigned int severity, unsigned int code, unsigned int a, unsigned int b,
+                             const char *detail)
+{
+        int at = -1, empty = -1;
+        struct windows_issue *issue;
+        unsigned int seq;
+
+        if (!table || !key || !key[0] || (severity != WINDOWS_ISSUE_WARNING && severity != WINDOWS_ISSUE_ERROR) || code == WINDOWS_ISSUE_NONE ||
+            code >= WINDOWS_ISSUE_COUNT)
+                return 0;
+        if (!windows_issue_lock(table))
+                return 0;
+        for (int i = 0; i < WINDOWS_ISSUES; i++)
+        {
+                if (table->issues[i].used && table->issues[i].code == code && windows_issue_same(table->issues[i].key, key))
+                {
+                        at = i;
+                        break;
+                }
+                if (!table->issues[i].used && empty < 0)
+                        empty = i;
+        }
+        if (at < 0 && empty < 0)
+        {
+                seq = windows_issue_begin(table);
+                table->issue_refused++;
+                windows_issue_end(table, seq);
+                return 0;
+        }
+        seq = windows_issue_begin(table);
+        issue = &table->issues[at >= 0 ? at : empty];
+        if (at < 0)
+                issue->used = 1, table->issue_count++;
+        string_copy_bounded((string_address)issue->key, (string_address)key, WINDOWS_ISSUE_KEY);
+        issue->severity = severity, issue->code = code, issue->a = a, issue->b = b;
+        string_copy_bounded((string_address)issue->detail, (string_address)(detail ? detail : ""), WINDOWS_ISSUE_DETAIL);
+        windows_issue_end(table, seq);
+        return 1;
+}
+
+// Clears the issues of a key: the one with code, or every one of the key when code is WINDOWS_ISSUE_ANY. The number cleared.
+static unsigned int windows_issue_clear(struct windows *table, const char *key, unsigned int code)
+{
+        unsigned int cleared = 0, seq;
+
+        if (!table || !key || !key[0] || !windows_issue_lock(table))
+                return 0;
+        seq = windows_issue_begin(table);
+        for (int i = 0; i < WINDOWS_ISSUES; i++)
+                if (table->issues[i].used && (code == WINDOWS_ISSUE_ANY || table->issues[i].code == code) && windows_issue_same(table->issues[i].key, key))
+                {
+                        memory_zero(&table->issues[i], sizeof(table->issues[i]));
+                        table->issue_count--, cleared++;
+                }
+        if (table->issue_count < WINDOWS_ISSUES)
+                table->issue_refused = 0;
+        windows_issue_end(table, seq);
+        return cleared;
+}
+
+// Copies the board: 1 when the copy is one the writers left whole, 0 when they kept writing through every try (the caller says the board is
+// busy and reads it again later). The copy is sanitized here, whatever the table says of itself.
+static int windows_issues_read(struct windows *table, struct windows_issues *into)
+{
+        for (int tries = 0; table && into && tries < WINDOWS_ISSUE_TRIES; tries++)
+        {
+                unsigned int before = __atomic_load_n(&table->issue_seq, __ATOMIC_ACQUIRE), after;
+                unsigned int count = 0;
+
+                if (before & 1u)
+                        continue;
+                memory_copy(into->issue, table->issues, sizeof(table->issues));
+                into->refused = table->issue_refused;
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                after = __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED);
+                if (before != after)
+                        continue;
+                for (int i = 0; i < WINDOWS_ISSUES; i++)
+                {
+                        struct windows_issue *issue = &into->issue[i];
+
+                        issue->key[WINDOWS_ISSUE_KEY - 1] = 0, issue->detail[WINDOWS_ISSUE_DETAIL - 1] = 0;
+                        if (!issue->used || !issue->key[0] || (issue->severity != WINDOWS_ISSUE_WARNING && issue->severity != WINDOWS_ISSUE_ERROR))
+                        {
+                                memory_zero(issue, sizeof(*issue));
+                                continue;
+                        }
+                        count++;
+                }
+                into->count = count;
+                return 1;
+        }
+        if (into)
+                memory_zero(into, sizeof(*into));
+        return 0;
+}
+
+// The worst severity of a key's issues on a copy (0 none, WINDOWS_ISSUE_WARNING or WINDOWS_ISSUE_ERROR), and how many there are.
+static unsigned int windows_issues_worst(const struct windows_issues *all, const char *key, unsigned int *count)
+{
+        unsigned int worst = 0;
+
+        if (count)
+                *count = 0;
+        for (int i = 0; all && key && i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && windows_issue_same(all->issue[i].key, key))
+                {
+                        worst = all->issue[i].severity > worst ? all->issue[i].severity : worst;
+                        if (count)
+                                (*count)++;
+                }
+        return worst;
 }
 
 /*

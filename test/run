@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus issues"
 
 describe()
 {
@@ -319,7 +319,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -4273,6 +4273,9 @@ scan_differential_one()
 lane_process()   { freestanding_checks_lane process process; }
 lane_signal()    { freestanding_checks_lane signal signal && glibc_twin signal -no-pie; }
 lane_lock()      { freestanding_checks_lane lock lock; }
+#       CHECK_issues: the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board that
+#       refuses and counts, a torn read given up, a dead writer's lock refused, and a hostile copy read as far as it is sound.
+lane_issues() { freestanding_checks_lane issues issues; }
 #
 #       A section's lines against glibc's: the section built by the host
 #       compiler over the machine's glibc with the given flags prints the
@@ -7230,6 +7233,13 @@ gate_terminal()
                 fonts/inter/Inter-Bold.ttf
 }
 
+#       CHECK_issues: the window table's issue board (window.c), held to its seqlock and to a hostile copy.
+gate_issues()
+{
+        freestanding_check issues "$work/issues-check" || return 1
+        "$work/issues-check"
+}
+
 #       CHECK_draw_list: the kit's draw list (ui_scene_begin and ui_scene_end, the reader's seqlock), the window lists' table and the app's
 #       list path, with the same fonts as the terminal.
 gate_draw_list()
@@ -7338,6 +7348,7 @@ lane_gate()
         job hard gate_row terminal gate_terminal
         job hard gate_row kit-frames gate_kit_frames
         job hard gate_row draw-list gate_draw_list
+        job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row gpu-kernels gate_gpu_kernels
         job hard gate_row inventory gate_inventory
