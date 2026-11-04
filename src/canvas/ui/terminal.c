@@ -2204,7 +2204,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         terminal.dirty = true;
                         return true;
                 }
-                ui_drag_let_go(&terminal.finger.drag); // the event's own time (ui_event_context)
+                ui_drag_throw_let_go(&terminal.finger.drag, terminal_scale()); // the event's own time (ui_event_context)
                 return true;
         }
         if (!clicked)

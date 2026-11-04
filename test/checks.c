@@ -133647,6 +133647,35 @@ static void check_kit_late_lift(void)
     check("kit late lift: a finger that came to rest throws nothing, lifted 150 ms after its last report", rested < UI_DRAG_THROW && rested > -UI_DRAG_THROW);
 }
 
+/*
+    The throw's floor is UI_DRAG_THROW dp a second, in logical pixels, so at a scale of 200 it is twice as many device pixels. A drag of
+    'step' device pixels every 'ms' milliseconds is a finger at step / ms thousand device pixels a second; the lift is 10 ms after the last
+    report. Speeds are kept well away from the floor (the drag's smoothed speed settles a little under its rate).
+*/
+static b32 check_throw_flick(int scale, int step, int reports, long ms)
+{
+    struct ui_drag drag;
+    positive start = 1000000000ull;
+
+    (ui_kit.now = (b64)start, ui_drag_start(&drag, 100));
+    for (int k = 1; k <= reports; k++)
+        (ui_kit.now = (b64)(start + (positive)k * (positive)ms * 1000000ull), ui_drag_follow(&drag, 100 + step * k));
+    ui_kit.now = (b64)(start + (positive)reports * (positive)ms * 1000000ull + 10000000ull);
+    return ui_drag_throw_let_go(&drag, scale);
+}
+
+static void check_kit_throw_dp(void)
+{
+    // The floor is 300 dp a second: 325 device pixels a second (a flick of 13 px every 40 ms) throws at 100% and not at 200% (where it is 162 dp),
+    // and 650 device pixels a second throws at 200%. 200 device pixels a second is under the floor at 100%.
+    check("kit throw dp: a flick of 325 px a second is thrown at 100% (over the floor of 300 dp)", check_throw_flick(100, 13, 16, 40));
+    check("kit throw dp: a flick of 325 px a second is not thrown at 200% (162 dp, under the floor of 300 dp)", !check_throw_flick(200, 13, 16, 40));
+    check("kit throw dp: a flick of 650 px a second is thrown at 200% (325 dp, over the floor)", check_throw_flick(200, 26, 16, 40));
+    check("kit throw dp: a flick of 200 px a second is not thrown at 100%", !check_throw_flick(100, 8, 16, 40));
+    check("kit throw dp: the cap is 8000 dp a second at any scale (Android's maximum fling velocity), and the floor is UI_DRAG_THROW dp",
+          ui_throw_most(200) == 16000 && ui_throw_most(100) == 8000 && ui_throw_least(200) == 600 && ui_throw_least(100) == 300);
+}
+
 static void check_select_scroll(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -153084,6 +153113,7 @@ static fn field_check(struct ui address_to wui)
         check_flick_lift();
         check_flick_retract();
     check_kit_late_lift();
+    check_kit_throw_dp();
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);

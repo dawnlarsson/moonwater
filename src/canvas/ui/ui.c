@@ -1162,7 +1162,9 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
 static inline b64 ui_qmul(b64 a, b64 b);
 static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_FRAME_NS 16000000l
-#define UI_DRAG_THROW 300   // the least speed a finger lets go at that throws the list
+#define UI_DRAG_THROW 300   // the least speed a finger lets go at that throws the list, in dp a second (300 at 100%, as it was in px; Android's
+                            // minimum is 50 dp/s, held up until a trackpad's stop-and-hold residual is judged by a pause rule: see the memory note)
+#define UI_THROW_MAX 8000   // the fastest a throw may be, in dp a second (Android's maximum fling velocity, 8000 dp/s)
 #define UI_DRAG_STILL 20    // the speed a throw stops at
 #define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel glide's rule)
 
@@ -1350,7 +1352,25 @@ static long ui_drag_velocity(const struct ui_drag address_to drag, positive now)
         return ui_drag_fling(drag, now);
 }
 
-static b32 ui_drag_let_go(struct ui_drag address_to drag)
+// The throw's floor and cap in device pixels a second at the scale (a dp is a logical pixel): the same speed is the same flick on
+// every screen, whatever its scale (a 2x screen throws at 2x the pixels, not at a fixed 300 of them).
+static long ui_throw_least(int scale)
+{
+        return UI_DRAG_THROW * (long)(scale > 0 ? scale : 100) / 100;
+}
+
+static long ui_throw_most(int scale)
+{
+        return UI_THROW_MAX * (long)(scale > 0 ? scale : 100) / 100;
+}
+
+static b32 ui_throws(long speed, int scale)
+{
+        return speed >= ui_throw_least(scale) || speed <= -ui_throw_least(scale);
+}
+
+// The finger lifted, at the scale the drag is drawn at (a list's, a terminal's): ui_drag_let_go is that at the standard scale.
+static b32 ui_drag_throw_let_go(struct ui_drag address_to drag, int scale)
 {
         positive now = (positive)ui_kit_time();
         // A finger that stopped before it lifted throws nothing, and one whose lift came late throws what it was doing, less (ui_drag_late).
@@ -1358,11 +1378,16 @@ static b32 ui_drag_let_go(struct ui_drag address_to drag)
                 drag->speed = 0;
         else
                 drag->speed = ui_drag_late(drag->speed, now > drag->at ? now - drag->at : 0);
-        drag->flying = drag->speed >= UI_DRAG_THROW || drag->speed <= -UI_DRAG_THROW;
+        drag->flying = ui_throws(drag->speed, scale);
         drag->owed = 0;
         drag->rate = (b64)drag->speed * UI_ONE;
         drag->at = now;
         return drag->flying;
+}
+
+static b32 ui_drag_let_go(struct ui_drag address_to drag)
+{
+        return ui_drag_throw_let_go(drag, 100);
 }
 
 static int ui_drag_step(struct ui_drag address_to drag)
@@ -6245,7 +6270,6 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_NOTCH_APEX_NS 120000000l  // a wheel's pull grows this long, then springs home though the notches go on (a Mac's trackpad sends them for a second)
 #define UI_NOTCH_BURST_NS 150000000l // notches closer than this are one burst: a burst bumps an end once, and what goes on pushing there is taken
 #define UI_RUBBER_CARRY 400          // the most a release carries past an end, in px a second: the spring's first frames run on from it
-#define UI_FLING_MAX 6000            // the fastest a throw may be, in px a second: a release is a flick, not a jump
 #define UI_SCROLL_VIEW_PAST 1        // the hand may hold the overscroll up to a view past the end
 #define UI_SCROLL_GLIDE 1              // the glide is built (the checks ask for it)
 
@@ -6533,7 +6557,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         {
                 // A throw's speed falls by e in UI_FLING_TAU_NS whatever the region's length, the one rule for every flick (the
                 // distance is the speed times it); the glide stops at the region's ends (ui_scroll_fit) and never passes its aim.
-                speed = speed > UI_FLING_MAX ? UI_FLING_MAX : speed < -UI_FLING_MAX ? -UI_FLING_MAX : speed;
+                speed = speed > ui_throw_most(s->scale) ? ui_throw_most(s->scale) : speed < -ui_throw_most(s->scale) ? -ui_throw_most(s->scale) : speed;
                 s->speed = (b64)speed * UI_SCROLL_SCALE;
                 ui_scroll_glide_to(s, s->at + s->speed * UI_FLING_TAU_NS / 1000000000ll, UI_FLING_TAU_NS);
         }
@@ -6547,7 +6571,7 @@ static void ui_scroll_release(struct ui_scroll address_to s)
 {
         positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0;
         long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
-        b32 thrown = s->precise && (speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW);
+        b32 thrown = s->precise && ui_throws(speed, s->scale);
 
         s->hand = 0;
         ui_scroll_let_go(s, thrown, speed);
@@ -9586,10 +9610,9 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
                 // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
                 // region moves the other way (ui_finger_move).
                 long speed = ui_drag_velocity(&f->drag, now);
-                b32 thrown = speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW;
 
                 if (f->region)
-                        ui_scroll_let_go(f->region, thrown, -speed);
+                        ui_scroll_let_go(f->region, ui_throws(speed, f->region->scale), -speed);
         }
         return f->press.down ? ui_press_end(&f->press, cancelled) : -1;
 }
