@@ -136979,6 +136979,8 @@ static positive rtl_compare(const unsigned int address_to left, const unsigned i
 
 static unsigned int rtl_first[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
 static int rtl_width, rtl_height; // the size of the picture a view made
+static int rtl_pressed[400][400];  // what a press at each place was on, left to right
+static positive rtl_pressed_wrong;
 static p8 rtl_settings_kept[sizeof(settings)], rtl_kit_kept[sizeof(ui_kit)];
 
 // The window in group (a number, or -1 for the kit's gallery) drawn whole at the kit's time, right to left or not.
@@ -137114,9 +137116,25 @@ static b32 rtl_view(string_address name, int group, int scale)
 
         rtl_draw(group, scale, false);
         memory_copy(rtl_first, settings_frames_whole, sizeof(rtl_first));
+        // What a press at each place of the Settings window is on (a row, a group of the column), every 5 pixels across and down, left to right.
+        if (group >= 0)
+                for (int gy = 0; gy < rtl_height / 5 && gy < 400; gy++)
+                        for (int gx = 0; gx < rtl_width / 5 && gx < 400; gx++)
+                                rtl_pressed[gy][gx] = settings_press_target(gx * 5, gy * 5);
         rtl_keep_count = 0;
         rtl_draw(group, scale, true);
         wrong = rtl_compare(rtl_first, settings_frames_whole, SETTINGS_FRAMES_W, rtl_width, rtl_height, &x, &y);
+        if (group >= 0)
+                for (int gy = 0; gy < rtl_height / 5 && gy < 400; gy++)
+                        for (int gx = 0; gx < rtl_width / 5 && gx < 400; gx++)
+                                if (settings_press_target(rtl_width - 1 - gx * 5, gy * 5) != rtl_pressed[gy][gx])
+                                {
+                                        if (!rtl_pressed_wrong)
+                                                string_format(log, "  rtl mirror: a press at %b,%b of %s at scale %b is on %b, at the mirrored place on %b\n", (bipolar)(gx * 5),
+                                                              (bipolar)(gy * 5), name, (bipolar)scale, (bipolar)rtl_pressed[gy][gx],
+                                                              (bipolar)settings_press_target(rtl_width - 1 - gx * 5, gy * 5));
+                                        rtl_pressed_wrong++;
+                                }
         if (wrong)
         {
                 p8 path[96];
@@ -137195,6 +137213,8 @@ static fn check_rtl_mirror(void)
                         groups &= rtl_view(settings_group_name(group), group, scale);
         check("rtl mirror: the kit's gallery, every control of it, right to left is its picture left to right flipped", gallery);
         check("rtl mirror: every group of the Settings window, its card, a menu and the launcher, right to left is its picture left to right flipped", groups);
+        check("rtl mirror: a press at a place of the Settings window right to left is on what a press at the mirrored place left to right is on, every group at scales 1 and 2",
+              !rtl_pressed_wrong);
         // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.
         {
                 static struct windows language_table;
