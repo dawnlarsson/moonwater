@@ -25012,7 +25012,7 @@ static const host_row host_rows[] = {
     {null, "canvas arrange [NAME[@X,Y|@off]...|default]", "where each screen is: names left to right, the first the primary [default]", 'b'},
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "canvas identify", "show the number of each screen for three seconds", 'b'},
-    {null, "canvas record [SECONDS]", "record the compositor's presents for SECONDS (1 to 10, 3 by default)", 'b'},
+    {null, "canvas record [SECONDS]", "record the presents of the compositor for SECONDS (1 to 10, 3 by default)", 'b'},
     {null, "canvas record report", "the report of the presents: the paths, flips, late and held presents", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
