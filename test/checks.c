@@ -195524,6 +195524,193 @@ b32 main(void)
 }
 #endif /* BENCH_fill_sizes */
 
+#ifdef BENCH_small_sizes
+/* The small sizes of memory_copy, string_length and memory_utf8_valid_span against the C loops a caller writes when the library loses
+   (the session bus's engine kept its own below 300, 8 and never called string_length): memory_copy at 1 to 512 bytes against a byte
+   loop on pointers the compiler knows nothing about (what dbus_bytes is) and the same loop on restrict pointers, which gcc turns into
+   sixteen bytes a turn; string_length of 0 to 100 against the byte loop; memory_utf8_valid_span of 1 to 40 bytes against the character
+   walk of the engine. Ticks a call, the least of nine runs of 2^20 calls, the offsets rotating (eight for the destination, four for the
+   source), the two buffers a half page apart so the 4 KiB aliasing of a load behind a store is not what is timed. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define REPS (1u << 20)
+#define TRIES 9
+
+static p8 sm_a[8192] __attribute__((aligned(64))), sm_b[8192] __attribute__((aligned(64)));
+static p8 sm_text[8][256] __attribute__((aligned(64)));
+static positive sm_sink;
+
+__attribute__((noinline, noclone)) static fn sm_copy_bytes(void *to, const void *from, positive n)
+{
+        p8 *d = (p8 *)to;
+        const p8 *s = (const p8 *)from;
+
+        for (positive at = 0; at < n; at++)
+                d[at] = s[at];
+}
+
+__attribute__((noinline, noclone)) static fn sm_copy_vector(void *__restrict to, const void *__restrict from, positive n)
+{
+        p8 *d = (p8 *)to;
+        const p8 *s = (const p8 *)from;
+
+        for (positive at = 0; at < n; at++)
+                d[at] = s[at];
+}
+
+__attribute__((noinline, noclone)) static positive sm_length_bytes(const char *s)
+{
+        positive n = 0;
+
+        while (s[n])
+                n++;
+        return n;
+}
+
+__attribute__((noinline, noclone)) static int sm_utf8_walk(const unsigned char *s, long n)
+{
+        for (long at = 0; at < n;)
+        {
+                unsigned char c = s[at];
+                long more = c < 0x80 ? 0 : c >= 0xc2 && c < 0xe0 ? 1 : c >= 0xe0 && c < 0xf0 ? 2 : c >= 0xf0 && c < 0xf5 ? 3 : -1;
+                unsigned long code;
+
+                if (!c || more < 0 || at + more >= n + (more == 0))
+                        return 0;
+                if (!more)
+                {
+                        at++;
+                        continue;
+                }
+                code = more == 1 ? c & 0x1fu : more == 2 ? c & 0x0fu : c & 0x07u;
+                for (long k = 1; k <= more; k++)
+                {
+                        if ((s[at + k] & 0xc0) != 0x80)
+                                return 0;
+                        code = code << 6 | (s[at + k] & 0x3fu);
+                }
+                if ((more == 2 && (code < 0x800 || (code >= 0xd800 && code < 0xe000))) || (more == 3 && (code < 0x10000 || code > 0x10ffff)))
+                        return 0;
+                at += more + 1;
+        }
+        return 1;
+}
+
+#define SM_LOOP(name, statement)                                                                    \
+        __attribute__((noinline, noclone)) static p64 name(positive n)                                \
+        {                                                                                           \
+                p64 start = get_cpu_time();                                                         \
+                                                                                                    \
+                for (positive r = 0; r < REPS; r++)                                                 \
+                {                                                                                   \
+                        p8 *to = sm_b + 1536 + (r & 7), *from = sm_a + 512 + (r & 3);              \
+                        const char *text = (const char *)sm_text[r & 7] + (r & 7);                 \
+                        (void)to, (void)from, (void)text;                                           \
+                        statement;                                                                  \
+                }                                                                                   \
+                return get_cpu_time() - start;                                                      \
+        }
+SM_LOOP(sm_copy_lib, memory_copy(to, from, n))
+SM_LOOP(sm_copy_apart, memory_copy_apart(to, from, n))
+SM_LOOP(sm_copy_c, sm_copy_bytes(to, from, n))
+SM_LOOP(sm_copy_v, sm_copy_vector(to, from, n))
+SM_LOOP(sm_length_lib, sm_sink += string_length(text))
+SM_LOOP(sm_length_c, sm_sink += sm_length_bytes(text))
+SM_LOOP(sm_utf8_lib, sm_sink += memory_utf8_valid_span((address_any)text, n).x == n)
+SM_LOOP(sm_utf8_c, sm_sink += (positive)sm_utf8_walk((const unsigned char *)text, (long)n))
+
+static fn sm_show(string_address what, positive n, p64 ticks)
+{
+        string_format(log, "%s %p: ", what, n);
+        positive_to_padded(log, (positive)(ticks * 100 / REPS) / 100, 3, ' ', 0);
+        string_format(log, ".");
+        positive_to_padded(log, (positive)(ticks * 100 / REPS) % 100, 2, '0', 0);
+        string_format(log, " ticks");
+}
+
+typedef p64 (*sm_function)(positive);
+
+static fn sm_row(string_address what, positive n, sm_function lib, sm_function first, sm_function second)
+{
+        p64 best_lib = ~(p64)0, best_first = ~(p64)0, best_second = ~(p64)0;
+
+        for (positive t = 0; t < TRIES; t++)
+        {
+                p64 a = lib(n), b = first(n), c = second ? second(n) : 0;
+
+                best_lib = a < best_lib ? a : best_lib;
+                best_first = b < best_first ? b : best_first;
+                best_second = second && c < best_second ? c : best_second;
+        }
+        sm_show(what, n, best_lib);
+        string_format(log, " (lib), ");
+        positive_to_padded(log, (positive)(best_first * 100 / REPS) / 100, 3, ' ', 0);
+        string_format(log, ".");
+        positive_to_padded(log, (positive)(best_first * 100 / REPS) % 100, 2, '0', 0);
+        string_format(log, " (C)");
+        if (second)
+        {
+                string_format(log, ", ");
+                positive_to_padded(log, (positive)(best_second * 100 / REPS) / 100, 3, ' ', 0);
+                string_format(log, ".");
+                positive_to_padded(log, (positive)(best_second * 100 / REPS) % 100, 2, '0', 0);
+                string_format(log, " (C, restrict)");
+        }
+        string_format(log, ", lib/C %p%%\n", (positive)(best_lib * 100 / (best_first ? best_first : 1)));
+}
+
+static fn sm_texts(positive n, positive multibyte)
+{
+        for (positive k = 0; k < 8; k++)
+        {
+                p8 *line = sm_text[k] + k;
+
+                for (positive at = 0; at < 200; at++)
+                        line[at] = (p8)('a' + at % 26);
+                if (multibyte && n >= 4)
+                        line[n - 3] = 0xc3, line[n - 2] = 0xa9, line[n - 1] = 'z';
+                line[n] = 0;
+        }
+}
+
+b32 main(void)
+{
+        static const positive copies[] = {1, 2, 3, 4, 5, 7, 8, 9, 12, 15, 16, 17, 24, 31, 32, 33, 40, 48, 63, 64, 65, 100, 128, 129, 160, 192,
+                                          200, 255, 256, 257, 300, 384, 512, 1100, 4096};
+        static const positive lengths[] = {0, 1, 2, 3, 4, 5, 8, 12, 16, 20, 24, 31, 40, 64, 100};
+        static const positive texts[] = {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 26, 40, 96};
+
+        for (positive k = 0; k < sizeof sm_a; k++)
+                sm_a[k] = (p8)(k * 7 + 3);
+        for (positive k = 0; k < array_count(copies); k++)
+                sm_row("copy", copies[k], sm_copy_lib, sm_copy_c, sm_copy_v);
+        for (positive k = 0; k < array_count(copies); k++)
+                if (copies[k] <= 512)
+                        sm_row("copy_apart", copies[k], sm_copy_apart, sm_copy_c, sm_copy_v);
+        for (positive k = 0; k < array_count(lengths); k++)
+        {
+                sm_texts(lengths[k], 0);
+                sm_row("string_length", lengths[k], sm_length_lib, sm_length_c, 0);
+        }
+        for (positive k = 0; k < array_count(texts); k++)
+        {
+                sm_texts(texts[k], 0);
+                sm_row("utf8 ascii", texts[k], sm_utf8_lib, sm_utf8_c, 0);
+        }
+        for (positive k = 0; k < array_count(texts); k++)
+                if (texts[k] >= 4)
+                {
+                        sm_texts(texts[k], 1);
+                        sm_row("utf8 e-acute last", texts[k], sm_utf8_lib, sm_utf8_c, 0);
+                }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_small_sizes */
+
 #ifdef BENCH_translate_planes
 /* memory_translate_planes_u32_rect against the C loop it replaced in
    src/canvas/font.c (font_translate_lcd): a strip of a terminal row as

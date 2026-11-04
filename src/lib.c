@@ -15324,25 +15324,45 @@ __asm__(
     //       feature byte, which is only written at module init and so is only
     //       ever read after the processor is fully set up.
     //
+    //
+    //       Two xmm for sixteen to thirty two outside the kernel, where the
+    //       registers are there to use (the general registers' four and four
+    //       above are the kernel's, for the reason given): half the
+    //       instructions, and at sixteen the one load and the one store.
+    //
+#ifdef KERNEL_MODE
     "mov (%rsi), %r9\n   mov 8(%rsi), %r10\n   mov -16(%rsi,%rdx), %r11\n   mov -8(%rsi,%rdx), %rcx\n"
     "mov %r9, (%rdi)\n   mov %r10, 8(%rdi)\n   mov %r11, -16(%rdi,%rdx)\n   mov %rcx, -8(%rdi,%rdx)\n" ASM_RET
+#else
+    "movdqu (%rsi), %xmm0\n   movdqu -16(%rsi,%rdx), %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, -16(%rdi,%rdx)\n" ASM_RET
+#endif
     "7:  cmp $8, %rdx\n   jb 8f\n   mov (%rsi), %r9\n   mov -8(%rsi,%rdx), %r10\n   mov %r9, (%rdi)\n   mov %r10, -8(%rdi,%rdx)\n" ASM_RET
     "8:  cmp $4, %rdx\n   jb 0f\n   mov (%rsi), %r9d\n   mov -4(%rsi,%rdx), %r10d\n   mov %r9d, (%rdi)\n   mov %r10d, -4(%rdi,%rdx)\n" ASM_RET
-    "0:  test %rdx, %rdx\n   jz 9f\n"
-    // all three read before any is written: at one or two bytes of overlap the
-    // store to the first would otherwise be the load for the middle
-    "movzbl (%rsi), %r9d\n   movzbl -1(%rsi,%rdx), %r10d\n   mov %rdx, %rcx\n   shr $1, %rcx\n"
-    "movzbl (%rsi,%rcx), %r11d\n   mov %r9b, (%rdi)\n   mov %r10b, -1(%rdi,%rdx)\n   mov %r11b, (%rdi,%rcx)\n"
+    //
+    //       One byte is one load and one store; two or three are the word at
+    //       each end, which overlap at three, both read before either is
+    //       written. It was the first byte, the last and the middle, six
+    //       memory instructions and a shift for a single byte, and a single
+    //       byte took 7.2 ticks against a loop's 6.5.
+    //
+    "0:  test %rdx, %rdx\n   jz 9f\n   test $2, %dl\n   jnz 10f\n   movzbl (%rsi), %r9d\n   mov %r9b, (%rdi)\n" ASM_RET
+    "10:  movzwl (%rsi), %r9d\n   movzwl -2(%rsi,%rdx), %r10d\n   mov %r9w, (%rdi)\n   mov %r10w, -2(%rdi,%rdx)\n"
     "9:  " ASM_RET
     //
     //       Sixteen to thirty two is the xmm pair above, which every x86_64 part
     //       can encode; wider than that needs the byte cpu_detect wrote.
     //
+    //       Thirty three to sixty four in four xmm, ahead of the feature bytes:
+    //       no byte to read, no branch on it and no vzeroupper after, for the
+    //       same eight instructions the pair of ymm and its four more cost.
+    //
     "6:\n"
     ASM_USERSPACE_WIDE(
+    "cmp $64, %rdx\n   ja 61f\n   movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu -32(%rsi,%rdx), %xmm2\n   movdqu -16(%rsi,%rdx), %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, -32(%rdi,%rdx)\n   movdqu %xmm3, -16(%rdi,%rdx)\n" ASM_RET
+    "61:\n"
     ASM_NARROW("cpu_has_avx2", "3f")
     ASM_WIDER("cpu_has_avx512", "5f")
-    "cmp $64, %rdx\n   ja 4f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx), %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
     "vmovdqu -64(%rsi,%rdx), %ymm2\n   vmovdqu -32(%rsi,%rdx), %ymm3\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n"
     "vmovdqu %ymm2, -64(%rdi,%rdx)\n   vmovdqu %ymm3, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
@@ -15363,8 +15383,7 @@ __asm__(
     "vmovdqa %ymm0, (%rdi)\n   vmovdqa %ymm1, 32(%rdi)\n   vmovdqa %ymm2, 64(%rdi)\n   vmovdqa %ymm3, 96(%rdi)\n   add $128, %rsi\n   add $128, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
     "vmovdqu %ymm4, -128(%r8)\n   vmovdqu %ymm5, -96(%r8)\n   vmovdqu %ymm6, -64(%r8)\n   vmovdqu %ymm7, -32(%r8)\n   vmovdqu %ymm8, (%rax)\n   vzeroupper\n" ASM_RET
     //       The zmm ladder, one rung longer for the reason memory_fill gives.
-    "5:  cmp $64, %rdx\n   ja 4f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx), %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 -64(%rsi,%rdx), %zmm1\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm1, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
+    "5:\n4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 -64(%rsi,%rdx), %zmm1\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm1, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 64(%rsi), %zmm1\n"
     "vmovdqu64 -128(%rsi,%rdx), %zmm2\n   vmovdqu64 -64(%rsi,%rdx), %zmm3\n   vmovdqu64 %zmm0, (%rdi)\n"
     "vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, -128(%rdi,%rdx)\n   vmovdqu64 %zmm3, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
@@ -15383,15 +15402,12 @@ __asm__(
     "add $256, %rcx\n   jnz 1b\n"
     "vmovdqu64 %zmm4, -256(%r8)\n   vmovdqu64 %zmm5, -192(%r8)\n   vmovdqu64 %zmm6, -128(%r8)\n   vmovdqu64 %zmm7, -64(%r8)\n   vmovdqu64 %zmm8, (%rax)\n   vzeroupper\n" ASM_RET
     //
-    //       Without AVX2, from 33 bytes to 255: the same ladder in the sixteen SSE2 registers, the head and
+    //       Without AVX2, from 65 bytes to 255: the same ladder in the sixteen SSE2 registers, the head and
     //       the tail of the copy in up to eight of them each, where the general registers took eight bytes a
     //       turn; from 256 the rep movsb below, as before. Userspace only: the kernel's copies stay in the
     //       general registers, for the reason given above.
     //
-    "3:  cmp $64, %rdx\n   ja 31f\n"
-    "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu -32(%rsi,%rdx), %xmm2\n   movdqu -16(%rsi,%rdx), %xmm3\n"
-    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, -32(%rdi,%rdx)\n   movdqu %xmm3, -16(%rdi,%rdx)\n" ASM_RET
-    "31:  cmp $128, %rdx\n   ja 32f\n"
+    "3:\n31:  cmp $128, %rdx\n   ja 32f\n"
     "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
     "movdqu -64(%rsi,%rdx), %xmm4\n   movdqu -48(%rsi,%rdx), %xmm5\n   movdqu -32(%rsi,%rdx), %xmm6\n   movdqu -16(%rsi,%rdx), %xmm7\n"
     "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
@@ -15424,7 +15440,21 @@ __asm__(
     // Backwards only where the regions overlap the wrong way. A plain loop
     // rather than the direction flag: the kernel requires it clear on every
     // path out, and one that faults mid-copy would not have cleared it.
+    //
+    //       The length before the direction, as arm64's is: every block of
+    //       memory_copy_apart's ladder reads all of its input into registers
+    //       before it writes any of its output, so a copy of up to 255 bytes
+    //       (32 in the kernel, whose ladder stops there and goes to rep movsb
+    //       above it) is right whichever way the two regions lie, and the
+    //       overlap test is five instructions and a branch that a sixteen byte
+    //       copy of 22 instructions paid for nothing.
+    //
     ASM_FUNC(memory_copy)
+#ifdef KERNEL_MODE
+    "cmp $32, %rdx\n   jbe memory_copy_apart\n"
+#else
+    "cmp $255, %rdx\n   jbe memory_copy_apart\n"
+#endif
     "mov %rdi, %rax\n   cmp %rsi, %rdi\n   jbe 1f\n   mov %rsi, %r8\n   add %rdx, %r8\n   cmp %r8, %rdi\n   jb 2f\n"
     "1:  jmp memory_copy_apart\n"
     "2:\n"
@@ -25371,12 +25401,20 @@ __asm__(
     "8:  cmp x2, #4\n   b.lo 0f\n   ldr w6, [x1]\n   ldur w7, [x5,  #-4]\n   str w6, [x0]\n   stur w7, [x4,  #-4]\n   mov x0, x3\n   ret\n"
     "0:  cbz x2, 9f\n   lsr x8, x2, #1\n   ldrb w6, [x1]\n   ldurb w7, [x5,  #-1]\n   ldrb w9, [x1, x8]\n   strb w6, [x0]\n   sturb w7, [x4,  #-1]\n   strb w9, [x0, x8]\n"
     "9:  mov x0, x3\n   ret\n"
-    "6:  cmp x2, #64\n   b.hi 4f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x4,  #-32]\n   mov x0, x3\n   ret\n"
-    "4:  cmp x2, #128\n   b.hi 2f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x5,  #-64]\n   ldp q6, q7, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    //       Above 32 the lengths are told apart from the middle: over 128 is one test away from its rung
+    //       and not three.
+    "6:  cmp x2, #128\n   b.hi 2f\n   cmp x2, #64\n   b.hi 4f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    "4:  ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x5,  #-64]\n   ldp q6, q7, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
     "stp q4, q5, [x4,  #-64]\n   stp q6, q7, [x4,  #-32]\n   mov x0, x3\n   ret\n"
-    "2:  cmp x2, #256\n   b.hi 5f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n   ldp q16, q17, [x5,  #-128]\n"
-    "ldp q18, q19, [x5,  #-96]\n   ldp q20, q21, [x5,  #-64]\n   ldp q22, q23, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n"
-    "stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-128]\n   stp q18, q19, [x4,  #-96]\n   stp q20, q21, [x4,  #-64]\n   stp q22, q23, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    //       129 to 256 as memory_copy's: the first 128 bytes and the end as far as the length needs.
+    "2:  cmp x2, #256\n   b.hi 5f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n   cmp x2, #160\n   b.hi 21f\n"
+    "ldp q16, q17, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    "21:  cmp x2, #192\n   b.hi 22f\n   ldp q16, q17, [x5,  #-64]\n   ldp q18, q19, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n"
+    "stp q16, q17, [x4,  #-64]\n   stp q18, q19, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    "22:  cmp x2, #224\n   b.hi 23f\n   ldp q16, q17, [x5,  #-96]\n   ldp q18, q19, [x5,  #-64]\n   ldp q20, q21, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    "stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-96]\n   stp q18, q19, [x4,  #-64]\n   stp q20, q21, [x4,  #-32]\n   mov x0, x3\n   ret\n"
+    "23:  ldp q16, q17, [x5,  #-128]\n   ldp q18, q19, [x5,  #-96]\n   ldp q20, q21, [x5,  #-64]\n   ldp q22, q23, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    "stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-128]\n   stp q18, q19, [x4,  #-96]\n   stp q20, q21, [x4,  #-64]\n   stp q22, q23, [x4,  #-32]\n   mov x0, x3\n   ret\n"
     ".Lmemory_copy_apart_arm64_big:\n5:  ldp q4, q5, [x1]\n   ldp q6, q7, [x1, #32]\n   ldp q16, q17, [x5,  #-64]\n   ldp q18, q19, [x5,  #-32]\n   add x6, x0, #64\n   bic x6, x6, #63\n"
     "sub x7, x6, x0\n   add x8, x1, x7\n   sub x9, x4, #64\n"
     "1:  ldp q0, q1, [x8]\n   ldp q2, q3, [x8, #32]\n   stp q0, q1, [x6]\n   stp q2, q3, [x6, #32]\n   add x6, x6, #64\n   add x8, x8, #64\n"
@@ -25411,7 +25449,7 @@ __asm__(
     //       and put back to return the destination. The copy of it this used
     //       to make was restoring a register that had not changed.
     //
-    "cmp x2, #256\n   b.hi 2f\n   add x4, x0, x2\n   add x5, x1, x2\n   cmp x2, #32\n   b.hi 6f\n   cmp x2, #16\n   b.lo 7f\n   ldr q0, [x1]\n   ldur q1, [x5,  #-16]\n"
+    "cmp x2, #128\n   b.hi 20f\n   add x4, x0, x2\n   add x5, x1, x2\n   cmp x2, #32\n   b.hi 6f\n   cmp x2, #16\n   b.lo 7f\n   ldr q0, [x1]\n   ldur q1, [x5,  #-16]\n"
     "str q0, [x0]\n   stur q1, [x4,  #-16]\n   ret\n"
     //
     //       Below sixteen a single bit answers the question a compare and a
@@ -25425,16 +25463,32 @@ __asm__(
     //       One, two and three bytes without a branch between them: the first,
     //       the last and the middle, all read before any is written, which at
     //       one byte of overlap is what keeps the store to the first from
-    //       being the load for the middle.
+    //       being the load for the middle. (A one byte path and a half word
+    //       pair for two and three, with the branch that tells them apart, was
+    //       measured on an M2: 2.1 ns for two bytes against this 1.8.)
     //
     "0:  cbz x2, 9f\n   lsr x8, x2, #1\n   ldrb w6, [x1]\n   ldurb w7, [x5,  #-1]\n   ldrb w9, [x1, x8]\n   strb w6, [x0]\n   sturb w7, [x4,  #-1]\n   strb w9, [x0, x8]\n"
     "9:  ret\n"
     "6:  cmp x2, #64\n   b.hi 4f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x4,  #-32]\n   ret\n"
-    "4:  cmp x2, #128\n   b.hi 3f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x5,  #-64]\n   ldp q6, q7, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    "4:  ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x5,  #-64]\n   ldp q6, q7, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
     "stp q4, q5, [x4,  #-64]\n   stp q6, q7, [x4,  #-32]\n   ret\n"
-    "3:  ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n   ldp q16, q17, [x5,  #-128]\n   ldp q18, q19, [x5,  #-96]\n"
-    "ldp q20, q21, [x5,  #-64]\n   ldp q22, q23, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n"
-    "stp q16, q17, [x4,  #-128]\n   stp q18, q19, [x4,  #-96]\n   stp q20, q21, [x4,  #-64]\n   stp q22, q23, [x4,  #-32]\n   ret\n"
+    //       Over 128 the length is asked once more, for the loop's sake, and the ends are computed only for the rungs.
+    "20:  cmp x2, #256\n   b.hi 2f\n   add x4, x0, x2\n   add x5, x1, x2\n"
+    //
+    //       129 to 256: the first 128 bytes and then only as much of the end as
+    //       the length needs, 32 bytes at a time (the last 128 whatever the
+    //       length rewrote bytes the first 128 had written, up to 127 of 129,
+    //       and an M2 pays for stores that overlap: 4.7 ns a copy of 129 to
+    //       160 bytes against 2.4 at 128).
+    //
+    "3:  ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n   cmp x2, #160\n   b.hi 31f\n"
+    "ldp q16, q17, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-32]\n   ret\n"
+    "31:  cmp x2, #192\n   b.hi 32f\n   ldp q16, q17, [x5,  #-64]\n   ldp q18, q19, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n"
+    "stp q16, q17, [x4,  #-64]\n   stp q18, q19, [x4,  #-32]\n   ret\n"
+    "32:  cmp x2, #224\n   b.hi 33f\n   ldp q16, q17, [x5,  #-96]\n   ldp q18, q19, [x5,  #-64]\n   ldp q20, q21, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    "stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-96]\n   stp q18, q19, [x4,  #-64]\n   stp q20, q21, [x4,  #-32]\n   ret\n"
+    "33:  ldp q16, q17, [x5,  #-128]\n   ldp q18, q19, [x5,  #-96]\n   ldp q20, q21, [x5,  #-64]\n   ldp q22, q23, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n"
+    "stp q4, q5, [x0, #64]\n   stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-128]\n   stp q18, q19, [x4,  #-96]\n   stp q20, q21, [x4,  #-64]\n   stp q22, q23, [x4,  #-32]\n   ret\n"
     //
     //       Above 256 the copy is a loop and a loop has a direction, so now the
     //       question has to be asked. The two ends the test computes are the
@@ -59788,6 +59842,20 @@ __asm__(
     ASM_FUNC(memory_utf8_valid_span)
     //   rdi = block, rsi = size; rax = bytes proven, rdx = characters
     "xor %eax, %eax\n   xor %edx, %edx\n"
+    //  Under eight bytes, ASCII, which is what a short name is: one byte, the
+    //  word at each end of two or three, or the double word at each end of
+    //  four to seven, read where they lie and proven by one test of the top
+    //  bits, the answer their count. A byte that is not ASCII leaves the byte
+    //  loop below its work, from the start. It was the walk's word loop a byte at
+    //  a time, seventeen instructions each: one byte took 3 times the C's
+    //  ticks, seven 2 times.
+    "cmp $8, %rsi\n   jae .Lutf8_valid_x64_notiny\n   cmp $2, %rsi\n   jae .Lutf8_valid_x64_tiny2\n"
+    "test %rsi, %rsi\n   jz .Lutf8_valid_x64_tiny0\n   cmpb $0x7f, (%rdi)\n   ja .Lutf8_valid_x64_byte\n   mov $1, %eax\n   mov $1, %edx\n"
+    ".Lutf8_valid_x64_tiny0:\n" ASM_RET
+    ".Lutf8_valid_x64_tiny2:  cmp $4, %rsi\n   jae .Lutf8_valid_x64_tiny4\n   movzwl (%rdi), %r8d\n   movzwl -2(%rdi,%rsi), %r9d\n   or %r9d, %r8d\n   test $0x8080, %r8d\n"
+    "jnz .Lutf8_valid_x64_byte\n   mov %rsi, %rax\n   mov %rsi, %rdx\n" ASM_RET
+    ".Lutf8_valid_x64_tiny4:  mov (%rdi), %r8d\n   or -4(%rdi,%rsi), %r8d\n   test $0x80808080, %r8d\n   jnz .Lutf8_valid_x64_byte\n   mov %rsi, %rax\n   mov %rsi, %rdx\n" ASM_RET
+    ".Lutf8_valid_x64_notiny:\n"
 #ifndef KERNEL_MODE
     "cmp $32, %rsi\n   jae .Lutf8_valid_x64_long\n"
 #endif
@@ -59819,20 +59887,24 @@ __asm__(
     ".Lutf8_valid_x64_skip8:  bsf %r8, %r8\n   shr $3, %r8d\n   jmp .Lutf8_valid_x64_skipped\n"
     ".Lutf8_valid_x64_skip:\n   bsf %r8d, %r8d\n"
     ".Lutf8_valid_x64_skipped:  add %r8, %rax\n   add %r8, %rdx\n   mov %rsi, %rcx\n   sub %rax, %rcx\n   movzbl (%rdi,%rax), %r8d\n   jmp .Lutf8_valid_x64_lead\n"
-    ".Lutf8_valid_x64_byte:  movzbl (%rdi,%rax), %r8d\n   cmp $0x80, %r8d\n   jae .Lutf8_valid_x64_lead\n   inc %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    ".Lutf8_valid_x64_byte:  movzbl (%rdi,%rax), %r8d\n   cmp $0x80, %r8d\n   jae .Lutf8_valid_x64_bytelead\n   inc %rax\n   inc %rdx\n   cmp %rsi, %rax\n   jb .Lutf8_valid_x64_byte\n" ASM_RET
+    ".Lutf8_valid_x64_bytelead:  mov %rsi, %rcx\n   sub %rax, %rcx\n   jmp .Lutf8_valid_x64_lead\n"
+    //  After a sequence: a block of under eight goes on by the byte loop, not
+    //  through the word loop's chain of tests for each byte it has left.
+    ".Lutf8_valid_x64_next:  cmp $8, %rsi\n   jae .Lutf8_valid_x64_word\n   cmp %rsi, %rax\n   jb .Lutf8_valid_x64_byte\n" ASM_RET
     //  r8 the lead, rcx what is left from it.
     ".Lutf8_valid_x64_lead:  cmp $0xc2, %r8d\n   jb .Lutf8_valid_x64_done\n   cmp $0xe0, %r8d\n   jae .Lutf8_valid_x64_three\n   cmp $2, %rcx\n   jb .Lutf8_valid_x64_done\n"
-    "movzbl 1(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n   add $2, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    "movzbl 1(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n   add $2, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_next\n"
     ".Lutf8_valid_x64_three:  cmp $0xf0, %r8d\n   jae .Lutf8_valid_x64_four\n   cmp $3, %rcx\n   jb .Lutf8_valid_x64_done\n   movzbl 1(%rdi,%rax), %r9d\n"
     "cmp $0xe0, %r8d\n   jne 1f\n   cmp $0xa0, %r9d\n   jb .Lutf8_valid_x64_done\n"
     "1:  cmp $0xed, %r8d\n   jne 2f\n   cmp $0xa0, %r9d\n   jae .Lutf8_valid_x64_done\n"
     "2:  and $0xc0, %r9d\n   cmp $0x80, %r9d\n   jne .Lutf8_valid_x64_done\n   movzbl 2(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n"
-    "add $3, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    "add $3, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_next\n"
     ".Lutf8_valid_x64_four:  cmp $0xf4, %r8d\n   ja .Lutf8_valid_x64_done\n   cmp $4, %rcx\n   jb .Lutf8_valid_x64_done\n   movzbl 1(%rdi,%rax), %r9d\n"
     "cmp $0xf0, %r8d\n   jne 1f\n   cmp $0x90, %r9d\n   jb .Lutf8_valid_x64_done\n"
     "1:  cmp $0xf4, %r8d\n   jne 2f\n   cmp $0x90, %r9d\n   jae .Lutf8_valid_x64_done\n"
     "2:  and $0xc0, %r9d\n   cmp $0x80, %r9d\n   jne .Lutf8_valid_x64_done\n   movzbl 2(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n"
-    "movzbl 3(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n   add $4, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_word\n"
+    "movzbl 3(%rdi,%rax), %ecx\n   and $0xc0, %ecx\n   cmp $0x80, %ecx\n   jne .Lutf8_valid_x64_done\n   add $4, %rax\n   inc %rdx\n   jmp .Lutf8_valid_x64_next\n"
     ".Lutf8_valid_x64_done:\n" ASM_RET
 #ifndef KERNEL_MODE
     //  32 or more: blocks through the validator when there is AVX2.
@@ -59981,6 +60053,17 @@ __asm__(
     ASM_FUNC(memory_utf8_valid_span)
     //   x0 = block, x1 = size; x2 = bytes proven, x3 = characters
     "mov x2, #0\n   mov x3, #0\n"
+    //  Under eight bytes, ASCII (what a short name is): the first and the
+    //  last four, or the first, the middle and the last, proven by one test
+    //  of the top bits, and the answer their count. A byte past ASCII leaves
+    //  the walk its work from the start. A single byte took 2.95 ns against
+    //  the C walk's 1.8.
+    "cmp x1, #8\n   b.hs .Lutf8_valid_arm64_notiny\n   cmp x1, #4\n   b.lo .Lutf8_valid_arm64_tiny3\n"
+    "ldr w4, [x0]\n   add x5, x0, x1\n   ldur w6, [x5, #-4]\n   orr w4, w4, w6\n   tst w4, #0x80808080\n   b.ne .Lutf8_valid_arm64_scalar\n   mov x0, x1\n" ASM_RET
+    ".Lutf8_valid_arm64_tiny3:  cbz x1, .Lutf8_valid_arm64_tiny0\n   ldrb w4, [x0]\n   add x5, x0, x1\n   ldurb w6, [x5, #-1]\n   lsr x7, x1, #1\n   ldrb w7, [x0, x7]\n"
+    "orr w4, w4, w6\n   orr w4, w4, w7\n   tst w4, #0x80\n   b.ne .Lutf8_valid_arm64_scalar\n"
+    ".Lutf8_valid_arm64_tiny0:  mov x0, x1\n" ASM_RET
+    ".Lutf8_valid_arm64_notiny:\n"
 #ifndef KERNEL_MODE
     "cmp x1, #16\n   b.lo .Lutf8_valid_arm64_scalar\n"
     ".Lutf8_valid_arm64_ascii:  ldr q0, [x0, x2]\n   umaxv b4, v0.16b\n   fmov w9, s4\n   tbnz w9, #7, .Lutf8_valid_arm64_enter\n   add x2, x2, #16\n   add x10, x2, #16\n   cmp x10, x1\n"
@@ -60014,14 +60097,15 @@ __asm__(
     ".Lutf8_valid_arm64_back:  sub x9, x10, x12\n   ldrb w9, [x9]\n   cmp w9, #0xc0\n   b.hs .Lutf8_valid_arm64_lead_back\n   cmp w9, #0x80\n   b.lo .Lutf8_valid_arm64_scalar\n"
     "cmp x12, #3\n   b.hs .Lutf8_valid_arm64_scalar\n   add x12, x12, #1\n   cmp x12, x2\n   b.ls .Lutf8_valid_arm64_back\n   b .Lutf8_valid_arm64_scalar\n"
     ".Lutf8_valid_arm64_lead_back:  sub x2, x2, x12\n   sub x3, x3, #1\n"
-    ".Lutf8_valid_arm64_scalar:\n"
 #endif
+    ".Lutf8_valid_arm64_scalar:\n"
     "mov x5, #0x8080808080808080\n"
     ".Lutf8_valid_arm64_word:  sub x6, x1, x2\n   cmp x6, #8\n   b.lo .Lutf8_valid_arm64_byte\n   ldr x7, [x0, x2]\n   ands x7, x7, x5\n   b.ne .Lutf8_valid_arm64_skip\n"
     "add x2, x2, #8\n   add x3, x3, #8\n   b .Lutf8_valid_arm64_word\n"
     ".Lutf8_valid_arm64_skip:  rbit x7, x7\n   clz x7, x7\n   lsr x7, x7, #3\n   add x2, x2, x7\n   add x3, x3, x7\n   sub x6, x6, x7\n   ldrb w7, [x0, x2]\n   b .Lutf8_valid_arm64_lead\n"
-    ".Lutf8_valid_arm64_byte:\n   cbz x6, .Lutf8_valid_arm64_done\n   ldrb w7, [x0, x2]\n   cmp w7, #0x80\n   b.hs .Lutf8_valid_arm64_lead\n"
-    "add x2, x2, #1\n   add x3, x3, #1\n   b .Lutf8_valid_arm64_word\n"
+    ".Lutf8_valid_arm64_byte:\n   cbz x6, .Lutf8_valid_arm64_done\n"
+    "1:  ldrb w7, [x0, x2]\n   cmp w7, #0x80\n   b.hs .Lutf8_valid_arm64_lead\n"
+    "add x2, x2, #1\n   add x3, x3, #1\n   subs x6, x6, #1\n   b.ne 1b\n   b .Lutf8_valid_arm64_done\n"
     //  w7 the lead, x6 what is left from it.
     ".Lutf8_valid_arm64_lead:  cmp w7, #0xc2\n   b.lo .Lutf8_valid_arm64_done\n   cmp w7, #0xf4\n   b.hi .Lutf8_valid_arm64_done\n   mov x4, #2\n   cmp w7, #0xdf\n   b.ls 1f\n"
     "mov x4, #3\n   cmp w7, #0xef\n   b.ls 1f\n   mov x4, #4\n"
@@ -60132,11 +60216,21 @@ __asm__(
     //   a0 = block, a1 = size; t0 = bytes proven, t1 = characters. No V is
     //   assumed and there is no Zbb, so ASCII runs go eight bytes a test
     //   from a naturally aligned word, and everything else a byte.
+    //
+    //   Under eight bytes the bytes are or-ed together and one test of the
+    //   top bit proves them all ASCII, the answer their count (a byte loop of
+    //   four instructions, where the walk below takes eleven a byte through
+    //   its word test and its byte test); a byte past ASCII hands the walk
+    //   its work from the start.
+    "li t3, 8\n   bgeu a1, t3, .Lutf8_valid_rv_notiny\n   li t3, 0\n   add t4, a0, a1\n   mv t5, a0\n   beq t5, t4, 2f\n"
+    "1:  lbu t6, 0(t5)\n   or t3, t3, t6\n   addi t5, t5, 1\n   bne t5, t4, 1b\n"
+    "2:  andi t3, t3, 0x80\n   bnez t3, .Lutf8_valid_rv_scalar\n   mv a0, a1\n" ASM_RET
+    ".Lutf8_valid_rv_notiny:\n"
 #ifndef KERNEL_MODE
     "li t3, 32\n   bltu a1, t3, .Lutf8_valid_rv_scalar\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lutf8_valid_rv_vector\n   bnez t3, .Lutf8_valid_rv_scalar\n"
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_utf8_valid_span\n"
-    ".Lutf8_valid_rv_scalar:\n"
 #endif
+    ".Lutf8_valid_rv_scalar:\n"
     "li t0, 0\n   li t1, 0\n   li t2, 0x8080808080808080\n"
     ".Lutf8_valid_rv_word:  sub t3, a1, t0\n   li t6, 8\n   bltu t3, t6, .Lutf8_valid_rv_byte\n   add a2, a0, t0\n   andi t6, a2, 7\n   bnez t6, .Lutf8_valid_rv_byte\n"
     "ld t4, 0(a2)\n   and t4, t4, t2\n   bnez t4, .Lutf8_valid_rv_byte\n   addi t0, t0, 8\n   addi t1, t1, 8\n   j .Lutf8_valid_rv_word\n"
