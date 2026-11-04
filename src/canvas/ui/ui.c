@@ -1362,6 +1362,12 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
 
 
 /* ---- kit: motion ---- */
+/*
+        The motion, in Q30 (motion.h). Springs: ui_spring_go (a kick), ui_spring_at (the value now), ui_spring_stop. Tweens:
+        ui_tween_put (the target), ui_tween_at, ui_tween_still. Ripples: ui_ripple_go, ui_ripple_at, ui_ripple_exit. Slides:
+        ui_slide_go, ui_slide_value, ui_slide_land. The time is the last argument, in nanoseconds, and the caller passes
+        ui_kit.now (set by ui_event_context); a caller's own clock is what check_kit_standard counts.
+*/
 
 /*
         The kit's motion, Dawning Native's Rubber Band standard (its ui.js and
@@ -2008,6 +2014,12 @@ static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to l
 /* ---- end of the kit's motion ---- */
 
 /* ---- kit: theme ---- */
+/*
+        The theme: a colour is a role (ui_role), a well is a role at an alpha (ui_well), a text's colour is ui_text_colour.
+        Direction: ui_rtl() says the language reads right to left; ui_mirror turns a box over its middle; ui_arrow(key) is +1
+        toward the end of a row; ui_start_x and ui_end_x are the edges. Layout mirrors, painters never do: a mark that must not
+        turn says UI_KEEP (see the macro above; a build says nothing of it).
+*/
 
 #include "theme.h"
 
@@ -2299,6 +2311,11 @@ static fn ui_kit_turn(void)
 /* ---- end of the kit's theme ---- */
 
 /* ---- kit: shapes ---- */
+/*
+        The box layer: boxes in Q8 device pixels (ui_q8 = device px * 256, ui_stroke the one-pixel stroke). ui_kit_fill paints a
+        box in an argb with an optional clip box, ui_kit_ring a ring, ui_kit_outline a line, ui_kit_put one pixel, ui_kit_run a
+        run of cover. ui_box_* is box geometry (radii, spans). Nothing here knows a control: a box, a colour and a cover.
+*/
 
 /*
         The kit's shapes, drawn with their edges where they fall: a rounded
@@ -2772,7 +2789,8 @@ static fn ui_kit_run(unsigned int address_to row, b32 count, unsigned int tone)
 }
 
 // The tone of a colour at a cover, as ui_kit_put lays it: a colour wholly over is itself, opaque or premultiplied.
-static inline unsigned int ui_kit_tone(unsigned int argb, unsigned int cover)
+// The argb at cover (256ths) of itself, premultiplied: the box layer's cover. ui_cover is the same at 255ths on each channel.
+static inline unsigned int ui_kit_cover(unsigned int argb, unsigned int cover)
 {
         if (cover >= UI_FULL && argb >> 24 == 255)
                 return argb | 0xff000000u;
@@ -2903,7 +2921,7 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
                         for (b32 x = lo; x < a; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                         if (b > a && inside)
-                                ui_kit_run(row + a, b - a, ui_kit_tone(argb, inside));
+                                ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside));
                         for (b32 x = b > a ? b : hi; x < hi; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                 }
@@ -3131,6 +3149,11 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
 /* ---- end of the kit's shapes ---- */
 
 /* ---- kit: controls ---- */
+/*
+        The controls: ui_control_draw paints one control of a page (its kind picks a static ui_<kind>_draw), ui_control_hit and
+        ui_control_place are its hit test and place, ui_slider_* the sliders, ui_tabs_* and ui_vtabs_* the tabs, ui_kit_text_* and
+        ui_kit_measure a run of text in a box. A control is data (kind, label, value, box); the kit draws, hits and moves it.
+*/
 
 /*
         The kit's type scale, its role names kept: Geist in the kit, here the
@@ -5356,6 +5379,12 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
 }
 
 /* ---- the pointer ---- */
+/*
+        The pointer and the scroll region. ui_event_context(event) is the one place an event's touch flag and time are taken
+        (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set, ui_scroll_show and ui_scroll_reveal place
+        it, ui_scroll_pointer and ui_scroll_wheel take input, ui_scroll_draw paints the bar and the stretch. The rubber band, the
+        wheel's burst and the hand are the kit's (ui_wheel_*, ui_scroll_hand): an app forwards its input and keeps no stretch.
+*/
 
 // Whether a device point is in a control's box (a radio group: which row; tabs: which tab), -1 when not.
 static int ui_control_hit(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
@@ -6629,6 +6658,11 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 }
 
 /* ---- menus: one set of defaults, a popup surface and the list in it ---- */
+/*
+        A menu: ui_popmenu_add (an item), ui_popmenu_choosable, ui_popmenu_size and ui_popmenu_at (its size and place),
+        ui_popmenu_event (its input), ui_popmenu_draw. A popup window: ui_popup_open and ui_popup_close, ui_popup_present,
+        ui_popup_pump (its event loop) and ui_popup_scroll. The sizes are ui_menu_sizes, one set for every menu.
+*/
 
 /*
         Every menu of the kit is one of these, and these are its defaults, all in logical pixels (ui_menu_sizes gives them
@@ -7273,6 +7307,11 @@ static int ui_popup_pump(struct ui_popup address_to p)
 }
 
 /* ---- the kit's composites: what a window is made of ---- */
+/*
+        The composites: ui_buttons_set, ui_buttons_event and ui_buttons_draw (a row of buttons, which lays itself out and takes
+        its own pointer and keys), ui_cut_by and ui_cut_write (text cut to a width), ui_fit, ui_signal (the signal bars), ui_chevron.
+        An app gives the labels and the actions.
+*/
 
 /*
         A window of the kit is a page: its title at the top left, a search
@@ -7775,6 +7814,11 @@ static fn ui_chevron(struct ui address_to ui, int cx, int cy, int size, unsigned
 }
 
 /* ---- a speaker, a level meter and strips of both: what a mixer is made of ---- */
+/*
+        A speaker, a level meter and the strips of both (the mixer's composite): ui_speaker, ui_level_* (the meter's feed and
+        motion), ui_strips_begin, ui_strips_add and ui_strips_end (a strip is data: a name and a level), ui_strips_event and
+        ui_strips_draw. The strips own their scroll and their pointer; the app adds strips.
+*/
 
 /*
         A speaker, size to a side with its left edge at left and its top at top (device pixels), in one colour: a body and a
@@ -8491,6 +8535,11 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 }
 
 /* ---- a list of rows in sections ---- */
+/*
+        A list of rows in sections: ui_list_layout places the rows, ui_list_row_y and ui_list_hit map a row to pixels and back,
+        ui_list_pointer and ui_list_key take input, ui_list_press_slide and ui_list_let_go finish a press, ui_list_damage marks a
+        row dirty and ui_list_draw paints it. An app gives its rows; the kit owns the press, the slide, the scroll and the damage.
+*/
 
 #define UI_LIST_MOST 256 // the rows a list shows at once
 #define UI_LIST_STARTS 1 // a row is its section's first
@@ -9088,6 +9137,11 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
 }
 
 /* ---- a finger on a page ---- */
+/*
+        A finger on a page: ui_finger_down, ui_finger_move and ui_finger_up (a target, a drag, a throw into the page's scroll
+        region). A finger grab is ui_press_begin with touch set. The text view keeps its own grab (ui_text_finger_*): a
+        duplicate, on the list in ui-audit-kit-2026-11-04.
+*/
 
 /*
         A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the region it went
@@ -9152,6 +9206,12 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
 }
 
 /* ---- a page ---- */
+/*
+        A page: ui_page_layout and ui_page_draw (a title, a search field, a column of groups, a body and a status line), the
+        column's ui_page_column_* (hit, reveal, key, press, bar) and ui_page_wheel. ui_app_run is the main loop: it calls
+        ui_event_context once for each event and forwards it. ui_argument reads a program's argument. An app declares its
+        groups and rows; the page lays out, scrolls and draws them.
+*/
 
 struct ui_page
 {
@@ -10025,6 +10085,12 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 }
 
 /* ---- text: a field, a text area and the code view, over text.c's documents ---- */
+/*
+        Text: a field (ui_field_open and ui_field_event take every typed input of Canvas; ui_field_digits for numbers), a text
+        area and the code view (ui_text_open, ui_text_close, ui_text_set, ui_text_event, ui_text_draw), the carets (ui_caret_*),
+        the text menu (ui_text_menu_*) and the overlay bars. Typing and selection live here (check_no_hand_typing); text.c holds
+        the documents.
+*/
 
 /*
         One widget for every place text is typed: a field (one line, the kit's UI_INPUT draws the well and this draws
@@ -12195,6 +12261,10 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
 }
 
 /* ---- drawing ---- */
+/*
+        The text painters: ui_text_draw paints a text widget, ui_text_field_draw a field, ui_text_draw_line one line. The colours
+        are the text's roles (ui_text_colour, ui_text_range_role).
+*/
 
 // The colour of a role of the tokenizer's, from the kit's roles: the text, and the accent and status colours for the rest.
 static unsigned int ui_text_role(int role)
