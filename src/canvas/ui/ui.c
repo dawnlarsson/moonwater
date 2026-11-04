@@ -3501,6 +3501,7 @@ struct ui_control
         // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
         // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
         int row_x, row_y, row_w, row_h;
+        unsigned int marks;                // tabs: bit k is a dot at the far end of item k (a file that has changes); last, for the layout's sake
 };
 
 // The row a control's ripple and hover cover, in logical pixels.
@@ -4375,6 +4376,7 @@ static int ui_tabs_length(struct ui address_to ui, const struct ui_control addre
 }
 
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
+static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c, int height);
 
 #define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
 static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -4443,6 +4445,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                         ui_kit_text(ui, middle / 256 - width / 2, baseline, (string_address)c->items[item], UI_LABEL_LARGE, ink, 0);
                 }
         }
+        ui_tabs_marks(ui, c, height);
         ui_kit.busy |= live;
 }
 
@@ -4997,6 +5000,20 @@ static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
 {
         ui_kit_fill(ui, &(struct ui_box){x * 256, y * 256, (x + ui_px(ui, UI_DOT)) * 256, (y + ui_px(ui, UI_DOT)) * 256, ui_px(ui, UI_DOT / 2) * 256,
                                          ui_px(ui, UI_DOT / 2) * 256}, argb, null);
+}
+
+// A tabs' marks (ui_tabs_draw, after the items): a dot UI_DOT_IN in from the far end of each marked item, over the strip, in the
+// item's place (the far end is the right, or the left when the layout reads from the right, ui_mirror).
+static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c, int height)
+{
+        for (int item = 0; item < c->count && item < 32; item++)
+                if (c->marks & (1u << item))
+                {
+                        int left = ui_dev(ui, ui_tab_left(ui, c, item)), wide = ui_dev(ui, ui_tab_width(ui, c, item));
+
+                        ui_kit_dot(ui, ui_mirror(left + wide - ui_px(ui, UI_DOT_IN), ui_px(ui, UI_DOT), left, wide), ui_px(ui, height) / 2 - ui_px(ui, UI_DOT / 2),
+                                   ui_role(UI_ON_SURFACE) | 0xff000000u);
+                }
 }
 
 // A badge, a tag or a key takes the width of its words: what its draw sets (c->w, logical pixels), said first for a layout that places it.

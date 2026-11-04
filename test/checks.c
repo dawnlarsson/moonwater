@@ -132111,6 +132111,44 @@ static void check_kit_pointer_send(struct ui address_to wui)
     ui_text_close(&b);
 }
 
+/*
+        A tab's mark is a dot at the far end of that item, drawn by the kit: two strips alike but for the mark on item 1 differ in
+        the pixels of item 1 and nowhere else (the editor's file tabs with changes are this).
+*/
+static void check_tabs_marks(struct ui address_to wui)
+{
+    static unsigned int plain[400 * 60], marked[400 * 60];
+    static struct ui_control base, a, b;
+    b32 inside = false, outside = false;
+    int left, wide;
+    unsigned int *kept_pixels = wui->pixels;
+    int kept_pitch = wui->pitch, kept_width = wui->width, kept_height = wui->height;
+
+    memory_zero(&base, sizeof(base));
+    base.kind = UI_TABS, base.variant = UI_TABS_SEGMENTED, base.x = 0, base.y = 0, base.w = 400, base.h = UI_TABS_H, base.count = 3;
+    base.items[0] = "one", base.items[1] = "two", base.items[2] = "three";
+    ui_control_start(&base);
+    a = base, b = base;
+    b.marks = 2;
+    ui_begin(wui, plain, 400, 400, 60);
+    ui_control_draw(wui, &a);
+    ui_begin(wui, marked, 400, 400, 60);
+    ui_control_draw(wui, &b);
+    left = ui_dev(wui, ui_tab_left(wui, &base, 1)), wide = ui_dev(wui, ui_tab_width(wui, &base, 1));
+    for (int y = 0; y < 60; y++)
+        for (int x = 0; x < 400; x++)
+            if (plain[(positive)y * 400 + (positive)x] != marked[(positive)y * 400 + (positive)x])
+            {
+                if (x >= left && x < left + wide)
+                    inside = true;
+                else
+                    outside = true;
+            }
+    check("tabs: a mark is a dot at the far end of its item, and the picture changes only in that item", inside && !outside);
+    // The window's picture is the caller's again: the strip was drawn into this check's own buffers.
+    wui->pixels = kept_pixels, wui->pitch = kept_pitch, wui->width = kept_width, wui->height = kept_height;
+}
+
 static void check_field_drag_drawn(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -151328,6 +151366,7 @@ static fn field_check(struct ui address_to wui)
         check_field_flick(wui);
         check_throw_last_step(wui);
         check_kit_pointer_send(wui);
+        check_tabs_marks(wui);
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);

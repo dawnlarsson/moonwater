@@ -453,6 +453,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
         c->x = 0, c->y = 0, c->w = editor.width * 100 / ui->scale, c->h = UI_TABS_H;
         c->count = editor.count;
+        c->marks = 0;
         for (int at = 0; at < editor.count; at++)
         {
                 const char address_to name = editor.tabs[at].path;
@@ -461,6 +462,8 @@ static fn editor_tabs_layout(struct ui address_to ui)
                         if (*s == '/')
                                 name = s + 1;
                 c->items[at] = name[0] ? name : WORDS(editor_untitled);
+                if (doc_dirty(&editor.tabs[at].view.doc))
+                        c->marks |= 1u << at;
         }
         c->at = editor.tab;
 }
@@ -471,24 +474,6 @@ static fn editor_show_tab(int at)
         editor.tab = at;
         editor_keys();
         editor.dirty = true;
-}
-
-static fn editor_tabs_draw(struct ui address_to ui, int height)
-{
-        struct ui_control address_to c = &editor.strip;
-
-        editor_tabs_layout(ui);
-        ui_control_draw(ui, c);
-        // The dot is the kit's badge dot (ui_kit_dot), its inset the kit's UI_DOT_IN from the tab's right edge.
-        for (int at = 0; at < editor.count; at++)
-                if (doc_dirty(&editor.tabs[at].view.doc))
-                {
-                        int left = ui_dev(ui, ui_tab_left(ui, c, at)), wide = ui_dev(ui, ui_tab_width(ui, c, at));
-
-                        // After the name: at the tab's right end, or its left reading from the right.
-                        ui_kit_dot(ui, ui_mirror(left + wide - ui_px(ui, UI_DOT_IN), ui_px(ui, UI_DOT), left, wide), height / 2 - ui_px(ui, UI_DOT / 2),
-                                   ui_role(UI_ON_SURFACE) | 0xff000000u);
-                }
 }
 
 /*
@@ -554,7 +539,10 @@ static fn editor_draw(unsigned int address_to pixels)
         // ui_begin clears the window to the kit's surface (the editor is an opaque app), so the ground is not painted again here.
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
         if (tabs)
-                editor_tabs_draw(ui, tabs);
+        {
+                editor_tabs_layout(ui);
+                ui_control_draw(ui, &editor.strip);
+        }
         if (find)
         {
                 const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
