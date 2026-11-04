@@ -8472,6 +8472,8 @@ static void compositor_metric_publish(void)
                 compositor_metric_presents_second = windows_metric_rate(compositor_metric_presents - compositor_metric_presents_then, now - compositor_metric_since);
                 compositor_metric_lists_second = windows_metric_rate(lists - compositor_metric_lists_then, now - compositor_metric_since);
                 compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists;
+                // The kernel's notices, once a second as the metrics are (window.c's kernel_notices_tick reads /dev/kmsg without waiting).
+                kernel_notices_tick(table, now);
         }
         table->metric_presents = compositor_metric_presents_second, table->metric_lists = compositor_metric_lists_second;
 }

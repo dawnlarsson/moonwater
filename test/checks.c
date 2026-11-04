@@ -222976,6 +222976,170 @@ static void iss_rows_metrics(void)
         }
 }
 
+// The kernel notices (window.c's kernel_notice_class, kernel_notices_record, kernel_notices_publish): lines the box's own log showed, with the level
+// the kernel gave each (the journal does not keep it; the level is what the driver prints them at), what class they are and their severity. A
+// code of 0 is a line that is not raised.
+struct iss_kernel_line { unsigned int level; const char *text; unsigned int code, severity; };
+static const struct iss_kernel_line iss_kernel_lines[] = {
+    {3, "amdgpu 0000:14:00.0: [drm] *ERROR* Unsupported screen format RA24 little-endian (0x34324152)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {3, "amdgpu 0000:14:00.0: [drm] *ERROR* LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.", 0, 0},
+    {3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1234, emitted seq=1235", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {4, "amdgpu 0000:14:00.0: Starting comp_1.0.0 ring reset", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
+    {3, "amdgpu 0000:14:00.0: [gfxhub] page fault (src_id:0 ring:24 vmid:8 pasid:32768)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {3, "amdgpu 0000:14:00.0:   in page starting at address 0x0000000000000000 from client 18 (UTCL2)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
+    {4, "amdgpu 0000:14:00.0: Failed to setup vendor infoframe on connector HDMI-A-1: -22", 0, 0},
+    {5, "amdgpu 0000:14:00.0: GPU reset begin! on a ring timeout", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
+    {6, "[drm:amdgpu_dm_init] DM_PPLIB: values for V-Blank", 0, 0},
+    {3, "snd_hda_intel 0000:14:00.6: no codecs found!", WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_ERROR},
+    {4, "snd_hda_intel 0000:14:00.6: codec error timeout", WINDOWS_ISSUE_KERNEL_AUDIO, WINDOWS_ISSUE_WARNING},
+    {4, "FAT-fs (nvme0n1p1): Volume was not properly unmounted. Some data may be corrupt. Please run fsck.", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_WARNING},
+    {3, "EXT4-fs error (device sda1): ext4_find_entry:1455: inode #2: comm ls: reading directory lblock 0", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
+    {3, "Buffer I/O error on dev sdb1, logical block 0, async page read", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
+    {3, "nvme nvme0: I/O 123 QID 3 timeout, aborting", WINDOWS_ISSUE_KERNEL_STORAGE, WINDOWS_ISSUE_ERROR},
+    {4, "workqueue: name exceeds WQ_NAME_LEN. Truncating to: hdmi_frl_status_polling_workque", 0, 0},
+    {4, "xhci_hcd 0000:00:14.0: WARN: buffer overrun event for slot 3 ep 2 on endpoint", WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_WARNING},
+    {3, "usb 1-3: device descriptor read/64, error -71", WINDOWS_ISSUE_KERNEL_USB, WINDOWS_ISSUE_ERROR},
+    {6, "xhci_hcd 0000:00:14.0: xHCI Host Controller", 0, 0},
+    {6, "usb 1-1: New USB device found, idVendor=046d, idProduct=c52b, bcdDevice=12.11", 0, 0},
+    {4, "usb usb3: We don't know the algorithms for LPM for this host, disabling LPM.", 0, 0},
+    {3, "iwlwifi 0000:00:14.3: Microcode SW error detected. Restarting 0x2000000.", WINDOWS_ISSUE_KERNEL_WIFI, WINDOWS_ISSUE_ERROR},
+    {4, "iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-cc-a0-77.ucode failed with error -2", 0, 0},
+    {3, "Bluetooth: hci0: command 0x0c03 tx timeout", WINDOWS_ISSUE_KERNEL_BLUETOOTH, WINDOWS_ISSUE_ERROR},
+    {6, "Bluetooth: Core ver 2.22", 0, 0},
+    {3, "mce: [Hardware Error]: CPU 0: Machine Check: 0 Bank 1: be00000000800400", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {3, "thermal thermal_zone3: critical temperature reached (105 C), shutting down", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "ACPI BIOS Error (bug): Could not resolve symbol [_SB.PCI0.GPP8.PEGP._DSM], AE_NOT_FOUND", 0, 0},
+    {4, "RDSEED32 is broken. Disabling the corresponding CPUID bit.", 0, 0},
+    {6, "virt/tdx: TDX not supported by the host platform", 0, 0},
+    {4, "kauditd_printk_skb: 225 callbacks suppressed", 0, 0},
+    {2, "Out of memory: Killed process 4321 (ld) total-vm:1048576kB, anon-rss:524288kB", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {6, "oom_kill_process.cold+0x2c/0x7d", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {2, "BUG: unable to handle page fault for address: ffff8880a1b2c3d4", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "WARNING: CPU: 3 PID: 1 at kernel/sched/core.c:1234 __schedule+0x1f", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "check[1234]: segfault at 0 ip 0000000000401000 sp 00007ffd error 4 in check[400000+1000]", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING},
+    {4, "bash[99]: segfault at 7f00 ip 00007f1 sp 00007f0 error 6 likely on CPU 2", WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING},
+    {4, "Call Trace:", 0, 0},
+    {6, "Mem-Info:", 0, 0},
+    {4, "lowmem_reserve[]: 0 0 0 0 0", 0, 0},
+    {3, "tmpfs: Unknown parameter 'bad'", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+    {4, "__vm_enough_memory: pid: 1234, comm: xz, bytes: 9999 not enough memory for the allocation", 0, 0},
+    {6, "Hardware name: Micro-Star International Co., Ltd. MS-7D25/PRO", 0, 0},
+    {4, "CPU: 4 UID: 0 PID: 99 Comm: cloudflared Not tainted 7.2.11-arch1-1", 0, 0},
+    {6, "Linux version 7.2.11-arch1-1 (builduser@archlinux)", 0, 0},
+    {5, "usb 2-1: notice: a device is in a new state", 0, 0},
+    {7, "pci 0000:00:02.0: debug line that a level of seven does not raise", 0, 0},
+    {1, "Out of memory and the kernel's words after a level one line", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
+};
+
+// A record of /dev/kmsg in the kernel's format: "priority,sequence,time,flags;text" and the newline. Returns its length.
+static unsigned int iss_kernel_record(unsigned int level, const char *text, char *into, unsigned int room)
+{
+        unsigned int at = 0;
+
+        into[at++] = (char)('0' + (level & 7));
+        for (const char *h = ",1000,123456789,-;"; *h && at + 2 < room; h++)
+                into[at++] = *h;
+        for (const char *t = text; *t && at + 2 < room; t++)
+                into[at++] = *t;
+        into[at++] = '\n';
+        into[at] = 0;
+        return at;
+}
+
+static void iss_rows_kernel(void)
+{
+        struct kernel_notices k;
+        char record[KERNEL_NOTICE_LINE];
+        unsigned int bad = 0, lines = sizeof(iss_kernel_lines) / sizeof(iss_kernel_lines[0]), raised = 0;
+
+        for (unsigned int i = 0; i < lines; i++)
+        {
+                unsigned int sev = 0, code = kernel_notice_class(iss_kernel_lines[i].text, (unsigned int)string_length((string_address)iss_kernel_lines[i].text),
+                                                                iss_kernel_lines[i].level, &sev);
+
+                if (code != iss_kernel_lines[i].code || (code && sev != iss_kernel_lines[i].severity))
+                        bad++;
+        }
+        check("kernel notices: each real line of the box's log is classified as it should be (its class and severity, or not raised)", bad == 0);
+        check("kernel notices: the table has forty lines or more", lines >= 40);
+        memory_zero(&k, sizeof(k));
+        k.fd = -2;
+        for (unsigned int i = 0; i < lines; i++)
+        {
+                unsigned int n = iss_kernel_record(iss_kernel_lines[i].level, iss_kernel_lines[i].text, record, sizeof(record));
+
+                raised += kernel_notices_record(&k, record, n, 1000);
+        }
+        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 26);
+        memory_zero(&k, sizeof(k));
+        k.fd = -2;
+        check("kernel notices: a record with no semicolon is no record", kernel_notices_record(&k, "3,1,2,-", 7, 1) == 0);
+        check("kernel notices: a record whose priority is not a number is no record", kernel_notices_record(&k, "x,1,2,-;amdgpu error", 21, 1) == 0);
+        check("kernel notices: an empty read is no record", kernel_notices_record(&k, "", 0, 1) == 0);
+        // Hostile: an escape and a bell in the message; a line of a kilobyte; a flood of the same error.
+        {
+                unsigned int n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring timeout \x1b[2J\x07 cleared", record, sizeof(record));
+                unsigned int clean = 1;
+
+                kernel_notices_record(&k, record, n, 2000);
+                for (unsigned int i = 0; i < WINDOWS_ISSUE_DETAIL && k.last[0][i]; i++)
+                        if ((unsigned char)k.last[0][i] < 0x20 || k.last[0][i] == 0x7f)
+                                clean = 0;
+                check("kernel notices: an escape and a bell in a line are blanks in the detail, the words stay", clean && k.last[0][0] == 'a' && k.count[0] == 1);
+        }
+        {
+                char big[900];
+                unsigned int at;
+
+                for (at = 0; at < sizeof(big) - 1; at++)
+                        big[at] = (char)('a' + (char)(at % 26));
+                big[at] = 0;
+                kernel_notice_sanitize(k.last[0], sizeof(k.last[0]), big, at);
+                check("kernel notices: a long line is cut to the detail's room, ended", string_length((string_address)k.last[0]) == WINDOWS_ISSUE_DETAIL - 1);
+        }
+        memory_zero(&k, sizeof(k));
+        k.fd = -2;
+        for (unsigned int i = 0; i < 10000; i++)
+        {
+                unsigned int n = iss_kernel_record(3, "amdgpu 0000:14:00.0: [drm] *ERROR* Unsupported screen format RA24 little-endian (0x34324152)", record, sizeof(record));
+
+                kernel_notices_record(&k, record, n, 3000 + i);
+        }
+        check("kernel notices: a flood of one class counts every record in that one class", k.count[0] == 10000 && k.count[1] == 0);
+}
+
+static void iss_rows_kernel_board(void)
+{
+        struct windows board;
+        struct kernel_notices k;
+        char record[KERNEL_NOTICE_LINE];
+        struct windows_issues copy;
+        unsigned long long t0 = 5000000000ull;
+        unsigned int n;
+
+        memory_zero(&board, sizeof(board));
+        memory_zero(&k, sizeof(k));
+        k.fd = -2;
+        for (unsigned int i = 0; i < 3000; i++)
+        {
+                n = iss_kernel_record(4, "xhci_hcd 0000:00:14.0: WARN: buffer overrun event for slot 3 ep 2 on endpoint", record, sizeof(record));
+                kernel_notices_record(&k, record, n, t0);
+        }
+        n = iss_kernel_record(3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1, emitted seq=2", record, sizeof(record));
+        kernel_notices_record(&k, record, n, t0);
+        kernel_notices_publish(&board, &k, t0 + 1000000000ull);
+        windows_issues_read(&board, &copy);
+        check("kernel notices: a flood is one issue per class on the board, and the warning and the error are their severities",
+              copy.count == 2 && windows_issues_worst(&copy, "usb", null) == WINDOWS_ISSUE_WARNING && windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
+        kernel_notices_publish(&board, &k, t0 + 601ull * 1000000000ull);
+        windows_issues_read(&board, &copy);
+        check("kernel notices: a warning not seen for ten minutes is cleared, and its count starts again",
+              windows_issues_worst(&copy, "usb", null) == 0 && k.count[1] == 0 && windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
+        kernel_notices_publish(&board, &k, t0 + 3600ull * 1000000000ull);
+        windows_issues_read(&board, &copy);
+        check("kernel notices: an error is kept until it is dismissed, however long ago it was", windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
+}
+
 b32 main(void)
 {
         iss_rows_basic();
@@ -222984,6 +223148,8 @@ b32 main(void)
         iss_rows_hostile();
         iss_rows_gpu();
         iss_rows_metrics();
+        iss_rows_kernel();
+        iss_rows_kernel_board();
         return test_report(null);
 }
 #endif /* CHECK_issues */

@@ -562,6 +562,15 @@ enum windows_issue_code
         WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
         WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
         WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix
+        // The kernel's own notices (the feeder below): a the records of the class seen, b the seconds since the last, the detail the last line.
+        WINDOWS_ISSUE_KERNEL_GPU,       // amdgpu, drm and i915 (under canvas gpu)
+        WINDOWS_ISSUE_KERNEL_USB,       // usb and xhci (under usb)
+        WINDOWS_ISSUE_KERNEL_WIFI,      // the wireless drivers (under wifi)
+        WINDOWS_ISSUE_KERNEL_BLUETOOTH, // bluetooth (under bluetooth)
+        WINDOWS_ISSUE_KERNEL_AUDIO,     // the sound drivers (under audio device)
+        WINDOWS_ISSUE_KERNEL_STORAGE,   // nvme, the filesystems and the block layer (under storage)
+        WINDOWS_ISSUE_KERNEL_SYSTEM,    // memory (out of memory, BUG, Oops), thermal and machine checks (under system notices)
+        WINDOWS_ISSUE_KERNEL_PROGRAM,   // a program that crashed (under system notices)
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
@@ -570,7 +579,9 @@ static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
         "none", "the kernel refused to map window pictures", "the card refused presents", "the lists are off", "the card is cooling down",
         "the card's self-test drew wrong", "the GPU family is not supported", "apps lost frames to the processor", "the card refused direct scan-out",
         "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate",
-        "a prerequisite of the GPU path failed"};
+        "a prerequisite of the GPU path failed", "a kernel notice about the GPU", "a kernel notice about USB", "a kernel notice about Wi-Fi",
+        "a kernel notice about Bluetooth", "a kernel notice about audio", "a kernel notice about storage", "a kernel notice about the system",
+        "a program crashed"};
 
 struct windows_issue
 {
@@ -1416,6 +1427,188 @@ static unsigned int windows_gpu_judge(const struct windows *table, unsigned int 
                 return share <= 15 ? WINDOWS_GPU_STATUS_NOT : share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : WINDOWS_GPU_STATUS_PARTLY;
         return share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : share <= 15 ? WINDOWS_GPU_STATUS_NOT : WINDOWS_GPU_STATUS_PARTLY;
 }
+
+/*
+        The kernel's own notices (moonwater's feeder): /dev/kmsg, the kernel's log, read without waiting, each record classified and the classes put on
+        the board. A record is raised when its level is emergency to error (0 to 3), or when its words are one of the classes' that matter whatever the
+        level (a warning from amdgpu about a ring that timed out, a program that crashed, an out of memory). Level 4 is raised only by those words;
+        levels 5 to 7 are never raised. Lines the kernel prints on every boot and that are not faults are quiet (kernel_notice_quiet). A class is one
+        issue on the board with the records of it counted, its worst severity, the seconds since its last record and its last line, sanitized: the
+        text is copied in as plain bytes, a control byte or an escape becomes a blank, and the line is cut to the detail's room. A flood of one
+        class is still one issue, and a warning not seen again for KERNEL_NOTICE_AGE_NS is cleared; an error is kept until it is dismissed.
+*/
+#define KMSG_FILE "/dev/kmsg"
+#define KERNEL_NOTICE_CLASSES 8
+#define KERNEL_NOTICE_MOST 256
+#define KERNEL_NOTICE_LINE 1024
+#define KERNEL_NOTICE_AGE_NS (600ull * 1000000000ull)
+static const char *const kernel_notice_key[KERNEL_NOTICE_CLASSES] = {"canvas gpu", "usb", "wifi", "bluetooth", "audio device", "storage", "system notices",
+                                                                    "system notices"};
+// The lines the kernel prints on normal boots that are not faults (every one is here for a reason the box's log showed).
+static const char *const kernel_notice_quiet[] = {
+    "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
+    "ACPI BIOS Error",        // firmware's own tables, on most boards
+    "Direct firmware load",   // an optional blob that is not there
+    "RDSEED32 is broken",     // a CPU bug the kernel works around
+    "kauditd_printk_skb",     // audit's count of the messages it suppressed
+    0};
+
+struct kernel_notices
+{
+        int fd;                                                                  // /dev/kmsg: -1 until it is first read, -2 when it cannot be
+        unsigned int count[KERNEL_NOTICE_CLASSES], severity[KERNEL_NOTICE_CLASSES]; // the records of each class, and its worst severity
+        unsigned long long seen[KERNEL_NOTICE_CLASSES];                         // when its last record was read (monotonic ns), 0 for none
+        char last[KERNEL_NOTICE_CLASSES][WINDOWS_ISSUE_DETAIL];                  // its last line, sanitized
+};
+static struct kernel_notices kernel_notice_state = {.fd = -1};
+
+// Whether text (length bytes, not ended) has word (ended).
+static int kernel_notice_has(const char *text, unsigned int length, const char *word)
+{
+        for (unsigned int at = 0; at < length; at++)
+        {
+                unsigned int k = 0;
+
+                while (word[k] && at + k < length && text[at + k] == word[k])
+                        k++;
+                if (!word[k])
+                        return 1;
+        }
+        return 0;
+}
+
+// The class of a line of the kernel's log at level, and the severity it is raised at (WINDOWS_ISSUE_*), or 0 when it is not raised: quiet lines,
+// and a level of 4 or more without the words that make a class of its own. Written as the table of the box's real lines it is checked against.
+static unsigned int kernel_notice_class(const char *text, unsigned int length, unsigned int level, unsigned int *severity)
+{
+        unsigned int error = level <= 3 ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING;
+
+        *severity = 0;
+        for (int q = 0; kernel_notice_quiet[q]; q++)
+                if (kernel_notice_has(text, length, kernel_notice_quiet[q]))
+                        return 0;
+        if (kernel_notice_has(text, length, "Out of memory") || kernel_notice_has(text, length, "oom_kill_process") ||
+            kernel_notice_has(text, length, "Killed process") || kernel_notice_has(text, length, "BUG:") || kernel_notice_has(text, length, "Oops") ||
+            kernel_notice_has(text, length, "Kernel panic") || kernel_notice_has(text, length, "WARNING: CPU"))
+                return *severity = WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_KERNEL_SYSTEM;
+        if (kernel_notice_has(text, length, "segfault at"))
+                return *severity = WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_KERNEL_PROGRAM;
+        if ((kernel_notice_has(text, length, "amdgpu") || kernel_notice_has(text, length, "drm") || kernel_notice_has(text, length, "i915")) &&
+            (level <= 3 || kernel_notice_has(text, length, "timeout") || kernel_notice_has(text, length, "reset") || kernel_notice_has(text, length, "fault") ||
+             kernel_notice_has(text, length, "failed")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_GPU;
+        if ((kernel_notice_has(text, length, "xhci") || kernel_notice_has(text, length, "usb")) &&
+            (level <= 3 || kernel_notice_has(text, length, "overrun") || kernel_notice_has(text, length, "disconnect") || kernel_notice_has(text, length, "failed")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_USB;
+        if ((kernel_notice_has(text, length, "iwlwifi") || kernel_notice_has(text, length, "ath1") || kernel_notice_has(text, length, "ath9") ||
+             kernel_notice_has(text, length, "mt76") || kernel_notice_has(text, length, "brcm") || kernel_notice_has(text, length, "cfg80211")) &&
+            (level <= 3 || kernel_notice_has(text, length, "firmware") || kernel_notice_has(text, length, "timeout") || kernel_notice_has(text, length, "error")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_WIFI;
+        if (kernel_notice_has(text, length, "Bluetooth:") && (level <= 3 || kernel_notice_has(text, length, "failed") || kernel_notice_has(text, length, "error")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_BLUETOOTH;
+        if ((kernel_notice_has(text, length, "snd_") || kernel_notice_has(text, length, "hda")) &&
+            (level <= 3 || kernel_notice_has(text, length, "no codecs") || kernel_notice_has(text, length, "error") || kernel_notice_has(text, length, "failed")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_AUDIO;
+        if ((kernel_notice_has(text, length, "nvme") || kernel_notice_has(text, length, "ext4") || kernel_notice_has(text, length, "btrfs") ||
+             kernel_notice_has(text, length, "xfs") || kernel_notice_has(text, length, "mmc") || kernel_notice_has(text, length, "FAT-fs") ||
+             kernel_notice_has(text, length, "I/O error") || kernel_notice_has(text, length, "Buffer I/O")) &&
+            (level <= 3 || kernel_notice_has(text, length, "I/O error") || kernel_notice_has(text, length, "Buffer I/O") ||
+             kernel_notice_has(text, length, "not properly unmounted") || kernel_notice_has(text, length, "error") || kernel_notice_has(text, length, "timeout")))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_STORAGE;
+        if (kernel_notice_has(text, length, "thermal") || kernel_notice_has(text, length, "throttl") || kernel_notice_has(text, length, "Hardware Error") ||
+            kernel_notice_has(text, length, "mce:") || kernel_notice_has(text, length, "EDAC"))
+                return *severity = error, WINDOWS_ISSUE_KERNEL_SYSTEM;
+        if (level <= 3)
+                return *severity = error, WINDOWS_ISSUE_KERNEL_SYSTEM;
+        return 0;
+}
+
+// One record of /dev/kmsg: "priority,sequence,time,flags;message", the message ended by a newline (the lines after it, which begin with a blank,
+// are not read). Its level is the priority's low three bits. 0 when the record is not one.
+static int kernel_notice_parse(const char *record, unsigned int length, unsigned int *level, const char **message, unsigned int *message_length)
+{
+        unsigned int at = 0, priority = 0, start, stop;
+
+        while (at < length && record[at] >= '0' && record[at] <= '9')
+        {
+                priority = priority * 10 + (unsigned int)(record[at] - '0');
+                if (priority > 100000u)
+                        return 0;
+                at++;
+        }
+        if (!at || at >= length || record[at] != ',')
+                return 0;
+        while (at < length && record[at] != ';' && record[at] != '\n')
+                at++;
+        if (at >= length || record[at] != ';')
+                return 0;
+        start = ++at;
+        for (stop = start; stop < length && record[stop] != '\n'; stop++)
+                ;
+        *level = priority & 7u, *message = record + start, *message_length = stop - start;
+        return 1;
+}
+
+// The kernel's words, copied in as plain text: a control byte or an escape is a blank, and the copy stops at the room (ended).
+static void kernel_notice_sanitize(char *into, unsigned int room, const char *text, unsigned int length)
+{
+        unsigned int at = 0;
+
+        for (unsigned int i = 0; i < length && at + 1 < room; i++)
+        {
+                unsigned char c = (unsigned char)text[i];
+
+                into[at++] = c < 0x20 || c == 0x7f ? ' ' : (char)c;
+        }
+        into[at] = 0;
+}
+
+// Counts one record of the kernel's log under its class, when it is raised: 1 when it was, 0 when it is none (a bad record, quiet, or a level
+// nothing raises).
+static int kernel_notices_record(struct kernel_notices *k, const char *record, unsigned int length, unsigned long long now)
+{
+        unsigned int level = 0, severity = 0, message_length = 0, code;
+        const char *message = null;
+        unsigned int idx;
+
+        if (!kernel_notice_parse(record, length, &level, &message, &message_length))
+                return 0;
+        code = kernel_notice_class(message, message_length, level, &severity);
+        if (!code)
+                return 0;
+        idx = code - WINDOWS_ISSUE_KERNEL_GPU;
+        if (k->count[idx] < 0xffffffffu)
+                k->count[idx]++;
+        if (severity > k->severity[idx])
+                k->severity[idx] = severity;
+        k->seen[idx] = now;
+        kernel_notice_sanitize(k->last[idx], sizeof(k->last[idx]), message, message_length);
+        return 1;
+}
+
+// Puts the classes on the board: a class with records is set (its count, its worst severity, the seconds since its last record, its last line),
+// and one whose warning has not come again for KERNEL_NOTICE_AGE_NS is cleared and its count started again. An error stays until it is dismissed.
+static void kernel_notices_publish(struct windows *table, struct kernel_notices *k, unsigned long long now)
+{
+        for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
+        {
+                unsigned int code = WINDOWS_ISSUE_KERNEL_GPU + idx;
+
+                if (!k->count[idx])
+                        continue;
+                if (k->severity[idx] == WINDOWS_ISSUE_WARNING && k->seen[idx] && now - k->seen[idx] > KERNEL_NOTICE_AGE_NS)
+                {
+                        if (table)
+                                windows_issue_clear(table, kernel_notice_key[idx], code);
+                        k->count[idx] = 0, k->severity[idx] = 0;
+                        continue;
+                }
+                if (table)
+                        windows_issue_set(table, kernel_notice_key[idx], k->severity[idx], code, k->count[idx] > 65535u ? 65535u : k->count[idx],
+                                          (unsigned int)((now - k->seen[idx]) / 1000000000ull), k->last[idx]);
+        }
+}
+
 
 /*
         A language's code as the table carries it: its two or three lower case letters (an ISO 639 code), the first in
@@ -3476,6 +3669,30 @@ static void places_note(struct places *places, const struct place_kept *kept)
         compositor has gone is then a byte in a pipe and never a SIGPIPE. Answers 0 or a negative errno.
 */
 #define WINDOWS_TAKING 0x80000000u
+
+// One tick of the feeder (once a second from the compositor): reads up to KERNEL_NOTICE_MOST records from /dev/kmsg without waiting, counts
+// them, and publishes. /dev/kmsg is opened on the first tick (the compositor is root); a kernel that does not give it is not asked again.
+static void kernel_notices_tick(struct windows *table, unsigned long long now)
+{
+        struct kernel_notices *k = &kernel_notice_state;
+        char record[KERNEL_NOTICE_LINE];
+
+        if (k->fd == -1)
+        {
+                long file = window_call(WINDOW_SYS_OPENAT, -100, (long)KMSG_FILE, 0x800 | 0x80000, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC, O_RDONLY
+
+                k->fd = file >= 0 ? (int)file : -2;
+        }
+        for (unsigned int n = 0; k->fd >= 0 && n < KERNEL_NOTICE_MOST; n++)
+        {
+                long got = window_call(WINDOW_SYS_READ, k->fd, (long)record, sizeof(record), 0, 0, 0);
+
+                if (got <= 0)
+                        break;
+                kernel_notices_record(k, record, (unsigned int)got, now);
+        }
+        kernel_notices_publish(table, k, now);
+}
 
 /*
         The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, once,

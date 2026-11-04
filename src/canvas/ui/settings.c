@@ -965,6 +965,15 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
         case WINDOWS_ISSUE_GPU_SCANOUT: language_format(into, room, WORDS(settings_issue_gpu_scanout), (long)issue->a); break;
         case WINDOWS_ISSUE_AUDIO_OPEN: language_format(into, room, WORDS(settings_issue_audio_open), (long)issue->a); break;
         case WINDOWS_ISSUE_AUDIO_RATE: language_format(into, room, WORDS(settings_issue_audio_rate), (long)issue->a, (long)issue->b); break;
+        // A kernel notice's words are the kernel's own, as its line says them (not translated yet: the detail is English).
+        case WINDOWS_ISSUE_KERNEL_GPU:
+        case WINDOWS_ISSUE_KERNEL_USB:
+        case WINDOWS_ISSUE_KERNEL_WIFI:
+        case WINDOWS_ISSUE_KERNEL_BLUETOOTH:
+        case WINDOWS_ISSUE_KERNEL_AUDIO:
+        case WINDOWS_ISSUE_KERNEL_STORAGE:
+        case WINDOWS_ISSUE_KERNEL_SYSTEM:
+        case WINDOWS_ISSUE_KERNEL_PROGRAM: string_copy_bounded((string_address)into, (string_address)issue->detail, room); break;
         default: language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code); break;
         }
 }
@@ -999,7 +1008,7 @@ static int settings_sub_rows(int row, int count)
                 count = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
                                          text, count);
                 // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
-                if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES)
+                if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_KERNEL_PROGRAM))
                         count = settings_sub_put(section, true, null, issue->detail, count);
         }
         return count;
