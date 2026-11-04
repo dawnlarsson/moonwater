@@ -507,6 +507,9 @@ static b32 gpu_start(positive bytes)
 #define GPU_MAPS 256
 static struct { positive from, to, va; unsigned int handle, used; b32 written; } gpu_maps[GPU_MAPS];
 static unsigned int gpu_map_count, gpu_tick;
+// Why the last map was refused (gpu_map_as): 1 all the maps are held, 2 no address for it, 3 the kernel would not take the pages (userptr), 4 it would not give them
+// their address; for 3 and 4 the error (the kernel's, negated) is in the bits above the first byte. moonwater canvas says it with the card's refusals.
+static unsigned int gpu_map_why;
 #define GPU_VA_MAPS 0x2000000000ull
 #define GPU_VA_END (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it
 static positive gpu_map_next = GPU_VA_MAPS;
@@ -548,6 +551,7 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
         p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
+        long taken;
 
         // A map the card writes is the only map of its pages: one that held them for reading would be found by gpu_va_bytes and written through, and the card
         // faults on a write to a map it was given to read.
@@ -559,11 +563,15 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                 old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
         if (gpu_map_count == GPU_MAPS && gpu_maps[old].used != gpu_tick)
                 gpu_drop(old);
-        if (gpu_map_count == GPU_MAPS || !(at = gpu_place(to - from)) || !gpu_io(3u, 0x11, 24, up))
-                return false;
+        if (gpu_map_count == GPU_MAPS)
+                return gpu_map_why = 1, false;
+        if (!(at = gpu_place(to - from)))
+                return gpu_map_why = 2, false;
+        if ((taken = system_control(gpu.fd, GPU_IO(3u, 0x11, 24), up)) != 0)
+                return gpu_map_why = 3 | (unsigned int)-taken << 8, false;
         va[0] = close[0] = up[2] >> 32, va[2] = at;
-        if (!gpu_io(1u, 8, 64, va))
-                return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), false; // the buffer with it
+        if ((taken = system_control(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
+                return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
         gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
         gpu_map_next = at + (to - from);

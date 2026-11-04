@@ -7301,6 +7301,7 @@ static void compositor_gpu_publish(void)
                 return;
         compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
         memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
+        compositor.table->gpu_map_why = gpu_map_why;
 }
 
 // A refusal of the card: the reason is counted, and said when it is first or due. A present the card is refused is the processor's (processor 1);
@@ -7314,7 +7315,8 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         if (n == 1 || ((n & 63) == 0 && (now = clock_monotonic_nanoseconds()) - compositor_gpu_counts.said_at[why] >= 60000000000ull))
         {
                 compositor_gpu_counts.said_at[why] = now ? now : clock_monotonic_nanoseconds();
-                string_format(log, "compositor: the GPU refused a present (%s), the processor composed it; %p so far\n", windows_gpu_reasons[why], (positive)n);
+                string_format(log, "compositor: the GPU refused a present (%s), the processor composed it; %p so far (the last map refused: step %p, error %p)\n", windows_gpu_reasons[why], (positive)n,
+                              (positive)(gpu_map_why & 255), (positive)(gpu_map_why >> 8));
                 log_flush();
         }
         compositor_gpu_publish();
@@ -7638,10 +7640,36 @@ static int compositor_lists_switch(void)
         return on;
 }
 
+// Whether the card is composing in earnest: a card that is up but refuses nearly every present (its maps of the window pictures fail, its scanout is one it cannot draw
+// into) draws no list either, and the window would go between its list and its own pixels. Sixteen presents in a row refused for want of the card's ability (not a
+// scene it does not draw yet: a landing, a preview) put it out, and it is back after thirty-two in a row that it drew. Looked at in the present that counted the last.
+#define COMPOSITOR_GPU_ABLE_LOSE 16
+#define COMPOSITOR_GPU_ABLE_WIN 32
+static int compositor_gpu_able = 1;
+
+static void compositor_gpu_able_count(enum compositor_gpu_why why)
+{
+        static unsigned int lost, won;
+
+        if (why == COMPOSITOR_GPU_WHY_DRAWN)
+        {
+                lost = 0;
+                if (!compositor_gpu_able && ++won >= COMPOSITOR_GPU_ABLE_WIN)
+                        compositor_gpu_able = 1, won = 0;
+        }
+        else if (why == COMPOSITOR_GPU_WHY_PICTURE || why == COMPOSITOR_GPU_WHY_OUTPUT || why == COMPOSITOR_GPU_WHY_ALIGN || why == COMPOSITOR_GPU_WHY_BUSY ||
+                 why == COMPOSITOR_GPU_WHY_HANG || why == COMPOSITOR_GPU_WHY_DEAD)
+        {
+                won = 0;
+                if (compositor_gpu_able && ++lost >= COMPOSITOR_GPU_ABLE_LOSE)
+                        compositor_gpu_able = 0, lost = 0;
+        }
+}
+
 static void compositor_gpu_lists_sync(void)
 {
         static int was;
-        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && compositor_lists_switch();
+        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && compositor_gpu_able && compositor_lists_switch();
 
         if (compositor.table && want != was)
                 was = want, compositor_lists_set(want);
@@ -7652,6 +7680,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
 {
         enum compositor_gpu_why why = compositor_gpu_draw(frames, count);
 
+        compositor_gpu_able_count(why);
         compositor_gpu_lists_sync();
 
         if (why == COMPOSITOR_GPU_WHY_DRAWN)

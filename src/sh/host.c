@@ -22289,6 +22289,13 @@ static b32 host_debug(string_address address_to arguments, positive count)
         for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why])
                         host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
+        if (table->gpu_map_why)
+                host_say(log, "  gpu map         the last map of a picture for the card was refused: %s (error %p)\n",
+                         (table->gpu_map_why & 255) == 1 ? (string_address) "all the maps are held" :
+                         (table->gpu_map_why & 255) == 2 ? (string_address) "no address left for it" :
+                         (table->gpu_map_why & 255) == 3 ? (string_address) "the kernel would not take the pages" :
+                                                           (string_address) "the kernel would not give the pages their address",
+                         (positive)(table->gpu_map_why >> 8));
         //      The apps' draw lists: the windows drawn from their lists (list state 1) and the lists the compositor refused.
         {
                 unsigned int from_lists = 0;

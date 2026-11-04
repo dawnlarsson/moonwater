@@ -220102,6 +220102,44 @@ b32 main(void)
                 compositor.damages = 0;
         }
 
+        // Whether the card composes in earnest (the lists go with it): sixteen presents in a row refused for want of its ability put it out, a scene it does not draw yet
+        // (a landing, a preview) does not count, one present it draws starts the count again, and thirty-two in a row that it drew bring it back.
+        {
+                int a, b, c, d, e, f2, g2;
+
+                compositor_gpu_able = 1;
+                for (int i = 0; i < 15; i++)
+                        compositor_gpu_able_count(COMPOSITOR_GPU_WHY_PICTURE);
+                a = compositor_gpu_able;
+                compositor_gpu_able_count(COMPOSITOR_GPU_WHY_DRAWN);
+                for (int i = 0; i < 15; i++)
+                        compositor_gpu_able_count(COMPOSITOR_GPU_WHY_OUTPUT);
+                b = compositor_gpu_able;
+                for (int i = 0; i < 100; i++)
+                        compositor_gpu_able_count(i & 1 ? COMPOSITOR_GPU_WHY_SCALED : COMPOSITOR_GPU_WHY_PREVIEW);
+                c = compositor_gpu_able;
+                compositor_gpu_able_count(COMPOSITOR_GPU_WHY_OUTPUT);
+                d = compositor_gpu_able;
+                for (int i = 0; i < 31; i++)
+                        compositor_gpu_able_count(COMPOSITOR_GPU_WHY_DRAWN);
+                compositor_gpu_able_count(COMPOSITOR_GPU_WHY_BUSY);
+                for (int i = 0; i < 31; i++)
+                        compositor_gpu_able_count(COMPOSITOR_GPU_WHY_DRAWN);
+                e = compositor_gpu_able;
+                compositor_gpu_able_count(COMPOSITOR_GPU_WHY_DRAWN);
+                f2 = compositor_gpu_able;
+                for (int i = 0; i < 40; i++)
+                        compositor_gpu_able_count(COMPOSITOR_GPU_WHY_DRAWN);
+                g2 = compositor_gpu_able;
+                check("gpu able: fifteen presents refused for want of the card's ability leave it in", a == 1);
+                check("gpu able: one present it drew starts the count again", b == 1);
+                check("gpu able: a landing or a preview is not a want of ability", c == 1);
+                check("gpu able: the sixteenth in a row puts it out", d == 0);
+                check("gpu able: thirty-one that it drew, one refused and thirty-one more leave it out", e == 0);
+                check("gpu able: thirty-two in a row that it drew bring it back", f2 == 1 && g2 == 1);
+                compositor_gpu_able = 1;
+        }
+
         // A width that is not a multiple of 4 (695): the card draws the columns below 692, and the processor the three past them (compositor_present's strip),
         // which together are the whole picture the processor draws. The picture is a window with a line and round corners over the ground.
         {
