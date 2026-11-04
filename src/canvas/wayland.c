@@ -108,6 +108,15 @@
 */
 #define WAYLAND_OK 0
 #define WAYLAND_DEAD (-1)
+/*
+        What a request answers when it cannot be done yet: a commit of a dma-buf the GPU is still drawing in. The commit and every
+        byte the client sent after it wait in the client (WAYLAND_STASH of them) and the client is stalled, which the host sees
+        (wayland_stalled) and stops reading its socket for, until wayland_resume finds the buffer ready. Nothing waits in the
+        compositor's loop, and the client is held to what its GPU draws: it has no frame callback for a picture that is not shown.
+*/
+#define WAYLAND_STALL 1
+#define WAYLAND_STASH 20480        // one read of the host (16384) and the message it was completing (4096)
+#define WAYLAND_STALL_MS 10000     // a client whose buffer is not ready by then is ended: its GPU hung
 
 struct wayland_rect
 {
@@ -249,6 +258,8 @@ struct wayland_host
         void (*clip_abort)(void *context, long client, long which);
         void (*clip_push)(void *context, long row, long which, long fd);
         void (*clip_clear)(void *context, long client, long which);
+        // Whether a dma-buf has no writer now (its GPU is done), asked and never waited for; a host with none says every buffer is ready.
+        int (*dmabuf_ready)(void *context, long fd);
 };
 
 /*
@@ -407,6 +418,9 @@ struct wayland_client
         long live, dead, slot, pid, uid;
         long in_length;
         unsigned char in[WAYLAND_MESSAGE];
+        // A commit that waits for its GPU, and what the client sent from it on: the bytes, the descriptor to ask of, since when.
+        unsigned char stash[WAYLAND_STASH];
+        long stash_length, stalled, stalled_fd, stalled_at;
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
@@ -1964,6 +1978,17 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 buffer = wayland_find(c, s->attached, WLI_wl_buffer);
                 if (buffer < 0)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the attached buffer is gone");
+        }
+        // A dma-buf the GPU is still drawing in: nothing of this commit is done, and it is made again when the buffer is ready.
+        if (buffer >= 0)
+        {
+                struct wayland_pool *held = &c->pools[c->buffers[c->objects[buffer].link].pool];
+
+                if (held->dmabuf && wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, held->fd))
+                {
+                        c->stalled_fd = held->fd;
+                        return WAYLAND_STALL;
+                }
         }
         if ((s->min_width && s->max_width && s->min_width > s->max_width) ||
             (s->min_height && s->max_height && s->min_height > s->max_height))
@@ -4871,28 +4896,33 @@ WAYLAND_API long wayland_dead(long slot)
         eight, above the largest or not a multiple of four leaves no boundary to find, so the client is dead; so is
         one whose request fails. Answers 0, or a negative number once the client is dead.
 */
-WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length, const long *fds, long count)
+/*
+        A commit that answered WAYLAND_STALL and every byte from it on are kept in the client, from the start of the stash, and the
+        client waits. head is a message that was completed in the client's own buffer, the rest what follows it; the rest may be the
+        stash itself, being taken again (it is moved to the front, forward, so it does not run over what it still has to read).
+*/
+static void wayland_stall(struct wayland_client *c, const unsigned char *head, long head_size, const unsigned char *rest, long rest_length)
 {
-        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        if (head_size + rest_length > WAYLAND_STASH)
+        {
+                wayland_fail(c, 1, WAYLAND_NO_MEMORY, "more sent than can wait for a buffer");
+                return;
+        }
+        for (long at = 0; at < head_size; at++)
+                c->stash[at] = head[at];
+        for (long at = 0; at < rest_length; at++)
+                c->stash[head_size + at] = rest[at];
+        c->stash_length = head_size + rest_length;
+        c->stalled = 1;
+        c->stalled_at = wayland.host->now(wayland.host->context);
+}
+
+/* The bytes of a client, a message at a time, until they are done or a commit has to wait. */
+static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, long length)
+{
         int status = WAYLAND_OK;
 
-        for (long at = 0; at < count; at++)
-        {
-                if (c && !c->dead && c->in_fd_count < WAYLAND_FDS)
-                {
-                        c->in_fds[c->in_fd_count++] = fds[at];
-                        wayland.fds++;
-                }
-                else
-                {
-                        wayland.host->close(wayland.host->context, fds[at]);
-                        if (c && !c->dead)
-                                wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "too many descriptors");
-                }
-        }
-        if (!c || c->dead)
-                return WAYLAND_DEAD;
-        while (length > 0 && !c->dead)
+        while (length > 0 && !c->dead && !c->stalled)
         {
                 long size, take;
 
@@ -4918,6 +4948,11 @@ WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length,
                                 continue;
                         c->in_length = 0;
                         status = wayland_dispatch(c, c->in, size);
+                        if (status == WAYLAND_STALL)
+                        {
+                                wayland_stall(c, c->in, size, bytes, length);
+                                status = WAYLAND_OK;
+                        }
                         continue;
                 }
                 if (length < 8)
@@ -4939,10 +4974,84 @@ WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length,
                         break;
                 }
                 status = wayland_dispatch(c, bytes, size);
+                if (status == WAYLAND_STALL)
+                {
+                        wayland_stall(c, bytes, 0, bytes, length);
+                        status = WAYLAND_OK;
+                        break;
+                }
                 bytes += size;
                 length -= size;
         }
         return c->dead ? WAYLAND_DEAD : status;
+}
+
+WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length, const long *fds, long count)
+{
+        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+
+        for (long at = 0; at < count; at++)
+        {
+                if (c && !c->dead && c->in_fd_count < WAYLAND_FDS)
+                {
+                        c->in_fds[c->in_fd_count++] = fds[at];
+                        wayland.fds++;
+                }
+                else
+                {
+                        wayland.host->close(wayland.host->context, fds[at]);
+                        if (c && !c->dead)
+                                wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "too many descriptors");
+                }
+        }
+        if (!c || c->dead)
+                return WAYLAND_DEAD;
+        if (c->stalled)
+        {
+                // A host that reads a client that waits for a buffer: what comes is kept behind what waits.
+                if (c->stash_length + length > WAYLAND_STASH)
+                        return wayland_fail(c, 1, WAYLAND_NO_MEMORY, "more sent than can wait for a buffer");
+                wayland_copy(c->stash + c->stash_length, bytes, length);
+                c->stash_length += length;
+                return WAYLAND_OK;
+        }
+        return wayland_pump(c, bytes, length);
+}
+
+/* Whether a client waits for a buffer to be ready, which the host does not read it for, and asks wayland_resume of. */
+WAYLAND_API long wayland_stalled(long slot)
+{
+        return slot >= 0 && slot < WAYLAND_CLIENTS && wayland.client[slot] && !wayland.client[slot]->dead && wayland.client[slot]->stalled;
+}
+
+/*
+        The commit a client waits for is made again if its buffer is ready now, and what the client sent after it is taken, which
+        may be a commit that waits in its turn. Answers 1 while it is still waiting, else 0; a client whose buffer is not ready in
+        WAYLAND_STALL_MS is ended, since its GPU is not going to finish.
+*/
+WAYLAND_API int wayland_resume(long slot)
+{
+        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+        long length;
+
+        if (!c || c->dead || !c->stalled)
+                return 0;
+        if (wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
+        {
+                if (wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
+                {
+                        c->stalled = 0;
+                        c->stash_length = 0;
+                        wayland_fail(c, 1, WAYLAND_IMPLEMENTATION, "the buffer's writer never finished");
+                        return 0;
+                }
+                return 1;
+        }
+        length = c->stash_length;
+        c->stash_length = 0;
+        c->stalled = 0;
+        wayland_pump(c, c->stash, length);
+        return c->stalled ? 1 : 0;
 }
 
 /*

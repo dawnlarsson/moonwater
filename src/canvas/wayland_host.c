@@ -1450,7 +1450,7 @@ static void compositor_wl_transfers_drop(long client)
                         compositor_wl_transfer_free(at);
 }
 
-// When the first transfer's time is up, or 0 for none: the loop wakes for it.
+// When the first transfer's time is up, or 0 for none: the loop wakes for it. And a millisecond on while a client's commit waits for its GPU.
 static positive compositor_wl_due(void)
 {
         positive first = 0;
@@ -1458,7 +1458,25 @@ static positive compositor_wl_due(void)
         for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
                 if (compositor_wl.transfer[at].state && (!first || compositor_wl.transfer[at].deadline < first))
                         first = compositor_wl.transfer[at].deadline;
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
+                {
+                        positive soon = clock_monotonic_nanoseconds() + 1000000ull;
+
+                        return !first || soon < first ? soon : first;
+                }
         return first;
+}
+
+// Whether a dma-buf has no writer: asked at once, never waited for.
+static int compositor_wl_dmabuf_signaled(void *context, long fd)
+{
+        struct compositor_poll watch = {(int)fd, COMPOSITOR_POLLIN, 0};
+        positive none[2] = {0, 0};
+
+        (void)context;
+        compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)none, 0, 0, 0);
+        return (watch.returned & COMPOSITOR_POLLIN) != 0;
 }
 
 static const struct wayland_host compositor_wl_host = {
@@ -1490,6 +1508,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_clip_abort,
     compositor_wl_clip_push,
     compositor_wl_clip_clear,
+    compositor_wl_dmabuf_signaled,
 };
 
 /* ---- the socket ---- */
@@ -1650,7 +1669,8 @@ static void compositor_wl_read(long slot)
                 }
                 if (wayland_feed(slot, bytes, got, fds, count) < 0)
                         return;
-                if (got < (long)sizeof bytes)
+                // A commit that waits for its GPU holds what follows it: no more is read until it is made.
+                if (got < (long)sizeof bytes || wayland_stalled(slot))
                         return;
         }
 }
@@ -1732,7 +1752,8 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 const unsigned char *bytes;
                 const long *fds;
                 long fd_count;
-                short events = COMPOSITOR_POLLIN;
+                // A client whose commit waits for its GPU is not read (a hangup is told all the same), and the loop wakes to ask.
+                short events = compositor_wl.fd[slot] >= 0 && wayland_stalled(slot) ? 0 : COMPOSITOR_POLLIN;
 
                 if (compositor_wl.fd[slot] >= 0 && wayland_out(slot, &bytes, &fds, &fd_count))
                         events |= COMPOSITOR_POLLOUT;
@@ -1758,6 +1779,14 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
 {
         if (!compositor_wl.started)
                 return;
+        // The commits that waited for their GPU, made when it is done, before what else the clients sent this pass.
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
+                {
+                        wayland_resume(slot);
+                        if (wayland_dead(slot))
+                                compositor_wl_flush(slot);
+                }
         if (wanted[0].returned)
                 compositor_wl_accept();
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)

@@ -158759,7 +158759,8 @@ static struct fake_host_state
         int pull_wfd, pull_rfd;
         char clip_text[2][64];
         // dma-bufs: whether the fake takes any, how many pictures were read through a descriptor, whether the next is skipped
-        long dmabuf_off, syncs, skip_next, dmabuf_maps;
+        long dmabuf_off, syncs, skip_next, dmabuf_maps, asked, pattern_at;
+        const char *pattern; // what the GPU says each time it is asked: N for not done, R for done; done once it has no more to say
         long hold_row, hold_mode, holds; // the window that holds the pointer and how
         int dmabuf_table_fd;
 } fake;
@@ -159071,6 +159072,17 @@ static void fake_clip_clear(void *context, long client, long which)
         fake.clip_size[which] = 0;
 }
 
+/* A GPU that says what fake.pattern says each time it is asked, and done after it. */
+static int fake_dmabuf_ready(void *context, long fd)
+{
+        (void)context;
+        (void)fd;
+        fake.asked++;
+        if (fake.pattern && fake.pattern[fake.pattern_at])
+                return fake.pattern[fake.pattern_at++] != 'N';
+        return 1;
+}
+
 /* The fake takes ARGB8888 and XRGB8888 linear on a device of its own, in one tranche; the descriptor a client gives is any file. */
 static long fake_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
 {
@@ -159136,7 +159148,7 @@ static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
-    fake_clip_clear};
+    fake_clip_clear, fake_dmabuf_ready};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -162462,6 +162474,7 @@ static void test_dmabuf(void)
         struct wlc *c;
         struct wl_event_seen *e;
         unsigned long feedback, buffer, params, made;
+        int resumed;
 
         wl_reset();
         wayland_start(&fake_host);
@@ -162531,6 +162544,67 @@ static void test_dmabuf(void)
         wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 1L, 1L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u), "and the next, of one pixel's damage, is the whole of it (%08x)", fake.row[0].pixels[6 * FAKE_W + 12]);
+
+        /*
+                A commit of a buffer its GPU is not done with is not waited for by the loop: it is not made, the buffer is not released
+                and the client's frame callback is not sent, and what the client sends after it waits behind it, until the buffer is
+                ready, when it is made and what came after follows in its order.
+        */
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff300000u, DRM_XRGB8888);
+        wlc_forget(c);
+        fake.pattern = "NNRR";
+        fake.pattern_at = 0;
+        fake.asked = 0;
+        dmabuf_commit(&s, buffer, 16, 8);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "after the commit");
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u) &&
+                    wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 0 && strcmp(fake.row[0].title, "after the commit") != 0,
+                "a commit of a buffer whose GPU is not done is not made, its buffer is not released, and what comes after it waits (%ld asked)", fake.asked);
+        resumed = wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(resumed == 1 && wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u) &&
+                    strcmp(fake.row[0].title, "after the commit") != 0,
+                "while the GPU is not done it is asked again and nothing changes");
+        resumed = wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(resumed == 0 && !wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x300000u) &&
+                    !strcmp(fake.row[0].title, "after the commit") && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1 && c->errors == 0,
+                "when it is done the commit is made, the buffer released, and what was sent after is taken (%08x, %s)",
+                fake.row[0].pixels[6 * FAKE_W + 12], fake.row[0].title);
+
+        /* a second commit behind the first waits in its turn, and what is sent after both is taken after both */
+        wlc_forget(c);
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff400000u, DRM_XRGB8888);
+        made = dmabuf_buffer(&s, 16, 8, 0xff500000u, DRM_XRGB8888);
+        fake.pattern = "NRRN";
+        fake.pattern_at = 0;
+        dmabuf_commit(&s, buffer, 16, 8);
+        dmabuf_commit(&s, made, 16, 8);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "after both");
+        WLCHECK(wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x300000u) && strcmp(fake.row[0].title, "after both") != 0,
+                "two commits and a title sent while the first waits all wait");
+        resumed = wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(resumed == 1 && wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x400000u) &&
+                    strcmp(fake.row[0].title, "after both") != 0 && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1,
+                "the first is made when its GPU is done and the second, whose is not, waits again with what follows it");
+        resumed = wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(resumed == 0 && !wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x500000u) &&
+                    !strcmp(fake.row[0].title, "after both") && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 2 && c->errors == 0,
+                "and the second is made when its is, and the title after it, in the order sent");
+        WLCHECK(wayland_resume(c->slot) == 0, "a client that waits for nothing is not stalled by being asked");
+
+        /* a GPU that is not done in ten seconds is a client ended, with what it held given back */
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff600000u, DRM_XRGB8888);
+        fake.pattern = "NNNNNNNNNNNNNNNNNNNN";
+        fake.pattern_at = 0;
+        dmabuf_commit(&s, buffer, 16, 8);
+        WLCHECK(wayland_stalled(c->slot), "a buffer whose GPU does not finish waits");
+        fake.now += 20000;
+        wayland_resume(c->slot);
+        WLCHECK(!wayland_stalled(c->slot) && wayland_dead(c->slot), "and is given up after ten seconds: the client is ended, with the error to say so");
+        fake.pattern = 0;
 
         /* the rules of params */
         wlc_end(c);
