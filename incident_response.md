@@ -41,6 +41,32 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-131: the editor's save made a mode-0 file readable by all, and root's save of another user's set-id program root's
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Information leak (file permissions widened); privilege escalation (a set-user-id file changing owner to root) |
+| Moonwater exposure window | 2026-10-30 16:59 +01:00 (`3f919186`, the editor) to the fix, about 4 days 18 hours |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_terminal`, `editor hostile: a file of mode 0 is saved mode 0, not readable by everyone` and `editor hostile: a set-user-id file whose owner the save cannot keep loses its set-id bits (as root it keeps both)` |
+
+**How it was exposed.** A save writes a new file beside the old one and renames it over it (`editor_save`). It gave
+the new file `tab->mode ? tab->mode : 0644`, so a file of mode 0 (Fedora's /etc/shadow and gshadow, any file a
+person locked with chmod 0) came back 0644, readable by every user. It never gave the new file the old file's owner,
+and the person runs as root, so every file root saved became root's; with the mode kept, a set-user-id or set-group-id
+program that belonged to another user (an unprivileged user's own `chmod 4755` binary, which runs as that user) was
+root's set-user-id program once root opened it in the editor and pressed Ctrl+S, whatever its bytes were.
+
+**The fix.** The new file is written mode 0600, then given the old file's owner and group (fchown) and its exact mode
+before it takes the name. A save that cannot give the old owner (a person who is not root saving someone else's file)
+drops the set-user-id and set-group-id bits. A file that was not there before keeps 0644.
+
+**The checks.** The mode-0 row saves a file whose read mode is 0 (set as root would read it, since only root can open
+one) and asks for mode 0 after; the set-id row saves a 4755 file whose recorded owner is another uid, and as a user who
+cannot chown it asks for 0755 (as root, for the other uid and 4755). Each fails with its part of the fix taken out
+(the 0644 fallback put back; the bits kept when chown fails).
+
 ### MW-2026-113: a Wayland client's paste or copy pipe could hold the whole compositor
 
 | | |

@@ -39,6 +39,7 @@ struct editor_tab
         positive length, mapped;  // mapped: the mapping's length, 0 when read
         p64 size, mtime, mtime_nsec;
         unsigned int mode;
+        p32 owner, group;         // the file's, which a save keeps; -1 for a file not there yet
         b32 changed_on_disk;
 };
 
@@ -105,6 +106,7 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                         }
                 }
                 tab->mode = 0644;
+                tab->owner = tab->group = (p32)-1;
                 return handle == -2;
         }
         if (fstat((b32)handle, address_of facts) < 0 || (facts.st_mode & 0170000) != 0100000)
@@ -121,6 +123,7 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         string_copy_bounded((string_address)tab->path, got > 0 ? (string_address)resolved : path, EDITOR_PATH);
         tab->size = (p64)facts.st_size, tab->mtime = (p64)facts.st_mtime, tab->mtime_nsec = (p64)facts.st_mtime_nsec;
         tab->mode = facts.st_mode & 07777;
+        tab->owner = facts.st_uid, tab->group = facts.st_gid;
         if (facts.st_size >= EDITOR_MAP_FROM)
         {
                 long mapped = (long)system_call_6(syscall(mmap), 0, (positive)facts.st_size, 1, 2, (positive)handle, 0);
@@ -190,7 +193,7 @@ static b32 editor_save(struct editor_tab address_to tab)
         string_copy((string_address)temporary + slash, (string_address) ".");
         string_copy_bounded((string_address)temporary + slash + 1, (string_address)tab->path + slash, EDITOR_PATH - slash - 1);
         string_copy((string_address)temporary + string_length((string_address)temporary), (string_address) ".editing");
-        handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, tab->mode ? tab->mode : 0644);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (handle < 0)
         {
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
@@ -205,8 +208,23 @@ static b32 editor_save(struct editor_tab address_to tab)
                 ok &= system_write_all((b32)handle, chunk, got) >= 0;
                 at += got;
         }
+        /*
+                The file's own owner and mode, which the new file is given before it takes the name: one of mode 0 was
+                written 0644 and readable by everyone (a shadow file), and one root saved for another user became root's,
+                its set-id bits kept, so a set-user-id program of that user's was root's own once saved. A file whose owner
+                cannot be kept (a save by someone else) loses those bits. Written as the owner alone could read it.
+        */
+        {
+                unsigned int mode = tab->mode;
+                error_stat made;
+
+                if (fstat((b32)handle, address_of made) == 0 &&
+                    ((tab->owner != (p32)-1 && made.st_uid != tab->owner) || (tab->group != (p32)-1 && made.st_gid != tab->group)) &&
+                    system_call_3(syscall(fchown), (positive)handle, (positive)tab->owner, (positive)tab->group) != 0)
+                        mode &= ~06000u;
+                system_call_2(syscall(fchmod), (positive)handle, (positive)mode);
+        }
         ok &= system_call_1(syscall(fsync), (positive)handle) == 0;
-        system_call_2(syscall(fchmod), (positive)handle, tab->mode ? tab->mode : 0644);
         system_close(handle);
         // renameat2 with no flags: riscv64 never had renameat, and its number there is nothing (a save that always failed).
         if (!ok || system_call_5(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)tab->path, 0) < 0)

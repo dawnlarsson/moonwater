@@ -155282,7 +155282,8 @@ static __attribute__((noinline)) fn editor_check_scribble(void)
 
 /*
         The editor against files another user chose: a link to nothing yet, named by an absolute path, is saved at
-        exactly that path (readlinkat ends nothing, and the name was read to the stack's next NUL).
+        exactly that path (readlinkat ends nothing, and the name was read to the stack's next NUL); a file of mode 0
+        is saved mode 0 (it was 0644); another user's set-user-id program saved stays theirs or loses the bit.
 */
 static fn editor_hostile_check(struct ui address_to wui)
 {
@@ -155306,6 +155307,59 @@ static fn editor_hostile_check(struct ui address_to wui)
         check("editor hostile: a link to nothing yet, by an absolute name, opens a new file of exactly that name",
               target[0] == '/' && editor_open((string_address)link_path) && editor.count == 1 &&
                   !memory_compare(editor_now()->path, target, string_length((string_address)target) + 1));
+
+        // A file of mode 0 (a shadow file), as root reads one: saved mode 0, not 0644 for everyone to read.
+        {
+                char secret[96];
+                bipolar handle;
+                error_stat facts;
+
+                string_copy(string_copy((string_address)secret, (string_address)dir) + string_length((string_address)dir), (string_address) "/secret");
+                handle = system_open_at_mode(AT_FDCWD, (string_address)secret, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                system_write_all((b32)handle, "k\n", 2);
+                system_close(handle);
+                editor.count = 0;
+                check("editor hostile: a file opens", editor_open((string_address)secret) && editor.count == 1);
+                editor_now()->mode = 0; // what editor_load reads of a file of mode 0, which only root can open
+                doc_type(&editor_now()->view.doc, (const p8 address_to) "x", 1);
+                check("editor hostile: its save succeeds", editor_save(editor_now()));
+                handle = system_open_at(AT_FDCWD, (string_address)secret, O_PATH | O_CLOEXEC);
+                facts.st_mode = 0777;
+                if (handle >= 0)
+                        fstat((b32)handle, address_of facts), system_close(handle);
+                check("editor hostile: a file of mode 0 is saved mode 0, not readable by everyone", handle >= 0 && (facts.st_mode & 07777) == 0);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)secret, 0);
+        }
+
+        // Another user's set-user-id program, saved: it stays theirs, or it is no set-user-id program of the saver's.
+        {
+                char program[96];
+                bipolar handle;
+                error_stat facts;
+                b32 root = system_call(syscall(getuid)) == 0;
+                p32 other;
+
+                string_copy(string_copy((string_address)program, (string_address)dir) + string_length((string_address)dir), (string_address) "/program");
+                handle = system_open_at_mode(AT_FDCWD, (string_address)program, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+                system_write_all((b32)handle, "#!/bin/sh\n", 10);
+                system_call_2(syscall(fchmod), (positive)handle, 04755);
+                system_close(handle);
+                editor.count = 0;
+                check("editor hostile: a set-user-id file opens", editor_open((string_address)program) && editor_now()->mode == 04755);
+                // An owner the save cannot give the new file unless it runs as root: the file is another user's.
+                other = editor_now()->owner + 1;
+                editor_now()->owner = other;
+                doc_type(&editor_now()->view.doc, (const p8 address_to) "x", 1);
+                check("editor hostile: its save succeeds", editor_save(editor_now()));
+                facts.st_mode = 0, facts.st_uid = 0;
+                handle = system_open_at(AT_FDCWD, (string_address)program, O_PATH | O_CLOEXEC);
+                if (handle >= 0)
+                        fstat((b32)handle, address_of facts), system_close(handle);
+                check("editor hostile: a set-user-id file whose owner the save cannot keep loses its set-id bits (as root it keeps both)",
+                      root ? facts.st_uid == other && (facts.st_mode & 07777) == 04755
+                           : facts.st_uid == (p32)system_call(syscall(getuid)) && (facts.st_mode & 07777) == 0755);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)program, 0);
+        }
 
         editor.count = 0;
         editor_open(null);
