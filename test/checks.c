@@ -166781,6 +166781,123 @@ static void al_mix2_tier(void)
         check("f32_rows_mix2: cases ran", faults.cases > 1500);
 }
 
+/*
+        The calling convention: a routine returns every register the machine's convention says it keeps. al_abi_call is a
+        trampoline that puts a known value in each of them, calls the routine al_abi_target names with the arguments it was
+        given (up to four on the stack), and counts the ones that came back different in al_abi_bad. x86_64: rbx, rbp and
+        r12 to r15; arm64: x19 to x29 and the low halves of v8 to v15 (d8 to d15), which a routine that wants a vector
+        register for a constant takes at its peril; riscv64: s0 to s11 and fs0 to fs11.
+*/
+extern unsigned long long al_abi_bad;
+extern void *al_abi_target;
+void al_abi_call(void);
+__asm__(".comm al_abi_bad, 8, 8\n.comm al_abi_target, 8, 8\n");
+#if X64
+__asm__(".text\n.globl al_abi_call\nal_abi_call:\n"
+        "push %rbx\n push %rbp\n push %r12\n push %r13\n push %r14\n push %r15\n"
+        "push 80(%rsp)\n push 80(%rsp)\n push 80(%rsp)\n push 80(%rsp)\n"
+        "movabs $0x1111111111111111, %rbx\n movabs $0x2222222222222222, %rbp\n movabs $0x3333333333333333, %r12\n"
+        "movabs $0x4444444444444444, %r13\n movabs $0x5555555555555555, %r14\n movabs $0x6666666666666666, %r15\n"
+        "call *al_abi_target(%rip)\n add $32, %rsp\n"
+        "movabs $0x1111111111111111, %r10\n cmp %r10, %rbx\n je 1f\n incq al_abi_bad(%rip)\n1:\n"
+        "movabs $0x2222222222222222, %r10\n cmp %r10, %rbp\n je 2f\n incq al_abi_bad(%rip)\n2:\n"
+        "movabs $0x3333333333333333, %r10\n cmp %r10, %r12\n je 3f\n incq al_abi_bad(%rip)\n3:\n"
+        "movabs $0x4444444444444444, %r10\n cmp %r10, %r13\n je 4f\n incq al_abi_bad(%rip)\n4:\n"
+        "movabs $0x5555555555555555, %r10\n cmp %r10, %r14\n je 5f\n incq al_abi_bad(%rip)\n5:\n"
+        "movabs $0x6666666666666666, %r10\n cmp %r10, %r15\n je 6f\n incq al_abi_bad(%rip)\n6:\n"
+        "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbp\n pop %rbx\n ret\n");
+#elif ARM64
+__asm__(".text\n.globl al_abi_call\nal_abi_call:\n"
+        "sub sp, sp, #192\n stp x29, x30, [sp, #16]\n stp x19, x20, [sp, #32]\n stp x21, x22, [sp, #48]\n stp x23, x24, [sp, #64]\n"
+        "stp x25, x26, [sp, #80]\n stp x27, x28, [sp, #96]\n stp d8, d9, [sp, #112]\n stp d10, d11, [sp, #128]\n stp d12, d13, [sp, #144]\n stp d14, d15, [sp, #160]\n"
+        "ldp x9, x10, [sp, #192]\n stp x9, x10, [sp, #0]\n"
+        "movz x19, #0x1901\n movz x20, #0x1902\n movz x21, #0x1903\n movz x22, #0x1904\n movz x23, #0x1905\n movz x24, #0x1906\n movz x25, #0x1907\n movz x26, #0x1908\n movz x27, #0x1909\n movz x28, #0x190a\n movz x29, #0x190b\n"
+        "movz x9, #0x1801\n fmov d8, x9\n movz x9, #0x1802\n fmov d9, x9\n movz x9, #0x1803\n fmov d10, x9\n movz x9, #0x1804\n fmov d11, x9\n"
+        "movz x9, #0x1805\n fmov d12, x9\n movz x9, #0x1806\n fmov d13, x9\n movz x9, #0x1807\n fmov d14, x9\n movz x9, #0x1808\n fmov d15, x9\n"
+        "adrp x16, al_abi_target\n ldr x16, [x16, :lo12:al_abi_target]\n blr x16\n"
+        "adrp x11, al_abi_bad\n add x11, x11, :lo12:al_abi_bad\n ldr x12, [x11]\n"
+        ".macro chk_x r, v\n movz x13, #\\v\n cmp \\r, x13\n cinc x12, x12, ne\n .endm\n"
+        "chk_x x19, 0x1901\n chk_x x20, 0x1902\n chk_x x21, 0x1903\n chk_x x22, 0x1904\n chk_x x23, 0x1905\n chk_x x24, 0x1906\n chk_x x25, 0x1907\n chk_x x26, 0x1908\n chk_x x27, 0x1909\n chk_x x28, 0x190a\n chk_x x29, 0x190b\n"
+        ".macro chk_d r, v\n fmov x14, \\r\n movz x13, #\\v\n cmp x14, x13\n cinc x12, x12, ne\n .endm\n"
+        "chk_d d8, 0x1801\n chk_d d9, 0x1802\n chk_d d10, 0x1803\n chk_d d11, 0x1804\n chk_d d12, 0x1805\n chk_d d13, 0x1806\n chk_d d14, 0x1807\n chk_d d15, 0x1808\n"
+        "str x12, [x11]\n"
+        "ldp x29, x30, [sp, #16]\n ldp x19, x20, [sp, #32]\n ldp x21, x22, [sp, #48]\n ldp x23, x24, [sp, #64]\n ldp x25, x26, [sp, #80]\n ldp x27, x28, [sp, #96]\n"
+        "ldp d8, d9, [sp, #112]\n ldp d10, d11, [sp, #128]\n ldp d12, d13, [sp, #144]\n ldp d14, d15, [sp, #160]\n add sp, sp, #192\n ret\n");
+#else
+__asm__(".text\n.globl al_abi_call\nal_abi_call:\n.option push\n.option arch, +d\n"
+        "addi sp, sp, -224\n sd ra, 16(sp)\n sd s0, 24(sp)\n sd s1, 32(sp)\n sd s2, 40(sp)\n sd s3, 48(sp)\n sd s4, 56(sp)\n sd s5, 64(sp)\n sd s6, 72(sp)\n sd s7, 80(sp)\n"
+        "sd s8, 88(sp)\n sd s9, 96(sp)\n sd s10, 104(sp)\n sd s11, 112(sp)\n fsd fs0, 120(sp)\n fsd fs1, 128(sp)\n fsd fs2, 136(sp)\n fsd fs3, 144(sp)\n fsd fs4, 152(sp)\n"
+        "fsd fs5, 160(sp)\n fsd fs6, 168(sp)\n fsd fs7, 176(sp)\n fsd fs8, 184(sp)\n fsd fs9, 192(sp)\n fsd fs10, 200(sp)\n fsd fs11, 208(sp)\n"
+        "ld t0, 224(sp)\n ld t1, 232(sp)\n sd t0, 0(sp)\n sd t1, 8(sp)\n"
+        "li s0, 0x101\n li s1, 0x102\n li s2, 0x103\n li s3, 0x104\n li s4, 0x105\n li s5, 0x106\n li s6, 0x107\n li s7, 0x108\n li s8, 0x109\n li s9, 0x10a\n li s10, 0x10b\n li s11, 0x10c\n"
+        "li t0, 0x201\n fmv.d.x fs0, t0\n li t0, 0x202\n fmv.d.x fs1, t0\n li t0, 0x203\n fmv.d.x fs2, t0\n li t0, 0x204\n fmv.d.x fs3, t0\n li t0, 0x205\n fmv.d.x fs4, t0\n li t0, 0x206\n fmv.d.x fs5, t0\n"
+        "li t0, 0x207\n fmv.d.x fs6, t0\n li t0, 0x208\n fmv.d.x fs7, t0\n li t0, 0x209\n fmv.d.x fs8, t0\n li t0, 0x20a\n fmv.d.x fs9, t0\n li t0, 0x20b\n fmv.d.x fs10, t0\n li t0, 0x20c\n fmv.d.x fs11, t0\n"
+        "la t2, al_abi_target\n ld t2, 0(t2)\n jalr t2\n"
+        "la t3, al_abi_bad\n ld t4, 0(t3)\n"
+        ".macro chk_s r, v\n li t5, \\v\n xor t5, \\r, t5\n snez t5, t5\n add t4, t4, t5\n .endm\n"
+        "chk_s s0, 0x101\n chk_s s1, 0x102\n chk_s s2, 0x103\n chk_s s3, 0x104\n chk_s s4, 0x105\n chk_s s5, 0x106\n chk_s s6, 0x107\n chk_s s7, 0x108\n chk_s s8, 0x109\n chk_s s9, 0x10a\n chk_s s10, 0x10b\n chk_s s11, 0x10c\n"
+        ".macro chk_f r, v\n fmv.x.d t6, \\r\n li t5, \\v\n xor t5, t6, t5\n snez t5, t5\n add t4, t4, t5\n .endm\n"
+        "chk_f fs0, 0x201\n chk_f fs1, 0x202\n chk_f fs2, 0x203\n chk_f fs3, 0x204\n chk_f fs4, 0x205\n chk_f fs5, 0x206\n chk_f fs6, 0x207\n chk_f fs7, 0x208\n chk_f fs8, 0x209\n chk_f fs9, 0x20a\n chk_f fs10, 0x20b\n chk_f fs11, 0x20c\n"
+        "sd t4, 0(t3)\n"
+        "ld ra, 16(sp)\n ld s0, 24(sp)\n ld s1, 32(sp)\n ld s2, 40(sp)\n ld s3, 48(sp)\n ld s4, 56(sp)\n ld s5, 64(sp)\n ld s6, 72(sp)\n ld s7, 80(sp)\n ld s8, 88(sp)\n ld s9, 96(sp)\n ld s10, 104(sp)\n ld s11, 112(sp)\n"
+        "fld fs0, 120(sp)\n fld fs1, 128(sp)\n fld fs2, 136(sp)\n fld fs3, 144(sp)\n fld fs4, 152(sp)\n fld fs5, 160(sp)\n fld fs6, 168(sp)\n fld fs7, 176(sp)\n fld fs8, 184(sp)\n fld fs9, 192(sp)\n fld fs10, 200(sp)\n fld fs11, 208(sp)\n"
+        "addi sp, sp, 224\n ret\n.option pop\n");
+#endif
+
+//      Every routine once, through the trampoline, with the shapes the mixing core gives them.
+static void al_abi_all(void)
+{
+        float *left = (float *)al_high[0] - 512, *right = (float *)al_high[1] - 512, *table = (float *)al_high[2] - 3 * 64, *out0 = (float *)al_high[3] - 512, *out1 = (float *)al_high[4] - 512;
+        unsigned char *bytes = al_high[3] - 8192 - 4096;
+        float *planes[3] = {out0, out1, (float *)al_high[1] - 1024};
+        float matrix[16] = {1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0};
+
+        for (int i = 0; i < 512; i++)
+                left[i] = right[i] = 0.25f;
+        for (int i = 0; i < 3 * 64; i++)
+                table[i] = 0.5f;
+        __builtin_memset(al_high[3] - 8192 - 4096, 0x11, 8192);
+        al_abi_target = (void *)resample_polyphase2_f32;
+        ((void (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 40);
+        al_abi_target = (void *)f32_scale_peak;
+        ((float (*)(float *, const float *, unsigned long long, float))al_abi_call)(out0, left, 295, 0.5f);
+        al_abi_target = (void *)f32_scale_add_peak;
+        ((float (*)(float *, const float *, unsigned long long, float))al_abi_call)(out0, left, 295, 0.5f);
+        //      Counts that leave something over for every step down (a turn of 32 or 16, then 8, then 4, then ones) and
+        //      the channel counts that have a body of their own and the one that walks a sample at a time.
+        for (unsigned long long channels = 1; channels <= 3; channels++)
+        {
+                al_abi_target = (void *)f32_planes_from_s16;
+                ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, channels);
+                al_abi_target = (void *)f32_planes_from_s32;
+                ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, channels);
+                al_abi_target = (void *)f32_planes_from_f32;
+                ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, channels);
+        }
+        al_abi_target = (void *)f32_pair_to_s16;
+        ((void (*)(unsigned char *, const float *, const float *, unsigned long long))al_abi_call)(bytes, left, right, 103);
+        al_abi_target = (void *)f32_pair_to_s32;
+        ((void (*)(unsigned char *, const float *, const float *, unsigned long long))al_abi_call)(bytes, left, right, 103);
+        al_abi_target = (void *)f32_pair_to_s24_32;
+        ((void (*)(unsigned char *, const float *, const float *, unsigned long long))al_abi_call)(bytes, left, right, 103);
+        al_abi_target = (void *)f32_pair_to_f32;
+        ((void (*)(unsigned char *, const float *, const float *, unsigned long long))al_abi_call)(bytes, left, right, 103);
+        al_abi_target = (void *)f32_pair_clip;
+        ((unsigned long long (*)(float *, float *, unsigned long long))al_abi_call)(out0, out1, 103);
+        al_abi_target = (void *)f32_rows_mix2;
+        ((void (*)(float *, float *, const float *, unsigned long long, const float *, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, 80, matrix, 77, 1);
+        ((void (*)(float *, float *, const float *, unsigned long long, const float *, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, 80, matrix, 77, 6);
+        ((void (*)(float *, float *, const float *, unsigned long long, const float *, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, 80, matrix, 77, 0);
+}
+
+static void al_abi_tier(string_address tier)
+{
+        al_abi_bad = 0;
+        al_abi_all();
+        string_format(log, "  %s\n", tier);
+        check("every routine returns the registers its machine's convention keeps (the callee-saved set)", al_abi_bad == 0);
+}
+
 static void al_polyphase_tier(string_address tier, int bits)
 {
         al_faults faults = {0, 0, 0, 0, 0, 0, 0};
@@ -166815,11 +166932,13 @@ b32 main(void)
                 if (had512)
                 {
                         cpu_has_avx512 = 1;
+                        al_abi_tier("avx512");
                         al_scale_tier("avx512");
                 }
                 cpu_has_avx512 = 0;
                 if (had2 && hadfma)
                 {
+                        al_abi_tier("avx2");
                         al_polyphase_tier("avx2 fma", 0);
                         al_scale_tier("avx2");
                         al_decode_tier("avx2");
@@ -166830,6 +166949,7 @@ b32 main(void)
                 if (had2)
                         al_polyphase_tier("avx2 without fma (sse2)", 1);
                 cpu_has_avx2 = 0;
+                al_abi_tier("sse2");
                 al_polyphase_tier("sse2", 1);
                 al_scale_tier("sse2");
                 al_decode_tier("sse2");
@@ -166856,6 +166976,7 @@ b32 main(void)
                 {
                         cpu_has_vector = tier ? 1 : vector;
                         al_first = tier == 0;
+                        al_abi_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_polyphase_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first", 0);
                         al_scale_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_decode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
@@ -166866,6 +166987,7 @@ b32 main(void)
                 cpu_has_vector = vector;
         }
 #else
+        al_abi_tier("neon");
         al_polyphase_tier("neon", 0);
         al_scale_tier("neon");
         al_decode_tier("neon");

@@ -44922,16 +44922,32 @@ __asm__(
     ASM_END(f32_pair_clip)
 
     //      f32_rows_mix2: x0 out0, x1 out1, x2 rows, x3 stride, x4 matrix, x5 count, x6 channels. The x86_64 block carries the
-    //      contract. Four frames a turn (ld1r broadcasts the weights), the rest one at a time.
+    //      contract. A block of frames at a time with the channels walked inside it, the sums kept in registers (sixteen
+    //      frames in eight accumulators, so the three cycles of an add are hidden behind the four of the multiplies;
+    //      then four; then one): the first channel's product added to a zero, each after it added to the sum so far, a
+    //      product and a sum rounded apart as in the C. The weights are single floats used by element.
     ASM_FUNC(f32_rows_mix2)
-    "cbz x5, 9f\n   lsl x3, x3, #2\n   cbnz x6, 1f\n   movi v0.4s, #0\n   mov x9, #0\n"
+    "cbz x5, 9f\n   cbnz x6, 1f\n   movi v0.4s, #0\n   mov x9, #0\n"
     "0:  str s0, [x0, x9]\n   str s0, [x1, x9]\n   add x9, x9, #4\n   cmp x9, x5, lsl #2\n   b.lo 0b\n   b 9f\n"
-    "1:  movi v5.4s, #0\n   mov x10, #1\n"
-    "2:  ld1r {v14.4s}, [x4]\n   add x11, x4, #32\n   ld1r {v15.4s}, [x11]\n   mov x7, x2\n   mov x8, x0\n   mov x9, x1\n   lsr x12, x5, #2\n   cbz x12, 6f\n"
-    "3:  ldr q2, [x7], #16\n   fmul v3.4s, v2.4s, v14.4s\n   fmul v4.4s, v2.4s, v15.4s\n   cbnz x10, 4f\n   ldr q6, [x8]\n   ldr q7, [x9]\n   fadd v3.4s, v3.4s, v6.4s\n   fadd v4.4s, v4.4s, v7.4s\n   b 5f\n4:  fadd v3.4s, v3.4s, v5.4s\n   fadd v4.4s, v4.4s, v5.4s\n5:  str q3, [x8], #16\n   str q4, [x9], #16\n   subs x12, x12, #1\n   b.ne 3b\n"
-    "6:  ands x12, x5, #3\n   b.eq 8f\n"
-    "7:  ldr s2, [x7], #4\n   fmul s3, s2, s14\n   fmul s4, s2, s15\n   cbnz x10, 71f\n   ldr s6, [x8]\n   ldr s7, [x9]\n   fadd s3, s3, s6\n   fadd s4, s4, s7\n   b 72f\n71: fadd s3, s3, s5\n   fadd s4, s4, s5\n72: str s3, [x8], #4\n   str s4, [x9], #4\n   subs x12, x12, #1\n   b.ne 7b\n"
-    "8:  mov x10, #0\n   add x2, x2, x3\n   add x4, x4, #4\n   subs x6, x6, #1\n   b.ne 2b\n"
+    "1:  lsl x3, x3, #2\n   movi v6.4s, #0\n   mov x13, x2\n   lsr x12, x5, #4\n   cbz x12, 20f\n"
+    "10: mov x7, x13\n   mov x8, x4\n   sub x10, x6, #1\n   ldp q2, q3, [x7]\n   ldp q4, q5, [x7, #32]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul v16.4s, v2.4s, v0.s[0]\n   fmul v17.4s, v3.4s, v0.s[0]\n   fmul v18.4s, v4.4s, v0.s[0]\n   fmul v19.4s, v5.4s, v0.s[0]\n   fmul v20.4s, v2.4s, v1.s[0]\n   fmul v21.4s, v3.4s, v1.s[0]\n   fmul v22.4s, v4.4s, v1.s[0]\n   fmul v23.4s, v5.4s, v1.s[0]\n   fadd v16.4s, v16.4s, v6.4s\n   fadd v17.4s, v17.4s, v6.4s\n   fadd v18.4s, v18.4s, v6.4s\n   fadd v19.4s, v19.4s, v6.4s\n   fadd v20.4s, v20.4s, v6.4s\n   fadd v21.4s, v21.4s, v6.4s\n   fadd v22.4s, v22.4s, v6.4s\n   fadd v23.4s, v23.4s, v6.4s\n\n   cbz x10, 12f\n"
+    ".balign 16\n"
+    "11: add x7, x7, x3\n   add x8, x8, #4\n   ldp q2, q3, [x7]\n   ldp q4, q5, [x7, #32]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul v24.4s, v2.4s, v0.s[0]\n   fmul v25.4s, v3.4s, v0.s[0]\n   fmul v26.4s, v4.4s, v0.s[0]\n   fmul v27.4s, v5.4s, v0.s[0]\n   fmul v28.4s, v2.4s, v1.s[0]\n   fmul v29.4s, v3.4s, v1.s[0]\n   fmul v30.4s, v4.4s, v1.s[0]\n   fmul v31.4s, v5.4s, v1.s[0]\n   fadd v16.4s, v24.4s, v16.4s\n   fadd v17.4s, v25.4s, v17.4s\n   fadd v18.4s, v26.4s, v18.4s\n   fadd v19.4s, v27.4s, v19.4s\n   fadd v20.4s, v28.4s, v20.4s\n   fadd v21.4s, v29.4s, v21.4s\n   fadd v22.4s, v30.4s, v22.4s\n   fadd v23.4s, v31.4s, v23.4s\n   subs x10, x10, #1\n   b.ne 11b\n"
+    "12: stp q16, q17, [x0]\n   stp q18, q19, [x0, #32]\n   add x0, x0, #64\n   stp q20, q21, [x1]\n   stp q22, q23, [x1, #32]\n   add x1, x1, #64\n   add x13, x13, #64\n   subs x12, x12, #1\n   b.ne 10b\n"
+    "20: and x12, x5, #15\n   lsr x12, x12, #2\n   cbz x12, 30f\n"
+    "21: mov x7, x13\n   mov x8, x4\n   sub x10, x6, #1\n   ldr q2, [x7]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul v16.4s, v2.4s, v0.s[0]\n   fmul v20.4s, v2.4s, v1.s[0]\n   fadd v16.4s, v16.4s, v6.4s\n   fadd v20.4s, v20.4s, v6.4s\n   cbz x10, 23f\n"
+    "22: add x7, x7, x3\n   add x8, x8, #4\n   ldr q2, [x7]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul v24.4s, v2.4s, v0.s[0]\n   fmul v28.4s, v2.4s, v1.s[0]\n   fadd v16.4s, v24.4s, v16.4s\n   fadd v20.4s, v28.4s, v20.4s\n   subs x10, x10, #1\n   b.ne 22b\n"
+    "23: str q16, [x0], #16\n   str q20, [x1], #16\n   add x13, x13, #16\n   subs x12, x12, #1\n   b.ne 21b\n"
+    "30: and x12, x5, #3\n   cbz x12, 9f\n"
+    "31: mov x7, x13\n   mov x8, x4\n   sub x10, x6, #1\n   ldr s2, [x7]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul s16, s2, s0\n   fmul s20, s2, s1\n   fadd s16, s16, s6\n   fadd s20, s20, s6\n   cbz x10, 33f\n"
+    "32: add x7, x7, x3\n   add x8, x8, #4\n   ldr s2, [x7]\n   ldr s0, [x8]\n   ldr s1, [x8, #32]\n"
+    "fmul s24, s2, s0\n   fmul s28, s2, s1\n   fadd s16, s24, s16\n   fadd s20, s28, s20\n   subs x10, x10, #1\n   b.ne 32b\n"
+    "33: str s16, [x0], #4\n   str s20, [x1], #4\n   add x13, x13, #4\n   subs x12, x12, #1\n   b.ne 31b\n"
     "9:  " ASM_RET
     ASM_END(f32_rows_mix2)
 );

@@ -156,14 +156,32 @@ M = [
     ("x86_64", "mix2 avx2: the frames left over past eight lost", "cmp %r9, %r11\\n   jae .Laudio_mix2_y_next\\n   vmovss (%rdx,%r11), %xmm2\\n   vmovss 0(%r8)", "jmp .Laudio_mix2_y_next\\n   vmovss (%rdx,%r11), %xmm2\\n   vmovss 0(%r8)"),
     ("x86_64", "mix2 sse2: second plane's weight from the first's", "movss 32(%r8), %xmm15\\n   shufps $0, %xmm15, %xmm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_x_tail1", "movss (%r8), %xmm15\\n   shufps $0, %xmm15, %xmm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_x_tail1"),
     ("x86_64", "mix2 sse2: a channel's pass adds into the first plane twice", "movups (%rsi,%r11), %xmm7\\n   addps %xmm7, %xmm2", "movups (%rdi,%r11), %xmm7\\n   addps %xmm7, %xmm2"),
-    ("arm64", "mix2 neon: second plane's weight from the first's", "ld1r {v15.4s}, [x11]", "ld1r {v15.4s}, [x4]"),
-    ("arm64", "mix2 neon: weights two floats on a channel", "add x4, x4, #4\\n   subs x6, x6, #1", "add x4, x4, #8\\n   subs x6, x6, #1"),
-    ("arm64", "mix2 neon: later channels not added to the outputs", "ldr q6, [x8]\\n   ldr q7, [x9]\\n   fadd v3.4s, v3.4s, v6.4s", "ldr q6, [x8]\\n   ldr q7, [x9]\\n   fadd v3.4s, v3.4s, v5.4s"),
-    ("arm64", "mix2 neon: the frames left over lost", "6:  ands x12, x5, #3\\n   b.eq 8f", "6:  ands x12, x5, #3\\n   b 8f"),
+    ("arm64", "mix2 neon: second plane's weight from the first's (first channel of sixteen)", "\"10: mov x7, x13\\n   mov x8, x4\\n   sub x10, x6, #1\\n   ldp q2, q3, [x7]\\n   ldp q4, q5, [x7, #32]\\n   ldr s0, [x8]\\n   ldr s1, [x8, #32]", "\"10: mov x7, x13\\n   mov x8, x4\\n   sub x10, x6, #1\\n   ldp q2, q3, [x7]\\n   ldp q4, q5, [x7, #32]\\n   ldr s0, [x8]\\n   ldr s1, [x8]"),
+    ("arm64", "mix2 neon: second plane's weight from the first's (later channels of sixteen)", "\"11: add x7, x7, x3\\n   add x8, x8, #4\\n   ldp q2, q3, [x7]\\n   ldp q4, q5, [x7, #32]\\n   ldr s0, [x8]\\n   ldr s1, [x8, #32]", "\"11: add x7, x7, x3\\n   add x8, x8, #4\\n   ldp q2, q3, [x7]\\n   ldp q4, q5, [x7, #32]\\n   ldr s0, [x8]\\n   ldr s1, [x8]"),
+    ("arm64", "mix2 neon: second plane's weight from the first's (four frames)", "\"22: add x7, x7, x3\\n   add x8, x8, #4\\n   ldr q2, [x7]\\n   ldr s0, [x8]\\n   ldr s1, [x8, #32]", "\"22: add x7, x7, x3\\n   add x8, x8, #4\\n   ldr q2, [x7]\\n   ldr s0, [x8]\\n   ldr s1, [x8]"),
+    ("arm64", "mix2 neon: second plane's weight from the first's (one frame)", "\"32: add x7, x7, x3\\n   add x8, x8, #4\\n   ldr s2, [x7]\\n   ldr s0, [x8]\\n   ldr s1, [x8, #32]", "\"32: add x7, x7, x3\\n   add x8, x8, #4\\n   ldr s2, [x7]\\n   ldr s0, [x8]\\n   ldr s1, [x8]"),
+    ("arm64", "mix2 neon: weights two floats on a channel (sixteen)", "\"11: add x7, x7, x3\\n   add x8, x8, #4", "\"11: add x7, x7, x3\\n   add x8, x8, #8"),
+    ("arm64", "mix2 neon: the next channel's row is the same row (four frames)", "\"22: add x7, x7, x3", "\"22: add x7, x7, #0"),
+    ("arm64", "mix2 neon: later channels not added to the sums (sixteen)", "fadd v16.4s, v24.4s, v16.4s\\n   fadd v17.4s", "fadd v16.4s, v24.4s, v24.4s\\n   fadd v17.4s"),
+    ("arm64", "mix2 neon: later channels not added to the sums (four frames)", "fadd v20.4s, v28.4s, v20.4s\\n   subs x10, x10, #1\\n   b.ne 22b", "fadd v20.4s, v28.4s, v28.4s\\n   subs x10, x10, #1\\n   b.ne 22b"),
+    ("arm64", "mix2 neon: later channels not added to the sums (one frame)", "fadd s20, s28, s20\\n   subs x10", "fadd s20, s28, s28\\n   subs x10"),
+    ("arm64", "mix2 neon: the first term not added to zero (sixteen)", "fadd v16.4s, v16.4s, v6.4s\\n   fadd v17.4s, v17.4s, v6.4s", "fadd v17.4s, v17.4s, v6.4s"),
+    ("arm64", "mix2 neon: the first term not added to zero (four frames)", "fadd v16.4s, v16.4s, v6.4s\\n   fadd v20.4s, v20.4s, v6.4s\\n   cbz x10, 23f", "fadd v20.4s, v20.4s, v6.4s\\n   cbz x10, 23f"),
+    ("arm64", "mix2 neon: the first term not added to zero (one frame)", "fadd s16, s16, s6\\n   fadd s20, s20, s6", "fadd s20, s20, s6"),
+    ("arm64", "mix2 neon: the sixteen-frame turns counted by thirty-two", "lsr x12, x5, #4\\n   cbz x12, 20f", "lsr x12, x5, #5\\n   cbz x12, 20f"),
+    ("arm64", "mix2 neon: the fours left over lost", "\"20: and x12, x5, #15", "\"20: b 30f\\n   and x12, x5, #15"),
+    ("arm64", "mix2 neon: the ones left over lost", "\"30: and x12, x5, #3", "\"30: b 9f\\n   and x12, x5, #3"),
+    ("arm64", "mix2 neon: stride taken in floats for bytes", "\"1:  lsl x3, x3, #2", "\"1:  lsl x3, x3, #0"),
+    ("arm64", "mix2 neon: the next sixteen frames start a vector early", "add x13, x13, #64", "add x13, x13, #48"),
+    ("arm64", "abi: the remix in the callee-saved v14", "\"11: add x7, x7, x3", "\"11: movi v14.4s, #0\\n   add x7, x7, x3"),
     ("riscv64", "mix2 rv scalar: second plane's weight from the first's", "2:  flw ft0, 0(a4)\\n   flw ft1, 32(a4)", "2:  flw ft0, 0(a4)\\n   flw ft1, 0(a4)"),
     ("riscv64", "mix2 rv scalar: the first term not added to zero", "4:  fadd.s ft3, ft3, ft5\\n   fadd.s ft4, ft4, ft5", "4:  fmv.s ft3, ft3\\n   fadd.s ft4, ft4, ft5"),
     ("riscv64", "mix2 rv vector: the second output loaded from the first", "vle32.v v24, (t2)", "vle32.v v24, (t1)"),
     ("riscv64", "mix2 rv vector: the first term not added to zero", "33: vfadd.vf v12, v12, ft5\\n   vfadd.vf v16, v16, ft5", "33: vfadd.vf v16, v16, ft5"),
+    # ---- the registers a routine keeps ----
+    ("x86_64", "abi: rbx used by a routine that does not save it", "ASM_FUNC(f32_scale_peak)\n    \"test %rdx, %rdx\\n   jz .Laudio_scale_peak_none\\n\"", "ASM_FUNC(f32_scale_peak)\n    \"xor %ebx, %ebx\\n   test %rdx, %rdx\\n   jz .Laudio_scale_peak_none\\n\""),
+    ("arm64", "abi: d14 used by a routine that does not save it", "5:  and x3, x3, #3\\n   cbz x3, 9f\\n\"\n    \"6:  ldr s0, [x1], #4\\n   ldr s1, [x2], #4", "5:  and x3, x3, #3\\n   cbz x3, 9f\\n   movi v14.4s, #0\\n\"\n    \"6:  ldr s0, [x1], #4\\n   ldr s1, [x2], #4"),
+    ("riscv64", "abi: s1 used by a routine that does not save it", "ASM_FUNC(f32_pair_clip)\n    \"mv a3, a0\\n   li a0, 0\\n   beqz a2, 9f\\n\"", "ASM_FUNC(f32_pair_clip)\n    \"li s1, 7\\n   mv a3, a0\\n   li a0, 0\\n   beqz a2, 9f\\n\""),
 ]
 
 
@@ -190,10 +208,12 @@ def build_and_run(index):
     for runner in RUN[machine]:
         try:
             ran = subprocess.run(runner + [binary], capture_output=True, text=True, timeout=300)
-        except subprocess.TimeoutExpired:
-            return name, 'killed (timeout)', ''
+        except subprocess.TimeoutExpired as late:
+            said = [line for line in (late.stdout or b'').decode(errors='replace').splitlines() if 'FAIL' in line]
+            return name, 'killed (timeout)', (' '.join(runner[1:]) + ': ' + said[0].strip()) if said else ''
         if ran.returncode != 0 or 'FAIL' in ran.stdout:
-            return name, 'killed', ' '.join(runner[1:]) + ': ' + (ran.stdout.strip().splitlines() or ['(' + str(ran.returncode) + ')'])[0]
+            said = [line for line in ran.stdout.splitlines() if 'FAIL' in line] or ran.stdout.strip().splitlines() or ['(' + str(ran.returncode) + ')']
+            return name, 'killed', ' '.join(runner[1:]) + ': ' + said[0].strip()
     return name, 'SURVIVED', ''
 
 
