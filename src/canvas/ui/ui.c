@@ -9278,6 +9278,16 @@ static b32 ui_finger_dragged(const struct ui_finger address_to f)
         groups and rows; the page lays out, scrolls and draws them.
 */
 
+// The two buffers of an app's window (ui_buffers_present, below): what each lacks, and whether the picture is due. A page embeds one.
+struct ui_buffers
+{
+        int shown;
+        int change_top, change_bottom;         // the rows changed since the last picture (empty when bottom <= top)
+        b32 change_all;                        // or all of them
+        int stale_top[2], stale_bottom[2];     // for each buffer, the rows it lacks since it was last drawn
+        b32 stale_all[2];                      // or all of them
+};
+
 #define UI_PAGE_WORD 128 // a choice's word on a page's menu (the app's words, as its rows have them)
 
 struct ui_page
@@ -9304,11 +9314,17 @@ struct ui_page
         int menu_row, menu_x, menu_y;      // the list row whose choice menu is open (-1 none) and where it is placed
         char menu_word[UI_MENU_ITEMS][UI_PAGE_WORD];   // the menu's words as the app gave them: a choice's value is one of these
         char menu_mark[UI_MENU_ITEMS][2 * UI_PAGE_WORD]; // the same, its ampersands doubled for the menu
-        // The app's: what scrolls in the body (its list's region, or a page of text's), and where a change is drawn again
-        // (rows of the window, device pixels).
+        // The app's: what scrolls in the body (its list's region, or a page of text's).
         struct ui_scroll address_to body;
-        fn (*damaged)(int top, int bottom);
+        // The picture: the page's buffers and the flag that it is due. The kit marks what changes in it (a press, a finger, a key,
+        // a menu); the app marks what its own data changed (ui_page_redraw, ui_page_rows).
+        struct ui_buffers buffers;
+        b32 dirty;
 };
+
+static fn ui_buffers_all(struct ui_buffers address_to b);
+static fn ui_buffers_rows(struct ui_buffers address_to b, int top, int bottom);
+static fn ui_page_damage(struct ui_page address_to p, int top, int bottom);
 
 static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_to p, int width, int height)
 {
@@ -9479,9 +9495,9 @@ static struct ui_scroll address_to ui_page_region(const struct ui address_to ui,
 
 static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to p, const struct ui_scroll address_to region)
 {
-        if (!p->damaged || !region)
+        if (!region)
                 return;
-        p->damaged(p->top - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
+        ui_page_damage(p, p->top - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
 }
 
 // The wheel on the page: it turns the region under the pointer.
@@ -9729,11 +9745,24 @@ static fn ui_page_stop(struct ui_page address_to p)
         ui_drag_stop(&p->finger.drag);
 }
 
-// The page's body changed in rows: the app's damage hook, over the page's band.
+// The page's body changed in rows [top, bottom) (device pixels): the picture is due, and those rows are drawn again.
+static fn ui_page_damage(struct ui_page address_to p, int top, int bottom)
+{
+        p->dirty = true;
+        ui_buffers_rows(&p->buffers, top, bottom);
+}
+
+// The page's body changed in its band (the kit's own change: a press, a finger, a key, a menu).
 static fn ui_page_changed(struct ui_page address_to p)
 {
-        if (p->damaged)
-                p->damaged(p->top, p->bottom);
+        ui_page_damage(p, p->top, p->bottom);
+}
+
+// The page changed everywhere (the app's own data changed, or the theme turned): its whole picture is drawn again.
+static fn ui_page_redraw(struct ui_page address_to p)
+{
+        p->dirty = true;
+        ui_buffers_all(&p->buffers);
 }
 
 // The target under a point of the page: the card, a group of the column, or a row of the list (-1 none).
@@ -10023,15 +10052,6 @@ static b32 ui_lines_key(const struct ui address_to ui, struct ui_scroll address_
         device pixels, [top, bottom); shown is the buffer on the screen, -1 when none is yet. The app says what changed
         (ui_buffers_all, ui_buffers_rows) and calls ui_buffers_present for its picture.
 */
-struct ui_buffers
-{
-        int shown;
-        int change_top, change_bottom;         // the rows changed since the last picture (empty when bottom <= top)
-        b32 change_all;                        // or all of them
-        int stale_top[2], stale_bottom[2];     // for each buffer, the rows it lacks since it was last drawn
-        b32 stale_all[2];                      // or all of them
-};
-
 // Rows [from, to) added to the rows [top, bottom) (empty when bottom <= top): the union, the empty one none.
 static void ui_rows_add(int address_to top, int address_to bottom, int from, int to)
 {
@@ -10163,6 +10183,8 @@ struct ui_app
         // The kit: its controls moved this frame, in rows top to bottom (all of it while the theme turns); the app
         // marks them to be drawn again, as the next frame comes a display period on.
         void (*moving)(int top, int bottom, b32 all);
+        // The app's picture buffers, when the kit marks them for it (every change of the app, and the controls' moves if moving is none).
+        struct ui_buffers address_to buffers;
         // A menu the app has open (ui_popup), whose wake the loop waits on too, and what it chose.
         struct ui_popup address_to popup;
         void (*chose)(int id);
@@ -10186,6 +10208,8 @@ static b32 ui_app_keys(struct ui_app address_to app, b32 focused)
 static fn ui_app_changed(struct ui_app address_to app)
 {
         *app->dirty = true;
+        if (app->buffers)
+                ui_buffers_all(app->buffers);
         if (app->changed)
                 app->changed();
 }
@@ -10200,6 +10224,17 @@ static fn ui_app_asked(struct ui_app address_to app)
                 app->page(asked - 1);
                 ui_app_changed(app);
         }
+}
+
+// The kit's controls moved this frame (all of the picture while the theme turns): the app's moving hook, or the kit's buffers.
+static fn ui_app_moved(struct ui_app address_to app, int top, int bottom, b32 all)
+{
+        if (app->moving)
+                app->moving(top, bottom, all);
+        else if (app->buffers && all)
+                ui_buffers_all(app->buffers);
+        else if (app->buffers && bottom > top)
+                ui_buffers_rows(app->buffers, top, bottom);
 }
 
 static int ui_app_run(struct ui_app address_to app)
@@ -10370,8 +10405,7 @@ static int ui_app_run(struct ui_app address_to app)
                                 if (ui_kit.busy)
                                 {
                                         *app->dirty = true;
-                                        if (app->moving)
-                                                app->moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                                        ui_app_moved(app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         timeout = timeout < 0 || timeout > (long)period ? (long)period : timeout;
                                 }
                         }

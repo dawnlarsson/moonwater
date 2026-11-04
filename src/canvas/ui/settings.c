@@ -705,7 +705,7 @@ static struct
         char status[SETTINGS_STATUS];
         int width, height;
         unsigned int ground;
-        b32 focused, dirty;
+        b32 focused;
 
         // What a command said, as a card in place of the list: lines cut to the window's width.
         positive card_length;
@@ -727,8 +727,6 @@ static struct
         positive queued;
         b32 told;         // the first reading is said in the machine's log
 
-        // The picture's two buffers and the rows each lacks (the kit's): what changed, what the compositor spoiled.
-        struct ui_buffers buffers;
         // What the wrapped lines were made for: the card, the width and the scale.
         unsigned int card_generation;
         b32 wrap_made;
@@ -770,18 +768,10 @@ static b32 settings_map(void)
         return true;
 }
 
-// The picture may have changed anywhere: the next one is drawn whole.
-static fn settings_dirty(void)
-{
-        settings.dirty = true;
-        ui_buffers_all(&settings.buffers);
-}
-
-// Rows [top, bottom) of the picture may have changed, and no others: the next one draws them.
+// Rows [top, bottom) of the list changed (the list's damage hook, which the kit calls for its rows): the page's rows are drawn again.
 static fn settings_changed(int top, int bottom)
 {
-        settings.dirty = true;
-        ui_buffers_rows(&settings.buffers, top, bottom);
+        ui_page_damage(&settings.page, top, bottom);
 }
 
 /* ---- the rows ---- */
@@ -1522,7 +1512,6 @@ static fn settings_layout(void)
         // The page's column shows with the rows and not with a card, which has the body and the whole width.
         settings.page.column_on = !settings.page.card;
         settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
-        settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
         ui_page_set_bottom(&settings.page, settings.height); // the content runs to the window's bottom edge
@@ -1597,7 +1586,7 @@ static fn settings_rebuild(void)
         if (settings_pos(settings.list.focus) < 0 && count)
                 settings.list.focus = settings.list.id[0];
         settings_layout();
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // The same, and the row with the focus brought into view.
@@ -1995,7 +1984,7 @@ static fn settings_card_open(const char address_to title)
         settings.card.scroll = 0;
         settings_wrap();
         settings_layout();
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 static fn settings_card_leave(void)
@@ -2003,7 +1992,7 @@ static fn settings_card_leave(void)
         settings.page.card = false;
         settings.status[0] = 0;
         settings_layout();
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 /* ---- the verbs ---- */
@@ -2252,7 +2241,7 @@ static fn settings_next_job(void)
                                                           : WORDS(settings_too_many)));
                 else if (settings.job >= 0)
                         settings.state[settings.job] = SETTINGS_FAILED;
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         }
 }
 
@@ -2670,7 +2659,7 @@ static long settings_feed_tick(void)
 static fn settings_reading_changed(int row)
 {
         if (settings.page.menu_row == row)
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         else if (!settings.page.card)
                 ui_list_damage(&settings.ui, &settings.list, row);
 }
@@ -3090,7 +3079,7 @@ static fn settings_output_apply(int row, const char address_to label)
 
                 windows_screen_numbers(table, number);
                 settings.map.display = settings_map_numbered(number, settings_map_count(), (unsigned int)at + 1);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return;
         }
         if (chosen < 0)
@@ -3154,7 +3143,7 @@ static fn settings_menu_close(void)
                 return;
         ui_page_menu_close(&settings.page, &settings.popup);
         settings_say((string_address) "");
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // A choice's menu, under its row and right-aligned to it, kept in the window's margin: its words, the one the row has now
@@ -3177,7 +3166,7 @@ static fn settings_menu_open(int row)
         if (!ui_page_menu_open(&settings.ui, &settings.page, &settings.list, &settings.popup, &settings.own, row, settings_menu_label, settings_shown_value(row)))
                 return;
         settings_say((string_address)WORDS(settings_menu_keys));
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // The item's word (as the row has it) set, and the menu closed; a choice the row has already sends nothing.
@@ -3261,7 +3250,7 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         if (row == SETTINGS_NAME_ROW)
                 t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = WORDS(settings_name_long);
         settings.editing = row;
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // A field typed in is done with: closed, and a passphrase typed in it wiped (ui_text_close).
@@ -3270,7 +3259,7 @@ static fn settings_edit_end(void)
         if (settings.editing >= 0)
                 ui_text_close(&settings.edit);
         settings.editing = -1;
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // Whether the row typed in is in view, so that the well its field was last drawn in is where it is.
@@ -3311,7 +3300,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         }
         else
                 settings_say((string_address)settings_item_text(item));
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // Delete on a saved network or a kept device forgets it, when it is pressed twice.
@@ -3418,7 +3407,7 @@ static fn settings_group_choose(int group)
                 settings.list.focus = settings.list.id[0];
         settings_side_reveal();
         settings_say((string_address)(settings.list.focus >= SETTINGS_ANY ? settings_text(settings.list.focus) : ""));
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 /*
@@ -3477,7 +3466,7 @@ static fn settings_edit_asked(p32 asks)
         else if (asks & UI_TEXT_CANCEL)
                 settings_edit_end();
         else if (asks)
-                settings_dirty();
+                ui_page_redraw(&settings.page);
 }
 
 // A key in a field being typed in: the field's (a key between a command's two Enters asks again).
@@ -3536,7 +3525,7 @@ static fn settings_filter_asked(p32 asks)
                 return;
         if (!settings_filter_take())
         {
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return;
         }
         ui_scroll_set(&settings.list.scroll, 0);
@@ -3691,13 +3680,13 @@ static b32 settings_map_key(const struct window_event address_to event)
         {
                 if (settings_map_stepped(dx, dy, &x, &y))
                         settings_map_place_change(at, x, y);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return true;
         }
         if (event->a == UI_KEY_DOWN)
         {
                 settings.map.keys = false;
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return true;
         }
         if (count && at >= 0 && at < (int)count)
@@ -3707,7 +3696,7 @@ static b32 settings_map_key(const struct window_event address_to event)
                 if (settings_map_numbered(number, count, (unsigned int)wanted) >= 0)
                         settings.map.display = settings_map_numbered(number, count, (unsigned int)wanted);
         }
-        settings_dirty();
+        ui_page_redraw(&settings.page);
         return true;
 }
 
@@ -3778,7 +3767,7 @@ static b32 settings_key(const struct window_event address_to event)
             settings_map_count())
         {
                 settings.map.keys = true;
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return true;
         }
         // The page's keys: Tab, the moves, Enter and Space, Delete and the arrows (what each row does is the app's, in settings_page_keys).
@@ -4158,7 +4147,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                         for (int at = 0; at < settings_gallery.count; at++)
                                 if (settings_gallery.control[at].edit)
                                         settings_gallery.control[at].focused = settings_gallery.control[at].edit->focused;
-                        settings_dirty();
+                        ui_page_redraw(&settings.page);
                         return true;
                 }
         }
@@ -4197,7 +4186,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                 }
         }
         if (moved)
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         return true;
 }
 
@@ -4220,7 +4209,7 @@ static void settings_map_drag_to(int x, int y)
         ty = (int)(settings_map_table_y(&view, y) - settings.map.grab_y);
         settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
         settings.map.target_x = tx, settings.map.target_y = ty;
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // A press in the map's panel: the button runs canvas identify, and a screen is chosen and taken to drag. True when the
@@ -4250,7 +4239,7 @@ static b32 settings_map_press(int x, int y)
                 settings.map.grab_y = (int)(settings_map_table_y(&view, y) - screens[at].y);
                 settings.map.target_x = screens[at].x, settings.map.target_y = screens[at].y;
         }
-        settings_dirty();
+        ui_page_redraw(&settings.page);
         return true;
 }
 
@@ -4265,7 +4254,7 @@ static void settings_map_release(void)
         settings.map.drag = -1, settings.map.nudged = false;
         if (count && at >= 0 && at < (int)count && (settings.map.target_x != screens[at].x || settings.map.target_y != screens[at].y))
                 settings_map_place_change(at, settings.map.target_x, settings.map.target_y);
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 static fn settings_press_at(void);
@@ -4331,7 +4320,7 @@ static b32 settings_event(const struct window_event address_to event)
                         settings_edit_asked(asks);
                         if (!outside || own)
                         {
-                                settings_dirty();
+                                ui_page_redraw(&settings.page);
                                 return true;
                         }
                 }
@@ -4340,7 +4329,7 @@ static b32 settings_event(const struct window_event address_to event)
                         if (event->type != WINDOW_EVENT_BUTTON || (asks != UI_TEXT_COMMIT && asks != UI_TEXT_CANCEL))
                         {
                                 settings_filter_asked(asks);
-                                settings_dirty();
+                                ui_page_redraw(&settings.page);
                                 return true;
                         }
                 }
@@ -4381,7 +4370,7 @@ static fn settings_press_at(void)
                 settings_edit_end();
                 settings.page.pane = 0;
                 settings_group_choose(row);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
                 return;
         }
         // A row: the kit gives it the keys, shows it pressed and ripples it from the press.
@@ -4396,7 +4385,7 @@ static fn settings_press_at(void)
                 settings_said_of(before);
         }
         settings.page.pane = 1;
-        settings_dirty();
+        ui_page_redraw(&settings.page);
         // A segment or a swatch is set where it is pressed.
         if (settings.list.part >= 0 && row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
         {
@@ -4484,9 +4473,9 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
 */
 static b32 settings_frame(void)
 {
-        if (!ui_buffers_present(&settings.buffers, &settings.own, settings.width, settings.height, settings_draw_rows, null))
+        if (!ui_buffers_present(&settings.page.buffers, &settings.own, settings.width, settings.height, settings_draw_rows, null))
                 return false;
-        settings.dirty = false;
+        settings.page.dirty = false;
         return true;
 }
 
@@ -4507,7 +4496,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
         if (settings.page.menu_row >= 0)
                 settings.page.menu_row = -1, ui_popmenu_close(&settings.popup);
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 // The settings' start, once its window is taken: the lift, the layout and the first picture. -1 runs the loop.
@@ -4518,7 +4507,7 @@ static fn settings_language(void)
         // A language that reads the other way is a page laid out the other way: the column, the bars and the rows' extent are placed again.
         if (settings.width > 0 && settings.height > 0)
                 settings_layout();
-        settings_dirty();
+        ui_page_redraw(&settings.page);
 }
 
 static int settings_open(void)
@@ -4579,12 +4568,12 @@ static fn settings_chose(int id)
                 p32 asks = ui_text_menu_do(&settings.ui, t, id);
 
                 settings_filter_asked(asks);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         }
         else if (t && (t == &settings_gallery.field[0] || t == &settings_gallery.field[1]))
         {
                 ui_text_menu_do(&settings.ui, t, id);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         }
 }
 
@@ -4606,7 +4595,7 @@ static long settings_tick(long timeout, long address_to other)
                         timeout = ui_text_timeout(&settings.ui, t, timeout, now, &redraw);
                 // The rows the field's handles and bar cover are drawn again with it, those they covered as well.
                 if (redraw && (t->bar || t->bar_up || t->over_bottom > t->over_top))
-                        settings_dirty();
+                        ui_page_redraw(&settings.page);
                 else if (redraw)
                         settings_changed(t->well_top, t->well_bottom);
         }
@@ -4652,14 +4641,6 @@ static fn settings_close(void)
 }
 
 // The kit's controls moved this frame: their rows are drawn again at the next (the whole picture while the theme turns).
-static fn settings_moving(int top, int bottom, b32 all)
-{
-        if (all)
-                settings_dirty();
-        else if (bottom > top)
-                settings_changed(top, bottom);
-}
-
 static struct ui_app settings_app = {
         .own = &settings.own,
         .ui = &settings.ui,
@@ -4669,14 +4650,13 @@ static struct ui_app settings_app = {
         .glass = 0, // the kit's surface: the window is the theme's, opaque, as every kit window is
         .font = null,
         .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
-        .dirty = &settings.dirty,
+        .dirty = &settings.page.dirty,
         .focused = &settings.focused,
         .ground = &settings.ground,
         .open = settings_open,
         .frame = settings_frame,
         .event = settings_event,
-        .changed = settings_dirty,
-        .moving = settings_moving,
+        .buffers = &settings.page.buffers,
         .size = settings_size,
         .tick = settings_tick,
         .ready = settings_drain,
@@ -4690,7 +4670,7 @@ static b32 settings_main()
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
         settings.editing = -1;
-        ui_buffers_start(&settings.buffers);
+        ui_buffers_start(&settings.page.buffers);
         settings.output = -1;
         settings.page.pane = 1; // the keys start in the rows, on the first of them
         settings.page.menu_row = -1;

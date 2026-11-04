@@ -135384,7 +135384,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_hold(zone, "");
                 settings_press(FIELD_KEY_ESCAPE);
                 settings.editing = -1;
-                settings.dirty = false;
+                settings.page.dirty = false;
 
                 // A field's text stays in its well: a name longer than the well is shown from its end, not drawn past it. The
                 // field is the kit's, bare, as a row's field is: its text is its engine's, the caret at its end.
@@ -135905,9 +135905,9 @@ static fn check_settings(string_address regular, string_address bold)
                                   string_equals((string_address)settings.value[wifi], (string_address) "on") &&
                                   settings.list.count == 1 + 5 && settings.list.id[0] == wifi);
                         settings.list.focus = (int)SETTINGS_LIST + 1; // Guest
-                        settings.dirty = false;
+                        settings.page.dirty = false;
                         settings_feed_read(false, false);
-                        check("settings: a reading that says what the last said changes nothing and draws nothing", !settings.dirty && settings.list.focus == (int)SETTINGS_LIST + 1);
+                        check("settings: a reading that says what the last said changes nothing and draws nothing", !settings.page.dirty && settings.list.focus == (int)SETTINGS_LIST + 1);
                         settings.list.scroll.scroll = 0;
                         memory_copy(settings_large->said, again, sizeof(again) - 1);
                         settings.said_length = sizeof(again) - 1;
@@ -135915,7 +135915,7 @@ static fn check_settings(string_address regular, string_address bold)
                         row_of = settings.list.focus;
                         check("settings: a list that moves under the keys does not move them: they stay on the network of that name",
                               settings.item_count[0] == 6 && settings_item(row_of) && string_equals((string_address)settings_item(row_of)->label, (string_address) "Guest") &&
-                                  row_of != (int)SETTINGS_LIST + 1 && settings.dirty && settings_pos(row_of) >= 0 && settings.page.pane == 1);
+                                  row_of != (int)SETTINGS_LIST + 1 && settings.page.dirty && settings_pos(row_of) >= 0 && settings.page.pane == 1);
                         check("settings: and the switch follows what the verb says now", string_equals((string_address)settings.value[wifi], (string_address) "off"));
                         memory_copy(settings_large->said, silent, sizeof(silent) - 1);
                         settings.said_length = sizeof(silent) - 1;
@@ -135930,12 +135930,12 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.said_length = sizeof(air) - 1;
                         settings_feed_read(false, false);
                         settings.editing = (int)SETTINGS_LIST + 2;
-                        settings.dirty = false;
+                        settings.page.dirty = false;
                         memory_copy(settings_large->said, again, sizeof(again) - 1);
                         settings.said_length = sizeof(again) - 1;
                         settings_feed_read(false, false);
                         check("settings: nothing is changed under a passphrase being typed", settings.item_count[0] == 5 &&
-                                  string_equals((string_address)items[1].label, (string_address) "Guest") && !settings.dirty);
+                                  string_equals((string_address)items[1].label, (string_address) "Guest") && !settings.page.dirty);
                         settings.editing = -1;
 
                         // What a person does to a row of the list.
@@ -136129,7 +136129,7 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.child <= 0 && settings.feed_due > clock_monotonic_nanoseconds());
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
-                        settings.own.table = null, settings.buffers.shown = -1;
+                        settings.own.table = null, settings.page.buffers.shown = -1;
                         settings.page.chosen = 0;
                         settings.item_count[0] = 0;
                         settings.item_count[1] = 0;
@@ -136382,7 +136382,7 @@ static fn settings_frames_pass(void)
         positive now = settings_frames.now;
 
         ui_kit.wheel_clock = (b64)now;
-        if (!settings.dirty || (ui_kit.busy && now < (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD))
+        if (!settings.page.dirty || (ui_kit.busy && now < (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD))
                 return;
         ui_kit.now = (b64)now;
         ui_kit.busy = 0;
@@ -136393,22 +136393,22 @@ static fn settings_frames_pass(void)
         ui_kit.drawn = (b64)now;
         if (ui_kit.busy)
         {
-                settings.dirty = true;
-                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                settings.page.dirty = true;
+                ui_app_moved(&settings_app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                 settings_frames.moving++;
         }
         // The compositor takes the picture at once, and what it shows is the buffer named.
         settings_frames.table->shown[settings.own.row] = settings_frames.table->frame[settings.own.row];
         settings_frames.frames++;
         if (!settings_frames.wrong)
-                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address) "shown");
+                settings_frames.wrong = !settings_frames_same(settings.page.buffers.shown, (string_address) "shown");
 }
 
 // The loop until a time: a pass now, then a frame each display period while anything moves.
 static fn settings_frames_until(positive until)
 {
         settings_frames_pass();
-        while (settings.dirty && ui_kit.busy && (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD <= until)
+        while (settings.page.dirty && ui_kit.busy && (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD <= until)
         {
                 settings_frames.now = (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD;
                 settings_frames_pass();
@@ -136448,12 +136448,12 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                 settings.list.count = count;
                 settings.list.scroll.scroll = 0;
                 ui_list_layout(&settings.ui, &settings.list);
-                settings_dirty();
+                ui_page_redraw(&settings.page);
         }
         settings.list.focus = settings_row_named(from);
         settings_reveal();
         settings.page.pane = !column;
-        settings_dirty();
+        ui_page_redraw(&settings.page);
         settings_frames_until(start + 1000 * SETTINGS_FRAMES_MS);
         start = settings_frames.now;
 
@@ -136491,13 +136491,13 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                         settings_frames_pass();
                 }
         settings_frames_until(settings_frames.now + 2000 * SETTINGS_FRAMES_MS);
-        check("settings frames: the loop comes to rest", !settings.dirty);
+        check("settings frames: the loop comes to rest", !settings.page.dirty);
         // The buffer not shown, drawn again with nothing new, then the first again: each is the whole picture then.
         for (int again = 0; again < 2 && !settings_frames.wrong; again++)
         {
-                settings.dirty = true;
+                settings.page.dirty = true;
                 settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
-                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+                settings_frames.wrong = !settings_frames_same(settings.page.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
         }
         check("settings frames: every buffer shown is the whole picture drawn at its time", !settings_frames.wrong);
         settings.child = 0;
@@ -136598,7 +136598,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                 case SF_THEME:
                         ui_kit_theme((unsigned int)s->a, (unsigned int)s->b ? (unsigned int)s->b : UI_ACCENT_STANDARD, 0);
                         ui_kit_inks(&settings.ui);
-                        settings_dirty();
+                        ui_page_redraw(&settings.page);
                         break;
                 case SF_SIZE:
                         ui_kit_settle();
@@ -136642,12 +136642,12 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                 settings_frames_pass();
         }
         settings_frames_until(settings_frames.now + 4000 * SETTINGS_FRAMES_MS);
-        check("settings frames: the loop comes to rest after a script", !settings.dirty);
+        check("settings frames: the loop comes to rest after a script", !settings.page.dirty);
         for (int again = 0; again < 2 && !settings_frames.wrong; again++)
         {
-                settings.dirty = true;
+                settings.page.dirty = true;
                 settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
-                settings_frames.wrong = !settings_frames_same(settings.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+                settings_frames.wrong = !settings_frames_same(settings.page.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
         }
         check("settings frames: every buffer a script shows is the whole picture drawn at its time", !settings_frames.wrong);
         string_format(log, "  settings frames (%s): %p frames, %p of them moving, %p changes answered\n", name,
@@ -137880,7 +137880,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 struct window_row own;
                 int width, height, shown, group;
                 struct ui_control address_to controls;
-        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.buffers.shown, settings.page.chosen, settings.list.controls};
+        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.page.buffers.shown, settings.page.chosen, settings.list.controls};
 
         if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
             font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
@@ -137907,7 +137907,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         ui_kit_inks(&settings.ui);
         ui_kit_settle();
         check_settings_edges();
-        ui_buffers_start(&settings.buffers);
+        ui_buffers_start(&settings.page.buffers);
         settings.focused = 1;
         settings_frames.now = 5000000000ull;
         ui_kit.drawn = 0;
@@ -138072,7 +138072,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
 
         settings.ui = saved.ui;
         settings.own = saved.own;
-        settings.width = saved.width, settings.height = saved.height, settings.buffers.shown = saved.shown, settings.page.chosen = saved.group;
+        settings.width = saved.width, settings.height = saved.height, settings.page.buffers.shown = saved.shown, settings.page.chosen = saved.group;
         settings.list.controls = saved.controls;
         settings_layout();
         compositor_call(syscall(munmap), (positive)table, WINDOWS_HEADER + 2 * buffer, 0, 0, 0, 0);
@@ -138875,7 +138875,7 @@ static fn check_rtl_mirror(void)
                 settings.state[at] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[at], (string_address)(row->standard ? row->standard : "1"), SETTINGS_VALUE);
         }
-        settings.buffers.shown = -1;
+        settings.page.buffers.shown = -1;
         settings.page.pane = 0;
         // The cuts the kit remembers are of the faces the checks before this one drew with.
         if (ui_cuts)
@@ -148869,7 +148869,7 @@ b32 main()
                         if (!settings_map())
                                 return 1;
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.buffers.shown = -1, settings.focused = 1;
+                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1, settings.focused = 1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];
@@ -148936,7 +148936,7 @@ b32 main()
                                         ui_kit_turn();
                                         settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
                                         if (ui_kit.busy)
-                                                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                                                ui_app_moved(&settings_app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         continue;
                                 }
                                 if (string_equals(what, (string_address) "settings-wheel"))
@@ -148958,7 +148958,7 @@ b32 main()
                                         ui_kit_turn();
                                         settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
                                         if (ui_kit.busy)
-                                                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                                                ui_app_moved(&settings_app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         continue;
                                 }
                                 if (string_equals(what, (string_address) "settings-keys"))
@@ -149116,7 +149116,7 @@ b32 main()
                         unsigned int glass = dark ? 0x2b2b2eu : 0xb4b4b4u;
 
                         settings_gallery.on = 0;
-                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.buffers.shown = -1;
+                        settings.editing = -1, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
                                 const struct settings_row address_to row = &settings_rows[at];
