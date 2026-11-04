@@ -85,6 +85,8 @@ enum {
         WLI_xdg_toplevel_icon_v1,
         WLI_zwp_xwayland_keyboard_grab_manager_v1,
         WLI_zwp_xwayland_keyboard_grab_v1,
+        WLI_zwp_text_input_manager_v3,
+        WLI_zwp_text_input_v3,
         WLI_COUNT
 };
 
@@ -170,6 +172,8 @@ enum {
 #define WLV_xdg_toplevel_icon_v1 1
 #define WLV_zwp_xwayland_keyboard_grab_manager_v1 1
 #define WLV_zwp_xwayland_keyboard_grab_v1 1
+#define WLV_zwp_text_input_manager_v3 2
+#define WLV_zwp_text_input_v3 2
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -738,6 +742,68 @@ enum {
 #define WLQ_zwp_xwayland_keyboard_grab_manager_v1_destroy 0
 #define WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard 1
 #define WLQ_zwp_xwayland_keyboard_grab_v1_destroy 0
+#define WLQ_zwp_text_input_manager_v3_destroy 0
+#define WLQ_zwp_text_input_manager_v3_get_text_input 1
+#define WLQ_zwp_text_input_v3_destroy 0
+#define WLQ_zwp_text_input_v3_enable 1
+#define WLQ_zwp_text_input_v3_disable 2
+#define WLQ_zwp_text_input_v3_set_surrounding_text 3
+#define WLQ_zwp_text_input_v3_set_text_change_cause 4
+#define WLQ_zwp_text_input_v3_set_content_type 5
+#define WLQ_zwp_text_input_v3_set_cursor_rectangle 6
+#define WLQ_zwp_text_input_v3_commit 7
+#define WLQ_zwp_text_input_v3_set_available_actions 8
+#define WLQ_zwp_text_input_v3_show_input_panel 9
+#define WLQ_zwp_text_input_v3_hide_input_panel 10
+#define WLE_zwp_text_input_v3_enter 0
+#define WLE_zwp_text_input_v3_leave 1
+#define WLE_zwp_text_input_v3_preedit_string 2
+#define WLE_zwp_text_input_v3_commit_string 3
+#define WLE_zwp_text_input_v3_delete_surrounding_text 4
+#define WLE_zwp_text_input_v3_done 5
+#define WLE_zwp_text_input_v3_action 6
+#define WLE_zwp_text_input_v3_language 7
+#define WLE_zwp_text_input_v3_preedit_hint 8
+#define WLN_zwp_text_input_v3_change_cause_input_method 0
+#define WLN_zwp_text_input_v3_change_cause_other 1
+#define WLN_zwp_text_input_v3_content_hint_none 0x0
+#define WLN_zwp_text_input_v3_content_hint_completion 0x1
+#define WLN_zwp_text_input_v3_content_hint_spellcheck 0x2
+#define WLN_zwp_text_input_v3_content_hint_auto_capitalization 0x4
+#define WLN_zwp_text_input_v3_content_hint_lowercase 0x8
+#define WLN_zwp_text_input_v3_content_hint_uppercase 0x10
+#define WLN_zwp_text_input_v3_content_hint_titlecase 0x20
+#define WLN_zwp_text_input_v3_content_hint_hidden_text 0x40
+#define WLN_zwp_text_input_v3_content_hint_sensitive_data 0x80
+#define WLN_zwp_text_input_v3_content_hint_latin 0x100
+#define WLN_zwp_text_input_v3_content_hint_multiline 0x200
+#define WLN_zwp_text_input_v3_content_hint_on_screen_input_provided 0x400
+#define WLN_zwp_text_input_v3_content_hint_no_emoji 0x800
+#define WLN_zwp_text_input_v3_content_hint_preedit_shown 0x1000
+#define WLN_zwp_text_input_v3_content_purpose_normal 0
+#define WLN_zwp_text_input_v3_content_purpose_alpha 1
+#define WLN_zwp_text_input_v3_content_purpose_digits 2
+#define WLN_zwp_text_input_v3_content_purpose_number 3
+#define WLN_zwp_text_input_v3_content_purpose_phone 4
+#define WLN_zwp_text_input_v3_content_purpose_url 5
+#define WLN_zwp_text_input_v3_content_purpose_email 6
+#define WLN_zwp_text_input_v3_content_purpose_name 7
+#define WLN_zwp_text_input_v3_content_purpose_password 8
+#define WLN_zwp_text_input_v3_content_purpose_pin 9
+#define WLN_zwp_text_input_v3_content_purpose_date 10
+#define WLN_zwp_text_input_v3_content_purpose_time 11
+#define WLN_zwp_text_input_v3_content_purpose_datetime 12
+#define WLN_zwp_text_input_v3_content_purpose_terminal 13
+#define WLN_zwp_text_input_v3_error_invalid_action 0
+#define WLN_zwp_text_input_v3_action_none 0
+#define WLN_zwp_text_input_v3_action_submit 1
+#define WLN_zwp_text_input_v3_preedit_hint_whole 1
+#define WLN_zwp_text_input_v3_preedit_hint_selection 2
+#define WLN_zwp_text_input_v3_preedit_hint_prediction 3
+#define WLN_zwp_text_input_v3_preedit_hint_prefix 4
+#define WLN_zwp_text_input_v3_preedit_hint_suffix 5
+#define WLN_zwp_text_input_v3_preedit_hint_spelling_error 6
+#define WLN_zwp_text_input_v3_preedit_hint_compose_error 7
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1087,6 +1153,28 @@ static const unsigned char wl_q_xdg_toplevel_icon_v1_add_buffer[] = {'o', WLI_wl
 static const unsigned char wl_q_zwp_xwayland_keyboard_grab_manager_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard[] = {'n', WLI_zwp_xwayland_keyboard_grab_v1, 'o', WLI_wl_surface, 'o', WLI_wl_seat, 0, 0};
 static const unsigned char wl_q_zwp_xwayland_keyboard_grab_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_manager_v3_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_manager_v3_get_text_input[] = {'n', WLI_zwp_text_input_v3, 'o', WLI_wl_seat, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_enable[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_disable[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_set_surrounding_text[] = {'s', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_set_text_change_cause[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_set_content_type[] = {'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_set_cursor_rectangle[] = {'i', 0, 'i', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_commit[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_set_available_actions[] = {'a', 0, 0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_show_input_panel[] = {0, 0};
+static const unsigned char wl_q_zwp_text_input_v3_hide_input_panel[] = {0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_enter[] = {'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_leave[] = {'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_preedit_string[] = {'S', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_commit_string[] = {'S', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_delete_surrounding_text[] = {'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_done[] = {'u', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_action[] = {'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_language[] = {'s', 0, 0, 0};
+static const unsigned char wl_e_zwp_text_input_v3_preedit_hint[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1654,6 +1742,34 @@ static const struct wl_message wl_requests_zwp_xwayland_keyboard_grab_manager_v1
 static const struct wl_message wl_requests_zwp_xwayland_keyboard_grab_v1[] = {
         {1, 1, wl_q_zwp_xwayland_keyboard_grab_v1_destroy},
 };
+static const struct wl_message wl_requests_zwp_text_input_manager_v3[] = {
+        {1, 1, wl_q_zwp_text_input_manager_v3_destroy},
+        {1, 0, wl_q_zwp_text_input_manager_v3_get_text_input},
+};
+static const struct wl_message wl_requests_zwp_text_input_v3[] = {
+        {1, 1, wl_q_zwp_text_input_v3_destroy},
+        {1, 0, wl_q_zwp_text_input_v3_enable},
+        {1, 0, wl_q_zwp_text_input_v3_disable},
+        {1, 0, wl_q_zwp_text_input_v3_set_surrounding_text},
+        {1, 0, wl_q_zwp_text_input_v3_set_text_change_cause},
+        {1, 0, wl_q_zwp_text_input_v3_set_content_type},
+        {1, 0, wl_q_zwp_text_input_v3_set_cursor_rectangle},
+        {1, 0, wl_q_zwp_text_input_v3_commit},
+        {2, 0, wl_q_zwp_text_input_v3_set_available_actions},
+        {2, 0, wl_q_zwp_text_input_v3_show_input_panel},
+        {2, 0, wl_q_zwp_text_input_v3_hide_input_panel},
+};
+static const struct wl_message wl_events_zwp_text_input_v3[] = {
+        {1, 0, wl_e_zwp_text_input_v3_enter},
+        {1, 0, wl_e_zwp_text_input_v3_leave},
+        {1, 0, wl_e_zwp_text_input_v3_preedit_string},
+        {1, 0, wl_e_zwp_text_input_v3_commit_string},
+        {1, 0, wl_e_zwp_text_input_v3_delete_surrounding_text},
+        {1, 0, wl_e_zwp_text_input_v3_done},
+        {2, 0, wl_e_zwp_text_input_v3_action},
+        {2, 0, wl_e_zwp_text_input_v3_language},
+        {2, 0, wl_e_zwp_text_input_v3_preedit_hint},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1738,4 +1854,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_xdg_toplevel_icon_v1] = {"xdg_toplevel_icon_v1", 1, 3, 0, wl_requests_xdg_toplevel_icon_v1, 0},
         [WLI_zwp_xwayland_keyboard_grab_manager_v1] = {"zwp_xwayland_keyboard_grab_manager_v1", 1, 2, 0, wl_requests_zwp_xwayland_keyboard_grab_manager_v1, 0},
         [WLI_zwp_xwayland_keyboard_grab_v1] = {"zwp_xwayland_keyboard_grab_v1", 1, 1, 0, wl_requests_zwp_xwayland_keyboard_grab_v1, 0},
+        [WLI_zwp_text_input_manager_v3] = {"zwp_text_input_manager_v3", 2, 2, 0, wl_requests_zwp_text_input_manager_v3, 0},
+        [WLI_zwp_text_input_v3] = {"zwp_text_input_v3", 2, 11, 9, wl_requests_zwp_text_input_v3, wl_events_zwp_text_input_v3},
 };

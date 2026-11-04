@@ -113,6 +113,9 @@ CONFIG = [
     ("protocols", "unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml", [
         "zwp_xwayland_keyboard_grab_manager_v1", "zwp_xwayland_keyboard_grab_v1",
     ]),
+    ("protocols", "unstable/text-input/text-input-unstable-v3.xml", [
+        "zwp_text_input_manager_v3", "zwp_text_input_v3",
+    ]),
 ]
 
 

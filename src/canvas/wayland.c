@@ -104,6 +104,7 @@
 #define WAYLAND_DMABUFS_ALL 192      // and all clients together
 #define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
 #define WAYLAND_NOTIFIES 8           // ext-idle-notify notifications one client holds
+#define WAYLAND_TEXTS 4              // zwp_text_input_v3 objects one client holds
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
@@ -166,6 +167,8 @@ struct wayland_rect
 #define WAYLAND_DO_CLOSE 8
 #define WAYLAND_DO_FOCUS 9      // raise and focus the window: an xdg-activation token that the person's input vouches for
 #define WAYLAND_DO_PINCH_WANT 11 // the window takes the pinch gesture (1) rather than Ctrl and a wheel (0): a client asked for a pinch object
+#define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
+#define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -510,6 +513,21 @@ struct wayland_params
         unsigned long offset[4], stride[4], modifier[4];
 };
 
+/*
+        A zwp_text_input_v3: its object's id, and its state as the last commit applied it (enabled, the content purpose, the cursor
+        rectangle's bottom in surface units, -1 for none) with the state the next commit applies (pending_*). row is the window that
+        has the seat's keyboard through its surface, -1 for none; counted is the row whose field count it holds (-1 for none). serial
+        counts the commits, which done carries.
+*/
+struct wayland_text
+{
+        unsigned int id;
+        unsigned char live, enabled, pending_enabled, purpose, pending_purpose;
+        long caret, pending_caret;
+        int row, counted;
+        unsigned long serial;
+};
+
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
@@ -539,6 +557,7 @@ struct wayland_client
         struct wayland_source sources[WAYLAND_SOURCES];
         struct wayland_offer offers[WAYLAND_OFFERS];
         struct wayland_params params[WAYLAND_PARAMS];
+        struct wayland_text texts[WAYLAND_TEXTS];
         unsigned int feedback_id[WAYLAND_FEEDBACKS];
         unsigned char feedbacks, dmabufs;
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
@@ -614,6 +633,7 @@ static struct
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
+        unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
 } wayland;
 
 /* ---- the wire ---- */
@@ -1018,6 +1038,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_xdg_toplevel_icon_manager_v1, 1},
     {WLI_xwayland_shell_v1, 1},
     {WLI_zwp_xwayland_keyboard_grab_manager_v1, 1},
+    {WLI_zwp_text_input_manager_v3, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -1317,12 +1338,16 @@ static void wayland_relative_send(struct wayland_client *c, long scale120, long 
 
 static void wayland_let_go(struct wayland_client *c, long index);
 
+static void wayland_texts_row_gone(struct wayland_client *c, long row);
+
 static void wayland_row_release(struct wayland_client *c, struct wayland_surface *s)
 {
         long lent = s->lent, gone = s->lent_gone;
 
         if (s->row < 0)
                 return;
+        // A text input that had the keys in the window gives back its field count before the window goes (the host still has the row).
+        wayland_texts_row_gone(c, s->row);
         wayland.row_client[s->row] = wayland.row_surface[s->row] = -1;
         wayland.row_percent[s->row] = 0;
         if (wayland.pointer_row == s->row)
@@ -4125,6 +4150,161 @@ WAYLAND_API void wayland_pointer_axis_stop(long row)
                 }
 }
 
+/*
+        zwp_text_input_v3: a text field of a client's window, which the desktop's on-screen keyboard shows by. Its enable, content type
+        and cursor rectangle are applied at the commit, as the protocol has them, and done carries the commit's serial. While it is
+        enabled and its window has the keyboard, the window's row holds one field count in the window table (WAYLAND_DO_TEXT, the same
+        count ui_field_focus keeps for a kit field), so the keyboard shows; the count goes when either stops being so, when the window
+        goes, and when the object is destroyed or its client dies. The cursor rectangle's bottom is passed with it (WAYLAND_DO_CARET),
+        so the window is moved up for the cursor and not for its own bottom edge. Nothing else of the protocol is done: no preedit, no
+        surrounding text, no change cause; a commit_string is never sent.
+*/
+static void wayland_text_sync(struct wayland_client *c, struct wayland_text *t)
+{
+        int want = t->enabled && t->row >= 0 ? t->row : -1;
+        struct wayland_surface *s;
+        struct wayland_client *owner = 0;
+        long caret = -1;
+
+        if (t->counted >= 0 && t->counted != want)
+        {
+                wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_TEXT, -1, 0);
+                t->counted = -1;
+        }
+        if (want >= 0 && t->counted < 0)
+        {
+                wayland.host->row_do(wayland.host->context, want, WAYLAND_DO_TEXT, 1, (long)t->purpose);
+                t->counted = want;
+        }
+        if (t->counted < 0)
+                return;
+        s = wayland_row_surface(t->counted, &owner);
+        if (s && owner == c && t->caret >= 0)
+                caret = wayland_pixels(t->caret, s->scale120);
+        wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_TEXT, 0, (long)t->purpose);
+        wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_CARET, caret, 0);
+}
+
+// The window of a row goes: its text inputs lose the keys with it, and give back their counts (called before the row is closed).
+static void wayland_texts_row_gone(struct wayland_client *c, long row)
+{
+        for (long at = 0; at < WAYLAND_TEXTS; at++)
+                if (c->texts[at].live && c->texts[at].row == row)
+                {
+                        c->texts[at].row = -1;
+                        wayland_text_sync(c, &c->texts[at]);
+                }
+}
+
+// The keyboard went to a window of the client (its row and surface id) or left it: each text input is told, and holds or gives back its
+// count with it. A leave is only for the window the keys were in.
+static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int surface, int entered)
+{
+        for (long at = 0; at < WAYLAND_TEXTS; at++)
+        {
+                struct wayland_text *t = &c->texts[at];
+                struct wayland_event e;
+
+                if (!t->live || (!entered && t->row != row))
+                        continue;
+                t->row = entered ? (int)row : -1;
+                e = wayland_begin(c, t->id, entered ? WLE_zwp_text_input_v3_enter : WLE_zwp_text_input_v3_leave);
+                wayland_word(&e, surface);
+                wayland_end(&e);
+                wayland_text_sync(c, t);
+        }
+}
+
+// The client's text input objects are given up: each one's count goes back (the client died, or the window's keys went with it).
+static void wayland_texts_drop(struct wayland_client *c)
+{
+        for (long at = 0; at < WAYLAND_TEXTS; at++)
+                if (c->texts[at].live)
+                {
+                        c->texts[at].enabled = 0;
+                        c->texts[at].row = -1;
+                        wayland_text_sync(c, &c->texts[at]);
+                        c->texts[at].live = 0;
+                }
+}
+
+static int wayland_text_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_text *t;
+
+        if (self->iface == WLI_zwp_text_input_manager_v3)
+        {
+                struct wayland_surface *focus;
+                struct wayland_client *owner = 0;
+                long index;
+
+                if (op != WLQ_zwp_text_input_manager_v3_get_text_input)
+                        return WAYLAND_OK;
+                for (index = 0; index < WAYLAND_TEXTS && c->texts[index].live; index++)
+                        ;
+                if (index == WAYLAND_TEXTS)
+                        return wayland_new_fail(c, self->id, a[0].u);
+                t = &c->texts[index];
+                t->live = 1;
+                t->id = (unsigned int)a[0].u;
+                t->enabled = t->pending_enabled = t->purpose = t->pending_purpose = 0;
+                t->caret = t->pending_caret = -1;
+                t->row = -1;
+                t->counted = -1;
+                t->serial = 0;
+                c->objects[a[0].slot].link = (short)index;
+                // A client that gets its text input once the keys are in its window is told so at once.
+                focus = wayland_row_surface(wayland.keyboard_row, &owner);
+                if (focus && owner == c)
+                        wayland_texts_focus(c, wayland.keyboard_row, focus->id, 1);
+                return WAYLAND_OK;
+        }
+        if (self->link < 0 || self->link >= WAYLAND_TEXTS || !c->texts[self->link].live)
+                return WAYLAND_OK;
+        t = &c->texts[self->link];
+        switch (op)
+        {
+        case WLQ_zwp_text_input_v3_destroy:
+                t->enabled = 0;
+                t->row = -1;
+                wayland_text_sync(c, t);
+                t->live = 0;
+                break;
+        case WLQ_zwp_text_input_v3_enable:
+                t->pending_enabled = 1;
+                break;
+        case WLQ_zwp_text_input_v3_disable:
+                t->pending_enabled = 0;
+                break;
+        case WLQ_zwp_text_input_v3_set_content_type:
+                // A purpose the protocol does not have is a normal one, so no field is ever given a purpose it cannot show.
+                t->pending_purpose = a[1].u <= WLN_zwp_text_input_v3_content_purpose_terminal ? (unsigned char)a[1].u
+                                                                                             : (unsigned char)WLN_zwp_text_input_v3_content_purpose_normal;
+                break;
+        case WLQ_zwp_text_input_v3_set_cursor_rectangle:
+                // The bottom edge is y + height, in surface units; a rectangle with a negative size, or one above the surface, is none.
+                t->pending_caret = a[2].i < 0 || a[3].i < 0 || (long)a[1].i + (long)a[3].i < 0 ? -1 : (long)a[1].i + (long)a[3].i;
+                break;
+        case WLQ_zwp_text_input_v3_commit:
+        {
+                struct wayland_event e;
+
+                t->enabled = t->pending_enabled;
+                t->purpose = t->pending_purpose;
+                t->caret = t->pending_caret;
+                wayland_text_sync(c, t);
+                t->serial++;
+                e = wayland_begin(c, t->id, WLE_zwp_text_input_v3_done);
+                wayland_word(&e, (unsigned long)t->serial);
+                wayland_end(&e);
+                break;
+        }
+        default: // set_surrounding_text and set_text_change_cause are taken and not used
+                break;
+        }
+        return WAYLAND_OK;
+}
+
 /* How fast a held key repeats, to one keyboard (from version 4): the rate a second and the delay in milliseconds. */
 static void wayland_keyboard_repeat(struct wayland_client *c, long slot)
 {
@@ -4244,6 +4424,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
                         wayland_word(&e, was->id);
                         wayland_end(&e);
                 }
+                wayland_texts_focus(old, wayland.keyboard_row, was->id, 0);
         }
         wayland.keyboard_row = is ? row : -1;
         // A shortcuts inhibitor is active while its window has the keys: the one that lost them is sent inactive, the one that got them active.
@@ -4266,6 +4447,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
                 for (long at = 0; at < count; at++)
                         wayland_keyboard_enter_one(now, slots[at], is, serial);
                 wayland_selections_to(now);
+                wayland_texts_focus(now, row, is->id, 1);
         }
 }
 
@@ -4317,6 +4499,31 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
                 }
         }
         (void)s;
+}
+
+/*
+        A key the desktop's keyboard sends for a window: the same as wayland_key, with Shift held for it when the key makes a capital or
+        a shifted symbol (shift). The client's keymap makes the character from the code and the modifiers, so the shim holds Shift for
+        the press and lets it go with the key's release, as a person's Shift would be (wayland.synth_code remembers the key).
+*/
+WAYLAND_API void wayland_key_shift(long row, long code, long pressed, long shift)
+{
+        int inject = pressed && shift && code != 42 && code != 54 && code >= 1 && code < 128 && !wayland.synth_code &&
+                     !((wayland.keys[42 >> 3] >> (42 & 7)) & 1) && !((wayland.keys[54 >> 3] >> (54 & 7)) & 1);
+
+        if (!wayland.host)
+                return;
+        if (inject)
+        {
+                wayland_key(row, 42, 1);
+                wayland.synth_code = (unsigned long)code;
+        }
+        wayland_key(row, code, pressed);
+        if (!pressed && wayland.synth_code == (unsigned long)code)
+        {
+                wayland_key(row, 42, 0);
+                wayland.synth_code = 0;
+        }
 }
 
 /* The repeat rate or delay changed (the settings): each keyboard is told, and nothing else of it. */
@@ -6336,6 +6543,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_cursor_shape_device_v1:
                         status = wayland_cursor_shape_request(c, o, op, a);
                         break;
+                case WLI_zwp_text_input_manager_v3:
+                case WLI_zwp_text_input_v3:
+                        status = wayland_text_request(c, o, op, a);
+                        break;
                 case WLI_wp_presentation:
                         status = wayland_presentation_request(c, o, op, a);
                         break;
@@ -6476,6 +6687,7 @@ WAYLAND_API void wayland_drop(long slot)
                         wayland_row_release(c, &c->surfaces[at]);
                         wayland.surfaces--;
                 }
+        wayland_texts_drop(c);
         for (long at = 0; at < WAYLAND_POOLS; at++)
                 if (c->pools[at].live)
                 {
