@@ -135978,7 +135978,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.height = 220;
                                 settings_refilter();
                                 settings_layout();
-                                settings_scroll_to(0);
+                                ui_page_scroll(&settings.page,0);
                                 finger.a = (settings.page.left + settings.page.right) / 2;
                                 finger.b = settings.page.top + ui_px(&settings.ui, 60);
                                 settings_event_real(&finger);
@@ -135999,7 +135999,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 check("settings: a finger's press the compositor took back does nothing", settings.queued == 0 && settings.page.menu_row < 0);
                                 settings.height = SETTINGS_HEIGHT;
                                 settings_refilter();
-                                settings_scroll_to(0);
+                                ui_page_scroll(&settings.page,0);
                         }
 #endif
 
@@ -136379,7 +136379,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.help = 2;
                         settings.child = 0;
                         memory_zero(settings.unread, sizeof(settings.unread));
-                        settings.feed_due = clock_monotonic_nanoseconds() + 5000000000ull;
+                        settings.feed_due = (positive)ui_kit.now + 5000000000ull;
                         {
                                 long wait = settings_feed_tick();
 
@@ -136741,7 +136741,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                 ui_page_redraw(&settings.page);
         }
         settings.list.focus = settings_row_named(from);
-        settings_reveal();
+        ui_page_reveal(&settings.ui, &settings.page, &settings.list);
         settings.page.pane = !column;
         ui_page_redraw(&settings.page);
         settings_frames_until(start + 1000 * SETTINGS_FRAMES_MS);
@@ -137185,7 +137185,7 @@ static fn settings_end_check(void)
                 x = settings.list.x + settings.list.w / 2, y = settings.list.y + settings.list.scroll.view / 2;
 
                 // The wheel: notches down, a frame between each, until it settles past the end.
-                settings_scroll_to(0);
+                ui_page_scroll(&settings.page,0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
                 for (int k = 0; k < 400; k++)
@@ -137197,7 +137197,7 @@ static fn settings_end_check(void)
                 wheel_ok = wheel_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.gliding && !settings.list.scroll.back.live;
 
                 // The bar: presses on its track below the thumb, each pages a view, until it reaches the end.
-                settings_scroll_to(0);
+                ui_page_scroll(&settings.page,0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 ui_scroll_track(&settings.ui, &settings.list.scroll, &track_top, &track_height);
                 bar_x = settings.list.scroll.x + UI_SCROLL_WIDTH * scale / 2;
@@ -137215,7 +137215,7 @@ static fn settings_end_check(void)
                          !settings.list.scroll.held;
 
                 // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end.
-                settings_scroll_to(0);
+                ui_page_scroll(&settings.page,0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
                 settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
@@ -137256,7 +137256,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         }
         settings.page.chosen = group;
         settings_refilter();
-        settings_scroll_to(0);
+        ui_page_scroll(&settings.page,0);
         settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
         most = ui_scroll_most(&settings.list.scroll);
         settings_frames_event(WINDOW_EVENT_MOTION, 0, (settings.page.left + settings.page.right) / 2, (settings.page.top + settings.page.bottom) / 2);
@@ -137302,10 +137302,10 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         }
         settings.page.chosen = group;
         settings_refilter();
-        settings_scroll_to(0);
+        ui_page_scroll(&settings.page,0);
         settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
         most = ui_scroll_most(&settings.list.scroll);
-        settings_scroll_to(most - start);
+        ui_page_scroll(&settings.page,most - start);
         settings_frames_until(settings_frames.now + 100 * SETTINGS_FRAMES_MS);
         x = (settings.page.left + settings.page.right) / 2, y = (settings.page.top + settings.page.bottom) / 2;
         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
@@ -153596,7 +153596,7 @@ static fn check_one_blink(void)
                 if (!bytes)
                         continue;
                 read++;
-                asked += check_hits(text, size, "ui_text_timeout(") + check_hits(text, size, "ui_findbar_timeout(") > 0;
+                asked += check_hits(text, size, "ui_text_timeout(") + check_hits(text, size, "ui_findbar_timeout(") + check_hits(text, size, "ui_field_tick(") > 0;
                 for (positive i = 0; i < sizeof(hand) / sizeof(hand[0]); i++)
                         hand_found += check_hits(text, size, hand[i]);
                 compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
@@ -154854,7 +154854,7 @@ static fn inputs_open(const struct inputs_input address_to in)
                 settings_edit_begin(row, "", in->masked);
                 settings.list.focus = row;
                 settings_layout();
-                settings_reveal();
+                ui_page_reveal(&settings.ui, &settings.page, &settings.list);
                 break;
         }
         case INPUTS_GALLERY:

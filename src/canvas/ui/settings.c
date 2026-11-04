@@ -1495,6 +1495,8 @@ static void settings_map_draw(struct ui address_to ui)
 static fn settings_describe(int id, struct ui_row address_to row);
 
 // The page laid out for the window's size: the kit's bands, its column and the list in the body.
+static int settings_map_inset(void);
+
 static fn settings_layout(void)
 {
         struct ui address_to ui = &settings.ui;
@@ -1518,49 +1520,16 @@ static fn settings_layout(void)
         settings.page.column_on = !settings.page.card;
         settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
-        ui_page_layout(ui, &settings.page, settings.width, settings.height);
-        ui_page_set_bottom(&settings.page, settings.height); // the content runs to the window's bottom edge
-        {
-                int top = settings.page.top;
-
-                if (settings_map_on())
-                        settings_map_place(), top += settings_map_height();
-                // The list's view runs from its top to the window's bottom edge; its content is clipped to that view, and its
-                // scroll track has the view's ends. The scroll ends at the rows minus the view.
-                ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
-                ui_page_rows(&settings.page, &settings.list);
-        }
-        ui_list_layout(ui, &settings.list);
-        ui_scroll_clamp(&settings.list.scroll);
-        // The card has the body's band and the whole width: the column is not shown with it.
-        settings.card.x = ui_rtl() ? settings.page.left - ui_px(ui, UI_SCROLL_WIDTH) - (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2
-                                   : settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
-        settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
-        settings.card.content = ui_lines_height(ui, settings.card_lines);
-        // A card that scrolls stretches at its ends like a list (ui_scroll_span), and at its top when it fits.
-        settings.card.bounds = 1, settings.card.scale = ui->scale;
-        ui_scroll_clamp(&settings.card);
+        ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, settings_map_inset, &settings.card, ui_lines_height(ui, settings.card_lines));
 }
 
-// The list or the card scrolled, and drawn again.
-static fn settings_scroll_to(int scroll)
+// The map's panel above the rows, placed in the page (its height is the rows' inset), or none when the map is not shown.
+static int settings_map_inset(void)
 {
-        if (ui_scroll_set(settings.page.card ? &settings.card : &settings.list.scroll, scroll))
-                settings_changed(settings.page.top, settings.page.bottom);
-}
-
-// The row with the focus kept in sight.
-static fn settings_reveal(void)
-{
-        if (!settings.page.card)
-                ui_list_reveal(&settings.ui, &settings.list);
-}
-
-// The chosen group kept in sight in a column that does not fit.
-static fn settings_side_reveal(void)
-{
-        if (ui_page_column_reveal(&settings.ui, &settings.page, settings.page.chosen))
-                settings_changed(settings.page.top, settings.page.bottom);
+        if (!settings_map_on())
+                return 0;
+        settings_map_place();
+        return settings_map_height();
 }
 
 /*
@@ -1598,7 +1567,7 @@ static fn settings_rebuild(void)
 static fn settings_refilter(void)
 {
         settings_rebuild();
-        settings_reveal();
+        ui_page_reveal(&settings.ui, &settings.page, &settings.list);
 }
 
 /* ---- what help says ---- */
@@ -3405,7 +3374,7 @@ static fn settings_group_choose(int group)
         settings_refilter();
         if (settings.list.count)
                 settings.list.focus = settings.list.id[0];
-        settings_side_reveal();
+        ui_page_column_show(&settings.ui, &settings.page);
         settings_say((string_address)(settings.list.focus >= SETTINGS_ANY ? settings_text(settings.list.focus) : ""));
         ui_page_redraw(&settings.page);
 }
@@ -3534,7 +3503,7 @@ static fn settings_filter_asked(p32 asks)
         if (settings.list.count)
         {
                 settings.list.focus = settings.list.id[0];
-                settings_reveal();
+                ui_page_reveal(&settings.ui, &settings.page, &settings.list);
         }
 }
 
@@ -4491,10 +4460,9 @@ static fn settings_size(unsigned int width, unsigned int height)
         if (settings.page.card)
                 settings_wrap();
         settings_layout();
-        settings_side_reveal();
+        ui_page_column_show(&settings.ui, &settings.page);
         // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
-        if (settings.page.menu_row >= 0)
-                settings.page.menu_row = -1, ui_popmenu_close(&settings.popup);
+        ui_page_menu_close(&settings.page, &settings.popup);
         ui_page_redraw(&settings.page);
 }
 
@@ -4585,18 +4553,8 @@ static long settings_tick(long timeout, long address_to other)
         {
                 struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
                                               : settings_editing() >= 0 ? &settings.edit : &settings.filter_edit;
-                positive now = (positive)ui_kit.now;
-                b32 redraw = false;
 
-                if (!settings_gallery.on)
-                        t->focused = settings.focused;
-                if (t->doc.selections)
-                        timeout = ui_text_timeout(&settings.ui, t, timeout, now, &redraw);
-                // The rows the field's handles and bar cover are drawn again with it, those they covered as well.
-                if (redraw && (t->bar || t->bar_up || t->over_bottom > t->over_top))
-                        ui_page_redraw(&settings.page);
-                else if (redraw)
-                        settings_changed(t->well_top, t->well_bottom);
+                timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, settings_gallery.on ? t->focused : settings.focused);
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {

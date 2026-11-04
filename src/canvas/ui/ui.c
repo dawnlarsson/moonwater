@@ -9541,6 +9541,7 @@ struct ui_page
 static fn ui_buffers_all(struct ui_buffers address_to b);
 static fn ui_buffers_rows(struct ui_buffers address_to b, int top, int bottom);
 static fn ui_page_damage(struct ui_page address_to p, int top, int bottom);
+static fn ui_page_changed(struct ui_page address_to p);
 
 static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_to p, int width, int height)
 {
@@ -9629,6 +9630,54 @@ static fn ui_page_groups(struct ui address_to ui, struct ui_page address_to p, c
 static b32 ui_page_column_reveal(const struct ui address_to ui, struct ui_page address_to p, int group)
 {
         return ui_scroll_reveal(&p->column_scroll, group * ui_dev(ui, UI_ROW), ui_dev(ui, UI_ROW));
+}
+
+/*
+        A page laid out in its window: the page's geometry (ui_page_layout), its band down to the window's bottom edge, the list's
+        place at the body's top plus the inset (asked after the page is laid out: a panel above the rows), the list's rows and its
+        layout, the body's scroll kept in its range, and the card's place (the body's whole band, at the side of the column) with
+        its content height. The app sets the column and the body first.
+*/
+static fn ui_page_fit(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int width, int height,
+                      int (*inset)(void), struct ui_scroll address_to card, int card_content)
+{
+        int top;
+
+        ui_page_layout(ui, p, width, height);
+        ui_page_set_bottom(p, height);
+        top = p->top + inset();
+        ui_list_place(ui, l, p->left, top, p->right - p->left, p->bottom - top);
+        ui_page_rows(p, l);
+        ui_list_layout(ui, l);
+        ui_scroll_clamp(&l->scroll);
+        card->x = ui_rtl() ? p->left - ui_px(ui, UI_SCROLL_WIDTH) - (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2
+                           : p->right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
+        card->y = p->top, card->height = card->view = p->bottom - p->top;
+        card->content = card_content;
+        // A card that scrolls stretches at its ends like a list (ui_scroll_span), and at its top when it fits.
+        card->bounds = 1, card->scale = ui->scale;
+        ui_scroll_clamp(card);
+}
+
+// The body scrolled to scroll: drawn again when it moved.
+static fn ui_page_scroll(struct ui_page address_to p, int scroll)
+{
+        if (ui_scroll_set(p->body, scroll))
+                ui_page_changed(p);
+}
+
+// The list kept in sight on the body: its focus, unless the page is a card (which has no rows).
+static fn ui_page_reveal(const struct ui address_to ui, const struct ui_page address_to p, struct ui_list address_to l)
+{
+        if (!p->card)
+                ui_list_reveal(ui, l);
+}
+
+// The chosen group kept in sight in a column that does not fit: drawn again when the column moved.
+static fn ui_page_column_show(const struct ui address_to ui, struct ui_page address_to p)
+{
+        if (ui_page_column_reveal(ui, p, p->chosen))
+                ui_page_changed(p);
 }
 
 // A key in the column: the group it moves to (Up, Down, Home, End, three for a page), or -1 when it is not one of them.
@@ -11861,6 +11910,26 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
                 timeout = (long)(scroll - now);
         if (bar && (timeout < 0 || (long)(bar - now) < timeout))
                 timeout = (long)(bar - now);
+        return timeout;
+}
+
+/*
+        A field on a page with the keys (or the caret's own) blinks its caret a while after its last key: its focus, its timeout, and
+        its well drawn again at each turn; the rows its handles and bar cover are drawn again with it, those they covered as well.
+        Answers the timeout the loop waits for.
+*/
+static long ui_field_tick(struct ui address_to ui, struct ui_page address_to p, struct ui_text address_to t, long timeout, b32 focused)
+{
+        positive now = (positive)ui_kit.now; // the loop's time, as the tick is run (upstream reads it so)
+        b32 redraw = false;
+
+        t->focused = focused;
+        if (t->doc.selections)
+                timeout = ui_text_timeout(ui, t, timeout, now, &redraw);
+        if (redraw && (t->bar || t->bar_up || t->over_bottom > t->over_top))
+                ui_page_redraw(p);
+        else if (redraw)
+                ui_page_damage(p, t->well_top, t->well_bottom);
         return timeout;
 }
 
