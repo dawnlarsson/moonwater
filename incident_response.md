@@ -41,6 +41,42 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-165: a touch's handles drew past the terminal's window picture (out-of-bounds write in the terminal)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Memory safety: out-of-bounds write (the overlay's knobs and the actions bar written up to pad_y rows past the picture) |
+| Attacker | none outside the machine: the trigger is the user's own touch selection (a long press on a word, then the handles drawn on a line near the bottom of the window); the program in the terminal is the one that is written past |
+| Moonwater exposure window | from `6987a6d65` (2026-11-04 13:32:22 +01:00, the terminal's touch selection with handles and the bar) to the fixing commit |
+| Fixed by | `4b1a2879e` (`src/canvas/ui/terminal.c` `terminal_overlay`) |
+
+**What it was.** The terminal's overlay (the handles and the actions bar) is drawn by the kit into the window's picture, through a kit whose origin is the grid's: `pad` columns in and `pad_y` rows down from the window's corner. The kit was given the window's whole width and height, so `ui_fill` clipped to a picture `pad_y` rows taller than the real one. A knob hung 2 * 6 px below a line on the last row (the handle's reach), past the paper that is `pad_y` rows high (6 px at a text of 19 px cells), was written into the `pad_y` rows after the picture. A guard row that draws a selection on the bottom line into a picture with sentinel words after it found 93 words written past the end.
+
+**The fix.** The overlay's kit is clipped to the window less the paper: width `terminal.width - pad`, height and bottom `terminal.height - pad_y`, so no write leaves the picture. A knob or the bar that cannot fit in the paper is cut at the paper's edge.
+
+**Tests that fail without it.** `CHECK_terminal` `terminal: a handle on the last line draws nothing past the end of the picture` (in the touch long press block of `check_pointer`): the selection is put on the cursor's row of a full screen, the window's geometry is that of a 19 px text (pad_y 6), and 16 rows of sentinels follow the picture. Without the fix the row fails (93 words written past the picture, gcc and clang); with it, nothing is written. The mutant `terminal overlay's kit is the whole window` in `test/ui_mutations.py` is red on that check.
+
+**Still open.** Whether the words past the picture belong to another buffer of the terminal process (the picture is the compositor's window buffer, and the bytes after it were not inspected); the guest run of the handles is pending.
+
+### MW-2026-164: a touch long press on a terminal word faulted the terminal (NULL face in the actions bar's labels)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Denial of service: NULL pointer dereference in the terminal process (`font_find` reads field 0x6c of a NULL face) |
+| Attacker | none outside the machine: the trigger is the user's own touch long press on a word of the terminal, after which the actions bar is drawn about 200 ms later |
+| Moonwater exposure window | from `6987a6d65` (2026-11-04 13:32:22 +01:00, the terminal's touch selection with handles and the bar) to the fixing commit |
+| Fixed by | `cbadf48c8` (`src/canvas/ui/terminal.c` `terminal_fonts`) |
+
+**What it was.** The actions bar's labels are measured and drawn by the kit's text code with the kit's faces (`ui->regular`, `ui->bold`). The terminal's kit (`terminal.ui`) gets its engine from `ui_engine_open_sized` and was never given a regular or bold face: the grid draws through the terminal's own faces, and nothing set the kit's. So the first label measured passed `font_find` a NULL face, which faulted (`mov 0x6c(%rdi)`), and the terminal process ended. The window froze with no selection and no bar. The guest's kernel log showed `terminal[151]: segfault at 6c ... in shell` at the time of the long press.
+
+**The fix.** `terminal_fonts` sets `terminal.ui.regular` to the grid's plain face and `terminal.ui.bold` to its first bold face (or the plain one).
+
+**Tests that fail without it.** `CHECK_terminal` `touch: the terminal's kit has the faces its own text is drawn with (the bar's labels)`, and the bar row `touch: the actions bar is drawn over the selection, its labels in the terminal's faces`. Without the fix the first reports FAIL and the second faults: a gdb backtrace on the box is `font_find` from `font_extent` from `ui_kit_measure` from the overlay's draw of the bar. The mutant `terminal kit has no faces (the bar's labels fault)` in `test/ui_mutations.py` is red.
+
+**Still open.** The guest run of the long press with the fix (screenshot of the handles and the bar) is pending.
+
 ### MW-2026-129: a window's door, its wake, the clipboard's door or keys.fire held by its pipe's lock froze the compositor
 
 | | |
