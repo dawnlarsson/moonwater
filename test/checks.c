@@ -216779,6 +216779,18 @@ static unsigned int gpu_random(void)
 
 static unsigned int gpu_kit_want[700 * 420];
 
+// The bench's samples sorted (insertion: a few runs), so that the median and the best are the middle one and the first.
+static void gpu_bench_sort(positive *took, int n)
+{
+        for (int i = 1; i < n; i++)
+                for (int j = i; j > 0 && took[j - 1] > took[j]; j--)
+                {
+                        positive keep = took[j];
+
+                        took[j] = took[j - 1], took[j - 1] = keep;
+                }
+}
+
 /*
         The recorded controls on the GPU: the spinner's arc and ring (ui_spinner_draw on the processor against the same painter recording into
         scene memory the GPU reads, at scales 100, 150, 200 and 300, three sizes), and the input's top edge (ui_edge_row on the processor against
@@ -218359,6 +218371,96 @@ b32 main(void)
                         app_rows(1, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         app_rows(2, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                 }
+        }
+
+        // The bench: what a present costs the card, for a desktop of twelve 800 by 600 windows over four tabs of the taskbar and the ground, composed into a
+        // screen of 1080p, 4K and 8K, for a caret's damage (4 by 20 pixels at the middle) and for the whole screen. Each figure is the median of nine runs
+        // of gpu_scene (the binning and the job, its wait included); the best is the first. Then a tiny job (one 64 by 4 fill) back to back, and the same job
+        // after half a second idle (the card's clock ramps up from idle): the median of nine and of five.
+        {
+                enum { WINS = 12, RUNS = 9, IDLE_RUNS = 5, WW = 800, WH = 600 };
+                static const int sizes[3][2] = {{1920, 1080}, {3840, 2160}, {7680, 4320}};
+                static const string_address bench_names[3] = {(string_address) "1080p", (string_address) "4K", (string_address) "8K"};
+                positive base = bins_at + (8 << 20), took[RUNS], tiny[RUNS], idle[IDLE_RUNS];
+                long pictures = system_call_6(syscall(mmap), 0, (positive)WINS * WW * WH * 4, 3, 0x22, (positive)-1, 0);
+                struct compositor_frame desk[WINS + 4];
+
+                if (pictures < 0 && pictures > -4096)
+                        return 1;
+                memory_fill_u32((unsigned int address_to)pictures, (positive)WINS * WW * WH, 0xff3a6ea5u);
+                for (int k = 0; k < WINS; k++)
+                        gpu_map((const void address_to)(pictures + (long)k * WW * WH * 4), (positive)WW * WH * 4);
+                for (int size = 0; size < 3; size++)
+                {
+                        int W = sizes[size][0], H = sizes[size][1];
+
+                        for (int k = 0; k < WINS; k++)
+                        {
+                                memory_zero(&desk[k], sizeof(desk[k]));
+                                desk[k].x = (k % 4) * (W / 4) + W / 16, desk[k].y = (k / 4) * (H / 4) + H / 12, desk[k].width = WW, desk[k].height = WH;
+                                desk[k].scale = 100, desk[k].radius = 10, desk[k].line = 2, desk[k].edge = 0xff405060u, desk[k].pitch = WW;
+                                desk[k].pixels = (const unsigned int address_to)pictures + (positive)k * WW * WH;
+                        }
+                        for (int t = 0; t < 4; t++)
+                        {
+                                memory_zero(&desk[WINS + t], sizeof(desk[0]));
+                                desk[WINS + t].builtin = 1, desk[WINS + t].slot = t - 2, desk[WINS + t].x = t * (W / 4), desk[WINS + t].y = H - 48;
+                                desk[WINS + t].width = W / 4, desk[WINS + t].height = 48, desk[WINS + t].scale = 100;
+                        }
+                        compositor_gscene.width = (unsigned int)W, compositor_gscene.height = (unsigned int)H;
+                        compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_OPS_AT), compositor_gscene.room = (1 << 20) / 32;
+                        compositor_gscene.tables = (unsigned char address_to)gpu.at + COMPOSITOR_GPU_TABLES_AT, compositor_gscene.tables_at = COMPOSITOR_GPU_TABLES_AT;
+                        compositor_gscene.tables_size = 1 << 20, compositor_gscene.kept = compositor_gscene.tables_used = 0;
+                        if (!compositor_gpu_frames(desk, WINS + 4, compositor_ground))
+                        {
+                                check("gpu bench: the desktop's records are the card's", false);
+                                break;
+                        }
+                        for (int which = 0; which < 2; which++)
+                        {
+                                unsigned int x0 = which ? 0 : (unsigned int)W / 2, y0 = which ? 0 : (unsigned int)H / 2;
+                                unsigned int x1 = which ? (unsigned int)W : x0 + 4, y1 = which ? (unsigned int)H : y0 + 20;
+                                int finished = 1;
+
+                                for (int run = 0; run < RUNS; run++)
+                                {
+                                        positive began = clock_monotonic_nanoseconds();
+
+                                        finished &= gpu_scene(COMPOSITOR_GPU_OPS_AT, compositor_gscene.count, COMPOSITOR_GPU_BINS_AT, base, (unsigned int)W,
+                                                              (unsigned int)W, (unsigned int)H, x0, y0, x1, y1);
+                                        took[run] = clock_monotonic_nanoseconds() - began;
+                                }
+                                gpu_bench_sort(took, RUNS);
+                                check("gpu bench: the desktop's scene finishes", finished);
+                                string_format(log, "  gpu bench: %s, %s damage, %p records: median %p us, best %p us\n", bench_names[size],
+                                              which ? (string_address) "the whole screen" : (string_address) "a caret", (positive)compositor_gscene.count, took[RUNS / 2] / 1000, took[0] / 1000);
+                        }
+                }
+                // a tiny job: one fill of 64 by 4 pixels, steady back to back, then after half a second of idle
+                ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0xff336699u, ops[6] = ops[7] = 0;
+                for (int run = 0; run < RUNS; run++)
+                {
+                        positive began = clock_monotonic_nanoseconds();
+
+                        gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4);
+                        tiny[run] = clock_monotonic_nanoseconds() - began;
+                }
+                for (int run = 0; run < IDLE_RUNS; run++)
+                {
+                        positive began;
+
+                        for (began = clock_monotonic_nanoseconds(); clock_monotonic_nanoseconds() - began < 500000000ull;)
+                                ; // half a second with the card idle
+                        began = clock_monotonic_nanoseconds();
+                        gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4);
+                        idle[run] = clock_monotonic_nanoseconds() - began;
+                }
+                gpu_bench_sort(tiny, RUNS);
+                gpu_bench_sort(idle, IDLE_RUNS);
+                string_format(log, "  gpu bench: a tiny job back to back, median %p us (best %p); after half a second idle, median %p us (best %p)\n",
+                              tiny[RUNS / 2] / 1000, tiny[0] / 1000, idle[IDLE_RUNS / 2] / 1000, idle[0] / 1000);
+                while (gpu_map_count)
+                        gpu_drop(0);
         }
         return test_report(null);
 }
