@@ -22520,13 +22520,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
         {
                 unsigned int fields = table->focus < WINDOWS ? table->field[table->focus] : 0;
 
-                host_say(log, "  keyboard        setting %s; %s; the focus has %p text %s with the keys; last input %s; a physical keyboard %s\n",
+                host_say(log, "  keyboard        setting %s; %s; the focus has %p text %s with the keys; last input %s; a physical keyboard %s; the desktop starts it %s\n",
                          table->osk_setting == 1 ? (string_address) "off" : table->osk_setting == 2 ? (string_address) "on" : (string_address) "auto",
                          table->osk_shown ? (string_address) "shown" : (string_address) "hidden", (positive)fields,
                          fields == 1 ? (string_address) "field" : (string_address) "fields",
                          table->osk_input == 2 ? (string_address) "a key" : table->osk_input == 1 ? (string_address) "a touch or a pen"
                                                                                                     : (string_address) "the mouse",
-                         table->osk_physical ? (string_address) "plugged in" : (string_address) "none");
+                         table->osk_physical ? (string_address) "plugged in" : (string_address) "none",
+                         table->osk_start ? (string_address) "yes" : (string_address) "no");
         }
         host_debug_inputs(table);
         host_windows_unmap(table);
@@ -22681,6 +22682,24 @@ static b32 locale_keyboard_xkb(void)
         return 0;
 }
 
+/*
+        moonwater keyboard start: whether the desktop starts the on-screen keyboard (osk) at its start. The machine script
+        runs osk when this exits 0. The compositor decides and keeps it in the window table (osk_start): the setting on, or
+        auto with a touch screen plugged in or no physical keyboard. Nothing is written and no window is taken.
+*/
+static b32 host_keyboard_start(void)
+{
+        const struct windows address_to table = host_windows_header();
+        b32 starts;
+
+        if (!table)
+                return host_refuse("the compositor's desktop is not up: moonwater desktop on starts it\n");
+        starts = table->osk_start != 0;
+        host_windows_unmap(table);
+        host_say(log, host_label "keyboard start %s\n", starts ? "yes" : "no");
+        return !starts;
+}
+
 static b32 host_keyboard(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
@@ -22692,6 +22711,8 @@ static b32 host_keyboard(string_address address_to arguments, positive count)
         if (string_equals(word, "repeat"))
                 return count == 3 ? host_setting_group(arguments + 1, 2) : host_usage();
         return_if(count != 3, host_usage());
+        if (string_equals(word, "start"))
+                return host_keyboard_start();
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
         if (string_equals(word, "xkb"))
@@ -24622,6 +24643,7 @@ static const host_row host_rows[] = {
     {null, "canvas identify", "show the number of each screen for three seconds", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
+    {null, "keyboard start", "exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard", 'b'},
     {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
     {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
     {null, "window PLACE... COMMAND...", "run COMMAND, its first window put where PLACE says:", 'b'},

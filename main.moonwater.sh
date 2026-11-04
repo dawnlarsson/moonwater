@@ -221,6 +221,13 @@ function desktop_terminal {
   fi
 }
 
+# The on-screen keyboard, when the desktop starts it (moonwater keyboard start: the setting on, or auto with a touch screen or
+# no keyboard). It starts hidden, and shows while a text field has the keys.
+function desktop_keyboard {
+  desktop_font
+  moonwater keyboard start > /dev/null && desktop_run /osk ${desktop_text:+-f "$desktop_text"}
+}
+
 # The launcher is drawn in the tabs' face; the terminals it starts are given the faces of the terminal. -a opens it beside
 # the panel's launcher button, which the compositor said it was pressed at (the key's is in the middle of the screen).
 function desktop_launcher {
@@ -288,6 +295,7 @@ function desktop_session {
   desktop_log
   # The terminal the person is at takes the keys when it shows, as a key's would: the mark is its launch's.
   desktop_asked desktop_terminal
+  desktop_keyboard
   wait $desktop_compositor
   desktop_status=$?
   if [ $desktop_status -gt 128 ]; then

@@ -905,7 +905,9 @@ struct windows
         unsigned int field[WINDOWS];
         // The compositor's, for moonwater debug: the on-screen keyboard's setting (0 auto, 1 off, 2 on), whether it is shown, the
         // last input (0 the mouse, 1 a touch or a pen, 2 a key of a physical keyboard) and whether a physical keyboard is plugged in.
-        unsigned int osk_setting, osk_shown, osk_input, osk_physical;
+        // osk_start is the decision the desktop starts the keyboard by (`moonwater keyboard start`): 1 when the setting is on, or
+        // auto with a touch screen plugged in or no physical keyboard.
+        unsigned int osk_setting, osk_shown, osk_input, osk_physical, osk_start;
         // The compositor's: the keyboard layout's name, its two letters packed (us is 'u' | 's' << 8), which the keyboard lays its letters out by.
         unsigned int osk_layout;
         // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).

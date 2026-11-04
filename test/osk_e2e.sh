@@ -5,7 +5,9 @@
 # overlap; the keyboard is tapped by a pointer on the compositor's evdev fifo (test/osk_input.py); the taps are typed into the
 # field, Ctrl+S (also on the fifo) saves the file, and the file is the proof. Then a terminal, which has no field, takes the focus:
 # the keyboard goes away and the editor comes back down. The second session has the setting off: the keyboard stays away.
-# The keyboard's own trace (osk -t) gives the keys' rectangles, and moonwater debug says what the compositor did.
+# The keyboard's own trace (osk -t) gives the keys' rectangles, and moonwater debug says what the compositor did. The boot session
+# is the desktop's start: moonwater keyboard start decides, and the keyboard started with no field focused is hidden (and idles at
+# its VmRSS, which the lane prints). The setting off says no to the start.
 #
 #     unshare -rm sh test/osk_e2e.sh COMPOSITOR [WORKDIR]
 #
@@ -55,6 +57,9 @@ session()
                 printf '%s\n' "$6" > /root/keyboard
                 sleep 1
         fi
+        # the desktop's start decision (the machine script starts osk when it says yes)
+        bin/moonwater keyboard start > start.txt 2>&1
+        echo $? > start.status
         MOONWATER_ASKED=1 bin/editor note.txt > editor.log 2>&1 &
         sleep 3
         bin/moonwater debug > debug.editor.txt 2>&1
@@ -109,10 +114,54 @@ Done" ctrl:s > input.log 2>&1
         return 0
 }
 
-if [ "${1:-}" = session ]; then
+# boot WORKDIR COMPOSITOR FONTS: the desktop's start as the machine script makes it: the decision, then the keyboard started with no
+# field focused (it must show nothing, and idle in its VmRSS), then an editor's field, which shows it.
+boot_session()
+{
+        work=$1
+        compositor=$2
+        fonts=$3
+        mount -t tmpfs tmpfs /run || return 1
+        mount -t tmpfs tmpfs /root || return 1
+        mount -t tmpfs tmpfs /dev/input || return 1
+        printf '%s\n' auto > /root/keyboard.onscreen
+        mkdir -p /run/moonwater "$work/bin" "$work/home"
+        mount --bind "$fonts" /usr/share/fonts || return 1
+        for name in compositor editor osk moonwater; do
+                ln -sf "$compositor" "$work/bin/$name"
+        done
+        export HOME="$work/home" PATH="$work/bin:/usr/bin:/bin" XDG_RUNTIME_DIR=/run
+        cd "$work" || return 1
+        mkfifo input.fifo
+        bin/compositor -H 800x600 "$work/after.img" -i "$work/input.fifo" > compositor.log 2>&1 &
+        cpid=$!
+        sleep 2
+        bin/moonwater keyboard start > start.txt 2>&1
+        echo $? > start.status
+        bin/osk > osk.log 2>&1 &
+        opid=$!
+        sleep 3
+        bin/moonwater debug > debug.boot.txt 2>&1
+        grep VmRSS "/proc/$opid/status" > rss.txt 2>&1
+        MOONWATER_ASKED=1 bin/editor note.txt > editor.log 2>&1 &
+        sleep 3
+        bin/moonwater debug > debug.focus.txt 2>&1
+        kill "$opid" 2> /dev/null
+        kill "$cpid" 2> /dev/null
+        wait "$cpid" 2> /dev/null
+        return 0
+}
+
+case "${1:-}" in
+session)
         session "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}"
         exit $?
-fi
+        ;;
+boot)
+        boot_session "$2" "$3" "$4"
+        exit $?
+        ;;
+esac
 
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
@@ -130,6 +179,8 @@ unshare -rm sh "$self" session "$work/fr" "$compositor" "$fonts" off real fr > "
 unshare -rm sh "$self" session "$work/maximised" "$compositor" "$fonts" off real "" maximised > "$work/maximised/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
+mkdir -p "$work/boot"
+unshare -rm sh "$self" boot "$work/boot" "$compositor" "$fonts" > "$work/boot/session.out" 2>&1 < /dev/null
 
 # the keyboard is a window of the desktop, at the bottom of the screen, above the panel and across the middle
 if grep -q '^  window [0-9]* *Keyboard at ' "$work/debug.shown.txt" 2> /dev/null; then
@@ -153,7 +204,7 @@ fi
 
 # the setting auto and a text field with the keys: the keyboard is shown, and the field's window is moved up by the overlap with it
 shown=$(python3 -I "$here/osk_debug.py" keyboard "$work/debug.shown.txt")
-if [ "$shown" = "shown 1 a_touch_or_a_pen none" ] || [ "$shown" = "shown 1 the_mouse none" ]; then
+if [ "$shown" = "shown 1 a_touch_or_a_pen none yes" ] || [ "$shown" = "shown 1 the_mouse none yes" ]; then
         row ok "with the setting auto and an editor's field focused, the keyboard is shown (the debug line says so, one field has the keys)"
 else
         row FAIL "with the setting auto and an editor's field focused, the keyboard is shown" "debug: $shown"
@@ -203,6 +254,38 @@ case "$off" in
 hidden\ 1\ *) row ok "with the setting off, an editor's field with the keys does not show the keyboard" ;;
 *) row FAIL "with the setting off, an editor's field with the keys does not show the keyboard" "debug: $off" ;;
 esac
+
+# the desktop's start decision: the setting auto with the headless fifo (no keyboard plugged in, no touch screen) says yes; the setting
+# off says no. A touch screen is the other yes; the headless compositor has none, so that is the rule's alone
+if [ "$(cat "$work/start.status" 2> /dev/null)" = 0 ] && grep -q "keyboard start yes" "$work/start.txt" 2> /dev/null; then
+        row ok "moonwater keyboard start says yes with the setting auto and no keyboard plugged in (the desktop starts osk)"
+else
+        row FAIL "moonwater keyboard start says yes with the setting auto and no keyboard plugged in" "status $(cat "$work/start.status" 2> /dev/null): $(cat "$work/start.txt" 2> /dev/null | tr '\n' ' ')"
+fi
+if [ "$(cat "$work/off/start.status" 2> /dev/null)" = 1 ] && grep -q "keyboard start no" "$work/off/start.txt" 2> /dev/null; then
+        row ok "moonwater keyboard start says no with the setting off"
+else
+        row FAIL "moonwater keyboard start says no with the setting off" "status $(cat "$work/off/start.status" 2> /dev/null)"
+fi
+
+# the desktop's start: the keyboard started with no field focused is hidden, and draws and takes nothing (moonwater debug says it is
+# hidden with no field with the keys, and the window is not on the screen); an editor's field shows it, and the VmRSS is its idle
+bootkb=$(python3 -I "$here/osk_debug.py" keyboard "$work/boot/debug.boot.txt")
+case "$bootkb" in
+hidden\ 0\ *\ yes) row ok "the keyboard started at the desktop's start is hidden with no field focused (moonwater debug: hidden, the desktop starts it)" ;;
+*) row FAIL "the keyboard started at the desktop's start is hidden with no field focused" "debug: $bootkb" ;;
+esac
+focusedkb=$(python3 -I "$here/osk_debug.py" keyboard "$work/boot/debug.focus.txt")
+case "$focusedkb" in
+shown\ 1\ *) row ok "the keyboard started at the desktop's start shows once an editor's field has the keys" ;;
+*) row FAIL "the keyboard started at the desktop's start shows once an editor's field has the keys" "debug: $focusedkb" ;;
+esac
+rss=$(awk '$1 == "VmRSS:" { print $2 }' "$work/boot/rss.txt" 2> /dev/null)
+if [ -n "$rss" ]; then
+        row ok "the keyboard idle with no field focused: VmRSS ${rss} KiB"
+else
+        row FAIL "the keyboard idle with no field focused: VmRSS" "no /proc status: $(cat "$work/boot/rss.txt" 2> /dev/null)"
+fi
 
 # the screen: drawn after the typing, and the compositor alive after the taps
 if [ -s "$work/after.shot.img" ] && [ "$(tr -d '\000' < "$work/after.shot.img" | wc -c)" -gt 0 ]; then

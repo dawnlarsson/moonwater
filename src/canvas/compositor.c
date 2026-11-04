@@ -13874,6 +13874,24 @@ static b32 compositor_osk_physical(void)
         return 0;
 }
 
+// A screen that fingers touch is plugged in (compositor_input_add's touchscreen).
+static b32 compositor_osk_touch(void)
+{
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                if (compositor.inputs[at] >= 0 && compositor.touchscreen[at])
+                        return 1;
+        return 0;
+}
+
+// Whether the desktop starts the keyboard at its start (osk_start): the setting says on, or it is auto and there is a touch
+// screen or no physical keyboard to type on.
+static b32 compositor_osk_starts(void)
+{
+        if (compositor.osk_setting == COMPOSITOR_OSK_ON)
+                return 1;
+        return compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_osk_touch() || !compositor_osk_physical());
+}
+
 // A row put away (the keyboard, while nothing has its field) or shown again; its picture is drawn again both times.
 static void compositor_osk_put_away(int row, b32 away)
 {
@@ -13944,7 +13962,8 @@ static void compositor_osk_unpan(int row)
                 compositor_place(row, compositor.x[row], compositor.y[row] + amount);
 }
 
-// What moonwater debug says of the keyboard: its setting, whether it is shown, the last input and whether a physical one is plugged in.
+// What moonwater debug says of the keyboard: its setting, whether it is shown, the last input, whether a physical one is plugged in,
+// and whether the desktop starts it (compositor_osk_starts, read by `moonwater keyboard start`).
 static void compositor_osk_publish(void)
 {
         struct windows *table = compositor.table;
@@ -13956,6 +13975,7 @@ static void compositor_osk_publish(void)
         // The layout's name, its two letters packed (us is 'u' | 's' << 8): the keyboard lays its letters out by it (osk.c).
         table->osk_layout = (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[0] |
                             (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[1] << 8;
+        table->osk_start = compositor_osk_starts();
 }
 
 static void compositor_osk_sync(void)

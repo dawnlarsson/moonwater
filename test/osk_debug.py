@@ -2,14 +2,15 @@
 # The e2e lane's reading of moonwater debug (test/osk_e2e.sh): a window's place, and the keyboard line.
 #
 #     osk_debug.py place FILE TITLE      the window titled TITLE: "x y width height", or nothing when there is none
-#     osk_debug.py keyboard FILE         "shown|hidden FIELDS INPUT PHYSICAL": the keyboard's state, the text fields with the keys in
-#                                        the focus, the last input (the mouse, a touch or a pen, a key) and a physical keyboard
+#     osk_debug.py keyboard FILE         "shown|hidden FIELDS INPUT PHYSICAL START": the keyboard's state, the text fields with the keys in
+#                                        the focus, the last input (the mouse, a touch or a pen, a key), a physical keyboard, and whether
+#                                        the desktop starts it (yes or no)
 import re
 import sys
 
 WINDOW = re.compile(r"^  window\s+\d+\s+(.*?)\s+at\s+(-?\d+),(-?\d+),\s+(\d+)x(\d+)\s*$")
 KEYBOARD = re.compile(r"^  keyboard\s+setting \S+; (shown|hidden); the focus has (\d+) text fields? with the keys; "
-                      r"last input (.*?); a physical keyboard (\S+)\s*$")
+                      r"last input (.*?); a physical keyboard (plugged in|none); the desktop starts it (yes|no)\s*$")
 
 
 def main():
@@ -26,8 +27,8 @@ def main():
         for line in lines:
             found = KEYBOARD.match(line)
             if found:
-                state, fields, last, physical = found.groups()
-                print(state, fields, last.replace(" ", "_"), physical)
+                state, fields, last, physical, start = found.groups()
+                print(state, fields, last.replace(" ", "_"), physical, start)
                 return
         print("none")
         return
