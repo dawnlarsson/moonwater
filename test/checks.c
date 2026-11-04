@@ -121949,7 +121949,365 @@ static int gpu_fake_busy; // the check's fake fence: while it is set, every job 
 #define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_io(3u, 9, 32, wait))
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
+// The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
+// other descriptor's call is made as it always is.
+static bipolar card_fake_control(positive handle, positive request, positive argument);
+#undef system_control
+#define system_control(handle, request, argument) card_fake_control((positive)(handle), (positive)(request), (positive)(argument))
 #include "../src/canvas/compositor.c"
+#undef system_control
+#define system_control(handle, request, argument)                            \
+        system_call_3(syscall(ioctl), (positive)(handle),                    \
+                      (positive)(request), (positive)(argument))
+/*
+        A card that is not there, for the checks of what the compositor asks of one: the calls compositor.c makes on
+        compositor.card, answered as the kernel's DRM answers them. A list is copied only as far as the room it is given and
+        its count is the card's whatever the room; a property's values and enums go through the pointers given, and a null
+        one with a count is a fault (EFAULT); a blob is copied only when its length is asked exactly; SETCRTC checks the
+        mode's viewport against the framebuffer with the plane's turn (drm_crtc_check_viewport), and a commit sets what it
+        names. The card is one panel on one crtc, its primary plane listing rotate-0 to rotate-270 when it is asked to,
+        and its descriptor a memfd, so its dumb buffers map.
+*/
+#define CARD_FAKE_PLANE 31u
+#define CARD_FAKE_CRTC 41u
+#define CARD_FAKE_CONNECTOR 51u
+#define CARD_FAKE_ENCODER 61u
+#define CARD_FAKE_EDID 20u
+#define CARD_FAKE_BLOB 77u
+#define CARD_FAKE_FB 100u
+#define CARD_FAKE_BYTES (64ul << 20)
+
+static struct
+{
+        int on, fd;
+        unsigned int connectors, connectors_after; // what GETRESOURCES lists, and how many it says the second time (0: as many)
+        unsigned int asked[64], asked_count;       // the connectors GETCONNECTOR was asked of
+        unsigned short width, height;              // the panel's one mode
+        int rotation, refuse_atomic;               // the plane lists a rotation property; the card refuses every commit
+        unsigned long plane_rotation;              // the plane's turn: the bit the last commit set, rotate-0's at the start
+        unsigned int edid_length;
+        unsigned char edid[33024];
+        unsigned int handles, fbs, fb_width[64], fb_height[64];
+        unsigned long offset, handle_offset[64];
+        unsigned int crtc_fb, crtc_x, crtc_y, refused, atomic_fb, atomics;
+} card_fake;
+
+static void card_fake_mode(struct compositor_mode address_to mode)
+{
+        memory_zero(mode, sizeof(*mode));
+        mode->clock = 100000;
+        mode->hdisplay = card_fake.width, mode->hsync_start = card_fake.width + 8, mode->hsync_end = card_fake.width + 16;
+        mode->htotal = card_fake.width + 32;
+        mode->vdisplay = card_fake.height, mode->vsync_start = card_fake.height + 2, mode->vsync_end = card_fake.height + 4;
+        mode->vtotal = card_fake.height + 8;
+        mode->vrefresh = 60;
+        mode->type = 8; // DRM_MODE_TYPE_PREFERRED
+}
+
+static bipolar card_fake_control(positive handle, positive request, positive argument)
+{
+        static const char address_to const names[12] = {"FB_ID",  "CRTC_ID", "SRC_X",  "SRC_Y",  "SRC_W", "SRC_H",
+                                                        "CRTC_X", "CRTC_Y",  "CRTC_W", "CRTC_H", "type",  "rotation"};
+        static const char address_to const turns[4] = {"rotate-0", "rotate-90", "rotate-180", "rotate-270"};
+        unsigned int listed = card_fake.connectors_after > card_fake.connectors ? card_fake.connectors_after : card_fake.connectors;
+
+        if (!card_fake.on || (bipolar)handle != card_fake.fd)
+                return (bipolar)system_call_3(syscall(ioctl), handle, request, argument);
+        switch (request)
+        {
+        case COMPOSITOR_GETRESOURCES:
+        {
+                struct compositor_card_res address_to r = (struct compositor_card_res address_to)argument;
+                // A pointer given is the second call: a card that grew between the two says so then.
+                unsigned int now = r->connectors && card_fake.connectors_after ? card_fake.connectors_after : card_fake.connectors;
+
+                for (unsigned int at = 0; at < now && r->connectors; at++)
+                        if (at < r->connector_count)
+                                ((unsigned int address_to)r->connectors)[at] = CARD_FAKE_CONNECTOR + at;
+                if (r->crtcs && r->crtc_count >= 1)
+                        ((unsigned int address_to)r->crtcs)[0] = CARD_FAKE_CRTC;
+                r->connector_count = now, r->crtc_count = 1, r->encoder_count = 1, r->fb_count = 0;
+                r->min_width = r->min_height = 1, r->max_width = r->max_height = 16384;
+                return 0;
+        }
+        case COMPOSITOR_GETCONNECTOR:
+        {
+                struct compositor_connector address_to c = (struct compositor_connector address_to)argument;
+                unsigned int id = c->connector_id;
+                int connected = id == CARD_FAKE_CONNECTOR;
+
+                if (card_fake.asked_count < 64)
+                        card_fake.asked[card_fake.asked_count++] = id;
+                if (id < CARD_FAKE_CONNECTOR || id - CARD_FAKE_CONNECTOR >= listed)
+                        return -2;
+                if (connected && c->mode_count >= 1 && c->modes)
+                        card_fake_mode((struct compositor_mode address_to)c->modes);
+                if (connected && c->encoder_count >= 1 && c->encoders)
+                        ((unsigned int address_to)c->encoders)[0] = CARD_FAKE_ENCODER;
+                c->mode_count = c->encoder_count = (unsigned int)connected;
+                c->prop_count = 0;
+                c->encoder_id = connected ? CARD_FAKE_ENCODER : 0;
+                c->connector_type = 14, c->connector_type_id = id - CARD_FAKE_CONNECTOR + 1; // eDP-N
+                c->connection = connected ? 1 : 2;
+                return 0;
+        }
+        case COMPOSITOR_GETENCODER:
+        {
+                struct compositor_encoder address_to e = (struct compositor_encoder address_to)argument;
+
+                if (e->encoder_id != CARD_FAKE_ENCODER)
+                        return -2;
+                e->crtc_id = CARD_FAKE_CRTC, e->possible_crtcs = 1, e->possible_clones = 0;
+                return 0;
+        }
+        case COMPOSITOR_GETCRTC:
+        {
+                struct compositor_crtc address_to c = (struct compositor_crtc address_to)argument;
+
+                if (c->crtc_id != CARD_FAKE_CRTC)
+                        return -2;
+                c->fb_id = card_fake.crtc_fb, c->x = card_fake.crtc_x, c->y = card_fake.crtc_y, c->mode_valid = 1;
+                card_fake_mode(&c->mode);
+                return 0;
+        }
+        case COMPOSITOR_OBJ_GETPROPERTIES:
+        {
+                struct
+                {
+                        unsigned long props, values;
+                        unsigned int count, object, type;
+                } address_to g = (void address_to)argument;
+                unsigned int ids[16], n = 0;
+                unsigned long values[16];
+
+                if (g->object == CARD_FAKE_PLANE)
+                {
+                        for (unsigned int id = 1; id <= 11; id++)
+                                ids[n] = id, values[n++] = id == 11 ? 1 : 0; // type: Primary
+                        if (card_fake.rotation)
+                                ids[n] = 12, values[n++] = card_fake.plane_rotation;
+                }
+                else if (g->object == CARD_FAKE_CONNECTOR + 0 && card_fake.edid_length)
+                        ids[n] = CARD_FAKE_EDID, values[n++] = CARD_FAKE_BLOB;
+                for (unsigned int at = 0; at < n && at < g->count; at++)
+                {
+                        if (!g->props || !g->values)
+                                return -14;
+                        ((unsigned int address_to)g->props)[at] = ids[at];
+                        ((unsigned long address_to)g->values)[at] = values[at];
+                }
+                g->count = n;
+                return 0;
+        }
+        case COMPOSITOR_GETPROPERTY:
+        {
+                struct
+                {
+                        unsigned long values, enums;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_enums;
+                } address_to p = (void address_to)argument;
+                struct
+                {
+                        unsigned long value;
+                        char name[32];
+                } address_to into = (void address_to)p->enums;
+                unsigned int id = p->id, values = 0, enums = 0;
+
+                if (id == CARD_FAKE_EDID)
+                        string_copy((string_address)p->name, (string_address) "EDID");
+                else if (id >= 1 && id <= 12 && (id < 12 || card_fake.rotation))
+                {
+                        string_copy((string_address)p->name, (string_address)names[id - 1]);
+                        // An object's id is one value (its type), a range two, an enum's and a bitmask's values its entries.
+                        values = id <= 2 ? 1 : id <= 10 ? 2 : id == 11 ? 3 : 4;
+                        enums = id == 11 ? 3 : id == 12 ? 4 : 0;
+                }
+                else
+                        return -2;
+                // drm_mode_getproperty_ioctl: put_user of every value up to the count given, through the pointer given.
+                for (unsigned int at = 0; at < values && at < p->count_values; at++)
+                {
+                        if (!p->values)
+                                return -14;
+                        ((unsigned long address_to)p->values)[at] = id == 12 ? at : at;
+                }
+                p->count_values = values;
+                for (unsigned int at = 0; at < enums && at < p->count_enums; at++)
+                {
+                        if (!p->enums)
+                                return -14;
+                        memory_zero(&into[at], sizeof(into[at]));
+                        into[at].value = at;
+                        string_copy((string_address)into[at].name, (string_address)(id == 12 ? turns[at] : at == 1 ? "Primary" : "Overlay"));
+                }
+                p->count_enums = enums;
+                return 0;
+        }
+        case COMPOSITOR_GETPROPBLOB:
+        {
+                struct
+                {
+                        unsigned int id, length;
+                        unsigned long data;
+                } address_to b = (void address_to)argument;
+
+                if (b->id != CARD_FAKE_BLOB || !card_fake.edid_length)
+                        return -2;
+                if (b->length == card_fake.edid_length)
+                {
+                        if (!b->data)
+                                return -14;
+                        memory_copy((void address_to)b->data, card_fake.edid, card_fake.edid_length);
+                }
+                b->length = card_fake.edid_length;
+                return 0;
+        }
+        case COMPOSITOR_GETPLANERESOURCES:
+        {
+                struct
+                {
+                        unsigned long ids;
+                        unsigned int count, pad;
+                } address_to r = (void address_to)argument;
+
+                if (r->count >= 1 && r->ids)
+                        ((unsigned int address_to)r->ids)[0] = CARD_FAKE_PLANE;
+                r->count = 1;
+                return 0;
+        }
+        case COMPOSITOR_GETPLANE:
+        {
+                struct
+                {
+                        unsigned int id, crtc, fb, possible, gamma, count;
+                        unsigned long formats;
+                } address_to p = (void address_to)argument;
+
+                if (p->id != CARD_FAKE_PLANE)
+                        return -2;
+                if (p->count >= 1 && p->formats)
+                        ((unsigned int address_to)p->formats)[0] = COMPOSITOR_XRGB8888;
+                p->crtc = CARD_FAKE_CRTC, p->fb = card_fake.crtc_fb, p->possible = 1, p->gamma = 0, p->count = 1;
+                return 0;
+        }
+        case COMPOSITOR_CREATE_DUMB:
+        {
+                struct compositor_dumb address_to d = (struct compositor_dumb address_to)argument;
+                unsigned long pitch = ((unsigned long)d->width * 4 + 63) & ~63ul, size = (pitch * d->height + 4095) & ~4095ul;
+
+                if (card_fake.handles >= 63 || card_fake.offset + size > CARD_FAKE_BYTES)
+                        return -12;
+                d->handle = ++card_fake.handles;
+                d->pitch = (unsigned int)pitch;
+                d->size = size;
+                card_fake.handle_offset[d->handle] = card_fake.offset;
+                card_fake.offset += size;
+                return 0;
+        }
+        case COMPOSITOR_ADDFB:
+        {
+                struct compositor_fb address_to f = (struct compositor_fb address_to)argument;
+
+                if (card_fake.fbs >= 63)
+                        return -12;
+                card_fake.fbs++;
+                card_fake.fb_width[card_fake.fbs] = f->width, card_fake.fb_height[card_fake.fbs] = f->height;
+                f->fb_id = CARD_FAKE_FB + card_fake.fbs;
+                return 0;
+        }
+        case COMPOSITOR_MAP_DUMB:
+        {
+                struct compositor_map_dumb address_to m = (struct compositor_map_dumb address_to)argument;
+
+                if (!m->handle || m->handle > card_fake.handles)
+                        return -2;
+                m->offset = card_fake.handle_offset[m->handle];
+                return 0;
+        }
+        case COMPOSITOR_SETCRTC:
+        {
+                struct compositor_crtc address_to s = (struct compositor_crtc address_to)argument;
+                unsigned int fb = s->fb_id - CARD_FAKE_FB, across = s->mode.hdisplay, down = s->mode.vdisplay, swap = across;
+
+                if (!s->fb_id || !s->mode_valid)
+                {
+                        card_fake.crtc_fb = 0;
+                        return 0;
+                }
+                if (!fb || fb > card_fake.fbs)
+                        return -2;
+                // The viewport, with the primary plane's turn as the kernel takes it: a quarter turn swaps the mode's sides.
+                if (card_fake.plane_rotation & (2 | 8))
+                        across = down, down = swap;
+                if (s->x + across > card_fake.fb_width[fb] || s->y + down > card_fake.fb_height[fb])
+                {
+                        card_fake.refused++;
+                        return -28;
+                }
+                card_fake.crtc_fb = s->fb_id, card_fake.crtc_x = s->x, card_fake.crtc_y = s->y;
+                return 0;
+        }
+        case COMPOSITOR_ATOMIC:
+        {
+                struct
+                {
+                        unsigned int flags, count;
+                        unsigned long objects, counts, props, values, reserved, user_data;
+                } address_to a = (void address_to)argument;
+                const unsigned int address_to objects = (const unsigned int address_to)a->objects;
+                const unsigned int address_to counts = (const unsigned int address_to)a->counts;
+                const unsigned int address_to props = (const unsigned int address_to)a->props;
+                const unsigned long address_to values = (const unsigned long address_to)a->values;
+                unsigned long fb = 0, rotation = 0;
+                unsigned int at = 0;
+
+                card_fake.atomics++;
+                if (card_fake.refuse_atomic)
+                        return -22;
+                for (unsigned int object = 0; object < a->count; object++)
+                        for (unsigned int each = 0; each < counts[object]; each++, at++)
+                                if (objects[object] == CARD_FAKE_PLANE && props[at] == 1)
+                                        fb = values[at];
+                                else if (objects[object] == CARD_FAKE_PLANE && props[at] == 12)
+                                        rotation = values[at];
+                if (fb)
+                        card_fake.atomic_fb = card_fake.crtc_fb = (unsigned int)fb;
+                if (rotation)
+                        card_fake.plane_rotation = rotation;
+                return 0;
+        }
+        case COMPOSITOR_RMFB:
+        case COMPOSITOR_GEM_CLOSE:
+        case COMPOSITOR_DIRTYFB:
+                return 0;
+        }
+        return -22;
+}
+
+// The fake card, a panel of width by height, as compositor.card; false when its memfd is not made.
+static b32 card_fake_open(unsigned short width, unsigned short height)
+{
+        memory_zero(&card_fake, sizeof(card_fake));
+        card_fake.fd = (int)system_call_2(syscall(memfd_create), (positive) "card-fake", 1);
+        if (card_fake.fd < 0 || system_call_2(syscall(ftruncate), (positive)card_fake.fd, CARD_FAKE_BYTES) != 0)
+                return false;
+        card_fake.on = 1;
+        card_fake.connectors = 1;
+        card_fake.width = width, card_fake.height = height;
+        card_fake.plane_rotation = 1; // rotate-0
+        compositor.card = card_fake.fd;
+        return true;
+}
+
+static fn card_fake_close(void)
+{
+        system_close(card_fake.fd);
+        card_fake.on = 0;
+        card_fake.fd = -1;
+        compositor.card = -1;
+}
 #include "../src/canvas/ui/features.h"
 #ifdef CHECK_terminal
 static void rtl_keep_add(int x, int y, int w, int h);
@@ -128599,6 +128957,33 @@ static void check_compositor_least_scale(void)
     check("least scale: and nothing past its own buffer is written (its other buffer, the next window's)", changed == 0);
     compositor.scale = 100;
     life_close(1);
+}
+
+/*
+        The connectors a card lists, asked for twice as the kernel wants (how many, then the list into room for them): a
+        screen that came between the two (a dock's MST port) makes the second answer's count larger than the list the
+        kernel wrote, and the compositor went on through the count, reading the ids past the 16 it had room for and asking
+        the card of whatever was in its stack. It reads what was written: the two connectors listed, and no other.
+*/
+static void check_compositor_card_lists(void)
+{
+    struct compositor_connected found;
+    unsigned int unlisted = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    if (!card_fake_open(800, 1280))
+    {
+        check("card lists: the fake card is made", false);
+        return;
+    }
+    card_fake.connectors = 2;
+    card_fake.connectors_after = 40;
+    compositor_connected_read(&found);
+    for (unsigned int at = 0; at < card_fake.asked_count; at++)
+        unlisted += card_fake.asked[at] != CARD_FAKE_CONNECTOR && card_fake.asked[at] != CARD_FAKE_CONNECTOR + 1;
+    check("card lists: connectors that came between the two calls are not read past the list the kernel wrote",
+          unlisted == 0 && card_fake.asked_count >= 2 && found.count == 1 && found.connector[0] == CARD_FAKE_CONNECTOR);
+    card_fake_close();
 }
 
 /*
@@ -157861,6 +158246,7 @@ b32 main()
         check_compositor_lifecycle_more();
         check_compositor_least_scale();
         check_compositor_touch_hold_gone();
+        check_compositor_card_lists();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();

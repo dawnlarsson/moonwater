@@ -41,6 +41,34 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-124: the compositor read the card's connector list past what the kernel wrote
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening) |
+| Class | Out-of-bounds read on the stack (CWE-125): a count trusted from the second of two calls |
+| Attacker | (5) a physical peripheral: a DisplayPort MST dock or hub whose ports come and go between the compositor's two GETRESOURCES calls |
+| Moonwater exposure window | from `13d03ddf` (2026-10-26 19:24 +01:00, every screen of the card read) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_connected_read`) |
+
+**What it was.** The card's connectors are asked for twice, as DRM wants: how many, then the list into room for that
+many (16 at most, a stack array). `drm_mode_getresources` writes no more ids than the room it is given and then answers
+how many connectors there are now, which is more when a connector was made between the two calls (an MST port). The
+compositor looped to that count, reading ids from past the ones written and past the array, and asked the card about
+each. It is a read and the ids go only to GETCONNECTOR, which refuses one that is not a connector; nothing was written.
+
+**The fix.** The count is held to the room given (the first answer) after the second call, for the connectors and the
+crtcs. The other lists the compositor asks twice for were already right: a connector's modes and encoders (copied by the
+kernel only whole, and the compositor uses them only then), a property's enums (copied up to the room and counted
+against it); a property's values and the EDID blob are the next two entries.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_card_lists`, against the checks' fake card (answering
+as the kernel answers, `card_fake_control`): a card listing two connectors that says forty the second time is asked of
+those two and no other. Without the clamp the row is red (1 failure, gcc).
+
+**Still open.** Nothing of this shape in the compositor's DRM calls.
+
+
 ### MW-2026-138: a font's lookups could try subtables that the shaping budget never paid for
 
 | | |

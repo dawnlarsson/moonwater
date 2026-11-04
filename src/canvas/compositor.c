@@ -7655,8 +7655,16 @@ static b32 compositor_connected_read(struct compositor_connected *found)
         resources.connectors = (unsigned long)connectors;
         resources.crtcs = (unsigned long)found->crtcs;
         resources.fb_count = resources.encoder_count = 0;
-        if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
-                return -COMPOSITOR_EINVAL;
+        {
+                unsigned int room_connectors = resources.connector_count, room_crtcs = resources.crtc_count;
+
+                if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
+                        return -COMPOSITOR_EINVAL;
+                // The kernel writes no more than the room it was given and answers how many there are now, which a screen
+                // that came between the two calls (a dock's MST port) makes more than were written: only those are read.
+                resources.connector_count = resources.connector_count < room_connectors ? resources.connector_count : room_connectors;
+                resources.crtc_count = resources.crtc_count < room_crtcs ? resources.crtc_count : room_crtcs;
+        }
         found->crtc_count = resources.crtc_count;
         found->max_width = resources.max_width;
         found->max_height = resources.max_height;
