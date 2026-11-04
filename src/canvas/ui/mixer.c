@@ -548,7 +548,7 @@ static fn mixer_size(unsigned int width, unsigned int height)
 // The timer: what is to be sent, then the page looked at as often as it is written, and the time to the next look.
 static long mixer_tick(long timeout, long address_to other)
 {
-        b64 now = (b64)clock_monotonic_nanoseconds(), wait;
+        b64 now = (b64)ui_kit.now, wait;
         b32 away = (mixer.own.table->state[mixer.own.row] & WINDOW_MINIMIZED) != 0;
 
         (void)other;
@@ -597,7 +597,7 @@ static int mixer_open(void)
         }
         mixer.big = (struct mixer_big address_to)mapped;
         // The page is read first: the recording popup is as wide as the strips it shows (the microphone and up to three programs; room for a line beside one at least).
-        mixer_poll((b64)clock_monotonic_nanoseconds());
+        mixer_poll((b64)ui_kit.now);
         if (mixer.quick && mixer.recording)
                 width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(mixer_quick_shown(mixer.big->strips.count)));
         mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
