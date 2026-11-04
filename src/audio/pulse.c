@@ -495,7 +495,7 @@ static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
         // the string is the bytes before it; not found, the frame or the string ran out first.
         start = r->at + 1;
         avail = r->length - start < PULSE_STRING + 1 ? r->length - start : PULSE_STRING + 1;
-        nul = avail > 0 ? __builtin_memchr(r->p + start, 0, (unsigned long)avail) : 0;
+        nul = avail > 0 ? memory_first_of(r->p + start, 0, (unsigned long)avail) : 0;
         if (!nul)
         {
                 r->bad = 1;
@@ -632,10 +632,10 @@ static void pulse_copy(char *to, long room, const char *from)
 
         if (room < 1)
                 return;
-        n = (long)__builtin_strlen(from);
+        n = (long)string_length(from);
         if (n > room - 1)
                 n = room - 1;
-        __builtin_memcpy(to, from, (unsigned long)n);
+        memory_copy_apart(to, from, (unsigned long)n);
         to[n] = 0;
 }
 
@@ -650,14 +650,14 @@ static int pulse_props_set(struct pulse_props *props, const char *key, const uns
         for (int i = 0; i < props->count; i++)
                 if (pulse_equal(props->entry[i].key, key))
                 {
-                        __builtin_memcpy(props->entry[i].value, value, (unsigned long)length);
+                        memory_copy_apart(props->entry[i].value, value, (unsigned long)length);
                         props->entry[i].length = (int)length;
                         return 1;
                 }
         if (props->count >= PULSE_PROPS)
                 return 0;
         pulse_copy(props->entry[props->count].key, PULSE_KEY, key);
-        __builtin_memcpy(props->entry[props->count].value, value, (unsigned long)length);
+        memory_copy_apart(props->entry[props->count].value, value, (unsigned long)length);
         props->entry[props->count].length = (int)length;
         props->count++;
         return 1;
@@ -792,7 +792,7 @@ static void pulse_w_raw(struct pulse_writer *w, const void *data, long n)
                 w->bad = 1;
                 return;
         }
-        __builtin_memcpy(w->p + w->len, data, (unsigned long)n);
+        memory_copy_apart(w->p + w->len, data, (unsigned long)n);
         w->len += n;
 }
 
@@ -923,9 +923,9 @@ static void pulse_out_put(struct pulse_client *c, const unsigned char *from, lon
         }
         at = (unsigned long)c->out_tail % PULSE_OUT;
         first = (long)(PULSE_OUT - at) < n ? (long)(PULSE_OUT - at) : n;
-        __builtin_memcpy(c->out + at, from, (unsigned long)first);
+        memory_copy_apart(c->out + at, from, (unsigned long)first);
         if (first < n)
-                __builtin_memcpy(c->out, from + first, (unsigned long)(n - first));
+                memory_copy_apart(c->out, from + first, (unsigned long)(n - first));
         c->out_tail += n;
 }
 
@@ -943,7 +943,7 @@ static int pulse_enqueue(struct pulse_client *c, unsigned long channel, const un
         // The descriptor is 20 bytes: a constant-size copy the compiler inlines, unless it straddles the end of the ring.
         if (at + 20 <= PULSE_OUT)
         {
-                __builtin_memcpy(c->out + at, header, 20);
+                memory_copy_apart(c->out + at, header, 20);
                 c->out_tail += 20;
         }
         else
@@ -1064,7 +1064,7 @@ AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *des
                 {
                         struct pulse_sink *s = p->sink + i;
 
-                        __builtin_memset(s, 0, sizeof(*s));
+                        memory_zero(s, sizeof(*s));
                         s->used = 1;
                         pulse_copy(s->name, PULSE_NAME, name);
                         pulse_copy(s->description, PULSE_DESCRIPTION, description);
@@ -1073,7 +1073,7 @@ AUDIO_API long pulse_sink_add(struct pulse *p, const char *name, const char *des
                         audio_sink_open(&s->mix, rate, 2);
                         if (p->default_sink < 0)
                                 p->default_sink = i;
-                        __builtin_memset(p->source + i, 0, sizeof(p->source[i]));
+                        memory_zero(p->source + i, sizeof(p->source[i]));
                         pulse_monitor_set(p, i);
                         if (p->default_source < 0)
                                 p->default_source = i;
@@ -1260,7 +1260,7 @@ static void pulse_monitor_set(struct pulse *p, long slot)
 
         if (!m->used)
         {
-                __builtin_memset(m, 0, sizeof(*m));
+                memory_zero(m, sizeof(*m));
                 m->used = 1;
                 m->volume[0] = m->volume[1] = AUDIO_VOLUME_NORM;
                 m->now = 1.0f;
@@ -1535,8 +1535,8 @@ static void pulse_record_take(struct pulse *p, struct pulse_record *r, const flo
                 struct audio_resampler *rs = &r->rs;
                 long room = audio_rs_room(rs), take = frames < room ? frames : room;
 
-                __builtin_memcpy(rs->buf[0] + rs->have, left, (unsigned long)take * sizeof(float));
-                __builtin_memcpy(rs->buf[1] + rs->have, right, (unsigned long)take * sizeof(float));
+                memory_copy_apart(rs->buf[0] + rs->have, left, (unsigned long)take * sizeof(float));
+                memory_copy_apart(rs->buf[1] + rs->have, right, (unsigned long)take * sizeof(float));
                 rs->have += take;
                 for (;;)
                 {
@@ -1627,7 +1627,7 @@ AUDIO_API long pulse_source_add(struct pulse *p, const char *name, const char *d
                 {
                         struct pulse_source *s = p->source + i;
 
-                        __builtin_memset(s, 0, sizeof(*s));
+                        memory_zero(s, sizeof(*s));
                         s->used = 1;
                         s->capture = 1;
                         s->sink = -1;
@@ -2023,7 +2023,7 @@ static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long f
                 *error = PULSE_ERR_TOOLARGE;
                 return 0;
         }
-        __builtin_memset(s, 0, offset_of(struct pulse_stream, voice));
+        memory_zero(s, offset_of(struct pulse_stream, voice));
         s->ring_memory = p->host.alloc(p->host.context, (long)ring);
         if (!s->ring_memory)
         {
@@ -2584,7 +2584,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 if (!table)
                         return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
         }
-        __builtin_memset(rec, 0, offset_of(struct pulse_record, rs));
+        memory_zero(rec, offset_of(struct pulse_record, rs));
         rec->used = 1;
         rec->table = table;
         if (table)
@@ -2961,7 +2961,7 @@ static int pulse_command_create_upload(struct pulse *p, long slot, struct pulse_
         memory = p->host.alloc(p->host.context, (long)length);
         if (!memory)
                 return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
-        __builtin_memset(u, 0, sizeof(*u));
+        memory_zero(u, sizeof(*u));
         u->used = 1;
         u->client = slot;
         u->channel = c->next_channel++;
@@ -3031,7 +3031,7 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
                 pulse_upload_free(p, u);
                 return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
         }
-        __builtin_memset(s, 0, sizeof(*s));
+        memory_zero(s, sizeof(*s));
         s->used = 1;
         s->index = old ? index : p->next_sample++;
         pulse_copy(s->name, PULSE_NAME, u->name);
@@ -3128,7 +3128,7 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         }
         if (mine >= PULSE_STREAMS_PER_CLIENT || !s)
                 return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
-        __builtin_memset(s, 0, offset_of(struct pulse_stream, voice));
+        memory_zero(s, offset_of(struct pulse_stream, voice));
         if (audio_voice_open(&s->voice, sample->format, sample->channels, sample->rate, sample->map, p->sink[sink].rate, sample->data, sample->bytes) < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
         s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size;
@@ -4046,7 +4046,7 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
                 {
                         if ((flags & 0xff) != 0 || offset != 0 || (unsigned long)length > u->length - u->got)
                                 return PULSE_DEAD;
-                        __builtin_memcpy(u->data + u->got, data, (unsigned long)length);
+                        memory_copy_apart(u->data + u->got, data, (unsigned long)length);
                         u->got += (unsigned long)length;
                 }
                 return PULSE_DONE;
@@ -4120,7 +4120,7 @@ AUDIO_API int pulse_client_feed(struct pulse *p, long slot, const unsigned char 
         {
                 long take = PULSE_IN - c->in_have < count ? PULSE_IN - c->in_have : count;
 
-                __builtin_memcpy(c->in + c->in_have, bytes, (unsigned long)take);
+                memory_copy_apart(c->in + c->in_have, bytes, (unsigned long)take);
                 c->in_have += take;
                 bytes += take;
                 count -= take;
@@ -4167,7 +4167,7 @@ AUDIO_API int pulse_client_feed(struct pulse *p, long slot, const unsigned char 
                 }
                 if (at)
                 {
-                        __builtin_memmove(c->in, c->in + at, (unsigned long)(c->in_have - at));
+                        memory_copy(c->in, c->in + at, (unsigned long)(c->in_have - at));
                         c->in_have -= at;
                 }
         }
@@ -4210,7 +4210,7 @@ AUDIO_API int pulse_client_late(struct pulse *p, long slot, long now)
 
 AUDIO_API void pulse_open(struct pulse *p, const struct pulse_host *host)
 {
-        __builtin_memset(p, 0, sizeof(*p));
+        memory_zero(p, sizeof(*p));
         p->host = *host;
         p->default_sink = -1;
         p->default_source = -1;

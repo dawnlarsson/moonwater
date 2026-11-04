@@ -130,7 +130,7 @@ static int audio_state_read(const volatile struct audio_state *page, struct audi
 
                 if (before & 1u)
                         continue;
-                __builtin_memcpy(copy, (const void *)page, sizeof(*copy));
+                memory_copy_apart(copy, (const void *)page, sizeof(*copy));
                 __atomic_thread_fence(__ATOMIC_ACQUIRE);
                 after = __atomic_load_n(&page->seq, __ATOMIC_ACQUIRE);
                 if (before == after)

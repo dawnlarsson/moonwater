@@ -121707,6 +121707,27 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #include <stddef.h>
 #define offset_of(type, member) offsetof(type, member)
 #endif
+#ifndef offset_of
+#define offset_of(type, member) ((unsigned long)&((type *)0)->member)
+#endif
+#ifndef memory_fill
+#define memory_fill(block, value, count) memset((block), (value), (count))
+#endif
+#ifndef memory_copy_apart
+#define memory_copy_apart(to, from, size) memcpy((to), (from), (size))
+#endif
+#ifndef memory_zero
+#define memory_zero(to, size) memset((to), 0, (size))
+#endif
+#ifndef memory_copy
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#endif
+#ifndef memory_first_of
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
+#endif
+#ifndef string_length
+#define string_length(text) strlen((const char *)(text))
+#endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 #include "../src/canvas/ui/mixer.c"
@@ -176952,6 +176973,27 @@ int main(void)
 #include <stddef.h>
 #define offset_of(type, member) offsetof(type, member)
 #endif
+#ifndef offset_of
+#define offset_of(type, member) ((unsigned long)&((type *)0)->member)
+#endif
+#ifndef memory_fill
+#define memory_fill(block, value, count) memset((block), (value), (count))
+#endif
+#ifndef memory_copy_apart
+#define memory_copy_apart(to, from, size) memcpy((to), (from), (size))
+#endif
+#ifndef memory_zero
+#define memory_zero(to, size) memset((to), 0, (size))
+#endif
+#ifndef memory_copy
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#endif
+#ifndef memory_first_of
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
+#endif
+#ifndef string_length
+#define string_length(text) strlen((const char *)(text))
+#endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 // The library's names control.c calls, as the libc has them for a hosted build (the freestanding build has the library's own).
@@ -183128,6 +183170,27 @@ static long system_call_6(long number, long a, long b, long c, long d, long e, l
 #ifndef offset_of
 #include <stddef.h>
 #define offset_of(type, member) offsetof(type, member)
+#endif
+#ifndef offset_of
+#define offset_of(type, member) ((unsigned long)&((type *)0)->member)
+#endif
+#ifndef memory_fill
+#define memory_fill(block, value, count) memset((block), (value), (count))
+#endif
+#ifndef memory_copy_apart
+#define memory_copy_apart(to, from, size) memcpy((to), (from), (size))
+#endif
+#ifndef memory_zero
+#define memory_zero(to, size) memset((to), 0, (size))
+#endif
+#ifndef memory_copy
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#endif
+#ifndef memory_first_of
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
+#endif
+#ifndef string_length
+#define string_length(text) strlen((const char *)(text))
 #endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
