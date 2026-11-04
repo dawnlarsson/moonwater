@@ -132345,6 +132345,12 @@ static fn check_launcher(void)
         check("launcher: case does not matter, on either side",
               launcher_rank("TERM", 4, "Terminal", 8) == 2 && launcher_rank("kernel LOG", 10, "Kernel log", 10) == 3 &&
                   launcher_rank("inal", 4, "Terminal", 8) == 1);
+        check("launcher: case does not matter past ASCII either: Latin-1, Greek and Cyrillic rank as their lower case does",
+              launcher_rank("\xc3\x89" "C", 3, "\xc3\xa9" "cran", 6) == 2 && launcher_rank("\xc3\x89", 2, "\xc3\xa9", 2) == 3 &&
+                  launcher_rank("\xce\x91\xce\x98", 4, "\xce\xb1\xce\xb8\xce\xb7\xce\xbd\xce\xb1", 10) == 2 &&
+                  launcher_rank("\xd0\x9f\xd0\xa0\xd0\x98", 6, "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82", 12) == 2 &&
+                  launcher_rank("\xd0\xa0\xd0\x98", 4, "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82", 12) == 1 &&
+                  launcher_rank("\xd0\x9f", 2, "\xc3\xa9", 2) == 0);
         check("launcher: a desktop program is named by its label and by its other words",
               launcher_program_rank("pref", 4, &launcher_programs[0]) == 2 && launcher_program_rank("set", 3, &launcher_programs[0]) == 2 &&
                   launcher_program_rank("dmesg", 5, &launcher_programs[2]) == 3 && launcher_program_rank("xyz", 3, &launcher_programs[1]) == 0);
@@ -133985,6 +133991,34 @@ static fn check_settings(string_address regular, string_address bold)
                         for (int at = 0; at < settings.card_lines; at++)
                                 within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
                         check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
+                        {
+                                // A word with no blank in it, wider than the window, in wide Cyrillic capitals (a lead byte alone is a narrower mark than the letter): cut between characters.
+                                char tall[160];
+                                positive length = 0;
+                                b32 whole = true;
+
+                                for (int again = 0; again < 24; again++, length += 6)
+                                        memory_copy(tall + length, "\xd0\xa8\xd0\x96\xd0\xa9", 6);
+                                memory_copy(settings_large->said, tall, length);
+                                settings.said_length = length;
+                                settings_card_fill();
+                                // At each of 24 widths, one pixel apart: a character a pixel too wide for a line is where a cut inside it was made.
+                                for (int extra = 0; extra < 24; extra++)
+                                {
+                                        settings.width = 300 + extra;
+                                        settings_wrap();
+                                        for (int at = 0; at < settings.card_lines; at++)
+                                                whole &= ((p8)settings_large->card[settings_large->card_at[at]] & 0xc0) != 0x80;
+                                        whole &= settings.card_lines >= 2;
+                                }
+                                settings.width = 300;
+                                settings_wrap();
+                                check("settings: a word wider than the window is cut between characters, never inside one, at any width", whole);
+                                memory_copy(settings_large->said, wide, sizeof(wide) - 1);
+                                settings.said_length = sizeof(wide) - 1;
+                                settings_card_fill();
+                                settings_wrap();
+                        }
                         settings_card_open("moonwater status");
                         settings_press(UI_KEY_DOWN);
                         check("settings: a card is scrolled by the keys", settings.view && settings.card.scroll > 0);
@@ -148973,6 +149007,13 @@ static fn language_runtime_check(void)
         language_format(text, sizeof(text), "%2$s: %1$d (%%)", (long)-42, (string_address) "x");
         check("language: placeholders are filled in the order the text names them, numbers signed, a percent sign escaped",
               !string_compare_max((string_address)text, (string_address) "x: -42 (%)", 11));
+        {
+                char small[4];
+                positive made = language_format(small, sizeof(small), "%s", (string_address) "\xd8\xa7\xd8\xa8");
+
+                check("language: a text cut at its room ends at a whole character, never in the middle of one",
+                      made == 2 && (p8)small[0] == 0xd8 && (p8)small[1] == 0xa7 && small[2] == 0);
+        }
         table.language = 'e' | 'n' << 8;
         ui_kit_language_take(&table);
         check("language: back to English the table answers again, with nothing left of the language before",
@@ -149178,6 +149219,14 @@ static fn taskbar_words_check(void)
         table.language = 0;
         taskbar_tray_render();
         check("taskbar words: and English again when the table says none", !language.code);
+        // The tray is drawn at once when the language changes, and not for a tick that changes neither the minute nor the language.
+        taskbar.minute = taskbar_minute_now();
+        taskbar_tick();
+        check("taskbar words: a tick of the same minute in the same language draws nothing", taskbar_tick() == 0);
+        table.language = 'd' | 'e' << 8;
+        check("taskbar words: a language taken is drawn at that tick, and not at the minute's end", taskbar_tick() == 1 && language.code == ('d' | 'e' << 8));
+        table.language = 0;
+        taskbar_tick();
         taskbar.tray_custom = 0, taskbar.battery_item = 0, taskbar.battery_charging = 0;
         taskbar.tray_format[0] = 0;
         compositor.table = saved;

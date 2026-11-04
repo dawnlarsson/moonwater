@@ -192,10 +192,52 @@ static b32 launcher_command_line(const char address_to text)
         How well a text names a name, in 3 (the same), 2 (its start), 1 (inside
         it) or 0 (not at all), whatever the case of either.
 */
+// A text with each letter in lower case, code point by code point by the library's table (a byte that is not UTF-8 stays), into room
+// bytes less one: a name and a text that have a letter past ASCII are ranked by these, as the ASCII ones are by the case-blind compares.
+static positive launcher_lower(char address_to into, positive room, const char address_to text, positive size)
+{
+        memory_utf8_state state = {0};
+        positive made = 0;
+
+        for (positive at = 0; at < size && made + 4 < room;)
+        {
+                b32 said = memory_utf8_feed(&state, (p8)text[at++]);
+
+                if (said > 0)
+                        made += memory_utf8_encode((p8 address_to)into + made, 4, (p32)unicode_case(state.value, UNICODE_CASE_LOWER));
+                else if (said < 0)
+                {
+                        into[made++] = text[at - 1];
+                        state = (memory_utf8_state){0};
+                }
+        }
+        into[made] = 0;
+        return made;
+}
+
+static b32 launcher_ascii(const char address_to text, positive size)
+{
+        for (positive at = 0; at < size; at++)
+                if ((unsigned char)text[at] >= 0x80)
+                        return false;
+        return true;
+}
+
 static unsigned int launcher_rank(const char address_to text, positive length, const char address_to name, positive size)
 {
         if (!length || length > size)
                 return 0;
+        if (!launcher_ascii(text, length) || !launcher_ascii(name, size))
+        {
+                char folded_text[96], folded_name[96];
+                positive a = launcher_lower(folded_text, sizeof(folded_text), text, length), b = launcher_lower(folded_name, sizeof(folded_name), name, size);
+
+                if (!a || a > b)
+                        return 0;
+                if (!memory_compare_ascii_case((address_any)folded_text, (address_any)folded_name, a))
+                        return a == b ? 3 : 2;
+                return memory_search_ascii_case((address_any)folded_name, b, (address_any)folded_text, a) ? 1 : 0;
+        }
         if (!memory_compare_ascii_case((address_any)text, (address_any)name, length))
                 return length == size ? 3 : 2;
         return memory_search_ascii_case((address_any)name, size, (address_any)text, length) ? 1 : 0;

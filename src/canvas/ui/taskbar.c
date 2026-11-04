@@ -971,10 +971,13 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 */
 static int taskbar_tick(void)
 {
-        unsigned int now = taskbar_minute_now();
+        unsigned int now = taskbar_minute_now(), language_now = compositor.table ? compositor.table->language : 0;
+        static unsigned int language_was;
 
-        if (now == taskbar.minute)
+        // A language taken is the tray's words in it (a weekday, a month, AM and PM) at once, and not at the minute's end.
+        if (now == taskbar.minute && language_now == language_was)
                 return 0;
+        language_was = language_now;
         taskbar.minute = now;
         taskbar_battery_refresh();
         taskbar_tray_render();

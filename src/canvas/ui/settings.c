@@ -1977,6 +1977,9 @@ static fn settings_wrap(void)
                                 while (fit < over && (plain ? settings_run_width(&settings.ui, &run, start, fit + 1)
                                                             : settings_card_width(start, fit + 1)) <= room)
                                         fit++;
+                                // Not inside a character: a line ends before the continuation bytes of one that did not fit.
+                                while (fit > start + 1 && fit < over && ((unsigned char)settings_large->card[fit] & 0xc0) == 0x80)
+                                        fit--;
                         }
                         if (settings.card_lines < SETTINGS_CARD_LINES)
                         {

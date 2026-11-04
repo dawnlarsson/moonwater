@@ -385,6 +385,20 @@ static positive language_format(char address_to into, positive room, const char 
                                 into[out++] = digits[--count];
                 }
         }
+        // A text cut at the room's end has no half of a character left at its end: the lead byte of a sequence that did not all fit goes.
+        {
+                positive back = out;
+
+                while (back && out - back < 3 && (((unsigned char)into[back - 1]) & 0xc0) == 0x80)
+                        back--;
+                if (back && (unsigned char)into[back - 1] >= 0xc0)
+                {
+                        unsigned char lead = (unsigned char)into[back - 1];
+
+                        if (back - 1 + (lead >= 0xf0 ? 4u : lead >= 0xe0 ? 3u : 2u) > out)
+                                out = back - 1;
+                }
+        }
         into[out] = 0;
         return out;
 }
