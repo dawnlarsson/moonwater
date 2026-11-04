@@ -279,7 +279,7 @@ M = [
     ("control", "any tag taken for ours", "if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)", "if (frame[20] != 'L' || frame[25] != 'L')"),
     ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
     ("control", "the device named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, name);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
-    ("control", "the timeout of the connection ignored", "long wait = c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS;", "long wait = CTL_TIMEOUT_MS;"),
+    ("control", "the timeout of the connection ignored", "c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "c->deadline = ctl_now(c) + CTL_TIMEOUT_MS;"),
     ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
     # ---- bowl.c (the sound server a bowl's program is offered, checked by the bowl_session harness) ----
     ("bowl", "the sound server offered with no socket", "return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;", "return true;"),
@@ -304,6 +304,8 @@ M = [
     ("socket", "one socket shared by every connection", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n        c->socket.fd = (int)fd;\n        c->socket.linked = 1;\n        c->transport = (struct ctl_transport){&c->socket,", "        static struct ctl_socket shared;\n        ctl_disconnect(c);\n        shared.fd = (int)fd;\n        shared.linked = 1;\n        c->transport = (struct ctl_transport){&shared,"),
     ("socket", "a reconnect leaks the socket it replaces", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n", ""),
     ("socket", "a receive waits per part again", "if (ctl_wait_until(s, 1, until) <= 0)", "if (ctl_wait(s->fd, 1, timeout_ms) <= 0)"),
+    # A known hole (run at the end of 2026-11-04's pass): a send's second wait for room must come after the first wait's timeout and
+    # inside the budget, which the kernel's writability threshold (a quarter of the send buffer) does not reach in CHECK_audio_control.
     ("socket", "a send waits per part again", "if (ctl_wait_until(s, 0, until) <= 0)", "if (ctl_wait(s->fd, 0, timeout_ms) <= 0)"),
     ("socket", "every part of an answer given the whole timeout", "c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0", "c->transport.receive(c->transport.context, frame, 20, c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS) < 0"),
     ("socket", "a call's budget never begun", "        c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "        (void)0;"),

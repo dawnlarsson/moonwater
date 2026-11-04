@@ -180891,7 +180891,7 @@ static unsigned cck_checks, cck_failures;
                 }                                                                                                     \
         } while (0)
 
-enum { CCK_NORMAL, CCK_DRIBBLE, CCK_CHATTY, CCK_STALL };
+enum { CCK_NORMAL, CCK_DRIBBLE, CCK_CHATTY, CCK_STALL, CCK_SLOW_READ };
 
 // What a forked server saw, counted by the server into a shared page and read by the check.
 struct cck_log
@@ -180977,6 +180977,22 @@ static void cck_serve(int listener, int mode, struct cck_log *log)
         {
                 long size, length;
 
+                if (mode == CCK_SLOW_READ && log->requests >= 2)
+                {
+                        // After the handshake: a reader that takes a kilobyte every 30 ms and answers nothing.
+                        unsigned char sink[1024];
+
+                        for (;;)
+                        {
+                                ssize_t got;
+
+                                usleep(30000);
+                                got = read(conn, sink, sizeof(sink));
+                                if (got <= 0)
+                                        break;
+                        }
+                        _exit(0);
+                }
                 if (cck_read_full(conn, head, 20) < 0)
                         break;
                 size = (long)cck_get(head);
@@ -181007,7 +181023,7 @@ static void cck_serve(int listener, int mode, struct cck_log *log)
                         for (long at = 0; at < length; at++)
                         {
                                 cck_write_full(conn, frame + at, 1);
-                                usleep(8000);
+                                usleep(20000);
                         }
                         continue;
                 }
@@ -181120,6 +181136,35 @@ static void cck_test_held(const char *dir, int mode, const char *name)
         cck_stop(pid, &c);
 }
 
+// A request bigger than the connection will take at once (its send buffer is 4 KB, the server reads a kilobyte in 30 ms and
+// answers nothing): the send is given the call's budget (60 ms) and stops there, and the call fails within it. A send that
+// waited per part would go on for as long as the reader read: 20 KB is about 600 ms.
+static void cck_test_slow_send(const char *dir)
+{
+        char path[108], *name = malloc(20001);
+        struct cck_log *log;
+        pid_t pid;
+        static struct ctl c;
+        double began;
+        long got;
+        int small = 4096;
+
+        snprintf(path, sizeof(path), "%s/w", dir);
+        pid = cck_spawn(path, CCK_SLOW_READ, &log);
+        memset(&c, 0, sizeof(c));
+        CCKCHECK(pid > 0 && name && ctl_connect(&c, path) == 0, "slow send: connected");
+        if (name)
+                memset(name, 'n', 20000), name[20000] = 0;
+        setsockopt(c.socket.fd, SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
+        c.timeout_ms = 60;
+        began = cck_now_ms();
+        got = name ? ctl_set_sink_volume(&c, name, 0x8000) : CTL_FAILED;
+        CCKCHECK(got == CTL_FAILED, "slow send: the call fails (%ld)", got);
+        CCKCHECK(cck_now_ms() - began < 200.0, "slow send: the call costs its budget and no more (%.0f ms, budget 60)", cck_now_ms() - began);
+        cck_stop(pid, &c);
+        free(name);
+}
+
 // A normal answer with a budget set: the volume is taken at once.
 static void cck_test_normal(const char *dir)
 {
@@ -181211,6 +181256,7 @@ int main(void)
         cck_test_held(dir, CCK_DRIBBLE, "d");
         cck_test_held(dir, CCK_CHATTY, "c");
         cck_test_held(dir, CCK_STALL, "s");
+        cck_test_slow_send(dir);
         printf("CHECK_audio_control: %u checks, %u failures\n", cck_checks, cck_failures);
         return cck_failures ? 1 : 0;
 }
