@@ -3386,6 +3386,24 @@ static void terminal_said(b32 reading, string_address what)
         compositor_kmsg(line, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), what);
 }
 
+// A start that fails (no font, no memory, no far end): the same line in the machine's log, and one line on standard error, where a
+// program started with no font (not the launcher's words) would otherwise say nothing.
+static void terminal_refused(b32 reading, string_address what)
+{
+        string_address name = reading ? (string_address) "klog" : (string_address) "terminal";
+
+        p8 line[128];
+        positive at = 0;
+
+        terminal_said(reading, what);
+        for (positive k = 0; name[k] && at < sizeof(line) - 2; k++)
+                line[at++] = (p8)name[k];
+        for (positive k = 0; what[k] && at < sizeof(line) - 2; k++)
+                line[at++] = (p8)what[k];
+        line[at++] = '\n';
+        log_error((address_any)line, at);
+}
+
 // What is said after a program this terminal was asked to run has ended: how it did, and what closes the window. The line is
 // the table's words in [ ] after a break from what was on the screen; here and not in terminal_exit_said so a check can ask it.
 static positive terminal_exit_line(p8 address_to line, positive room)
@@ -3896,7 +3914,7 @@ static int terminal_start(void)
 
         if (!terminal_fonts(terminal_paths, terminal_face_count, terminal_bold_path, size))
         {
-                terminal_said(terminal.reading, " has no font to draw with (-f FONT.ttf)");
+                terminal_refused(terminal.reading, " has no font to draw with (-f FONT.ttf)");
                 return 1;
         }
 
@@ -3932,7 +3950,7 @@ static int terminal_start(void)
 
         if (!window || !terminal_frames())
         {
-                terminal_said(terminal.reading, " has no memory for its cells");
+                terminal_refused(terminal.reading, " has no memory for its cells");
                 return 1;
         }
 
@@ -3951,7 +3969,7 @@ static int terminal_start(void)
 
         if (terminal.child < 0)
         {
-                terminal_said(terminal.reading, " cannot open its far end");
+                terminal_refused(terminal.reading, " cannot open its far end");
                 return 1;
         }
 
