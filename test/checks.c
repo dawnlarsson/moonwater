@@ -217822,7 +217822,9 @@ b32 main(void)
                         // into a frame of no area after the tabs (zero size, the rest of its fields as compositor_preview_lift leaves them).
                         // A round with a tint compares the channels only: compositor_mix leaves a pixel mixed at cover 0 with its top byte clear, where
                         // the card keeps the byte (memory_mix_u32_row's rule, "a pixel with cover 0 is left"). The top byte is not shown (the scanout is
-                        // XRGB), and the card's rule is a kernel's to change (the mix record's cover 0), so this is the one place the rig is not whole-word.
+                        // XRGB). The card's rule is the library routine's contract (memory_mix_u32_row, bit for bit, kept as it is); compositor_mix's clear
+                        // is the processor's own, and nothing shows the byte, so the rounds with a tint or a spot compare channels: the one place the rig
+                        // is not whole-word, and kept so until the processor's rule and the library's agree on the byte.
                         unsigned int frame_mask = 0xffffffffu;
                         for (int k = 0; k < count; k++)
                                 if (gpu_random() % 3 == 0)
