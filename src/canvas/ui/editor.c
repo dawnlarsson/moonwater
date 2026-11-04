@@ -414,19 +414,10 @@ static fn editor_close_tab_asked(void)
 {
         char line[UI_CONFIRM_TEXT];
 
-        if (!doc_dirty(&editor_now()->view.doc))
-        {
-                ui_confirm_drop(&editor.confirm);
+        if (ui_confirm_gate(&editor.confirm, DOC_CMD_CLOSE, doc_dirty(&editor_now()->view.doc), WORDS(editor_closes_unsaved), line, sizeof(line)))
                 editor_close_tab();
-                return;
-        }
-        if (!ui_confirm_ask(&editor.confirm, DOC_CMD_CLOSE, ""))
-        {
-                ui_confirm_line(line, sizeof(line), WORDS(editor_closes_unsaved));
+        else
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
-                return;
-        }
-        editor_close_tab();
 }
 
 /*
@@ -439,19 +430,11 @@ static fn editor_save_asked(void)
         char line[UI_CONFIRM_TEXT];
 
         // A file with no write bit is asked for the same way: the rename that saves would replace it without a word.
-        if (!tab->changed_on_disk && (tab->mode & 0222))
-        {
-                ui_confirm_drop(&editor.confirm);
+        if (ui_confirm_gate(&editor.confirm, DOC_CMD_SAVE, tab->changed_on_disk || !(tab->mode & 0222),
+                            tab->changed_on_disk ? WORDS(editor_writes_over_changed) : WORDS(editor_writes_over_readonly), line, sizeof(line)))
                 editor_save(tab);
-                return;
-        }
-        if (!ui_confirm_ask(&editor.confirm, DOC_CMD_SAVE, ""))
-        {
-                ui_confirm_line(line, sizeof(line), tab->changed_on_disk ? WORDS(editor_writes_over_changed) : WORDS(editor_writes_over_readonly));
+        else
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
-                return;
-        }
-        editor_save(tab);
 }
 
 // The window asked to go (its close box, Alt+F4): held while a file in it has changes, which it says, and gone once none has.
@@ -540,6 +523,22 @@ static fn editor_chose(int id)
         The file tabs: the kit's segmented tabs, one item a file's name (untitled for none), the file shown chosen; a dot
         after a name that has changes. The strip is the top band of the window, UI_TABS_H high.
 */
+// A tab's name: the file's last part, untitled for none (the kit's tabs take it as the item's name).
+static const char address_to editor_tab_name(int at)
+{
+        const char address_to name = editor.tabs[at].path;
+
+        for (const char address_to s = editor.tabs[at].path; *s; s++)
+                if (*s == '/')
+                        name = s + 1;
+        return name[0] ? name : WORDS(editor_untitled);
+}
+
+static b32 editor_tab_dirty(int at)
+{
+        return doc_dirty(&editor.tabs[at].view.doc);
+}
+
 static fn editor_tabs_layout(struct ui address_to ui)
 {
         struct ui_control address_to c = &editor.strip;
@@ -547,20 +546,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
         if (c->kind != UI_TABS)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
         c->x = 0, c->y = 0, c->w = editor.width * 100 / ui->scale, c->h = UI_TABS_H;
-        c->count = editor.count;
-        c->marks = 0;
-        for (int at = 0; at < editor.count; at++)
-        {
-                const char address_to name = editor.tabs[at].path;
-
-                for (const char address_to s = editor.tabs[at].path; *s; s++)
-                        if (*s == '/')
-                                name = s + 1;
-                c->items[at] = name[0] ? name : WORDS(editor_untitled);
-                if (doc_dirty(&editor.tabs[at].view.doc))
-                        c->marks |= 1u << at;
-        }
-        c->at = editor.tab;
+        ui_tabs_fill(c, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
 }
 
 // The file shown is at is: the keys and the mouse choose a tab alike.

@@ -1110,6 +1110,24 @@ static void ui_confirm_line(char address_to into, positive room, const char addr
         string_append_bounded((string_address)into, (string_address)what, room);
 }
 
+/*
+        An app's guard for an action that is not undone: when it is not needed the confirm is dropped and the action goes (true);
+        when it is, the first press arms the confirm and the line that says so goes to into (false), and the next press with
+        nothing between does the action (true).
+*/
+static b32 ui_confirm_gate(struct ui_confirm address_to c, int what, b32 needed, const char address_to why, char address_to into, positive room)
+{
+        if (!needed)
+        {
+                ui_confirm_drop(c);
+                return true;
+        }
+        if (ui_confirm_ask(c, what, ""))
+                return true;
+        ui_confirm_line(into, room, why);
+        return false;
+}
+
 static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it can press is at least UI_TARGET each way
 static b32 ui_kit_retract; // the event is a hand's lead taken away (WINDOW_KEY_SETTLE): a place and no step the hand made
 
@@ -5021,6 +5039,21 @@ static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
 {
         ui_kit_fill(ui, &(struct ui_box){x * 256, y * 256, (x + ui_px(ui, UI_DOT)) * 256, (y + ui_px(ui, UI_DOT)) * 256, ui_px(ui, UI_DOT / 2) * 256,
                                          ui_px(ui, UI_DOT / 2) * 256}, argb, null);
+}
+
+// A strip of tabs from an app's content: count items, the chosen one at, each item's name and whether it is marked, asked of the
+// app for each item (name(i), marked(i)). The app keeps its files; the kit keeps the strip's items and marks.
+static fn ui_tabs_fill(struct ui_control address_to c, int count, int at, const char address_to (*name)(int item), b32 (*marked)(int item))
+{
+        c->count = count < UI_ITEMS ? count : UI_ITEMS;
+        c->at = at;
+        c->marks = 0;
+        for (int item = 0; item < c->count; item++)
+        {
+                c->items[item] = name(item);
+                if (marked(item))
+                        c->marks |= 1u << item;
+        }
 }
 
 // A tabs' marks (ui_tabs_draw, after the items): a dot UI_DOT_IN in from the far end of each marked item, over the strip, in the
