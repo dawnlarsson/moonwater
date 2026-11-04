@@ -2105,33 +2105,29 @@ static p64 doc_word_left(const struct doc address_to doc, p64 at)
         return at;
 }
 
-/*
-        The word at at, for a double click: the UAX #29 segment that holds it, cut again at the separators, read from a
-        window of the line round it. On blanks it is the blanks; on a separator, that one; at a line's end, the word
-        before.
-*/
-#define DOC_WORD_WINDOW 2048
+#define DOC_WORD_WINDOW 2048 // the window of text a word is read from, in bytes
 
-static fn doc_word_at(const struct doc address_to doc, p64 at, p64 address_to start, p64 address_to finish)
+/*
+        The word rule over bytes, the one rule every selection takes (the text widget's and the terminal's): the UAX #29 segment that
+        holds at, cut again at the separators, with a separator a word of its own; on blanks, the blanks; at the end of the text, the
+        word before. bytes holds length bytes of text, at is a byte offset in it, and the answer is the word's [start, finish) in bytes.
+        doc supplies the separators only (a zeroed document has the default ones).
+*/
+static fn doc_word_in(const struct doc address_to doc, const p8 address_to bytes, positive length, positive at, positive address_to start,
+                      positive address_to finish)
 {
-        p64 line = doc_line_of(doc, at), line_start = doc_line_start(doc, line), line_end = doc_line_end(doc, line);
-        p64 from = at > line_start + DOC_WORD_WINDOW / 2 ? doc_cluster_start(doc, at - DOC_WORD_WINDOW / 2) : line_start;
-        p64 to = line_end - from > DOC_WORD_WINDOW ? from + DOC_WORD_WINDOW : line_end;
-        p8 bytes[DOC_WORD_WINDOW];
         p16 props[DOC_WORD_WINDOW];
         p32 offsets[DOC_WORD_WINDOW + 1];
         p8 breaks[DOC_WORD_WINDOW + 1];
-        positive length = doc_read(doc, from, bytes, (positive)(to - from)), count = 0, here = 0;
+        positive count = 0, here = 0;
 
-        if (at == line_end && at > line_start)
-                at--;
         for (positive i = 0; i < length;)
         {
                 p32 code, size = doc_decode(bytes + i, length - i, &code);
 
                 offsets[count] = (p32)i;
                 props[count] = doc_props(code);
-                if (from + i <= at)
+                if (i <= at)
                         here = count;
                 count++;
                 i += size;
@@ -2159,9 +2155,30 @@ static fn doc_word_at(const struct doc address_to doc, p64 at, p64 address_to st
                         first--;
                 while (last < count && !breaks[last])
                         last++;
-                *start = from + offsets[first];
-                *finish = from + offsets[last];
+                *start = offsets[first];
+                *finish = offsets[last];
         }
+}
+
+// The word at at, for a double click: doc_word_in over a window of the line round it.
+static fn doc_word_at(const struct doc address_to doc, p64 at, p64 address_to start, p64 address_to finish)
+{
+        p64 line = doc_line_of(doc, at), line_start = doc_line_start(doc, line), line_end = doc_line_end(doc, line);
+        p64 from = at > line_start + DOC_WORD_WINDOW / 2 ? doc_cluster_start(doc, at - DOC_WORD_WINDOW / 2) : line_start;
+        p64 to = line_end - from > DOC_WORD_WINDOW ? from + DOC_WORD_WINDOW : line_end;
+        p8 bytes[DOC_WORD_WINDOW];
+        positive length = doc_read(doc, from, bytes, (positive)(to - from)), first, last;
+
+        if (at == line_end && at > line_start)
+                at--;
+        if (!length)
+        {
+                *start = *finish = at;
+                return;
+        }
+        doc_word_in(doc, bytes, length, (positive)(at - from), &first, &last);
+        *start = from + first;
+        *finish = from + last;
 }
 
 // How many columns a cluster takes at column: a tab to the next stop, a flag or an emoji asked for (VS16) two.

@@ -2274,17 +2274,6 @@ static b32 terminal_line_kept(unsigned int line)
         return window->head - line <= window->history && window->head - line > 0;
 }
 
-// The cell of a line at column as a word's: letters, digits and the shell's word characters.
-static b32 terminal_word_cell(unsigned int line, unsigned int column)
-{
-        unsigned int slot = line % window->history, length = window_lengths(window)[slot];
-        unsigned int c;
-
-        if (column >= length || column >= window->stride)
-                return false;
-        c = window_cells(window)[(unsigned long)slot * window->stride + column].character;
-        return c > 127 || byte_is_alpha((b8)c) || byte_is_digit((b8)c) || (c && memory_first_of((address_any) "_-./~:@%+=", (b8)c, 10));
-}
 
 // A place in the grid's ring as one number in reading order (the line, then the column in it: a column is under the window's
 // stride, which is under TERMINAL_PLACE), so the kit's selection rule compares places as it compares text offsets.
@@ -2293,6 +2282,53 @@ static b32 terminal_word_cell(unsigned int line, unsigned int column)
 static p64 terminal_place(unsigned int line, unsigned int column)
 {
         return (p64)line * TERMINAL_PLACE + column;
+}
+
+/*
+        A word of a line, by the rule every selection takes (doc_word_in, the text widget's): the cells of the line round column are
+        written as the UTF-8 the document would hold (a wide cell's right half takes no bytes of its own), the word is read there, and
+        its bytes are mapped back to cells. A right half under the press is its left cell's word. A place past the line's text is no
+        word: the place alone, as an empty line gives the text widget.
+*/
+#define TERMINAL_WORD_CELLS 256
+
+static struct doc terminal_words; // zeroed: the default separators
+
+static void terminal_word_span(unsigned int line, unsigned int column, p64 address_to start, p64 address_to finish)
+{
+        unsigned int slot = line % window->history, stride = window->stride, stored = window_lengths(window)[slot];
+        const struct window_cell address_to cells = window_cells(window) + (unsigned long)slot * stride;
+        unsigned int lo, hi, cs, cf;
+        positive offsets[TERMINAL_WORD_CELLS + 1], length = 0, at, first, last;
+        p8 bytes[TERMINAL_WORD_CELLS * 4];
+
+        stored = stored < stride ? stored : stride;
+        *start = *finish = terminal_place(line, column);
+        if (column >= stored)
+                return;
+        if (column && (cells[column].flags & WINDOW_CELL_WIDE_RIGHT))
+                column--;
+        lo = column > TERMINAL_WORD_CELLS / 2 ? column - TERMINAL_WORD_CELLS / 2 : 0;
+        hi = lo + TERMINAL_WORD_CELLS < stored ? lo + TERMINAL_WORD_CELLS : stored;
+        for (unsigned int c = lo; c < hi; c++)
+        {
+                unsigned int code = cells[c].character;
+
+                offsets[c - lo] = length;
+                if (cells[c].flags & WINDOW_CELL_WIDE_RIGHT)
+                        continue;
+                length += memory_utf8_encode(bytes + length, 4, code ? code : ' ');
+        }
+        offsets[hi - lo] = length;
+        at = offsets[column - lo];
+        doc_word_in(&terminal_words, bytes, length, at, &first, &last);
+        for (cs = lo; cs < hi; cs++)
+                if (!(cells[cs].flags & WINDOW_CELL_WIDE_RIGHT) && offsets[cs - lo] >= first)
+                        break;
+        for (cf = lo; cf < hi; cf++)
+                if (!(cells[cf].flags & WINDOW_CELL_WIDE_RIGHT) && offsets[cf - lo] >= last)
+                        break;
+        *start = terminal_place(line, cs), *finish = terminal_place(line, cf > cs ? cf : cs + 1 > hi ? hi : cs + 1);
 }
 
 // The span a kind takes at a place: its characters (the place alone), its word (the cells of the word it is in, or the one cell
@@ -2306,14 +2342,7 @@ static void terminal_select_span_of(int kind, unsigned int line, unsigned int co
         }
         if (kind == UI_SELECT_WORDS)
         {
-                unsigned int from = column, to = column;
-
-                while (from && terminal_word_cell(line, from - 1) && terminal_word_cell(line, from))
-                        from--;
-                while (terminal_word_cell(line, to))
-                        to++;
-                to += to == column;
-                *start = terminal_place(line, from), *finish = terminal_place(line, to);
+                terminal_word_span(line, column, start, finish);
                 return;
         }
         *start = *finish = terminal_place(line, column);
