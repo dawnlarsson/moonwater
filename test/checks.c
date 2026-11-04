@@ -183634,6 +183634,7 @@ static void sv_start(void)
                 audio_service.input[k].pcm.fd = -1;
         audio_service.pcm.fd = -1;
         audio_service.no_card = 1;
+        audio_service.notify = -1;
         audio_service.rate = 48000;
         audio_output_open(48000);
 }
@@ -184175,6 +184176,31 @@ static void sv_test_text(void)
         SVCHECK(audio_text_length("hello") == 5 && audio_text_length("") == 0, "the length of a text");
 }
 
+/* ---- the settings watch: a settings file written or moved into place is an event, another file is not, and an empty queue does not block ---- */
+static void sv_test_notify(void)
+{
+        char moved[300], tmp[300];
+
+        sv_setup();
+        audio_notify_open(sv_dir);
+        SVCHECK(audio_service.notify >= 0, "a watch on the settings directory is open");
+        if (audio_service.notify < 0)
+                return;
+        sv_write_file("audio.volume", "50\n");
+        SVCHECK(audio_notify_drain() == 1, "a settings file written is an event");
+        sv_write_file("other.txt", "x");
+        SVCHECK(audio_notify_drain() == 0, "a file that is not a setting is not an event");
+        /* a save is a rename into place: the file is written under another name and moved over the setting */
+        sv_path(tmp, sizeof tmp, "tmp.file");
+        sv_path(moved, sizeof moved, "audio.mute");
+        sv_write_file("tmp.file", "on\n");
+        SVCHECK(rename(tmp, moved) == 0, "a setting is moved into place");
+        SVCHECK(audio_notify_drain() == 1, "a setting moved into place is an event");
+        SVCHECK(audio_notify_drain() == 0, "an empty queue answers at once");
+        system_close(audio_service.notify);
+        audio_service.notify = -1;
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -184186,6 +184212,7 @@ static int sv_main_checks(void)
         sv_test_job();
         sv_test_bucket();
         sv_test_text();
+        sv_test_notify();
         sv_test_socket();
         sv_test_card();
         sv_test_file();

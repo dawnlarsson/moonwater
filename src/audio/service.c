@@ -80,6 +80,7 @@ static struct
 {
         struct pulse pulse;
         int listen, signals, timer;
+        int notify, settings_due;       // inotify on the settings directory (-1 when refused: the look is then every half second), and a look it asked for
         int fd[PULSE_CLIENTS];
         positive stalled[PULSE_CLIENTS];
         struct audio_pcm pcm;
@@ -2091,6 +2092,57 @@ static void audio_listen(void)
         audio_service.listen = (int)got;
 }
 
+/* ---- the settings directory is watched: the look happens when a file of theirs is moved or written, not every half second ---- */
+
+// The directory's events: 1 when one names a settings file (audio.*), or when the queue overflowed (then every file is looked at).
+static int audio_notify_drain(void)
+{
+        static unsigned char buffer[4096];
+        int hit = 0;
+
+        for (;;)
+        {
+                long got = audio_call(syscall(read), (positive)audio_service.notify, (positive)buffer, sizeof(buffer), 0, 0, 0);
+
+                if (got <= 0)
+                        break; // EAGAIN: nothing more is queued
+                for (long at = 0; at + 16 <= got;)
+                {
+                        unsigned int mask = 0, length = 0;
+                        long next;
+
+                        memory_copy(&mask, buffer + at + 4, 4);
+                        memory_copy(&length, buffer + at + 12, 4);
+                        next = at + 16 + (long)length;
+                        if (next > got)
+                                break;
+                        if (mask & 0x4000) // IN_Q_OVERFLOW
+                                hit = 1;
+                        else if (length >= 6 && memory_compare(buffer + at + 16, "audio.", 6) == 0)
+                                hit = 1;
+                        at = next;
+                }
+        }
+        return hit;
+}
+
+// The watch on the settings directory: files moved in or written or removed (inotify, IN_NONBLOCK | IN_CLOEXEC). Refused, it is -1 and the
+// loop looks at the settings every half second as it did before.
+static void audio_notify_open(const char *directory)
+{
+        long fd = audio_call(syscall(inotify_init1), 0x800 | 0x80000, 0, 0, 0, 0, 0);
+        unsigned long mask = 0x8 | 0x40 | 0x80 | 0x100 | 0x200; // IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE
+
+        if (fd < 0)
+                return;
+        if (audio_call(syscall(inotify_add_watch), (positive)fd, (positive)directory, mask, 0, 0, 0) < 0)
+        {
+                system_close((int)fd);
+                return;
+        }
+        audio_service.notify = (int)fd;
+}
+
 static b32 audio_main()
 {
         positive rate = 48000;
@@ -2098,6 +2150,7 @@ static b32 audio_main()
 
         claim_standard_descriptors();
         audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
+        audio_service.notify = -1;
         audio_service.card = audio_service.device = -1;
         audio_service.applied_in_volume = AUDIO_VOLUME_NORM;
         audio_service.applied_capture = 1;
@@ -2142,6 +2195,7 @@ static b32 audio_main()
                 return audio_test();
         audio_start();
         audio_listen();
+        audio_notify_open(audio_service.settings);
         if (audio_service.listen < 0 || audio_service.signals < 0)
                 return 1;
         audio_settings_read(1); // the person's choice of card first, so it is the one opened
@@ -2157,8 +2211,8 @@ static b32 audio_main()
 
         while (running)
         {
-                struct audio_poll wanted[4 + AUDIO_INPUTS + PULSE_CLIENTS];
-                long owner[4 + AUDIO_INPUTS + PULSE_CLIENTS];
+                struct audio_poll wanted[5 + AUDIO_INPUTS + PULSE_CLIENTS];
+                long owner[5 + AUDIO_INPUTS + PULSE_CLIENTS];
                 unsigned int count = 0;
                 positive now;
                 long awaited, wait[2] = {0, audio_busy() ? 16000000 : 250000000};
@@ -2187,6 +2241,11 @@ static b32 audio_main()
                 {
                         wanted[count] = (struct audio_poll){audio_service.wake[0], AUDIO_POLLIN, 0};
                         owner[count++] = -5;
+                }
+                if (audio_service.notify >= 0)
+                {
+                        wanted[count] = (struct audio_poll){audio_service.notify, AUDIO_POLLIN, 0};
+                        owner[count++] = -7;
                 }
                 wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
                 owner[count++] = -2;
@@ -2222,6 +2281,8 @@ static b32 audio_main()
                                         audio_clock_pass();
                                 else if (owner[at] == -5)
                                         audio_job_finish();
+                                else if (owner[at] == -7)
+                                        audio_service.settings_due |= audio_notify_drain();
                                 else if (owner[at] <= -10)
                                         audio_capture_pass((int)(-10 - owner[at]));
                                 else if (audio_service.fd[owner[at]] >= 0)
@@ -2247,8 +2308,10 @@ static b32 audio_main()
                         audio_service.state_at = now;
                         audio_page_write();
                 }
-                if (now - audio_service.settings_at >= AUDIO_SETTINGS_NS)
+                // A look when the directory said a settings file moved; with no watch, every half second.
+                if (audio_service.settings_due || (audio_service.notify < 0 && now - audio_service.settings_at >= AUDIO_SETTINGS_NS))
                 {
+                        audio_service.settings_due = 0;
                         audio_service.settings_at = now;
                         audio_settings_read(0);
                 }
