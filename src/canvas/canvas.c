@@ -3563,6 +3563,14 @@ static void canvas_master_end(struct drm_device *dev)
         Outside desktop.lock and every other lock of this file: it takes a
         card's filelist_mutex, which drm_open and drm_release hold, and the
         cards are only referenced here, not locked, while it does.
+
+        The cards are the desktop's, the ones desktop_taken asked of, taken
+        under desktop.lock (a card's outputs are consecutive). Not the list
+        under canvas_list_lock: the thread runs this, and the thread is
+        joined by callers holding that lock (canvas_thread_stop), so a pass
+        that waited for it was never joined -- Control-Alt-Backspace as
+        Canvas was turned off or its last card went hung the thread, the one
+        turning it off, and every request after them that asks for the lock.
 */
 #define CANVAS_RECLAIM_CARDS 4
 
@@ -3570,17 +3578,21 @@ static void canvas_reclaim(void)
 {
         struct drm_device *cards[CANVAS_RECLAIM_CARDS];
         unsigned int count = 0;
-        struct canvas *canvas;
+        struct output *output;
 
-        mutex_lock(&canvas_list_lock);
-        list_for_each_entry(canvas, &canvas_list, link)
+        rt_mutex_lock(&desktop.lock);
+        list_for_each_entry(output, &desktop.outputs, link)
         {
+                struct drm_device *dev = output->canvas->client.dev;
+
+                if (count && cards[count - 1] == dev)
+                        continue;
                 if (count == CANVAS_RECLAIM_CARDS)
                         break;
-                drm_dev_get(canvas->client.dev);
-                cards[count++] = canvas->client.dev;
+                drm_dev_get(dev);
+                cards[count++] = dev;
         }
-        mutex_unlock(&canvas_list_lock);
+        rt_mutex_unlock(&desktop.lock);
 
         while (count)
         {

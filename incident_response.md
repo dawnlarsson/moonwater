@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-161: Control-Alt-Backspace as Canvas went off could hang the canvas thread and every later Canvas request
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Kernel deadlock (lock order: a kthread joined under a lock the kthread takes) |
+| Moonwater exposure window | 2026-10-06 12:34 +02:00 (`cdd7decf`, the reclaim chord) to the fix, 29 days |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `--harness canvas_lifetime`, `the thread's reclaim waits for no lock its joiner holds` (16 of 17 with the parent's canvas_reclaim) |
+
+**How it was exposed.** canvas_thread_stop joins the canvas thread with kthread_stop, and its callers hold
+canvas_list_lock while it does (it asserts so with lockdep_is_held): canvas_turn_off, which is `moonwater desktop off`
+and the Control-Alt-Shift-Backspace work, and client_unregister for the last card. The file's lock order says this is
+safe because the thread takes only desktop.lock. But the thread answers Control-Alt-Backspace (canvas_suspend_check),
+and canvas_reclaim took canvas_list_lock to list the cards. A reclaim asked for, while a program held the card, in the
+moment between a turn-off taking the lock and the input handler going away, left the thread waiting for the lock and
+the turn-off waiting for the thread, both uninterruptibly. Everything after them that takes the lock waited too, and
+that includes the SPARK_CANVAS_STATUS request any user may make on /dev/spark. The window is short and needs a key
+pressed at the machine, so this is a local hang, not an escalation. Now canvas_reclaim takes the cards from
+desktop.outputs under desktop.lock. Those are the cards desktop_taken asked about, so the thread takes no lock its
+joiner holds. The check runs the real canvas_reclaim with canvas_list_lock held by a joiner and counts waits for it.
+
 ### MW-2026-160: any user read root's bound command lines from /dev/spark, all but the first byte
 
 | | |

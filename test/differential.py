@@ -34313,12 +34313,21 @@ struct output {
 static struct { struct list_head outputs; int lock; } desktop;
 static struct list_head canvas_list;
 static int canvas_list_lock;
-static void mutex_lock(int *m) { (void)m; }
+/* canvas_thread_stop joins the thread (kthread_stop) under canvas_list_lock:
+   while joiner is set that lock is held by whoever waits for the thread, and a
+   wait for it from the thread's side is one that never ends. */
+static bool joiner;
+static unsigned joins_blocked;
+static void mutex_lock(int *m) { if (m==&canvas_list_lock && joiner) joins_blocked++; }
 static void mutex_unlock(int *m) { (void)m; }
 static void rt_mutex_lock(int *m) { assert(!*m); *m=1; }
 static void rt_mutex_unlock(int *m) { assert(*m); *m=0; }
 static unsigned threads_stopped;
 static void canvas_thread_stop(void) { threads_stopped++; }
+static unsigned device_gets, device_puts, masters_ended;
+static void drm_dev_get(struct drm_device *d) { (void)d; device_gets++; }
+static void drm_dev_put(struct drm_device *d) { (void)d; device_puts++; }
+static void canvas_master_end(struct drm_device *d) { (void)d; assert(!desktop.lock); masters_ended++; }
 static struct canvas *canvas_from_client(struct drm_client_dev *c) {
     return container_of(c,struct canvas,client);
 }
@@ -34366,7 +34375,11 @@ static void drm_client_release(struct drm_client_dev *c) {
         ("src/canvas/canvas.c", "canvas_release"),
         ("src/canvas/canvas.c", "canvas_claimed_forget"),
         ("src/canvas/canvas.c", "client_unregister"),
+        ("src/canvas/canvas.c", "canvas_reclaim"),
     ])
+    reclaim_cards = re.search(r"^#define CANVAS_RECLAIM_CARDS \d+$",
+                              (args.source_root / "src/canvas/canvas.c").read_text(), re.M).group(0)
+    bodies = reclaim_cards + "\n" + bodies
 
     runner = r'''
 static struct drm_device device;
@@ -34443,6 +34456,26 @@ int main(void) {
         check("unregister forgets that card's claimed minor",
               canvas_claimed==others && !(canvas_claimed&BIT_ULL(0)));
         device.primary=NULL;
+    }
+    /* Control-Alt-Backspace is answered by the canvas thread (canvas_suspend_check),
+       and the thread is joined by a caller holding canvas_list_lock: Canvas turned off,
+       and the last card leaving. A reclaim that asked for that lock in that moment
+       waited for its own joiner, and both, with every later request for the lock,
+       waited for good. The cards are the desktop's. */
+    reset();
+    {
+        static struct drm_device second_device;
+        struct canvas *first=card(), *second=card();
+
+        second->client.dev=&second_device;
+        output(first); output(first); output(second);
+        device_gets=device_puts=masters_ended=joins_blocked=0;
+        joiner=true;
+        canvas_reclaim();
+        joiner=false;
+        check("the thread's reclaim waits for no lock its joiner holds",joins_blocked==0);
+        check("and ends the master of each card the desktop shows once, outside desktop.lock",
+              masters_ended==2 && device_gets==2 && device_puts==2 && !desktop.lock);
     }
     reset();
     printf("canvas-lifetime %u/%u\n",checks-failures,checks); return failures?1:0;
