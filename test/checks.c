@@ -148937,6 +148937,76 @@ static fn check_kit_axis_swipe(void)
         ui_kit.test_clock = 0;
 }
 
+// A multitouch pad's two fingers (compositor_pad_pinch, read from its slots): a span change of 4 mm begins a pinch, a 2x pinch out
+// is four events (begin, two updates, end) with the wheel held, a parallel move with the span still is no pinch, and the lift that
+// leaves one finger ends it. Units: 100 to a millimetre, so 20 mm is 2000 units.
+static fn check_pad_pinch(void)
+{
+        struct windows address_to table;
+        struct compositor_pad *pad = &compositor.pad[0];
+        unsigned int head, at, after;
+        int row = 1, held = 0, parallel_held = 0, lifted = 0;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+        compositor.touch.pinch_row = COMPOSITOR_NONE;
+        if (!glass_table_map())
+        {
+                touch_ok("pad pinch: the table is made", false);
+                return;
+        }
+        table = compositor.table;
+        compositor.showing[row] = 1;
+        compositor.x[row] = 10, compositor.y[row] = 20, compositor.w[row] = 200, compositor.h[row] = 100;
+        table->x[row] = 10, table->y[row] = 20, table->width[row] = 200, table->height[row] = 100;
+        compositor.stacked = 1, compositor.stack[0] = row;
+        compositor.pointer_x = 50, compositor.pointer_y = 60;
+        table->pinch_wanted[row] = 1;
+        memory_zero(pad, sizeof(*pad));
+        pad->per_mm_x = pad->per_mm_y = 100;
+
+        /* Two fingers, 20 mm apart, down: the span is measured; a parallel move is the wheel's, not a pinch. */
+        pad->mt_down[0] = 1, pad->mt_x[0] = 0, pad->mt_y[0] = 1000;
+        pad->mt_down[1] = 1, pad->mt_x[1] = 2000, pad->mt_y[1] = 1000;
+        compositor_pad_pinch(pad);
+        head = table->event_head[row];
+        for (int step = 1; step <= 3; step++)
+        {
+                pad->mt_y[0] = 1000 + step * 300, pad->mt_y[1] = 1000 + step * 300;
+                parallel_held |= compositor_pad_pinch(pad);
+        }
+        touch_ok("pad pinch: two fingers moved together, span unchanged, are the wheel's: no pinch, no event",
+                 !parallel_held && table->event_head[row] == head && !pad->pinching);
+        pad->mt_y[0] = 1000, pad->mt_y[1] = 1000;
+
+        /* A span change of 2 mm is under the slop: no pinch yet. */
+        pad->mt_x[1] = 2200;
+        held = compositor_pad_pinch(pad);
+        touch_ok("pad pinch: a span change of 2 mm is under the 4 mm slop: no pinch", !held && !pad->pinching);
+
+        /* Past it: 25 mm begins (the scale at the begin is 1024, then its update), 40 mm is 2x (2048), and the wheel is held. */
+        pad->mt_x[1] = 2500;
+        held = compositor_pad_pinch(pad);
+        pad->mt_x[1] = 4000;
+        held &= compositor_pad_pinch(pad);
+        touch_ok("pad pinch: a span past the slop begins a pinch, and the wheel is held while it goes on", held && pad->pinching &&
+                 pad->pinch_scale == 2048);
+        at = head % WINDOWS_EVENTS;
+        touch_ok("pad pinch: the pinch is begin, updates to 1280 and 2048, in the window's events",
+                 table->event_head[row] - head == 3 && table->event_type[row][at] == WINDOW_EVENT_PINCH &&
+                     (table->event_flags[row][at] & WINDOW_PINCH_BEGIN) && table->event_a[row][at] == WINDOW_PINCH_ONE &&
+                     table->event_a[row][(at + 1) % WINDOWS_EVENTS] == 1280 && table->event_a[row][(at + 2) % WINDOWS_EVENTS] == 2048);
+
+        /* One finger lifts: the pinch ends, and the one left is the wheel's again. */
+        pad->mt_down[1] = 0;
+        lifted = compositor_pad_pinch(pad);
+        after = table->event_head[row];
+        touch_ok("pad pinch: a finger lifting ends the pinch (its end is posted) and holds no wheel",
+                 !lifted && !pad->pinching && after - head == 4 &&
+                     (table->event_flags[row][(head + 3) % WINDOWS_EVENTS] & WINDOW_PINCH_END));
+}
+
 // The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
 static fn check_kit_cell_rules(void)
 {
@@ -159910,6 +159980,7 @@ b32 main()
         check_kit_pinch_zoom();
         check_pinch_delivery();
         check_kit_axis_swipe();
+        check_pad_pinch();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

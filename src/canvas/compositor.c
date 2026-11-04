@@ -3549,6 +3549,13 @@ struct compositor_pad
         int per_mm_x, per_mm_y; // its units to a millimetre
         int left_x, left_y;     // what a move or a turn left under a whole count or 120th, times the units to a millimetre
         unsigned int clicked;   // the button the pad's press went down as
+        // A multitouch pad's fingers (ABS_MT_SLOT, TRACKING_ID and POSITION_X and Y, compositor_pad_slot): a pinch is the span of
+        // two of them (compositor_pad_pinch), and is read from these, not from the primary finger the wheel reads.
+        int slot;                           // the slot the next events are about
+        int mt_down[UI_TOUCH_SLOTS];        // a finger is down in the slot
+        int mt_x[UI_TOUCH_SLOTS], mt_y[UI_TOUCH_SLOTS]; // its place, in the pad's units
+        int pinch_count, pinch_ref;         // the fingers down the span was last measured with, and that span (micro-millimetres)
+        int pinching, pinch_scale;          // a pinch is under way, and the scale it last reported (1024ths)
 };
 
 /*
@@ -15511,16 +15518,104 @@ static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
 
 // A touchpad's report over: its finger's move is a mouse's, and two fingers' are the wheel, counted for moonwater
 // debug as the device's wheel.
+/*
+        A multitouch pad's slots (ABS_MT_SLOT selects one; TRACKING_ID says whether a finger is down in it, POSITION_X and Y where
+        it is). The events of other codes are not the pad's.
+*/
+static void compositor_pad_slot(struct compositor_pad *pad, unsigned int code, int value)
+{
+        int slot = pad->slot;
+
+        if (code == COMPOSITOR_ABS_MT_SLOT)
+                pad->slot = value < 0 ? 0 : value >= UI_TOUCH_SLOTS ? UI_TOUCH_SLOTS - 1 : value;
+        else if (code == COMPOSITOR_ABS_MT_TRACKING_ID)
+                pad->mt_down[slot] = value >= 0;
+        else if (code == COMPOSITOR_ABS_MT_POSITION_X)
+                pad->mt_x[slot] = value;
+        else if (code == COMPOSITOR_ABS_MT_POSITION_Y)
+                pad->mt_y[slot] = value;
+}
+
+// The span between two slots' fingers, in micro-millimetres (the pad's units to a millimetre, per axis).
+static int compositor_pad_span(const struct compositor_pad *pad, int a, int b)
+{
+        long long pmx = pad->per_mm_x > 0 ? pad->per_mm_x : 1, pmy = pad->per_mm_y > 0 ? pad->per_mm_y : 1;
+        long long dx = (long long)(pad->mt_x[a] - pad->mt_x[b]) * 1000 / pmx, dy = (long long)(pad->mt_y[a] - pad->mt_y[b]) * 1000 / pmy;
+
+        return (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy));
+}
+
+// A pinch's threshold: 4 mm of span change, about the touch screen's 16 px at 100%.
+#define COMPOSITOR_PAD_PINCH_SLOP 4000
+
+static void compositor_pinch(const struct ui_touch_event *e);
+
+static void compositor_pad_pinch_event(int kind, int scale)
+{
+        struct ui_touch_event e = {UI_TOUCH_IDLE, 0, 0, 0, 0, 0};
+
+        e.kind = (enum ui_touch_kind)kind, e.x = compositor.pointer_x, e.y = compositor.pointer_y, e.scale = scale;
+        compositor_pinch(&e);
+}
+
+/*
+        Two fingers on a multitouch pad: a span change past the pinch slop begins a pinch, about the pointer, as the touch screen's
+        does (the same recogniser's ratio, ui_touch_ratio), and it ends when the fingers change. While a pinch is under way the
+        wheel is not turned (the pan rides in the pinch's focal point; compositor_pad_apply). A parallel move with the span still
+        is the wheel, as before. Answers whether a pinch is under way (the wheel is held).
+*/
+static int compositor_pad_pinch(struct compositor_pad *pad)
+{
+        int first = -1, second = -1, count = 0, span, scale;
+
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                if (pad->mt_down[slot])
+                {
+                        count++;
+                        if (first < 0)
+                                first = slot;
+                        else if (second < 0)
+                                second = slot;
+                }
+        if (count != pad->pinch_count)
+        {
+                if (pad->pinching)
+                        compositor_pad_pinch_event(UI_TOUCH_PINCH_END, pad->pinch_scale);
+                pad->pinching = 0, pad->pinch_scale = UI_TOUCH_PINCH_ONE;
+                pad->pinch_count = count;
+                pad->pinch_ref = count == 2 ? compositor_pad_span(pad, first, second) : 0;
+                return 0;
+        }
+        if (count != 2)
+                return 0;
+        span = compositor_pad_span(pad, first, second);
+        if (!pad->pinching)
+        {
+                if (!ui_touch_span_past(pad->pinch_ref, span, COMPOSITOR_PAD_PINCH_SLOP))
+                        return 0;
+                pad->pinching = 1, pad->pinch_scale = UI_TOUCH_PINCH_ONE;
+                compositor_pad_pinch_event(UI_TOUCH_PINCH_BEGIN, UI_TOUCH_PINCH_ONE);
+        }
+        scale = ui_touch_ratio(span, pad->pinch_ref);
+        if (scale != pad->pinch_scale)
+        {
+                pad->pinch_scale = scale;
+                compositor_pad_pinch_event(UI_TOUCH_PINCH_UPDATE, scale);
+        }
+        return 1;
+}
+
 static void compositor_pad_apply(unsigned int at, positive now)
 {
         int x, y, kind = compositor_pad_report(&compositor.pad[at], &x, &y);
+        int pinch = compositor_pad_pinch(&compositor.pad[at]);
 
         if (kind == 1)
         {
                 compositor.raw_x = compositor_counts(compositor.raw_x, x);
                 compositor.raw_y = compositor_counts(compositor.raw_y, y);
         }
-        else if (kind == 2)
+        else if (kind == 2 && !pinch)
         {
                 compositor.table->input_wheel_read[at]++;
                 compositor.table->input_wheel_used[at]++;
@@ -16170,6 +16265,9 @@ static void compositor_input_read(unsigned int at)
                                         compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
                                 }
                         }
+                        else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] && event->code >= COMPOSITOR_ABS_MT_SLOT &&
+                                 event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
+                                compositor_pad_slot(&compositor.pad[at], event->code, event->value);
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
                         {
                                 if (event->code)
