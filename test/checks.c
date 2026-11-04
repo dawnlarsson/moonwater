@@ -148803,6 +148803,140 @@ static fn check_kit_pinch_zoom(void)
                  ui_pinch_steps(steps, count, 4, ui_pinch_size(16, 0)) == 0 && ui_pinch_steps(steps, count, 4, 1000) == count - 1);
 }
 
+// A finger or a mouse event as the app gives it: the control first, and the page only when the control did not take it (the
+// page's finger then drags its region from where the press went down). A press is given its place first (ui_kit_track).
+static void axis_event(struct ui address_to ui, struct ui_control address_to c, struct ui_page address_to p, struct ui_list address_to l,
+                       struct window_event address_to e, int x, int y, b32 down)
+{
+        struct window_event at = {WINDOW_EVENT_MOTION, 0, x, y};
+
+        ui_kit_track(&at);
+        ui_event_context(e);
+        if (!ui_kit_pointer(ui, c, 1, (int)e->type, x, y, down, e->flags))
+                ui_page_pointer(ui, p, l, e, check_kit_pointer_done);
+}
+
+// The axis a control takes a finger on: a finger's first movement past the slop along the other axis is the page's (the control
+// lets go, its value stays, and the page's finger drags the region), along its own axis the control takes it. A mouse keeps it.
+static fn check_kit_axis_swipe(void)
+{
+        struct ui ui;
+        struct ui_page p;
+        struct ui_list l;
+        struct ui_control sl, sw, vs, fld;
+        struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+        struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+        struct window_event mouse_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event drag = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+        struct window_event mouse_drag = {WINDOW_EVENT_MOTION, 0, 0, 0};
+        b64 before;
+
+        memory_zero(&ui, sizeof(ui));
+        memory_zero(&l, sizeof(l));
+        memory_zero(&p, sizeof(p));
+        l.down = l.hover = l.focus = -1;
+        p.width = 400, p.height = 600, p.top = 0, p.bottom = 600;
+        ui.scale = 100;
+        kit_pointer_done = 0, kit_pointer_touch = 0;
+        ui_kit.test_clock = 5000000000ull, ui_kit.now = ui_kit.test_clock;
+
+        /* A vertical swipe on a horizontal slider: the slider lets go at once, its value is kept, and the page's finger drags. */
+        memory_zero(&sl, sizeof(sl));
+        sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+        sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+        ui_control_start(&sl);
+        before = sl.value;
+        axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
+        drag.a = 172, drag.b = 186;
+        axis_event(&ui, &sl, &p, &l, &drag, 172, 186, false);
+        check("kit axis: a vertical swipe on a horizontal slider lets the slider go, keeps its value, and the page's finger drags",
+              ui_kit_held == null && sl.value == before && !sl.down && p.finger.press.dragged);
+        axis_event(&ui, &sl, &p, &l, &up, 172, 186, false);
+
+        /* A horizontal drag on the same slider moves it, and the page does not get the finger. */
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 600, p.top = 0, p.bottom = 600;
+        sl.value = ui_q(50), sl.moved = 0, sl.down = 0;
+        axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
+        drag.a = 230, drag.b = 158;
+        axis_event(&ui, &sl, &p, &l, &drag, 230, 158, false);
+        check("kit axis: a horizontal drag on a horizontal slider moves it, and the page is not given the finger",
+              ui_kit_held == &sl && sl.value != before && !p.finger.press.dragged);
+        axis_event(&ui, &sl, &p, &l, &up, 230, 158, false);
+
+        /* A diagonal one follows the dominant axis: 30 across to 14 down is the slider's, 10 across to 44 down is the page's. */
+        memory_zero(&sl, sizeof(sl));
+        sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+        sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+        ui_control_start(&sl);
+        axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
+        drag.a = 200, drag.b = 170;
+        axis_event(&ui, &sl, &p, &l, &drag, 200, 170, false);
+        check("kit axis: a diagonal drag with the wider move across is the slider's", ui_kit_held == &sl && !p.finger.press.dragged);
+        axis_event(&ui, &sl, &p, &l, &up, 200, 170, false);
+        memory_zero(&sl, sizeof(sl));
+        sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+        sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+        ui_control_start(&sl);
+        axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
+        drag.a = 180, drag.b = 200;
+        axis_event(&ui, &sl, &p, &l, &drag, 180, 200, false);
+        check("kit axis: a diagonal drag with the taller move down is the page's, and the slider lets go", ui_kit_held == null && p.finger.press.dragged);
+        axis_event(&ui, &sl, &p, &l, &up, 180, 200, false);
+
+        /* A switch: a vertical swipe starting on it scrolls the page and does not toggle it; a horizontal drag still moves it. */
+        memory_zero(&sw, sizeof(sw));
+        sw.kind = UI_SWITCH, sw.x = 20, sw.y = 300, sw.w = 80, sw.h = 40, sw.label = "Wi-Fi";
+        ui_control_start(&sw);
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 600, p.top = 0, p.bottom = 600;
+        axis_event(&ui, &sw, &p, &l, &down, 60, 320, true);
+        drag.a = 62, drag.b = 368;
+        axis_event(&ui, &sw, &p, &l, &drag, 62, 368, false);
+        check("kit axis: a vertical swipe that starts on a switch lets the switch go and the page drags", ui_kit_held == null && !sw.on && p.finger.press.dragged);
+        axis_event(&ui, &sw, &p, &l, &up, 62, 368, false);
+        memory_zero(&sw, sizeof(sw));
+        sw.kind = UI_SWITCH, sw.x = 20, sw.y = 300, sw.w = 80, sw.h = 40, sw.label = "Wi-Fi";
+        ui_control_start(&sw);
+        axis_event(&ui, &sw, &p, &l, &down, 60, 320, true);
+        drag.a = 100, drag.b = 322;
+        axis_event(&ui, &sw, &p, &l, &drag, 100, 322, false);
+        check("kit axis: a horizontal drag on a switch takes it", ui_kit_held == &sw);
+        axis_event(&ui, &sw, &p, &l, &up, 100, 322, false);
+
+        /* A vertical slider takes the vertical drag and lets a horizontal swipe go. */
+        memory_zero(&vs, sizeof(vs));
+        vs.kind = UI_SLIDER, vs.variant = UI_SLIDER_VERTICAL, vs.x = 340, vs.y = 100, vs.w = 28, vs.h = 200, vs.label = "Volume";
+        vs.low = ui_q(0), vs.high = ui_q(100), vs.step = 0, vs.value = ui_q(50);
+        ui_control_start(&vs);
+        axis_event(&ui, &vs, &p, &l, &down, 354, 200, true);
+        drag.a = 394, drag.b = 204;
+        axis_event(&ui, &vs, &p, &l, &drag, 394, 204, false);
+        check("kit axis: a horizontal swipe on a vertical slider lets it go", ui_kit_held == null && p.finger.press.dragged);
+        axis_event(&ui, &vs, &p, &l, &up, 394, 204, false);
+
+        /* A text field keeps any press: its drag (the selection's) is not an axis of the control's, so it is not let go. */
+        memory_zero(&fld, sizeof(fld));
+        fld.kind = UI_INPUT, fld.x = 20, fld.y = 420, fld.w = 300, fld.h = 40;
+        ui_control_start(&fld);
+        /* A field has no axis of its own to refuse (its drag is the selection's, in ui_text), so a vertical move is no refusal. */
+        check("kit axis: a field has no axis to refuse, a vertical move or a horizontal one alike; a switch refuses only the vertical",
+              !ui_kit_axis_refused(&fld, 2, 40) && !ui_kit_axis_refused(&fld, 40, 2) && ui_kit_axis_refused(&sw, 2, 40) &&
+                  !ui_kit_axis_refused(&sw, 40, 2));
+
+        /* A mouse keeps its slider whatever the direction: the rule is the finger's. */
+        memory_zero(&sl, sizeof(sl));
+        sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+        sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+        ui_control_start(&sl);
+        axis_event(&ui, &sl, &p, &l, &mouse_down, 170, 156, true);
+        mouse_drag.a = 172, mouse_drag.b = 186;
+        axis_event(&ui, &sl, &p, &l, &mouse_drag, 172, 186, false);
+        check("kit axis: a mouse's vertical move on a slider keeps the slider held (the rule is a finger's)", ui_kit_held == &sl);
+        axis_event(&ui, &sl, &p, &l, &up, 172, 186, false);
+        ui_kit.test_clock = 0;
+}
+
 // The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
 static fn check_kit_cell_rules(void)
 {
@@ -159775,6 +159909,7 @@ b32 main()
         check_kit_touch_gestures();
         check_kit_pinch_zoom();
         check_pinch_delivery();
+        check_kit_axis_swipe();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

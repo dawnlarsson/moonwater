@@ -5854,6 +5854,40 @@ static fn ui_event_context(const struct window_event address_to event)
 #define UI_POINTER_RIGHT 0x111
 #define UI_POINTER_MIDDLE 0x112
 
+/*
+        A control lets go of the press it held: no value changes, and its ripple, squish and extent settle as a release would (a
+        switch's extent goes back to where its state is). The compositor's cancel, and a finger handed back to the page, use this.
+*/
+static void ui_kit_let_go_held(struct ui_control address_to c)
+{
+        ui_kit_held = null;
+        c->down = c->moved = 0;
+        c->sliding = c->sliding && c->kind == UI_SLIDER;
+        ui_kit_ripples_exit(c);
+        ui_squish_release(&c->squish);
+        if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
+                ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
+        if (c->bend > UI_REST_SCALE && !ui_kit.motion)
+                ui_spring_go(&c->held_squish, c->bend, 0);
+        c->bend = c->bend_target = 0;
+}
+
+/*
+        The axis a control takes a finger on. A horizontal slider, a switch, a checkbox and radios take a horizontal drag (the
+        finger's first movement past the slop is along it when |dx| is at least |dy|); a vertical slider takes a vertical one. A
+        button, a field and tabs take either. Refused: the finger went the other way, so the control lets go and the page scrolls.
+*/
+static b32 ui_kit_axis_refused(const struct ui_control address_to c, int dx, int dy)
+{
+        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+
+        if (c->kind == UI_SLIDER && (c->variant & UI_SLIDER_VERTICAL))
+                return ax > ay;
+        if (c->kind == UI_SLIDER || c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
+                return ay > ax;
+        return 0;
+}
+
 static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, struct ui_control address_to controls, int count, int type, int x, int y,
                                                    b32 down, unsigned int flags)
 {
@@ -5864,18 +5898,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
         // what it held springs home as a release would, and no value changes.
         if (type == WINDOW_EVENT_BUTTON && !down && (flags & WINDOW_KEY_CANCEL) && ui_kit_held)
         {
-                struct ui_control address_to c = ui_kit_held;
-
-                ui_kit_held = null;
-                c->down = c->moved = 0;
-                c->sliding = c->sliding && c->kind == UI_SLIDER;
-                ui_kit_ripples_exit(c);
-                ui_squish_release(&c->squish);
-                if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
-                        ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
-                if (c->bend > UI_REST_SCALE && !ui_kit.motion)
-                        ui_spring_go(&c->held_squish, c->bend, 0);
-                c->bend = c->bend_target = 0;
+                ui_kit_let_go_held(ui_kit_held);
                 return null;
         }
 
@@ -5888,6 +5911,13 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         int dx = x - c->press_x, dy = y - c->press_y;
                         b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100), ldy = ui_qdiv(ui_q(dy), ui_q(ui->scale) / 100);
 
+                        // A finger's first movement past the slop decides the axis: the other way, the control lets the finger go, and
+                        // the page it is on takes the drag (its finger drags the region from where the press went down).
+                        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y) && ui_kit_axis_refused(c, dx, dy))
+                        {
+                                ui_kit_let_go_held(c);
+                                return null;
+                        }
                         c->pointer_x = x, c->pointer_y = y;
                         // A finger that moves past the slop is a drag: what it lifts on is no click (the kit's press rule).
                         if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y))
