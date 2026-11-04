@@ -148239,6 +148239,50 @@ static void check_terminal_wheel_curve(void)
         wide row is seen. The curve is the same curve in more time: the radius at t times the pace is the reference's at t, and on a
         600 px row the ripple is still growing at 225 ms, where the reference's had reached its size.
 */
+/*
+        A ripple's centre: a press at device x, y in a row starts the ripple's middle at that press, at every scale the kit lays out at (100, 150,
+        200 and 300 percent), so the circle begins where the press was (a device pixel). The drawing puts the row's origin at ui_q8 of its logical x
+        (device 256ths), and the middle is measured from there: the centre in device 256ths is the origin plus the middle at the first frame.
+*/
+static fn check_kit_ripple_centre(void)
+{
+        static const int scales[4] = {100, 150, 200, 300};
+        b64 first = 5000000000ll, worst = 0;
+        b32 all = 1;
+
+        for (int k = 0; k < 4; k++)
+        {
+                struct ui ui;
+                struct ui_control c;
+                struct ui_ripple *r;
+                int bx, by, bw, bh, px, py;
+                b64 cx, cy, radius, opacity, dx, dy, error;
+
+                memory_zero(&ui, sizeof(ui));
+                memory_zero(&c, sizeof(c));
+                ui.scale = scales[k];
+                bx = ui_dev(&ui, 130), by = ui_dev(&ui, 170), bw = ui_dev(&ui, 600), bh = ui_dev(&ui, 38);
+                px = bx + ui_dev(&ui, 270), py = by + ui_dev(&ui, 12);
+                ui_kit.motion = 0;
+                ui_kit.now = (b64)first;
+                r = ui_kit_ripple_start(&ui, &c, px, py, bx, by, bw, bh, 0);
+                if (!r || !ui_ripple_at(r, &cx, &cy, &radius, &opacity))
+                {
+                        all = 0;
+                        continue;
+                }
+                dx = (b64)bx * 256 + ((cx * ui.scale / 100) >> 22);
+                dy = (b64)by * 256 + ((cy * ui.scale / 100) >> 22);
+                error = dx > (b64)px * 256 ? dx - (b64)px * 256 : (b64)px * 256 - dx;
+                if (dy > (b64)py * 256 ? dy - (b64)py * 256 : (b64)py * 256 - dy)
+                        error += 256;
+                worst = error > worst ? error : worst;
+                if (error > 256)
+                        all = 0;
+        }
+        check("kit ripple centre: a press at device x, y starts the ripple's middle there, at 100, 150, 200 and 300 percent (within a device pixel)", all);
+}
+
 static fn check_kit_ripple_pace(void)
 {
         struct ui_ripple small, wide, middle, plain;
@@ -161188,6 +161232,7 @@ b32 main()
         check_kit_scroll_ends();
         check_kit_scroll_robust();
         check_kit_ripple_pace();
+        check_kit_ripple_centre();
         check_kit_ripple_cover();
         check_kit_event_context();
         check_kit_buffers();
