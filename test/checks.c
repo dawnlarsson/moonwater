@@ -122723,6 +122723,14 @@ static fn render_reference(p32 address_to into, const struct window_cell address
 */
 static b32 render_listing;
 static positive render_list_frames;
+
+static positive render_clock(void)
+{
+        positive when[2] = {0, 0};
+
+        system_call_2(syscall(clock_gettime), 1, (positive)address_of when);
+        return when[0] * 1000000000ull + when[1];
+}
 static unsigned int address_to render_replay_pixels, address_to render_full_pixels;
 
 static unsigned int render_generation(void)
@@ -160033,6 +160041,44 @@ b32 main()
                 for (positive step = 0; step < 6000; step++)
                         if (!render_step(&listed_compared, &listed_wrong, step))
                                 refused++;
+                // The cost of a full frame on the state the steps left (min of 50 each): recorded into the list (the frame's whole
+                // list path, the same painter) against the processor's full draw of the same cells. The ops and cover bytes are the list's.
+                {
+                        positive best_record = 0, best_paint = 0;
+                        struct ui_draw_view measured;
+                        static const char line[] = "\x1b[31mred \x1b[0mThe quick brown fox jumps over the lazy dog 0123456789 abcdefghij\r\n";
+
+                        // A full grid of text, the largest the rig's ring holds (50 by 14 cells): the cells the measurement draws, the list's and the processor's alike.
+                        cursor_hide();
+                        window->columns = 50;
+                        window->rows = 14;
+                        regrid(-1);
+                        terminal_view_clamp();
+                        terminal_view_live();
+                        render_surface();
+                        for (int at = 0; at < 60; at++)
+                                term_bytes((const p8 address_to)line, sizeof(line) - 1);
+                        to_shell_length = 0;
+                        cursor_show();
+
+                        for (positive k = 0; k < 50; k++)
+                        {
+                                positive started, ended;
+
+                                terminal.own.table->shown[0] = terminal.own.table->frame[0];
+                                started = render_clock();
+                                if (terminal_frame())
+                                        ended = render_clock(), best_record = !best_record || ended - started < best_record ? ended - started : best_record;
+                                started = render_clock();
+                                render_reference(render_full_pixels, terminal.frame[2]);
+                                ended = render_clock();
+                                best_paint = !best_paint || ended - started < best_paint ? ended - started : best_paint;
+                        }
+                        if (ui_draw_list_open((unsigned char address_to)ui_app_list.base, WINDOW_LIST_BYTES, &measured) == 1)
+                                string_format(log, "  terminal list, a full %p by %p frame: %p ops, %p cover bytes; record %p us, processor's full draw %p us (min of 50)\n",
+                                              (positive)COLUMNS, (positive)ROWS, (positive)measured.count, (positive)measured.cover_used,
+                                              best_record / 1000, best_paint / 1000);
+                }
                 render_listing = false;
                 render_state = saved;
                 ui_app_list.ready = 0, ui_app_ui = null;
