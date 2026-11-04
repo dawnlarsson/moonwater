@@ -25,7 +25,8 @@
 
         One loop and one thread: it waits for the socket, the programs' sockets and the card (or the clock) in one
         poll, and a pass of it does a bounded amount of work, so a program that writes too much, reads too little or
-        stops cannot make the sound late for the others. The card is kept filled to three periods of about 5 ms; the
+        stops cannot make the sound late for the others. The card is kept filled to three periods of 2.67 ms (a stream with a
+        buffer of at most 20 ms gets four periods of 1.33 ms, 5.3 ms in all, and the output keeps the card's rate of the stream); the
         loop asks the system for a real-time priority and says so in its log when it does not get one.
 
         Programs that record are served by the same loop: every capture device of every card is a source (and the monitor
@@ -49,7 +50,11 @@
 #define AUDIO_READ 65536              // one read from a client; a client gets AUDIO_READS of them a pass
 #define AUDIO_READS 4
 #define AUDIO_ACCEPTS 4
-#define AUDIO_PERIOD 128              // frames of a period at 48000 Hz (2.67 ms)
+#define AUDIO_PERIOD 128              // frames of a period at 48000 Hz (2.67 ms), and the card kept AUDIO_FILL periods ahead of the mixer
+#define AUDIO_FILL 3
+#define AUDIO_PERIOD_LOW 64           // a low-latency output (its first stream asks for at most AUDIO_LOW_MS of buffer): 1.33 ms periods,
+#define AUDIO_FILL_LOW 4              // kept four periods ahead (5.3 ms): two and three underran under full CPU load on the USB card
+#define AUDIO_LOW_MS 20               // the buffer of a stream (tlength) at most this many ms makes its output low-latency
 #define AUDIO_STALL_NS 10000000000ull // a client that has taken none of what it was sent for this long is dropped
 #define AUDIO_RESCAN_NS 2000000000ull
 #define AUDIO_SETTINGS "/root"
@@ -89,7 +94,13 @@ static struct
         int fd[PULSE_CLIENTS];
         positive stalled[PULSE_CLIENTS];
         struct audio_pcm pcm;
-        long sink, rate;
+        long sink, rate;                // the rate the output runs at now (the card's, or the clock's)
+        long asked;                     // the rate the card is opened at next: the first stream's when the card takes it, else default_rate
+        int asked_low;                  // and with the low-latency periods (the first stream's buffer is small)
+        int low;                        // the output runs with the low-latency periods
+        long period;                    // frames of a period of the output (the clock's tick, and the card's period asked for)
+        long default_rate;              // 48000 unless -r says otherwise: what the output runs at when no stream asks for another
+        long played_rate;               // the rate of the playback stream that plays (the first of them) at the last pass; 0 when none
         int file;
         int no_card;
         long card, device;
@@ -427,7 +438,7 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
 
 static void audio_timer_set(long rate)
 {
-        long period_ns = (long)((long long)AUDIO_PERIOD * 1000000000ll / (rate ? rate : 48000));
+        long period_ns = (long)((long long)audio_service.period * 1000000000ll / (rate ? rate : 48000));
         long spec[4] = {0, period_ns, 0, period_ns}; // interval, then first expiry
 
         if (audio_service.timer < 0)
@@ -444,22 +455,26 @@ static void audio_timer_stop(void)
                 audio_call(syscall(timerfd_settime), (positive)audio_service.timer, 0, (positive)spec, 0, 0, 0);
 }
 
-// The card, or the clock when there is none: opened, and the sink made or moved to its rate. Answers 1 when a card is open.
-static int audio_output_open(long asked_rate)
+// The card, or the clock when there is none: opened, and the sink made or moved to its rate. low takes the low-latency periods (a
+// shorter period, kept fewer periods ahead). Answers 1 when a card is open.
+static int audio_output_open(long asked_rate, int low)
 {
         char name[PULSE_NAME], description[PULSE_DESCRIPTION];
         long card = -1, device = -1;
+        long period = low ? AUDIO_PERIOD_LOW : AUDIO_PERIOD, fill = low ? AUDIO_FILL_LOW : AUDIO_FILL;
 
         if (!audio_service.no_card && audio_card_pick(&card, &device, name, sizeof(name), description, sizeof(description)))
         {
                 struct audio_pcm pcm;
-                long result = audio_pcm_open(&pcm, card, device, AUDIO_ALSA_PLAYBACK, asked_rate, AUDIO_PERIOD, -1);
+                long result = audio_pcm_open_fill(&pcm, card, device, AUDIO_ALSA_PLAYBACK, asked_rate, period, -1, fill);
 
                 if (result == 0)
                 {
                         audio_service.pcm = pcm;
                         audio_service.why = audio_service.pick_why;
                         audio_service.rate = pcm.rate;
+                        audio_service.low = low;
+                        audio_service.period = period;
                         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), name);
                         audio_copy_text(audio_service.active_description, sizeof(audio_service.active_description), description);
                         if (audio_service.sink < 0)
@@ -495,6 +510,8 @@ static int audio_output_open(long asked_rate)
         audio_service.hw_done = 0;
         audio_service.why = 0;
         audio_service.rate = asked_rate;
+        audio_service.low = low;
+        audio_service.period = period;
         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), "auto_null");
         audio_copy_text(audio_service.active_description, sizeof(audio_service.active_description), "Dummy Output");
         if (audio_service.sink < 0)
@@ -503,6 +520,63 @@ static int audio_output_open(long asked_rate)
                 pulse_sink_reconfigure(&audio_service.pulse, audio_service.sink, "auto_null", "Dummy Output", asked_rate);
         audio_timer_set(audio_service.rate);
         return 0;
+}
+
+// The rate the output should run at for a stream that begins to play while nothing on it does: the stream's own when the card takes
+// it (the stream then plays with no resampler, bit for bit), else the default. takes is audio_rate_offered for an open card; a closed
+// one is asked for the stream's rate and the open falls back when the card refuses it.
+static long audio_rate_target(int takes, long stream, long fallback)
+{
+        return takes && stream > 0 ? stream : fallback;
+}
+
+// The first playback stream that plays now: its rate (0 when none plays), and in *low whether its buffer (tlength) is no more than
+// AUDIO_LOW_MS, which asks the output for the low-latency periods.
+static long audio_playing_stream(int *low)
+{
+        struct pulse *p = &audio_service.pulse;
+
+        *low = 0;
+        for (int i = 0; i < PULSE_STREAMS; i++)
+        {
+                struct pulse_stream *s = &p->stream[i];
+                long frames;
+
+                if (!s->used || s->dying || s->corked)
+                        continue;
+                frames = s->voice.frame ? (long)(s->tlength / s->voice.frame) : 0;
+                *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
+                return s->rate;
+        }
+        return 0;
+}
+
+// A stream began to play while nothing else on the output did, so no sound is in the card: the output takes its rate and its periods
+// (the card is closed and opened again, only when either is not what it runs at already). A suspended output takes them at its resume.
+static void audio_rate_choose(long stream, int low)
+{
+        int open = audio_service.pcm.fd >= 0;
+        int takes = open ? audio_rate_offered(audio_service.pcm.rates, stream) : 1;
+        long target = audio_service.no_card ? stream : audio_rate_target(takes, stream, audio_service.default_rate);
+
+        audio_service.asked = target;
+        audio_service.asked_low = low;
+        if (audio_service.suspended)
+        {
+                string_format(log, "audio: a stream at %p Hz begins on an idle output: the output runs at %p Hz on its resume\n", (positive)stream, (positive)target);
+                log_flush();
+                return;
+        }
+        if (open && target == audio_service.rate && low == audio_service.low)
+                return;
+        if (open)
+        {
+                audio_pcm_close(&audio_service.pcm);
+                audio_service.pcm.fd = -1;
+        }
+        audio_output_open(target, low);
+        string_format(log, "audio: a stream at %p Hz begins on an idle output: the output runs at %p Hz\n", (positive)stream, (positive)audio_service.rate);
+        log_flush();
 }
 
 /* ---- what is kept: the settings files, the memory of programs' volumes, the page ---- */
@@ -1183,7 +1257,7 @@ static void audio_devices_pass(void)
                 audio_pcm_close(&audio_service.pcm);
                 audio_service.pcm.fd = -1;
         }
-        audio_output_open(audio_service.rate);
+        audio_output_open(audio_service.asked, audio_service.asked_low);
 }
 
 /* ---- the loop's own numbers ---- */
@@ -1465,7 +1539,7 @@ static void audio_clock_pass(void)
 {
         unsigned long long expirations = 0;
         long got = audio_call(syscall(read), (positive)audio_service.timer, (positive)&expirations, 8, 0, 0, 0);
-        positive began = clock_monotonic_nanoseconds(), period_ns = (positive)AUDIO_PERIOD * 1000000000ull / (positive)(audio_service.rate ? audio_service.rate : 48000), took;
+        positive began = clock_monotonic_nanoseconds(), period_ns = (positive)audio_service.period * 1000000000ull / (positive)(audio_service.rate ? audio_service.rate : 48000), took;
 
         if (got != 8 || !expirations)
                 return;
@@ -1484,7 +1558,7 @@ static void audio_clock_pass(void)
         if (expirations > 16)
                 expirations = 16;
         // A tick is one period, AUDIO_PERIOD frames at the rate (period_ns above is that many frames of it): the frames are not scaled from 48000.
-        audio_produce((long)expirations * AUDIO_PERIOD);
+        audio_produce((long)expirations * audio_service.period);
         pulse_sink_delay(&audio_service.pulse, audio_service.sink, 0);
         took = clock_monotonic_nanoseconds() - began;
         audio_bucket(audio_service.stats.pass, took);
@@ -2066,6 +2140,19 @@ static b32 audio_test_run(void)
         return audio_test();
 }
 
+/*
+        The loop's memory is locked (mlockall, current and future pages), so no page is faulted in while the card is refilled: the
+        mixing path touches only what is resident. The real-time priority is audio_start's. A refusal (a user with no memory
+        limit to speak of) is logged and the loop is the same without the lock.
+*/
+static void audio_lock_memory(void)
+{
+        long locked = audio_call(syscall(mlockall), 1 | 2, 0, 0, 0, 0, 0); // MCL_CURRENT | MCL_FUTURE
+
+        if (locked != 0)
+                audio_say("memory is not locked, error", locked);
+}
+
 static void audio_start(void)
 {
         struct pulse_host host = {0};
@@ -2239,6 +2326,8 @@ static void audio_power_apply(int action)
                 }
                 audio_timer_stop();
                 audio_service.suspended = 1;
+                audio_service.asked = audio_service.default_rate; // nothing asks for a rate now: the next stream that plays asks again
+                audio_service.asked_low = 0;
                 audio_service.stats.due = 0;
                 string_format(log, "audio: no stream for five seconds: the output is suspended, and the card is released\n");
                 log_flush();
@@ -2252,10 +2341,8 @@ static void audio_power_apply(int action)
                 audio_service.resume_at = began;
                 audio_service.resume_frames = audio_service.frames_played;
                 audio_service.stats.due = 0;
-                if (audio_service.no_card)
-                        audio_timer_set(audio_service.rate);
-                else
-                        audio_output_open(audio_service.rate);
+                // The card, or the clock, at the rate and periods the stream asked for; the sink follows (audio_output_open does both).
+                audio_output_open(audio_service.asked, audio_service.asked_low);
                 string_format(log, "audio: a stream plays: the output resumes\n");
                 log_flush();
                 audio_page_write();
@@ -2327,13 +2414,16 @@ static b32 audio_main()
                 rate = 48000;
         if (audio_service.test)
                 return audio_test();
+        audio_lock_memory();
         audio_start();
         audio_listen();
         audio_notify_open(audio_service.settings);
         if (audio_service.listen < 0 || audio_service.signals < 0)
                 return 1;
         audio_settings_read(1); // the person's choice of card first, so it is the one opened
-        audio_output_open((long)rate);
+        audio_service.default_rate = audio_service.asked = (long)rate;
+        audio_service.period = AUDIO_PERIOD;
+        audio_output_open(audio_service.asked, 0);
         audio_settings_read(1); // and the volume and the mute, now that there is a sink to put them on
         audio_inputs_pass(1);   // the capture devices, and which of them is the default
         audio_apps_load();
@@ -2451,7 +2541,17 @@ static b32 audio_main()
                                                 audio_client_drop(slot);
                                 }
                         }
-                // The output follows the streams: one that plays resumes it, and none for five seconds suspends it.
+                // A stream that begins while nothing plays picks the output's rate (passed through when the card takes it) and its
+                // periods (low-latency for a short buffer); then the output follows the streams: one that plays resumes it, and none
+                // for five seconds suspends it.
+                {
+                        int low = 0;
+                        long playing = audio_playing_stream(&low);
+
+                        if (playing && !audio_service.played_rate)
+                                audio_rate_choose(playing, low);
+                        audio_service.played_rate = playing;
+                }
                 audio_power_apply(audio_power_decide(now, audio_playing_now()));
                 audio_resume_said();
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.
@@ -2494,7 +2594,7 @@ static b32 audio_main()
                 if (audio_service.pcm.fd < 0 && !audio_service.no_card && !audio_service.suspended && audio_service.rescan_at && now >= audio_service.rescan_at)
                 {
                         audio_service.rescan_at = now + AUDIO_RESCAN_NS;
-                        if (audio_output_open(audio_service.rate))
+                        if (audio_output_open(audio_service.asked, audio_service.asked_low))
                                 audio_service.rescan_at = 0;
                 }
         }

@@ -283,8 +283,22 @@ struct audio_pcm
         long frame_bytes;
         long period, buffer, boundary;
         long target;            // playback: the frames the device is kept filled to
+        unsigned int rates;     // the rates of audio_alsa_rate_table the device takes in this format and these channels (bit n: entry n)
         unsigned long xruns, resumes;
 };
+
+// The rates a card is asked about when it is asked which it takes: the usual ones of audio and the rates a device has (bit n of a mask).
+#define AUDIO_ALSA_RATES 14
+static const long audio_alsa_rate_table[AUDIO_ALSA_RATES] = {8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000};
+
+// Whether a device with the rates mask takes rate (a rate that is not in the table is taken by none).
+AUDIO_API int audio_rate_offered(unsigned int mask, long rate)
+{
+        for (int n = 0; n < AUDIO_ALSA_RATES; n++)
+                if (audio_alsa_rate_table[n] == rate)
+                        return (mask >> n) & 1;
+        return 0;
+}
 
 // "/dev/snd/pcmC<card>D<device>p" into path (at least 32 bytes).
 AUDIO_API void audio_alsa_path(char *path, long card, long device, int stream, int control)
@@ -321,25 +335,44 @@ static inline long audio_alsa_clamp(long value, long low, long high)
         return value < low ? low : value > high ? high : value;
 }
 
+// The table's rates the device takes in the set hw is narrowed to (format and channels fixed by the caller): each is asked alone, as the
+// driver narrows it. hw itself is not changed.
+static unsigned int audio_alsa_rate_mask(int fd, const struct audio_alsa_hw *hw)
+{
+        unsigned int mask = 0;
+
+        for (int n = 0; n < AUDIO_ALSA_RATES; n++)
+        {
+                struct audio_alsa_hw attempt = *hw;
+
+                audio_alsa_between(&attempt, AUDIO_ALSA_RATE, (unsigned int)audio_alsa_rate_table[n], (unsigned int)audio_alsa_rate_table[n]);
+                if (audio_alsa_refine(fd, &attempt) == 0)
+                        mask |= 1u << n;
+        }
+        return mask;
+}
+
 /*
         Opens a PCM and sets it up: card, device, playback or capture, the rate asked for (the nearest the device takes
         is the one run), and the frames of a period asked for at 48000 Hz (scaled to the rate). The result is 0 with *pcm
         filled in, or a negative errno with nothing held. subdevice is the one asked for on a device that has several
         (a loopback card), -1 for the driver's choice.
 */
-AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int stream, long rate, long period_at_48000, long subdevice)
+AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device, int stream, long rate, long period_at_48000, long subdevice, long fill)
 {
         static const long fallback_rates[] = {48000, 44100, 96000, 192000, 32000, 22050, 16000, 24000, 88200, 176400, 8000, 11025, 384000, 352800};
         char path[40];
         struct audio_alsa_hw hw;
         struct audio_alsa_sw sw;
         long fd, result, format_at = -1, channels, got_rate = 0, period;
-        unsigned int low, high;
+        unsigned int low, high, rates;
 
         memory_zero(pcm, sizeof(*pcm));
         pcm->fd = -1;
         if (card < 0 || card >= AUDIO_ALSA_CARDS || device < 0 || device >= 256 || rate < 1 || period_at_48000 < 1)
                 return AUDIO_EINVAL;
+        // Two periods at least: the device is woken when one period has played, so one period of fill would wake it with the buffer empty.
+        fill = fill < 2 ? 2 : fill > 8 ? 8 : fill;
         if (subdevice >= 0)
         {
                 // The loopback card has eight subdevices and an open takes the first free one; asking for one is a control call.
@@ -398,6 +431,7 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
         if (result < 0)
                 goto fail;
 
+        rates = audio_alsa_rate_mask((int)fd, &hw);
         // The rate asked for, then the usual ones; the first the device takes.
         for (long r = -1; r < (long)(sizeof(fallback_rates) / sizeof(fallback_rates[0])) && !got_rate; r++)
         {
@@ -460,6 +494,7 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
         pcm->stream = stream;
         pcm->card = card;
         pcm->device = device;
+        pcm->rates = rates;
         pcm->format = audio_alsa_formats[format_at].format;
         // A 16-bit card gets the shorter resampling filter (its floor is 98 dB); the wider cards keep the 144 dB one.
         if (stream == AUDIO_ALSA_PLAYBACK)
@@ -476,8 +511,8 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
                 goto fail;
         }
 
-        // Kept filled to three periods (the whole buffer when it is smaller); woken when a period has been played.
-        pcm->target = pcm->buffer < 3 * pcm->period ? pcm->buffer : 3 * pcm->period;
+        // Kept filled to fill periods (the whole buffer when it is smaller); woken when a period has been played.
+        pcm->target = pcm->buffer < fill * pcm->period ? pcm->buffer : fill * pcm->period;
         memory_zero(&sw, sizeof(sw));
         sw.tstamp_mode = 0;
         sw.period_step = 1;
@@ -521,6 +556,12 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
 fail:
         audio_sys_close((int)fd);
         return result < 0 ? result : AUDIO_EINVAL;
+}
+
+// audio_pcm_open_fill with the usual fill of three periods: the device is kept three periods ahead of the mixer.
+AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int stream, long rate, long period_at_48000, long subdevice)
+{
+        return audio_pcm_open_fill(pcm, card, device, stream, rate, period_at_48000, subdevice, 3);
 }
 
 AUDIO_API void audio_pcm_close(struct audio_pcm *pcm)

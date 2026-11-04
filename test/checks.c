@@ -180604,8 +180604,40 @@ static void al_test_negotiation(void)
                         al_fds[0].avail_min, al_fds[0].start_threshold);
                 ALCHECK(pcm.boundary >= pcm.buffer && pcm.boundary % pcm.buffer == 0, "%s: boundary %ld", al_models[cases[c].model].name, pcm.boundary);
                 ALCHECK(pcm.frame_bytes == audio_format_bytes(pcm.format) * pcm.channels, "%s: frame bytes %ld", al_models[cases[c].model].name, pcm.frame_bytes);
+                {
+                        // The rates mask is the model's list, bit for bit, in the table of rates the file asks about.
+                        unsigned int want = 0;
+
+                        for (int n = 0; n < AUDIO_ALSA_RATES; n++)
+                                for (int r = 0; al_models[cases[c].model].rates[r]; r++)
+                                        if (al_models[cases[c].model].rates[r] == audio_alsa_rate_table[n])
+                                                want |= 1u << n;
+                        ALCHECK(pcm.rates == want, "%s at %ld: rates mask %x, the model's %x", al_models[cases[c].model].name, cases[c].rate, pcm.rates, want);
+                        ALCHECK(audio_rate_offered(pcm.rates, cases[c].rate_got) == 1, "%s: the rate it runs at is offered", al_models[cases[c].model].name);
+                        ALCHECK(audio_rate_offered(pcm.rates, 22050) == (int)((want >> 3) & 1) && audio_rate_offered(pcm.rates, 12345) == 0,
+                                "%s: 22050 is offered as the model says and a rate outside the table is not", al_models[cases[c].model].name);
+                }
                 audio_pcm_close(&pcm);
                 ALCHECK(al_opens == al_closes && pcm.fd == -1, "%s: every open is closed", al_models[cases[c].model].name);
+        }
+        // A fill of two periods: the target is two periods and the wake is when one has played; a fill of one is taken as two.
+        {
+                struct audio_pcm pcm;
+                long result;
+
+                al_reset();
+                al_card_present[0] = 1;
+                al_model_of_card[0] = 0;
+                result = audio_pcm_open_fill(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 64, -1, 2);
+                ALCHECK(result == 0 && pcm.target == 2 * pcm.period && al_fds[0].start_threshold == pcm.target &&
+                                al_fds[0].avail_min == pcm.buffer - pcm.target + pcm.period,
+                        "a fill of two periods: target %ld, period %ld, buffer %ld, avail_min %ld", pcm.target, pcm.period, pcm.buffer, al_fds[0].avail_min);
+                if (result == 0)
+                        audio_pcm_close(&pcm);
+                result = audio_pcm_open_fill(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 64, -1, 1);
+                ALCHECK(result == 0 && pcm.target == 2 * pcm.period, "a fill of one period is taken as two: target %ld, period %ld", pcm.target, pcm.period);
+                if (result == 0)
+                        audio_pcm_close(&pcm);
         }
         // Cards that cannot be used: refused, nothing left open.
         for (int model = 4; model <= 5; model++)
@@ -187647,7 +187679,8 @@ static void sv_start(void)
         audio_service.devices_due = 0;
         audio_service.resume_at = 0;
         audio_service.rate = 48000;
-        audio_output_open(48000);
+        audio_service.period = AUDIO_PERIOD;
+        audio_output_open(48000, 0);
 }
 
 static void sv_setup(void)
@@ -187903,6 +187936,30 @@ static void sv_test_card(void)
         close(q[0]);
         close(q[1]);
         audio_service.pcm.fd = -1;
+}
+
+/*
+        The output's rate follows the first stream that plays on an idle output: a stream at a rate the card takes is
+        played at that rate, with no table in its voice (the passthrough: the samples are copied, and the latency is none),
+        a stream at a rate the card does not take (or no card) gets the default, and a voice moved between a rate and the
+        card's comes back to the copy when the rates meet again.
+*/
+static void sv_test_rate(void)
+{
+        unsigned int mask = (1u << 6) | (1u << 7) | (1u << 9); // 44100, 48000 and 96000, as a usb card takes them
+        static unsigned char ring[8192];
+        struct audio_voice voice;
+
+        SVCHECK(audio_rate_target(audio_rate_offered(mask, 44100), 44100, 48000) == 44100, "a stream at 44100 on a card that takes it runs the card at 44100");
+        SVCHECK(audio_rate_target(audio_rate_offered(mask, 22050), 22050, 48000) == 48000, "a stream at 22050 the card does not take gets the default");
+        SVCHECK(audio_rate_target(audio_rate_offered(mask, 96000), 96000, 48000) == 96000, "96000 is taken and runs the card at 96000");
+        SVCHECK(audio_rate_target(1, 44100, 48000) == 44100, "a closed card is asked for the stream's rate (the open falls back)");
+        SVCHECK(audio_rate_target(1, 0, 48000) == 48000, "no stream asks for a rate: the default");
+        SVCHECK(audio_voice_open(&voice, AUDIO_FORMAT_S16LE, 2, 44100, 0, 44100, ring, sizeof ring) == 0, "a voice at the card's rate opens");
+        SVCHECK(voice.table == 0 && audio_voice_delay(&voice) == 0, "at the card's rate the voice has no table and no delay (the passthrough)");
+        SVCHECK(audio_voice_retarget(&voice, 48000) == 0 && voice.table != 0 && audio_voice_delay(&voice) > 0, "moved to 48000 it takes a table and a delay");
+        SVCHECK(audio_voice_retarget(&voice, 44100) == 0 && voice.table == 0 && audio_voice_delay(&voice) == 0, "back at 44100 the table is given up");
+        audio_voice_close(&voice);
 }
 
 /* ---- the clock's file that cannot be written: let go, and the sound goes on ---- */
@@ -188377,6 +188434,7 @@ static int sv_main_checks(void)
         sv_test_spin();
         sv_test_socket();
         sv_test_card();
+        sv_test_rate();
         sv_test_file();
         sv_test_page();
         sv_test_page_rows();

@@ -6577,7 +6577,9 @@ lane_wayland()
 #       every PCM format against its definition, G.711 from the standard's own formula, the ring against a model of
 #       bytes, the channel map, mixing of known sines against integer arithmetic, the volume curve, the ramps and the
 #       fade of a stream that runs out, the resampler's error, gain and rejection against the sine itself, and a
-#       fixed-seed fuzz that gives every ring and table back.
+#       fixed-seed fuzz that gives every ring and table back. The output's rate follows its first stream (test/audio_rates.sh): a
+#       44100 Hz stream on an idle output is passed through sample for sample, a second stream of another rate is resampled to it,
+#       and the output takes the rate of the next first stream after five seconds idle.
 lane_audio()
 (
         work=$(mktemp -d)
@@ -6658,6 +6660,31 @@ lane_audio()
                 mkdir -p "$work/bin"
                 ln -sf "$work/shell" "$work/bin/audio"
                 audio_row "idle-cpu" audio_idle_cpu "$work"
+                #       The output's rate follows its first stream (test/audio_rates.sh): with no card, the server's file sink is the
+                #       output and a 44100 Hz stream is compared sample for sample; with the loopback card (snd-aloop) the card is
+                #       opened at the stream's rate. A row needs paplay, pactl and python3 and says so when one is missing.
+                if command -v paplay > /dev/null 2>&1 && command -v pactl > /dev/null 2>&1 && command -v python3 > /dev/null 2>&1
+                then
+                        audio_row "rates-file" sh test/audio_rates.sh "$work/bin/audio" "$work/rates-file" -n
+                        audio_loopback=$(awk '/\[Loopback/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
+                        if [ -n "$audio_loopback" ]
+                        then
+                                audio_row "rates-card" sh test/audio_rates.sh "$work/bin/audio" "$work/rates-card" "-d $audio_loopback:0"
+                        else
+                                note "audio rates-card: no loopback card (sudo modprobe snd-aloop index=7 pcm_substreams=2); not run"
+                        fi
+                else
+                        note "audio rates: paplay, pactl or python3 is missing; not run"
+                fi
+                #       the low-latency output (the short periods) under full CPU load on a USB card: no underrun (test/audio_load.sh).
+                #       The USB card is the hardware the periods are for; the loopback card's own timing underruns under load.
+                audio_usb=$(awk '/USB/ {print $1; exit}' /proc/asound/cards 2>/dev/null)
+                if command -v paplay > /dev/null 2>&1 && [ -n "$audio_usb" ]
+                then
+                        audio_row "load-card" sh test/audio_load.sh "$work/bin/audio" "$work/load-card" "-d $audio_usb:0"
+                else
+                        note "audio load-card: no USB card or no paplay; not run"
+                fi
         else
                 audio_status=1
                 tally "audio-idle-cpu" 0 1
