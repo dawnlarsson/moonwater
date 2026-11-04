@@ -136941,7 +136941,7 @@ static fn settings_frames_pass(void)
 {
         positive now = settings_frames.now;
 
-        ui_kit.wheel_clock = (b64)now;
+        ui_kit.test_clock = (b64)now;
         if (!settings.page.dirty || (ui_kit.busy && now < (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD))
                 return;
         ui_kit.now = (b64)now;
@@ -144271,7 +144271,7 @@ static struct wheel_run wheel_spin(const struct ui address_to ui, struct ui_scro
         {
                 for (b64 t = 0; t < gap; t += 16666667)
                 {
-                        ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                        ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(ui, s);
                         run.passed = run.passed || (b64)s->scroll * UI_SCROLL_SCALE > s->aim + UI_SCROLL_SCALE;
                 }
@@ -144280,7 +144280,7 @@ static struct wheel_run wheel_spin(const struct ui address_to ui, struct ui_scro
         }
         for (int frame = 0; frame < 300 && (s->gliding || s->back.live); frame++)
         {
-                ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
                 ui_scroll_glide(ui, s);
                 run.passed = run.passed || (b64)s->scroll * UI_SCROLL_SCALE > s->aim + UI_SCROLL_SCALE;
         }
@@ -144870,11 +144870,11 @@ static fn check_kit_place(void)
                 b32 glides = false, once = false, travel_ok = false, capped = false;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0, ui_kit.wheel_off = 0;
-                ui_kit.wheel_clock = 30000000000ll;
+                ui_kit.test_clock = 30000000000ll;
                 ui_scroll_wheel(&ui, &smooth, -120);
                 for (frame = 0; frame < 60; frame++)
                 {
-                        ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                        ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &smooth);
                         frames_between += smooth.scroll > 0 && smooth.scroll < row;
                         jump = smooth.scroll - last > jump ? smooth.scroll - last : jump;
@@ -144894,7 +144894,7 @@ static fn check_kit_place(void)
                 fast_travel = run.scroll;
                 travel_ok = slow_travel == 5 * row && fast_travel > slow_travel;
                 capped = run.fastest <= (b64)UI_WHEEL_RUN * row * UI_SCROLL_SCALE && !run.passed && !fast.gliding;
-                ui_kit.wheel_clock = 0;
+                ui_kit.test_clock = 0;
                 check("kit wheel: with the wheel smooth a notch glides to its row over several frames with no frame jumping a row, and off a notch is one row at once",
                       glides && once);
                 check("kit wheel: a single slow notch is one row, and the same notches fired fast travel further than fired slowly", travel_ok);
@@ -145201,12 +145201,12 @@ static fn check_kit_place(void)
 
                 // A wheel turn at the bottom: no move, a brief stretch from the bottom edge, and back to rest within half a second.
                 ui_scroll_set(&tall.scroll, most);
-                ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.test_clock = ui_kit.now;
                 wheel_moved = ui_scroll_wheel(&ui, &tall.scroll, -120);
                 for (frame = 0; frame < 60; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_kit.wheel_clock = ui_kit.now;
+                        ui_kit.test_clock = ui_kit.now;
                         ui_scroll_glide(&ui, &tall.scroll);
 #ifdef UI_LIST_STRETCH
                         stretch = ui_scroll_stretched(&tall.scroll, &edge);
@@ -145217,7 +145217,7 @@ static fn check_kit_place(void)
 #endif
                         shown = shown && tall.scroll.scroll == most;
                 }
-                ui_kit.wheel_clock = 0;
+                ui_kit.test_clock = 0;
                 wheel_brief = wheel_peak > 0 && wheel_edge && wheel_back;
                 check("kit list: a list that fits does not move under a wheel turn: its scroll and its rows stay where they are, frame by frame",
                       still);
@@ -145554,7 +145554,7 @@ static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int
                         q = q * 245 / 256;
                 turn.a = (int)(q / 256);
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
-                ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.test_clock = ui_kit.now;
                 b64 before = s->at;
 
                 if (turn.a)
@@ -145569,7 +145569,7 @@ static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int
                         break;
                 }
         }
-        ui_kit.wheel_clock = 0;
+        ui_kit.test_clock = 0;
 }
 
 // A finger on a list's end, the way the kit's finger path drives it: a flick moves it fast enough to fling (the region clamps at
@@ -145610,7 +145610,7 @@ static void ends_touch(struct ui address_to ui, struct ui_scroll address_to s, b
 static void hand_frame(struct ui address_to ui, struct ui_scroll address_to s)
 {
         ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
-        ui_kit.wheel_clock = ui_kit.now;
+        ui_kit.test_clock = ui_kit.now;
         ui_scroll_glide(ui, s);
 }
 
@@ -145620,7 +145620,7 @@ static void hand_report(struct ui address_to ui, struct ui_scroll address_to s, 
 {
         struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, (int)((long)q * 120 / ((long)UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE)), 0};
 
-        ui_kit.wheel_clock = ui_kit.now;
+        ui_kit.test_clock = ui_kit.now;
         ui_wheel_turn(ui, s, &report);
 }
 
@@ -145649,14 +145649,14 @@ static void check_terminal_wheel_curve(void)
         ui_kit.now = 9000000000ll, ui_kit.busy = 0;
         for (int k = 0; k < 6; k++)
         {
-                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.wheel_clock = clock;
+                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
                 terminal_bar_turn(&notch, &dirty);
                 ui_wheel_turn(&kit, &list, &notch);
                 frames_same = frames_same && terminal.bar.scroll == list.scroll && terminal.bar.at == list.at;
         }
         for (int k = 0; k < 240; k++)
         {
-                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.wheel_clock = clock;
+                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
                 ui_scroll_glide(&kit, &terminal.bar);
                 terminal_bar_out();
                 ui_scroll_glide(&kit, &list);
@@ -145666,7 +145666,7 @@ static void check_terminal_wheel_curve(void)
         moved = terminal.bar.scroll > (int)first * (int)terminal.cell_h;
         terminal_extent(&first, &shown, &total);
         view_follows = first == (unsigned int)((terminal.bar.scroll + (int)terminal.cell_h / 2) / (int)terminal.cell_h);
-        ui_kit.wheel_clock = 0;
+        ui_kit.test_clock = 0;
         terminal_view_live();
         ui_scroll_stop(&terminal.bar);
         check("terminal scrollback: a burst of notches moves the scrollback on the kit's own curve, frame for frame as a list's does",
@@ -145913,7 +145913,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
         memory_zero(&finger, sizeof(finger));
         ui.scale = 100;
         region.x = 100, region.y = 10, region.height = 400, region.view = 400, region.content = g->content, region.bounds = 1, region.scale = 100;
-        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&region, g->start);
         first_scroll = region.scroll;
         pos[0] = 0;
@@ -145945,13 +145945,13 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
 
                 while (next < count && reports[next].deliver <= tf)
                 {
-                        ui_kit.now = 9000000000ll + reports[next].deliver * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + reports[next].deliver * 1000, ui_kit.test_clock = ui_kit.now;
                         rb_give(kind, &ui, &region, &finger, &down, reports[next].want, &sent);
                         next++;
                 }
                 if (kind == 1 && down && !lifted && next == count && tf >= lift_us)
                 {
-                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now;
                         ui_finger_up(&finger, false);
                         lifted = true;
                         delivered_at_lift = region.scroll - first_scroll;
@@ -145960,7 +145960,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 {
                         long before = region.scroll;
 
-                        ui_kit.now = 9000000000ll + tf * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now;
                         if (kind == 0)
                         {
                                 struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -2, 0};
@@ -145975,7 +145975,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         out->regrab_jump = rb_abs(region.scroll - before);
                         second = true;
                 }
-                ui_kit.now = 9000000000ll + tf * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
                 if (ui_scroll_glide(&ui, &region) || 1)
                 {
                         drawn[frames] = region.scroll - first_scroll;
@@ -146010,7 +146010,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
         {
                 long before = region.scroll;
 
-                ui_kit.now += frame_us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_kit.now += frame_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
                 if (ui_scroll_glide(&ui, &region) || region.scroll != before || ui_scroll_stretched(&region, &edge))
                         out->busy_after++;
         }
@@ -146260,7 +146260,7 @@ static fn check_kit_finger_pull(void)
         memory_zero(&s, sizeof(s));
         ui.scale = 100;
         s.x = 100, s.y = 10, s.height = 200, s.view = 200, s.content = 1000, s.bounds = 1, s.scale = 100;
-        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&s, 800);
         for (int k = 0; k < 60; k++)
         {
@@ -146271,7 +146271,7 @@ static fn check_kit_finger_pull(void)
         ui_scroll_let_go(&s, 0, 0);
         for (frames = 0; frames < 120; frames++)
         {
-                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0, ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0, ui_kit.test_clock = ui_kit.now;
                 if (!ui_scroll_glide(&ui, &s) && !s.back.live)
                 {
                         home = s.scroll == 800;
@@ -146389,11 +146389,11 @@ static fn check_kit_hand(void)
         {
                 struct window_event pad = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -120, 0};
 
-                ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.test_clock = ui_kit.now;
                 ui_wheel_turn(&ui, &s, &pad);
                 check("kit hand: a trackpad's 120ths of a notch are one notch's distance, one for one, with no glide under them",
                       s.at == 400 * UI_SCROLL_SCALE + UI_ROW * UI_SCROLL_SCALE && !s.gliding && s.dragging);
-                ui_kit.wheel_clock = 0;
+                ui_kit.test_clock = 0;
         }
 
         // Natural: pixels that move the content down (fingers down) move the scroll the other way, as the finger's drag does.
@@ -146428,7 +146428,7 @@ static fn check_kit_hand(void)
         for (frame = 0; frame < 240 && !released; frame++)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
-                ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.test_clock = ui_kit.now;
                 ui_scroll_glide(&ui, &minor);
                 if (minor.back.live)
                 {
@@ -146461,13 +146461,13 @@ static fn check_kit_hand(void)
         }
         start = glide.scroll;
         ui_kit.now += 100000000ll;
-        ui_kit.wheel_clock = ui_kit.now;
+        ui_kit.test_clock = ui_kit.now;
         ui_scroll_glide(&ui, &glide); // the hand's gap passes, and the release is let go
         speed_at_start = glide.speed;
         for (frame = 0; frame < 240 && (glide.gliding || glide.back.live); frame++)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
-                ui_kit.wheel_clock = ui_kit.now;
+                ui_kit.test_clock = ui_kit.now;
                 ui_scroll_glide(&ui, &glide);
                 if (frame == 29)
                         speed_at_half = glide.speed;
@@ -146513,7 +146513,7 @@ static int wheel_stream(int content, int start, const struct wheel_note address_
         ui.scale = 100;
         memory_zero(&s, sizeof(s));
         s.x = 100, s.y = 10, s.height = 200, s.content = content, s.view = 200, s.bounds = 1, s.scale = 100;
-        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&s, start);
         for (int k = 0; k < count; k++)
                 last = notes[k].us > last ? notes[k].us : last;
@@ -146523,20 +146523,20 @@ static int wheel_stream(int content, int start, const struct wheel_note address_
                 {
                         struct window_event turn = {WINDOW_EVENT_WHEEL, 0, notes[next].a, 0};
 
-                        ui_kit.now = 9000000000ll + notes[next].us * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + notes[next].us * 1000, ui_kit.test_clock = ui_kit.now;
                         ui_wheel_turn(&ui, &s, &turn);
                         next++;
                 }
                 if (us >= next_frame)
                 {
-                        ui_kit.now = 9000000000ll + us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                        ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &s);
                         next_frame += 16667;
                         if (next == count && us > last + 500000 && !s.gliding && !s.back.live && !s.dragging && !s.hand)
                                 break;
                 }
         }
-        ui_kit.wheel_clock = 0;
+        ui_kit.test_clock = 0;
         return s.scroll;
 }
 
@@ -146642,7 +146642,7 @@ static void wheel_burst(const struct wheel_note address_to notes, int count, str
         memory_zero(&s, sizeof(s));
         memory_zero(out, sizeof(*out));
         s.x = 100, s.y = 10, s.height = 200, s.content = 1000, s.view = 200, s.bounds = 1, s.scale = 100;
-        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&s, 800);
         for (int k = 0; k < count; k++)
                 last = notes[k].us > last ? notes[k].us : last;
@@ -146650,7 +146650,7 @@ static void wheel_burst(const struct wheel_note address_to notes, int count, str
         {
                 long us = (long)frame * 16667;
 
-                ui_kit.now = 9000000000ll + us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
                 while (next < count && notes[next].us <= us)
                 {
                         struct window_event turn = {WINDOW_EVENT_WHEEL, 0, notes[next].a, 0};
@@ -146662,7 +146662,7 @@ static void wheel_burst(const struct wheel_note address_to notes, int count, str
                 out->stretch[frame] = (long)ui_scroll_stretched(&s, &edge);
                 out->frames = frame + 1;
         }
-        ui_kit.wheel_clock = 0;
+        ui_kit.test_clock = 0;
         out->scroll = s.scroll;
         out->going = ui_scroll_going(&s) || s.hand || s.dragging;
         (void)last;
@@ -148858,13 +148858,13 @@ static fn check_kit_states(void)
                 glide.x = 100, glide.y = 10, glide.height = 200, glide.content = 1000, glide.view = 200;
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
                 // The two notches are a slow turn apart (300 ms on the wheel's clock): a fast pair travels further (ui_wheel_rate).
-                ui_kit.wheel_clock = 40000000000ll;
+                ui_kit.test_clock = 40000000000ll;
                 ui_scroll_wheel(&ui, &glide, -120);
                 for (int k = 0; k < 2; k++)
                         sweep_scroll_frame(&ui, &glide);
-                ui_kit.wheel_clock += 300000000ll;
+                ui_kit.test_clock += 300000000ll;
                 ui_scroll_wheel(&ui, &glide, -120);
-                ui_kit.wheel_clock = 0;
+                ui_kit.test_clock = 0;
                 frames = sweep_settle_scroll(&ui, &glide);
                 check("kit states: a second notch during a glide carries on to two rows and goes idle there",
                       frames > 0 && !glide.gliding && glide.scroll == 2 * UI_ROW && glide.at == glide.aim);

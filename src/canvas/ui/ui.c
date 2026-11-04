@@ -2125,7 +2125,6 @@ static struct ui_kit
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
         unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
         unsigned int read_rtl;             // the way the language read when the controls were last placed
-        b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
         b64 drawn;                        // the last frame's time: the next is a display period after it
@@ -6677,7 +6676,7 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
 // The wheel's clock: a test's, when it has one, else the monotonic clock the notches arrive on.
 static b64 ui_wheel_clock(void)
 {
-        return ui_kit.wheel_clock ? ui_kit.wheel_clock : (b64)ui_kit_clock();
+        return ui_kit_clock();
 }
 
 /*
