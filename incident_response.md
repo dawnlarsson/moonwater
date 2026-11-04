@@ -41,6 +41,45 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-129: a window's door, its wake, the clipboard's door or keys.fire held by its pipe's lock froze the compositor
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Denial of service: an uninterruptible wait of the root compositor's only loop on a lock another process holds |
+| Attacker | a window's program, or whatever holds an end of one of the compositor's FIFOs (root today: they are 0600, MW-2026-020); the machine script for keys.fire |
+| Moonwater exposure window | from `c793b422` (2026-10-11 19:16 +02:00, the compositor and its doors) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_doors`) |
+
+**What it was.** Every read, write and open of a pipe takes the pipe's lock first, whatever O_NONBLOCK says, and poll takes
+none (the Wayland shim's clipboard had the same fault, MW-2026-113). A process with an end of a FIFO can keep that lock: a
+splice into the pipe from a socket that has nothing to say holds it while it waits, and one out of it into a socket that
+is full does too, and no signal frees the one that waits for it. The compositor's loop drained a window's door when it was
+knocked on, opened the door again when it closed, wrote a byte to a window's wake whenever the window had news, drained
+the clipboard's door, and opened and wrote keys.fire for a chord: a program holding its own door's or wake's lock (or the
+script holding keys.fire's) stopped every frame, the pointer and the keys for as long as it liked.
+
+**The fix.** No read, write or open of those FIFOs is made on the loop. Each row has a thread (and the clipboard's door and
+keys.fire one between them) that drains its door, opens it again when it closes and writes its wake; the loop polls the
+doors itself (poll takes no lock), takes what a knock says from the table at once, does not poll a door its thread has,
+and hears through an eventfd when the thread is done: the row is read again then (a knock that came before the drain is
+taken) and a row whose door closed is let go once its new door is open, so a program that takes the row finds one. A
+chord's line goes into a ring the thread says to keys.fire. A held lock now holds that row's thread alone.
+
+**Cost.** A program's wake is one thread hop later: from `compositor_knock` to the program's ppoll returning, 2.35 us at the
+median and 5 to 6 us at p99 on the loop, against 4.5 to 4.6 us and 10 to 11 us through the row's thread (the box, two
+pinned cores of CCD0, 20,000 wakes each, twice). A knock reaches the loop as before. 33 threads more, idle in ppoll.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_doors_held`: with a door's and a wake's locks held by
+splices from idle sockets, the loop's knock, its wake and a close of the door return at once (in a child the check waits
+three seconds for). With the threads asked nothing (every drain and write on the loop, as before) the child is still in the
+door's read after three seconds and is killed (1 failure, gcc). A headless compositor with the threads, run as root of a
+user namespace, showed forty windows opened and closed in turn (rows let go and taken again through the threads' reopen),
+eight at once, and a window after them all, and lived.
+
+**Still open.** The wake's hop could be taken off a window's own path only with a wake that is no pipe (an eventfd passed to
+the program), a change of the window protocol.
+
 ### MW-2026-128: a headless compositor's window table could be truncated under it
 
 | | |

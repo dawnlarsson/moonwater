@@ -9673,13 +9673,162 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         return 1;
 }
 
-// Every row that was given something in this pass is knocked on, once.
+/*
+        The doors' own threads. Every read, write and open of a pipe takes the pipe's lock first, whatever O_NONBLOCK says,
+        and poll takes none: a process with an end of one of the compositor's FIFOs can hold that lock for as long as it
+        likes (a splice into the pipe from a socket that has nothing to say holds it while it waits, and one out of it into
+        a socket that is full), and no signal frees the one that waits for it. So the loop makes no read, write or open of
+        a door, a wake, the clipboard's door or keys.fire: it polls the doors (no lock), takes what a knock says from the
+        table at once, and hands the pipe's work to a thread of the row's -- the knock's bytes drained, a closed door opened
+        again, a wake's byte written -- which may wait on a held lock with nothing else waiting for it; the clipboard's door
+        and keys.fire have one thread between them (the last slot). A door is not polled while its thread has it, and the
+        thread says it is done through an eventfd the loop polls: the row is read again then (a knock that came before
+        the drain is taken), and a row whose door closed is let go once its new door is open, so a program that takes the
+        row finds a door to open. With no thread (none could be made, or a check's compositor) it is done on the loop.
+*/
+#define COMPOSITOR_DOOR_DRAIN 1u
+#define COMPOSITOR_DOOR_REOPEN 2u
+#define COMPOSITOR_DOOR_WAKE 4u
+#define COMPOSITOR_DOOR_LINES 8u
+#define COMPOSITOR_DOOR_MISC WINDOWS // the clipboard's door and keys.fire
+#define COMPOSITOR_DOOR_LINE 34
+
+static struct
+{
+        thread *worker[WINDOWS + 1];
+        int kick[WINDOWS + 1];          // eventfds, the loop to a thread
+        unsigned int asked[WINDOWS + 1]; // COMPOSITOR_DOOR_* asked of a thread
+        unsigned long busy;             // the slots whose door a thread has: not polled
+        unsigned long drained, reopened; // what the threads have done, for the loop to take
+        int done;                       // the eventfd a thread knocks the loop with, or -1
+        int clip;                       // the clipboard's door, as the misc thread has it
+        char lines[16][COMPOSITOR_DOOR_LINE];
+        unsigned int line_head, line_tail; // the lines for keys.fire, the loop's to add and the thread's to say
+} compositor_doors = {.done = -1};
+
+static const char *compositor_keys_fire;
+
+// Something asked of a slot's thread: false when it has none, and the loop does it itself.
+static int compositor_door_ask(unsigned int slot, unsigned int what)
+{
+        unsigned long one = 1;
+
+        if (!compositor_doors.worker[slot])
+                return 0;
+        __atomic_or_fetch(&compositor_doors.asked[slot], what, __ATOMIC_RELEASE);
+        compositor_call(syscall(write), (positive)compositor_doors.kick[slot], (positive)&one, sizeof one, 0, 0, 0);
+        return 1;
+}
+
+// A door's knocks read and thrown away, a bounded number a turn: what a writer that never stops costs.
+static void compositor_door_drain(int handle)
+{
+        char bytes[64];
+
+        for (int reads = 0; reads < 64 && system_read_once(handle, bytes, sizeof(bytes)) > 0; reads++)
+                ;
+}
+
+// A thread done with what it was asked: the loop is told.
+static void compositor_door_told(unsigned long *into, unsigned int slot)
+{
+        unsigned long one = 1;
+
+        __atomic_or_fetch(into, 1ul << slot, __ATOMIC_RELEASE);
+        compositor_call(syscall(write), (positive)compositor_doors.done, (positive)&one, sizeof one, 0, 0, 0);
+}
+
+// A row's thread: its wake written, its door drained, and its door opened again when it closed.
+static fn compositor_door_run(address_any context)
+{
+        unsigned int row = (unsigned int)(positive)context;
+
+        for (;;)
+        {
+                struct compositor_poll wanted = {compositor_doors.kick[row], COMPOSITOR_POLLIN, 0};
+                unsigned long count = 0;
+                unsigned int asked;
+                char byte = 0;
+
+                compositor_call(syscall(ppoll), (positive)&wanted, 1, 0, 0, 0, 0);
+                compositor_call(syscall(read), (positive)compositor_doors.kick[row], (positive)&count, sizeof count, 0, 0, 0);
+                asked = __atomic_exchange_n(&compositor_doors.asked[row], 0u, __ATOMIC_ACQ_REL);
+                if (asked & COMPOSITOR_DOOR_WAKE)
+                        system_write_once(compositor.wake[row], &byte, 1);
+                if (asked & (COMPOSITOR_DOOR_DRAIN | COMPOSITOR_DOOR_REOPEN))
+                        compositor_door_drain(compositor.door[row]);
+                if (asked & COMPOSITOR_DOOR_REOPEN)
+                {
+                        p8 name[48];
+
+                        windows_door_name((char *)name, row, 0);
+                        system_close(compositor.door[row]);
+                        __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC),
+                                         __ATOMIC_RELEASE);
+                        compositor_door_told(&compositor_doors.reopened, row);
+                }
+                else if (asked & COMPOSITOR_DOOR_DRAIN)
+                        compositor_door_told(&compositor_doors.drained, row);
+        }
+}
+
+// The last slot's thread: the clipboard's door drained, and the lines for keys.fire said, each a open, a write and a close.
+static fn compositor_door_misc(address_any context)
+{
+        (void)context;
+        for (;;)
+        {
+                struct compositor_poll wanted = {compositor_doors.kick[COMPOSITOR_DOOR_MISC], COMPOSITOR_POLLIN, 0};
+                unsigned long count = 0;
+                unsigned int asked;
+
+                compositor_call(syscall(ppoll), (positive)&wanted, 1, 0, 0, 0, 0);
+                compositor_call(syscall(read), (positive)compositor_doors.kick[COMPOSITOR_DOOR_MISC], (positive)&count, sizeof count, 0, 0, 0);
+                asked = __atomic_exchange_n(&compositor_doors.asked[COMPOSITOR_DOOR_MISC], 0u, __ATOMIC_ACQ_REL);
+                while (__atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_doors.line_head, __ATOMIC_ACQUIRE))
+                {
+                        const char *line = compositor_doors.lines[compositor_doors.line_tail % 16];
+                        bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire,
+                                                        O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+
+                        if (handle >= 0)
+                        {
+                                system_write_once(handle, line, string_length((string_address)line));
+                                system_close(handle);
+                        }
+                        __atomic_add_fetch(&compositor_doors.line_tail, 1u, __ATOMIC_RELEASE);
+                }
+                if (asked & COMPOSITOR_DOOR_DRAIN)
+                {
+                        compositor_door_drain(compositor_doors.clip);
+                        compositor_door_told(&compositor_doors.drained, COMPOSITOR_DOOR_MISC);
+                }
+        }
+}
+
+// The threads, once the doors are open (clip, the clipboard's); a slot that can have none is the loop's, as every slot was.
+static void compositor_doors_start(int clip)
+{
+        compositor_doors.clip = clip;
+        compositor_doors.done = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0); // EFD_CLOEXEC | EFD_NONBLOCK
+        if (compositor_doors.done < 0)
+                return;
+        for (unsigned int slot = 0; slot <= WINDOWS; slot++)
+        {
+                compositor_doors.kick[slot] = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+                if (compositor_doors.kick[slot] >= 0)
+                        compositor_doors.worker[slot] = thread_start(slot < WINDOWS ? compositor_door_run : compositor_door_misc,
+                                                                     (address_any)(positive)slot);
+        }
+}
+
+// Every row that was given something in this pass is knocked on, once: its byte written by its thread, or here.
 static void compositor_knock(void)
 {
         char byte = 0;
 
         for (int row = 0; row < WINDOWS; row++)
-                if (compositor.woken & (1u << row))
+                if ((compositor.woken & (1u << row)) && !compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
                         system_write_once(compositor.wake[row], &byte, 1);
         compositor.woken = 0;
 }
@@ -12221,15 +12370,12 @@ static void compositor_clip_door(int row)
         }
 }
 
-// A knock on the clipboard's own door: the command line offered, cleared, or changed the settings.
-static void compositor_clip_cli(void)
+// What the command line asked in the header: an offer, a clear, the settings changed.
+static void compositor_clip_cli_read(void)
 {
         struct windows address_to table = compositor.table;
-        char bytes[64];
         unsigned int serial;
 
-        for (int reads = 0; reads < 64 && system_read_once(compositor_clip.door, bytes, sizeof(bytes)) > 0; reads++)
-                ;
         if (table->cli_clear)
         {
                 if (table->cli_clear == 2)
@@ -12249,6 +12395,16 @@ static void compositor_clip_cli(void)
                         compositor_clip_keep(table->cli_which & 1u, opened, length, -2);
                 __atomic_store_n(&table->cli_answer, opened >= 0 ? serial : serial | WINDOWS_CLIP_NO, __ATOMIC_RELEASE);
         }
+}
+
+// A knock on the clipboard's own door: its bytes drained by its thread (the door not polled until it has), or here with none.
+static void compositor_clip_cli(void)
+{
+        if (compositor_door_ask(COMPOSITOR_DOOR_MISC, COMPOSITOR_DOOR_DRAIN))
+                compositor_doors.busy |= 1ul << COMPOSITOR_DOOR_MISC;
+        else
+                compositor_door_drain(compositor_clip.door);
+        compositor_clip_cli_read();
 }
 
 // The door made with the table's, and the service's numbers in the header.
@@ -12407,16 +12563,33 @@ static void compositor_popup_leave(int row)
                         compositor_popup_parent[child] = -1;
 }
 
+// A row whose program has gone, its new door open: let go.
+static void compositor_door_gone(int row)
+{
+        compositor_clip_leave(row);
+        compositor_popup_leave(row);
+        compositor_leave(row);
+}
+
+/*
+        A door knocked on or closed: the row read at once. The knock's bytes are drained, and a closed door opened again, by
+        the row's thread (compositor_doors), which tells the loop when it is done: the row is read again then, and a row
+        whose door closed is let go once its new door is open. With no thread it is all done here, the drain first.
+*/
 static void compositor_door(int row, int returned)
 {
-        char bytes[64];
         p8 name[48];
 
+        if (compositor_door_ask((unsigned int)row, returned & COMPOSITOR_POLLHUP ? COMPOSITOR_DOOR_REOPEN : COMPOSITOR_DOOR_DRAIN))
+        {
+                compositor_doors.busy |= 1ul << row;
+                compositor_take(row);
+                compositor_clip_door(row);
+                return;
+        }
         // Any program may open a door and write to it, so what is read in one turn is bounded: one that never stops
         // writing is not the whole of the compositor's time.
-        for (int reads = 0; reads < 64 && system_read_once(compositor.door[row], bytes, sizeof(bytes)) > 0; reads++)
-                ;
-
+        compositor_door_drain(compositor.door[row]);
         compositor_take(row);
         compositor_clip_door(row);
         if (!(returned & COMPOSITOR_POLLHUP))
@@ -12425,9 +12598,28 @@ static void compositor_door(int row, int returned)
         windows_door_name((char *)name, (unsigned int)row, 0);
         system_close(compositor.door[row]);
         compositor.door[row] = (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC);
-        compositor_clip_leave(row);
-        compositor_popup_leave(row);
-        compositor_leave(row);
+        compositor_door_gone(row);
+}
+
+// What the doors' threads have done since the loop last looked: a drained row read again, a reopened one let go.
+static void compositor_doors_done(void)
+{
+        unsigned long count = 0, drained, reopened;
+
+        compositor_call(syscall(read), (positive)compositor_doors.done, (positive)&count, sizeof count, 0, 0, 0);
+        drained = __atomic_exchange_n(&compositor_doors.drained, 0ul, __ATOMIC_ACQ_REL);
+        reopened = __atomic_exchange_n(&compositor_doors.reopened, 0ul, __ATOMIC_ACQ_REL);
+        compositor_doors.busy &= ~(drained | reopened);
+        for (int row = 0; row < WINDOWS; row++)
+                if ((drained | reopened) >> row & 1)
+                {
+                        compositor_take(row);
+                        compositor_clip_door(row);
+                        if (reopened >> row & 1)
+                                compositor_door_gone(row);
+                }
+        if (drained >> COMPOSITOR_DOOR_MISC & 1)
+                compositor_clip_cli_read();
 }
 
 // How long a report took to be on its way to the screen or the window, which `moonwater latency`
@@ -12613,19 +12805,33 @@ static void compositor_keys_read(void)
 // starts a program for (tray_double, launcher_button). A script that does not listen hears nothing.
 static void compositor_script_say(const char *name)
 {
-        // Not through a link: the FIFO is the machine script's, and a link in its place would have this write into what it names.
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-        char line[34];
+        bipolar handle;
+        char line[COMPOSITOR_DOOR_LINE];
         positive length = string_length((string_address)name);
+        unsigned int head = compositor_doors.line_head;
 
+        if (length > sizeof(line) - 2)
+                length = sizeof(line) - 2;
+        // Said by the doors' thread, which may wait on the FIFO's lock (compositor_doors); a ring that is full drops the line.
+        if (compositor_doors.worker[COMPOSITOR_DOOR_MISC])
+        {
+                if (head - __atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) >= 16)
+                        return;
+                memory_copy(compositor_doors.lines[head % 16], name, length);
+                compositor_doors.lines[head % 16][length] = '\n';
+                compositor_doors.lines[head % 16][length + 1] = 0;
+                __atomic_store_n(&compositor_doors.line_head, head + 1, __ATOMIC_RELEASE);
+                compositor_door_ask(COMPOSITOR_DOOR_MISC, COMPOSITOR_DOOR_LINES);
+                return;
+        }
+        // Not through a link: the FIFO is the machine script's, and a link in its place would have this write into what it names.
+        handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
         {
                 compositor_kmsg((string_address) "compositor: nothing reads /run/moonwater/keys.fire, error ", (positive)-handle,
                                 (string_address) "");
                 return;
         }
-        if (length > sizeof(line) - 2)
-                length = sizeof(line) - 2;
         memory_copy(line, name, length);
         line[length] = '\n';
         system_write_once(handle, line, length + 1);
@@ -15830,6 +16036,8 @@ static b32 compositor_main()
                         compositor_hand_back();
                 return 1;
         }
+        // The doors' threads, which do every read and write of a FIFO the loop would otherwise wait on (compositor_doors).
+        compositor_doors_start(compositor_clip.door);
         if (headless)
                 compositor_headless_scale();
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -15852,8 +16060,8 @@ static b32 compositor_main()
         while (running)
         {
                 // The Wayland shim's: its socket, its clients, its transfers' knock and the dma-bufs its stalled clients wait for.
-                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32];
-                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0;
+                struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32]; // 6: one more, the doors' threads
+                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
 
@@ -15862,9 +16070,16 @@ static b32 compositor_main()
                 inputs = count;
                 for (unsigned int at = 0; at < compositor.input_count; at++)
                         wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
+                // A door its thread has (a drain or a reopen out) is not polled until the thread is done with it.
                 doors = count;
                 for (unsigned int row = 0; row < WINDOWS; row++)
-                        wanted[count++] = (struct compositor_poll){compositor.door[row], COMPOSITOR_POLLIN, 0};
+                        wanted[count++] = (struct compositor_poll){compositor_doors.busy >> row & 1 ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
+                                                                   COMPOSITOR_POLLIN, 0};
+                if (compositor_doors.done >= 0)
+                {
+                        done_at = count;
+                        wanted[count++] = (struct compositor_poll){compositor_doors.done, COMPOSITOR_POLLIN, 0};
+                }
                 // A flip in flight: its event says the card has let go of the buffer it showed before.
                 if (compositor.flip_pending)
                 {
@@ -15876,7 +16091,7 @@ static b32 compositor_main()
                         uevents_at = count;
                         wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
                 }
-                if (compositor_clip.door >= 0)
+                if (compositor_clip.door >= 0 && !(compositor_doors.busy >> COMPOSITOR_DOOR_MISC & 1))
                 {
                         clip_at = count;
                         wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
@@ -16017,6 +16232,8 @@ static b32 compositor_main()
                 for (unsigned int row = 0; row < WINDOWS; row++)
                         if (wanted[doors + row].returned)
                                 compositor_door((int)row, wanted[doors + row].returned);
+                if (done_at && wanted[done_at].returned)
+                        compositor_doors_done();
 
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (wayland_at && compositor_wl.started)

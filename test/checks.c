@@ -129101,6 +129101,89 @@ static void check_compositor_pipe_ignored(void)
 }
 
 /*
+        A process with an end of a window's door or wake can hold the pipe's lock (a splice into the pipe from a socket that
+        has nothing to say holds it while it waits), and every read and write of the pipe waits for that lock whatever
+        O_NONBLOCK says: the loop drained the door and wrote the wake itself, so the whole compositor waited, past SIGKILL.
+        With the doors' threads (compositor_doors) the loop's knock, its wake and a chord's line return at once while the
+        locks are held, and the row's thread is the one that waits. In a child the check waits three seconds for.
+*/
+static fn doors_hold(address_any context)
+{
+        const long address_to ends = (const long address_to)context;
+
+        compositor_call(syscall(splice), (positive)ends[0], 0, (positive)ends[1], 0, 4096, 0);
+}
+
+static void check_compositor_doors_held(void)
+{
+    static const char door[] = "compositor-door.tmp", wake[] = "compositor-wake.tmp";
+    bipolar child, waited = -1;
+    positive status = 0;
+
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)door, 0);
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)wake, 0);
+    if (system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)door, 0010600, 0) != 0 ||
+        system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)wake, 0010600, 0) != 0)
+    {
+        check("doors held: the FIFOs are made", false);
+        return;
+    }
+    child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+    if (child == 0)
+    {
+        static long held[2][2];
+        int door_socket[2], wake_socket[2];
+        timespec nap = {0, 100000000};
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        if (!glass_table_map())
+            system_call_1(syscall(exit_group), 4);
+        compositor.door[1] = (int)system_open_at(AT_FDCWD, (string_address)door, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        compositor.wake[1] = (int)system_open_at(AT_FDCWD, (string_address)wake, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC);
+        // Blocking ends: a splice into a pipe whose file is O_NONBLOCK does not wait on its socket, and holds no lock.
+        held[0][1] = (long)system_open_at(AT_FDCWD, (string_address)door, O_WRONLY | O_CLOEXEC);
+        held[1][1] = (long)system_open_at(AT_FDCWD, (string_address)wake, O_WRONLY | O_CLOEXEC);
+        if (compositor_call(syscall(socketpair), 1, 1, 0, (positive)door_socket, 0, 0) != 0 ||
+            compositor_call(syscall(socketpair), 1, 1, 0, (positive)wake_socket, 0, 0) != 0 || compositor.door[1] < 0 ||
+            compositor.wake[1] < 0 || held[0][1] < 0 || held[1][1] < 0)
+            system_call_1(syscall(exit_group), 5);
+        held[0][0] = door_socket[0], held[1][0] = wake_socket[0];
+        // The two splices take the door's and the wake's locks and keep them: their sockets have nothing to say.
+        thread_start(doors_hold, (address_any)held[0]);
+        thread_start(doors_hold, (address_any)held[1]);
+        system_call_2(syscall(nanosleep), (positive)&nap, 0);
+        compositor_doors_start(-1);
+        compositor_door(1, COMPOSITOR_POLLIN);
+        compositor.woken = 1u << 1;
+        compositor_knock();
+        compositor_door(1, COMPOSITOR_POLLIN | COMPOSITOR_POLLHUP);
+        system_call_1(syscall(exit_group), 0);
+    }
+    for (int tries = 0; child > 0 && tries < 300 && waited != child; tries++)
+    {
+        timespec nap = {0, 10000000};
+
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 1, 0);
+        if (waited != child)
+            system_call_2(syscall(nanosleep), (positive)&nap, 0);
+    }
+    if (child > 0 && waited != child)
+    {
+        system_call_2(syscall(kill), (positive)child, 9);
+        system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    }
+    check("doors held: a door's and a wake's held locks do not hold the loop: a knock, a wake and a close return at once",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)door, 0);
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)wake, 0);
+}
+
+/*
         A headless compositor's table is a memfd sealed against shrinking, as one with a card has: it was a plain file in
         /run/moonwater, which whatever writes the table could cut to nothing under the compositor's mapping, and its next read
         of the table was SIGBUS. In a child, root of a user namespace of its own with a /run of its own: the table made as
@@ -158638,6 +158721,7 @@ b32 main()
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
         check_compositor_table_sealed();
+        check_compositor_doors_held();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
