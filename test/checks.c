@@ -9770,6 +9770,23 @@ static AUDIO_C_UNUSED void audio_c_pack24(unsigned char *dst, const unsigned *sr
 
 //      A hosted check has no library: it takes this C for the routines of the library's names, which mix.c calls.
 #ifdef AUDIO_C_AS_LIBRARY
+// The library's memory names as mix.c calls them, for a hosted build: the C library's own copy and fill (a shim of the test, which
+// is not the code being measured).
+void *memory_copy_apart(void *destination, const void *source, unsigned long size)
+{
+        return memcpy(destination, source, size);
+}
+
+void *memory_copy(void *destination, const void *source, unsigned long size)
+{
+        return memmove(destination, source, size);
+}
+
+void *memory_fill(void *destination, unsigned char value, unsigned long size)
+{
+        return memset(destination, value, size);
+}
+
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
 {
         audio_c_widen(dst, src, samples, kind);
@@ -121684,6 +121701,10 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #include "../src/canvas/ui/taskbar.c"
 #endif
 #if MOONWATER_UI_MIXER
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 #include "../src/canvas/ui/mixer.c"
@@ -171965,6 +171986,10 @@ int main(int argc, char **argv)
 #undef SHARED_audio_loops
 
 //      The mixing core as the service has it, with lib.c in the translation unit: the loops it calls are the assembly.
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 /*
         CHECK_audiolib: lib.c's audio routines, the loops of the sound server's mixing core (src/audio/mix.c), on the
@@ -173364,6 +173389,10 @@ b32 main(void)
 #undef AUDIO_C_AS_LIBRARY
 #undef SHARED_audio_loops
 
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 
 static unsigned au_checks, au_failures;
@@ -175035,6 +175064,10 @@ int main(void)
 #undef AUDIO_C_AS_LIBRARY
 #undef SHARED_audio_loops
 
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 
 static long audio_sys_open(const char *path, int flags);
@@ -176614,6 +176647,10 @@ int main(void)
 #undef AUDIO_C_AS_LIBRARY
 #undef SHARED_audio_loops
 
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 // The library's names control.c calls, as the libc has them for a hosted build (the freestanding build has the library's own).
@@ -182782,6 +182819,10 @@ static long system_call_6(long number, long a, long b, long c, long d, long e, l
         return r < 0 ? -(long)errno : r;
 }
 
+#ifndef offset_of
+#include <stddef.h>
+#define offset_of(type, member) offsetof(type, member)
+#endif
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 // The library's names control.c calls, as the libc has them for a hosted build.

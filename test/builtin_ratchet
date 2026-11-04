@@ -2,7 +2,6 @@
 # and the aim is none. Lower it with python3 test/function_audit.py --builtins.
 kernel/patch/fold-x86.h 5
 src/audio/alsa.c 17
-src/audio/mix.c 21
 src/audio/pulse.c 24
 src/audio/service.c 6
 src/audio/state.c 1

@@ -255,7 +255,7 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
         if (kind > 8)
         {
                 for (long c = 0; c < channels; c++)
-                        __builtin_memset(dst[c], 0, (unsigned long)frames * sizeof(float));
+                        memory_fill(dst[c], 0, (unsigned long)frames * sizeof(float));
                 return;
         }
         while (done < frames)
@@ -280,7 +280,7 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
 static inline int audio_round16(float v)
 {
         float r;
-        int bits;
+        union { float f; int i; } bits;
 
         if (v != v)
                 return 0;
@@ -288,22 +288,23 @@ static inline int audio_round16(float v)
         v = v > 32767.0f ? 32767.0f : v;
         v = v < -32768.0f ? -32768.0f : v;
         r = v + 12582912.0f; // 1.5 * 2^23: the sum's low bits are the rounded integer
-        __builtin_memcpy(&bits, &r, 4);
-        return (bits & 0x7fffff) - 0x400000;
+        bits.f = r;
+        return (bits.i & 0x7fffff) - 0x400000;
 }
 
 static inline int audio_round_wide(float v, double scale, double high)
 {
         double d = (double)v * scale, r;
-        long long bits;
 
         if (v != v)
                 return 0;
         d = d > high ? high : d;
         d = d < -high - 1.0 ? -high - 1.0 : d;
         r = d + 6755399441055744.0; // 1.5 * 2^52
-        __builtin_memcpy(&bits, &r, 8);
-        return (int)(bits & 0xffffffffll);
+        union { double d; long long i; } bits;
+
+        bits.d = r;
+        return (int)(bits.i & 0xffffffffll);
 }
 
 /*
@@ -358,23 +359,30 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
                         {
                         case AUDIO_FORMAT_S16LE:
                         {
-                                short x = (short)audio_round16(v);
+                                unsigned short x = (unsigned short)(short)audio_round16(v);
 
-                                __builtin_memcpy(q, &x, 2);
+                                q[0] = (unsigned char)x;
+                                q[1] = (unsigned char)(x >> 8);
                                 break;
                         }
                         case AUDIO_FORMAT_S32LE:
                         {
-                                int x = audio_round_wide(v, 2147483648.0, 2147483647.0);
+                                unsigned int x = (unsigned int)audio_round_wide(v, 2147483648.0, 2147483647.0);
 
-                                __builtin_memcpy(q, &x, 4);
+                                q[0] = (unsigned char)x;
+                                q[1] = (unsigned char)(x >> 8);
+                                q[2] = (unsigned char)(x >> 16);
+                                q[3] = (unsigned char)(x >> 24);
                                 break;
                         }
                         case AUDIO_FORMAT_S24_32LE:
                         {
-                                int x = audio_round_wide(v, 8388608.0, 8388607.0);
+                                unsigned int x = (unsigned int)audio_round_wide(v, 8388608.0, 8388607.0);
 
-                                __builtin_memcpy(q, &x, 4);
+                                q[0] = (unsigned char)x;
+                                q[1] = (unsigned char)(x >> 8);
+                                q[2] = (unsigned char)(x >> 16);
+                                q[3] = (unsigned char)(x >> 24);
                                 break;
                         }
                         case AUDIO_FORMAT_S24LE:
@@ -388,9 +396,13 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
                         }
                         default: // F32LE
                         {
-                                float x = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+                                union { float f; unsigned int i; } x;
 
-                                __builtin_memcpy(q, &x, 4);
+                                x.f = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+                                q[0] = (unsigned char)x.i;
+                                q[1] = (unsigned char)(x.i >> 8);
+                                q[2] = (unsigned char)(x.i >> 16);
+                                q[3] = (unsigned char)(x.i >> 24);
                                 break;
                         }
                         }
@@ -447,9 +459,9 @@ AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned c
         first = ring->size - from;
         if (first > n)
                 first = n;
-        __builtin_memcpy(ring->data + from, src, first);
+        memory_copy_apart(ring->data + from, src, first);
         if (n > first)
-                __builtin_memcpy(ring->data, src + first, n - first);
+                memory_copy_apart(ring->data, src + first, n - first);
         ring->write += n;
         if (ring->write > ring->limit)
                 ring->limit = ring->write;
@@ -468,9 +480,9 @@ AUDIO_API unsigned long audio_ring_put_silence(struct audio_ring *ring, unsigned
         first = ring->size - from;
         if (first > n)
                 first = n;
-        __builtin_memset(ring->data + from, ring->silence, first);
+        memory_fill(ring->data + from, ring->silence, first);
         if (n > first)
-                __builtin_memset(ring->data, ring->silence, n - first);
+                memory_fill(ring->data, ring->silence, n - first);
         ring->write += n;
         if (ring->write > ring->limit)
                 ring->limit = ring->write;
@@ -750,8 +762,8 @@ AUDIO_API void audio_rs_reset(struct audio_resampler *rs)
 {
         long lead = rs->table->taps / 2 - 1;
 
-        __builtin_memset(rs->buf[0], 0, (unsigned long)lead * sizeof(float));
-        __builtin_memset(rs->buf[1], 0, (unsigned long)lead * sizeof(float));
+        memory_fill(rs->buf[0], 0, (unsigned long)lead * sizeof(float));
+        memory_fill(rs->buf[1], 0, (unsigned long)lead * sizeof(float));
         rs->have = lead;
         rs->pos = 0;
         rs->k = 0;
@@ -827,7 +839,7 @@ AUDIO_API long audio_rs_run(struct audio_resampler *rs, float *out0, float *out1
         if (drop > 0)
         {
                 for (int c = 0; c < 2; c++)
-                        __builtin_memmove(rs->buf[c], rs->buf[c] + drop, (unsigned long)(rs->have - drop) * sizeof(float));
+                        memory_copy(rs->buf[c], rs->buf[c] + drop, (unsigned long)(rs->have - drop) * sizeof(float));
                 rs->have -= drop;
                 rs->pos -= (unsigned long)drop << 32;
         }
@@ -866,7 +878,7 @@ struct audio_sink
 
 AUDIO_API void audio_sink_open(struct audio_sink *sink, long rate, long channels)
 {
-        __builtin_memset(sink, 0, sizeof(*sink));
+        memory_fill(sink, 0, sizeof(*sink));
         sink->rate = rate;
         sink->channels = channels;
         sink->master_target = sink->master_now = 1.0f;
@@ -885,7 +897,7 @@ AUDIO_API int audio_voice_open(struct audio_voice *voice, long format, long chan
         if (!bytes || channels < 1 || channels > AUDIO_CHANNELS_MAX || rate < 1 || rate > AUDIO_RATE_MAX || out_rate < 1 ||
             out_rate > AUDIO_RATE_MAX || ring_bytes < (unsigned long)(bytes * channels))
                 return AUDIO_E_INVALID;
-        __builtin_memset(voice, 0, offset_of(struct audio_voice, rs));
+        memory_fill(voice, 0, offset_of(struct audio_voice, rs));
         voice->format = format;
         voice->channels = channels;
         voice->rate = rate;
@@ -1063,8 +1075,8 @@ static void audio_voice_pull(struct audio_sink *sink, struct audio_voice *voice,
                 }
                 if (voice->identity)
                 {
-                        __builtin_memcpy(out0, sink->decoded[0], (unsigned long)n * sizeof(float));
-                        __builtin_memcpy(out1, sink->decoded[1], (unsigned long)n * sizeof(float));
+                        memory_copy_apart(out0, sink->decoded[0], (unsigned long)n * sizeof(float));
+                        memory_copy_apart(out1, sink->decoded[1], (unsigned long)n * sizeof(float));
                 }
                 else
                         f32_rows_mix2(out0, out1, sink->decoded[0], AUDIO_BLOCK, voice->remix[0], (unsigned long)n, (unsigned long)voice->channels);
@@ -1125,8 +1137,8 @@ AUDIO_API long audio_voice_mix(struct audio_sink *sink, struct audio_voice *voic
 
                         if (zeros > audio_rs_room(rs))
                                 zeros = audio_rs_room(rs);
-                        __builtin_memset(rs->buf[0] + rs->have, 0, (unsigned long)zeros * sizeof(float));
-                        __builtin_memset(rs->buf[1] + rs->have, 0, (unsigned long)zeros * sizeof(float));
+                        memory_fill(rs->buf[0] + rs->have, 0, (unsigned long)zeros * sizeof(float));
+                        memory_fill(rs->buf[1] + rs->have, 0, (unsigned long)zeros * sizeof(float));
                         rs->have += zeros;
                         voice->flushed = 1;
                 }
@@ -1170,7 +1182,7 @@ AUDIO_API void audio_sink_begin(struct audio_sink *sink, long frames)
                 frames = AUDIO_BLOCK;
         if (frames > 0)
                 for (int c = 0; c < 2; c++)
-                        __builtin_memset(sink->bus[c], 0, (unsigned long)frames * sizeof(float));
+                        memory_fill(sink->bus[c], 0, (unsigned long)frames * sizeof(float));
 }
 
 AUDIO_API void audio_sink_gain(struct audio_sink *sink, float gain)
