@@ -134593,11 +134593,28 @@ static void check_compositor_edges(void)
     edge_show_controls();
     check("edge: with motion reduced the controls are in their place at once", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.slide == 0);
 
-    /* A full-screen window: the first swipe into it is its own, with an indicator; a second within 2 s is the system's; a later one is the window's again. */
+    /* A full-screen window (a client's set_fullscreen, or a placement's): the first swipe into it is its own, with an indicator; a second
+       within 2 s is the system's; a later one is the window's again. A maximised window that is not full-screen takes the first swipe at once. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor_fullscreen_row(1);
+    check("edge fullscreen: a client's fullscreen request marks the window full-screen, and it is maximised",
+          compositor.fullscreen[1] && compositor.arranged[1] == COMPOSITOR_MAXIMIZED);
     edge_setup(0);
     table = compositor.table;
     layout_show(1, 0, 0, 256, 256);
     compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    edge_drag(128, 252, 128, 200, 6, 10000);
+    check("edge fullscreen: an ordinary maximised window takes the first swipe at once: the launcher opens, and it gets nothing",
+          compositor.launcher_asked == 1 && compositor.chip.kind != COMPOSITOR_CHIP_HINT && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0);
+    edge_at(128, 200, 1, 10000);
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor_fullscreen_row(1);
     head = table->event_head[1];
     edge_at(128, 252, 0, 10000);
     edge_drag(128, 252, 128, 200, 6, 10000);

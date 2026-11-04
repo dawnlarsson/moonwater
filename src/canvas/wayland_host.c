@@ -760,7 +760,7 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 compositor_arrange(row, COMPOSITOR_ROOM);
                 break;
         case WAYLAND_DO_FULLSCREEN:
-                compositor_arrange(row, COMPOSITOR_MAXIMIZED);
+                compositor_fullscreen_row(row);
                 break;
         case WAYLAND_DO_UNMAXIMIZE:
         case WAYLAND_DO_UNFULLSCREEN:

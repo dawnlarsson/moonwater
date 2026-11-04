@@ -4015,6 +4015,7 @@ static struct
         unsigned int picture_w[WINDOWS], picture_h[WINDOWS]; // as its program drew it
         unsigned int asking[WINDOWS];   // shown at a size asked of it, until a picture of that size comes
         unsigned int arranged[WINDOWS]; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
+        unsigned char fullscreen[WINDOWS]; // a window that asked to fill its screen under the taskbar too (fullscreen): a client's request, or a placement's
         unsigned int edges[WINDOWS];    // the edges the hand holds, until the window is the size asked for
         int far_x[WINDOWS], far_y[WINDOWS]; // where the edges it does not hold are
         int saved_x[WINDOWS], saved_y[WINDOWS]; // where it was floating, and how large
@@ -11430,7 +11431,7 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor.press_x = compositor.pointer_x;
         compositor.press_y = compositor.pointer_y;
         if (!compositor_tile_cells(compositor.arranged[row]))
-                compositor.arranged[row] = COMPOSITOR_FLOATING;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.edges[row] = edges;
         compositor.far_x[row] = compositor.x[row] + (int)compositor.w[row];
         compositor.far_y[row] = compositor.y[row] + (int)compositor.h[row];
@@ -11486,6 +11487,10 @@ static unsigned int compositor_tile_edges(unsigned int how)
 static void compositor_set_rect(int row, unsigned int how, const int *rect)
 {
         int was[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+        // Only maximised windows can be fullscreen: whatever else a window is set to is not.
+        if (how != COMPOSITOR_MAXIMIZED)
+                compositor.fullscreen[row] = 0;
 
         // Its line goes with it: the outline it had is damaged before it is a filling one.
         compositor_damage_row(row);
@@ -12118,6 +12123,17 @@ static void compositor_arrange(int row, unsigned int how)
         compositor_arrange_on(row, how, -1);
 }
 
+// A window asked to fill its screen under the taskbar too (a client's set_fullscreen): arranged maximised, and marked, so the second-swipe
+// rule of the screen edges applies to it and to no other maximised window (compositor_swipe_act).
+static void compositor_fullscreen_row(int row)
+{
+        if (row < 0 || row >= WINDOWS)
+                return;
+        compositor_arrange(row, COMPOSITOR_MAXIMIZED);
+        if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+                compositor.fullscreen[row] = 1;
+}
+
 // Back to the rectangle it had, wherever it was put since.
 static void compositor_float(int row)
 {
@@ -12127,7 +12143,7 @@ static void compositor_float(int row)
                 return;
 
         compositor_damage_row(row);
-        compositor.arranged[row] = COMPOSITOR_FLOATING;
+        compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.edges[row] = 0;
         compositor_put(row, compositor.saved_x[row], compositor.saved_y[row]);
         compositor_damage_row(row);
@@ -12169,7 +12185,7 @@ static void compositor_float_for_drag(int row)
                 compositor_glide_damage_now(row);
         compositor.glide[row] = 0;
         compositor_damage_row(row);
-        compositor.arranged[row] = COMPOSITOR_FLOATING;
+        compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.edges[row] = 0;
         compositor_put(row, compositor.pointer_x - grab, compositor.pointer_y - at);
         compositor_damage_row(row);
@@ -12628,6 +12644,8 @@ static void compositor_first_put(int row, int x, int y)
         if (fills != COMPOSITOR_FLOATING)
         {
                 compositor_arrange_rect(row, fills, rect);
+                if (fills == COMPOSITOR_MAXIMIZED && how == WINDOW_PLACE_FULLSCREEN)
+                        compositor.fullscreen[row] = 1;
                 return;
         }
         compositor_put(row, rect[0], rect[1]);
@@ -12851,7 +12869,7 @@ static void compositor_take(int row)
                 compositor.front[row] = front;
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
                 table->state[row] = compositor.state[row];
-                compositor.arranged[row] = COMPOSITOR_FLOATING;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
                 compositor.edges[row] = 0;
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
@@ -13022,7 +13040,7 @@ static void compositor_leave(int row)
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
         compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
         compositor.asks[row] = 0;
-        compositor.arranged[row] = COMPOSITOR_FLOATING;
+        compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
         compositor.title[row][0] = 0;
         compositor.name[row][0] = 0;
         compositor_glass_drop(row);
@@ -16842,7 +16860,7 @@ static void compositor_swipe_act(unsigned int at, positive now, const struct ui_
         struct compositor_swipe *swipe = &compositor.swipe;
         int row = swipe->row;
 
-        if (row >= 0 && compositor.arranged[row] == COMPOSITOR_MAXIMIZED && (swipe->armed_row != row || now >= swipe->armed_until))
+        if (row >= 0 && compositor.fullscreen[row] && (swipe->armed_row != row || now >= swipe->armed_until))
         {
                 swipe->armed_row = row, swipe->armed_until = now + COMPOSITOR_SWIPE_ARM_NS;
                 compositor_chip_hint(swipe->rect, swipe->x0, swipe->y0, swipe->side, now);
