@@ -168787,10 +168787,10 @@ static void db_test_hostile(void)
         }
         DBCHECK(dbus_dead(slot), "a message that announces more than the cap ends the connection");
         dbus_drop(slot);
-        // a client that does not read is dropped, not waited for
+        // a client that does not read is not waited for: what is sent it past its room is refused (db_test_queue has the rest)
         {
                 long a = db_connect(1000), b = db_connect(1000);
-                int dropped = 0;
+                int full = 0;
 
                 db_hello(a);
                 db_hello(b);
@@ -168808,12 +168808,142 @@ static void db_test_hostile(void)
                         db_send(b, &spam);
                         db_drain(b);
                 }
-                dropped = dbus_dead(a) == 2;
-                DBCHECK(dropped, "a client that does not read fills its queue and is dropped (%ld)", dbus_dead(a));
+                full = dbus.client[a]->out_length > DBUS_OUT - DBUS_OWED - 512 && dbus.client[a]->out_length <= DBUS_OUT - DBUS_OWED;
+                DBCHECK(full && !dbus_dead(a), "a client that does not read fills its queue to the most others may give it, and is not ended for it (%ld, %ld)",
+                        dbus.client[a]->out_length, dbus_dead(a));
                 DBCHECK(!dbus_dead(b), "and the one that called it is not");
                 dbus_drop(a);
                 dbus_drop(b);
         }
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+// A signal of an array of payload bytes from a client to destination (a unique name, or "" for everyone): its length.
+static long db_big_signal(unsigned char *into, long room, const char *destination, long payload)
+{
+        struct dbus_out w = {into, 0, room, 0};
+        struct dbus_fields f = {"/o", "org.example.I", "Big", "", destination, "", "ay", 0, 0};
+        long body;
+
+        dbus_o_header(&w, DBUS_SIGNAL, DBUS_FLAG_NO_REPLY, ++db_serial, &f);
+        body = w.length;
+        dbus_o_u32(&w, (unsigned long)payload);
+        if (payload >= 0 && w.length + payload <= w.room)
+        {
+                memset(w.at + w.length, 'x', (size_t)payload);
+                w.length += payload;
+        }
+        else
+                w.bad = 1;
+        dbus_o_end(&w, body);
+        return w.bad ? -1 : w.length;
+}
+
+// The messages queued for a client, walked: how many, and the type and error name of the last (an error's, else "").
+static long db_queue_last(long slot, unsigned *type, char *error, long room)
+{
+        const unsigned char *bytes;
+        long n = dbus_out(slot, &bytes), at = 0, count = 0;
+
+        *type = 0;
+        error[0] = 0;
+        while (at + 16 <= n)
+        {
+                struct dbus_message m;
+                long total = DBUS_ALIGN(16 + (long)dbus_get32(bytes + at + 12), 8) + (long)dbus_get32(bytes + at + 4);
+
+                if (at + total > n || dbus_parse(bytes + at, total, &m) != 0)
+                        return -1;
+                *type = m.type;
+                snprintf(error, (size_t)room, "%s", m.error);
+                count++;
+                at += total;
+        }
+        return count;
+}
+
+/*
+        One client cannot have another ended by what it sends it. A client's queue holds what it is sent until it reads
+        it; what other clients send it (calls, signals, the bus's own broadcasts) is refused once it fills the most of it
+        they may have, and a sender that waits for a reply is told (LimitsExceeded), while the rest of the queue is kept
+        for what the bus owes the client, the answers to its own calls. Only a client that does not read what it asked
+        for itself is ended. (Before, a message of any client that did not fit ended the client it was sent to, and the
+        largest message the bus takes did not fit an empty queue: any program could end any other, a browser or a
+        desktop's own, with one signal sent to its unique name.)
+*/
+static void db_test_queue(void)
+{
+        static unsigned char big[DBUS_MESSAGE + 64];
+        long victim, attacker, header, n, refused = 0, count;
+        unsigned type;
+        char error[128];
+        struct db_seen s;
+
+        db_reset();
+        victim = db_connect(1000);
+        attacker = db_connect(1001);
+        db_hello(victim);
+        db_hello(attacker);
+        db_drain(victim);
+        db_drain(attacker);
+        header = db_big_signal(big, sizeof big, ":1.2", 0) - 4;
+        n = db_big_signal(big, sizeof big, ":1.2", DBUS_MESSAGE - header - 4);
+        DBCHECK(n == DBUS_MESSAGE, "the signal is as large as the bus takes (%ld)", n);
+        db_feed(attacker, big, n);
+        DBCHECK(!dbus_dead(attacker), "the bus takes it");
+        DBCHECK(!dbus_dead(victim) && db_queue_last(victim, &type, error, sizeof error) == 1 && type == DBUS_SIGNAL,
+                "and gives it to the client it was sent to, which it does not end (dead %ld)", dbus_dead(victim));
+
+        // a client that does not read, sent more and more: what does not fit is refused, and neither the sender nor it is ended
+        n = db_big_signal(big, sizeof big, ":1.2", 200000);
+        for (int k = 0; k < 40 && !dbus_dead(victim) && !dbus_dead(attacker); k++)
+        {
+                long before = dbus.client[victim]->out_length;
+
+                db_feed(attacker, big, n);
+                refused += dbus.client[victim]->out_length == before;
+        }
+        DBCHECK(!dbus_dead(victim) && !dbus_dead(attacker) && refused > 0, "signals past the room a client has are refused, and end no one (%ld refused, dead %ld %ld)",
+                refused, dbus_dead(victim), dbus_dead(attacker));
+        DBCHECK(dbus.client[victim]->out_length <= DBUS_OUT - DBUS_OWED, "and what others sent it is within the most they may have (%ld)",
+                dbus.client[victim]->out_length);
+        // a broadcast too
+        db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',member='Big'", 0);
+        n = db_big_signal(big, sizeof big, "", 200000);
+        for (int k = 0; k < 10 && !dbus_dead(victim); k++)
+                db_feed(attacker, big, n);
+        DBCHECK(!dbus_dead(victim) && dbus.client[victim]->out_length <= DBUS_OUT, "broadcasts to a client whose queue is full end it not (dead %ld)",
+                dbus_dead(victim));
+
+        // the client's own call is still answered: the room the bus owes it was kept
+        db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", 0, 0);
+        count = db_queue_last(victim, &type, error, sizeof error);
+        DBCHECK(!dbus_dead(victim) && count > 0 && type == DBUS_RETURN, "a client whose queue others filled still gets the answer to its own call (type %u)", type);
+
+        // a call that waits for a reply, to a client with no room: the caller is told, and nothing is left waiting
+        n = db_big_signal(big, sizeof big, ":1.2", 0);
+        for (int k = 0; k < 20000 && dbus.client[victim]->out_length + n <= DBUS_OUT - DBUS_OWED; k++)
+                db_feed(attacker, big, n);
+        db_drain(attacker);
+        db_call(attacker, ":1.2", "/o", "org.example.I", "Ask", "s", "a question longer than the signals that filled the queue, which are the smallest", 0);
+        DBCHECK(db_find(attacker, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.LimitsExceeded") && !dbus_dead(attacker) &&
+                    dbus.client[attacker]->pending == 0,
+                "a call to a client with a full queue is an error to its caller (LimitsExceeded), and waits on nothing (%ld)", dbus.client[attacker]->pending);
+
+        // what it was given, read, makes room again
+        db_drain(victim);
+        n = db_big_signal(big, sizeof big, ":1.2", 1000);
+        db_feed(attacker, big, n);
+        DBCHECK(db_queue_last(victim, &type, error, sizeof error) == 1 && type == DBUS_SIGNAL, "a client that read is sent to again");
+
+        // a client that does not read the answers to its own calls is ended: it is the one that does not read
+        db_drain(victim);
+        for (int k = 0; k < 4000 && !dbus_dead(victim); k++)
+                db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
+        DBCHECK(dbus_dead(victim) == 2, "a client that does not read what it asked for is ended (%ld)", dbus_dead(victim));
+        DBCHECK(!dbus_dead(attacker), "and that ends no other");
+        dbus_drop(victim);
+        dbus_drop(attacker);
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
@@ -169616,6 +169746,7 @@ int main(int argc, char **argv)
         db_test_portal();
         db_test_hostile();
         db_test_caps();
+        db_test_queue();
         db_test_fuzz(rounds);
         db_test_structured(grammar);
         printf("CHECK_dbus: %u checks, %u failures\n", db_checks, db_failures);

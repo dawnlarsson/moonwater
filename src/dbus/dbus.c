@@ -31,8 +31,11 @@
            is acted on or passed on; a message that is not valid is the end of that connection.
         3. The sender of a message is the bus's to say: it is stamped on what is passed on and what a client wrote there
            is not kept. A reply is passed only to the caller it answers, from the callee it was asked of.
-        4. A client that does not read never blocks the bus: its output queue is bounded, and a client that fills it is
-           dropped. A connection that has not said Hello in a few seconds is dropped.
+        4. A client that does not read never blocks the bus: its output queue is bounded. What other clients send it
+           (calls, signals, the bus's broadcasts) may fill only part of it, and past that is refused, with an error to
+           a caller that waits for a reply; the rest is kept for what the bus owes it, the answers to its own calls, and
+           a client that does not read those is dropped. So no client can have another dropped by sending it more than
+           it reads. A connection that has not said Hello in a few seconds is dropped.
         5. A name is a client's only while it is connected; the bus's own names, and the service's, are not for taking.
 
         It is freestanding C with no allocator, in ring 3, the same way the Wayland shim is, with the host behind a small
@@ -46,7 +49,9 @@
 #define DBUS_CLIENTS 32
 #define DBUS_PER_UID 12          // connections of one uid, root's as many as the table has room for
 #define DBUS_MESSAGE 262144      // the most a message may be, header and body
-#define DBUS_OUT 262144          // a client's output queue
+#define DBUS_STAMPED (DBUS_MESSAGE + 4096) // the most a message may be once the bus has stamped its sender on it
+#define DBUS_OUT (4 * DBUS_MESSAGE) // a client's output queue
+#define DBUS_OWED DBUS_STAMPED      // of it, the room only the answers to its own calls may take: the largest message there is
 #define DBUS_NAMES 128           // well-known names, all clients together
 #define DBUS_NAMES_PER 8
 #define DBUS_RULES 64            // match rules one client holds
@@ -140,8 +145,8 @@ static struct
         long next_id, clients;
         unsigned long serial;
         char guid[33];
-        unsigned char scratch[DBUS_MESSAGE + 4096];
-        unsigned char stamped[DBUS_MESSAGE + 4096];
+        unsigned char scratch[DBUS_STAMPED];
+        unsigned char stamped[DBUS_STAMPED];
 } dbus;
 
 /* ---- small things (no library) ---- */
@@ -526,7 +531,8 @@ struct dbus_message
 #define DBUS_HAS_SIGNATURE 128u
 #define DBUS_HAS_FDS 256u
 
-// 0 when the bytes are one whole message, valid; the message read into m.
+// 0 when the bytes are one whole message, valid; the message read into m. (A client's own are cut at DBUS_MESSAGE before; one the bus
+// stamped its sender on may be up to DBUS_STAMPED, and is read again by this to be broadcast.)
 static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
 {
         long fields, limit, at = 16, body, pos;
@@ -535,7 +541,7 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
         m->has = 0;
         m->path = m->interface = m->member = m->error = m->destination = m->sender = m->signature = "";
         m->reply = 0;
-        if (size < 16 || size > DBUS_MESSAGE || b[0] != 'l' || b[3] != 1 || b[1] < DBUS_CALL || b[1] > DBUS_SIGNAL)
+        if (size < 16 || size > DBUS_STAMPED || b[0] != 'l' || b[3] != 1 || b[1] < DBUS_CALL || b[1] > DBUS_SIGNAL)
                 return -1;
         m->bytes = b;
         m->size = size;
@@ -865,7 +871,7 @@ static void dbus_unique_text(char *into, long id)
         into[at] = 0;
 }
 
-// Queued to a client; a client with no room for it is dropped.
+// Queued to a client, what the bus owes it (an answer to its own call): a client with no room for it does not read, and is dropped.
 static void dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long n)
 {
         if (!c || c->slot == DBUS_SERVICE || c->dead)
@@ -878,6 +884,20 @@ static void dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long
         }
         dbus_copy(c->out + c->out_length, bytes, n);
         c->out_length += n;
+}
+
+/*
+        Queued to a client, what another client sent it (a call, a signal) or the bus tells everyone: 1 when it was, 0
+        when the queue has no room for it short of the room kept for what the bus owes the client. A sender cannot end
+        a client by sending it more than it reads: what does not fit is not given, and the client is not ended for it.
+*/
+static int dbus_offer(struct dbus_client *c, const unsigned char *bytes, long n)
+{
+        if (!c || c->slot == DBUS_SERVICE || c->dead || c->out_length + n > DBUS_OUT - DBUS_OWED)
+                return 0;
+        dbus_copy(c->out + c->out_length, bytes, n);
+        c->out_length += n;
+        return 1;
 }
 
 static unsigned long dbus_next_serial(void)
@@ -1117,7 +1137,7 @@ static void dbus_broadcast(const unsigned char *bytes, long n, long from, const 
                 for (long k = 0; k < DBUS_RULES; k++)
                         if (c->rule[k].used && dbus_rule_matches(&c->rule[k], from, m))
                         {
-                                dbus_deliver(c, bytes, n);
+                                dbus_offer(c, bytes, n);
                                 break;
                         }
         }
@@ -1834,7 +1854,7 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
 // The message with its sender stamped (what the client wrote there is not kept): the new bytes in dbus.stamped, their length.
 static long dbus_stamp(const struct dbus_message *m, const char *sender)
 {
-        struct dbus_out w = {dbus.stamped, 0, DBUS_MESSAGE + 4096, 0};
+        struct dbus_out w = {dbus.stamped, 0, DBUS_STAMPED, 0};
         struct dbus_fields f = {m->path, m->interface, m->member, m->error, m->destination, sender, m->signature, m->reply,
                                 (m->has & DBUS_HAS_REPLY) != 0};
 
@@ -1888,6 +1908,7 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
 {
         long to, n;
         struct dbus_client *target;
+        struct dbus_pending *waits = 0;
 
         if (dbus.host->trace)
                 dbus_trace(from, m);
@@ -1916,25 +1937,28 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                 target = dbus_client_of(to);
                 if (!(m->flags & DBUS_FLAG_NO_REPLY))
                 {
-                        struct dbus_pending *p = 0;
-
-                        for (long at = 0; at < DBUS_PENDING && !p; at++)
+                        for (long at = 0; at < DBUS_PENDING && !waits; at++)
                                 if (!dbus.pending[at].used)
-                                        p = &dbus.pending[at];
-                        if (!p || from->pending >= DBUS_PENDING_PER)
+                                        waits = &dbus.pending[at];
+                        if (!waits || from->pending >= DBUS_PENDING_PER)
                         {
                                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "Too many calls wait for a reply", DBUS_NAME_BUS);
                                 return;
                         }
-                        p->used = 1;
-                        p->caller = (short)from->slot;
-                        p->callee = (short)to;
-                        p->serial = m->serial;
+                        waits->used = 1;
+                        waits->caller = (short)from->slot;
+                        waits->callee = (short)to;
+                        waits->serial = m->serial;
                         from->pending++;
                 }
                 n = dbus_stamp(m, from->unique);
-                if (n > 0)
-                        dbus_deliver(target, dbus.stamped, n);
+                if (n > 0 && !dbus_offer(target, dbus.stamped, n) && waits)
+                {
+                        // not given: the caller is told at once, and no reply is waited for
+                        waits->used = 0;
+                        from->pending--;
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "The client it was sent to has no room for it", DBUS_NAME_BUS);
+                }
                 return;
         }
         if (m->type == DBUS_SIGNAL)
@@ -1946,7 +1970,7 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                 {
                         to = dbus_resolve(m->destination);
                         if (to >= 0 && to != DBUS_SERVICE)
-                                dbus_deliver(dbus_client_of(to), dbus.stamped, n);
+                                dbus_offer(dbus_client_of(to), dbus.stamped, n);
                         return;
                 }
                 {
