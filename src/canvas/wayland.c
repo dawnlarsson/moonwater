@@ -86,6 +86,8 @@
 #define WAYLAND_GLOBALS_MAX 32
 #define WAYLAND_SEATS 8         // pointers, keyboards and touches, one client holds
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
+#define WAYLAND_TOKENS 16       // xdg-activation tokens pending or given out, over every client
+#define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
 #define WAYLAND_SOURCES 8       // data sources (and primary selection sources) one client holds
 #define WAYLAND_OFFERS 16       // offers made to one client and not yet destroyed by it
@@ -159,6 +161,7 @@ struct wayland_rect
 #define WAYLAND_DO_MOVE 6
 #define WAYLAND_DO_RESIZE 7
 #define WAYLAND_DO_CLOSE 8
+#define WAYLAND_DO_FOCUS 9      // raise and focus the window: an xdg-activation token that the person's input vouches for
 
 #define WAYLAND_STATE_MAXIMIZED 1
 #define WAYLAND_STATE_FULLSCREEN 2
@@ -274,6 +277,7 @@ struct wayland_host
         void (*clip_clear)(void *context, long client, long which);
         // Whether a dma-buf has no writer now (its GPU is done), asked and never waited for; a host with none says every buffer is ready.
         int (*dmabuf_ready)(void *context, long fd);
+        int (*random)(void *context, unsigned char *into, long bytes); // fills bytes with random bytes: 1 when it did
 };
 
 /*
@@ -345,6 +349,7 @@ struct wayland_surface
         unsigned char modal;
         // wp_tearing_control's presentation hint, asynchronous (tearing allowed) or not, pending and as the commit shows it.
         unsigned char pending_async, async_hint;
+        unsigned char attention;     // an xdg-activation asked for the window that was not vouched for: it wants attention
         // xdg.
         unsigned int xdg_id, role_id;
         unsigned int serial[WAYLAND_SERIALS];
@@ -503,6 +508,19 @@ struct wayland_touch
 };
 
 /*
+        An xdg-activation token: pending (made, not committed: the serial a client names and the surface), then given out (text,
+        the time it was given, whether it may be used). Its client is the one that made it, and a token is used once.
+*/
+struct wayland_token
+{
+        unsigned char live, committed;
+        int client;
+        unsigned long serial;
+        long when;
+        char text[33];
+};
+
+/*
         The one state this file has: the host, the clients (a pointer each, to the block the host gave), and the
         row each window of a client is in. Nothing else is static.
 */
@@ -528,6 +546,7 @@ static struct
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
         long idle_inhibitors;                  // idle inhibitors held by every client (each counted once, while it lives)
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
+        struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
 } wayland;
 
 /* ---- the wire ---- */
@@ -921,6 +940,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_xdg_system_bell_v1, 1},
     {WLI_wp_content_type_manager_v1, 1},
     {WLI_wp_alpha_modifier_v1, 1},
+    {WLI_xdg_activation_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -5219,6 +5239,134 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
         }
 }
 
+/*
+        xdg-activation. A token is made by the client that asks for one, given a serial of its own input (the one the person's key
+        or button carried to it) and a surface, and given out by its commit: a random 32 digit text, sent in done. A client
+        activates a window with the text: when the token's serial is still one of its client's recent inputs and the token is
+        under ten seconds old, the window is raised and focused (WAYLAND_DO_FOCUS); otherwise the window only wants attention.
+        A token is used once; a token the shim does not know is nothing.
+*/
+static int wayland_token_free(void)
+{
+        long now = wayland.host->now(wayland.host->context);
+
+        for (int at = 0; at < WAYLAND_TOKENS; at++)
+                if (wayland.token[at].live && wayland.token[at].committed && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
+                        wayland.token[at].live = 0;
+        for (int at = 0; at < WAYLAND_TOKENS; at++)
+                if (!wayland.token[at].live)
+                        return at;
+        return -1;
+}
+
+static int wayland_token_make(struct wayland_token *t)
+{
+        static const char digits[] = "0123456789abcdef";
+        unsigned char bytes[16];
+
+        if (!wayland.host->random(wayland.host->context, bytes, (long)sizeof bytes))
+                return 0;
+        for (int at = 0; at < 16; at++)
+        {
+                t->text[2 * at] = digits[bytes[at] >> 4];
+                t->text[2 * at + 1] = digits[bytes[at] & 15];
+        }
+        t->text[32] = 0;
+        return 1;
+}
+
+static void wayland_token_forget(long slot)
+{
+        for (int at = 0; at < WAYLAND_TOKENS; at++)
+                if (wayland.token[at].live && wayland.token[at].client == slot)
+                        wayland.token[at].live = 0;
+}
+
+static int wayland_activation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        int at = self->link;
+        struct wayland_token *t = at >= 0 && at < WAYLAND_TOKENS && wayland.token[at].live && wayland.token[at].client == c->slot
+                                      ? &wayland.token[at] : 0;
+
+        if (self->iface == WLI_xdg_activation_v1)
+        {
+                struct wayland_surface *s;
+                long now;
+
+                if (op == WLQ_xdg_activation_v1_get_activation_token)
+                {
+                        at = wayland_token_free();
+                        if (at < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many activation tokens");
+                        wayland.token[at].live = 1;
+                        wayland.token[at].committed = 0;
+                        wayland.token[at].client = c->slot;
+                        wayland.token[at].serial = 0;
+                        wayland.token[at].text[0] = 0;
+                        c->objects[a[0].slot].link = (short)at;
+                        return WAYLAND_OK;
+                }
+                if (op != WLQ_xdg_activation_v1_activate)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                for (at = 0; at < WAYLAND_TOKENS; at++)
+                        if (wayland.token[at].live && wayland.token[at].committed &&
+                            wayland_name_is(a[0].text, a[0].length, wayland.token[at].text))
+                                break;
+                if (at == WAYLAND_TOKENS)
+                        return WAYLAND_OK;
+                {
+                        struct wayland_token *given = &wayland.token[at];
+                        struct wayland_client *issuer = wayland.client[given->client];
+                        int recent;
+
+                        now = wayland.host->now(wayland.host->context);
+                        recent = now - given->when < WAYLAND_TOKEN_MS;
+                        given->live = 0;
+                        if (recent && issuer && s->row >= 0 && wayland_input_serial_ok(issuer, given->serial))
+                        {
+                                s->attention = 0;
+                                wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_FOCUS, 0, 0);
+                        }
+                        else
+                                s->attention = 1;
+                }
+                return WAYLAND_OK;
+        }
+        // xdg_activation_token_v1: a serial (set_serial), the surface and app id are kept for nothing else, and a commit gives the token out.
+        if (op == WLQ_xdg_activation_token_v1_set_serial)
+        {
+                if (t && !t->committed)
+                        t->serial = (unsigned long)a[0].u;
+        }
+        else if (op == WLQ_xdg_activation_token_v1_commit)
+        {
+                if (t && !t->committed)
+                {
+                        struct wayland_event e;
+
+                        if (!wayland_token_make(t))
+                        {
+                                t->live = 0;
+                                return WAYLAND_OK;
+                        }
+                        t->committed = 1;
+                        t->when = wayland.host->now(wayland.host->context);
+                        e = wayland_begin(c, self->id, WLE_xdg_activation_token_v1_done);
+                        wayland_string(&e, t->text);
+                        wayland_end(&e);
+                }
+        }
+        else if (op == WLQ_xdg_activation_token_v1_destroy)
+        {
+                if (t && !t->committed)
+                        t->live = 0;
+        }
+        return WAYLAND_OK;
+}
+
 static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
@@ -5568,6 +5716,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_tearing_control_v1:
                         status = wayland_games_request(c, o, op, a);
                         break;
+                case WLI_xdg_activation_v1:
+                case WLI_xdg_activation_token_v1:
+                        status = wayland_activation_request(c, o, op, a);
+                        break;
                 case WLI_xdg_wm_dialog_v1:
                 case WLI_xdg_dialog_v1:
                 case WLI_xdg_system_bell_v1:
@@ -5650,7 +5802,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
             !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
             !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
-            !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold)
+            !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold || !host->random)
                 return -1;
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
@@ -5718,6 +5870,7 @@ WAYLAND_API void wayland_drop(long slot)
         if (!c)
                 return;
         wayland_touch_forget(slot);
+        wayland_token_forget(slot);
         // The idle inhibitors this client held are let go with it.
         for (long at = 0; at < WAYLAND_OBJECTS; at++)
                 if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && (c->objects[at].flags & 2))
@@ -6277,6 +6430,15 @@ WAYLAND_API long wayland_row_content(long row)
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
         return s ? (long)s->content : WLN_wp_content_type_v1_type_none;
+}
+
+/* Whether a window was asked for by an xdg-activation it was not vouched for (it wants attention, until it is focused). */
+WAYLAND_API long wayland_row_attention(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->attention : 0;
 }
 
 /* Whether a window has a keyboard shortcuts inhibitor, and whether its tearing hint is asynchronous (allowed to tear). */

@@ -166140,6 +166140,18 @@ static void fake_repeat(void *context, long *rate, long *delay)
         *delay = fake.delay ? fake.delay : 600;
 }
 
+/* Random bytes that differ from one call to the next, so no two tokens are the same. */
+static int fake_random(void *context, unsigned char *into, long bytes)
+{
+        static unsigned int calls;
+
+        (void)context;
+        for (long at = 0; at < bytes; at++)
+                into[at] = (unsigned char)(calls * 131u + (unsigned int)at * 17u + 7u);
+        calls++;
+        return 1;
+}
+
 static long fake_seat(void *context)
 {
         (void)context;
@@ -166290,7 +166302,7 @@ static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
-    fake_clip_clear, fake_dmabuf_ready};
+    fake_clip_clear, fake_dmabuf_ready, fake_random};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -167442,6 +167454,101 @@ static void test_hints(void)
         destroy or by its client's going; a keyboard shortcuts inhibitor is read per window; a tearing hint is shown from the commit
         after it is set (asynchronous, or back to vsync on destroy).
 */
+/*
+        xdg-activation: a token made by a client that named a serial of its own input and a surface, given out at its commit, focuses
+        its window when it is used (once), with the serial still recent; a token with no serial, or one that is ten seconds old,
+        only marks the window as wanting attention; an unknown token is nothing.
+*/
+static void test_activation(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat, pointer, activation, token, plain;
+        long a, serial, before;
+        char given[64], unvouched[64];
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        activation = wl_global(c, s.registry, WLI_xdg_activation_v1, 1);
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_pointer, pointer);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_enter, 0);
+        serial = a >= 0 ? (long)c->ev[a].u[0] : 0;
+        WLCHECK(activation && serial != 0, "an xdg-activation is offered, and an enter gives a serial the client may name");
+
+        wlc_forget(c);
+        token = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, token);
+        wlc_send(c, token, WLQ_xdg_activation_token_v1_set_serial, (unsigned long)serial, seat);
+        wlc_send(c, token, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(c);
+        a = event_at(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        WLCHECK(a >= 0 && strlen(c->ev[a].text[0]) == 32, "a committed token is given out as 32 digits");
+        if (a >= 0)
+                memcpy(given, c->ev[a].text[0], sizeof given);
+        else
+                given[0] = 0;
+
+        /* a token with the person's serial focuses its window, once */
+        before = fake.row[0].did_count;
+        wlc_forget(c);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
+        WLCHECK(fake.row[0].did_count == before + 1 && fake.row[0].did[before] == WAYLAND_DO_FOCUS,
+                "a token whose serial is still the client's recent input focuses its window");
+        WLCHECK(wayland_row_attention(0) == 0, "and that window does not want attention");
+        before = fake.row[0].did_count;
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
+        WLCHECK(fake.row[0].did_count == before, "a token is used once");
+
+        /* a token with no serial of the person's marks its window as wanting attention, and does not focus it */
+        plain = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, plain);
+        wlc_send(c, plain, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(c);
+        a = event_at(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        if (a >= 0)
+                memcpy(unvouched, c->ev[a].text[0], sizeof unvouched);
+        else
+                unvouched[0] = 0;
+        before = fake.row[0].did_count;
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, unvouched, s.surface);
+        WLCHECK(fake.row[0].did_count == before, "a token with no serial does not focus the window");
+        WLCHECK(wayland_row_attention(0) == 1, "it marks the window as wanting attention");
+
+        /* a token gone old is no focus, even with a serial */
+        wlc_forget(c);
+        token = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, token);
+        wlc_send(c, token, WLQ_xdg_activation_token_v1_set_serial, (unsigned long)serial, seat);
+        wlc_send(c, token, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(c);
+        a = event_at(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        if (a >= 0)
+                memcpy(given, c->ev[a].text[0], sizeof given);
+        else
+                given[0] = 0;
+        fake.now += 20000;
+        before = fake.row[0].did_count;
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
+        WLCHECK(fake.row[0].did_count == before, "a token ten seconds old is no focus");
+        WLCHECK(c->errors == 0, "and none of it is a protocol error");
+
+        /* a text that is no token of the compositor's is nothing */
+        before = fake.row[0].did_count;
+        wlc_send(c, activation, WLQ_xdg_activation_v1_activate, "0123456789abcdef0123456789abcdef", s.surface);
+        WLCHECK(fake.row[0].did_count == before && c->errors == 0, "an unknown token is nothing, and no error");
+        wlc_end(c);
+        leak_check("activation");
+        wayland_stop();
+}
+
 static void test_inhibit_state(void)
 {
         struct session s;
@@ -171239,6 +171346,7 @@ int main(int argc, char **argv)
         test_axis_stop();
         test_hints();
         test_inhibit_state();
+        test_activation();
         test_text();
         test_popups();
         test_surface_rules();

@@ -750,6 +750,10 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         case WAYLAND_DO_CLOSE:
                 compositor_close(row);
                 break;
+        case WAYLAND_DO_FOCUS:
+                compositor_raise(row);
+                compositor_focus(row);
+                break;
         case WAYLAND_DO_MOVE:
                 // Only while the person holds the left button on this window: a client cannot take the pointer.
                 if ((compositor.button_down & 1u) && compositor.button_row[0] == row && compositor.drag < 0 && compositor.resize < 0)
@@ -941,6 +945,13 @@ static void compositor_wl_repeat(void *context, long *rate, long *delay)
 
 // What the seat can do: a pointer and a keyboard; touch is not offered yet.
 // A touch capability while a touch screen is on the machine (the screens' fingers are sent to the windows as wl_touch).
+// Random bytes for the xdg-activation tokens: the kernel's, from the pool as it is (a token is no secret of a key's size).
+static int compositor_wl_random(void *context, unsigned char *into, long bytes)
+{
+        (void)context;
+        return system_random_fill(into, (positive)bytes, 0) == 0;
+}
+
 static long compositor_wl_seat(void *context)
 {
         long caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
@@ -1626,6 +1637,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_clip_push,
     compositor_wl_clip_clear,
     compositor_wl_dmabuf_signaled,
+    compositor_wl_random,
 };
 
 /* ---- the socket ---- */
