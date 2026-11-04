@@ -530,11 +530,14 @@ static void gpu_drop(unsigned int i)
 }
 
 // With every map held, the one used longest ago goes first (a window dragged larger makes a map at each size, faster than gpu_trim lets them go), unless all
-// are this tick's.
-static b32 gpu_map(const void *addr, positive size)
+// are this tick's. The card may only read a map (a window's picture is a program's pages): a write of a kernel past what its records name faults there and
+// is dropped; gpu_map_written is for the one the GPU draws into (a headless scanout). No map can be run as code.
+#define gpu_map(addr, size) gpu_map_as(addr, size, 0)
+#define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
+static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
-        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, 0, 0, to - from};
+        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
 
         for (unsigned int i = 1; gpu_map_count == 64 && i < 64; i++)
@@ -543,9 +546,9 @@ static b32 gpu_map(const void *addr, positive size)
                 gpu_drop(old);
         if (gpu_map_count == 64 || !(at = gpu_place(to - from)) || !gpu_io(3u, 0x11, 24, up))
                 return false;
-        va[0] = up[2] >> 32, va[2] = at;
+        va[0] = close[0] = up[2] >> 32, va[2] = at;
         if (!gpu_io(1u, 8, 64, va))
-                return false;
+                return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), false; // the buffer with it
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at;
         gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
         gpu_map_next = at + (to - from);
@@ -592,7 +595,7 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
 {
         unsigned int share[3] = {handle, 2 | 0x80000, 0};
         positive at = gpu_place((bytes + 4095) & ~4095ull);
-        p64 va[8] = {0, 1 | 14ull << 32, at, 0, (bytes + 4095) & ~4095ull};
+        p64 va[8] = {0, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}; // read and written, never run
 
         if (!at || system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;

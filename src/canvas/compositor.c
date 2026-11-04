@@ -6991,7 +6991,7 @@ static positive compositor_gpu_output(void)
         {
                 positive at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
 
-                if (!at && gpu_map(compositor.scanout, compositor.scanout_bytes))
+                if (!at && gpu_map_written(compositor.scanout, compositor.scanout_bytes))
                         at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
                 compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
         }
