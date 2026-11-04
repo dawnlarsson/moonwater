@@ -7001,6 +7001,16 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         bytes = 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width);
         if (bytes >= 1ull << 31)
                 return 0;
+        // A tab is a slice of its band's pixels (compositor_panel_tabs): the band is mapped whole, once, not a map a tab. The kernel looks at the pages
+        // of every map at every job: on the box's 610M 34 tab slices cost each present 68 us more, the band as one map nothing to speak of.
+        for (int at = 0; at < WINDOWS_OUTPUTS && !compositor_gpu_va(f); at++)
+        {
+                const unsigned int *band = at ? compositor.band_more[at] : compositor.band;
+                unsigned long had = at ? compositor.band_more_bytes[at] : compositor.band_bytes;
+
+                if (band && f->pixels >= band && f->pixels < band + had / 4)
+                        gpu_map(band, had);
+        }
         return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 

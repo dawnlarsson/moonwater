@@ -213863,6 +213863,74 @@ b32 main(void)
                 compositor_gpu_state.dead = 0;
                 compositor.damages = 0, compositor_gpu_state.up = 0;
         }
+
+        // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
+        // submission. A job of one 64 by 4 fill, best and median of 31, with no maps; the two buffers of five 1920 by 1080 windows of a 3840-wide
+        // screen (the window table's rows); those and a band of 34 tabs, 48 rows of 3840, each tab a map of its own slice; and the windows and the tabs
+        // as compositor_gpu_picture maps them (the band as one map).
+        {
+                enum { RUNS = 31, TABS = 34, BAND_ROWS = 48, WIDE = 3840 };
+                positive window_bytes = (positive)WIDE * 1080 * 4, band_bytes = (positive)WIDE * BAND_ROWS * 4, took[RUNS], best[4], middle[4];
+                long windows = system_call_6(syscall(mmap), 0, 10 * window_bytes, 3, 0x22, (positive)-1, 0), band = system_call_6(syscall(mmap), 0, band_bytes, 3, 0x22, (positive)-1, 0);
+
+                if ((windows < 0 && windows > -4096) || (band < 0 && band > -4096))
+                        return 1;
+                memory_fill_u32((unsigned int address_to)windows, 10 * window_bytes / 4, 0xff202020u);
+                memory_fill_u32((unsigned int address_to)band, band_bytes / 4, 0xff303030u);
+                for (int way = 0; way < 4; way++)
+                {
+                        while (gpu_map_count)
+                                gpu_drop(0);
+                        for (int k = 0; way && k < 10; k++)
+                                gpu_map((const void address_to)(windows + (long)k * (long)window_bytes), 4 * ((positive)WIDE * 1079 + 1920));
+                        for (int t = 0; way == 2 && t < TABS; t++) // a tab's slice: from its left edge, every row of the band, its width
+                                gpu_map((const void address_to)(band + 4 * t * (WIDE / TABS)), 4 * ((positive)WIDE * (BAND_ROWS - 1) + WIDE / TABS));
+                        if (way == 3) // the tabs as the present maps them: compositor_gpu_picture of each tab's frame, the band the compositor's
+                        {
+                                unsigned int address_to was_band = compositor.band;
+                                unsigned long was_bytes = compositor.band_bytes;
+                                int tabs_mapped = 1;
+
+                                compositor.band = (unsigned int address_to)band, compositor.band_bytes = band_bytes;
+                                for (int t = 0; t < TABS; t++)
+                                {
+                                        struct compositor_frame tab;
+
+                                        memory_zero(&tab, sizeof(tab));
+                                        tab.width = WIDE / TABS, tab.height = BAND_ROWS, tab.pitch = WIDE, tab.scale = 100;
+                                        tab.pixels = (const unsigned int address_to)band + t * (WIDE / TABS);
+                                        tabs_mapped &= compositor_gpu_picture(&tab);
+                                }
+                                compositor.band = was_band, compositor.band_bytes = was_bytes;
+                                if (gpu_map_count != 11)
+                                        string_format(log, "  gpu cost: %p maps for ten window buffers and 34 tabs\n", (positive)gpu_map_count);
+                                check("gpu cost: the tabs of a band are one map, the band's", tabs_mapped && gpu_map_count == 11);
+                        }
+                        for (int run = 0; run < RUNS; run++)
+                        {
+                                positive began;
+
+                                ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0xff336699u, ops[6] = ops[7] = 0;
+                                began = clock_monotonic_nanoseconds();
+                                gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4);
+                                took[run] = clock_monotonic_nanoseconds() - began;
+                        }
+                        for (int i = 1; i < RUNS; i++) // sorted, for the median
+                                for (int j = i; j > 0 && took[j - 1] > took[j]; j--)
+                                {
+                                        positive keep = took[j];
+
+                                        took[j] = took[j - 1], took[j - 1] = keep;
+                                }
+                        best[way] = took[0], middle[way] = took[RUNS / 2];
+                        if (way == 2)
+                                string_format(log, "  gpu cost: %p maps held for the windows and the tabs\n", (positive)gpu_map_count);
+                }
+                string_format(log, "  gpu cost: a job with no maps %p us (median %p), ten window buffers %p (%p), and 34 tab slices %p (%p), the tabs as the present maps them %p (%p)\n",
+                              best[0] / 1000, middle[0] / 1000, best[1] / 1000, middle[1] / 1000, best[2] / 1000, middle[2] / 1000, best[3] / 1000, middle[3] / 1000);
+                while (gpu_map_count)
+                        gpu_drop(0);
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */
