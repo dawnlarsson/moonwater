@@ -133539,15 +133539,6 @@ static b32 settings_event_real(const struct window_event address_to event)
         return settings_event(event);
 }
 
-// Whether the rows to ask (settings.unread) are the one row's bit and no other, in whichever word of them it is.
-static b32 settings_unread_only(positive row)
-{
-        for (positive word = 0; word < SETTINGS_UNREAD_WORDS; word++)
-                if (settings.unread[word] != (word == row / 64 ? (positive)1 << (row % 64) : 0))
-                        return false;
-        return true;
-}
-
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -134976,7 +134967,6 @@ static fn check_settings(string_address regular, string_address bold)
                                 memory_zero(settings.unread, sizeof(settings.unread));
                                 settings.group = settings_group_of(battery);
                                 settings_feed_rows();
-                                // One bit of the words of rows set, the row's (a table of more than 64 rows keeps its bits in more words).
                                 check("settings: a rows feed asks again the rows of its group that change by themselves, and those only",
                                       settings_unread_only((positive)battery));
                                 memory_zero(settings.unread, sizeof(settings.unread));
