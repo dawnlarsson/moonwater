@@ -146615,6 +146615,126 @@ static void hand_report(struct ui address_to ui, struct ui_scroll address_to s, 
         The scrollback is the kit's region: a burst of notches on the terminal's bar, and the same burst on a list with the bar's
         geometry, move the same offset frame for frame. The frames are the kit's own glide, stepped on the same clock for both.
 */
+/*
+    A stretch of the grid, against a kit list: the same finger's hand (ui_scroll_hand) and release on the terminal's bar and on a copy of it as
+    a plain list, frame by frame. Each frame the grid is drawn whole (terminal_frame), and its pixels in the grid's columns are the still
+    frame's moved by the grid's shift (terminal_grid_shift); the list's overscroll (ui_scroll_past) is that shift. The still frame is the
+    view at rest, taken before the hand.
+*/
+static unsigned int terminal_stretch_still[1 << 21], terminal_stretch_moved[1 << 21];
+
+static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b32 *settled, b32 *list_match)
+{
+    struct ui kit = terminal.ui;
+    struct ui_scroll list;
+    unsigned int first, shown, total, *buffer, width = terminal.pad + COLUMNS * terminal.cell_w;
+    unsigned int height = terminal.height, pitch = terminal.pitch;
+    b64 clock = 70000000000ll;
+    int edge, shift, move = top ? -12 * UI_SCROLL_SCALE : 12 * UI_SCROLL_SCALE; // a hand's move: positive moves the view down the content
+
+    *peak = 0, *pixels_match = true, *settled = false, *list_match = true;
+    kit.scale = terminal_scale();
+    for (int k = 0; k < 300; k++)
+        term_bytes("row\r\n", 5);
+    if (top)
+        terminal_view_set(0);
+    else
+        terminal_view_live();
+    terminal_extent(&first, &shown, &total);
+    terminal_bar_place(first, shown, total);
+    ui_kit.busy = 0, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+    terminal.own.table->shown[0] = terminal.own.table->frame[0]; // the compositor has taken the last picture
+    terminal_frame();
+    buffer = windows_buffer(terminal.own.table, terminal.own.row, terminal.shown);
+    memory_copy(terminal_stretch_still, buffer, (positive)pitch * height * sizeof(unsigned int));
+    list = terminal.bar;
+    for (int k = 0; k < 8; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        ui_scroll_hand(&terminal.bar, move);
+        ui_scroll_hand(&list, move);
+    }
+    for (int k = 0; k < 120; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        if (k == 0)
+            ui_scroll_release(&terminal.bar), ui_scroll_release(&list);
+        else
+            ui_scroll_glide(&kit, &terminal.bar), ui_scroll_glide(&kit, &list);
+        terminal.own.table->shown[0] = terminal.own.table->frame[0];
+        terminal_frame();
+        shift = terminal_grid_shift();
+        if (shift > *peak)
+            *peak = shift;
+        else if (-shift > *peak)
+            *peak = -shift;
+        {
+            // The list's overscroll (down positive) and the view's sub-line place, which is the bar's place less the view's whole row.
+            b64 past = ui_scroll_past(&list, &edge);
+            int px = (int)((past + UI_SCROLL_SCALE / 2) >> 8), sub;
+            int expect;
+
+            terminal_extent(&first, &shown, &total);
+            sub = (int)(first * terminal.cell_h) - list.scroll;
+            expect = (edge < 0 ? px : edge > 0 ? -px : 0) + sub;
+
+            *list_match = *list_match && list.at == terminal.bar.at && list.scroll == terminal.bar.scroll &&
+                          shift - expect >= -1 && shift - expect <= 1;
+        }
+        buffer = windows_buffer(terminal.own.table, terminal.own.row, terminal.shown);
+        memory_copy(terminal_stretch_moved, buffer, (positive)pitch * height * sizeof(unsigned int));
+        for (unsigned int y = 0; y < height / 2; y++)
+            for (unsigned int x = 0; x < width; x++)
+            {
+                long src = (long)y - shift;
+
+                if (src < 0 || src >= (long)height)
+                    continue;
+                if (terminal_stretch_moved[y * pitch + x] != terminal_stretch_still[(unsigned long)src * pitch + x])
+                {
+                    if (*pixels_match)
+                    {
+                        string_format(log, "  terminal stretch diag: frame %p, first mismatch at x %p y %p (src row %p), shift %b, moved %p, still %p, pad %p, cell %p, height %p\n",
+                                      (positive)k, (positive)x, (positive)y, (positive)src, (bipolar)shift,
+                                      (positive)terminal_stretch_moved[y * pitch + x], (positive)terminal_stretch_still[(unsigned long)src * pitch + x],
+                                      (positive)terminal.pad, (positive)terminal.cell_h, (positive)height);
+                        for (unsigned int yy = 0; yy < 120 && yy < height; yy += 12)
+                            string_format(log, "    y %p moved %p still %p\n", (positive)yy, (positive)terminal_stretch_moved[yy * pitch + x],
+                                          (positive)terminal_stretch_still[yy * pitch + x]);
+                    }
+                    *pixels_match = false;
+                }
+            }
+        if (shift == 0)
+        {
+            *settled = true;
+            for (unsigned int y = 0; y < height / 2; y++)
+                for (unsigned int x = 0; x < width; x++)
+                    if (terminal_stretch_moved[y * pitch + x] != terminal_stretch_still[y * pitch + x])
+                        *settled = false;
+        }
+    }
+    ui_kit.test_clock = 0;
+    ui_scroll_stop(&terminal.bar);
+    terminal_view_live();
+}
+
+static void check_terminal_stretch(void)
+{
+    int peak_top, peak_end;
+    b32 top_pixels, top_settled, top_list, end_pixels, end_settled, end_list;
+
+    check_terminal_stretch_run(1, &peak_top, &top_pixels, &top_settled, &top_list);
+    check_terminal_stretch_run(0, &peak_end, &end_pixels, &end_settled, &end_list);
+    string_format(log, "  terminal stretch: at the top %p px peak, pixels %b, springs whole %b, list %b; at the live end %p px peak, pixels %b, springs whole %b, list %b\n",
+                  (positive)peak_top, (bipolar)top_pixels, (bipolar)top_settled, (bipolar)top_list,
+                  (positive)peak_end, (bipolar)end_pixels, (bipolar)end_settled, (bipolar)end_list);
+    check("terminal stretch: a pull past the oldest line draws the grid moved down by the stretch, row for row the still frame's", top_pixels);
+    check("terminal stretch: a pull past the live end draws the grid moved up by the stretch, row for row the still frame's", end_pixels);
+    check("terminal stretch: each stretch peaks past 4 px and springs back to a whole frame that is the still one", peak_top > 4 && peak_end > 4 && top_settled && end_settled);
+    check("terminal stretch: the grid's shift is the kit list's overscroll per frame (ui_scroll_past), at both ends", top_list && end_list);
+}
+
 static void check_terminal_wheel_curve(void)
 {
         struct ui kit = terminal.ui;
@@ -158961,6 +159081,7 @@ b32 main()
 #if MOONWATER_UI_ANY
         check_caret_blink();
         check_caret_terminal();
+        check_terminal_stretch(); // last of the terminal's rows: it leaves the terminal scrolled to the live end, with its buffers drawn whole
 #endif
         check_no_input_codes();
         check_no_shapes_by_hand();

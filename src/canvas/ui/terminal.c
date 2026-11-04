@@ -179,6 +179,7 @@ static struct
         b32 modes_fresh, title_owed;
         // Per buffer: the top margin was drawn over by what the compositor wrote, and is drawn again.
         b32 margin_spoiled[2];
+        int shift[2];              // the pixels the grid was slid by in each buffer when it was last drawn (terminal_grid_shift): a slid buffer is drawn whole
         // The theme's default ink and paper the pictures were drawn in: a turn of the theme draws them whole again.
         unsigned int painted_ink, painted_paper;
 
@@ -574,6 +575,24 @@ static void terminal_bar_follow(void)
         ui_scroll_set(&terminal.bar, (int)first * (int)terminal.cell_h);
 }
 
+// The grid's shift in device pixels, down positive: the overscroll past an end (the kit's rubber band, ui_scroll_past) and the part
+// of the bar's place past the view's whole row (a glide between rows, which the view cannot draw). Nothing on the alternate screen,
+// and nothing while a program has the pointer: it has no scrollback to stretch, and the wheel is its.
+static int terminal_grid_shift(void)
+{
+        unsigned int first, shown, total;
+        int edge, shift;
+        b64 give;
+
+        if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
+                return 0;
+        give = ui_scroll_past(&terminal.bar, &edge);
+        shift = (int)((give + UI_SCROLL_SCALE / 2) >> 8);
+        shift = edge < 0 ? shift : edge > 0 ? -shift : 0;
+        shift += (int)(first * terminal.cell_h) - terminal.bar.scroll;
+        return shift > (int)terminal.height ? (int)terminal.height : shift < -(int)terminal.height ? -(int)terminal.height : shift;
+}
+
 // The view is where the kit's bar is, to the nearest row (a row is a cell's height): the grid's only rounding of the kit's offset.
 static b32 terminal_bar_out(void)
 {
@@ -619,12 +638,12 @@ static void terminal_bar_step(void)
         kit.scale = terminal_scale();
         ui_kit.busy = 0;
         {
-                int edge;
-                b64 stretch = ui_scroll_stretched(&terminal.bar, &edge);
+                int shift = terminal_grid_shift();
                 b32 moved = ui_scroll_glide(&kit, &terminal.bar);
 
-                // The pull past an end springing home moves no row, and is drawn all the same, the last frame of it too.
-                if (terminal_bar_out() || moved || ui_scroll_stretched(&terminal.bar, &edge) != stretch)
+                // The pull past an end springing home moves no row, and is drawn all the same, the last frame of it too: the grid's
+                // shift is what is drawn, so a change of it is a frame.
+                if (terminal_bar_out() || moved || terminal_grid_shift() != shift)
                         terminal.dirty = true;
         }
 }
@@ -869,6 +888,39 @@ static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned
 
         memory_fill_u32_rect(pixels + (positive)y * terminal.pitch + x, terminal.pitch,
                              x2 - x, y2 - y, colour);
+}
+
+// A frame drawn whole (every row, its margins, the bar) slid by shift device pixels, down positive: the rows move, and the strip
+// they leave is the paper of the edge they were pulled from (the window's first pixel at the top, its last at the bottom). The
+// rows that move past the window's edge are cut, as a window cuts what it draws.
+static void terminal_grid_slide(unsigned int address_to whole, int shift)
+{
+        unsigned int height = terminal.height, pitch = terminal.pitch, width = terminal.width;
+        unsigned int up = shift < 0 ? (unsigned int)-shift : (unsigned int)shift;
+
+        if (!shift)
+                return;
+        if (up >= height)
+        {
+                terminal_fill(whole, 0, 0, width, height, whole[0]);
+                return;
+        }
+        if (shift > 0)
+        {
+                unsigned int colour = whole[0];
+
+                for (unsigned int y = height; y-- > up;)
+                        memory_copy(whole + (positive)y * pitch, whole + (positive)(y - up) * pitch, (positive)width * sizeof(unsigned int));
+                terminal_fill(whole, 0, 0, width, up, colour);
+        }
+        else
+        {
+                unsigned int colour = whole[(positive)(height - 1) * pitch];
+
+                for (unsigned int y = 0; y + up < height; y++)
+                        memory_copy(whole + (positive)y * pitch, whole + (positive)(y + up) * pitch, (positive)width * sizeof(unsigned int));
+                terminal_fill(whole, 0, (int)(height - up), width, up, colour);
+        }
 }
 
 // What a style paints over the cell: an underline, a strike and the bar.
@@ -1502,7 +1554,8 @@ static b32 terminal_frame(void)
         unsigned int first, shown, total;
         unsigned int row_x0[1024], row_x1[1024];
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
-        b32 bar, bar_told, any, right = false, turning;
+        b32 bar, bar_told, any, right = false, turning, full;
+        int shift;
 
         terminal_paint_theme();
         if (slot < 0)
@@ -1522,6 +1575,13 @@ static b32 terminal_frame(void)
         terminal_build(now);
         terminal_caret_frame();
         terminal_extent(&first, &shown, &total);
+        // A grid shifted (a stretch past an end, a glide between rows) is drawn whole, every row and the bar; so is a buffer that
+        // still holds a shifted grid, which the incremental draw would otherwise diff against cells it does not show.
+        // The bar is put where the view is first (unless it is moving), so the shift reads the bar's place of this frame.
+        if (total > shown)
+                terminal_bar_place(first, shown, total);
+        shift = terminal_grid_shift();
+        full = shift != 0 || terminal.shift[slot] != 0;
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
         if (drawn)
@@ -1545,6 +1605,8 @@ static b32 terminal_frame(void)
         // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
         b32 margin = terminal.margin_spoiled[slot];
 
+        bar = bar || full;
+        bar_told = bar_told || full;
         any = bar || bar_told || margin || terminal_overlay_wanted() || terminal.overlay_bottom[slot] > terminal.overlay_top[slot];
 
         positive changed = 0;
@@ -1573,6 +1635,10 @@ static b32 terminal_frame(void)
                         if (screen && !terminal_caret_held(front))
                                 terminal_span_take(&b0, &b1, column);
                 }
+
+                // A whole frame draws every row: the cells the buffer holds are not diffed against, and the spans are the row.
+                if (full)
+                        a0 = 0, a1 = COLUMNS;
 
                 // The bar is drawn over the cells at the window's right edge, so when it is drawn again (it moved, grew,
                 // or went, or there is a thumb to draw) those cells are painted again too: the cells under its old thumb
@@ -1608,7 +1674,7 @@ static b32 terminal_frame(void)
 
         if (changed)
         {
-                struct terminal_banding banding = {pixels, whole, now, drawn, rows, 1, bar || visible};
+                struct terminal_banding banding = {pixels, whole, now, drawn, rows, 1, bar || visible || full};
 
                 terminal_cells_draw(&banding, changed);
         }
@@ -1618,6 +1684,10 @@ static b32 terminal_frame(void)
                 terminal_margin(whole, now, 0, 0, COLUMNS);
                 terminal.margin_spoiled[slot] = false;
         }
+
+        // The grid slid past its place: the rows drawn above are moved, and the paper they leave is filled (before the bar,
+        // which is the window's own and not the grid's).
+        terminal_grid_slide(whole, shift);
 
         // Nothing differs from the buffer or from the screen: nothing is made or said.
         if (!any)
@@ -1642,7 +1712,15 @@ static b32 terminal_frame(void)
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
         // it shows. With nothing on the screen to differ from, all of it (a width of 0); with nothing
         // differing, none (a height of 0).
-        if (screen && ROWS <= 1024)
+        if (full)
+        {
+                // A whole frame is the window's picture: the compositor takes all of it again.
+                table->damage_x[own] = 0;
+                table->damage_y[own] = 0;
+                table->damage_width[own] = terminal.width;
+                table->damage_height[own] = terminal.height;
+        }
+        else if (screen && ROWS <= 1024)
         {
                 for (unsigned int row = 0; row < ROWS; row++)
                         if (row_x1[row] > row_x0[row])
@@ -1701,6 +1779,7 @@ static b32 terminal_frame(void)
         table->width[own] = terminal.width;
         table->height[own] = terminal.height;
         windows_show(&terminal.own, (unsigned int)slot);
+        terminal.shift[slot] = shift;
         terminal.forced = false;
         terminal.shown = slot;
         return true;
@@ -2154,13 +2233,15 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 *handled = true;
                 if (!alternate)
                 {
+                        int shift = terminal_grid_shift();
+
                         terminal.finger.region = terminal_finger_region();
                         ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                         // Where the grid fits there is no region to follow the finger: its reports are kept all the same, for a drag
                         // that finds the grid scrolling later.
                         if (!terminal.finger.region && ui_finger_dragged(&terminal.finger))
                                 ui_drag_follow(&terminal.finger.drag, terminal_at_y());
-                        if (terminal.finger.region && terminal_bar_out())
+                        if (terminal.finger.region && (terminal_bar_out() | (terminal_grid_shift() != shift)))
                                 *dirty = true;
                         return true;
                 }

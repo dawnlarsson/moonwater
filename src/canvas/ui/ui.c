@@ -6372,6 +6372,40 @@ static b64 ui_scroll_stretched(const struct ui_scroll address_to s, int address_
         return s->back.value[0];
 }
 
+// The overscroll a bounded region draws past its end, in 256ths of a device pixel, and the edge it is past (-1 top, 1 bottom, 0 none):
+// the rubber band's give of the pull (ui_scroll_give, the curve a pixel of the region is drawn on), so the drawn distance rises
+// with the pull and flattens as it grows, and a region that springs home draws the same curve of what the spring still holds. A
+// stretch drawn as a pixel offset (the terminal's grid) reads this; the lists keep their squash (ui_scroll_stretched).
+static b64 ui_scroll_past(const struct ui_scroll address_to s, int address_to edge)
+{
+        b64 most = ui_scroll_most256(s), past = 0;
+
+        *edge = 0;
+        if (!s->bounds)
+                return 0;
+        if (s->dragging)
+        {
+                if (s->flung)
+                        return 0;
+                if (s->at < 0)
+                        past = -s->at, *edge = -1;
+                else if (s->at > most)
+                        past = s->at - most, *edge = 1;
+                else
+                        return 0;
+        }
+        else
+        {
+                if (!s->back.live)
+                        return 0;
+                past = s->back.value[1] >> 22;
+                if (past <= 0)
+                        return 0;
+                *edge = s->edge;
+        }
+        return ui_scroll_give(s, past);
+}
+
 // The drawn position, in whole device pixels, from where it is.
 static void ui_scroll_show(struct ui_scroll address_to s)
 {
