@@ -132352,6 +132352,24 @@ static void check_kit_pointer_send(struct ui address_to wui)
         A tab's mark is a dot at the far end of that item, drawn by the kit: two strips alike but for the mark on item 1 differ in
         the pixels of item 1 and nowhere else (the editor's file tabs with changes are this).
 */
+/*
+        The columns of a line are one walk (doc_cluster_measure): a wide character takes two, a column in its first half is the
+        boundary before it and in its second half the one after, and past the line's end the line's end. Both directions agree.
+*/
+static void check_doc_columns(void)
+{
+    static unsigned char text[] = "a\xe4\xb8\xad" "b\n";
+    struct doc doc;
+    positive length = 6;
+
+    doc_open(&doc, text, length);
+    check("doc columns: a wide character takes two columns, and the byte after it is three columns on", doc_column(&doc, 4) == 3 && doc_column(&doc, 1) == 1);
+    check("doc at column: a column in a wide character's first half is the boundary before it, in its second half the one after",
+          doc_at_column(&doc, 0, 1) == 1 && doc_at_column(&doc, 0, 2) == 4);
+    check("doc at column: past a line's end it is the line's end", doc_at_column(&doc, 0, 9) == 5);
+    doc_close(&doc);
+}
+
 static void check_tabs_marks(struct ui address_to wui)
 {
     static unsigned int plain[400 * 60], marked[400 * 60];
@@ -151841,6 +151859,7 @@ static fn field_check(struct ui address_to wui)
         check_throw_last_step(wui);
         check_kit_pointer_send(wui);
         check_tabs_marks(wui);
+        check_doc_columns();
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);

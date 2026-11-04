@@ -2185,19 +2185,27 @@ static p32 doc_cluster_width(const struct doc address_to doc, const p8 address_t
         return width ? width : 1;
 }
 
+// The cluster that starts at at, on a line walked from its start at column: its width there, and next, the place it ends at.
+// The one walk the columns are made of (doc_column and doc_at_column both measure a line by it).
+static p32 doc_cluster_measure(const struct doc address_to doc, p64 at, p64 column, p64 address_to next)
+{
+        p8 cluster[64];
+        p64 finish = doc_cluster_end(doc, at);
+        positive size = doc_read(doc, at, cluster, finish - at < sizeof(cluster) ? (positive)(finish - at) : sizeof(cluster));
+
+        *next = finish;
+        return doc_cluster_width(doc, cluster, size, column);
+}
+
 // The display column of at on its line.
 static p64 doc_column(const struct doc address_to doc, p64 at)
 {
-        p64 start = doc_line_start(doc, doc_line_of(doc, at)), column = 0;
-        p8 cluster[64];
+        p64 start = doc_line_start(doc, doc_line_of(doc, at)), column = 0, next;
 
         while (start < at)
         {
-                p64 finish = doc_cluster_end(doc, start);
-                positive size = doc_read(doc, start, cluster, finish - start < sizeof(cluster) ? (positive)(finish - start) : sizeof(cluster));
-
-                column += doc_cluster_width(doc, cluster, size, column);
-                start = finish;
+                column += doc_cluster_measure(doc, start, column, &next);
+                start = next;
         }
         return column;
 }
@@ -2205,14 +2213,11 @@ static p64 doc_column(const struct doc address_to doc, p64 at)
 // Where column want falls on line: the boundary before it, or the one after when want is past a wide one's middle.
 static p64 doc_at_column(const struct doc address_to doc, p64 line, p64 want)
 {
-        p64 at = doc_line_start(doc, line), finish = doc_line_end(doc, line), column = 0;
-        p8 cluster[64];
+        p64 at = doc_line_start(doc, line), finish = doc_line_end(doc, line), column = 0, next;
 
         while (at < finish)
         {
-                p64 next = doc_cluster_end(doc, at);
-                positive size = doc_read(doc, at, cluster, next - at < sizeof(cluster) ? (positive)(next - at) : sizeof(cluster));
-                p32 width = doc_cluster_width(doc, cluster, size, column);
+                p32 width = doc_cluster_measure(doc, at, column, &next);
 
                 if (column + width > want)
                         return want - column >= (width + 1) / 2 && width > 1 ? next : at;
