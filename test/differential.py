@@ -47515,7 +47515,10 @@ def harness_moonwater_cli(argv):
         lines, finished = session(say("audio volume 40") + say("audio volume 101") + say("audio volume x") + say("audio volume default") +
                                   say("audio mute on") + say("audio mute maybe") +
                                   say("audio device alsa_output.pci-0000_00_1f.3.analog-stereo") + say("audio device bad/name") +
-                                  say("audio server off") + say("audio server maybe") + say("audio") + say("audio sideways"))
+                                  say("audio server off") + say("audio server maybe") + say("audio") + say("audio sideways") +
+                                  say("audio capture off") + say("audio capture maybe") + say("audio source alsa_input.pci-0000_00_1f.3.analog-stereo") +
+                                  say("audio source bad/name") + say("audio input volume 40") + say("audio input volume 101") + say("audio input volume x") +
+                                  say("audio input volume default") + say("audio input mute on") + say("audio input mute maybe") + say("audio input"))
         got = answers(lines)
         check(finished and got["audio volume 40"]["status"] == 0 and any("volume 40 percent" in line for line in got["audio volume 40"]["out"]),
               "audio volume 40 is kept and said", repr(got["audio volume 40"]))
@@ -47536,9 +47539,27 @@ def harness_moonwater_cli(argv):
               any("the sound server is not running" in line for line in bare),
               "bare audio says the four, and that the server is not running when it has no page", repr(bare))
         check(got["audio sideways"]["status"] == 2, "a word that is none is the usage page", repr(got["audio sideways"]))
+        #       The recording half: the switch for recording, the microphone by name, and the microphone's volume and mute, kept as the
+        #       sound server reads them (a volume is a percent, default is 100), and said bare.
+        check(got["audio capture off"]["status"] == 0 and kept_audio("audio.capture") == "off\n" and got["audio capture maybe"]["status"] == 1,
+              "audio capture off is kept as the server reads it, and a word that is none is refused", repr((got["audio capture off"], kept_audio("audio.capture"))))
+        check(got["audio source alsa_input.pci-0000_00_1f.3.analog-stereo"]["status"] == 0 and
+              kept_audio("audio.source") == "alsa_input.pci-0000_00_1f.3.analog-stereo\n" and got["audio source bad/name"]["status"] == 1,
+              "a microphone is a name the server gives it, kept as it is typed, and a path is no name",
+              repr((got["audio source alsa_input.pci-0000_00_1f.3.analog-stereo"], kept_audio("audio.source"))))
+        check(got["audio input volume 40"]["status"] == 0 and any("volume 40 percent" in line for line in got["audio input volume 40"]["out"]) and
+              got["audio input volume 101"]["status"] == 1 and got["audio input volume x"]["status"] == 1 and kept_audio("audio.source.volume") == "100\n",
+              "the microphone's volume is a percent to 100, and default keeps 100 and not the word default",
+              repr((got["audio input volume 40"], got["audio input volume 101"], kept_audio("audio.source.volume"))))
+        check(got["audio input mute on"]["status"] == 0 and kept_audio("audio.source.mute") == "on\n" and got["audio input mute maybe"]["status"] == 1,
+              "the microphone's mute is kept as the server reads it, and a word that is none is refused", repr((got["audio input mute on"], kept_audio("audio.source.mute"))))
+        check(got["audio input"]["status"] == 2, "audio input alone is the usage page", repr(got["audio input"]))
+        check(any("capture on" in line for line in bare) and any("input volume 100 percent" in line for line in bare) and
+              any("input mute off" in line for line in bare) and any("source default" in line for line in bare),
+              "bare audio says the recording rows too", repr(bare))
 
-        def audio_page(volume, muted, device, name, cards, programs):
-            body = struct.pack("<4I", 0x5341574d, 1, 4, 6684)
+        def audio_page(volume, muted, device, name, cards, programs, capture=1, source=(b"", b"", 0, 0), sources=(), records=()):
+            body = struct.pack("<4I", 0x5341574d, 2, 4, 10776)
             body += struct.pack("<11I", volume, muted, 0, 0, 0, 0, 48000, 256, 5000, len(programs), len(cards))
             body += device.ljust(96, b"\0") + name.ljust(64, b"\0")
             for at in range(8):
@@ -47551,7 +47572,21 @@ def harness_moonwater_cli(argv):
                     body += app.ljust(48, b"\0") + media.ljust(48, b"\0") + b"\0" * 32
                 else:
                     body += struct.pack("<6I", 0xffffffff, 0, 0, 0, 0, 0) + struct.pack("<iI", 0, 0) + b"\0" * 128
-            assert len(body) == 6684
+            # The input half: the microphone's levels, whether programs may record, the places used, the microphone as shown and as named,
+            # the list of them (flags 1: the default, 2: the monitor of a sink), and the programs that record.
+            body += struct.pack("<7I", source[2], source[3], 0, 0, capture, len(sources), len(records))
+            body += source[0].ljust(96, b"\0") + source[1].ljust(64, b"\0")
+            for at in range(8):
+                entry = sources[at] if at < len(sources) else (b"", b"", 0)
+                body += entry[0].ljust(64, b"\0") + entry[1].ljust(96, b"\0") + struct.pack("<2I", entry[2], 0)
+            for at in range(16):
+                if at < len(records):
+                    index, client, vol, flags, app, media = records[at]
+                    body += struct.pack("<6I", index, client, vol, flags, 0, 0) + struct.pack("<iI", 100, 0)
+                    body += app.ljust(48, b"\0") + media.ljust(48, b"\0") + b"\0" * 32
+                else:
+                    body += struct.pack("<6I", 0xffffffff, 0, 0, 0, 0, 0) + struct.pack("<iI", 0, 0) + b"\0" * 128
+            assert len(body) == 10776
             return body
 
         (sandbox / "run/moonwater/pulse").mkdir(parents=True, exist_ok=True)
@@ -47567,6 +47602,38 @@ def harness_moonwater_cli(argv):
               any("A track  100 percent, playing" in line for line in bare),
               "bare audio, with a page, says the card and its volume, the cards (the active one starred) and each program with its volume",
               repr(bare))
+        # With a microphone, the programs that record from it and one that records what plays, the page says the recording half too; with
+        # recording turned off it says that, and a page of the old version is no page.
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(
+            52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [(b"alsa_output.pci", b"Speakers (Realtek)", 1)], [],
+            source=(b"Built-in Microphone", b"alsa_input.pci", 32768, 1),
+            sources=[(b"alsa_output.pci.monitor", b"Monitor of Speakers", 2), (b"alsa_input.pci", b"Built-in Microphone", 1), (b"alsa_input.usb", b"USB Microphone", 0)],
+            records=[(3, 8, 65536, 4, b"Chromium", b"Meet"), (4, 9, 13107, 4 | 1, b"obs", b"mic"), (5, 10, 65536, 4 | 8, b"parec", b"monitor of Speakers")]))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("recording from Built-in Microphone, 50 percent, muted" in line for line in bare) and
+              any("  * alsa_input.pci  Built-in Microphone" in line for line in bare) and any("    alsa_input.usb  USB Microphone" in line for line in bare) and
+              not any("alsa_output.pci.monitor" in line for line in bare) and
+              any("Chromium  recording, 100 percent" in line for line in bare) and any("obs  recording, 20 percent, muted" in line for line in bare) and
+              not any("parec" in line for line in bare),
+              "bare audio, with a page, says the microphone and its volume, the microphones (the monitor of a sink is none) and the programs that record (not the one that records what plays)",
+              repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], [], capture=0))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("recording is off" in line for line in bare), "with recording turned off bare audio says so", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], []))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("no microphone" in line for line in bare), "and with none, that there is no microphone", repr(bare))
+        old = bytearray((sandbox / "run/moonwater/pulse/state").read_bytes())
+        old[4:8] = struct.pack("<I", 1)
+        (sandbox / "run/moonwater/pulse/state").write_bytes(bytes(old))
+        lines, finished = session(say("audio"))
+        check(finished and any("the sound server is not running" in line for line in answers(lines)["audio"]["out"]), "a page of another version is no page", repr(answers(lines)["audio"]))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(
+            52429, 1, b"Speakers (Realtek)", b"alsa_output.pci", [(b"alsa_output.pci", b"Speakers (Realtek)", 1), (b"alsa_output.hdmi", b"HDMI", 0)],
+            [(7, 3, 32768, 4, b"Firefox", b"Tab"), (9, 4, 13107, 1 | 2, b"mpv", b"film.mkv"), (12, 5, 65536, 4, b"", b"A track")]))
         page = bytearray((sandbox / "run/moonwater/pulse/state").read_bytes())
         page[8:12] = struct.pack("<I", 5)
         (sandbox / "run/moonwater/pulse/state").write_bytes(bytes(page))

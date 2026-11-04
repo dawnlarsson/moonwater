@@ -136904,6 +136904,7 @@ static fn check_settings_groups(void)
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Time zone", "Time"},
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
+            {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
             {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},

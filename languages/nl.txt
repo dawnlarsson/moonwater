@@ -153,6 +153,7 @@ ui_field_full	fe02	meer past er niet in
 =Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
 =Airplane mode	3b8a	Vliegtuigmodus
 =All commands	4a42	Alle opdrachten
+=Allow recording	f7e5	Opnemen toestaan
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
 =Background	0abd	Achtergrond
@@ -185,6 +186,9 @@ ui_field_full	fe02	meer past er niet in
 =Identify	033d	Identificeren
 =In range and saved	7941	In bereik en opgeslagen
 =Input	e11b	Invoer
+=Input device (name, or default)	af7b	Invoerapparaat (naam of default)
+=Input mute	ad50	Invoer dempen
+=Input volume (percent, or default)	263f	Invoervolume (procent of default)
 =Keep a device by its name	9c51	Een apparaat op naam bewaren
 =Keep the lowest-delay sample	d8b9	Monster met laagste vertraging bewaren
 =Kernel log	e57a	Kernellogboek

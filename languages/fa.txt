@@ -154,6 +154,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
 =Airplane mode	3b8a	حالت هواپیما
 =All commands	4a42	همه فرمان‌ها
+=Allow recording	f7e5	اجازهٔ ضبط
 =Audio	1439	صدا
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
 =Background	0abd	پس‌زمینه
@@ -186,6 +187,9 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Identify	033d	شناسایی
 =In range and saved	7941	در برد و ذخیره‌شده
 =Input	e11b	ورودی
+=Input device (name, or default)	af7b	دستگاه ورودی (نام یا default)
+=Input mute	ad50	بی‌صدا کردن ورودی
+=Input volume (percent, or default)	263f	بلندی ورودی (درصد یا default)
 =Keep a device by its name	9c51	نگه‌داشتن دستگاه با نامش
 =Keep the lowest-delay sample	d8b9	نگه‌داشتن نمونه با کمترین تأخیر
 =Kernel log	e57a	گزارش هسته

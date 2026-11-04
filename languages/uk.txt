@@ -153,6 +153,7 @@ ui_field_full	fe02	більше не вміщається
 =Accent colour (rrggbb or reset)	53aa	Колір акценту (rrggbb або reset)
 =Airplane mode	3b8a	Режим польоту
 =All commands	4a42	Усі команди
+=Allow recording	f7e5	Дозволити запис
 =Audio	1439	Звук
 =Authenticated time (NTS)	e533	Автентифікований час (NTS)
 =Background	0abd	Тло
@@ -185,6 +186,9 @@ ui_field_full	fe02	більше не вміщається
 =Identify	033d	Визначити
 =In range and saved	7941	У зоні дії та збережені
 =Input	e11b	Введення
+=Input device (name, or default)	af7b	Пристрій введення (назва або default)
+=Input mute	ad50	Вимкнути мікрофон
+=Input volume (percent, or default)	263f	Гучність мікрофона (відсотки або default)
 =Keep a device by its name	9c51	Запам'ятати пристрій за назвою
 =Keep the lowest-delay sample	d8b9	Залишати вимір із найменшою затримкою
 =Kernel log	e57a	Журнал ядра

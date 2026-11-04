@@ -107,6 +107,12 @@
 #define SETTING_AUDIO_MUTE_PATH "/root/audio.mute"
 #define SETTING_AUDIO_DEVICE_PATH "/root/audio.device"
 #define SETTING_AUDIO_SERVER_PATH "/root/audio.server"
+// And the recording half, read the same way: whether programs may record at all (absent is on), the microphone they are given by name,
+// and that microphone's volume and mute.
+#define SETTING_AUDIO_CAPTURE_PATH "/root/audio.capture"
+#define SETTING_AUDIO_SOURCE_PATH "/root/audio.source"
+#define SETTING_AUDIO_SOURCE_VOLUME_PATH "/root/audio.source.volume"
+#define SETTING_AUDIO_SOURCE_MUTE_PATH "/root/audio.source.mute"
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
@@ -372,6 +378,23 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Sound server", SETTINGS_SWITCH, 0, ("audio", "server"), "server ", null,
                       .path = SETTING_AUDIO_SERVER_PATH, .standard = "on", .usage = "audio server [on|off]",
                       .help = "the server programs play their sound through; off keeps it from starting with the desktop [on]"),
+    //  Recording: the person's switch for every program that records (off ends the recordings there are and refuses new ones),
+    //  the microphone they are given (a name from the server's page, or default for the first), and that microphone's volume and
+    //  mute, which the mixer's input strip and the microphone key change too. The microphone's verb is written by hand (host.c) as
+    //  the sound card's is.
+    SETTING_PLAIN_ROW(null, "Allow recording", SETTINGS_SWITCH, 0, ("audio", "capture"), "capture ", null,
+                      .path = SETTING_AUDIO_CAPTURE_PATH, .standard = "on", .usage = "audio capture [on|off]",
+                      .help = "let programs record from the microphone; off ends every recording and refuses new ones [on]"),
+    {null, "Input device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "source"}, "source ", null, {"audio", "source"}, null, 0, null,
+     .usage = "audio source [NAME|default]",
+     .help = "the microphone programs record from, by the name bare audio lists; default picks the first [default]"},
+    SETTING_PLAIN_ROW(null, "Input volume (percent, or default)", SETTINGS_FIELD, 0, ("audio", "input", "volume"), "volume ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_AUDIO_SOURCE_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
+                      .low = 0, .high = 100, .usage = "audio input volume [PERCENT|default]",
+                      .help = "the volume of the microphone, 0 to 100 percent [100]"),
+    SETTING_PLAIN_ROW(null, "Input mute", SETTINGS_SWITCH, 0, ("audio", "input", "mute"), "mute ", null,
+                      .path = SETTING_AUDIO_SOURCE_MUTE_PATH, .standard = "off", .usage = "audio input mute [on|off]",
+                      .help = "silence the microphone, and keep its volume [off]"),
     SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",

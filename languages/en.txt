@@ -153,6 +153,7 @@ ui_field_full	fe02	that is as much as it holds
 =Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
 =Airplane mode	3b8a	Airplane mode
 =All commands	4a42	All commands
+=Allow recording	f7e5	Allow recording
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Authenticated time (NTS)
 =Background	0abd	Background
@@ -185,6 +186,9 @@ ui_field_full	fe02	that is as much as it holds
 =Identify	033d	Identify
 =In range and saved	7941	In range and saved
 =Input	e11b	Input
+=Input device (name, or default)	af7b	Input device (name, or default)
+=Input mute	ad50	Input mute
+=Input volume (percent, or default)	263f	Input volume (percent, or default)
 =Keep a device by its name	9c51	Keep a device by its name
 =Keep the lowest-delay sample	d8b9	Keep the lowest-delay sample
 =Kernel log	e57a	Kernel log

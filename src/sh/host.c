@@ -21442,11 +21442,12 @@ static b32 host_setting_verb(string_address address_to arguments, positive count
 }
 
 /*
-        moonwater audio [volume|mute|server|device ...]: the sound server's settings (src/audio). The volume, the mute and the
-        server's switch are plain rows of the table, found before this; the card is a name that is kept as it is typed
-        and that the server, which reads /root/audio.device again twice a second, plays on when it finds it, else it plays on the
-        card it would have chosen. A name is what the page of the server lists (letters, digits and . _ - : @ +, at most 63), or
-        default. Bare, it says the four.
+        moonwater audio [volume|mute|server|device|source|capture|input ...]: the sound server's settings (src/audio). The volume,
+        the mute, the server's switch, the switch for recording and the microphone's volume and mute are plain rows of the table,
+        found before this; the card and the microphone are names that are kept as they are typed and that the server, which
+        reads /root/audio.device and /root/audio.source again twice a second, plays on or records from when it finds them, else it
+        takes what it would have chosen. A name is what the page of the server lists (letters, digits and . _ - : @ +, at
+        most 63), or default. Bare, it says them all.
 */
 #define LOCALE_AUDIO_NAME 64
 
@@ -21466,29 +21467,30 @@ static bool locale_audio_name(string_address word)
         return true;
 }
 
-static b32 locale_audio_device_status(void)
+// What `audio device` and `audio source` keep, said: the verb is the label after "audio ".
+static b32 locale_audio_pick_status(string_address label, string_address path)
 {
         p8 word[LOCALE_AUDIO_NAME + 16];
 
-        if (!locale_readable(SETTING_AUDIO_DEVICE_PATH, word, sizeof(word)))
-                host_say(log, host_label "device " LOCALE_NEEDS_ROOT "\n");
+        if (!locale_readable(path, word, sizeof(word)))
+                host_say(log, host_label "%s " LOCALE_NEEDS_ROOT "\n", label + 6);
         else
-                host_say(log, host_label "device %s\n", word[0] && locale_audio_name(word) ? (string_address)word : (string_address) "default");
+                host_say(log, host_label "%s %s\n", label + 6, word[0] && locale_audio_name(word) ? (string_address)word : (string_address) "default");
         return 0;
 }
 
-static b32 locale_audio_device(string_address address_to arguments, positive count)
+static b32 locale_audio_pick(string_address address_to arguments, positive count, string_address label, string_address path)
 {
         if (count == 3)
-                return locale_audio_device_status();
+                return locale_audio_pick_status(label, path);
         return_if(count > 4, host_usage());
         if (!string_equals(arguments[3], "default") && !locale_audio_name(arguments[3]))
-                return host_refuse("audio device is a name audio lists (letters, digits and . _ - : @ +, at most %p bytes), or default, not %s\n",
+                return host_refuse("%s is a name audio lists (letters, digits and . _ - : @ +, at most %p bytes), or default, not %s\n", label,
                                    (positive)(LOCALE_AUDIO_NAME - 1), arguments[3]);
         host_need_root();
-        if (host_save("audio device", SETTING_AUDIO_DEVICE_PATH, arguments[3]))
+        if (host_save(label, path, arguments[3]))
                 return 1;
-        return locale_audio_device_status();
+        return locale_audio_pick_status(label, path);
 }
 
 /*
@@ -21542,7 +21544,8 @@ static b32 locale_audio_status(string_address address_to arguments)
         const struct audio_state address_to state = &locale_audio_state;
 
         host_setting_group(arguments + 1, 1);
-        locale_audio_device_status();
+        locale_audio_pick_status("audio device", SETTING_AUDIO_DEVICE_PATH);
+        locale_audio_pick_status("audio source", SETTING_AUDIO_SOURCE_PATH);
         page = locale_audio_page();
         if (page < 0 && page != -ENOENT)
         {
@@ -21569,13 +21572,38 @@ static b32 locale_audio_status(string_address address_to arguments)
                          locale_audio_percent(stream->volume), (stream->flags & AUDIO_STATE_MUTED) ? (string_address) ", muted" : (string_address) "",
                          (stream->flags & AUDIO_STATE_PLAYING) && !(stream->flags & AUDIO_STATE_CORKED) ? (string_address) ", playing" : (string_address) "");
         }
+        // The recording half: whether programs may record, the microphone they are given and the ones there are (what plays back
+        // through a sink is no microphone), and the programs that record from one.
+        if (!state->capture)
+                host_say(log, host_label "recording is off\n");
+        else if (state->input[0])
+                host_say(log, host_label "recording from %s, %p percent%s\n", (string_address)state->input, locale_audio_percent(state->input_volume),
+                         state->input_muted ? (string_address) ", muted" : (string_address) "");
+        else
+                host_say(log, host_label "no microphone\n");
+        for (positive at = 0; at < state->inputs && at < AUDIO_STATE_INPUTS; at++)
+                if (!(state->input_list[at].flags & AUDIO_STATE_DEVICE_MONITOR))
+                        host_say(log, "  %s %s  %s\n", (state->input_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) ? (string_address) "*" : (string_address) " ",
+                                 (string_address)state->input_list[at].name, (string_address)state->input_list[at].description);
+        for (positive at = 0; at < AUDIO_STATE_RECORDS; at++)
+        {
+                const struct audio_state_stream address_to record = &state->record[at];
+
+                if (record->index == 0xffffffffu || (record->flags & AUDIO_STATE_MONITOR))
+                        continue;
+                host_say(log, "  %s  recording, %p percent%s%s\n", (string_address)(record->app[0] ? record->app : record->media[0] ? record->media : "?"),
+                         locale_audio_percent(record->volume), (record->flags & AUDIO_STATE_MUTED) ? (string_address) ", muted" : (string_address) "",
+                         (record->flags & AUDIO_STATE_CORKED) ? (string_address) ", paused" : (string_address) "");
+        }
         return 0;
 }
 
 static b32 host_audio(string_address address_to arguments, positive count)
 {
         if (count >= 3 && string_equals(arguments[2], "device"))
-                return locale_audio_device(arguments, count);
+                return locale_audio_pick(arguments, count, "audio device", SETTING_AUDIO_DEVICE_PATH);
+        if (count >= 3 && string_equals(arguments[2], "source"))
+                return locale_audio_pick(arguments, count, "audio source", SETTING_AUDIO_SOURCE_PATH);
         return_if(count != 2, host_usage());
         return locale_audio_status(arguments);
 }
@@ -24372,7 +24400,7 @@ static const host_row host_rows[] = {
     {null, "@keyboard", null, 'r'},
     {null, "@mouse", null, 'r'},
     {null, "@taskbar", null, 'r'},
-    {null, "audio", "the volume and the mute, the sound card and the cards there are, the programs that play, and whether the sound server starts", 'b'},
+    {null, "audio", "the volume and the mute, the sound card and the cards there are, the programs that play, the microphone and the programs that record, and whether the sound server starts", 'b'},
     {null, "@audio", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@language", null, 'r'},
@@ -24793,8 +24821,9 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(SETTING_CANVAS_DISPLAYS_PATH),
     //  The tray's format, whose row is a special one (locale_taskbar_tray), so the table's plain rows do not name it.
     HOST_WIPE_KEEP(SETTING_TASKBAR_TRAY_PATH),
-    //  The sound card, whose row is a special one (locale_audio_device); the volume, the mute and the server's switch are plain rows.
+    //  The sound card and the microphone, whose rows are special ones (locale_audio_pick); the rest of the Sound rows are plain.
     HOST_WIPE_KEEP(SETTING_AUDIO_DEVICE_PATH),
+    HOST_WIPE_KEEP(SETTING_AUDIO_SOURCE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),

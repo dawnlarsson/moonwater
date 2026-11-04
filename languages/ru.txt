@@ -153,6 +153,7 @@ ui_field_full	fe02	больше не помещается
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
 =Airplane mode	3b8a	Режим полёта
 =All commands	4a42	Все команды
+=Allow recording	f7e5	Разрешить запись
 =Audio	1439	Звук
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
 =Background	0abd	Фон
@@ -185,6 +186,9 @@ ui_field_full	fe02	больше не помещается
 =Identify	033d	Определить
 =In range and saved	7941	В зоне действия и сохранённые
 =Input	e11b	Ввод
+=Input device (name, or default)	af7b	Устройство ввода (имя или default)
+=Input mute	ad50	Отключить микрофон
+=Input volume (percent, or default)	263f	Громкость микрофона (проценты или default)
 =Keep a device by its name	9c51	Запомнить устройство по имени
 =Keep the lowest-delay sample	d8b9	Оставлять замер с наименьшей задержкой
 =Kernel log	e57a	Журнал ядра

@@ -153,6 +153,7 @@ ui_field_full	fe02	mer ryms inte
 =Accent colour (rrggbb or reset)	53aa	Accentfärg (rrggbb eller reset)
 =Airplane mode	3b8a	Flygplansläge
 =All commands	4a42	Alla kommandon
+=Allow recording	f7e5	Tillåt inspelning
 =Audio	1439	Ljud
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
 =Background	0abd	Bakgrund
@@ -185,6 +186,9 @@ ui_field_full	fe02	mer ryms inte
 =Identify	033d	Identifiera
 =In range and saved	7941	I närheten och sparade
 =Input	e11b	Inmatning
+=Input device (name, or default)	af7b	Ingångsenhet (namn eller default)
+=Input mute	ad50	Stäng av ingång
+=Input volume (percent, or default)	263f	Ingångsvolym (procent eller default)
 =Keep a device by its name	9c51	Spara en enhet med namn
 =Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
 =Kernel log	e57a	Kärnlogg

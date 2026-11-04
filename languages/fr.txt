@@ -153,6 +153,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Accent colour (rrggbb or reset)	53aa	Couleur d'accent (rrggbb ou reset)
 =Airplane mode	3b8a	Mode avion
 =All commands	4a42	Toutes les commandes
+=Allow recording	f7e5	Autoriser l'enregistrement
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)
 =Background	0abd	Arrière-plan
@@ -185,6 +186,9 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Identify	033d	Identifier
 =In range and saved	7941	À portée et enregistrés
 =Input	e11b	Saisie
+=Input device (name, or default)	af7b	Périphérique d'entrée (nom ou default)
+=Input mute	ad50	Couper l'entrée
+=Input volume (percent, or default)	263f	Volume d'entrée (pourcentage ou default)
 =Keep a device by its name	9c51	Garder un appareil par son nom
 =Keep the lowest-delay sample	d8b9	Garder l'échantillon au plus faible délai
 =Kernel log	e57a	Journal du noyau

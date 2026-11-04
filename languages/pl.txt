@@ -153,6 +153,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Accent colour (rrggbb or reset)	53aa	Kolor akcentu (rrggbb lub reset)
 =Airplane mode	3b8a	Tryb samolotowy
 =All commands	4a42	Wszystkie polecenia
+=Allow recording	f7e5	Zezwalaj na nagrywanie
 =Audio	1439	Dźwięk
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
 =Background	0abd	Tło
@@ -185,6 +186,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =Identify	033d	Identyfikuj
 =In range and saved	7941	W zasięgu i zapisane
 =Input	e11b	Wprowadzanie
+=Input device (name, or default)	af7b	Urządzenie wejściowe (nazwa lub default)
+=Input mute	ad50	Wycisz wejście
+=Input volume (percent, or default)	263f	Głośność wejścia (procent lub default)
 =Keep a device by its name	9c51	Zapamiętaj urządzenie po nazwie
 =Keep the lowest-delay sample	d8b9	Zachowuj próbkę o najmniejszym opóźnieniu
 =Kernel log	e57a	Dziennik jądra

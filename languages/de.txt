@@ -153,6 +153,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Accent colour (rrggbb or reset)	53aa	Akzentfarbe (rrggbb oder reset)
 =Airplane mode	3b8a	Flugmodus
 =All commands	4a42	Alle Befehle
+=Allow recording	f7e5	Aufnahme erlauben
 =Audio	1439	Audio
 =Authenticated time (NTS)	e533	Authentifizierte Zeit (NTS)
 =Background	0abd	Hintergrund
@@ -185,6 +186,9 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Identify	033d	Identifizieren
 =In range and saved	7941	In Reichweite und gespeichert
 =Input	e11b	Eingabe
+=Input device (name, or default)	af7b	Eingabegerät (Name oder default)
+=Input mute	ad50	Eingang stummschalten
+=Input volume (percent, or default)	263f	Eingangslautstärke (Prozent oder default)
 =Keep a device by its name	9c51	Ein Gerät nach Namen merken
 =Keep the lowest-delay sample	d8b9	Die Probe mit der geringsten Verzögerung behalten
 =Kernel log	e57a	Kernel-Protokoll

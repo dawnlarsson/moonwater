@@ -154,6 +154,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
 =Airplane mode	3b8a	מצב טיסה
 =All commands	4a42	כל הפקודות
+=Allow recording	f7e5	אפשר הקלטה
 =Audio	1439	שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
 =Background	0abd	רקע
@@ -186,6 +187,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Identify	033d	זיהוי
 =In range and saved	7941	בטווח ושמורות
 =Input	e11b	קלט
+=Input device (name, or default)	af7b	התקן קלט (שם או default)
+=Input mute	ad50	השתקת קלט
+=Input volume (percent, or default)	263f	עוצמת קלט (אחוזים או default)
 =Keep a device by its name	9c51	שמור התקן לפי שמו
 =Keep the lowest-delay sample	d8b9	שמור את הדגימה עם ההשהיה הנמוכה ביותר
 =Kernel log	e57a	יומן הליבה

@@ -153,6 +153,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Accent colour (rrggbb or reset)	53aa	Cor de destaque (rrggbb ou reset)
 =Airplane mode	3b8a	Modo avião
 =All commands	4a42	Todos os comandos
+=Allow recording	f7e5	Permitir gravação
 =Audio	1439	Áudio
 =Authenticated time (NTS)	e533	Hora autenticada (NTS)
 =Background	0abd	Plano de fundo
@@ -185,6 +186,9 @@ ui_field_full	fe02	não cabe mais que isso
 =Identify	033d	Identificar
 =In range and saved	7941	No alcance e salvas
 =Input	e11b	Entrada
+=Input device (name, or default)	af7b	Dispositivo de entrada (nome ou default)
+=Input mute	ad50	Silenciar entrada
+=Input volume (percent, or default)	263f	Volume de entrada (porcentagem ou default)
 =Keep a device by its name	9c51	Guardar um dispositivo pelo nome
 =Keep the lowest-delay sample	d8b9	Manter a amostra de menor atraso
 =Kernel log	e57a	Registro do kernel
