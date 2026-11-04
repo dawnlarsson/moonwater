@@ -44,6 +44,12 @@ CONFIG_FW_LOADER_COMPRESS_ZSTD=y
 
 CONFIG_DRM_AMDGPU=y
 
+# Userptr: the card reading and writing a program's own pages (a window's picture in the compositor's shared memory). Without it amdgpu's
+# amdgpu_hmm_register is a stub that answers -ENODEV (error 19) to every AMDGPU_GEM_USERPTR, and the GPU compose and the apps' draw lists
+# have no picture to read or write: a Steam Deck composed 1 of 1311 presents on a kernel built without it. It selects HMM_MIRROR and
+# MMU_NOTIFIER, which need nothing else.
+CONFIG_DRM_AMDGPU_USERPTR=y
+
 # Pre-GCN 1.2 parts. Off by default: they are old enough to fall outside what
 # the general profile targets, and each one costs size.
 CONFIG_DRM_AMDGPU_SI=n
