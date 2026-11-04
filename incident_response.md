@@ -92,28 +92,6 @@ the text must end inside its buffer and the field after it (`launcher`, a sentin
 the 384 bytes hold no NUL (1 failure of 3655, gcc on the box); with it, none. The run without the fix is the mutant (the
 seam in, the guard out).
 
-### MW-2026-152: the session bus's trace wrote two bytes past its line on the stack
-
-| | |
-|---|---|
-| Status | Fixed on main, 2026-11-04 |
-| Class | Stack buffer overflow by two bytes (a `]` and a NUL), in a root process, from what any client sends; only with `-t` |
-| Attacker | (a) any local program on `/run/moonwater/bus`, while the bus runs with `-t` (a debugging trace: `TRIAL_BUS_ARGS=-t` in the trials; the machine script starts it without) |
-| Moonwater exposure window | 2026-11-04 02:33 +01:00 (`0fc46fa3`) to the commit that adds this entry; no exposure as the machine starts it |
-| Fixed by | the commit that adds this entry (`src/dbus/dbus.c` `dbus_trace`) |
-
-**What it was.** `dbus_trace` builds `char line[400]` from a message's kind, sender, destination, path, interface,
-member, error and signature (copied while `n < 399`), then, when the first argument is a string of less than 80 bytes,
-` [`, the arguments and `]` (copied while `n < 398`), and ends the line. A client's call whose path, interface and member
-(up to 255 bytes each) filled the line left `n` at 399: the `]` went to `line[399]` and the NUL to `line[400]`, past the
-buffer. UBSan: `index 400 out of bounds for type 'char[400]'`.
-
-**The fix.** The `]` is written only while there is room for it and the NUL.
-
-**Tests that fail without it.** CHECK_dbus `db_test_trace`: a bus with a trace host, a call with a 251-byte path, a
-244-byte interface, a 250-byte member and two 50-byte string arguments; the line must be at most 399 long (it was 400,
-and UBSan stops at the write). The mutant that writes the `]` unguarded is red.
-
 ### MW-2026-162: on the locked tier the ext4 readdir ports allocated with flags taken from the wrong register
 
 | | |
@@ -424,33 +402,6 @@ apply, a commit), since a run changes nothing it is made of; what is drawn is th
 rows unchanged). The same commit takes 8.7 ms. What is left is the copies themselves, one per rectangle per surface
 under it, which is what the protocol asks.
 
-### MW-2026-151: a few programs on the session bus could have every other program's calls refused
-
-| | |
-|---|---|
-| Status | Fixed on main, 2026-11-04 |
-| Class | Denial of service across clients and users: a shared table smaller than what its users may take |
-| Attacker | (a) any local program that can open `/run/moonwater/bus` (eight connections; the per-uid cap is 12) |
-| Moonwater exposure window | 2026-11-04 02:33 +01:00 (`0fc46fa3`) to the commit that adds this entry, on main only |
-| Fixed by | the commit that adds this entry (`src/dbus/dbus.c`: `DBUS_PENDING`) |
-
-**What it was.** A method call that waits for a reply takes a row of the bus's pending table until it is answered or a
-side goes; a client may have `DBUS_PENDING_PER` (64) of them, but the table held 512 for all 32 clients. A program with
-nine connections, one owning a name and answering nothing and eight calling it 64 times each, took every row, and from
-then on every call of every other client to any client (a browser's to a keyring, a toolkit's to a notification daemon)
-was answered `LimitsExceeded`, for as long as those connections stayed open; there is no reply timeout to free them.
-
-**The fix.** `DBUS_PENDING` is `DBUS_CLIENTS * DBUS_PENDING_PER` (2048 rows, 32 KiB): every client can have all the calls
-it may have waiting, so no client's calls take another's room. A client that fills its own 64 is refused its 65th, as
-before.
-
-**Tests that fail without it.** CHECK_dbus `db_test_pending`: all 32 clients (the callee calling itself among them) each
-with 64 calls waiting on a callee that answers none, every one delivered and none refused; on the engine before 1,536 of
-the 2,048 were refused. Mutants: the table back at 512 (1,536 refused) and one row short (1 refused) are both red.
-
-**Still open.** Calls waiting on a callee that never answers are held until a side goes (dbus-daemon times them out); a
-client only holds up its own.
-
 ### MW-2026-130: the editor read a dangling link's target past its end
 
 | | |
@@ -496,89 +447,6 @@ no client, open no pipe for the clipboard and no file at all), and keeps the fil
 more than it may, and the stream no longer lines up with what the shim was given). Reproduced first on the box against
 the parent's compositor (`unshare -rm`, a private `/run`, four connections each sending one `wl_display.sync` with 36
 descriptors of `/dev/null`): 32 more descriptors open in `/proc/PID/fd` afterwards; 0 with the fix.
-
-### MW-2026-150: any program on the session bus could end any other with one signal
-
-| | |
-|---|---|
-| Status | Fixed on main, 2026-11-04 |
-| Class | Denial of service across clients (and across users: the socket is `0666` and a hardened bowl's programs are uid 1000) |
-| Attacker | (a) any local program that can open `/run/moonwater/bus`, of any user |
-| Moonwater exposure window | 2026-11-04 02:33 +01:00 (`0fc46fa3`, the bus) to the commit that adds this entry, about 8 hours, on main only |
-| Fixed by | the commit that adds this entry (`src/dbus/dbus.c`: `dbus_offer`, `DBUS_OUT`, `DBUS_OWED`, `DBUS_STAMPED`) |
-
-**What it was.** Every message the bus passed on went through `dbus_deliver`, which ended the client it was sent to when
-its output queue (`DBUS_OUT`, 256 KiB) had no room: the threat model's "a client that does not read is dropped". But who
-fills a queue is the sender, not the reader: a signal sent to a client's unique name is delivered whatever its match
-rules, and the largest message the bus takes (`DBUS_MESSAGE`, 256 KiB) is larger than an empty queue once the bus has
-stamped its sender on it. So one signal of 256 KiB to `:1.N` ended client N at once, and two of 200 KiB did the same to a
-client between two of its reads; a broadcast did it to every client whose rule it matched. GDBus's shared session
-connection exits the program when the bus closes it (`exit-on-close`), so a browser, a GTK program or a desktop's own
-could be ended at will by any program on the bus. dbus-daemon refuses such a message instead ("Rejected: destination has
-a full message queue") and never ends the receiver for it.
-
-**The fix.** What other clients send (calls, signals) and what the bus tells everyone (NameOwnerChanged,
-SettingChanged) goes through `dbus_offer`: it is refused when it would fill more than `DBUS_OUT - DBUS_OWED` of the
-queue, and a caller that waits for a reply is told at once (`LimitsExceeded`) with nothing left pending. What the bus owes
-a client (answers and errors to its own calls, routed replies, NameAcquired/NameLost) still goes through
-`dbus_deliver`, which keeps the room of the largest stamped message (`DBUS_OWED`) for them and ends the client only when
-it does not read those. The queue is 1 MiB (`4 * DBUS_MESSAGE`) so the largest message fits; a message the bus stamped
-may be up to `DBUS_STAMPED` (the message and 4 KiB) and is parsed again for a broadcast at that size, where before a
-broadcast of a message near the cap was silently dropped.
-
-**How it was reproduced.** CHECK_dbus `db_test_queue` against the engine before the fix: the 256 KiB signal to `:1.2`
-ended it (`dead 2`), as did the 200 KiB signals and a broadcast, and the victim's own ListNames was never answered (6
-rows red).
-
-**Tests that fail without it.** `db_test_queue` (the largest signal delivered and nobody ended; signals and broadcasts
-past the room refused and nobody ended; the queue within what others may fill; the client's own call answered after
-others filled it; a call to a full client is `LimitsExceeded` to its caller and waits on nothing; a client that read is
-sent to again; a client that does not read the answers to its own calls is still ended, and no other with it);
-`db_test_hostile`'s non-reader row now asks that the queue fill to the peers' room and the client stay. Eight mutants,
-each red: the refusal ending the receiver again, the queue back to 256 KiB, no room kept for what is owed, no error to
-the caller, the pending call kept, the parse cap back at `DBUS_MESSAGE`, unicast signals and broadcasts through
-`dbus_deliver` again.
-
-**Still open.** A client that never reads keeps its slot and up to `DBUS_OUT - DBUS_OWED` of memory until it goes
-(as on dbus-daemon); the per-uid cap (`DBUS_PER_UID`, 12) bounds how many. A callee a client chose to call can still
-end it by answering several calls at once with replies of the largest size while the client does not read: the client
-asked for them.
-
-### MW-2026-110: the session bus's portal could put a cut character, or a boolean of 7, on the wire
-
-| | |
-|---|---|
-| Status | Fixed on main, 2026-11-04; no exposure (every caller passes a constant) |
-| Class | Output that is not valid D-Bus from an internal API (latent); a client that reads it leaves the bus |
-| Attacker | none today: no byte a program sends, and no settings file, reaches the texts or booleans of `dbus_setting_set` |
-| Moonwater exposure window | none |
-| Fixed by | the commit that adds this entry (`src/dbus/dbus.c` `dbus_setting_set`, `test/checks.c` CHECK_dbus) |
-| Found by | the grammar fuzz this commit adds to CHECK_dbus (`db_test_structured`), seed 111, 1.5 million rounds, under ASan and UBSan with gcc and clang on the box |
-
-**What it was.** `dbus_setting_set` (src/dbus/dbus.c) kept a text setting with `dbus_text`, which cuts at the 63 bytes of
-`struct dbus_setting.text`: a text longer than that, with a letter of two or more bytes across the cut, was kept as
-invalid UTF-8, and a boolean was written as whatever number it was given. ReadAll, Read and SettingChanged put both on
-the wire as they were, and libdbus and GDBus take a message with a string that is not UTF-8, or a boolean that is not 0
-or 1, for one that is not valid: they drop the connection, and a GLib program exits with it. The sessionbus tool's
-callers (`sessionbus_settings`) pass only constants ("prefer-dark", "Adwaita", "12h", ...) and booleans made by `!` and
-`==`, so nothing reached it; it is fixed because the bus's own promise (threat model point 2) is that what it sends is
-valid.
-
-**The fix.** A text that does not fit, a namespace, key or text that is not UTF-8, a kind that is none: no setting (-1).
-A boolean is 1 for any number but 0.
-
-**Tests that fail without it.** CHECK_dbus `db_test_portal`: a text that would be cut in a character, one that is not
-UTF-8, a missing text, a key that is not UTF-8, a kind that is none, a boolean of 7. Mutants (each turns its row red):
-the UTF-8 check of the text removed, the room check removed, the boolean left as given, the kind check removed. The
-grammar fuzz's invariant (every message a client is given parses whole) catches the cut text at seed 111.
-
-**The fuzz.** `db_test_structured` makes messages from the grammar (random signatures of every basic type, arrays,
-dictionaries, structs and variants nested, random values, random header fields, to the bus, the portal, a client by
-unique or well-known name, or to nobody; a third of them changed at a length, a count, a signature byte or a cut), the
-bus's own calls with random arguments, replies and forged replies, clients that read and do not, that go and come back,
-the clock, and bytes in pieces of random size; after every step the queues, names and pending calls are checked, every
-message a client reads must parse whole, every message the grammar makes whole must be taken, and at the end every
-record is returned. `CHECK_dbus ROUNDS GRAMMAR SEED`; the lane runs 20,000 of each.
 
 ### MW-2026-080: the clipboard and paste were designed against snooping and paste injection before either existed
 
