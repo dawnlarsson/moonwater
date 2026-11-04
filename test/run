@@ -6550,6 +6550,13 @@ lane_wayland()
                         ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf $wayland_games $wayland_scale test/wayland_shm.c '$work/client/xdg-shell-code.c' \
                         ${wayland_dmabuf:+$wayland_dmabuf_code} ${wayland_games:+$wayland_games_code} ${wayland_scale:+$wayland_scale_code} \
                         $(pkg-config --cflags --libs wayland-client) $wayland_dmabuf_libs -o '$work/client/wayland-shm'"
+                #       The text field of the on-screen keyboard's rows (test/wayland_textinput.c): the xdg-shell code above, and the
+                #       text-input-unstable-v3 protocol the field speaks (its headers and code made from the protocol's XML here).
+                wayland_text_xml=$(pkg-config --variable=pkgdatadir wayland-protocols 2> /dev/null)/unstable/text-input/text-input-unstable-v3.xml
+                wayland_row client-build-textinput sh -c "wayland-scanner client-header '$wayland_text_xml' '$work/client/text-input-client.h' &&
+                        wayland-scanner private-code '$wayland_text_xml' '$work/client/text-input-code.c' &&
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -Werror -I'$work/client' test/wayland_textinput.c '$work/client/xdg-shell-code.c' \
+                        '$work/client/text-input-code.c' $(pkg-config --cflags --libs wayland-client) -o '$work/client/wayland-textinput'"
                 if [ -x "$work/client/wayland-shm" ] && freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
                         wayland_e2e=0
                         unshare -rm sh test/wayland_e2e.sh "$work/shell-wayland" "$work/client/wayland-shm" \
@@ -6571,6 +6578,29 @@ lane_wayland()
                         tally wayland-e2e-build 0 1
                         wayland_status=1
                         note "wayland: the compositor with the shim did not build"
+                fi
+                #       The on-screen keyboard and a text field (test/wayland_textinput.sh): the field is a libwayland client with a
+                #       zwp_text_input_v3 on its seat, and the keyboard is the shell's own osk, both in the headless compositor.
+                if [ -x "$work/shell-wayland" ] && [ -x "$work/client/wayland-textinput" ]; then
+                        wayland_textinput_at=0
+                        unshare -rm sh test/wayland_textinput.sh "$work/shell-wayland" "$work/client/wayland-textinput" fonts "$work/textinput" \
+                                > "$work/textinput.out" 2>&1 < /dev/null
+                        while IFS= read -r wayland_line; do
+                                case $wayland_line in
+                                "ok "*) wayland_textinput_at=$((wayland_textinput_at + 1)); tally "wayland-textinput-$wayland_textinput_at" 1 1 ;;
+                                "FAIL "*)
+                                        wayland_textinput_at=$((wayland_textinput_at + 1))
+                                        tally "wayland-textinput-$wayland_textinput_at" 0 1
+                                        wayland_status=1
+                                        note "wayland textinput: $wayland_line"
+                                        ;;
+                                esac
+                        done < "$work/textinput.out"
+                        [ "$wayland_textinput_at" -gt 0 ] || { tally wayland-textinput-ran 0 1; wayland_status=1; note "wayland textinput ran no row"; }
+                elif [ -x "$work/client/wayland-textinput" ]; then
+                        tally wayland-textinput-build 0 1
+                        wayland_status=1
+                        note "wayland: the compositor with the shim did not build for the text input rows"
                 fi
                 # The X clients (test/wayland_xwayland.sh): Xwayland as a client of the shim, an Xlib client in it. Xwayland is the
                 # host's, or the one in the root MW_XWAYLAND_ROOT names (an Arch or Alpine root with xorg-xwayland and xorg-xprop, whose
