@@ -506,6 +506,10 @@ static void audio_file_write(const char *name, const char *text, long length)
         if (fd < 0)
                 return;
         put = audio_call(syscall(write), (positive)fd, (positive)text, (positive)length, 0, 0, 0);
+        // The data is on the disk before the name moves to it, and the name is on the disk before the save is over: a crash keeps the old
+        // volume or the new one, never an empty file (the person's volume is what these are for).
+        if (put == length)
+                audio_call(syscall(fsync), (positive)fd, 0, 0, 0, 0, 0);
         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
         // A short or failed write is not put over the file that is there: the new one is taken away and the old one stays.
         if (put != length)
@@ -514,6 +518,13 @@ static void audio_file_write(const char *name, const char *text, long length)
                 return;
         }
         audio_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0);
+        // The directory's entry for the new name: O_RDONLY | O_DIRECTORY, fsync, close.
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.settings, 0x10000 | 0x80000, 0, 0, 0);
+        if (fd >= 0)
+        {
+                audio_call(syscall(fsync), (positive)fd, 0, 0, 0, 0, 0);
+                audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        }
 }
 
 static long audio_text_length(const char *s)
