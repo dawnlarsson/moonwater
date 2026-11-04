@@ -169009,6 +169009,69 @@ static void test_pacing(void)
         wp_fifo's barrier: a commit that sets one is made, and the next frame drawn clears it; a commit that waits for it is held (its
         client's stream waits) until that frame, and is made then. A surface with no window holds nothing, since no frame would come for it.
 */
+/*
+        zwp_keyboard_shortcuts_inhibitor_v1: active while its window has the keys (active is sent, inactive when they go), so the compositor's
+        chords are the window's while it is. Super with Escape, held a second, is the one chord kept: it gives the keys back and the inhibitor
+        is inactive until the keys come to its window again. Escape alone, Tab and the rest are the window's.
+*/
+static void test_shortcuts(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long shortcuts, inhibitor;
+        long active, inactive;
+
+        wl_reset();
+        fake.clock_still = 1;
+        fake.now = 1000;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        shortcuts = wl_global(c, s.registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
+        wlc_forget(c);
+        inhibitor = wlc_id(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1);
+        wlc_send(c, shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, inhibitor, s.surface, s.seat);
+        WLCHECK(c->errors == 0 && wayland_row_shortcuts(0) == 0, "an inhibitor is not active before its window has the keys");
+        wayland_keyboard_to(0);
+        wlc_pump(c);
+        active = wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active);
+        WLCHECK(active == 1 && wayland_row_shortcuts(0) == 1, "it is active, and says so, once its window has the keys");
+        WLCHECK(wayland_shortcuts_key(0, 15, 1, 0) == 1, "while active, Tab is the window's, and so is any key");
+        WLCHECK(wayland_shortcuts_key(0, 1, 1, 0) == 1, "Escape without Super is the window's");
+        WLCHECK(wayland_shortcuts_key(0, 1, 1, 1) == 2, "Super with Escape is the compositor's kept chord, and the window does not get it");
+        fake.now += 500;
+        WLCHECK(wayland_shortcuts_key(0, 1, 0, 1) == 2 && wayland_row_shortcuts(0) == 1, "let go before a second, it does not give the keys back");
+        fake.now += 500;
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive) == 0,
+                "and nothing is said about it");
+        WLCHECK(wayland_shortcuts_key(0, 1, 1, 1) == 2, "held again for a second");
+        fake.now += 1000;
+        WLCHECK(wayland_shortcuts_key(0, 1, 0, 1) == 2 && wayland_row_shortcuts(0) == 0, "held a second, the kept chord gives the keys back");
+        wlc_pump(c);
+        inactive = wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive);
+        WLCHECK(inactive == 1, "and the inhibitor is told inactive");
+        WLCHECK(wayland_shortcuts_key(0, 15, 1, 0) == 0, "with the inhibitor inactive, the compositor's chords run again");
+        wayland_keyboard_to(-1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive) == 1,
+                "losing the keys after an escape does not say inactive twice");
+        wayland_keyboard_to(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active) == 2 && wayland_row_shortcuts(0) == 1,
+                "back on the keys, it is active again");
+        wayland_keyboard_to(-1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive) == 2 && wayland_row_shortcuts(0) == 0,
+                "losing the keys says inactive once it is active again");
+        WLCHECK(wayland_shortcuts_key(0, 15, 1, 0) == 0, "and no window has the keys, so the chords run");
+        wlc_send(c, inhibitor, WLQ_zwp_keyboard_shortcuts_inhibitor_v1_destroy);
+        WLCHECK(c->errors == 0, "the inhibitor is destroyed");
+        wlc_end(c);
+        wayland_stop();
+}
+
 static void test_barrier(void)
 {
         struct session s;
@@ -169296,7 +169359,9 @@ static void test_inhibit_state(void)
 
         other = wlc_id(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1);
         wlc_send(c, shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, other, s.surface, s.seat);
-        WLCHECK(wayland_row_shortcuts(0) == 1, "a window with a shortcuts inhibitor says so");
+        WLCHECK(wayland_row_shortcuts(0) == 0, "a shortcuts inhibitor is not active until its window has the keys");
+        wayland_keyboard_to(0);
+        WLCHECK(wayland_row_shortcuts(0) == 1, "and is active once its window has them");
 
         control = wlc_id(c, WLI_wp_tearing_control_v1, 1);
         wlc_send(c, tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, control, s.surface);
@@ -172713,8 +172778,8 @@ static void test_games(void)
         wlc_send(cd, d.k.s.shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, inhibitor, d.k.s.surface, d.k.s.seat);
         wayland_keyboard_to(d.k.row);
         wlc_pump(cd);
-        WLCHECK(cd->errors == 0 && wlc_count(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active) == 0,
-                "a shortcuts inhibitor is taken and never active: the compositor's chords are not a client's");
+        WLCHECK(cd->errors == 0 && wlc_count(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active) == 1,
+                "a shortcuts inhibitor is active on the window with the keys, and says so");
         wlc_send(cd, d.k.s.shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, wlc_id(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1),
                  d.k.s.surface, d.k.s.seat);
         WLCHECK(refused_with(cd, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited), "a surface has one inhibitor");
@@ -172761,7 +172826,8 @@ static void test_games(void)
                 unsigned long grab = wlc_id(cd, WLI_zwp_xwayland_keyboard_grab_v1, 1);
 
                 wlc_send(cd, d.k.s.xgrab, WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard, grab, d.k.s.surface, d.k.s.seat);
-                WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 1, "a keyboard grab holds the keys of its window (%s)", cd->error_text);
+                wayland_keyboard_to(d.k.row);
+                WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 1, "a keyboard grab holds the keys of its window while it has them (%s)", cd->error_text);
                 wlc_send(cd, grab, WLQ_zwp_xwayland_keyboard_grab_v1_destroy);
                 WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 0, "and lets them go with its destroy (%s)", cd->error_text);
         }
@@ -173358,6 +173424,7 @@ int main(int argc, char **argv)
         test_activation();
         test_pacing();
         test_barrier();
+        test_shortcuts();
         test_cursor_shape();
         test_pinch();
         test_text();

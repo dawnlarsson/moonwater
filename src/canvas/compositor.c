@@ -14435,6 +14435,7 @@ static int compositor_wl_key(unsigned int code, int value);
 static int compositor_wl_hold_counts(int dx, int dy, positive now);
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
+static int compositor_wl_suspends(unsigned int code, int value, int super);
 #endif
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
@@ -14484,6 +14485,25 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
 #endif
                 return;
         }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // A client's keyboard shortcuts inhibitor on the window with the keys suspends the compositor's chords: the keys are the
+        // window's, except Super with Escape, the one chord kept (it is the compositor's, held a second to give the keys back), and the
+        // media keys, which are not chords and stay the desktop's (compositor_wl_suspends: 0 the chords run, 1 the window has the key,
+        // 2 the kept chord).
+        if (!bit)
+        {
+                int suspended = compositor_wl_suspends(code, value, (modifiers & WINDOW_KEY_SUPER) != 0);
+
+                if (suspended == 2)
+                        return;
+                if (suspended == 1 && code != CK_KEY_MUTE && code != CK_KEY_VOLUME_DOWN && code != CK_KEY_VOLUME_UP && code != CK_KEY_MICMUTE)
+                {
+                        compositor_wl_key(code, value);
+                        return;
+                }
+        }
+#endif
 
         if (chord == WINDOW_KEY_ALT && code == CK_KEY_TAB)
         {

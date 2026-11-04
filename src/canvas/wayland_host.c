@@ -1644,11 +1644,13 @@ static void compositor_wl_table(void)
         table->wl_idled = (unsigned int)idled;
         table->wl_bells = (unsigned int)bells;
         table->wl_icons = (unsigned int)icons;
+        table->wl_shortcuts = 0;
         for (long row = 0; row < WINDOWS; row++)
         {
                 table->wl_content[row] = (unsigned char)wayland_row_content(row);
                 table->wl_modal[row] = (unsigned char)wayland_row_modal(row);
                 table->wl_icon[row] = (unsigned char)wayland_row_icon(row);
+                table->wl_shortcuts += wayland_row_shortcuts(row) != 0;
         }
 }
 
@@ -2046,6 +2048,18 @@ static int compositor_wl_key_row(void)
         while (row >= 0 && compositor_popup_parent[row] >= 0 && wayland_row_owner(row) >= 0 && !wayland_row_grabs(row))
                 row = compositor_popup_parent[row];
         return wayland_row_owner(row) >= 0 ? row : -1;
+}
+
+// What the compositor's chords do for a key, for the window that has the keys: 0 they run, 1 the window has the key (its shortcuts
+// inhibitor is active), 2 the one chord the inhibitor keeps (Super and Escape), which is the compositor's (wayland_shortcuts_key).
+static int compositor_wl_suspends(unsigned int code, int value, int super)
+{
+        int row;
+
+        if (!compositor_wl.started)
+                return 0;
+        row = compositor_wl_key_row();
+        return row < 0 ? 0 : (int)wayland_shortcuts_key(row, (long)code, (long)value, super);
 }
 
 /*

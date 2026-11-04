@@ -22382,6 +22382,9 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  hints           %p bell rings, %p toplevel icons set; windows: %p with a content type, %p modal, %p with an icon\n",
                          (positive)table->wl_bells, (positive)table->wl_icons, (positive)content, (positive)modal, (positive)icon);
         }
+        if (table->wl_input_ms)
+                host_say(log, "  shortcuts       %p windows have an active keyboard shortcuts inhibitor: the compositor's chords are off for them, and Super with Escape held a second gives the keys back\n",
+                         (positive)table->wl_shortcuts);
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)

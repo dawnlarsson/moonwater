@@ -397,6 +397,11 @@ struct wayland_surface
         // A zwp_xwayland_keyboard_grab_v1 holds the keys as a shortcuts inhibitor does (xgrab).
         unsigned char xsurface, xserial_set, xgrab;
         unsigned long long xserial;
+        // The shortcuts inhibitor: its object, whether it is active (the surface has the keyboard and the inhibitor is not cancelled by
+        // the escape chord), and the escape chord's Escape: held down, and since when (the host's ms).
+        unsigned int shortcut_id;
+        unsigned char shortcut_active, escape_down;
+        long escape_at;
         unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, shown_full, translucent;
         long translucent_x, translucent_y, translucent_w, translucent_h; // where a translucent picture was laid
         struct wayland_rect shown_rect;
@@ -4077,6 +4082,8 @@ static void wayland_keyboard_enter_one(struct wayland_client *c, long slot, stru
 static void wayland_selections_to(struct wayland_client *c);
 
 /* The keys go to row (or to none, -1): the client it leaves is sent its leave, the one it enters its enter with the keys held. */
+static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surface *s, int active);
+
 WAYLAND_API void wayland_keyboard_to(long row)
 {
         struct wayland_client *old = 0, *now = 0;
@@ -4101,6 +4108,11 @@ WAYLAND_API void wayland_keyboard_to(long row)
                 }
         }
         wayland.keyboard_row = is ? row : -1;
+        // A shortcuts inhibitor is active while its window has the keys: the one that lost them is sent inactive, the one that got them active.
+        if (was && old && (was->shortcuts || was->xgrab) && was->shortcut_active)
+                wayland_shortcuts_send(old, was, 0);
+        if (is && now && (is->shortcuts || is->xgrab) && !is->shortcut_active)
+                wayland_shortcuts_send(now, is, 1);
         wayland_constraints_update();
         if (is)
         {
@@ -5788,6 +5800,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                                 return wayland_fail(c, self->id, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited,
                                                     "the surface has an inhibitor");
                         surface->shortcuts = 1;
+                        surface->shortcut_id = c->objects[a[0].slot].id;
                         c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
                         c->objects[a[0].slot].aux = (unsigned short)surface->gen;
                 }
@@ -5795,7 +5808,11 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
         case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
                 surface = wayland_surface_of(c, self - c->objects);
                 if (surface)
+                {
                         surface->shortcuts = 0;
+                        surface->shortcut_active = 0;
+                        surface->escape_down = 0;
+                }
                 return WAYLAND_OK;
         case WLI_wp_tearing_control_manager_v1:
                 if (op == WLQ_wp_tearing_control_manager_v1_get_tearing_control)
@@ -7024,7 +7041,69 @@ WAYLAND_API long wayland_row_shortcuts(long row)
         struct wayland_client *c = 0;
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
-        return s ? (s->shortcuts || s->xgrab) : 0;
+        return s && (s->shortcuts || s->xgrab) ? s->shortcut_active : 0;
+}
+
+/*
+        The keyboard shortcuts inhibitor's active state follows the keyboard: it becomes active when its surface gets the keys (and says
+        so, with active), and inactive when the keys go (and says so, with inactive). Nothing else sends them.
+*/
+static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surface *s, int active)
+{
+        long slot = wayland_find(c, s->shortcut_id, WLI_zwp_keyboard_shortcuts_inhibitor_v1);
+
+        s->shortcut_active = (unsigned char)active;
+        s->escape_down = 0;
+        if (slot >= 0)
+        {
+                struct wayland_event e = wayland_begin(c, s->shortcut_id, active ? WLE_zwp_keyboard_shortcuts_inhibitor_v1_active
+                                                                                 : WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive);
+
+                wayland_end(&e);
+        }
+}
+
+// Keys said to the compositor's chords, for the window that has them: whether a shortcuts inhibitor is active there. Where the
+// keys are taken from a chord, these are the answers (wayland_shortcuts_key).
+#define WAYLAND_KEY_ESC 1                 // the Linux code of Escape
+#define WAYLAND_ESCAPE_MS 1000            // how long Super and Escape are held to give the keys back
+#define WAYLAND_KEYS_CHORDS 0             // the compositor's chords run
+#define WAYLAND_KEYS_CLIENT 1             // the window has the keys (a shortcut inhibitor): the compositor's chords do not run
+#define WAYLAND_KEYS_ESCAPE 2             // Super and Escape, the one chord the inhibitor keeps: it is the compositor's, and nothing else gets it
+
+/*
+        What a key does to the compositor's chords, for the window with the keys in row. An active shortcuts inhibitor suspends them, so the
+        key is the window's: WAYLAND_KEYS_CLIENT. The one chord kept is Super with Escape, held for WAYLAND_ESCAPE_MS: its press and its
+        release are the compositor's (WAYLAND_KEYS_ESCAPE, and no client sees them), and a hold as long as that gives the keys back, the
+        inhibitor is inactive until the keys next come to its window, and it is sent inactive. Escape with no Super is the window's.
+        super is 1 while the logo key is held.
+*/
+WAYLAND_API long wayland_shortcuts_key(long row, long code, long value, int super)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+        long now;
+
+        if (!s || !(s->shortcuts || s->xgrab) || !s->shortcut_active)
+                return WAYLAND_KEYS_CHORDS;
+        if (code == WAYLAND_KEY_ESC && value == 1 && super && !s->escape_down)
+        {
+                s->escape_down = 1;
+                s->escape_at = wayland.host->now(wayland.host->context);
+                return WAYLAND_KEYS_ESCAPE;
+        }
+        if (code == WAYLAND_KEY_ESC && s->escape_down)
+        {
+                if (value == 0)
+                {
+                        now = wayland.host->now(wayland.host->context);
+                        s->escape_down = 0;
+                        if (now - s->escape_at >= WAYLAND_ESCAPE_MS)
+                                wayland_shortcuts_send(c, s, 0);
+                }
+                return WAYLAND_KEYS_ESCAPE;
+        }
+        return WAYLAND_KEYS_CLIENT;
 }
 
 WAYLAND_API long wayland_row_async(long row)

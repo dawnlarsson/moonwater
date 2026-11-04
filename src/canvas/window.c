@@ -924,7 +924,7 @@ struct windows
         // the xdg_system_bell rings and toplevel icons set, and per window its content type (wp_content_type), whether its dialog is
         // modal (xdg-dialog) and whether it has an icon (xdg-toplevel-icon).
         unsigned long wl_input_ms;
-        unsigned int wl_inhibitors, wl_idled, wl_bells, wl_icons;
+        unsigned int wl_inhibitors, wl_idled, wl_bells, wl_icons, wl_shortcuts;
         unsigned char wl_content[WINDOWS], wl_modal[WINDOWS], wl_icon[WINDOWS];
 };
 
