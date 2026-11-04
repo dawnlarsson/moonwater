@@ -24649,6 +24649,8 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
     HOST_WIPE_KEEP(SETTING_CANVAS_ARRANGE_PATH),
     HOST_WIPE_KEEP(SETTING_CANVAS_DISPLAYS_PATH),
+    //  The tray's format, whose row is a special one (locale_taskbar_tray), so the table's plain rows do not name it.
+    HOST_WIPE_KEEP(SETTING_TASKBAR_TRAY_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),
