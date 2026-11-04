@@ -182599,7 +182599,7 @@ static void pt_test_period_clock(void)
 {
         static unsigned char data[AUDIO_BLOCK * 4 * 8];
         static unsigned char dst[AUDIO_BLOCK * 4];
-        unsigned long channel, index, missing, chans[4];
+        unsigned long channel, index, missing;
         long slot, before;
 
         pt_reset();
@@ -182609,7 +182609,6 @@ static void pt_test_period_clock(void)
         for (int i = 0; i < 4; i++)
         {
                 PTCHECK(pt_create(slot, 35, 100 + (unsigned long)i, 0, 0, 0, &channel, &index, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "stream %d is made", i);
-                chans[i] = channel;
                 pt_data(slot, channel, data, sizeof(data), 0, 0);
         }
         pt_collect(slot);
