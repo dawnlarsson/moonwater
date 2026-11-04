@@ -217166,7 +217166,7 @@ static void gpu_bench_sort(positive *took, int n)
 static font_engine app_engine;
 static p8 app_atlas[512 * 512];
 static font_face app_face;
-static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[2400 * 2400], app_dummy[2400 * 2400];
+static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS];
 static struct windows app_table;
 static struct ui_scene app_scene;
 // The app regions, from the GPU's base at app_at: the picture (16 MiB), the ops (4 MiB), the binning (16 MiB), the text covers (28 MiB).
@@ -217208,6 +217208,17 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                 return;
         }
         font_start(&app_engine, app_atlas, 512, 512);
+        // The processor's pictures are the largest of the scales' (memory(), as the 8K section takes its reference).
+        positive need = 0;
+        for (int k = 0; k < count; k++)
+        {
+                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : MIXER_WIDTH) * s / 100;
+                int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+
+                if ((positive)pitch * H > need)
+                        need = (positive)pitch * H;
+        }
+        unsigned int address_to cpu = (unsigned int address_to)memory(need * 4), address_to dummy = (unsigned int address_to)memory(need * 4);
         for (int mode = 0; mode < 2; mode++)
         {
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
@@ -217269,10 +217280,10 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
 
                         // A warm-up paint: a painter keeps state between paints (the mixer's tabs tween and their pip), and the first paint after a
                         // change is not the steady frame; the reference and the recording are both steady.
-                        memory_zero(app_dummy, sizeof(app_dummy));
-                        paint(app_dummy);
-                        memory_zero(app_cpu, sizeof(app_cpu));
-                        paint(app_cpu);
+                        memory_zero(dummy, need * 4);
+                        paint(dummy);
+                        memory_zero(cpu, need * 4);
+                        paint(cpu);
 
                         memory_zero(&app_scene, sizeof(app_scene));
                         app_scene.ops = ops, app_scene.room = 1u << 15, app_scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + cover_at);
@@ -217283,7 +217294,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 settings.ui.scene = &app_scene;
                         else
                                 mixer.ui.scene = &app_scene;
-                        paint(app_dummy);
+                        paint(dummy);
                         launcher.ui.scene = null, mixer.ui.scene = null, settings.ui.scene = null;
                         if (app_scene.lost)
                         {
@@ -217304,9 +217315,9 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 for (int x = 0; x < W; x++)
                                 {
                                         checks++;
-                                        if (pic[(positive)y * pitch + x] != app_cpu[(positive)y * pitch + x] && (++failures, ++bad) < 6)
+                                        if (pic[(positive)y * pitch + x] != cpu[(positive)y * pitch + x] && (++failures, ++bad) < 6)
                                                 string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
-                                                              (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)app_cpu[(positive)y * pitch + x]);
+                                                              (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)cpu[(positive)y * pitch + x]);
                                 }
                         if (which == 5)
                                 check("gpu apps: the gallery showcase replays bit for bit", bad == 0);
@@ -218780,9 +218791,9 @@ b32 main(void)
                         for (app_group = 0; app_group < 4; app_group++)
                                 app_rows(4, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         {
-                                static const int two[2] = {100, 150};
+                                static const int gallery_scales[4] = {100, 150, 200, 300};
 
-                                app_rows(5, big, kops, kbins, kbins + (4 << 20), 4u << 20, two, 2, 0);
+                                app_rows(5, big, kops, kbins, kbins + (4 << 20), 4u << 20, gallery_scales, 4, 0);
                         }
                 }
         }
