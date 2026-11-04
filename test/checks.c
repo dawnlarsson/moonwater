@@ -9800,6 +9800,14 @@ void *memory_fill(void *destination, unsigned char value, unsigned long size)
 }
 #endif
 
+/* the helpers below are defined after their first use here (lib.c's five pulse loops, 22a16648f): declared first */
+static long audio_c_text_clean(unsigned char *to, const unsigned char *from, long length);
+static int audio_c_key_printable(const unsigned char *from, long length);
+static void audio_c_reverse_units(unsigned char *dst, long count, long width);
+static void audio_c_s16_to_u8(unsigned char *dst, const unsigned char *src, long count);
+static long audio_c_window_peaks(float *out0, float *out1, const float *left, const float *right, long frames, float *state,
+                                 long *count, long window, int mono);
+
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
 {
         audio_c_widen(dst, src, samples, kind);
@@ -186327,6 +186335,29 @@ static void sv_test_power(void)
         audio_service.page_path = "/tmp/unused";
 }
 
+/* ---- the server's own look at the cards is not a device event: the scan opens and closes the control nodes, and an event for each
+        close made the next look (the loop never slept, on the box with a client connected). Only a node that comes or goes is one. ---- */
+static void sv_test_spin(void)
+{
+        static struct audio_card cards[AUDIO_ALSA_CARDS];
+
+        sv_setup();
+        if (access("/dev/snd", F_OK) != 0)
+                return; /* no sound devices on this machine: nothing to watch, nothing to open */
+        audio_notify_open(sv_dir);
+        if (audio_service.notify < 0)
+        {
+                SVCHECK(0, "the settings directory and the device nodes are watched");
+                return;
+        }
+        SVCHECK(audio_service.snd_wd >= 0, "the device nodes are watched");
+        audio_cards_scan(cards, AUDIO_ALSA_CARDS);
+        audio_cards_scan(cards, AUDIO_ALSA_CARDS);
+        SVCHECK((audio_notify_drain() & 2) == 0, "the server's own opens and closes of the cards are not device events");
+        system_close(audio_service.notify);
+        audio_service.notify = -1;
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -186341,6 +186372,7 @@ static int sv_main_checks(void)
         sv_test_notify();
         sv_test_clients();
         sv_test_power();
+        sv_test_spin();
         sv_test_socket();
         sv_test_card();
         sv_test_file();

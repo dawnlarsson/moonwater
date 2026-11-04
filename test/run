@@ -6613,6 +6613,57 @@ lane_audio()
                         -DCHECK_audio_service test/checks.c -o '$work/check-service-$audio_cc' -lm && '$work/check-service-$audio_cc'"
         done
 
+        #       The server, idle, with a card and a client connected (a tray's or a mixer's control connection, which is
+        #       pactl subscribe where it is there): the server is the shell's applet, run on the first card the machine has
+        #       (no card: the clock), and its CPU over ten seconds is under one per cent of a core (10 ticks). A server that
+        #       spins here burns a core on a machine that is doing nothing: the loop must sleep when nothing is due.
+        audio_idle_cpu()
+        (
+                w=$1
+                d=$w/idle
+                rm -rf "$d"
+                mkdir -p "$d/settings"
+                echo 50 > "$d/settings/audio.volume"
+                echo on > "$d/settings/audio.mute"
+                card=-n
+                for node in /dev/snd/controlC*
+                do
+                        [ -e "$node" ] || continue
+                        card="-d ${node##*controlC}:0"
+                        break
+                done
+                "$w/bin/audio" $card -S "$d/sock" -C "$d/settings" -P "$d/state" > "$d/log" 2>&1 &
+                pid=$!
+                sleep 2
+                client=none
+                if command -v pactl > /dev/null 2>&1
+                then
+                        PULSE_SERVER=unix:$d/sock timeout 40 pactl subscribe > /dev/null 2>&1 &
+                        sub=$!
+                        client="pactl subscribe"
+                fi
+                sleep 2
+                before=$(awk '{print $14 + $15}' /proc/$pid/stat)
+                sleep 10
+                after=$(awk '{print $14 + $15}' /proc/$pid/stat)
+                [ -n "$sub" ] && kill $sub 2>/dev/null
+                kill -TERM $pid 2>/dev/null
+                wait $pid 2>/dev/null
+                ticks=$((after - before))
+                echo "the idle server ($card, client: $client): $ticks ticks in ten seconds (one per cent of a core is 10)"
+                [ "$ticks" -lt 10 ]
+        )
+        if freestanding programs/shell.c "$work/shell" > /dev/null 2>&1
+        then
+                mkdir -p "$work/bin"
+                ln -sf "$work/shell" "$work/bin/audio"
+                audio_row "idle-cpu" audio_idle_cpu "$work"
+        else
+                audio_status=1
+                tally "audio-idle-cpu" 0 1
+                note "audio idle-cpu: the server (programs/shell.c) did not build"
+        fi
+
         [ "$audio_status" = 0 ]
 )
 

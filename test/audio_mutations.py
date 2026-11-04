@@ -368,6 +368,7 @@ M = [
     ("service", "the output is suspended after four seconds", "#define AUDIO_SUSPEND_NS 5000000000ull", "#define AUDIO_SUSPEND_NS 4000000000ull"),
     ("service", "a stream that plays does not resume a suspended output", "return audio_service.suspended ? AUDIO_POWER_RESUME : AUDIO_POWER_KEEP;", "return AUDIO_POWER_KEEP;"),
     ("service", "a burst of play does not restart the five seconds", "        if (busy)\n        {\n                audio_service.idle_since = 0;", "        if (busy)\n        {"),
+    ("service", "the device nodes are watched for every event, the server's own opens too", "snd = audio_call(syscall(inotify_add_watch), (positive)fd, (positive)\"/dev/snd\", 0x100 | 0x200, 0, 0, 0);", "snd = audio_call(syscall(inotify_add_watch), (positive)fd, (positive)\"/dev/snd\", 0x8 | 0x100 | 0x200, 0, 0, 0);"),
     ("service", "the capture thread keeps the real-time policy", "        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread", "        (void)ordinary;"),
     ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]

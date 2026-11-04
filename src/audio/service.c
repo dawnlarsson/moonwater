@@ -2182,8 +2182,10 @@ static void audio_notify_open(const char *directory)
                 system_close((int)fd);
                 return;
         }
-        // The device nodes too: a card that comes or goes is an event, so the cards need no look every few seconds.
-        snd = audio_call(syscall(inotify_add_watch), (positive)fd, (positive)"/dev/snd", mask, 0, 0, 0);
+        // The device nodes too, for a node that comes or goes (IN_CREATE, IN_DELETE) and nothing else: the server opens and closes
+        // these nodes itself to look at the cards, and a close of a node written to is IN_CLOSE_WRITE, which made every look
+        // another look (the loop never slept). An open and a close are not events here.
+        snd = audio_call(syscall(inotify_add_watch), (positive)fd, (positive)"/dev/snd", 0x100 | 0x200, 0, 0, 0);
         if (snd >= 0)
                 audio_service.snd_wd = (int)snd;
         audio_service.notify = (int)fd;
