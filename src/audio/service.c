@@ -607,6 +607,46 @@ static void audio_inputs_choose(void);
 static void audio_inputs_levels(void);
 static void audio_inputs_pass(int first);
 
+// A settings file's stamp: its inode, size and times, as stat says them (the same offsets on x86_64 and arm64). Each save is a rename, a new
+// inode, and a write in place changes a time or the size. Timestamps are coarse (a few milliseconds), so a file changed in the last two
+// seconds is read whatever its stamp says: a change in the tick the last look was in is not missed.
+struct audio_stamp
+{
+        unsigned long long inode, size;
+        long long mtime_s, mtime_ns, ctime_s, ctime_ns;
+        int there;
+};
+
+// 1 when the file is not the one the last look saw (or on the first look, or it changed a moment ago): it is read then, and not otherwise.
+static int audio_file_moved(int slot, const char *name, int first)
+{
+        static struct audio_stamp stamps[8];
+        unsigned char st[144]; // struct stat, 144 bytes on x86_64 and arm64
+        struct audio_stamp now;
+        timespec at = {0, 0};
+        char path[160];
+
+        memory_zero(&now, sizeof now);
+        audio_path(path, sizeof(path), name);
+        if (audio_call(syscall(newfstatat), (positive)AT_FDCWD, (positive)path, (positive)st, 0x100, 0, 0) == 0) // AT_SYMLINK_NOFOLLOW
+        {
+                now.there = 1;
+                __builtin_memcpy(&now.inode, st + 8, 8);
+                __builtin_memcpy(&now.size, st + 48, 8);
+                __builtin_memcpy(&now.mtime_s, st + 88, 8);
+                __builtin_memcpy(&now.mtime_ns, st + 96, 8);
+                __builtin_memcpy(&now.ctime_s, st + 104, 8);
+                __builtin_memcpy(&now.ctime_ns, st + 112, 8);
+        }
+        clock_gettime(CLOCK_REALTIME, address_of at);
+        if (!first && now.there && now.mtime_s + 2 > (long long)at.tv_sec && now.ctime_s + 2 > (long long)at.tv_sec)
+                return 1; // changed a moment ago: not trusted to be the same as the look before
+        if (!first && __builtin_memcmp(&now, &stamps[slot], sizeof now) == 0)
+                return 0;
+        stamps[slot] = now;
+        return 1;
+}
+
 // The master volume and mute, and the choice of card, from the settings files: what is new in them is applied. The server's own writes are not read back as changes.
 static void audio_settings_read(int first)
 {
@@ -615,7 +655,7 @@ static void audio_settings_read(int first)
         long percent;
 
         // The choice of card is read before there is a sink; the volume and the mute need one.
-        if (audio_file_read("audio.device", text, sizeof(text)))
+        if (audio_file_moved(0, "audio.device", first) && audio_file_read("audio.device", text, sizeof(text)))
         {
                 char wanted[PULSE_NAME];
                 long n = 0;
@@ -637,6 +677,7 @@ static void audio_settings_read(int first)
                 }
         }
         // The person's switch for capture: on unless the file says off (and a file taken away is on).
+        if (audio_file_moved(1, "audio.capture", first))
         {
                 int on = 1;
 
@@ -649,7 +690,7 @@ static void audio_settings_read(int first)
                 }
         }
         // The default source: the person's choice of it by name, and its level.
-        if (audio_file_read("audio.source", text, sizeof(text)))
+        if (audio_file_moved(2, "audio.source", first) && audio_file_read("audio.source", text, sizeof(text)))
         {
                 char wanted[PULSE_NAME];
                 long n = 0;
@@ -670,7 +711,7 @@ static void audio_settings_read(int first)
                                 audio_inputs_choose();
                 }
         }
-        if (audio_file_read("audio.source.volume", text, sizeof(text)) && (percent = audio_percent(text)) >= 0)
+        if (audio_file_moved(3, "audio.source.volume", first) && audio_file_read("audio.source.volume", text, sizeof(text)) && (percent = audio_percent(text)) >= 0)
         {
                 unsigned long volume = (unsigned long)percent * AUDIO_VOLUME_NORM / 100;
 
@@ -682,7 +723,7 @@ static void audio_settings_read(int first)
                                 pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.pulse.default_source);
                 }
         }
-        if (audio_file_read("audio.source.mute", text, sizeof(text)))
+        if (audio_file_moved(4, "audio.source.mute", first) && audio_file_read("audio.source.mute", text, sizeof(text)))
         {
                 int mute = text[0] == 'o' && text[1] == 'n';
 
@@ -696,7 +737,7 @@ static void audio_settings_read(int first)
         }
         if (!sink)
                 return;
-        if (audio_file_read("audio.volume", text, sizeof(text)) && (percent = audio_percent(text)) >= 0)
+        if (audio_file_moved(5, "audio.volume", first) && audio_file_read("audio.volume", text, sizeof(text)) && (percent = audio_percent(text)) >= 0)
         {
                 unsigned long volume = (unsigned long)percent * AUDIO_VOLUME_NORM / 100;
 
@@ -708,7 +749,7 @@ static void audio_settings_read(int first)
                                 pulse_event(&audio_service.pulse, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)audio_service.sink);
                 }
         }
-        if (audio_file_read("audio.mute", text, sizeof(text)))
+        if (audio_file_moved(6, "audio.mute", first) && audio_file_read("audio.mute", text, sizeof(text)))
         {
                 int mute = text[0] == 'o' && text[1] == 'n';
 

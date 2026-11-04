@@ -183587,11 +183587,28 @@ static void sv_test_page_rows(void)
         audio_service.page_path = "/tmp/unused";
 }
 
+/* ---- the settings look reads a file that moved, and a file that changed more than two seconds ago (an older change is seen
+        by its stamp, the one a look did not see is not lost) ---- */
+static void sv_test_gate(void)
+{
+        struct pulse_sink *sink;
+
+        sv_setup();
+        sink = audio_service.pulse.sink + audio_service.sink;
+        sink->volume[0] = sink->volume[1] = 65536;
+        audio_settings_read(1);
+        sv_write_file("audio.volume", "25\n");
+        usleep(2500000); /* older than the look's trust: the stamp alone says the file moved */
+        audio_settings_read(0);
+        SVCHECK(sink->volume[0] == 16384 && sink->volume[1] == 16384, "a file changed more than two seconds ago is read (volume %lu)", (unsigned long)sink->volume[0]);
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
         sv_test_clock();
         sv_test_settings();
+        sv_test_gate();
         sv_test_fifo();
         sv_test_table();
         sv_test_job();
