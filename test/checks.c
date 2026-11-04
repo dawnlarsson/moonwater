@@ -213171,6 +213171,46 @@ b32 main(void)
                                 string_format(log, "  gpu scanout: %p of the third scanout's pixels are not the present's\n", stale);
                         check("gpu scanout: the GPU draws into the scanout made last, not one given back", !stale);
                         compositor_scanout_free(fb[2], handle[2], pixels[2], bytes[2]);
+                        // gpu_import's refusals (the compositor asks again each present) let go of what they took: a render node that will not take the shared
+                        // buffer (here a descriptor that is no render node), an address map the buffer is too small for, no room for another import. The
+                        // descriptors and the handles are the lowest free ones, so one left open shows as the next descriptor's number, or as a handle that is there.
+                        {
+                                long nobody = system_open_at(AT_FDCWD, (string_address) "/dev/null", 2 | O_CLOEXEC), probe;
+                                p64 tiny[4] = {4096, 4096, 2, 0}, close_of[1] = {0};
+                                unsigned int dumb_fb = 0, dumb = 0, address_to dumb_pixels = 0, saved_imports = gpu.imports;
+                                unsigned long dumb_bytes = 0, dumb_pitch = 0;
+                                int real = gpu.fd, refused = 1;
+
+                                if (nobody >= 0 && compositor_scanout_make(64, 16, &dumb_fb, &dumb, &dumb_pixels, &dumb_bytes, &dumb_pitch) == 0 && gpu_io(3u, 0, 32, tiny))
+                                {
+                                        close_of[0] = tiny[0];
+                                        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close_of); // its handle is the lowest free one now
+                                        probe = system_open_at(AT_FDCWD, (string_address) "/dev/null", 2 | O_CLOEXEC);
+                                        system_close((int)probe); // and this the lowest free descriptor
+                                        gpu.fd = (int)nobody;
+                                        refused &= !gpu_import(card, dumb, dumb_bytes);
+                                        gpu.fd = real;
+                                        refused &= !gpu_import(card, dumb, dumb_bytes * 4);
+                                        gpu.imports = 8;
+                                        refused &= !gpu_import(card, dumb, dumb_bytes);
+                                        gpu.imports = saved_imports;
+                                        check("gpu import: each refusal answers none", refused);
+                                        {
+                                                long next = system_open_at(AT_FDCWD, (string_address) "/dev/null", 2 | O_CLOEXEC);
+
+                                                if (next != probe)
+                                                        string_format(log, "  gpu import: the next descriptor is %p, not %p\n", (positive)next, (positive)probe);
+                                                check("gpu import: a refusal leaves no descriptor open", next == probe);
+                                                system_close((int)next);
+                                        }
+                                        check("gpu import: a refusal leaves no handle open", system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close_of) != 0);
+                                        compositor_scanout_free(dumb_fb, dumb, dumb_pixels, dumb_bytes);
+                                }
+                                else
+                                        check("gpu import: a buffer to refuse is made", false);
+                                if (nobody >= 0)
+                                        system_close((int)nobody);
+                        }
                         compositor.card = -1;
                         system_close(card);
                 }

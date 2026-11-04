@@ -595,21 +595,25 @@ static b32 gpu_drop_unmapped(void)
 
 // A buffer of another node of the card (the scanout's dumb buffer on the display node, by its handle on that node's descriptor), made reachable here: its address, 0 for none.
 // bytes is its size; the address is the one it keeps while the buffer lives.
+// A refusal lets go of what it took (the compositor asks again each present): the shared descriptor always, the handle unless an import held already has it.
 static positive gpu_import(int node, unsigned int handle, positive bytes)
 {
         unsigned int share[3] = {handle, 2 | 0x80000, 0};
-        positive at = gpu_place((bytes + 4095) & ~4095ull);
-        p64 va[8] = {0, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}; // read and written, never run
+        positive at = gpu.imports == 8 ? 0 : gpu_place((bytes + 4095) & ~4095ull);
+        p64 va[8] = {0, 1 | 6ull << 32, at, 0, (bytes + 4095) & ~4095ull}, close[1]; // read and written, never run
+        b32 held = false;
 
         if (!at || system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;
         share[0] = 0;
         if (system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
-                return 0;
+                return system_close((int)share[2]), 0;
         system_close((int)share[2]);
-        va[0] = share[0];
-        if (gpu.imports == 8 || !gpu_io(1u, 8, 64, va))
-                return 0;
+        va[0] = close[0] = share[0];
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                held |= gpu.imported[i] == share[0]; // the same buffer again: the kernel answers the handle it gave before
+        if (!gpu_io(1u, 8, 64, va))
+                return held || system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = va[4], gpu.imported[gpu.imports++] = share[0];
         gpu_map_next = at + va[4];
         return at;
