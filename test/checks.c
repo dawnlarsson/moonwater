@@ -216431,6 +216431,123 @@ static unsigned int gpu_random(void)
 
 static unsigned int gpu_kit_want[700 * 420];
 
+/*
+        The recorded controls on the GPU: the spinner's arc and ring (ui_spinner_draw on the processor against the same painter recording into
+        scene memory the GPU reads, at scales 100, 150, 200 and 300, three sizes), and the input's top edge (ui_edge_row on the processor against
+        ui_edge_record, the row's covers random, the highlight random with its alpha). Each recording is replayed by gpu_scene over a ground the
+        scene's first op makes, and every pixel compared with the processor's. The whole field is not here: its text needs the field's state.
+*/
+static unsigned int gpu_ctl_want[700 * 420], gpu_ctl_dummy[700 * 420];
+static unsigned short gpu_ctl_face[256], gpu_ctl_low[256], gpu_ctl_face_rec[256], gpu_ctl_low_rec[256];
+
+static void gpu_kit_recorded_controls(positive pic_at, positive ops_at, positive bins_at)
+{
+        enum { CW = 240, CH = 160, CP = 700 };
+        unsigned int address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        const unsigned int ground = 0xff1b2a3cu;
+        const int scales[4] = {100, 150, 200, 300}, sizes[3] = {14, 20, 28};
+        static struct ui cpu, rec;
+        static struct ui_scene scene;
+        struct ui_control control;
+        positive bad = 0, arc_pixels = 0;
+
+        // The roles are the theme's: without one every role is transparent and the painters paint nothing (the kit-frames rig sets the light theme too).
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+
+        // The spinner: its ring, recorded as boxes with a hole, and its arc, recorded as tone rects of coalesced covers.
+        for (int k = 0; k < 4; k++)
+                for (int s = 0; s < 3; s++)
+                {
+                        for (positive i = 0; i < (positive)CP * CH; i++)
+                                gpu_ctl_want[i] = ground;
+                        memory_zero(&cpu, sizeof(cpu));
+                        cpu.pixels = gpu_ctl_want, cpu.pitch = CP, cpu.width = CW, cpu.height = CH, cpu.top = 0, cpu.bottom = CH, cpu.scale = scales[k];
+                        memory_zero(&control, sizeof(control));
+                        control.x = 20, control.y = 20, control.w = sizes[s];
+                        ui_spinner_draw(&cpu, &control);
+                        for (positive i = 0; i < (positive)CP * CH; i++)
+                                arc_pixels += gpu_ctl_want[i] != ground;
+
+                        memory_zero(&rec, sizeof(rec));
+                        rec.pixels = gpu_ctl_dummy, rec.pitch = CP, rec.width = CW, rec.height = CH, rec.top = 0, rec.bottom = CH, rec.scale = scales[k];
+                        memory_zero(&scene, sizeof(scene));
+                        scene.ops = ops + 8, scene.room = 4096, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + ops_at + 8192), scene.size = 4096;
+                        rec.scene = &scene;
+                        ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = CW, ops[4] = CH, ops[5] = ground, ops[6] = ops[7] = 0;
+                        control.x = 20, control.y = 20, control.w = sizes[s];
+                        ui_spinner_draw(&rec, &control);
+                        for (positive i = 0; i < (positive)CP * CH; i++)
+                                pic[i] = 0x12345678u;
+                        if (!gpu_scene(ops_at, 1 + scene.count, bins_at, pic_at, CP, CW, CH, 0, 0, CW, CH))
+                        {
+                                check("gpu controls: the spinner's scene finishes", false);
+                                return;
+                        }
+                        for (int y = 0; y < CH; y++)
+                                for (int x = 0; x < CW; x++)
+                                {
+                                        checks++;
+                                        if (pic[(positive)y * CP + x] != gpu_ctl_want[(positive)y * CP + x] && (++failures, ++bad) < 6)
+                                                string_format(log, "  FAIL gpu spinner scale %p size %p: pixel %p,%p is %p, wanted %p\n", (positive)scales[k], (positive)sizes[s],
+                                                              (positive)x, (positive)y, (positive)pic[(positive)y * CP + x], (positive)gpu_ctl_want[(positive)y * CP + x]);
+                                }
+                }
+        check("gpu controls: the spinner's arc and ring replay bit for bit at 100, 150, 200 and 300 percent", bad == 0);
+        string_format(log, "  spinner pixels painted by the processor over 12 spinners: %p\n", (positive)arc_pixels);
+        check("gpu controls: the spinner paints an arc to compare (its pixels are not all the ground)", arc_pixels > 1000);
+
+        // The input's top edge: random covers on each row, the processor's ui_edge_row against ui_edge_record, the same row replayed.
+        for (int round = 0; round < 24; round++)
+        {
+                int width = 1 + (int)(gpu_random() % 200), first = (int)(gpu_random() % (unsigned int)(CW - width)), y = (int)(gpu_random() % CH);
+                int lo = gpu_random() % 2 ? 0 : (int)(gpu_random() % (unsigned int)(width / 4 + 1)), hi = width - (gpu_random() % 2 ? 0 : (int)(gpu_random() % (unsigned int)(width / 4 + 1)));
+                unsigned int highlight = gpu_random();
+                int face_run = 0, low_run = 0;
+                struct ui_edge_row edge;
+
+                for (positive i = 0; i < (positive)CP * CH; i++)
+                        gpu_ctl_want[i] = ground;
+                for (int x = 0; x < width; x++)
+                {
+                        int f = (int)(gpu_random() % 4097), l = gpu_random() % 3 ? (int)(gpu_random() % 4097) : f;
+
+                        gpu_ctl_face[x] = (unsigned short)(f - face_run), gpu_ctl_low[x] = (unsigned short)(l - low_run);
+                        face_run = f, low_run = l;
+                }
+                memory_copy(gpu_ctl_face_rec, gpu_ctl_face, sizeof(unsigned short) * (unsigned long)width);
+                memory_copy(gpu_ctl_low_rec, gpu_ctl_low, sizeof(unsigned short) * (unsigned long)width);
+                if (lo > hi)
+                        lo = hi;
+                edge = (struct ui_edge_row){gpu_ctl_face, gpu_ctl_low, gpu_ctl_want + (positive)y * CP + first + lo, width, lo, hi, highlight, ui_edge_put};
+                ui_edge_row(&edge);
+
+                memory_zero(&rec, sizeof(rec));
+                rec.pixels = gpu_ctl_dummy, rec.pitch = CP, rec.width = CW, rec.height = CH, rec.top = 0, rec.bottom = CH, rec.scale = 100;
+                memory_zero(&scene, sizeof(scene));
+                scene.ops = ops + 8, scene.room = 1024, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + ops_at + 8192), scene.size = 4096;
+                rec.scene = &scene;
+                ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = CW, ops[4] = CH, ops[5] = ground, ops[6] = ops[7] = 0;
+                edge = (struct ui_edge_row){gpu_ctl_face_rec, gpu_ctl_low_rec, null, width, lo, hi, highlight, ui_edge_put};
+                ui_edge_record(&rec, &edge, y, first);
+                for (positive i = 0; i < (positive)CP * CH; i++)
+                        pic[i] = 0x12345678u;
+                if (!gpu_scene(ops_at, 1 + scene.count, bins_at, pic_at, CP, CW, CH, 0, 0, CW, CH))
+                {
+                        check("gpu controls: the input's edge scene finishes", false);
+                        return;
+                }
+                for (int yy = 0; yy < CH; yy++)
+                        for (int x = 0; x < CW; x++)
+                        {
+                                checks++;
+                                if (pic[(positive)yy * CP + x] != gpu_ctl_want[(positive)yy * CP + x] && (++failures, ++bad) < 6)
+                                        string_format(log, "  FAIL gpu edge round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)yy,
+                                                      (positive)pic[(positive)yy * CP + x], (positive)gpu_ctl_want[(positive)yy * CP + x]);
+                        }
+        }
+        check("gpu controls: the input's top edge replays bit for bit over 24 random rows", bad == 0);
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
@@ -216497,6 +216614,8 @@ b32 main(void)
                                                       (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                         }
         }
+
+        gpu_kit_recorded_controls(pic_at, ops_at, bins_at);
 
         // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
         // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
