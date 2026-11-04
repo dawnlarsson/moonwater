@@ -172530,6 +172530,10 @@ int main(void)
 
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
+// The library's names control.c calls, as the libc has them for a hosted build (the freestanding build has the library's own).
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#define string_length(text) strlen((const char *)(text))
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
 #define CTL_NO_SYSTEM
 #include "../src/audio/control.c"
 
@@ -178155,6 +178159,11 @@ static long system_call_6(positive number, positive a, positive b, positive c, p
         return got < 0 ? -errno : got;
 }
 #define syscall(name) SYS_##name
+
+// The library's names control.c calls, as the libc has them for a hosted build.
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#define string_length(text) strlen((const char *)(text))
+#define memory_first_of(block, value, size) memchr((block), (value), (size))
 
 #include "../src/audio/control.c"
 

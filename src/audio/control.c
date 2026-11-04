@@ -87,8 +87,7 @@ static void ctl_w_raw(struct ctl_w *w, const void *data, long n)
                 w->bad = 1;
                 return;
         }
-        for (long i = 0; i < n; i++)
-                w->p[w->len + i] = ((const unsigned char *)data)[i];
+        memory_copy(w->p + w->len, data, (unsigned long)n);
         w->len += n;
 }
 
@@ -118,11 +117,7 @@ static void ctl_w_bool(struct ctl_w *w, int v)
 
 static long ctl_length(const char *s)
 {
-        long n = 0;
-
-        while (s[n])
-                n++;
-        return n;
+        return (long)string_length(s);
 }
 
 static void ctl_w_string(struct ctl_w *w, const char *s)
@@ -182,7 +177,7 @@ static int ctl_r_bool(struct ctl_r *r)
 // A string, passed over (the null string 'N' or one that ends in its null inside the answer).
 static void ctl_r_string(struct ctl_r *r)
 {
-        long at;
+        void *nul;
 
         if (r->bad || r->at >= r->length)
         {
@@ -199,14 +194,14 @@ static void ctl_r_string(struct ctl_r *r)
                 r->bad = 1;
                 return;
         }
-        for (at = r->at + 1; at < r->length && r->p[at]; at++)
-                ;
-        if (at >= r->length)
+        // The string's null, within the answer: none there is a string that runs past it.
+        nul = memory_first_of((void *)(r->p + r->at + 1), 0, (unsigned long)(r->length - r->at - 1));
+        if (!nul)
         {
                 r->bad = 1;
                 return;
         }
-        r->at = at + 1;
+        r->at = (long)((const unsigned char *)nul - r->p) + 1;
 }
 
 // A field of fixed size behind its tag, passed over: a sample spec ('a', 6), a 64-bit time ('U', 8).
