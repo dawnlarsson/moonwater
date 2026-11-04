@@ -20,6 +20,12 @@
         poll, and a pass of it does a bounded amount of work, so a program that writes too much, reads too little or
         stops cannot make the sound late for the others. The card is kept filled to three periods of about 5 ms; the
         loop asks the system for a real-time priority and says so in its log when it does not get one.
+
+        Programs that record are served by the same loop: every capture device of every card is a source (and the monitor
+        of every sink is one), a capture device is opened while a program listens to it and for a second after, and what
+        it reads is given to the engine a period at a time. The person's switch /root/audio.capture (on or off) decides
+        whether any program may record; /root/audio.source names the default source, and /root/audio.source.volume and
+        .mute are its level.
 */
 #ifndef MOONWATER_AUDIO_SERVICE
 #define MOONWATER_AUDIO_SERVICE
@@ -50,6 +56,12 @@
 #define AUDIO_POLLOUT 4
 #define AUDIO_POLLERR 8
 #define AUDIO_POLLHUP 16
+#define AUDIO_INPUTS (PULSE_SOURCES - PULSE_SINKS) // capture devices at most
+#define AUDIO_CAPTURE_LINGER_NS 1000000000ull      // a capture device is kept open this long after the last program stopped listening
+#define AUDIO_CAPTURE_RETRY_NS 2000000000ull       // and one that could not be opened is tried again after this
+#define AUDIO_CAPTURE_ROUNDS 4                     // blocks one wake of a capture device reads at most
+#define AUDIO_JOB_OPEN 1
+#define AUDIO_JOB_CLOSE 2
 
 struct audio_poll
 {
@@ -96,10 +108,51 @@ static struct
         struct { char name[PULSE_VALUE + 1]; unsigned long volume; int mute; } apps[AUDIO_APPS];
         int app_count;
         char active_name[PULSE_NAME], active_description[PULSE_DESCRIPTION];
+        // The capture devices: each is a source of the engine; its PCM is open while a program listens.
+        struct
+        {
+                int used, failed, opening;
+                long slot, card, device;
+                char name[PULSE_NAME], description[PULSE_DESCRIPTION];
+                struct audio_pcm pcm;
+                positive idle_since, retry_at;
+        } input[AUDIO_INPUTS];
+        int inputs_open;
+        // The opening and the closing of a capture device are slow on some hardware (a USB device takes 20 ms to prepare and 7 to close),
+        // which is longer than the card holds of what is playing: a thread does them, one at a time, and tells the loop on a pipe.
+        struct
+        {
+                int kind, k, running, done;
+                struct audio_pcm pcm;
+                long card, device, result;
+                thread address_to handle;
+                positive took;
+        } job;
+        int wake[2];
+        int input_internal;             // set while the service itself changes the sources, so the host's notice of it is not taken for the person's choice
+        char wanted_source[PULSE_NAME]; // the person's choice of default source, "" for the best there is
+        char applied_source[PULSE_NAME];
+        unsigned long applied_in_volume; // the level of the input as the settings last said it (or the server last wrote it)
+        int applied_in_mute, applied_capture;
+        struct
+        {
+                unsigned long wakes, overruns, opens;
+                unsigned long pass[16];
+                positive worst_pass, worst_open;
+                unsigned long long frames;
+        } capture;
+        float in_planes[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
+        unsigned char in_block[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
         unsigned char block[AUDIO_BLOCK * 8 * 4];
         unsigned char read[AUDIO_READ];
         unsigned char file_block[AUDIO_BLOCK * 4];
 } audio_service; // zeroes only: an initialiser with a -1 in it would put its 4 MiB in the file
+
+// Something plays or something records: the loop looks at the page and the clients sixty times a second, else twice.
+static int audio_busy(void)
+{
+        return audio_service.pulse.streams_made != audio_service.pulse.streams_freed || audio_service.pulse.records_made != audio_service.pulse.records_freed;
+}
 
 static long audio_call(positive number, positive a, positive b, positive c, positive d, positive e, positive f)
 {
@@ -197,11 +250,10 @@ static void audio_say_text(string_address what, string_address text)
 
 /* ---- the card ---- */
 
-// "alsa_output.<card id>.<device>" with the characters a name may have.
-static void audio_sink_name(char *to, long room, const struct audio_card *card, long device)
+// "<prefix><card id>.<device>" with the characters a name may have.
+static void audio_device_name(char *to, long room, const char *prefix, const struct audio_card *card, long device)
 {
         long at = 0;
-        const char *prefix = "alsa_output.";
 
         for (; *prefix && at < room - 1; prefix++)
                 to[at++] = *prefix;
@@ -215,6 +267,11 @@ static void audio_sink_name(char *to, long room, const struct audio_card *card, 
         to[at++] = (char)('0' + device / 10 % 10);
         to[at++] = (char)('0' + device % 10);
         to[at] = 0;
+}
+
+static void audio_sink_name(char *to, long room, const struct audio_card *card, long device)
+{
+        audio_device_name(to, room, "alsa_output.", card, device);
 }
 
 static void audio_copy_text(char *to, long room, const char *from)
@@ -458,6 +515,10 @@ static long audio_number_text(char *to, unsigned long value)
         return at;
 }
 
+static void audio_inputs_choose(void);
+static void audio_inputs_levels(void);
+static void audio_inputs_pass(int first);
+
 // The master volume and mute, and the choice of card, from the settings files: what is new in them is applied. The server's own writes are not read back as changes.
 static void audio_settings_read(int first)
 {
@@ -485,6 +546,64 @@ static void audio_settings_read(int first)
                         audio_copy_text(audio_service.wanted_device, sizeof(audio_service.wanted_device), wanted);
                         if (!first && !audio_service.no_card)
                                 audio_service.devices_at = 1; // looked at again at once
+                }
+        }
+        // The person's switch for capture: on unless the file says off (and a file taken away is on).
+        {
+                int on = 1;
+
+                if (audio_file_read("audio.capture", text, sizeof(text)))
+                        on = !(text[0] == 'o' && text[1] == 'f');
+                if (first || on != audio_service.applied_capture)
+                {
+                        audio_service.applied_capture = on;
+                        pulse_capture_allow(&audio_service.pulse, on);
+                }
+        }
+        // The default source: the person's choice of it by name, and its level.
+        if (audio_file_read("audio.source", text, sizeof(text)))
+        {
+                char wanted[PULSE_NAME];
+                long n = 0;
+
+                while (text[n] && text[n] != '\n' && n < PULSE_NAME - 1)
+                {
+                        wanted[n] = text[n];
+                        n++;
+                }
+                wanted[n] = 0;
+                if (audio_text_equal(wanted, "default"))
+                        wanted[0] = 0;
+                if (!audio_text_equal(wanted, audio_service.applied_source))
+                {
+                        audio_copy_text(audio_service.applied_source, sizeof(audio_service.applied_source), wanted);
+                        audio_copy_text(audio_service.wanted_source, sizeof(audio_service.wanted_source), wanted);
+                        if (!first)
+                                audio_inputs_choose();
+                }
+        }
+        if (audio_file_read("audio.source.volume", text, sizeof(text)) && (percent = audio_percent(text)) >= 0)
+        {
+                unsigned long volume = (unsigned long)percent * AUDIO_VOLUME_NORM / 100;
+
+                if (first || volume != audio_service.applied_in_volume)
+                {
+                        audio_service.applied_in_volume = volume;
+                        audio_inputs_levels();
+                        if (!first && audio_service.pulse.default_source >= 0)
+                                pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.pulse.default_source);
+                }
+        }
+        if (audio_file_read("audio.source.mute", text, sizeof(text)))
+        {
+                int mute = text[0] == 'o' && text[1] == 'n';
+
+                if (first || mute != audio_service.applied_in_mute)
+                {
+                        audio_service.applied_in_mute = mute;
+                        audio_inputs_levels();
+                        if (!first && audio_service.pulse.default_source >= 0)
+                                pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.pulse.default_source);
                 }
         }
         if (!sink)
@@ -528,6 +647,38 @@ static void audio_settings_write(void)
         text[length++] = '\n';
         audio_file_write("audio.volume", text, length);
         audio_file_write("audio.mute", sink->muted ? "on\n" : "off\n", sink->muted ? 3 : 4);
+}
+
+// The default source's level, and which source it is, as a program left them (a program's change of either is kept; the service's own is not).
+static void audio_inputs_save(int bits)
+{
+        struct pulse *p = &audio_service.pulse;
+        char text[16];
+        long length;
+
+        if (p->default_source < 0)
+                return;
+        if (bits & 4)
+        {
+                audio_service.applied_in_volume = p->source[p->default_source].volume[0];
+                audio_service.applied_in_mute = p->source[p->default_source].muted;
+                length = audio_number_text(text, p->source[p->default_source].volume[0] * 100 / AUDIO_VOLUME_NORM);
+                text[length++] = '\n';
+                audio_file_write("audio.source.volume", text, length);
+                audio_file_write("audio.source.mute", p->source[p->default_source].muted ? "on\n" : "off\n", p->source[p->default_source].muted ? 3 : 4);
+        }
+        if (bits & 8)
+        {
+                char line[PULSE_NAME + 16];
+                long n = audio_text_length(p->source[p->default_source].name);
+
+                audio_copy_text(audio_service.applied_source, sizeof(audio_service.applied_source), p->source[p->default_source].name);
+                audio_copy_text(audio_service.wanted_source, sizeof(audio_service.wanted_source), p->source[p->default_source].name);
+                audio_copy_text(line, sizeof(line), p->source[p->default_source].name);
+                line[n] = '\n';
+                line[n + 1] = 0;
+                audio_file_write("audio.source", line, n + 1);
+        }
 }
 
 /* The memory of programs' volumes: a line a program, "name TAB volume TAB mute". */
@@ -631,13 +782,17 @@ static void audio_host_remember(void *context, const char *name, unsigned long v
 static void audio_host_changed(void *context, int what, long sink)
 {
         (void)context;
-        (void)sink;
         if (what == PULSE_CHANGED_SINK_VOLUME)
-        {
                 audio_service.dirty |= 1;
-                if (!audio_service.dirty_since)
-                        audio_service.dirty_since = clock_monotonic_nanoseconds();
-        }
+        // A program changed the default source's level, or which source is the default: kept. (What the service does to the sources itself is not.)
+        else if (what == PULSE_CHANGED_SOURCE_VOLUME && sink == audio_service.pulse.default_source && !audio_service.input_internal)
+                audio_service.dirty |= 4;
+        else if (what == PULSE_CHANGED_DEFAULT_SOURCE && !audio_service.input_internal)
+                audio_service.dirty |= 8;
+        else
+                return;
+        if (!audio_service.dirty_since)
+                audio_service.dirty_since = clock_monotonic_nanoseconds();
 }
 
 // The page: the sink's state, the devices and every stream, copied under the sequence number.
@@ -701,6 +856,57 @@ static void audio_page_write(void)
                 pulse_props_text(&s->props, "media.name", out->media, sizeof(out->media));
                 pulse_props_text(&c->props, "application.icon_name", out->icon, sizeof(out->icon));
         }
+        // The input half: the default source's level and peak, the capture devices, and the programs that record.
+        {
+                struct pulse_source *in = p->default_source >= 0 ? p->source + p->default_source : 0;
+
+                build.capture = !p->capture_off;
+                if (in)
+                {
+                        build.input_volume = (unsigned int)in->volume[0];
+                        build.input_muted = (unsigned int)in->muted;
+                        build.input_peak_left = (unsigned int)(in->peak[0] * 32767.0f > 32767.0f ? 32767.0f : in->peak[0] * 32767.0f);
+                        build.input_peak_right = (unsigned int)(in->peak[1] * 32767.0f > 32767.0f ? 32767.0f : in->peak[1] * 32767.0f);
+                        in->peak[0] = in->peak[1] = 0;
+                        audio_copy_text(build.input, sizeof(build.input), in->description);
+                        audio_copy_text(build.input_name, sizeof(build.input_name), in->name);
+                }
+                for (long i = 0; i < PULSE_SOURCES && build.inputs < AUDIO_STATE_INPUTS; i++)
+                        if (p->source[i].used)
+                        {
+                                audio_copy_text(build.input_list[build.inputs].name, sizeof(build.input_list[0].name), p->source[i].name);
+                                audio_copy_text(build.input_list[build.inputs].description, sizeof(build.input_list[0].description), p->source[i].description);
+                                build.input_list[build.inputs].flags = (i == p->default_source ? AUDIO_STATE_DEVICE_ACTIVE : 0) | (p->source[i].capture ? 0 : AUDIO_STATE_DEVICE_MONITOR);
+                                build.inputs++;
+                        }
+                for (int i = 0; i < AUDIO_STATE_RECORDS; i++)
+                        build.record[i].index = 0xffffffffu;
+                for (int i = 0; i < PULSE_RECORDS; i++)
+                {
+                        struct pulse_record *r = p->record + i;
+                        struct pulse_client *c;
+                        struct audio_state_stream *out;
+                        unsigned long sum = 0;
+
+                        if (!r->used || r->client < 0 || !(c = p->client[r->client]) || build.records >= AUDIO_STATE_RECORDS)
+                                continue;
+                        out = build.record + build.records++;
+                        out->index = (unsigned int)r->index;
+                        out->client = (unsigned int)c->index;
+                        for (long k = 0; k < r->map_channels; k++)
+                                sum += r->volume[k];
+                        out->volume = (unsigned int)(r->map_channels ? sum / (unsigned long)r->map_channels : 0);
+                        out->flags = (r->muted ? AUDIO_STATE_MUTED : 0) | (r->corked ? AUDIO_STATE_CORKED : AUDIO_STATE_PLAYING) | (!p->source[r->source].capture ? AUDIO_STATE_MONITOR : 0);
+                        out->peak_left = (unsigned int)(r->peak[0] * 32767.0f > 32767.0f ? 32767.0f : r->peak[0] * 32767.0f);
+                        out->peak_right = (unsigned int)(r->peak[1] * 32767.0f > 32767.0f ? 32767.0f : r->peak[1] * 32767.0f);
+                        r->peak[0] = r->peak[1] = 0;
+                        out->pid = (int)c->pid;
+                        out->uid = (unsigned int)c->uid;
+                        pulse_props_text(&c->props, "application.name", out->app, sizeof(out->app));
+                        pulse_props_text(&r->props, "media.name", out->media, sizeof(out->media));
+                        pulse_props_text(&c->props, "application.icon_name", out->icon, sizeof(out->icon));
+                }
+        }
         seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED);
         __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELEASE); // odd: being written
         __builtin_memcpy((char *)page + 16, (char *)&build + 16, sizeof(build) - 16);
@@ -733,6 +939,7 @@ static void audio_devices_pass(void)
 
         if (audio_service.no_card)
                 return;
+        audio_inputs_pass(0);
         have = audio_card_pick(&card, &device, name, sizeof(name), description, sizeof(description));
         if (!have)
                 return;
@@ -778,6 +985,17 @@ static void audio_stats_say(const char *why)
                 for (int at = 0; at < 16; at++)
                         if (counts[at])
                                 string_format(log, " %s=%p", names[at], (positive)counts[at]);
+                string_format(log, "\n");
+        }
+        if (audio_service.capture.opens)
+        {
+                string_format(log, "audio: capture: %p opens (the longest %p us), %p wakes, the worst pass %p us, %p overruns, %p frames\n", (positive)audio_service.capture.opens,
+                              (positive)(audio_service.capture.worst_open / 1000), (positive)audio_service.capture.wakes, (positive)(audio_service.capture.worst_pass / 1000),
+                              (positive)audio_service.capture.overruns, (positive)audio_service.capture.frames);
+                string_format(log, "audio:   capture pass (us):");
+                for (int at = 0; at < 16; at++)
+                        if (audio_service.capture.pass[at])
+                                string_format(log, " %s=%p", names[at], (positive)audio_service.capture.pass[at]);
                 string_format(log, "\n");
         }
         log_flush();
@@ -982,6 +1200,379 @@ static void audio_clock_pass(void)
                 audio_service.stats.worst_pass = took;
 }
 
+/* ---- the capture devices ---- */
+
+/*
+        Every capture device of every card is a source of the engine (a program picks its microphone from the list), and its
+        PCM is opened only while a program listens to it, and a second after: a microphone nobody records from is not
+        running, powers nothing, and is free for another program of the machine that wants the card itself.
+*/
+
+struct audio_found
+{
+        long card, device;
+        char name[PULSE_NAME], description[PULSE_DESCRIPTION];
+};
+
+// The capture devices there are, at most room of them, in the order of the cards.
+static int audio_inputs_scan(struct audio_found *found, int room)
+{
+        static struct audio_card cards[AUDIO_ALSA_CARDS];
+        long n = audio_cards_scan(cards, AUDIO_ALSA_CARDS);
+        int count = 0;
+
+        for (long i = 0; i < n; i++)
+                for (long d = 0; d < cards[i].devices && count < room; d++)
+                        if (cards[i].device[d].capture)
+                        {
+                                found[count].card = cards[i].number;
+                                found[count].device = cards[i].device[d].device;
+                                audio_device_name(found[count].name, sizeof(found[count].name), "alsa_input.", cards + i, cards[i].device[d].device);
+                                audio_describe(found[count].description, sizeof(found[count].description), cards[i].name, cards[i].device[d].name);
+                                count++;
+                        }
+        return count;
+}
+
+static void audio_input_close(int k)
+{
+        if (audio_service.input[k].pcm.fd >= 0)
+        {
+                audio_pcm_close(&audio_service.input[k].pcm);
+                audio_service.inputs_open--;
+        }
+        audio_service.input[k].pcm.fd = -1;
+}
+
+// The person's levels for the input (the files /root/audio.source.volume and .mute), put on the default source.
+static void audio_inputs_levels(void)
+{
+        struct pulse *p = &audio_service.pulse;
+
+        if (p->default_source < 0)
+                return;
+        p->source[p->default_source].volume[0] = p->source[p->default_source].volume[1] = audio_service.applied_in_volume;
+        p->source[p->default_source].muted = audio_service.applied_in_mute;
+}
+
+/*
+        The default source: the one the person named (audio.source) if there is such a source, else the capture device on the
+        card the sound is played on (a laptop's own microphone is on its own card), else the first. Programs that follow the
+        default are moved to it.
+*/
+static void audio_inputs_choose(void)
+{
+        struct pulse *p = &audio_service.pulse;
+        long pick = -1, rank = 0;
+
+        audio_service.input_internal++;
+        if (audio_service.wanted_source[0])
+                pick = pulse_source_named(p, audio_service.wanted_source);
+        for (int k = 0; k < AUDIO_INPUTS && pick < 0; k++)
+                if (audio_service.input[k].used)
+                {
+                        long this = audio_service.pcm.fd >= 0 && audio_service.input[k].card == audio_service.pcm.card ? 2 : 1;
+
+                        if (this > rank)
+                        {
+                                rank = this;
+                                pick = audio_service.input[k].slot;
+                        }
+                }
+        if (pick >= 0 && pick != p->default_source)
+        {
+                pulse_source_default(p, pick);
+                audio_inputs_levels();
+        }
+        audio_service.input_internal--;
+}
+
+// The cards were looked at again: a capture device that came is a source, one that went is not, and the default is chosen if anything changed.
+static void audio_inputs_pass(int first)
+{
+        struct audio_found found[AUDIO_INPUTS];
+        int count, changed = first;
+
+        if (audio_service.no_card)
+                return;
+        count = audio_inputs_scan(found, AUDIO_INPUTS);
+        audio_service.input_internal++;
+        for (int k = 0; k < AUDIO_INPUTS; k++)
+        {
+                int still = 0;
+
+                if (!audio_service.input[k].used)
+                        continue;
+                for (int f = 0; f < count; f++)
+                        still |= audio_text_equal(found[f].name, audio_service.input[k].name);
+                if (!still)
+                {
+                        audio_say_text("a capture device is gone:", audio_service.input[k].description);
+                        audio_input_close(k);
+                        audio_service.input[k].opening = 0;
+                        pulse_source_remove(&audio_service.pulse, audio_service.input[k].slot);
+                        audio_service.input[k].used = 0;
+                        changed = 1;
+                }
+        }
+        for (int f = 0; f < count; f++)
+        {
+                int present = 0, free_at = -1;
+
+                for (int k = 0; k < AUDIO_INPUTS; k++)
+                {
+                        present |= audio_service.input[k].used && audio_text_equal(found[f].name, audio_service.input[k].name);
+                        if (!audio_service.input[k].used && free_at < 0)
+                                free_at = k;
+                }
+                if (!present && free_at >= 0)
+                {
+                        long slot = pulse_source_add(&audio_service.pulse, found[f].name, found[f].description, 48000);
+
+                        if (slot < 0)
+                                continue;
+                        __builtin_memset(&audio_service.input[free_at], 0, sizeof(audio_service.input[free_at]));
+                        audio_service.input[free_at].used = 1;
+                        audio_service.input[free_at].slot = slot;
+                        audio_service.input[free_at].card = found[f].card;
+                        audio_service.input[free_at].device = found[f].device;
+                        audio_service.input[free_at].pcm.fd = -1;
+                        audio_copy_text(audio_service.input[free_at].name, sizeof(audio_service.input[free_at].name), found[f].name);
+                        audio_copy_text(audio_service.input[free_at].description, sizeof(audio_service.input[free_at].description), found[f].description);
+                        string_format(log, "audio: a capture device: %s\n", found[f].description);
+                        log_flush();
+                        changed = 1;
+                }
+        }
+        audio_service.input_internal--;
+        if (changed)
+                audio_inputs_choose();
+}
+
+// What the thread does: opens a capture device, or closes one, and says so on the pipe.
+static fn audio_job_entry(address_any argument)
+{
+        positive began = clock_monotonic_nanoseconds();
+        char byte = 'x';
+
+        (void)argument;
+        if (audio_service.job.kind == AUDIO_JOB_OPEN)
+                audio_service.job.result = audio_pcm_open(&audio_service.job.pcm, audio_service.job.card, audio_service.job.device, AUDIO_ALSA_CAPTURE, 48000, AUDIO_PERIOD, -1);
+        else
+        {
+                audio_pcm_close(&audio_service.job.pcm);
+                audio_service.job.result = 0;
+        }
+        audio_service.job.took = clock_monotonic_nanoseconds() - began;
+        __atomic_store_n(&audio_service.job.done, 1, __ATOMIC_RELEASE);
+        audio_call(syscall(write), (positive)audio_service.wake[1], (positive)&byte, 1, 0, 0, 0);
+}
+
+// A job for the thread, if it has none; 1 when it was started. For a close the descriptor goes to the thread and the input has none.
+static int audio_job_start(int kind, int k)
+{
+        if (audio_service.job.running)
+                return 0;
+        audio_service.job.kind = kind;
+        audio_service.job.k = k;
+        __atomic_store_n(&audio_service.job.done, 0, __ATOMIC_RELEASE);
+        if (kind == AUDIO_JOB_OPEN)
+        {
+                audio_service.job.card = audio_service.input[k].card;
+                audio_service.job.device = audio_service.input[k].device;
+        }
+        else
+                audio_service.job.pcm = audio_service.input[k].pcm;
+        audio_service.job.handle = thread_start(audio_job_entry, null);
+        if (!audio_service.job.handle)
+                return 0;
+        audio_service.job.running = 1;
+        if (kind == AUDIO_JOB_CLOSE)
+        {
+                audio_service.input[k].pcm.fd = -1;
+                audio_service.inputs_open--;
+        }
+        else
+                audio_service.input[k].opening = 1;
+        return 1;
+}
+
+// The thread has done its job: joined, and what it opened is the input's.
+static void audio_job_finish(void)
+{
+        char junk[16];
+        int k;
+
+        audio_call(syscall(read), (positive)audio_service.wake[0], (positive)junk, sizeof(junk), 0, 0, 0);
+        if (!audio_service.job.running || !__atomic_load_n(&audio_service.job.done, __ATOMIC_ACQUIRE))
+                return;
+        thread_join(audio_service.job.handle);
+        audio_service.job.running = 0;
+        audio_service.job.handle = null;
+        if (audio_service.job.kind != AUDIO_JOB_OPEN)
+                return;
+        k = audio_service.job.k;
+        audio_service.input[k].opening = 0;
+        if (audio_service.job.result == 0 && audio_service.job.pcm.channels > AUDIO_CHANNELS_MAX)
+        {
+                audio_pcm_close(&audio_service.job.pcm);
+                audio_service.job.result = -22;
+        }
+        if (audio_service.job.result < 0)
+        {
+                audio_service.input[k].retry_at = clock_monotonic_nanoseconds() + AUDIO_CAPTURE_RETRY_NS;
+                if (!audio_service.input[k].failed && audio_service.input[k].used)
+                        audio_say("a capture device could not be opened, error", audio_service.job.result);
+                audio_service.input[k].failed = 1;
+                return;
+        }
+        if (!audio_service.input[k].used || audio_service.input[k].card != audio_service.job.card || audio_service.input[k].device != audio_service.job.device)
+        {
+                audio_pcm_close(&audio_service.job.pcm); // the device went while it was being opened (and another may have its place)
+                return;
+        }
+        audio_service.input[k].failed = 0;
+        audio_service.input[k].pcm = audio_service.job.pcm;
+        audio_service.inputs_open++;
+        audio_service.capture.opens++;
+        if (audio_service.job.took > audio_service.capture.worst_open)
+                audio_service.capture.worst_open = audio_service.job.took;
+        string_format(log, "audio: capturing from %s at %p Hz, %p channels, a period of %p frames; opened in %p us\n", audio_service.input[k].description, (positive)audio_service.job.pcm.rate,
+                      (positive)audio_service.job.pcm.channels, (positive)audio_service.job.pcm.period, (positive)(audio_service.job.took / 1000));
+        log_flush();
+        if (audio_service.job.pcm.rate != audio_service.pulse.source[audio_service.input[k].slot].rate)
+        {
+                audio_service.input_internal++;
+                pulse_source_reconfigure(&audio_service.pulse, audio_service.input[k].slot, audio_service.input[k].name, audio_service.input[k].description, audio_service.job.pcm.rate);
+                audio_service.input_internal--;
+        }
+}
+
+// A capture device opened here, when no thread could be made for it.
+static void audio_input_open_now(int k, positive now)
+{
+        struct audio_pcm pcm;
+        long result = audio_pcm_open(&pcm, audio_service.input[k].card, audio_service.input[k].device, AUDIO_ALSA_CAPTURE, 48000, AUDIO_PERIOD, -1);
+
+        if (result == 0 && pcm.channels > AUDIO_CHANNELS_MAX)
+        {
+                audio_pcm_close(&pcm);
+                result = -22;
+        }
+        if (result < 0)
+        {
+                audio_service.input[k].retry_at = now + AUDIO_CAPTURE_RETRY_NS;
+                audio_service.input[k].failed = 1;
+                return;
+        }
+        audio_service.input[k].pcm = pcm;
+        audio_service.inputs_open++;
+        audio_service.capture.opens++;
+}
+
+// A capture device that has data: read, decoded to the pair, and given to the engine, a few blocks at most so the sound waits for nothing.
+static void audio_capture_pass(int k)
+{
+        struct audio_pcm *pcm = &audio_service.input[k].pcm;
+        long slot = audio_service.input[k].slot;
+        positive began = clock_monotonic_nanoseconds(), took;
+        float *planes[AUDIO_CHANNELS_MAX];
+
+        for (int rounds = 0; rounds < AUDIO_CAPTURE_ROUNDS; rounds++)
+        {
+                long avail = audio_pcm_avail(pcm), want, got;
+
+                if (avail < 0)
+                {
+                        long error = audio_pcm_recover(pcm, avail);
+
+                        if (pcm->broken)
+                        {
+                                audio_say("a capture device is gone, error", error);
+                                audio_input_close(k);
+                                audio_service.input[k].retry_at = began + AUDIO_CAPTURE_RETRY_NS;
+                                return;
+                        }
+                        if (avail == AUDIO_EPIPE)
+                                audio_service.capture.overruns++;
+                        return;
+                }
+                if (avail == 0)
+                        break;
+                want = avail < AUDIO_BLOCK ? avail : AUDIO_BLOCK;
+                got = audio_pcm_read(pcm, audio_service.in_block, want);
+                if (got <= 0)
+                {
+                        if (pcm->broken)
+                        {
+                                audio_input_close(k);
+                                audio_service.input[k].retry_at = began + AUDIO_CAPTURE_RETRY_NS;
+                        }
+                        break;
+                }
+                for (long c = 0; c < pcm->channels; c++)
+                        planes[c] = audio_service.in_planes[c];
+                audio_decode(pcm->format, audio_service.in_block, got, pcm->channels, planes);
+                pulse_source_feed(&audio_service.pulse, slot, planes[0], pcm->channels > 1 ? planes[1] : planes[0], got);
+                audio_service.capture.frames += (unsigned long long)got;
+                if (got < want)
+                        break;
+        }
+        if (pcm->fd >= 0)
+        {
+                long delay = audio_pcm_delay(pcm);
+
+                if (delay >= 0)
+                        pulse_source_delay(&audio_service.pulse, slot, delay);
+        }
+        took = clock_monotonic_nanoseconds() - began;
+        audio_service.capture.wakes++;
+        audio_bucket(audio_service.capture.pass, took);
+        if (took > audio_service.capture.worst_pass)
+                audio_service.capture.worst_pass = took;
+}
+
+// Every pass: a capture device that a program has begun to listen to is opened, one that none has listened to for a second is closed.
+static void audio_inputs_run(positive now)
+{
+        struct pulse *p = &audio_service.pulse;
+
+        if (p->records_made == p->records_freed && !audio_service.inputs_open)
+                return;
+        for (int k = 0; k < AUDIO_INPUTS; k++)
+        {
+                long wanted;
+
+                if (!audio_service.input[k].used)
+                        continue;
+                wanted = pulse_source_wanted(p, audio_service.input[k].slot);
+                if (wanted)
+                {
+                        audio_service.input[k].idle_since = 0;
+                        if (audio_service.input[k].pcm.fd < 0 && !audio_service.input[k].opening && now >= audio_service.input[k].retry_at && !audio_job_start(AUDIO_JOB_OPEN, k) && !audio_service.job.running)
+                                audio_input_open_now(k, now);
+                }
+                else if (audio_service.input[k].pcm.fd >= 0)
+                {
+                        if (!audio_service.input[k].idle_since)
+                                audio_service.input[k].idle_since = now;
+                        else if (now - audio_service.input[k].idle_since >= AUDIO_CAPTURE_LINGER_NS)
+                        {
+                                if (audio_job_start(AUDIO_JOB_CLOSE, k))
+                                {
+                                        audio_service.input[k].idle_since = 0;
+                                        audio_say_text("stopped capturing from", audio_service.input[k].description);
+                                }
+                                else if (!audio_service.job.running)
+                                {
+                                        audio_input_close(k);
+                                        audio_service.input[k].idle_since = 0;
+                                }
+                        }
+                }
+        }
+}
+
 static void audio_start(void)
 {
         struct pulse_host host = {0};
@@ -1003,6 +1594,8 @@ static void audio_start(void)
         if (audio_call(syscall(sched_setscheduler), 0, 1, (positive)&param, 0, 0, 0) < 0)
                 audio_say_text("no real-time priority, playing at the ordinary one", "");
         audio_service.signals = audio_signals();
+        audio_service.wake[0] = audio_service.wake[1] = -1;
+        audio_call(syscall(pipe2), (positive)audio_service.wake, 0x800 | 0x80000, 0, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC
         // A client that has gone is an error of the write, not a signal that ends the server.
         system_signal_install(13, 1, 0, 0, null);
         for (int i = 0; i < 2; i++)
@@ -1044,6 +1637,10 @@ static b32 audio_main()
         claim_standard_descriptors();
         audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
         audio_service.card = audio_service.device = -1;
+        audio_service.applied_in_volume = AUDIO_VOLUME_NORM;
+        audio_service.applied_capture = 1;
+        for (int k = 0; k < AUDIO_INPUTS; k++)
+                audio_service.input[k].pcm.fd = -1;
         audio_service.socket_path = AUDIO_SOCKET;
         audio_service.settings = AUDIO_SETTINGS;
         audio_service.page_path = AUDIO_STATE_PATH;
@@ -1082,6 +1679,7 @@ static b32 audio_main()
         audio_settings_read(1); // the person's choice of card first, so it is the one opened
         audio_output_open((long)rate);
         audio_settings_read(1); // and the volume and the mute, now that there is a sink to put them on
+        audio_inputs_pass(1);   // the capture devices, and which of them is the default
         audio_apps_load();
         audio_page_open();
         audio_service.started_at = clock_monotonic_nanoseconds();
@@ -1091,11 +1689,11 @@ static b32 audio_main()
 
         while (running)
         {
-                struct audio_poll wanted[3 + PULSE_CLIENTS];
-                long owner[3 + PULSE_CLIENTS];
+                struct audio_poll wanted[4 + AUDIO_INPUTS + PULSE_CLIENTS];
+                long owner[4 + AUDIO_INPUTS + PULSE_CLIENTS];
                 unsigned int count = 0;
                 positive now;
-                long awaited, wait[2] = {0, audio_service.pulse.streams_made != audio_service.pulse.streams_freed ? 16000000 : 250000000};
+                long awaited, wait[2] = {0, audio_busy() ? 16000000 : 250000000};
 
                 // The card (or the clock) is first in the list and so first in the pass: whatever the clients have sent waits behind the sound.
                 if (audio_service.pcm.fd >= 0)
@@ -1108,8 +1706,20 @@ static b32 audio_main()
                         wanted[count] = (struct audio_poll){audio_service.timer, AUDIO_POLLIN, 0};
                         owner[count++] = -4;
                 }
+                // A microphone that is listened to is next: what it has is as late as it is made to wait.
+                for (int k = 0; k < AUDIO_INPUTS; k++)
+                        if (audio_service.input[k].used && audio_service.input[k].pcm.fd >= 0)
+                        {
+                                wanted[count] = (struct audio_poll){audio_service.input[k].pcm.fd, AUDIO_POLLIN, 0};
+                                owner[count++] = -10 - k;
+                        }
                 wanted[count] = (struct audio_poll){audio_service.signals, AUDIO_POLLIN, 0};
                 owner[count++] = -1;
+                if (audio_service.job.running && audio_service.wake[0] >= 0)
+                {
+                        wanted[count] = (struct audio_poll){audio_service.wake[0], AUDIO_POLLIN, 0};
+                        owner[count++] = -5;
+                }
                 wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
                 owner[count++] = -2;
                 for (long slot = 0; slot < PULSE_CLIENTS; slot++)
@@ -1142,6 +1752,10 @@ static b32 audio_main()
                                         audio_card_pass();
                                 else if (owner[at] == -4)
                                         audio_clock_pass();
+                                else if (owner[at] == -5)
+                                        audio_job_finish();
+                                else if (owner[at] <= -10)
+                                        audio_capture_pass((int)(-10 - owner[at]));
                                 else if (audio_service.fd[owner[at]] >= 0)
                                 {
                                         long slot = owner[at];
@@ -1152,6 +1766,7 @@ static b32 audio_main()
                         }
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.
                 pulse_tick(&audio_service.pulse);
+                audio_inputs_run(now);
                 for (long slot = 0; slot < PULSE_CLIENTS; slot++)
                         if (audio_service.fd[slot] >= 0)
                         {
@@ -1159,7 +1774,7 @@ static b32 audio_main()
                                         audio_client_drop(slot);
                         }
                 // The page, the settings, the cards, and what a program changed that is kept.
-                if (now - audio_service.state_at >= (audio_service.pulse.streams_made != audio_service.pulse.streams_freed ? AUDIO_STATE_NS : AUDIO_STATE_IDLE_NS))
+                if (now - audio_service.state_at >= (audio_busy() ? AUDIO_STATE_NS : AUDIO_STATE_IDLE_NS))
                 {
                         audio_service.state_at = now;
                         audio_page_write();
@@ -1180,6 +1795,8 @@ static b32 audio_main()
                                 audio_settings_write();
                         if (audio_service.dirty & 2)
                                 audio_apps_save();
+                        if (audio_service.dirty & 12)
+                                audio_inputs_save(audio_service.dirty);
                         audio_service.dirty = 0;
                         audio_service.dirty_since = 0;
                 }
@@ -1198,6 +1815,17 @@ static b32 audio_main()
                 audio_settings_write();
         if (audio_service.dirty & 2)
                 audio_apps_save();
+        if (audio_service.dirty & 12)
+                audio_inputs_save(audio_service.dirty);
+        if (audio_service.job.running)
+        {
+                thread_join(audio_service.job.handle);
+                audio_service.job.running = 0;
+                if (audio_service.job.kind == AUDIO_JOB_OPEN && audio_service.job.result == 0)
+                        audio_pcm_close(&audio_service.job.pcm);
+        }
+        for (int k = 0; k < AUDIO_INPUTS; k++)
+                audio_input_close(k);
         if (audio_service.page)
                 audio_call(syscall(munmap), (positive)audio_service.page, AUDIO_STATE_BYTES, 0, 0, 0, 0);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);

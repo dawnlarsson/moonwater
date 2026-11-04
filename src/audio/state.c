@@ -14,6 +14,12 @@
 
         The page is for the person's own session (mode 0600, root): what a program calls its stream is what it plays.
 
+        The input half of the page (version 2): the capture device the programs that record are given (its volume, mute and
+        peak, which are the levels of the default source and are only live while something records from it), the list of
+        capture devices, whether the person has let programs record at all, and the programs that are recording (a record
+        stream is listed as a playback stream is, with the flag AUDIO_STATE_MONITOR when what it records is what the
+        machine plays and not a microphone).
+
         Control goes the other way, over the PulseAudio socket (src/audio/pulse.c) or the settings files (/root/audio.*):
         a mixer is a client of the server like any other.
 */
@@ -22,16 +28,20 @@
 
 #define AUDIO_STATE_PATH "/run/moonwater/pulse/state"
 #define AUDIO_STATE_MAGIC 0x5341574du // "MWAS"
-#define AUDIO_STATE_VERSION 1u
+#define AUDIO_STATE_VERSION 2u
 #define AUDIO_STATE_STREAMS 32
 #define AUDIO_STATE_DEVICES 8
-#define AUDIO_STATE_BYTES 8192
+#define AUDIO_STATE_INPUTS 8
+#define AUDIO_STATE_RECORDS 16
+#define AUDIO_STATE_BYTES 16384
 
 #define AUDIO_STATE_MUTED 1u
 #define AUDIO_STATE_CORKED 2u
 #define AUDIO_STATE_PLAYING 4u
+#define AUDIO_STATE_MONITOR 8u // a record stream: what it records is what a sink plays, not a capture device
 
 #define AUDIO_STATE_DEVICE_ACTIVE 1u
+#define AUDIO_STATE_DEVICE_MONITOR 2u // an input: the monitor of a sink (what the machine plays), not a microphone
 
 struct audio_state_stream
 {
@@ -69,6 +79,16 @@ struct audio_state
         char name[64];                 // and as programs name it
         struct audio_state_device device_list[AUDIO_STATE_DEVICES];
         struct audio_state_stream stream[AUDIO_STATE_STREAMS];
+        // The input half. An index here is a source output's, and a record stream's "client" is its program's connection.
+        unsigned int input_volume;     // the default capture source's volume (65536 is 100%)
+        unsigned int input_muted;
+        unsigned int input_peak_left, input_peak_right;
+        unsigned int capture;          // 1: programs may record; 0: the person has turned capture off, and none is
+        unsigned int inputs, records;  // places used in the two lists below
+        char input[96];                // the default capture device as the person is shown it; empty when there is none
+        char input_name[64];           // and as programs name it
+        struct audio_state_device input_list[AUDIO_STATE_INPUTS]; // AUDIO_STATE_DEVICE_ACTIVE is the default
+        struct audio_state_stream record[AUDIO_STATE_RECORDS];
 };
 
 _Static_assert(sizeof(struct audio_state) <= AUDIO_STATE_BYTES, "the state page fits its file");
