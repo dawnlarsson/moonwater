@@ -196,6 +196,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Mount kept disks	f0c8	Gespeicherte Datenträger einhängen
 =Mouse acceleration	c400	Mausbeschleunigung
 =Mouse sensitivity (percent, or default)	8a23	Mausempfindlichkeit (Prozent oder default)
+=Mute	9f74	Stummschalten
 =NTS servers (or default)	9fd7	NTS-Server (oder default)
 =Name	7306	Name
 =Name servers (auto for the network)	695a	Namensserver (auto für das Netzwerk)
@@ -206,6 +207,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Fenster dort öffnen, wo sie zuletzt lagen
 =Other devices	8362	Andere Geräte
+=Output device (name, or default)	d73c	Ausgabegerät (Name oder default)
 =Plain Text	2bbe	Nur-Text
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
@@ -223,6 +225,8 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Side taskbar text faces	d115	Textausrichtung der seitlichen Taskleiste
 =Simultaneous threads (SMT)	e836	Simultane Threads (SMT)
 =Smooth mouse wheel	0dab	Sanftes Mausrad
+=Sound	9a34	Ton
+=Sound server	84bf	Tonserver
 =Start the desktop	be4c	Desktop starten
 =Storage	df06	Speicher
 =Taskbar	d759	Taskleiste
@@ -242,6 +246,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Turned right	7a49	Nach rechts gedreht
 =USB	da81	USB
 =Upside down	9dc1	Auf dem Kopf
+=Volume (percent, or default)	f6e3	Lautstärke (Prozent oder default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Kabelgebunden
 =all	4bc4	Alle

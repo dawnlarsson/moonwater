@@ -196,6 +196,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Mount kept disks	f0c8	Monter les disques conservés
 =Mouse acceleration	c400	Accélération de la souris
 =Mouse sensitivity (percent, or default)	8a23	Sensibilité de la souris (pourcentage ou default)
+=Mute	9f74	Couper le son
 =NTS servers (or default)	9fd7	Serveurs NTS (ou default)
 =Name	7306	Nom
 =Name servers (auto for the network)	695a	Serveurs de noms (auto pour le réseau)
@@ -206,6 +207,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Other devices	8362	Autres périphériques
+=Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Plain Text	2bbe	Texte brut
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
@@ -223,6 +225,8 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Side taskbar text faces	d115	Orientation du texte de la barre latérale
 =Simultaneous threads (SMT)	e836	Threads simultanés (SMT)
 =Smooth mouse wheel	0dab	Molette de la souris fluide
+=Sound	9a34	Son
+=Sound server	84bf	Serveur de son
 =Start the desktop	be4c	Démarrer le bureau
 =Storage	df06	Stockage
 =Taskbar	d759	Barre des tâches
@@ -242,6 +246,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Turned right	7a49	Pivoté à droite
 =USB	da81	USB
 =Upside down	9dc1	À l'envers
+=Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Filaire
 =all	4bc4	tous

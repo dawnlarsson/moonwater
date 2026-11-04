@@ -197,6 +197,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
 =Mouse acceleration	c400	شتاب ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
+=Mute	9f74	بی‌صدا
 =NTS servers (or default)	9fd7	سرورهای NTS (یا default)
 =Name	7306	نام
 =Name servers (auto for the network)	695a	سرورهای نام (auto برای شبکه)
@@ -207,6 +208,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Normal	2772	عادی
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
 =Other devices	8362	دستگاه‌های دیگر
+=Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Plain Text	2bbe	متن ساده
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
@@ -224,6 +226,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Side taskbar text faces	d115	جهت متن نوار وظیفه کناری
 =Simultaneous threads (SMT)	e836	رشته‌های هم‌زمان (SMT)
 =Smooth mouse wheel	0dab	چرخ ماوس نرم
+=Sound	9a34	صدا
+=Sound server	84bf	کارساز صدا
 =Start the desktop	be4c	اجرای رومیزی
 =Storage	df06	ذخیره‌سازی
 =Taskbar	d759	نوار وظیفه
@@ -243,6 +247,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Turned right	7a49	چرخیده به راست
 =USB	da81	USB
 =Upside down	9dc1	وارونه
+=Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	شبکه سیمی
 =all	4bc4	همه

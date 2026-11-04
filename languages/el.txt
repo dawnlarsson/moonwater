@@ -196,6 +196,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
+=Mute	9f74	Σίγαση
 =NTS servers (or default)	9fd7	Διακομιστές NTS (ή default)
 =Name	7306	Όνομα
 =Name servers (auto for the network)	695a	Διακομιστές ονομάτων (auto για το δίκτυο)
@@ -206,6 +207,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Normal	2772	Κανονική
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Other devices	8362	Άλλες συσκευές
+=Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Plain Text	2bbe	Απλό κείμενο
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
@@ -223,6 +225,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Side taskbar text faces	d115	Προσανατολισμός κειμένου πλευρικής γραμμής
 =Simultaneous threads (SMT)	e836	Ταυτόχρονα νήματα (SMT)
 =Smooth mouse wheel	0dab	Ομαλός τροχός ποντικιού
+=Sound	9a34	Ήχος
+=Sound server	84bf	Διακομιστής ήχου
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
 =Storage	df06	Αποθήκευση
 =Taskbar	d759	Γραμμή εργασιών
@@ -242,6 +246,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Turned right	7a49	Στραμμένη δεξιά
 =USB	da81	USB
 =Upside down	9dc1	Ανάποδα
+=Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Ενσύρματο
 =all	4bc4	όλα

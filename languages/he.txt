@@ -197,6 +197,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
 =Mouse acceleration	c400	האצת העכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
+=Mute	9f74	השתקה
 =NTS servers (or default)	9fd7	שרתי NTS (או default)
 =Name	7306	שם
 =Name servers (auto for the network)	695a	שרתי שמות (auto עבור הרשת)
@@ -207,6 +208,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Normal	2772	רגיל
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
 =Other devices	8362	התקנים אחרים
+=Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Plain Text	2bbe	טקסט פשוט
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
@@ -224,6 +226,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Side taskbar text faces	d115	כיוון הטקסט בשורת המשימות הצדדית
 =Simultaneous threads (SMT)	e836	תהליכונים בו-זמניים (SMT)
 =Smooth mouse wheel	0dab	גלגלת עכבר חלקה
+=Sound	9a34	צליל
+=Sound server	84bf	שרת השמע
 =Start the desktop	be4c	הפעל את שולחן העבודה
 =Storage	df06	אחסון
 =Taskbar	d759	שורת המשימות
@@ -243,6 +247,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Turned right	7a49	מסובב ימינה
 =USB	da81	USB
 =Upside down	9dc1	הפוך
+=Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	רשת קווית
 =all	4bc4	הכול

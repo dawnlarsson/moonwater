@@ -101,6 +101,12 @@
 #define SETTING_GPU_PATH "/root/canvas.gpu"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 #define SETTING_CLIPBOARD_LIMIT_PATH "/root/canvas.clipboard.limit"
+// The sound server's (src/audio/service.c reads the first three again twice a second and writes the volume and the mute back when
+// a program changes them; the machine script reads the last when it starts the server).
+#define SETTING_AUDIO_VOLUME_PATH "/root/audio.volume"
+#define SETTING_AUDIO_MUTE_PATH "/root/audio.mute"
+#define SETTING_AUDIO_DEVICE_PATH "/root/audio.device"
+#define SETTING_AUDIO_SERVER_PATH "/root/audio.server"
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
@@ -348,6 +354,24 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
+    //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
+    //  when a program (the mixer, the tray, a volume key) changes the volume, so a row here and a slider there are one value.
+    //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume
+    //  back to 100 (a file that said default would be read by the server as no word at all). The card is a name from the page the
+    //  server gives it or default for the automatic choice, so its verb is written by hand (host.c).
+    SETTING_PLAIN_ROW("Sound", "Volume (percent, or default)", SETTINGS_FIELD, 0, ("audio", "volume"), "volume ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_AUDIO_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
+                      .low = 0, .high = 100, .usage = "audio volume [PERCENT|default]",
+                      .help = "the volume of everything that plays, 0 to 100 percent [100]"),
+    SETTING_PLAIN_ROW(null, "Mute", SETTINGS_SWITCH, 0, ("audio", "mute"), "mute ", null,
+                      .path = SETTING_AUDIO_MUTE_PATH, .standard = "off", .usage = "audio mute [on|off]",
+                      .help = "silence everything that plays, and keep the volume [off]"),
+    {null, "Output device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "device"}, "device ", null, {"audio", "device"}, null, 0, null,
+     .usage = "audio device [NAME|default]",
+     .help = "the sound card that plays, by the name the server gives it; default picks the first that is not HDMI [default]"},
+    SETTING_PLAIN_ROW(null, "Sound server", SETTINGS_SWITCH, 0, ("audio", "server"), "server ", null,
+                      .path = SETTING_AUDIO_SERVER_PATH, .standard = "on", .usage = "audio server [on|off]",
+                      .help = "the server programs play their sound through; off keeps it from starting with the desktop [on]"),
     SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",

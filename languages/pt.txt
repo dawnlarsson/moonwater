@@ -196,6 +196,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Mount kept disks	f0c8	Montar os discos mantidos
 =Mouse acceleration	c400	Aceleração do mouse
 =Mouse sensitivity (percent, or default)	8a23	Sensibilidade do mouse (porcentagem ou default)
+=Mute	9f74	Silenciar
 =NTS servers (or default)	9fd7	Servidores NTS (ou default)
 =Name	7306	Nome
 =Name servers (auto for the network)	695a	Servidores de nomes (auto para a rede)
@@ -206,6 +207,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Abrir janelas onde foram deixadas
 =Other devices	8362	Outros dispositivos
+=Output device (name, or default)	d73c	Dispositivo de saída (nome ou default)
 =Plain Text	2bbe	Texto simples
 =Power	a5e6	Energia
 =Power profile	8def	Perfil de energia
@@ -223,6 +225,8 @@ ui_field_full	fe02	não cabe mais que isso
 =Side taskbar text faces	d115	Orientação do texto da barra lateral
 =Simultaneous threads (SMT)	e836	Threads simultâneos (SMT)
 =Smooth mouse wheel	0dab	Roda do mouse suave
+=Sound	9a34	Som
+=Sound server	84bf	Servidor de som
 =Start the desktop	be4c	Iniciar a área de trabalho
 =Storage	df06	Armazenamento
 =Taskbar	d759	Barra de tarefas
@@ -242,6 +246,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Turned right	7a49	Girada para a direita
 =USB	da81	USB
 =Upside down	9dc1	De cabeça para baixo
+=Volume (percent, or default)	f6e3	Volume (porcentagem ou default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Com fio
 =all	4bc4	todas

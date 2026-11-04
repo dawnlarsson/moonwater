@@ -196,6 +196,7 @@ ui_field_full	fe02	mer ryms inte
 =Mount kept disks	f0c8	Montera sparade diskar
 =Mouse acceleration	c400	Musacceleration
 =Mouse sensitivity (percent, or default)	8a23	Musens känslighet (procent eller default)
+=Mute	9f74	Ljud av
 =NTS servers (or default)	9fd7	NTS-servrar (eller default)
 =Name	7306	Namn
 =Name servers (auto for the network)	695a	Namnservrar (auto för nätverket)
@@ -206,6 +207,7 @@ ui_field_full	fe02	mer ryms inte
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Other devices	8362	Andra enheter
+=Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Plain Text	2bbe	Oformaterad text
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
@@ -223,6 +225,8 @@ ui_field_full	fe02	mer ryms inte
 =Side taskbar text faces	d115	Sidofältets textriktning
 =Simultaneous threads (SMT)	e836	Samtidiga trådar (SMT)
 =Smooth mouse wheel	0dab	Mjukt mushjul
+=Sound	9a34	Ljud
+=Sound server	84bf	Ljudserver
 =Start the desktop	be4c	Starta skrivbordet
 =Storage	df06	Lagring
 =Taskbar	d759	Aktivitetsfält
@@ -242,6 +246,7 @@ ui_field_full	fe02	mer ryms inte
 =Turned right	7a49	Vriden åt höger
 =USB	da81	USB
 =Upside down	9dc1	Upp och ned
+=Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Trådbundet
 =all	4bc4	alla

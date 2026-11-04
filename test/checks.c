@@ -133539,6 +133539,15 @@ static b32 settings_event_real(const struct window_event address_to event)
         return settings_event(event);
 }
 
+// Whether the rows to ask (settings.unread) are the one row's bit and no other, in whichever word of them it is.
+static b32 settings_unread_only(positive row)
+{
+        for (positive word = 0; word < SETTINGS_UNREAD_WORDS; word++)
+                if (settings.unread[word] != (word == row / 64 ? (positive)1 << (row % 64) : 0))
+                        return false;
+        return true;
+}
+
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -134967,6 +134976,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 memory_zero(settings.unread, sizeof(settings.unread));
                                 settings.group = settings_group_of(battery);
                                 settings_feed_rows();
+                                // One bit of the words of rows set, the row's (a table of more than 64 rows keeps its bits in more words).
                                 check("settings: a rows feed asks again the rows of its group that change by themselves, and those only",
                                       settings_unread_only((positive)battery));
                                 memory_zero(settings.unread, sizeof(settings.unread));
@@ -136466,7 +136476,7 @@ static int settings_groups_named(const char address_to name)
 */
 static fn check_settings_groups(void)
 {
-        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Taskbar", "Time",
+        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Sound", "Taskbar", "Time",
                                                 "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot"};
         static const struct
         {
@@ -136477,7 +136487,7 @@ static fn check_settings_groups(void)
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
-            {{"canvas", "wheel"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"},
+            {{"canvas", "wheel"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"usb"}, "USB"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
@@ -136492,6 +136502,7 @@ static fn check_settings_groups(void)
             {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Time zone", "Time"},
+            {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
@@ -136505,7 +136516,7 @@ static fn check_settings_groups(void)
         for (int at = 0; at < count && at < settings_groups(); at++)
                 order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
         order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
-        check("settings groups: Machine, Canvas, Display, Input, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
+        check("settings groups: Machine, Canvas, Display, Input, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
 
         // Each row in the group of its verb's family: the groups are what the rows do.
         for (positive at = 0; at < SETTINGS_ROWS; at++)

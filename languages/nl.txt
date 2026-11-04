@@ -196,6 +196,7 @@ ui_field_full	fe02	meer past er niet in
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
 =Mouse acceleration	c400	Muisversnelling
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
+=Mute	9f74	Dempen
 =NTS servers (or default)	9fd7	NTS-servers (of default)
 =Name	7306	Naam
 =Name servers (auto for the network)	695a	Naamservers (auto voor het netwerk)
@@ -206,6 +207,7 @@ ui_field_full	fe02	meer past er niet in
 =Normal	2772	Normaal
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Other devices	8362	Andere apparaten
+=Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Plain Text	2bbe	Platte tekst
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
@@ -223,6 +225,8 @@ ui_field_full	fe02	meer past er niet in
 =Side taskbar text faces	d115	Tekstrichting van de zijtaakbalk
 =Simultaneous threads (SMT)	e836	Gelijktijdige threads (SMT)
 =Smooth mouse wheel	0dab	Soepel muiswiel
+=Sound	9a34	Geluid
+=Sound server	84bf	Geluidsserver
 =Start the desktop	be4c	Bureaublad starten
 =Storage	df06	Opslag
 =Taskbar	d759	Taakbalk
@@ -242,6 +246,7 @@ ui_field_full	fe02	meer past er niet in
 =Turned right	7a49	Naar rechts gedraaid
 =USB	da81	USB
 =Upside down	9dc1	Ondersteboven
+=Volume (percent, or default)	f6e3	Volume (procent of default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Bekabeld
 =all	4bc4	alle

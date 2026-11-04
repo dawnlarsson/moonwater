@@ -196,6 +196,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Mount kept disks	f0c8	Saklanan diskleri bağla
 =Mouse acceleration	c400	Fare ivmesi
 =Mouse sensitivity (percent, or default)	8a23	Fare duyarlılığı (yüzde veya default)
+=Mute	9f74	Sessiz
 =NTS servers (or default)	9fd7	NTS sunucuları (veya default)
 =Name	7306	Ad
 =Name servers (auto for the network)	695a	Ad sunucuları (ağ için auto)
@@ -206,6 +207,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Other devices	8362	Diğer aygıtlar
+=Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Plain Text	2bbe	Düz Metin
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
@@ -223,6 +225,8 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Side taskbar text faces	d115	Yan çubuğun metin yönü
 =Simultaneous threads (SMT)	e836	Eşzamanlı iş parçacıkları (SMT)
 =Smooth mouse wheel	0dab	Düzgün fare tekerleği
+=Sound	9a34	Ses
+=Sound server	84bf	Ses sunucusu
 =Start the desktop	be4c	Masaüstünü başlat
 =Storage	df06	Depolama
 =Taskbar	d759	Görev çubuğu
@@ -242,6 +246,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Turned right	7a49	Sağa döndürülmüş
 =USB	da81	USB
 =Upside down	9dc1	Baş aşağı
+=Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Kablolu
 =all	4bc4	tümü

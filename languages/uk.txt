@@ -196,6 +196,7 @@ ui_field_full	fe02	більше не вміщається
 =Mount kept disks	f0c8	Монтувати збережені диски
 =Mouse acceleration	c400	Прискорення миші
 =Mouse sensitivity (percent, or default)	8a23	Чутливість миші (відсотки або default)
+=Mute	9f74	Без звуку
 =NTS servers (or default)	9fd7	Сервери NTS (або default)
 =Name	7306	Ім'я
 =Name servers (auto for the network)	695a	Сервери імен (auto для мережі)
@@ -206,6 +207,7 @@ ui_field_full	fe02	більше не вміщається
 =Normal	2772	Звичайний
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Other devices	8362	Інші пристрої
+=Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Plain Text	2bbe	Звичайний текст
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
@@ -223,6 +225,8 @@ ui_field_full	fe02	більше не вміщається
 =Side taskbar text faces	d115	Напрямок тексту бічної панелі
 =Simultaneous threads (SMT)	e836	Одночасні потоки (SMT)
 =Smooth mouse wheel	0dab	Плавне колесо миші
+=Sound	9a34	Звук
+=Sound server	84bf	Звуковий сервер
 =Start the desktop	be4c	Запускати робочий стіл
 =Storage	df06	Накопичувачі
 =Taskbar	d759	Панель завдань
@@ -242,6 +246,7 @@ ui_field_full	fe02	більше не вміщається
 =Turned right	7a49	Повернуто праворуч
 =USB	da81	USB
 =Upside down	9dc1	Догори дриґом
+=Volume (percent, or default)	f6e3	Гучність (відсотки або default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Дротова мережа
 =all	4bc4	усі

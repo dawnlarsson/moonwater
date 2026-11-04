@@ -21441,6 +21441,65 @@ static b32 host_setting_verb(string_address address_to arguments, positive count
 }
 
 /*
+        moonwater audio [volume|mute|server|device ...]: the sound server's settings (src/audio). The volume, the mute and the
+        server's switch are plain rows of the table, found before this; the card is a name that is kept as it is typed
+        and that the server, which reads /root/audio.device again twice a second, plays on when it finds it, else it plays on the
+        card it would have chosen. A name is what the page of the server lists (letters, digits and . _ - : @ +, at most 63), or
+        default. Bare, it says the four.
+*/
+#define LOCALE_AUDIO_NAME 64
+
+static bool locale_audio_name(string_address word)
+{
+        positive length = string_length(word);
+
+        if (!length || length >= LOCALE_AUDIO_NAME)
+                return false;
+        for (positive at = 0; at < length; at++)
+        {
+                p8 c = word[at];
+
+                if (!byte_is_alnum(c) && c != '.' && c != '_' && c != '-' && c != ':' && c != '@' && c != '+')
+                        return false;
+        }
+        return true;
+}
+
+static b32 locale_audio_device_status(void)
+{
+        p8 word[LOCALE_AUDIO_NAME + 16];
+
+        if (!locale_readable(SETTING_AUDIO_DEVICE_PATH, word, sizeof(word)))
+                host_say(log, host_label "device " LOCALE_NEEDS_ROOT "\n");
+        else
+                host_say(log, host_label "device %s\n", word[0] && locale_audio_name(word) ? (string_address)word : (string_address) "default");
+        return 0;
+}
+
+static b32 locale_audio_device(string_address address_to arguments, positive count)
+{
+        if (count == 3)
+                return locale_audio_device_status();
+        return_if(count > 4, host_usage());
+        if (!string_equals(arguments[3], "default") && !locale_audio_name(arguments[3]))
+                return host_refuse("audio device is a name audio lists (letters, digits and . _ - : @ +, at most %p bytes), or default, not %s\n",
+                                   (positive)(LOCALE_AUDIO_NAME - 1), arguments[3]);
+        host_need_root();
+        if (host_save("audio device", SETTING_AUDIO_DEVICE_PATH, arguments[3]))
+                return 1;
+        return locale_audio_device_status();
+}
+
+static b32 host_audio(string_address address_to arguments, positive count)
+{
+        if (count >= 3 && string_equals(arguments[2], "device"))
+                return locale_audio_device(arguments, count);
+        return_if(count != 2, host_usage());
+        host_setting_group(arguments + 1, 1);
+        return locale_audio_device_status();
+}
+
+/*
         What the schedule makes of a query that ended, or of a look between
         queries. A success is only a success if the kernel still says the
         clock is synchronised when it is looked at: any change of
@@ -24232,6 +24291,8 @@ static const host_row host_rows[] = {
     {null, "@keyboard", null, 'r'},
     {null, "@mouse", null, 'r'},
     {null, "@taskbar", null, 'r'},
+    {null, "audio", "the sound card, the volume and the mute, and whether the sound server starts", 'b'},
+    {null, "@audio", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@language", null, 'r'},
     {null, "@dns", null, 'r'},
@@ -24651,6 +24712,8 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(SETTING_CANVAS_DISPLAYS_PATH),
     //  The tray's format, whose row is a special one (locale_taskbar_tray), so the table's plain rows do not name it.
     HOST_WIPE_KEEP(SETTING_TASKBAR_TRAY_PATH),
+    //  The sound card, whose row is a special one (locale_audio_device); the volume, the mute and the server's switch are plain rows.
+    HOST_WIPE_KEEP(SETTING_AUDIO_DEVICE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),
@@ -25547,6 +25610,7 @@ static b32 host_main()
             {"mouse", host_setting_verb, false, true},
             {"language", host_setting_verb, false, true},
             {"taskbar", host_taskbar, false, true},
+            {"audio", host_audio, false, true},
             {"time", host_time, false, true},
             {"name", host_name, true},
             {"dns", host_dns, false, true},

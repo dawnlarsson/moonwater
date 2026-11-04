@@ -196,6 +196,7 @@ ui_field_full	fe02	that is as much as it holds
 =Mount kept disks	f0c8	Mount kept disks
 =Mouse acceleration	c400	Mouse acceleration
 =Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)
+=Mute	9f74	Mute
 =NTS servers (or default)	9fd7	NTS servers (or default)
 =Name	7306	Name
 =Name servers (auto for the network)	695a	Name servers (auto for the network)
@@ -206,6 +207,7 @@ ui_field_full	fe02	that is as much as it holds
 =Normal	2772	Normal
 =Open windows where they were last put	8711	Open windows where they were last put
 =Other devices	8362	Other devices
+=Output device (name, or default)	d73c	Output device (name, or default)
 =Plain Text	2bbe	Plain Text
 =Power	a5e6	Power
 =Power profile	8def	Power profile
@@ -223,6 +225,8 @@ ui_field_full	fe02	that is as much as it holds
 =Side taskbar text faces	d115	Side taskbar text faces
 =Simultaneous threads (SMT)	e836	Simultaneous threads (SMT)
 =Smooth mouse wheel	0dab	Smooth mouse wheel
+=Sound	9a34	Sound
+=Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop
 =Storage	df06	Storage
 =Taskbar	d759	Taskbar
@@ -242,6 +246,7 @@ ui_field_full	fe02	that is as much as it holds
 =Turned right	7a49	Turned right
 =USB	da81	USB
 =Upside down	9dc1	Upside down
+=Volume (percent, or default)	f6e3	Volume (percent, or default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Wired
 =all	4bc4	all

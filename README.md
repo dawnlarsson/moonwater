@@ -90,6 +90,11 @@ moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 1
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
+moonwater audio                        the sound card, the volume and the mute, and whether the sound server starts
+moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0 to 100 percent [100]
+moonwater audio mute [on|off]          silence everything that plays, and keep the volume [off]
+moonwater audio device [NAME|default]  the sound card that plays, by the name the server gives it; default picks the first that is not HDMI [default]
+moonwater audio server [on|off]        the server programs play their sound through; off keeps it from starting with the desktop [on]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar launcher [on|off]    a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]

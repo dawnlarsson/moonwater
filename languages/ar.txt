@@ -197,6 +197,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
 =Mouse acceleration	c400	تسارع الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
+=Mute	9f74	كتم الصوت
 =NTS servers (or default)	9fd7	خوادم NTS (أو default)
 =Name	7306	الاسم
 =Name servers (auto for the network)	695a	خوادم الأسماء (auto للشبكة)
@@ -207,6 +208,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Normal	2772	عادي
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
 =Other devices	8362	أجهزة أخرى
+=Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Plain Text	2bbe	نص عادي
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
@@ -224,6 +226,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Side taskbar text faces	d115	اتجاه نص شريط المهام الجانبي
 =Simultaneous threads (SMT)	e836	الخيوط المتزامنة (SMT)
 =Smooth mouse wheel	0dab	عجلة الماوس السلسة
+=Sound	9a34	الصوت
+=Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب
 =Storage	df06	التخزين
 =Taskbar	d759	شريط المهام
@@ -243,6 +247,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Turned right	7a49	مدار لليمين
 =USB	da81	USB
 =Upside down	9dc1	مقلوب
+=Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	الشبكة السلكية
 =all	4bc4	الكل

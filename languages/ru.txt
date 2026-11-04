@@ -196,6 +196,7 @@ ui_field_full	fe02	больше не помещается
 =Mount kept disks	f0c8	Монтировать сохранённые диски
 =Mouse acceleration	c400	Ускорение мыши
 =Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
+=Mute	9f74	Без звука
 =NTS servers (or default)	9fd7	Серверы NTS (или default)
 =Name	7306	Имя
 =Name servers (auto for the network)	695a	Серверы имён (auto для сети)
@@ -206,6 +207,7 @@ ui_field_full	fe02	больше не помещается
 =Normal	2772	Обычный
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
 =Other devices	8362	Другие устройства
+=Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Plain Text	2bbe	Простой текст
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
@@ -223,6 +225,8 @@ ui_field_full	fe02	больше не помещается
 =Side taskbar text faces	d115	Направление текста боковой панели
 =Simultaneous threads (SMT)	e836	Одновременные потоки (SMT)
 =Smooth mouse wheel	0dab	Плавное колесо мыши
+=Sound	9a34	Звук
+=Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
 =Storage	df06	Накопители
 =Taskbar	d759	Панель задач
@@ -242,6 +246,7 @@ ui_field_full	fe02	больше не помещается
 =Turned right	7a49	Повёрнут вправо
 =USB	da81	USB
 =Upside down	9dc1	Перевёрнут
+=Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Проводная сеть
 =all	4bc4	все
