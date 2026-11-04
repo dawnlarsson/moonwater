@@ -4191,6 +4191,10 @@ static struct
         // The prediction a frame ahead, per class (COMPOSITOR_PREDICT_*), and the classes `moonwater canvas predict` turned off.
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
+        // The on-screen keyboard (compositor_osk_sync): its setting (COMPOSITOR_OSK_*), whether the last input was a key of a
+        // physical keyboard, whether it is shown, and how far each window was moved up for it (osk_pan), to be moved back.
+        unsigned char osk_setting, osk_typed, osk_shown;
+        int osk_pan[WINDOWS];
         // Where the hand is, before its lead (real_x, real_y), and the class that moved the pointer last (owner). The pointer
         // itself (pointer_x, pointer_y) is where that is led to, and every consumer of motion reads it; at_real is set while a
         // press is handled, so a press is at the real place.
@@ -10788,6 +10792,8 @@ static void compositor_inputs_open(void)
                 compositor_input_add(number);
 }
 
+static void compositor_osk_setting_read(void);
+
 // What appeared in /dev/input since the last look: a name that is eventN is a device;
 // and a keyboard written in /root is a layout that was changed.
 static void compositor_inputs_watch(void)
@@ -10817,6 +10823,7 @@ static void compositor_inputs_watch(void)
                                 compositor_look_read();
                                 compositor_theme_read();
                                 compositor_input_settings_read();
+                                compositor_osk_setting_read();
                                 // The arrangement and the displays: the screens laid again, which probes them, so only when one
                                 // of those files is the one written.
                                 if (string_equals((string_address)name,
@@ -11150,6 +11157,8 @@ static void compositor_keys_release(void)
         memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
 }
 
+static void compositor_osk_sync(void);
+
 // The keys to a window, or to none; both are knocked on, and read focus in the table.
 static void compositor_focus(int row)
 {
@@ -11178,6 +11187,7 @@ static void compositor_focus(int row)
                 compositor_damage_row(row);
         }
         compositor_tabs_changed();
+        compositor_osk_sync();
 }
 
 // Whether a window is in the focus cycle: one that asked for no tab (WINDOW_NO_TAB, the identify overlays) is not, so
@@ -13199,6 +13209,8 @@ static void compositor_take(int row)
                         compositor_focus(row);
                 compositor_land(row);
                 compositor_tabs_changed();
+                if (compositor.asks[row] & WINDOW_KEYBOARD)
+                        compositor_osk_sync();
                 return;
         }
 
@@ -13390,10 +13402,12 @@ static void compositor_leave(int row)
         compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + row * 2 * compositor.buffer,
                         2 * compositor.buffer, 9, 0, 0, 0);
 
+        compositor.osk_pan[row] = 0;
         if (compositor.focus == row)
                 compositor_refocus();
         compositor.woken &= ~(1u << row);
         __atomic_store_n(&table->pid[row], 0, __ATOMIC_RELEASE);
+        compositor_osk_sync();
 }
 
 /*
@@ -13471,6 +13485,127 @@ static void compositor_minimize_row(int row)
 static void compositor_minimize_focused(void)
 {
         compositor_minimize_row(compositor.focus);
+}
+
+/*
+        The on-screen keyboard: the window that asks WINDOW_KEYBOARD (osk.c), shown while the focused window has a text field with
+        the keys (the table's field count, ui.c's ui_field_focus) and the setting lets it. on: always, with a field; off: never;
+        auto: with a field, when no keyboard is plugged in or the last input was a touch or a pen (not a key of a physical keyboard,
+        not the mouse). Shown, it is raised, and the focused window is moved up by the overlap of its bottom with the keyboard's
+        top, not past the top of its screen; the amount is kept (osk_pan) and moved back when the keyboard is put away, the focus
+        goes elsewhere, or the window goes. It is asked from each place the answer can change: the focus, a knock (a field's count
+        is written before its program knocks), a key, a touch or the mouse, the setting, and the rows' make and release.
+*/
+#define COMPOSITOR_OSK_AUTO 0
+#define COMPOSITOR_OSK_OFF 1
+#define COMPOSITOR_OSK_ON 2
+
+// The keyboard's row, a window shown that asks WINDOW_KEYBOARD, or -1 when none is.
+static int compositor_osk_row(void)
+{
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                if (compositor.showing[row] && (compositor.asks[row] & WINDOW_KEYBOARD))
+                        return (int)row;
+        return -1;
+}
+
+// A keyboard that is taken as one is plugged in (WINDOWS_INPUT_KEYBOARD). The headless compositor's fifo is not one.
+static b32 compositor_osk_physical(void)
+{
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                if (compositor.inputs[at] >= 0 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
+                        return 1;
+        return 0;
+}
+
+// A row put away (the keyboard, while nothing has its field) or shown again; its picture is drawn again both times.
+static void compositor_osk_put_away(int row, b32 away)
+{
+        if (((compositor.state[row] & WINDOW_MINIMIZED) != 0) == away)
+                return;
+        compositor_damage_row(row);
+        if (away)
+                compositor.state[row] |= WINDOW_MINIMIZED;
+        else
+        {
+                compositor.state[row] &= ~WINDOW_MINIMIZED;
+                compositor_raise(row);
+        }
+        compositor.table->state[row] = compositor.state[row];
+        compositor_damage_row(row);
+        compositor.woken |= 1u << row;
+}
+
+// The focused row moved up by the overlap with the keyboard's top, as far as its own screen's top allows: nothing when it is
+// already moved or does not overlap.
+static void compositor_osk_pan(int row, int keyboard)
+{
+        int x, y, width, height, overlap, room, amount, was;
+
+        if (compositor.osk_pan[row])
+                return;
+        compositor_output_rect(compositor_screen_of(row), &x, &y, &width, &height);
+        overlap = compositor.y[row] + (int)compositor.h[row] - compositor.y[keyboard];
+        room = compositor.y[row] - y;
+        amount = overlap < room ? overlap : room;
+        if (amount <= 0)
+                return;
+        // Kept as it was moved: the screen keeps a window's top where it may be (a pixel below the edge), not always where asked.
+        was = compositor.y[row];
+        compositor_place(row, compositor.x[row], was - amount);
+        compositor.osk_pan[row] = was - compositor.y[row];
+}
+
+// A row moved for the keyboard goes back where it was (it may have moved since: the amount is taken off where it is).
+static void compositor_osk_unpan(int row)
+{
+        int amount = compositor.osk_pan[row];
+
+        compositor.osk_pan[row] = 0;
+        if (amount && compositor.showing[row])
+                compositor_place(row, compositor.x[row], compositor.y[row] + amount);
+}
+
+// What moonwater debug says of the keyboard: its setting, whether it is shown, the last input and whether a physical one is plugged in.
+static void compositor_osk_publish(void)
+{
+        struct windows *table = compositor.table;
+
+        table->osk_setting = compositor.osk_setting;
+        table->osk_shown = compositor.osk_shown;
+        table->osk_input = compositor.osk_typed ? 2 : compositor.owner != COMPOSITOR_PREDICT_MOUSE ? 1 : 0;
+        table->osk_physical = compositor_osk_physical();
+}
+
+static void compositor_osk_sync(void)
+{
+        int keyboard = compositor_osk_row(), focus = compositor.focus, want = 0;
+        b32 touch = !compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE;
+
+        if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF)
+                want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_osk_physical();
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                if (compositor.osk_pan[row] && (!want || (int)row != focus))
+                        compositor_osk_unpan((int)row);
+        if (keyboard >= 0)
+        {
+                compositor_osk_put_away(keyboard, !want);
+                if (want)
+                        compositor_osk_pan(focus, keyboard);
+        }
+        compositor.osk_shown = (unsigned char)(keyboard >= 0 && want);
+        compositor_osk_publish();
+}
+
+// The Settings choice, keyboard onscreen: auto unless the file says off or on.
+static void compositor_osk_setting_read(void)
+{
+        char word[16];
+
+        compositor_word(SETTING_ONSCREEN_PATH, word, sizeof(word));
+        compositor.osk_setting = string_equals((string_address)word, (string_address)"off") ? COMPOSITOR_OSK_OFF
+                                 : string_equals((string_address)word, (string_address)"on") ? COMPOSITOR_OSK_ON : COMPOSITOR_OSK_AUTO;
+        compositor_osk_sync();
 }
 
 // A window asked to go: by its close button, Alt-F4, or a middle press on its tab. What happens next is the program's.
@@ -13765,6 +13900,7 @@ static void compositor_clip_door(int row)
         unsigned int ask = __atomic_load_n(&table->clip_ask_serial[row], __ATOMIC_ACQUIRE);
 
         compositor_osk_read(row);
+        compositor_osk_sync();
         positive now;
 
         if (offer == compositor_clip.offer_seen[row] && ask == compositor_clip.ask_seen[row])
@@ -15903,7 +16039,9 @@ static void compositor_predict_mouse(positive when, positive now)
         (void)when;
         (void)now;
         compositor.owner = COMPOSITOR_PREDICT_MOUSE;
+        compositor.osk_typed = 0;
         compositor_pointer_shown();
+        compositor_osk_sync();
 }
 
 // A finger or a pen is at x, y: it is the hand's real place, and the pointer is where it will be, so that is where the windows
@@ -15912,10 +16050,12 @@ static void compositor_predict_place(unsigned int cls, int x, int y, positive no
 {
         compositor_pointer_sync();
         compositor.owner = cls;
+        compositor.osk_typed = 0;
         compositor.real_x = x, compositor.real_y = y;
         compositor_predict_sample(cls, (long long)x * COMPOSITOR_PREDICT_FX, (long long)y * COMPOSITOR_PREDICT_FX, now, now);
         compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x = compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y = 0;
         compositor_pointer_shown();
+        compositor_osk_sync();
 }
 
 // A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off). A mouse's pointer goes back to
@@ -17603,7 +17743,12 @@ static void compositor_input_read(unsigned int at)
                                 compositor_press(code, event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
+                        {
+                                // A key of a physical keyboard is the last input (the on-screen keyboard's auto rule).
+                                if (event->value == 1 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
+                                        compositor.osk_typed = 1;
                                 compositor_key(at, event->code, event->value, now);
+                        }
                 }
         }
 
@@ -18349,6 +18494,8 @@ static b32 compositor_main()
         compositor_inputs_open();
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
+                // The -i device is no keyboard the compositor took (its kinds stay none): the headless fifo is not a physical one.
+                compositor.input_kinds[compositor.input_count] = 0;
                 compositor.inputs[compositor.input_count] = extra;
                 compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
         }
@@ -18387,6 +18534,8 @@ static b32 compositor_main()
 #endif
         // The theme goes in the table it now has.
         compositor_theme_read();
+        // The keyboard's setting too (compositor_osk_sync writes the table).
+        compositor_osk_setting_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 compositor_input_publish(at);
 

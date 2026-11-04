@@ -9,6 +9,7 @@
 #     hold:LABEL:SECS    a press held for SECS, then the lift
 #     text:STRING        each character as a tap: a capital is Shift and the letter, a space is Space, a newline is Enter
 #     wait:SECS          nothing, for the screen to settle
+#     ctrl:s             Control held over the letter s (Ctrl+S), on the fifo's own keys
 # KEYS is the keyboard's trace: one line a key, "page row column x y w h word", the rectangle in the screen's pixels. The pages
 # are numbered as the keyboard numbers them (0 letters, 1 numbers, 2 the second symbols page), and the commands follow the page
 # that a key on the page shown changes to (123, ABC and #+= do).
@@ -101,6 +102,14 @@ def main():
             tap(label, float(seconds))
         elif kind == "wait":
             time.sleep(float(rest))
+        elif kind == "ctrl":
+            # Control held over one letter, as a physical keyboard's keys on the fifo (the compositor takes the fifo for no keyboard, so
+            # these reach the window with the keys by the same path as the on-screen keys do)
+            key = {"s": 31}[rest]
+            for code, value in ((29, 1), (key, 1), (key, 0), (29, 0)):
+                pointer.send(EV_KEY, code, value)
+                pointer.syn()
+            time.sleep(0.3)
         elif kind == "text":
             for ch in rest:
                 if ch == "\n":

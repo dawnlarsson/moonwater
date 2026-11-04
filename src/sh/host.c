@@ -22459,6 +22459,18 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  refused error   %p (the kernel's, as a number: 22 is EINVAL, 12 ENOMEM, 95 EOPNOTSUPP)\n", (positive)table->refused_error);
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
                  table->unscanned < sizeof(reasons) / sizeof(reasons[0]) ? reasons[table->unscanned] : (string_address) "?");
+        //      The on-screen keyboard: its setting, whether it is shown, the text fields with the keys in the focused window, the last input.
+        {
+                unsigned int fields = table->focus < WINDOWS ? table->field[table->focus] : 0;
+
+                host_say(log, "  keyboard        setting %s; %s; the focus has %p text %s with the keys; last input %s; a physical keyboard %s\n",
+                         table->osk_setting == 1 ? (string_address) "off" : table->osk_setting == 2 ? (string_address) "on" : (string_address) "auto",
+                         table->osk_shown ? (string_address) "shown" : (string_address) "hidden", (positive)fields,
+                         fields == 1 ? (string_address) "field" : (string_address) "fields",
+                         table->osk_input == 2 ? (string_address) "a key" : table->osk_input == 1 ? (string_address) "a touch or a pen"
+                                                                                                    : (string_address) "the mouse",
+                         table->osk_physical ? (string_address) "plugged in" : (string_address) "none");
+        }
         host_debug_inputs(table);
         host_windows_unmap(table);
         return 0;

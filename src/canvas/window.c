@@ -891,6 +891,9 @@ struct windows
         // The program's, read by the compositor: how many of the window's text fields have the keys (ui.c's ui_field_focus moves
         // it with each field's focus; the program zeroes it when it starts). The on-screen keyboard shows while the focus's is not 0.
         unsigned int field[WINDOWS];
+        // The compositor's, for moonwater debug: the on-screen keyboard's setting (0 auto, 1 off, 2 on), whether it is shown, the
+        // last input (0 the mouse, 1 a touch or a pen, 2 a key of a physical keyboard) and whether a physical keyboard is plugged in.
+        unsigned int osk_setting, osk_shown, osk_input, osk_physical;
         // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).
         unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];
