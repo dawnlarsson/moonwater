@@ -148964,6 +148964,32 @@ static void check_pinch_delivery(void)
                 touch_ok("pinch delivery: a window that does not take pinches is sent three Ctrl wheel notches up for 2x, and nothing else",
                          wheels == 3 && others == 0 && control);
         }
+        // The begin's window goes away (its row is left), and another window takes the row: an update of the pinch that began on
+        // the first must go to neither (the stray update of 2026-11-04 reached a window that never had the begin).
+        table->pinch_wanted[row] = 1;
+        head = table->event_head[row];
+        {
+                struct ui_touch_event e;
+
+                e.kind = UI_TOUCH_PINCH_BEGIN, e.x = 50, e.y = 60, e.scale = UI_TOUCH_PINCH_ONE;
+                compositor_pinch(&e);
+                compositor_leave(row);
+                compositor.showing[row] = 1, compositor.stacked = 1, compositor.stack[0] = row;
+                table->pinch_wanted[row] = 1;
+                e.kind = UI_TOUCH_PINCH_UPDATE, e.x = 60, e.y = 70, e.scale = 4332;
+                compositor_pinch(&e);
+                e.kind = UI_TOUCH_PINCH_END;
+                compositor_pinch(&e);
+        }
+        {
+                int stray = 0;
+
+                for (unsigned int k = head; k != table->event_head[row]; k++)
+                        stray |= table->event_type[row][k % WINDOWS_EVENTS] == WINDOW_EVENT_PINCH && table->event_a[row][k % WINDOWS_EVENTS] == 4332;
+                touch_ok("pinch delivery: a pinch whose window was left sends its update (4332) to no window (the row is free)",
+                         !stray && compositor.touch.pinch_row == COMPOSITOR_NONE);
+        }
+
 }
 
 // The pinch as zoom (ui.c's ui_pinch_size and ui_pinch_steps): a 2x pinch is six of the terminal's steps (16 to 32), and the steps

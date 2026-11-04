@@ -12827,6 +12827,10 @@ static void compositor_leave(int row)
         table->ground[row] = 0;
         table->hover_off[row] = 0;
         table->pinch_wanted[row] = 0;
+        // A pinch that began on this window goes nowhere now: the row is free to be another window's, and its updates and end
+        // are that window's only if it began them (compositor_pinch sends updates to the row the begin named, and no other).
+        if (compositor.touch.pinch_row == row)
+                compositor.touch.pinch_row = COMPOSITOR_NONE;
         table->state[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
