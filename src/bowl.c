@@ -8149,6 +8149,128 @@ static string_address bowl_chrome_names[] = {
     "it for x86-64 and aarch64 only)\n"
 #endif
 
+/*
+        Steam, from Arch's own packages (x86-64 only: Valve ships the client
+        for it, and Arch's [multilib] carries its 32-bit libraries). The
+        component is the package `steam` and what it needs that is not already
+        Steam's own dependency: the Mesa stack in 64 and 32 bits, which is
+        where the GPU comes from (the same packages the graphics profile holds
+        for Arch, with their 32-bit twins, and all three vendors' Vulkan
+        drivers: a bowl does not look at the card, and every vendor's
+        driver is a few tens of MiB); the sound libraries, with ALSA routed to
+        Moonwater's sound server by the PulseAudio client and its plugin; the
+        fonts; Xwayland, which the session starts, since Steam and most games
+        are X11 clients; and bubblewrap, which the Steam Runtime's container
+        runs under. Steam's own dependencies come with `steam` (glibc and the
+        32-bit runtime, GTK for its dialogs, Python, libxkbcommon, lib32-systemd
+        and lib32-pipewire, which are libraries only: nothing in them starts a
+        daemon, checked against Arch's file lists). Not listed, and not
+        pulled: gamemode (an optional launch wrapper that starts a daemon of
+        its own), PipeWire, NetworkManager, any systemd unit, any display
+        manager or seat daemon.
+
+        The sizes are Arch's Installed Size of the packages that a bootstrap
+        bowl does not already hold, 234 of the 345 in the closure, read from
+        the sync databases on 2026-11-04. LLVM alone is 335 MiB of it (Mesa's
+        llvmpipe and radeonsi link it, for both architectures).
+*/
+static string_address bowl_steam_arch[] = {
+    // Steam itself; its dependencies are pacman's.
+    "steam",
+    // The GPU: Mesa's GL and the Vulkan loader, with the Radeon, Intel and
+    // software Vulkan drivers, in 64 and 32 bits.
+    "mesa", "lib32-mesa", "libglvnd", "lib32-libglvnd",
+    "vulkan-icd-loader", "lib32-vulkan-icd-loader", "vulkan-radeon",
+    "lib32-vulkan-radeon", "vulkan-intel", "lib32-vulkan-intel",
+    "vulkan-swrast",
+    // Sound: the PulseAudio client and ALSA's plugin for it, to Moonwater's
+    // sound server, in 64 and 32 bits.
+    "libpulse", "lib32-libpulse", "alsa-lib", "alsa-plugins",
+    "lib32-alsa-plugins",
+    // Fonts for the client's own text and for the games that draw with fontconfig.
+    "fontconfig", "ttf-dejavu",
+    // X11 clients on Canvas: the X server the session starts beside Steam.
+    "xorg-xwayland",
+    // The Steam Runtime's container.
+    "bubblewrap",
+    null};
+
+// Nothing of the bowl's /usr/bin by name: the session is the way in.
+static string_address bowl_steam_expose[] = {null};
+
+#if X64
+#define BOWL_STEAM_ARCH_BYTES ((p64)1250 * 1024 * 1024)
+#else
+#define BOWL_STEAM_ARCH_BYTES 0
+#endif
+
+static const struct bowl_component bowl_steam_components[] = {
+    {"arch", bowl_steam_arch, BOWL_STEAM_ARCH_BYTES, bowl_steam_expose},
+    {null, null, 0, null},
+};
+
+#define BOWL_STEAM_SOCKET "/run/moonwater/wayland-0"
+#define BOWL_STEAM_SOUND "/run/moonwater/pulse/native"
+#define BOWL_STEAM_DISPLAY ":1"
+#define BOWL_STEAM_X_SOCKET "/tmp/.X11-unix/X1"
+
+/*
+        The session. It runs in the machine's shell with the arguments the
+        launcher was given, which Steam takes. Canvas's socket is checked
+        first, and the launch is the person's (MOONWATER_ASKED gives the first
+        window the keys). The bowl's capabilities are cleared: Steam Runtime's
+        container is bubblewrap, which refuses to run with any. GTK (zenity,
+        Steam's file dialogs) keeps its settings in memory, since the session
+        bus has no dconf. Sound goes to Moonwater's server where it is up.
+        The graphics device nodes are given to the render group, as the
+        browser's session does; the input nodes are left as the machine has
+        them, so Steam Input's virtual controllers (/dev/uinput) and any
+        controller's event node stay out of reach of the bowl unless the
+        image's device modes say otherwise: Steam's udev rules grant them
+        through logind's uaccess tag, and this image runs no logind.
+
+        Xwayland is started in the bowl as the X server for Steam and the
+        games. It runs rootful, as a Wayland client of Canvas: its X windows
+        are drawn inside one window of Canvas, which is made fullscreen (with
+        no window manager of X's own, the focus of an X window follows the
+        pointer otherwise). Its access is the socket file only (-nolisten
+        local). The session ends the X server when Steam ends, and does not
+        restart it if it dies while Steam runs. The wrapper that connects it
+        to Canvas's window manager is not in this image yet; this is the plain
+        server, and the wrapper replaces this one line when it lands.
+
+        No flags are given to Steam. Its CEF sandbox uses user namespaces, which
+        the bowl already makes for the program (the browser's sandbox runs the
+        same way); a Steam that finds them refused falls back by itself, and
+        -no-cef-sandbox is the workaround for the older clients that do not.
+*/
+static string_address bowl_steam_session[] = {
+    "[ -S " BOWL_STEAM_SOCKET " ] || { echo \"steam: Canvas has no Wayland "
+    "socket (" BOWL_STEAM_SOCKET "): this image was built with "
+    "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
+    "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GSETTINGS_BACKEND=memory",
+    "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
+    "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
+    "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
+    BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland " BOWL_STEAM_DISPLAY " -nolisten local -fullscreen &",
+    "xwayland=$!",
+    "n=0; while [ ! -S " BOWL_STEAM_X_SOCKET " ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
+    "[ -S " BOWL_STEAM_X_SOCKET " ] || { echo \"steam: the X server did not start (no "
+    BOWL_STEAM_X_SOCKET " in 5 s)\" >&2; kill $xwayland 2>/dev/null; exit 1; }",
+    "export DISPLAY=" BOWL_STEAM_DISPLAY,
+    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"",
+    "status=$?; kill $xwayland 2>/dev/null; exit $status",
+    null};
+
+#if X64
+#define BOWL_STEAM_UNAVAILABLE null
+#else
+#define BOWL_STEAM_UNAVAILABLE                                               \
+    "Arch has no Steam for this architecture (Valve packages it for "       \
+    "x86-64 only, and Arch's arm64 and RISC-V ports have no [multilib])\n"
+#endif
+
 static const struct bowl_profile bowl_profiles[] = {
     {"desktop", "KDE Plasma", "start it with: desktop", bowl_desktop_components,
      bowl_desktop_session, false},
@@ -8158,9 +8280,12 @@ static const struct bowl_profile bowl_profiles[] = {
     {"chrome", "Chromium (Alpine's build, not Google Chrome: no Widevine) on Canvas",
      "start it with: chrome", bowl_chrome_components, bowl_chrome_session,
      false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true},
+    {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
+     "start it with: steam", bowl_steam_components, bowl_steam_session,
+     false, null, BOWL_STEAM_UNAVAILABLE, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome\n"
+#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {

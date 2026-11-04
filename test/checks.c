@@ -97591,6 +97591,89 @@ static fn multilib_rows(void)
                   bowl_multilib_has(ended, string_length(ended)));
 }
 
+static fn steam_profile(void)
+{
+        const struct bowl_profile address_to steam = bowl_find_profile("steam");
+        const struct bowl_profile address_to chrome = bowl_find_profile("chrome");
+        const struct bowl_profile address_to graphics = bowl_find_profile("graphics");
+        const struct bowl_component address_to part = steam ? steam->components : null;
+        static string_address daemons[] = {
+            "pipewire", "networkmanager", "gamemode", "lib32-gamemode", "systemd",
+            "xorg-server", "sddm", "elogind", "seatd", "wireplumber", "greetd", null};
+        bool unique = true;
+        bool named = true;
+
+        check("The steam profile is a program with one component, Arch's, and no libraries",
+              steam && steam->program && !steam->libraries && steam->session && part &&
+                  string_equals(part->distro, "arch") && !(part + 1)->distro);
+        check("The steam row is its own profile, not chrome's or graphics'",
+              steam && chrome && graphics && steam != chrome && steam != graphics);
+        check("The steam component names steam and the packages the profile holds, none of them empty",
+              part && chrome_has(part->packages, "steam") && part->packages[0] && part->packages[0][0]);
+        for (positive at = 0; part && part->packages[at]; at++)
+                for (positive other = at + 1; part->packages[other]; other++)
+                        unique &= !string_equals(part->packages[at], part->packages[other]);
+        check("No package the steam profile names is named twice", unique);
+        for (string_address address_to name = daemons; *name; name++)
+                named &= !chrome_has(part ? part->packages : null, *name);
+        check("No package the steam profile names is a daemon, a display server or a seat Moonwater does not run",
+              named);
+        bool graphic = true;
+
+        for (string_address address_to name = bowl_graphics_arch; *name; name++)
+                graphic &= chrome_has(part ? part->packages : null, *name);
+        check("The steam profile holds every package of the graphics profile for Arch, which is where the GPU comes from",
+              graphic);
+        check("The steam profile has the 32-bit Mesa, sound and Vulkan loader packages Steam loads by name",
+              chrome_has(part ? part->packages : null, "lib32-mesa") &&
+                  chrome_has(part ? part->packages : null, "lib32-vulkan-radeon") &&
+                  chrome_has(part ? part->packages : null, "lib32-libpulse") &&
+                  chrome_has(part ? part->packages : null, "lib32-vulkan-icd-loader"));
+        check("The steam profile has Xwayland, which the session starts beside Steam, and bubblewrap for the Steam Runtime",
+              chrome_has(part ? part->packages : null, "xorg-xwayland") &&
+                  chrome_has(part ? part->packages : null, "bubblewrap"));
+        check("The steam component exposes no program of the bowl by name: its session is the way in",
+              part && part->expose && !part->expose[0]);
+        check("Steam's launcher is the profile's own name and no other name",
+              steam && !steam->names);
+
+        positive socket = chrome_line(steam ? steam->session : null, "-S /run/moonwater/wayland-0");
+        positive exported = chrome_line(steam ? steam->session : null, "export WAYLAND_DISPLAY=/run/moonwater/wayland-0");
+        positive capabilities = chrome_line(steam ? steam->session : null, "BOWL_CAPABILITIES=none");
+        positive xwayland = chrome_line(steam ? steam->session : null, "/usr/bin/Xwayland :1");
+        positive wait = chrome_line(steam ? steam->session : null, "-S /tmp/.X11-unix/X1");
+        positive display = chrome_line(steam ? steam->session : null, "export DISPLAY=:1");
+        positive run = chrome_line(steam ? steam->session : null, "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"");
+        positive sound = chrome_line(steam ? steam->session : null, "PULSE_SERVER=unix:/run/moonwater/pulse/native");
+        positive unset = chrome_line(steam ? steam->session : null, "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND");
+        positive ended = chrome_line(steam ? steam->session : null, "exit $status");
+        check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
+              socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
+        check("The session names the socket as an absolute path, and marks the launch as the person's",
+              exported && exported < run && strstr(steam->session[exported - 1], "MOONWATER_ASKED=1"));
+        check("The session clears the bowl's capabilities, which bubblewrap under Steam Runtime refuses",
+              capabilities && capabilities < run);
+        check("The sound server is named when it is up, and the session does not start a sound server of its own",
+              sound && sound < run && strstr(steam->session[sound - 1], "-S /run/moonwater/pulse/native"));
+        check("SDL and Proton are left to X11 through Xwayland, not Wayland",
+              unset && unset < run);
+        check("Xwayland starts before Steam, and the session waits for its socket before exporting DISPLAY",
+              xwayland && wait && display && xwayland < wait && wait < display && display < run);
+        check("The session ends Xwayland when Steam ends, and gives Steam's exit status back",
+              ended && ended > run && strstr(steam->session[ended - 1], "kill $xwayland"));
+        check("The session passes the arguments it was given to Steam",
+              run && strstr(steam->session[run - 1], "\"$@\""));
+        check("The session gives Steam no flags of its own (its CEF sandbox runs on the bowl's user namespaces)",
+              run && !strstr(steam->session[run - 1], "--no-sandbox") &&
+                  !strstr(steam->session[run - 1], "-no-cef-sandbox"));
+#if X64
+        check("Steam is on this machine's architecture: the profile can be installed", steam && !steam->unavailable);
+#else
+        check("Steam is not on this machine's architecture: the profile says so",
+              steam && steam->unavailable && string_has_prefix(steam->unavailable, "Arch has no Steam"));
+#endif
+}
+
 static fn chrome_profile(void)
 {
         const struct bowl_profile address_to chrome = bowl_find_profile("chrome");
@@ -99615,6 +99698,7 @@ b32 main(void)
         profiles();
         chrome_profile();
         multilib_rows();
+        steam_profile();
         downloads();
         download_ceiling();
         secret_lines();

@@ -182,7 +182,8 @@ A switch with no word after it says where it stands, to anybody; with one it
 changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). `bowl` runs other distributions' programs
 (`bowl profile desktop` installs KDE, `bowl profile chrome` Alpine's Chromium as a
-program of Canvas: `moonwater desktop` does not take it for a session), and
+program of Canvas, `bowl profile steam` Arch's Steam with its 32-bit graphics and
+sound, on x86-64: `moonwater desktop` does not take either for a session), and
 `main.moonwater.sh` is the machine script that sets a machine up at boot.
 
 `moonwater security` changes what the TLS client (wget, the clock's NTS, names over
