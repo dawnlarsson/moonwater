@@ -10327,6 +10327,67 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
         }
 }
 
+static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t);
+
+/*
+        A page's picture, with its parts: the page's own (ui_page_draw, the search field lit while keys), then the card in place of the
+        body (parts->card, drawn by the app), or the column of groups, the between (the app's: a panel above the rows), the rows lit
+        and keyed as the parts say, and the column's bar, drawn last; then the overlays the app lists (each over the rows, when not
+        null). The app says what each part shows; the kit draws them in this order.
+*/
+struct ui_page_parts
+{
+        b32 keys;                                        // the search field has the keys
+        const char address_to (*group_name)(int group);  // the column's groups, by name
+        int groups;
+        b32 column_keys, column_off;                     // the column's keys; and whether it is off (a search lists every group's rows)
+        b32 list_lit, list_keys;                         // the rows: lit (their focus shows), and the keys are in them
+        struct ui_list address_to list;
+        void (*between)(struct ui address_to ui);        // drawn between the column and the rows (the app's)
+        void (*card)(struct ui address_to ui);           // drawn in place of the rows when the page is a card (the app's)
+        struct ui_text address_to overlays[2];           // over the rows, each when not null
+};
+
+// The picture's setup in the buffer: its pixels and pitch, the window's size, the band of rows drawn (band_top, band_bottom).
+static fn ui_paint_into(struct ui address_to ui, unsigned int address_to pixels, unsigned int pitch, int width, int height,
+                        int band_top, int band_bottom)
+{
+        ui->pixels = pixels;
+        ui->pitch = pitch;
+        ui->width = width;
+        ui->height = height;
+        ui->top = 0;
+        ui->bottom = height;
+        ui->band_top = band_bottom > band_top ? band_top : 0;
+        ui->band_bottom = band_bottom > band_top ? band_bottom : 0;
+}
+
+static fn ui_page_paint(struct ui address_to ui, struct ui_page address_to p, const struct ui_page_parts address_to parts)
+{
+        int k;
+
+        ui_page_draw(ui, p, parts->keys);
+        if (p->card)
+        {
+                if (parts->card)
+                        parts->card(ui);
+        }
+        else
+        {
+                ui_page_groups(ui, p, parts->group_name, parts->groups);
+                ui_page_column(ui, p, parts->column_keys, parts->column_off);
+                if (parts->between)
+                        parts->between(ui);
+                parts->list->lit = parts->list_lit;
+                parts->list->keys = parts->list_keys;
+                ui_list_draw(ui, parts->list);
+                ui_page_column_bar(ui, p);
+        }
+        for (k = 0; k < 2; k++)
+                if (parts->overlays[k])
+                        ui_text_overlay(ui, parts->overlays[k]);
+}
+
 /*
         A page of text in the body: lines in the body role, a line's height apart and padded, drawn where they are in
         view of the region; and the region's height, for what it scrolls over.

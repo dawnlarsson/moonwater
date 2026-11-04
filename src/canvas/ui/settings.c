@@ -4388,18 +4388,25 @@ static const char address_to settings_card_line(int at, char address_to into, po
         the group chosen, or the card, and over them the menu a choice opened. settings_paint calls it only for a band
         with rows in it (ui_buffers_present calls it).
 */
+// The map above the rows, drawn between the column and the rows: a panel the page's inset holds, when the map is shown.
+static void settings_map_paint(struct ui address_to ui)
+{
+        if (settings_map_on())
+                settings_map_draw(ui);
+}
+
+// The card's lines, in place of the rows when the page is a card.
+static void settings_card_paint(struct ui address_to ui)
+{
+        ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
+}
+
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
         struct ui address_to ui = &settings.ui;
+        struct ui_page_parts parts;
 
-        ui->pixels = pixels;
-        ui->pitch = settings.own.table->stride;
-        ui->width = settings.width;
-        ui->height = settings.height;
-        ui->top = 0;
-        ui->bottom = settings.height;
-        ui->band_top = band_bottom > band_top ? band_top : 0;
-        ui->band_bottom = band_bottom > band_top ? band_bottom : 0;
+        ui_paint_into(ui, pixels, settings.own.table->stride, settings.width, settings.height, band_top, band_bottom);
         if (settings_gallery.on)
         {
                 settings_gallery_draw(ui);
@@ -4412,27 +4419,23 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         // clipboard, its caret), with the keys while the window has them and no row is typed in.
         settings.page.search.items[0] = settings.page.card ? null : WORDS(settings_filter_hint);
         settings.page.search.edit = settings.page.card ? null : settings_filter_field();
-        ui_page_draw(ui, &settings.page, settings_editing() < 0 && settings.focused);
-        if (settings.page.card)
-                ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
-        else
-        {
-                ui_page_groups(ui, &settings.page, settings_group_text, settings_groups());
-                ui_page_column(ui, &settings.page, settings.focused && !settings.page.pane, settings_filter_length() != 0);
-                if (settings_map_on())
-                        settings_map_draw(ui);
-                // A row typed in is a field on the page, not a band: its well is the only thing lit there.
-                // The map has the keys while it is focused, so no row is lit or has the focus then.
-                settings.list.lit = (settings.page.pane || settings_filter_length()) && settings_editing() < 0 && !settings.map.keys;
-                settings.list.keys = settings.focused && settings.page.pane && !settings.map.keys;
-                ui_list_draw(ui, &settings.list);
-                ui_page_column_bar(ui, &settings.page);
-        }
+        memory_zero(&parts, sizeof(parts));
+        parts.keys = settings_editing() < 0 && settings.focused;
+        parts.group_name = settings_group_text;
+        parts.groups = settings_groups();
+        parts.column_keys = settings.focused && !settings.page.pane;
+        parts.column_off = settings_filter_length() != 0;
+        // A row typed in is a field on the page, not a band: its well is the only thing lit there. The map has the keys while it
+        // is focused, so no row is lit or has the focus then.
+        parts.list_lit = (settings.page.pane || settings_filter_length()) && settings_editing() < 0 && !settings.map.keys;
+        parts.list_keys = settings.focused && settings.page.pane && !settings.map.keys;
+        parts.list = &settings.list;
+        parts.between = settings_map_paint;
+        parts.card = settings_card_paint;
         // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
-        if (settings_editing() >= 0 && settings_edit_shown())
-                ui_text_overlay(ui, &settings.edit);
-        if (settings.filter_open && !settings.page.card)
-                ui_text_overlay(ui, &settings.filter_edit);
+        parts.overlays[0] = settings_editing() >= 0 && settings_edit_shown() ? &settings.edit : null;
+        parts.overlays[1] = settings.filter_open && !settings.page.card ? &settings.filter_edit : null;
+        ui_page_paint(ui, &settings.page, &parts);
 }
 
 /*
