@@ -22899,6 +22899,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                                                                     : (string_address) "the mouse",
                          table->osk_physical ? (string_address) "plugged in" : (string_address) "none",
                          table->osk_start ? (string_address) "yes" : (string_address) "no");
+                // The focus's text field, when it is one with the keys: its content purpose (the protocol's number, 0 normal) and the
+                // bottom of its cursor in the window's pixels (0 none), which the keyboard keeps above its top.
+                host_say(log, "  text input      the focus has its field's content purpose %p and cursor bottom %p (0 for none)\n",
+                         (positive)table->osk_purpose, (positive)table->osk_caret);
         }
         host_debug_inputs(table);
         host_windows_unmap(table);

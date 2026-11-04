@@ -4224,6 +4224,10 @@ static struct
         unsigned char osk_setting, osk_typed, osk_shown;
         int osk_pan[WINDOWS], osk_height[WINDOWS];
         unsigned int osk_edges[WINDOWS];
+        // A Wayland client's text field (wayland_host.c): the content purpose of its field, and the bottom of its text cursor in the
+        // window's pixels (0 for none). The pan keeps the cursor above the keyboard, not the window's bottom edge.
+        unsigned char text_purpose[WINDOWS];
+        int caret[WINDOWS];
         // Where the hand is, before its lead (real_x, real_y), and the class that moved the pointer last (owner). The pointer
         // itself (pointer_x, pointer_y) is where that is led to, and every consumer of motion reads it; at_real is set while a
         // press is handled, so a press is at the real place.
@@ -13821,6 +13825,8 @@ static void compositor_leave(int row)
 
         compositor.osk_pan[row] = 0;
         compositor.osk_height[row] = 0;
+        compositor.caret[row] = 0;
+        compositor.text_purpose[row] = 0;
         if (compositor.focus == row)
                 compositor_refocus();
         compositor.woken &= ~(1u << row);
@@ -13995,7 +14001,9 @@ static void compositor_osk_pan(int row, int keyboard)
                 return;
         }
         compositor_output_rect(compositor_screen_of(row), &x, &y, &width, &height);
-        overlap = compositor.y[row] + (int)compositor.h[row] - compositor.y[keyboard];
+        // The bottom that must clear the keyboard: the text cursor's, when its client gave one, else the window's own.
+        overlap = compositor.y[row] + (compositor.caret[row] > 0 && compositor.caret[row] < (int)compositor.h[row] ? compositor.caret[row] : (int)compositor.h[row]) -
+                  compositor.y[keyboard];
         room = compositor.y[row] - y;
         amount = overlap < room ? overlap : room;
         if (amount <= 0)
@@ -14038,6 +14046,16 @@ static void compositor_osk_publish(void)
         table->osk_layout = (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[0] |
                             (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[1] << 8;
         table->osk_start = compositor_osk_starts();
+        // The focus's text field: its content purpose, which the keyboard picks its page by (a change wakes it), and its cursor.
+        {
+                int focus = compositor.focus, keyboard = compositor_osk_row();
+                unsigned int purpose = focus >= 0 && table->field[focus] ? compositor.text_purpose[focus] : 0;
+
+                if (table->osk_purpose != purpose && keyboard >= 0)
+                        compositor.woken |= 1u << keyboard;
+                table->osk_purpose = purpose;
+                table->osk_caret = focus >= 0 && table->field[focus] && compositor.caret[focus] > 0 ? (unsigned int)compositor.caret[focus] : 0;
+        }
 }
 
 static void compositor_osk_sync(void)

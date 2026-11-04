@@ -911,6 +911,9 @@ struct windows
         unsigned int osk_setting, osk_shown, osk_input, osk_physical, osk_start;
         // The compositor's: the keyboard layout's name, its two letters packed (us is 'u' | 's' << 8), which the keyboard lays its letters out by.
         unsigned int osk_layout;
+        // The compositor's: the content purpose of the focus's text field (the protocol's content_purpose values, 0 normal, and 0 for a
+        // window with no field from a Wayland client), and the bottom of its text cursor in the window's pixels (0 for none).
+        unsigned int osk_purpose, osk_caret;
         // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).
         unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];

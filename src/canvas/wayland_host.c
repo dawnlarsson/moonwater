@@ -1040,11 +1040,57 @@ static int compositor_wl_asked_shape(int row)
         return compositor_wl.cursor_asked[row] == COMPOSITOR_WL_HIDDEN ? -2 : compositor_wl.cursor_asked[row] - 1;
 }
 
+/*
+        A text field of a window's client has the keys (delta 1), gives them back (-1), or says its content purpose (0): the window
+        table's count of focused fields, which the on-screen keyboard shows by (ui_field_focus's count, so one place), and the purpose
+        the keyboard's page is picked by. A purpose is kept while the count is held and is none when it goes.
+*/
+static void compositor_wl_field(int row, long delta, long purpose)
+{
+        unsigned int *count = &compositor.table->field[row];
+
+        if (delta > 0)
+                (*count)++;
+        else if (delta < 0 && *count)
+                (*count)--;
+        compositor.text_purpose[row] = *count && purpose >= 0 && purpose <= 13 ? (unsigned char)purpose : 0;
+        compositor_osk_sync();
+}
+
+/*
+        The bottom of a text cursor, in the window's pixels (0 for none). A cursor below the window's bottom is the bottom; the keyboard
+        is asked again, and a window already moved for an earlier cursor is moved back first, so it is moved for this one.
+*/
+static void compositor_wl_caret(int row, long bottom)
+{
+        int want = bottom > 0 ? (int)(bottom < WAYLAND_DIMENSION ? bottom : WAYLAND_DIMENSION) : 0;
+
+        if (compositor.caret[row] == want)
+                return;
+        compositor.caret[row] = want;
+        if (compositor.osk_pan[row] || compositor.osk_height[row])
+                compositor_osk_unpan(row);
+        compositor_osk_sync();
+}
+
 static void compositor_wl_row_do(void *context, int row, long what, long a, long b)
 {
         (void)context;
-        (void)b;
-        if (row < 0 || row >= WINDOWS || !compositor.showing[row])
+        if (row < 0 || row >= WINDOWS)
+                return;
+        // A text field's count is kept whether or not the window has shown a picture yet: the shim counts it from the enable, and
+        // gives it back when the window goes, which is before the row closes.
+        if (what == WAYLAND_DO_TEXT)
+        {
+                compositor_wl_field(row, a, b);
+                return;
+        }
+        if (what == WAYLAND_DO_CARET)
+        {
+                compositor_wl_caret(row, a);
+                return;
+        }
+        if (!compositor.showing[row])
                 return;
         switch (what)
         {
@@ -2432,8 +2478,9 @@ static void compositor_wl_drain(int row)
 
                 if (type == WINDOW_EVENT_KEY)
                 {
+                        // The keyboard's key carries the Shift it makes its character with (osk.c): the client is told Shift as a person's.
                         if (!(flags & WINDOW_KEY_REPEAT))
-                                wayland_key(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0);
+                                wayland_key_shift(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0, (flags & WINDOW_KEY_SHIFT) ? 1 : 0);
                         continue;
                 }
                 if (type == WINDOW_EVENT_PINCH)
