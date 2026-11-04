@@ -15309,10 +15309,22 @@ static void compositor_table_drop(void)
                 }
 }
 
-// SIGTERM, SIGINT and SIGHUP, as a descriptor the loop polls.
+/*
+        SIGPIPE ignored: a write to a FIFO or a socket whose reader has gone is EPIPE and no end of the compositor. keys.fire is
+        opened only while the machine script reads it, and the script may close it between the open and the write; the sound
+        server's socket may go. The Wayland shim ignored it when it started, so a build without the shim died of it.
+*/
+static void compositor_pipe_ignore(void)
+{
+        system_signal_install(13, 1, 0, 0, null); // SIGPIPE, SIG_IGN
+}
+
+// SIGTERM, SIGINT and SIGHUP, as a descriptor the loop polls; SIGPIPE ignored.
 static int compositor_signals(void)
 {
         unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1);
+
+        compositor_pipe_ignore();
 
         compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         return (int)compositor_call(syscall(signalfd4), (positive)-1, (positive)address_of mask, 8,

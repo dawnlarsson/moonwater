@@ -129072,6 +129072,34 @@ static void check_compositor_setting_opens(void)
 }
 
 /*
+        A write the compositor makes to a pipe whose reader has gone (keys.fire closed by the script between the open and the
+        write, the sound server's socket) is EPIPE, not the compositor's end: it ignores SIGPIPE itself, as it set its signals
+        up (compositor_signals), where only the Wayland shim did before. In a child, which writes to such a pipe.
+*/
+static void check_compositor_pipe_ignored(void)
+{
+    bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
+    positive status = 0;
+
+    if (child == 0)
+    {
+        int ends[2];
+        bipolar wrote;
+
+        compositor_pipe_ignore();
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+            system_call_1(syscall(exit_group), 4);
+        system_close(ends[0]);
+        wrote = system_write_once(ends[1], "x", 1);
+        system_call_1(syscall(exit_group), wrote == -32 ? 0 : 3); // EPIPE
+    }
+    if (child > 0)
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    check("pipe ignored: a write to a pipe with no reader is EPIPE, and the compositor is not ended by SIGPIPE",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+}
+
+/*
         A monitor's name from its EDID, whatever its length: the blob was asked for at 256 bytes, and the kernel copies a blob
         only when the length asked is its own, so a monitor with no extension (128) or with two or more (384 and up) had no
         name. Every length of whole blocks up to a base block and 255 extensions is read; one that is not whole blocks, or
@@ -158469,6 +158497,7 @@ b32 main()
         check_compositor_card_turn();
         check_compositor_card_edid();
         check_compositor_setting_opens();
+        check_compositor_pipe_ignored();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();

@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-126: the compositor relied on the Wayland shim to ignore SIGPIPE
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening: a build without the Wayland shim) |
+| Class | Denial of service: the root compositor ended by a signal its own writes raise |
+| Attacker | none outside root: the machine script closing keys.fire between the compositor's open and write, or the sound server going while a volume is told |
+| Moonwater exposure window | for a build with `CONFIG_MOONWATER_WAYLAND=n`, from `c793b422` (2026-10-11 19:16 +02:00) to the fixing commit; a default build ignored it from `compositor_wl_start` |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_pipe_ignore`) |
+
+**What it was.** A write to a pipe or a socket whose reader has gone raises SIGPIPE, which ends a process that does not
+ignore it. The compositor writes chords into keys.fire, which it opens only while the script reads it (the script can close
+it between the open and the write), and volumes into the sound server's socket. Only the Wayland shim ignored SIGPIPE, when
+it started; the audio control client sends with MSG_NOSIGNAL, keys.fire's write did not.
+
+**The fix.** `compositor_signals`, where the compositor sets its signals up, ignores SIGPIPE itself.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_pipe_ignored`: a child that writes to a pipe with no
+reader after `compositor_pipe_ignore` is answered EPIPE and lives. With the line out it is ended by SIGPIPE (1 failure, gcc).
+
+**Still open.** Nothing.
+
 ### MW-2026-125: the compositor's reads of /root followed links and waited on FIFOs
 
 | | |
