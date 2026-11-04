@@ -176309,6 +176309,96 @@ static void pt_test_control_client(void)
         PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped, "every client is given back: %lu made, %lu dropped", pt_engine.clients_made, pt_engine.clients_dropped);
 }
 
+// The control client's recording half: the microphone's volume and mute by the source's name, and a record stream's by its number.
+static void pt_test_control_input(void)
+{
+        long owner, person, other, mic, sends;
+        struct pt_rec_args a = pt_rec_args();
+        unsigned long channel, playing, missing, stereo, mono, six;
+        struct pulse_record *rec;
+        struct ctl_input info;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        mic = pulse_source_add(&pt_engine, "alsa_input.test.00", "Test mic", 48000);
+        owner = pt_connect(1000, 12, 35, "Recorder");
+        PTCHECK(pt_create(owner, 35, 20, 19200, 19200, 4800, &channel, &playing, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a playing stream, with number 0");
+        a.source_index = (unsigned long)mic;
+        a.channels = 1;
+        PTCHECK(pt_rec_create(owner, 35, 21, &a) == 0, "a mono record stream");
+        mono = pt_rec_reply.index;
+        a.channels = 2;
+        PTCHECK(pt_rec_create(owner, 35, 22, &a) == 0, "a stereo one");
+        stereo = pt_rec_reply.index;
+        a.channels = 6;
+        PTCHECK(pt_rec_create(owner, 35, 23, &a) == 0, "and a six channel one");
+        six = pt_rec_reply.index;
+        PTCHECK(mono == playing, "the record stream's number is the playing stream's (the numbers of the two kinds are apart): %lu %lu", mono, playing);
+
+        person = pt_ctl_join(0);
+        PTCHECK(person >= 0, "the person joins");
+        PTCHECK(ctl_get_input(&pt_ctl, playing, &info) == 0 && ctl_kept_channels(&pt_ctl, playing) == 2, "the playing stream's count is kept: 2");
+
+        // The microphone: a source is named, as the page names it, and the master is its own, not the sink's.
+        PTCHECK(ctl_set_source_volume(&pt_ctl, "alsa_input.test.00", 0x8000) == 0 && pt_engine.source[mic].volume[0] == 0x8000 && pt_engine.source[mic].volume[1] == 0x8000,
+                "the source's volume is on both channels");
+        PTCHECK(pt_engine.sink[0].volume[0] != 0x8000, "and the sink's is not touched");
+        PTCHECK(ctl_set_source_volume(&pt_ctl, "alsa_input.test.00", 0x30000) == 0 && pt_engine.source[mic].volume[0] == CTL_VOLUME_MAX, "and held to 200%%");
+        PTCHECK(ctl_set_source_mute(&pt_ctl, "alsa_input.test.00", 1) == 0 && pt_engine.source[mic].muted == 1 && !pt_engine.sink[0].muted, "the source is muted, and the sink is not");
+        PTCHECK(ctl_set_source_mute(&pt_ctl, "alsa_input.test.00", 0) == 0 && pt_engine.source[mic].muted == 0, "and not");
+        PTCHECK(ctl_set_source_volume(&pt_ctl, "no such source", 0x8000) == CTL_NOENTITY && ctl_set_source_mute(&pt_ctl, "no such source", 1) == CTL_NOENTITY,
+                "a source that is not there is CTL_NOENTITY");
+        PTCHECK(ctl_set_source_volume(&pt_ctl, "null", 0x8000) == CTL_NOENTITY, "and a sink's name is no source's");
+
+        // A record stream's volume: its count of channels is found by sending, and kept under a number of its own.
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_output_volume(&pt_ctl, stereo, 0x6000) == 0, "a stereo record stream's volume is taken");
+        rec = pulse_output_of(&pt_engine, stereo);
+        PTCHECK(rec && rec->volume[0] == 0x6000 && rec->volume[1] == 0x6000 && pt_ctl_sends == sends + 1, "on both channels, in one request (the first guess is two): %ld", pt_ctl_sends - sends);
+        PTCHECK(ctl_kept_channels(&pt_ctl, stereo + CTL_RECORD_KEY) == 2, "and the count is kept");
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x5000) == 0, "a mono one's");
+        rec = pulse_output_of(&pt_engine, mono);
+        PTCHECK(rec && rec->map_channels == 1 && rec->volume[0] == 0x5000 && pt_ctl_sends == sends + 2, "is found in two requests (two refused, one taken): %ld", pt_ctl_sends - sends);
+        PTCHECK(ctl_kept_channels(&pt_ctl, mono + CTL_RECORD_KEY) == 1 && ctl_kept_channels(&pt_ctl, playing) == 2,
+                "the count is kept under the record stream's own number, and the playing stream's (which has the same) is as it was");
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x4000) == 0 && pulse_output_of(&pt_engine, mono)->volume[0] == 0x4000 && pt_ctl_sends == sends + 1, "and the next is one request");
+        PTCHECK(ctl_set_input_volume(&pt_ctl, playing, 0x7000) == 0 && pt_stream_of(playing)->volume[0] == 0x7000 && pt_stream_of(playing)->volume[1] == 0x7000,
+                "while the playing stream's is still its two channels");
+        sends = pt_ctl_sends;
+        PTCHECK(ctl_set_output_volume(&pt_ctl, six, 0x2000) == 0, "a six channel one's");
+        rec = pulse_output_of(&pt_engine, six);
+        PTCHECK(rec && rec->map_channels == 6 && rec->volume[0] == 0x2000 && rec->volume[5] == 0x2000 && pt_ctl_sends == sends + 4,
+                "is found by the counts in turn: two, one and four refused, six taken (%ld)", pt_ctl_sends - sends);
+        PTCHECK(ctl_set_output_volume(&pt_ctl, six, 0x30000) == 0 && pulse_output_of(&pt_engine, six)->volume[3] == CTL_VOLUME_MAX, "and held to 200%%");
+        ctl_keep_channels(&pt_ctl, stereo + CTL_RECORD_KEY, 6);
+        PTCHECK(ctl_set_output_volume(&pt_ctl, stereo, 0x3000) == 0 && pulse_output_of(&pt_engine, stereo)->volume[1] == 0x3000 && ctl_kept_channels(&pt_ctl, stereo + CTL_RECORD_KEY) == 2,
+                "a wrong count is mended and the right one kept");
+        PTCHECK(ctl_set_output_volume(&pt_ctl, 9999, 0x8000) == CTL_NOENTITY, "a record stream that is not there is CTL_NOENTITY");
+
+        // Its mute: the one program's microphone.
+        PTCHECK(ctl_set_output_mute(&pt_ctl, mono, 1) == 0 && pulse_output_of(&pt_engine, mono)->muted == 1 && !pt_stream_of(playing)->muted,
+                "a record stream is muted, and a playing stream of the same number is not");
+        PTCHECK(ctl_set_output_mute(&pt_ctl, mono, 0) == 0 && pulse_output_of(&pt_engine, mono)->muted == 0, "and not");
+        PTCHECK(ctl_set_output_mute(&pt_ctl, 9999, 1) == CTL_NOENTITY, "a mute for one that is not there is CTL_NOENTITY");
+
+        // Who may: the person's session, and a program its own record streams only.
+        other = pt_ctl_join(1001);
+        PTCHECK(other >= 0, "another user joins");
+        PTCHECK(ctl_set_output_mute(&pt_ctl, mono, 1) == CTL_ACCESS && pulse_output_of(&pt_engine, mono)->muted == 0, "a mute of another user's record stream is refused: CTL_ACCESS");
+        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x1000) == CTL_ACCESS && pulse_output_of(&pt_engine, mono)->volume[0] == 0x4000, "and a volume");
+        PTCHECK(ctl_set_source_volume(&pt_ctl, "alsa_input.test.00", 0x1000) == CTL_ACCESS && pt_engine.source[mic].volume[0] == CTL_VOLUME_MAX, "the microphone is not another user's to change");
+        PTCHECK(ctl_set_source_mute(&pt_ctl, "alsa_input.test.00", 1) == CTL_ACCESS && !pt_engine.source[mic].muted, "nor its mute");
+        pulse_client_close(&pt_engine, other);
+        other = pt_ctl_join(1000);
+        PTCHECK(other >= 0 && ctl_set_output_mute(&pt_ctl, mono, 1) == 0 && pulse_output_of(&pt_engine, mono)->muted == 1, "the program's own user may mute its record stream");
+        PTCHECK(ctl_set_output_volume(&pt_ctl, mono, 0x1000) == 0 && pulse_output_of(&pt_engine, mono)->volume[0] == 0x1000, "and change its volume");
+        pulse_client_close(&pt_engine, other);
+        pulse_client_close(&pt_engine, person);
+        pulse_client_close(&pt_engine, owner);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -176341,6 +176431,7 @@ int main(void)
         pt_test_session();
         pt_test_fuzz();
         pt_test_control_client();
+        pt_test_control_input();
         printf("CHECK_audio_pulse: %u checks, %u failures\n", pt_checks, pt_failures);
         return pt_failures ? 1 : 0;
 }

@@ -31,6 +31,7 @@
 #define CTL_CACHE 16            // streams whose channel count is kept
 #define CTL_NAME "Moonwater mixer"
 #define CTL_VOLUME_MAX 0x20000ul // 200%, the server's own limit
+#define CTL_RECORD_KEY 0x40000000ul // added to a record stream's number in the table of kept channel counts: its numbers are its own, not a playback stream's
 
 /* ---- the wire: PulseAudio's command numbers and errors, and the tag structure's writers and readers this needs ---- */
 
@@ -44,9 +45,13 @@
 #define CTL_COMMAND_GET_SINK_INPUT_INFO 29
 #define CTL_COMMAND_SET_SINK_VOLUME 36
 #define CTL_COMMAND_SET_SINK_INPUT_VOLUME 37
+#define CTL_COMMAND_SET_SOURCE_VOLUME 38
 #define CTL_COMMAND_SET_SINK_MUTE 39
+#define CTL_COMMAND_SET_SOURCE_MUTE 40
 #define CTL_COMMAND_KILL_SINK_INPUT 49
 #define CTL_COMMAND_SET_SINK_INPUT_MUTE 69
+#define CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME 98
+#define CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE 99
 #define CTL_ERR_ACCESS 1
 #define CTL_ERR_INVALID 3
 #define CTL_ERR_NOENTITY 5
@@ -467,7 +472,7 @@ static long ctl_get_input(struct ctl *c, unsigned long index, struct ctl_input *
         return 0;
 }
 
-static long ctl_volume_once(struct ctl *c, unsigned long index, unsigned long volume, long channels)
+static long ctl_volume_once(struct ctl *c, unsigned long command, unsigned long index, unsigned long volume, long channels)
 {
         struct ctl_w w;
         unsigned long all[CTL_CHANNELS];
@@ -476,7 +481,7 @@ static long ctl_volume_once(struct ctl *c, unsigned long index, unsigned long vo
                 return CTL_INVALID;
         for (long i = 0; i < channels; i++)
                 all[i] = volume;
-        ctl_begin(c, &w, CTL_COMMAND_SET_SINK_INPUT_VOLUME);
+        ctl_begin(c, &w, command);
         ctl_w_u32(&w, index);
         ctl_w_cvolume(&w, all, channels);
         if (w.bad)
@@ -498,32 +503,74 @@ static long ctl_set_input_volume(struct ctl *c, unsigned long index, unsigned lo
         volume = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
         if (channels)
         {
-                got = ctl_volume_once(c, index, volume, channels);
+                got = ctl_volume_once(c, CTL_COMMAND_SET_SINK_INPUT_VOLUME, index, volume, channels);
                 if (got != CTL_INVALID)
                         return got < 0 ? got : 0;
         }
         // Not known, or refused for its count: asked again, and sent once more.
         if ((got = ctl_get_input(c, index, &info)) < 0)
                 return got;
-        got = ctl_volume_once(c, index, volume, info.channels);
+        got = ctl_volume_once(c, CTL_COMMAND_SET_SINK_INPUT_VOLUME, index, volume, info.channels);
         return got < 0 ? got : 0;
 }
 
-// A stream muted or not. The same answers as the volume's.
-static long ctl_set_input_mute(struct ctl *c, unsigned long index, int muted)
+/*
+        A record stream's volume, by the number the page gives it (record[].index): the same on every channel, and 200% the most. The
+        count of its channels is not on the page, and the server's answer about a record stream is long (the list of its properties
+        comes before its volume), so it is found by sending: the count that was kept for it, else the counts a capture has (two, one, four,
+        six, eight) in turn until the server takes one. 0 when it did; CTL_NOENTITY for a stream that is gone, CTL_ACCESS for one that is not
+        ours, CTL_INVALID when no count was taken, CTL_FAILED when there is no server.
+*/
+static long ctl_set_output_volume(struct ctl *c, unsigned long index, unsigned long volume)
+{
+        static const signed char guess[] = {2, 1, 4, 6, 8};
+        long channels = ctl_kept_channels(c, index + CTL_RECORD_KEY), got = CTL_INVALID;
+
+        if (!c->open)
+                return CTL_FAILED;
+        volume = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
+        if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != CTL_INVALID)
+                return got < 0 ? got : 0;
+        for (unsigned int k = 0; k < sizeof(guess); k++)
+        {
+                if (guess[k] == channels)
+                        continue;
+                got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, guess[k]);
+                if (got == CTL_INVALID)
+                        continue;
+                if (got >= 0)
+                        ctl_keep_channels(c, index + CTL_RECORD_KEY, guess[k]);
+                return got < 0 ? got : 0;
+        }
+        return CTL_INVALID;
+}
+
+// A stream muted or not, by the command that names its kind. The same answers as the volume's.
+static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long index, int muted)
 {
         struct ctl_w w;
         long got;
 
         if (!c->open)
                 return CTL_FAILED;
-        ctl_begin(c, &w, CTL_COMMAND_SET_SINK_INPUT_MUTE);
+        ctl_begin(c, &w, command);
         ctl_w_u32(&w, index);
         ctl_w_bool(&w, muted != 0);
         if (w.bad)
                 return CTL_FAILED;
         got = ctl_exchange(c, w.len);
         return got < 0 ? got : 0;
+}
+
+static long ctl_set_input_mute(struct ctl *c, unsigned long index, int muted)
+{
+        return ctl_stream_mute(c, CTL_COMMAND_SET_SINK_INPUT_MUTE, index, muted);
+}
+
+// A record stream muted or not: the one program's microphone, which is the person's (root's) or the program's own.
+static long ctl_set_output_mute(struct ctl *c, unsigned long index, int muted)
+{
+        return ctl_stream_mute(c, CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE, index, muted);
 }
 
 // A stream ended: its program is told its stream is gone (the server only lets the person's own session do it).
@@ -543,10 +590,11 @@ static long ctl_kill_input(struct ctl *c, unsigned long index)
 }
 
 /*
-        The master volume and mute of the sink the server plays on, named as the page names it (the person's session only: the server
-        refuses any other uid). A volume is one number on both channels, up to 200%; the same answers as a stream's.
+        The master volume and mute of the sink the server plays on and of the source programs record from (the microphone), each
+        named as the page names it (the person's session only: the server refuses any other uid). A volume is one number on both
+        channels, up to 200%; the same answers as a stream's.
 */
-static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long volume)
+static long ctl_device_volume(struct ctl *c, unsigned long command, const char *name, unsigned long volume)
 {
         struct ctl_w w;
         unsigned long both[2];
@@ -555,9 +603,9 @@ static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long v
         if (!c->open)
                 return CTL_FAILED;
         both[0] = both[1] = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
-        ctl_begin(c, &w, CTL_COMMAND_SET_SINK_VOLUME);
+        ctl_begin(c, &w, command);
         ctl_w_u32(&w, CTL_NONE);
-        ctl_w_string(&w, sink);
+        ctl_w_string(&w, name);
         ctl_w_cvolume(&w, both, 2);
         if (w.bad)
                 return CTL_FAILED;
@@ -565,21 +613,41 @@ static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long v
         return got < 0 ? got : 0;
 }
 
-static long ctl_set_sink_mute(struct ctl *c, const char *sink, int muted)
+static long ctl_device_mute(struct ctl *c, unsigned long command, const char *name, int muted)
 {
         struct ctl_w w;
         long got;
 
         if (!c->open)
                 return CTL_FAILED;
-        ctl_begin(c, &w, CTL_COMMAND_SET_SINK_MUTE);
+        ctl_begin(c, &w, command);
         ctl_w_u32(&w, CTL_NONE);
-        ctl_w_string(&w, sink);
+        ctl_w_string(&w, name);
         ctl_w_bool(&w, muted != 0);
         if (w.bad)
                 return CTL_FAILED;
         got = ctl_exchange(c, w.len);
         return got < 0 ? got : 0;
+}
+
+static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long volume)
+{
+        return ctl_device_volume(c, CTL_COMMAND_SET_SINK_VOLUME, sink, volume);
+}
+
+static long ctl_set_sink_mute(struct ctl *c, const char *sink, int muted)
+{
+        return ctl_device_mute(c, CTL_COMMAND_SET_SINK_MUTE, sink, muted);
+}
+
+static long ctl_set_source_volume(struct ctl *c, const char *source, unsigned long volume)
+{
+        return ctl_device_volume(c, CTL_COMMAND_SET_SOURCE_VOLUME, source, volume);
+}
+
+static long ctl_set_source_mute(struct ctl *c, const char *source, int muted)
+{
+        return ctl_device_mute(c, CTL_COMMAND_SET_SOURCE_MUTE, source, muted);
 }
 
 #ifndef CTL_NO_SYSTEM

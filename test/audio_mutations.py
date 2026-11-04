@@ -172,14 +172,14 @@ M = [
     ("pulse", "record meter on another's stream served", '        if (direct != PULSE_INVALID)\n                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);', ''),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
-    ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended"),
+    ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),
     ("control", "the channel count not kept", "        c->kept[c->kept_next].index = index;\n        c->kept[c->kept_next].channels = channels;\n        c->kept_next = (c->kept_next + 1) % CTL_CACHE;", "        c->kept_next = (c->kept_next + 1) % CTL_CACHE;"),
     ("control", "a wrong count not mended", "                if (got != CTL_INVALID)\n                        return got < 0 ? got : 0;", "                return got < 0 ? got : 0;"),
     ("control", "an access error as a failure", "return code == CTL_ERR_ACCESS ? CTL_ACCESS :", "return code == CTL_ERR_ACCESS ? CTL_FAILED :"),
     ("control", "a missing stream as a failure", "code == CTL_ERR_NOENTITY ? CTL_NOENTITY", "code == CTL_ERR_NOENTITY ? CTL_FAILED"),
     ("control", "any tag taken for ours", "if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)", "if (frame[20] != 'L' || frame[25] != 'L')"),
     ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
-    ("control", "the sink named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, sink);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
+    ("control", "the device named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, name);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
     ("control", "the timeout of the connection ignored", "long wait = c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS;", "long wait = CTL_TIMEOUT_MS;"),
     ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
     # ---- bowl.c (the sound server a bowl's program is offered, checked by the bowl_session harness) ----
@@ -190,6 +190,16 @@ M = [
     ("bowl", "the sound server's socket said wrong", "\"=unix:\" BOWL_SOUND_SOCKET", "\"=\" BOWL_SOUND_SOCKET"),
     ("bowl", "no room kept for what is offered", "#define BOWL_ENV_DEFAULTS 13", "#define BOWL_ENV_DEFAULTS 12"),
     ("bowl", "the bus offered with no socket", "return system_access_at(AT_FDCWD, (string_address)BOWL_SESSION_BUS_SOCKET, 0) >= 0;", "return true;"),
+    ("control", 'a source muted as a sink', 'return ctl_device_mute(c, CTL_COMMAND_SET_SOURCE_MUTE, source, muted);', 'return ctl_device_mute(c, CTL_COMMAND_SET_SINK_MUTE, source, muted);'),
+    ("control", "a source's volume sent to the sink", 'return ctl_device_volume(c, CTL_COMMAND_SET_SOURCE_VOLUME, source, volume);', 'return ctl_device_volume(c, CTL_COMMAND_SET_SINK_VOLUME, source, volume);'),
+    ("control", "a record stream's volume sent as a playing stream's", 'got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, guess[k]);', 'got = ctl_volume_once(c, CTL_COMMAND_SET_SINK_INPUT_VOLUME, index, volume, guess[k]);'),
+    ("control", "a record stream's mute sent as a playing stream's", 'return ctl_stream_mute(c, CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE, index, muted);', 'return ctl_stream_mute(c, CTL_COMMAND_SET_SINK_INPUT_MUTE, index, muted);'),
+    ("control", "a record stream's count not kept", '                        ctl_keep_channels(c, index + CTL_RECORD_KEY, guess[k]);', ''),
+    ("control", "a record stream's count kept as a playing stream's", 'ctl_keep_channels(c, index + CTL_RECORD_KEY, guess[k]);', 'ctl_keep_channels(c, index, guess[k]);'),
+    ("control", "a record stream's kept count looked up as a playing stream's", 'long channels = ctl_kept_channels(c, index + CTL_RECORD_KEY), got = CTL_INVALID;', 'long channels = ctl_kept_channels(c, index), got = CTL_INVALID;'),
+    ("control", "a record stream's counts not tried", 'static const signed char guess[] = {2, 1, 4, 6, 8};', 'static const signed char guess[] = {2};'),
+    ("control", "a record stream's wrong count not mended", 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != CTL_INVALID)', 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != 12345)'),
+    ("control", "a record stream's refusal for its count taken for one for access", '                if (got == CTL_INVALID)\n                        continue;', '                if (got < 0)\n                        continue;'),
     ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index + 1);"),
 ]
 
