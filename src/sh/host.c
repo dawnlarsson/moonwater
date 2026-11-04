@@ -22304,7 +22304,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                         if (table->pid[row] && table->list_state[row] == 1)
                                 from_lists++;
                 host_say(log, "  lists           %p windows drawn from their lists, %p refused; list mode %s\n", (positive)from_lists, (positive)table->list_refused,
-                         table->list_mode ? (string_address) "on" : (string_address) "off (touch /run/moonwater/lists)");
+                         table->list_mode ? (string_address) "on (touch /run/moonwater/lists-off to turn it off)" : (string_address) "off (the card is not composing, canvas gpu is off, or /run/moonwater/lists-off is there)");
                 if (table->list_why[0])
                         host_say(log, "  lists drawn     %p frames\n", (positive)table->list_why[0]);
                 for (unsigned int why = 1; why < 10; why++)

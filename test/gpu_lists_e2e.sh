@@ -47,9 +47,7 @@ session()
         cd "$work" || return 1
         if [ "$mode" = off ]; then
                 echo off > /root/canvas.gpu
-        else
-                : > /run/moonwater/lists # the lists are off without it (the compositor looks for it)
-        fi
+        fi # the lists are on by default wherever the card composes
         # the input: the evdev fifo (-i), written by the flicker detector as a device would write it
         mkfifo "$work/input.fifo"
         bin/compositor -H 800x600 "$work/$mode.img" -G -i "$work/input.fifo" > "$work/$mode.compositor.log" 2>&1 &

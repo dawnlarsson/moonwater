@@ -7625,19 +7625,20 @@ static void compositor_lists_set(int on);
 // made to agree with it at every present: the card going away (a hang's cool-down, canvas gpu off) puts every window back to painting its own pixels, and a check
 // that sets the mode itself to draw lists with a renderer of its own is not undone by a present on a machine with no card.
 //
-// THE SWITCH: the file /run/moonwater/lists. The apps' lists are off until it is there (looked for every 32nd present), because a window drawn from lists
-// flickered under a hand on a machine with a card (2026-11-04: frames mixed with the program's pixels, a picture written in place); they are turned on by default
-// once the lists lane (test/gpu_lists_e2e.sh) shows no frame differing from the processor's under input.
+// THE SWITCH: on by default, wherever the card composes in earnest (compositor_gpu_able); off while the file /run/moonwater/lists-off is there (looked for every
+// 32nd present: touch it, and remove it, to turn only the lists off; canvas gpu off turns the card off and the lists with it). A card that is up but cannot map the
+// windows' pictures sends every list back to the program's pixels, which is guarded against there; a flicker seen with the lists on (2026-11-04) was not found on a
+// card that composes, and moonwater debug says the lists drawn, refused and switched back to pixels.
 static int compositor_lists_switch(void)
 {
         static unsigned int probes;
-        static int on;
+        static int on = 1;
 
         if ((probes++ & 31) == 0)
         {
-                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists", FILE_READ | O_CLOEXEC);
+                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-off", FILE_READ | O_CLOEXEC);
 
-                on = handle >= 0;
+                on = handle < 0;
                 if (handle >= 0)
                         system_close(handle);
         }
