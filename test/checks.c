@@ -129100,6 +129100,71 @@ static void check_compositor_pipe_ignored(void)
 }
 
 /*
+        A headless compositor's table is a memfd sealed against shrinking, as one with a card has: it was a plain file in
+        /run/moonwater, which whatever writes the table could cut to nothing under the compositor's mapping, and its next read
+        of the table was SIGBUS. In a child, root of a user namespace of its own with a /run of its own: the table made as
+        compositor_table makes it with no card, cut through its path, and read.
+*/
+static fn table_sealed_write(const char *path, const char *text)
+{
+    bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_WRITE | O_CLOEXEC);
+
+    if (handle >= 0)
+        system_write_once(handle, text, string_length((string_address)text)), system_close(handle);
+}
+
+static void check_compositor_table_sealed(void)
+{
+    unsigned int uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
+    unsigned int gid = (unsigned int)compositor_call(syscall(getgid), 0, 0, 0, 0, 0, 0);
+    bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
+    positive status = 0;
+
+    if (child == 0)
+    {
+        char map[40] = "0 ";
+        positive at = 2;
+        bipolar handle;
+        volatile unsigned int frame;
+
+        if (compositor_call(syscall(unshare), 0x10000000 | 0x00020000, 0, 0, 0, 0, 0) != 0) // CLONE_NEWUSER | CLONE_NEWNS
+            system_call_1(syscall(exit_group), 77);
+        table_sealed_write("/proc/self/setgroups", "deny");
+        at += positive_into_string((p8 address_to)map + at, uid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/uid_map", map);
+        at = 2;
+        at += positive_into_string((p8 address_to)map + at, gid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/gid_map", map);
+        if (compositor_call(syscall(mount), (positive) "none", (positive) "/run", (positive) "tmpfs", 0, 0, 0) != 0)
+            system_call_1(syscall(exit_group), 77);
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.card = -1;
+        compositor.width = compositor.height = 64;
+        compositor.scale = 100;
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        if (compositor_table() < 0)
+            system_call_1(syscall(exit_group), 78);
+        handle = system_open_at(AT_FDCWD, (string_address)WINDOWS_TABLE, FILE_READ_WRITE | O_CLOEXEC);
+        if (handle >= 0)
+            compositor_call(syscall(ftruncate), (positive)handle, 0, 0, 0, 0, 0);
+        frame = compositor.table->frame[0];
+        compositor.table->focus = frame;
+        system_call_1(syscall(exit_group), 0);
+    }
+    if (child > 0)
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    if (waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) >= 77)
+    {
+        string_format(log, "  table sealed: NOT RUN, no user namespace with a /run of its own here (%p)\n", (status >> 8) & 0xff);
+        return;
+    }
+    check("table sealed: a headless compositor's table cut through its path is not cut, and the compositor reads it on",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+}
+
+/*
         A monitor's name from its EDID, whatever its length: the blob was asked for at 256 bytes, and the kernel copies a blob
         only when the length asked is its own, so a monitor with no extension (128) or with two or more (384 and up) had no
         name. Every length of whole blocks up to a base block and 255 extensions is read; one that is not whole blocks, or
@@ -158498,6 +158563,7 @@ b32 main()
         check_compositor_card_edid();
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
+        check_compositor_table_sealed();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();

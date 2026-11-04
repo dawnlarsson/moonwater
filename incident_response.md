@@ -41,6 +41,30 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-128: a headless compositor's window table could be truncated under it
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening: root-only, a headless compositor) |
+| Class | Denial of service: SIGBUS in the root compositor from a file truncated under its mapping |
+| Attacker | whatever can write the table (root today, MW-2026-050) |
+| Moonwater exposure window | from `0b5d97442` (2026-10-14 13:51 +02:00, the memfd for a compositor with a card) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_table`) |
+
+**What it was.** A compositor with a card keeps its window table in a memfd sealed against shrinking and growing, linked at
+`/run/moonwater/windows`. A headless one (`-H`, a test's) kept it in a plain file there, which anything that can open it
+for writing can truncate: the compositor's next read of a page past the new end is SIGBUS, and it ends.
+
+**The fix.** The table is the sealed memfd whether there is a card or not; the plain file is left for when there is no
+memfd. What a card does with the memfd (udmabuf, handing it to `/dev/spark` for programs) is still only with a card.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_table_sealed`: in a child that is root of a user
+namespace with a `/run` of its own, the table made as `compositor_table` makes it with no card is cut through its path
+and read; the seal refuses the cut and the read is answered. With the plain file the child is ended by SIGBUS (1 failure,
+gcc). Where no user namespace can be made the row says NOT RUN.
+
+**Still open.** Nothing.
+
 ### MW-2026-127: a window could make itself a popup of the focused window for the clipboard
 
 | | |
