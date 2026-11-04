@@ -6311,6 +6311,15 @@ SEARCH_KNOWN(search_known, memory_first_of)
 SEARCH_KNOWN(search_case_known, memory_first_of_ascii_case)
 #undef SEARCH_KNOWN
 
+//      The length of a literal is a number the compiler has: string_length(s)
+//      with a literal (or a constant array) for s is that number, and the call
+//      is gone. Twenty nine call sites hand it one (write(s, string_length(s))
+//      in the shell's cold paths); a run time string takes the routine.
+static inline INLINE positive length_known(positive length)
+{
+        return length;
+}
+
 //====================================================================
 //      bounded-string
 //====================================================================
@@ -8414,9 +8423,16 @@ static inline INLINE positive span_table_first(string_address source,
                  : memory_search_ascii_case((block), (size), (needle),        \
                                             (needle_size)))
 
+//      source-length
+
+#define string_length(source)                                                 \
+        (__builtin_constant_p(__builtin_strlen((const char address_to)(source))) \
+                 ? length_known((positive)__builtin_strlen((const char address_to)(source))) \
+                 : string_length(source))
+
 //      bounded-string
 
-#define string_length_max(source, bound)                                      \
+#define string_length_max(source, bound)                                    \
         (LIBRARY_EXPAND(STRING, (bound), KNOWN_BOUND_MAX)                     \
                  ? length_max_known((source), (bound))                        \
                  : string_length_max((source), (bound)))

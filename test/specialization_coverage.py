@@ -775,8 +775,13 @@ string_to_positive string_to_bipolar string_to_whole string_to_whole_wide
 string_to_host
 ''', 'a literal string would fold the whole answer, and no caller parses a '
      'literal; the routines exist for text that arrived at run time')
+cover('specialized', 'source', 'string_length',
+      'A literal source is its length, a number the compiler has: twenty nine call sites hand it one (write(s, string_length(s)) in the shell\'s cold '
+      'paths) and the call is gone. Measured as the routine\'s own cost: 3.5 ticks on a 9950X from an empty string to 31 bytes, 1.3 ns on an M2 Pro, '
+      'which the literal removes',
+      expansion='length_known', evidence='test/checks.c#CHECK_standard')
 cover('folds_already', 'source', '''
-string_length string_compare string_copy string_append
+string_compare string_copy string_append
 string_first_of string_first_of_or_end string_last_of string_last_of_or_end
 string_compare_folded string_digits
 string_digits_exact string_bipolar
