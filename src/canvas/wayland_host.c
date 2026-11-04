@@ -86,7 +86,7 @@ static struct
         int wake;                       // the eventfd a transfer's thread knocks on when it has ended
         int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
-        unsigned char cursor_asked[WINDOWS]; // the cursor shape a window's client asked for (wp_cursor_shape), as its CP_ shape + 1; 0 for none
+        unsigned char cursor_asked[WINDOWS]; // the cursor a window's client asked for (wp_cursor_shape, set_cursor): its CP_ shape + 1, COMPOSITOR_WL_HIDDEN, or 0 for none
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
         positive slow_until[WAYLAND_CLIENTS];
@@ -727,13 +727,20 @@ static void compositor_wl_row_title(void *context, int row, const char *text, lo
         compositor_take(row);
 }
 
-// The compositor's shape for each WAYLAND_CURSOR_* code (wayland.c), in order.
-static const unsigned char compositor_wl_cursor_of[8] = {CP_ARROW, CP_TEXT, CP_CROSS, CP_MOVE, CP_RESIZE_H, CP_RESIZE_V, CP_RESIZE_NWSE, CP_RESIZE_NESW};
+// The cursor_asked value for a pointer the client hid (set_cursor with no surface).
+#define COMPOSITOR_WL_HIDDEN 0xffu
 
-// The shape a window's client asked for, as a compositor shape, or -1 for none (compositor_motion asks inside the window).
+// The compositor's shape for each WAYLAND_CURSOR_* code (wayland.c), in order.
+static const unsigned char compositor_wl_cursor_of[11] = {CP_ARROW, CP_TEXT, CP_CROSS, CP_MOVE, CP_RESIZE_H, CP_RESIZE_V, CP_RESIZE_NWSE,
+                                                          CP_RESIZE_NESW, CP_HAND, CP_WAIT, CP_NOTALLOWED};
+
+// The shape a window's client asked for, as a compositor shape: -1 for none (the arrow), -2 for no pointer at all (compositor_motion
+// asks inside the window).
 static int compositor_wl_asked_shape(int row)
 {
-        return row >= 0 && row < WINDOWS && compositor_wl.cursor_asked[row] ? compositor_wl.cursor_asked[row] - 1 : -1;
+        if (row < 0 || row >= WINDOWS || !compositor_wl.cursor_asked[row])
+                return -1;
+        return compositor_wl.cursor_asked[row] == COMPOSITOR_WL_HIDDEN ? -2 : compositor_wl.cursor_asked[row] - 1;
 }
 
 static void compositor_wl_row_do(void *context, int row, long what, long a, long b)
@@ -766,7 +773,8 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 break;
         case WAYLAND_DO_CURSOR:
                 // The shape the window's client asked for over the pointer: its CP_ shape, stored +1 (0 for none).
-                compositor_wl.cursor_asked[row] = (unsigned char)(a < 0 || a > WAYLAND_CURSOR_RESIZE_NESW ? 0 : compositor_wl_cursor_of[a] + 1);
+                compositor_wl.cursor_asked[row] = (unsigned char)(a == WAYLAND_CURSOR_HIDDEN ? COMPOSITOR_WL_HIDDEN
+                                                                  : a < 0 || a > WAYLAND_CURSOR_NOTALLOWED ? 0 : compositor_wl_cursor_of[a] + 1);
                 break;
         case WAYLAND_DO_MOVE:
                 // Only while the person holds the left button on this window: a client cannot take the pointer.

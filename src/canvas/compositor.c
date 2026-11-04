@@ -2775,7 +2775,10 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 #define CP_TEXT 5               // the I-beam (text), and the two shapes a client may ask for that the compositor draws too
 #define CP_CROSS 6              // the crosshair
 #define CP_MOVE 7               // four arrows (move, all scroll)
-#define CP_SHAPES 8
+#define CP_HAND 8               // the hand: a link, a grab
+#define CP_WAIT 9               // the hourglass: busy
+#define CP_NOTALLOWED 10        // the circle and slash: no drop, not allowed
+#define CP_SHAPES 11
 // The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
 #define CP_PLANE 64
 
@@ -2796,6 +2799,12 @@ static const unsigned short compositor_cursor_edge[CP_SHAPES][CP_CURSOR_H] = {
      0x0101, 0x01ff, 0x0100, 0x0100, 0x0100, 0x0280, 0x0280, 0x0280, 0x0100, 0x0100},
     {0x0080, 0x0140, 0x0220, 0x0410, 0x0080, 0x0080, 0x0080, 0x4081, 0x5f7d, 0x8001,
      0x5f7d, 0x4081, 0x0080, 0x0080, 0x0080, 0x0410, 0x0220, 0x0140, 0x0080, 0x0000},
+    {0x0060, 0x0090, 0x0090, 0x0090, 0x0690, 0xd290, 0x5293, 0x5291, 0x2949, 0x4081,
+     0x8002, 0x0002, 0x0004, 0x0008, 0x0008, 0x8010, 0x8010, 0x4020, 0x3fe0, 0x0000},
+    {0xffff, 0x0001, 0x4ff9, 0x8002, 0x2004, 0x2008, 0x2010, 0x1020, 0x0840, 0x0480,
+     0x0480, 0x0840, 0x1020, 0x2010, 0x2008, 0x2004, 0x8002, 0x4ff9, 0x0001, 0xffff},
+    {0x0ff0, 0x300c, 0x4002, 0xaaaa, 0x4009, 0x2011, 0x1021, 0x0841, 0x0481, 0x0841,
+     0x1021, 0x2011, 0x4009, 0xaaaa, 0x4002, 0x300c, 0x0ff0, 0x0000, 0x0000, 0x0000},
 };
 
 static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
@@ -2815,9 +2824,15 @@ static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
      0x00fe, 0x0000, 0x0000, 0x0000, 0x0000, 0x0100, 0x0100, 0x0100, 0x0000, 0x0000},
     {0x0000, 0x0080, 0x01c0, 0x03e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0080, 0x7ffe,
      0x0080, 0x0000, 0x0000, 0x0000, 0x0000, 0x03e0, 0x01c0, 0x0080, 0x0000, 0x0000},
+    {0x0000, 0x0060, 0x0060, 0x0060, 0x0060, 0x0c60, 0x8c60, 0x8c66, 0xd6b6, 0xbf7e,
+     0x7ffc, 0xfffc, 0xfff8, 0xfff0, 0xfff0, 0x7fe0, 0x7fe0, 0x3fc0, 0x0000, 0x0000},
+    {0x0000, 0xfffe, 0x3006, 0x7ffc, 0x1ff8, 0x1ff0, 0x1fe0, 0x0fc0, 0x0780, 0x0300,
+     0x0300, 0x0780, 0x0fc0, 0x1fe0, 0x1ff0, 0x1ff8, 0x7ffc, 0x3006, 0xfffe, 0x0000},
+    {0x0000, 0x0000, 0x0000, 0x1550, 0x3ff0, 0x1fe0, 0x0fc0, 0x0780, 0x0300, 0x0780,
+     0x0fc0, 0x1fe0, 0x3ff0, 0x1550, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
 };
 
-static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7, 7, 7, 7};
+static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7};
 
 // The edges of a window a hand has hold of, and the shape that says so.
 #define CP_EDGE_LEFT 1u
@@ -4006,6 +4021,7 @@ static struct
                 int soft;               // the pointer is drawn into the scanout
                 int drawn, x, y;        // where the software pointer was last damaged,
                 unsigned int drawn_shape;
+                int client_hidden;   // a window's client asked for no pointer (wl_pointer.set_cursor with no surface), over that window
                 int drawn_scale;
                 unsigned int shape;     // what the pointer wears now
                 int magnified;          // it is shaken: found
@@ -9316,7 +9332,7 @@ static void compositor_cursor_move(void)
         unsigned int shape = compositor.cursor.shape;
 
         // A finger was the last thing used: no pointer under it, on a plane or drawn, until a mouse or a pad moves.
-        if (compositor.touch.hidden)
+        if (compositor.touch.hidden || compositor.cursor.client_hidden)
         {
                 if (compositor.cursor.handle[0] && compositor.cursor.plane_shape >= 0)
                         compositor_cursor_planes_off();
@@ -14392,6 +14408,8 @@ static void compositor_motion(void)
                                           : zone ? compositor_cursor_by_edges[zone & 15]
                                           : asked >= 0 ? (unsigned int)asked
                                           : CP_ARROW;
+                // A client that asked for no pointer over its window has none there (-2 is that answer).
+                compositor.cursor.client_hidden = asked == -2;
         }
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());

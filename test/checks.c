@@ -168257,11 +168257,29 @@ static void test_cursor_shape(void)
                  (unsigned long)WLN_wp_cursor_shape_device_v1_shape_crosshair);
         WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_TEXT, "a shape with a serial that is not a recent input of the client is nothing");
         wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
-                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_grab);
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_zoom_in);
         WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_ARROW, "a shape the compositor does not draw is the arrow");
         wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
                  (unsigned long)WLN_wp_cursor_shape_device_v1_shape_nwse_resize);
         WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_RESIZE_NWSE, "a diagonal resize is the diagonal resize");
+
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_pointer);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_HAND, "a link's pointer shape is the hand");
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_wait);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_WAIT, "a busy window's shape is the hourglass");
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, (unsigned long)serial,
+                 (unsigned long)WLN_wp_cursor_shape_device_v1_shape_not_allowed);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_NOTALLOWED, "a not-allowed shape is the circle and slash");
+
+        /* wl_pointer.set_cursor: no surface hides the pointer over the window; a stale serial is nothing; a surface is the arrow */
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)(serial - 500), 0ul, 0ul, 0ul);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_NOTALLOWED, "a set_cursor with a serial that is not a recent input is nothing");
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, 0ul, 0ul, 0ul);
+        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_HIDDEN, "a set_cursor with no surface hides the pointer over the window");
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, (unsigned long)s.surface, 0ul, 0ul);
+        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_ARROW, "a set_cursor with a surface gives the arrow until the surface is drawn");
 
         wayland_pointer_to(-1, 0, 0);
         WLCHECK(fake_cursor[0] == -1, "a shape is none again when the pointer leaves the window");

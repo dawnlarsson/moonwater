@@ -171,6 +171,10 @@ struct wayland_rect
 #define WAYLAND_CURSOR_RESIZE_V 5
 #define WAYLAND_CURSOR_RESIZE_NWSE 6
 #define WAYLAND_CURSOR_RESIZE_NESW 7
+#define WAYLAND_CURSOR_HAND 8
+#define WAYLAND_CURSOR_WAIT 9
+#define WAYLAND_CURSOR_NOTALLOWED 10
+#define WAYLAND_CURSOR_HIDDEN 11 // no pointer at all over the window (wl_pointer.set_cursor with no surface)
 
 #define WAYLAND_STATE_MAXIMIZED 1
 #define WAYLAND_STATE_FULLSCREEN 2
@@ -4172,8 +4176,15 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
 }
 
 /* A pointer or a keyboard let go: out of its client's list. A pointer's set_cursor is taken and its image not yet shown. */
-static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op)
+static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
+        // wl_pointer.set_cursor (serial, surface, hotspot): the serial must be a recent input of the client's, and only the client
+        // with the pointer may set its cursor. No surface hides the pointer over its window. A surface is not drawn yet: its window
+        // gets the arrow, the compositor's own, rather than the client's picture (a gap in the protocol, not a fake of it).
+        if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && wayland.pointer_row >= 0 &&
+            wayland.row_client[wayland.pointer_row] == c->slot && wayland_input_serial_ok(c, a[0].u))
+                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR,
+                                     a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
         if (op == WLQ_wl_pointer_release && self->iface == WLI_wl_pointer)
                 wayland_seat_remove(c, WLI_wl_pointer, self->id);
         else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
@@ -4708,6 +4719,16 @@ static long wayland_cursor_code(unsigned long shape)
         case WLN_wp_cursor_shape_device_v1_shape_sw_resize:
         case WLN_wp_cursor_shape_device_v1_shape_nesw_resize:
                 return WAYLAND_CURSOR_RESIZE_NESW;
+        case WLN_wp_cursor_shape_device_v1_shape_pointer:
+        case WLN_wp_cursor_shape_device_v1_shape_grab:
+        case WLN_wp_cursor_shape_device_v1_shape_grabbing:
+                return WAYLAND_CURSOR_HAND;
+        case WLN_wp_cursor_shape_device_v1_shape_progress:
+        case WLN_wp_cursor_shape_device_v1_shape_wait:
+                return WAYLAND_CURSOR_WAIT;
+        case WLN_wp_cursor_shape_device_v1_shape_not_allowed:
+        case WLN_wp_cursor_shape_device_v1_shape_no_drop:
+                return WAYLAND_CURSOR_NOTALLOWED;
         default:
                 return WAYLAND_CURSOR_ARROW;
         }
@@ -5798,7 +5819,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wl_pointer:
                 case WLI_wl_keyboard:
                 case WLI_wl_touch:
-                        status = wayland_seat_object_request(c, o, op);
+                        status = wayland_seat_object_request(c, o, op, a);
                         break;
                 case WLI_xdg_wm_base:
                         status = wayland_wm_base_request(c, o, op, a);
