@@ -15,6 +15,8 @@ manual review coverage, branch coverage, or freedom from defects.
 """
 
 import argparse
+import os
+import pickle
 import hashlib
 import pathlib
 import re
@@ -26,6 +28,12 @@ from inventory import c_bodies, graph_assembly_inventory, included_audit, lex
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+CACHE = pathlib.Path(os.environ.get('MW_AUDIT_CACHE') or
+                     pathlib.Path.home() / '.cache/moonwater-function-audit')
+TOOL_DIGEST = hashlib.sha256(
+    (ROOT / 'test/function_audit.py').read_bytes() +
+    (ROOT / 'test/assembly/inventory.py').read_bytes()).digest()
+
 SEAL = ROOT / 'test/function_audit.seal'
 Definition = namedtuple('Definition', 'path line name kind')
 
@@ -204,12 +212,43 @@ def generated_definitions(path):
     return definitions
 
 
+def cached(kind, key, compute):
+    """The answer for one input, kept across runs: reading every production
+       source with the lexer is thirty seconds of Python and a landing runs
+       the audit more than once, with every other landing waiting for it, so
+       what a file said last time (the same bytes under the same tool) is read
+       from the cache and only a changed file is read again. The cache is the
+       user's, outside every tree, and a wrong or missing entry is just a
+       miss."""
+    digest = hashlib.sha256()
+    for part in (TOOL_DIGEST, kind.encode(), key):
+        digest.update(len(part).to_bytes(8, 'little'))
+        digest.update(part)
+    entry = CACHE / (digest.hexdigest()[:40] + '.pickle')
+    try:
+        return pickle.loads(entry.read_bytes())
+    except Exception:
+        pass
+    value = compute()
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        scratch = entry.with_suffix('.%d' % os.getpid())
+        scratch.write_bytes(pickle.dumps(value))
+        scratch.replace(entry)
+    except OSError:
+        pass
+    return value
+
+
 def inventory():
     definitions = []
     for path in production_sources():
-        definitions += ordinary_definitions(path)
-        definitions += alias_definitions(path)
-        definitions += generated_definitions(path)
+        relative = path.relative_to(ROOT).as_posix().encode()
+        definitions += cached(
+            'definitions', relative + b'\0' + path.read_bytes(),
+            lambda path=path: (ordinary_definitions(path) +
+                               alias_definitions(path) +
+                               generated_definitions(path)))
     return sorted(definitions)
 
 
