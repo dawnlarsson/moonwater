@@ -456,7 +456,7 @@ typedef struct
         p32 ground;
 } font_pairing;
 
-_Static_assert(__builtin_offsetof(font_pairing, ground) == __builtin_offsetof(font_pairing, pixel) + 2048,
+_Static_assert(offset_of(font_pairing, ground) == offset_of(font_pairing, pixel) + 2048,
                "the ground follows the planes, where memory_blend_u32_rect reads it");
 
 typedef struct

@@ -129,15 +129,15 @@ typedef struct
 } lex_frame;
 
 _Static_assert(sizeof(lex_token) == 32, "lex_line_floor stores 32-byte tokens");
-_Static_assert(__builtin_offsetof(lex_token, kind) == 0, "kind");
-_Static_assert(__builtin_offsetof(lex_token, op) == 4, "op");
-_Static_assert(__builtin_offsetof(lex_token, text) == 8, "text");
-_Static_assert(__builtin_offsetof(lex_token, length) == 16, "length");
-_Static_assert(__builtin_offsetof(lex_token, at) == 24, "at");
-_Static_assert(__builtin_offsetof(lex_frame, tokens) == 0, "tokens");
-_Static_assert(__builtin_offsetof(lex_frame, token_room) == 8, "room");
-_Static_assert(__builtin_offsetof(lex_frame, count) == 16, "count");
-_Static_assert(__builtin_offsetof(lex_frame, line) == 24, "line");
+_Static_assert(offset_of(lex_token, kind) == 0, "kind");
+_Static_assert(offset_of(lex_token, op) == 4, "op");
+_Static_assert(offset_of(lex_token, text) == 8, "text");
+_Static_assert(offset_of(lex_token, length) == 16, "length");
+_Static_assert(offset_of(lex_token, at) == 24, "at");
+_Static_assert(offset_of(lex_frame, tokens) == 0, "tokens");
+_Static_assert(offset_of(lex_frame, token_room) == 8, "room");
+_Static_assert(offset_of(lex_frame, count) == 16, "count");
+_Static_assert(offset_of(lex_frame, line) == 24, "line");
 
 /*
         Nested input gets its own token table; the outer table and the input

@@ -8065,10 +8065,10 @@ static PURE inline INLINE bool exec_function_matches(
 */
 positive exec_function_slot(string_address name, positive2 named);
 
-_Static_assert(sizeof(exec_function) == 80 && __builtin_offsetof(exec_function, name) == 0 &&
-               __builtin_offsetof(exec_function, name_hash) == 16 &&
-               __builtin_offsetof(exec_function, name_length) == 24 &&
-               __builtin_offsetof(exec_function, body) == 32,
+_Static_assert(sizeof(exec_function) == 80 && offset_of(exec_function, name) == 0 &&
+               offset_of(exec_function, name_hash) == 16 &&
+               offset_of(exec_function, name_length) == 24 &&
+               offset_of(exec_function, body) == 32,
                "exec_function_slot reads a slot at these offsets");
 
 /*

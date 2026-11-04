@@ -867,7 +867,7 @@ AUDIO_API int audio_voice_open(struct audio_voice *voice, long format, long chan
         if (!bytes || channels < 1 || channels > AUDIO_CHANNELS_MAX || rate < 1 || rate > AUDIO_RATE_MAX || out_rate < 1 ||
             out_rate > AUDIO_RATE_MAX || ring_bytes < (unsigned long)(bytes * channels))
                 return AUDIO_E_INVALID;
-        __builtin_memset(voice, 0, __builtin_offsetof(struct audio_voice, rs));
+        __builtin_memset(voice, 0, offset_of(struct audio_voice, rs));
         voice->format = format;
         voice->channels = channels;
         voice->rate = rate;

@@ -1821,7 +1821,7 @@ _Static_assert(sizeof(struct window_cell) == 8, "window cell ABI");
 /* Every field of the page, where the compositor and its programs both
    expect it. */
 #define WINDOW_AT(field, offset)                                               \
-        _Static_assert(__builtin_offsetof(struct window, field) == (offset), "window page ABI " #field)
+        _Static_assert(offset_of(struct window, field) == (offset), "window page ABI " #field)
 WINDOW_AT(x, 0);
 WINDOW_AT(y, 4);
 WINDOW_AT(z, 8);
@@ -1858,10 +1858,10 @@ WINDOW_AT(max_columns, 1272);
 WINDOW_AT(max_rows, 1276);
 WINDOW_AT(mapping, 1280);
 WINDOW_AT(want, 1284);
-_Static_assert(__builtin_offsetof(struct window_key, character) == 4, "window key ABI");
-_Static_assert(__builtin_offsetof(struct window_cell, ink) == 4, "window cell ABI");
-_Static_assert(__builtin_offsetof(struct window_cell, paper) == 5, "window cell ABI");
-_Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell ABI");
+_Static_assert(offset_of(struct window_key, character) == 4, "window key ABI");
+_Static_assert(offset_of(struct window_cell, ink) == 4, "window cell ABI");
+_Static_assert(offset_of(struct window_cell, paper) == 5, "window cell ABI");
+_Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 
 #if defined(__x86_64__)
 #define WINDOW_SYS_OPENAT 257

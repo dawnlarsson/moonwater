@@ -150,7 +150,7 @@ static bipolar link_groups_read(link_groups address_to groups,
         link_records_named((p8 address_to)groups->record,
                            address_of groups->count,
                            sizeof(struct link_group_record),
-                           __builtin_offsetof(struct link_group_record, namespace),
+                           offset_of(struct link_group_record, namespace),
                            WATERLINK_NAMESPACE_MAX);
         return 0;
 }
@@ -191,7 +191,7 @@ static bool link_groups_scrub(positive records)
                             syscall(pwrite64), handle, (p8 address_to)zeros,
                             sizeof zeros,
                             at * sizeof(struct link_group_record) +
-                                __builtin_offsetof(struct link_group_record,
+                                offset_of(struct link_group_record,
                                                    check)) ==
                                     (bipolar)sizeof zeros;
                 scrubbed &= system_call_1(syscall(fsync), (positive)handle) >= 0;

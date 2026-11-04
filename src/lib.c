@@ -843,6 +843,12 @@ __attribute__((optimize("inline-max-size=" #max_size)))
 
 #define prefetch_read(addr) __builtin_prefetch((addr), 0, 3)
 #define prefetch_write(addr) __builtin_prefetch((addr), 1, 3)
+#define offset_of(type, member) __builtin_offsetof(type, member)
+#define add_overflow(a, b, out) __builtin_add_overflow(a, b, out)
+#define sub_overflow(a, b, out) __builtin_sub_overflow(a, b, out)
+#define mul_overflow(a, b, out) __builtin_mul_overflow(a, b, out)
+#define unreachable_here() __builtin_unreachable()
+#define trap_now() __builtin_trap()
 
 #define atomic_add(address, val) __sync_fetch_and_add(address, val)
 #define atomic_sub(address, val) __sync_fetch_and_sub(address, val)

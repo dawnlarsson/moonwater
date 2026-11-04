@@ -6087,7 +6087,7 @@ typedef struct
 
 /* The part of a connection zeroed when it opens: everything before the
    buffers. */
-#define TLS_CONN_HEAD __builtin_offsetof(tls_conn, post_handshake)
+#define TLS_CONN_HEAD offset_of(tls_conn, post_handshake)
 
 /* RFC 8446 5.5 holds each AES-GCM key under 2^24.5 full records. Half way
    there a direction is rekeyed with KeyUpdate -- the write side by sending
@@ -12974,7 +12974,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                               string_address host, bool tls, bool check_cert)
 {
         //      The session's buffers are tls_connect's to leave alone.
-        memory_fill(link, 0, __builtin_offsetof(http_link, session));
+        memory_fill(link, 0, offset_of(http_link, session));
         link->handle = http_stream_open(ip, port, HTTP_IDLE_SECONDS);
         if (link->handle < 0)
                 return link->handle;
@@ -15442,7 +15442,7 @@ static COLD bipolar nts_ke(string_address host, p16 port, bool bootstrap,
         memory_fill(state, 0, sizeof(*state));
         if (!ip)
                 return HTTP_NO_HOST;
-        memory_fill(address_of link, 0, __builtin_offsetof(http_link, session));
+        memory_fill(address_of link, 0, offset_of(http_link, session));
         link.handle = http_stream_open(ip, port, NTS_KE_SECONDS);
         if (link.handle < 0)
                 return link.handle;
@@ -15630,7 +15630,7 @@ static COLD bipolar dns_query_tls(p32 server, string_address name,
         network_store_16(request, (p16)request_length);
         host[host_into(host, server)] = end;
 
-        memory_fill(address_of link, 0, __builtin_offsetof(http_link, session));
+        memory_fill(address_of link, 0, offset_of(http_link, session));
         link.handle = dns_stream_connect_until(address_of where, deadline);
         if (link.handle < 0)
                 return DNS_TLS_FAILED;
@@ -17086,14 +17086,14 @@ static CONST COLD bool dhcp_mask_valid(p32 mask)
 /* All destinations are actual p32 fields. Address comes from the fixed
    header; the remaining fields are options, some containing address lists. */
 static const struct { p8 option, offset; bool multiple; } dhcp_fields[] = {
-    {0, __builtin_offsetof(dhcp_lease, address), false},
-    {DHCP_OPTION_MASK, __builtin_offsetof(dhcp_lease, mask), false},
-    {DHCP_OPTION_ROUTER, __builtin_offsetof(dhcp_lease, router), true},
-    {DHCP_OPTION_DNS, __builtin_offsetof(dhcp_lease, nameserver), true},
-    {DHCP_OPTION_SERVER, __builtin_offsetof(dhcp_lease, server), false},
-    {DHCP_OPTION_LEASE, __builtin_offsetof(dhcp_lease, seconds), false},
-    {DHCP_OPTION_RENEWAL, __builtin_offsetof(dhcp_lease, renewal), false},
-    {DHCP_OPTION_REBINDING, __builtin_offsetof(dhcp_lease, rebinding), false},
+    {0, offset_of(dhcp_lease, address), false},
+    {DHCP_OPTION_MASK, offset_of(dhcp_lease, mask), false},
+    {DHCP_OPTION_ROUTER, offset_of(dhcp_lease, router), true},
+    {DHCP_OPTION_DNS, offset_of(dhcp_lease, nameserver), true},
+    {DHCP_OPTION_SERVER, offset_of(dhcp_lease, server), false},
+    {DHCP_OPTION_LEASE, offset_of(dhcp_lease, seconds), false},
+    {DHCP_OPTION_RENEWAL, offset_of(dhcp_lease, renewal), false},
+    {DHCP_OPTION_REBINDING, offset_of(dhcp_lease, rebinding), false},
 };
 
 /* RFC 2131 requires T1 < T2 < expiry.  Each omitted timer gets its standard
@@ -17934,7 +17934,7 @@ static COLD bipolar dhcp_frame_next(bipolar frames, p8 address_to into,
                 memory_zero(peer, sizeof *peer);
                 address_to peer_size = sizeof *peer;
                 if ((positive)got > sizeof frame ||
-                    message.name_size <= __builtin_offsetof(socket_address_packet,
+                    message.name_size <= offset_of(socket_address_packet,
                                                             pkttype) ||
                     (from.pkttype != DHCP_PACKET_HOST &&
                      from.pkttype != DHCP_PACKET_BROADCAST) ||

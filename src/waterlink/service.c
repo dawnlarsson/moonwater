@@ -384,7 +384,7 @@ static bipolar link_peers_read(link_peers address_to peers)
         //      rather than printed.
         link_records_named((p8 address_to)peers->peer, address_of peers->count,
                            sizeof(struct waterlink_peer),
-                           __builtin_offsetof(struct waterlink_peer, name),
+                           offset_of(struct waterlink_peer, name),
                            WATERLINK_NAME_MAX);
         return 0;
 }

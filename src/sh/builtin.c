@@ -1505,13 +1505,13 @@ static inline INLINE bool env_name_same(string_address held, const_string name,
 */
 positive env_find_hashed_span_probe(const_string name, positive length, positive hash);
 
-_Static_assert(sizeof(env_variable) == 40 && __builtin_offsetof(env_variable, text) == 0 &&
-               __builtin_offsetof(env_variable, hash) == 8 &&
-               __builtin_offsetof(env_variable, name_length) == 16,
+_Static_assert(sizeof(env_variable) == 40 && offset_of(env_variable, text) == 0 &&
+               offset_of(env_variable, hash) == 8 &&
+               offset_of(env_variable, name_length) == 16,
                "env_find_hashed_span_probe reads a variable at these offsets");
-_Static_assert(sizeof(name_index_slot) == 24 && __builtin_offsetof(name_index_slot, hash) == 0 &&
-               __builtin_offsetof(name_index_slot, length) == 8 &&
-               __builtin_offsetof(name_index_slot, index_plus_one) == 16,
+_Static_assert(sizeof(name_index_slot) == 24 && offset_of(name_index_slot, hash) == 0 &&
+               offset_of(name_index_slot, length) == 8 &&
+               offset_of(name_index_slot, index_plus_one) == 16,
                "env_find_hashed_span_probe reads a slot at these offsets");
 _Static_assert(sizeof(env_lookup) == 40, "env_find_hashed_span_probe writes the last hit as five words");
 
@@ -3624,13 +3624,13 @@ KEEP __attribute__((externally_visible)) bool env_write_whole(const_string name,
                      positive idx, const_string value, bool assignment,
                      env_variable address_to destination, bool protect);
 
-_Static_assert(sizeof(env_variable) == 40 && __builtin_offsetof(env_variable, value_length) == 24 &&
-               __builtin_offsetof(env_variable, owned) == 32 &&
-               __builtin_offsetof(env_variable, permanent) == 33 &&
-               __builtin_offsetof(env_variable, declared) == 34 &&
-               __builtin_offsetof(env_variable, attributes) == 35,
+_Static_assert(sizeof(env_variable) == 40 && offset_of(env_variable, value_length) == 24 &&
+               offset_of(env_variable, owned) == 32 &&
+               offset_of(env_variable, permanent) == 33 &&
+               offset_of(env_variable, declared) == 34 &&
+               offset_of(env_variable, attributes) == 35,
                "env_write_destination writes a variable at these offsets");
-_Static_assert(sizeof(env_cell) == 16 && __builtin_offsetof(env_cell, room) == 8,
+_Static_assert(sizeof(env_cell) == 16 && offset_of(env_cell, room) == 8,
                "env_write_destination reads a cell's room eight bytes before its text");
 _Static_assert(SHELL_FLAG('a') == 1, "env_write_destination tests allexport as bit zero");
 
@@ -17634,9 +17634,9 @@ positive shell_name_index_probe(string_address name, positive length,
                                 positive hash, const shell_name_slot address_to slots,
                                 positive mask, const void address_to table);
 
-_Static_assert(sizeof(shell_name_slot) == 8 && __builtin_offsetof(shell_name_slot, length) == 4 &&
-               __builtin_offsetof(shell_name_slot, index_plus_one) == 6 &&
-               sizeof(shell_tool) == 16 && __builtin_offsetof(shell_tool, name) == 0,
+_Static_assert(sizeof(shell_name_slot) == 8 && offset_of(shell_name_slot, length) == 4 &&
+               offset_of(shell_name_slot, index_plus_one) == 6 &&
+               sizeof(shell_tool) == 16 && offset_of(shell_tool, name) == 0,
                "shell_name_index_probe reads a slot and a table row at these offsets");
 
 #if X64
@@ -23982,7 +23982,7 @@ _Static_assert(SHELL_COMMAND_COUNT == MOONWATER_CONFIG_BUILTINS,
 #define SHELL_COMMAND_INDEX_ROOM 256
 
 static shell_name_slot shell_command_index[SHELL_COMMAND_INDEX_ROOM];
-_Static_assert(sizeof(shell_command) == 16 && __builtin_offsetof(shell_command, name) == 0,
+_Static_assert(sizeof(shell_command) == 16 && offset_of(shell_command, name) == 0,
                "shell_name_index_probe reads a command row as it reads a tool row");
 _Static_assert(SHELL_COMMAND_COUNT < SHELL_COMMAND_INDEX_ROOM,
                "the command index needs a free slot for every builtin");

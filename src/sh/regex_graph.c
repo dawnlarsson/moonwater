@@ -1559,7 +1559,7 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
         rx_hints *hints = &pool->hints;
         /* Every accepted proof byte is constructed before publication;
            reusing the hints does not require clearing unused capacity. */
-        memory_fill(hints, 0, __builtin_offsetof(rx_hints, fixed_literal));
+        memory_fill(hints, 0, offset_of(rx_hints, fixed_literal));
         c.program = (regex_program){.nodes = pool->nodes, .sets = (const p8 (*)[256])pool->sets,
                                 .hints = hints, .policy = policy, .flags = icase ? RX_IGNORE_CASE : 0};
         hints->serial = ++rx_compiles;
@@ -3367,7 +3367,7 @@ static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *
 {
         positive fixed = program->hints->fixed_length < RX_FIXED_MAX
                              ? program->hints->fixed_length : RX_FIXED_MAX;
-        positive hints = (__builtin_offsetof(rx_hints, fixed_literal) + fixed + 15) & ~(positive)15;
+        positive hints = (offset_of(rx_hints, fixed_literal) + fixed + 15) & ~(positive)15;
         // A pattern of nothing has no nodes and no sets, and the pool may
         // never have been given any: the program points at nothing then.
         positive nodes = program->nodes ? pool->used.nodes * sizeof(rx_node) : 0;

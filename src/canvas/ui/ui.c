@@ -678,19 +678,19 @@ struct ui_walk
         unsigned long stroke;              // the stroke, 0 for none
         struct ui_ramp address_to ramp;
 };
-_Static_assert(__builtin_offsetof(struct ui_walk, scratch) == 0 && __builtin_offsetof(struct ui_walk, wide) == 8 &&
-               __builtin_offsetof(struct ui_walk, rows) == 16 && __builtin_offsetof(struct ui_walk, top) == 24 &&
-               __builtin_offsetof(struct ui_walk, first) == 32 && __builtin_offsetof(struct ui_walk, last) == 40 &&
-               __builtin_offsetof(struct ui_walk, pixels) == 48 && __builtin_offsetof(struct ui_walk, pitch) == 56 &&
-               __builtin_offsetof(struct ui_walk, pen_x) == 64 && __builtin_offsetof(struct ui_walk, ui_top) == 72 &&
-               __builtin_offsetof(struct ui_walk, ui_bottom) == 80 && __builtin_offsetof(struct ui_walk, ui_height) == 88 &&
-               __builtin_offsetof(struct ui_walk, band_top) == 96 && __builtin_offsetof(struct ui_walk, band_bottom) == 104 &&
-               __builtin_offsetof(struct ui_walk, paper) == 112 && __builtin_offsetof(struct ui_walk, ground) == 120 &&
-               __builtin_offsetof(struct ui_walk, flip) == 128 && __builtin_offsetof(struct ui_walk, stroke) == 136 &&
-               __builtin_offsetof(struct ui_walk, ramp) == 144,
+_Static_assert(offset_of(struct ui_walk, scratch) == 0 && offset_of(struct ui_walk, wide) == 8 &&
+               offset_of(struct ui_walk, rows) == 16 && offset_of(struct ui_walk, top) == 24 &&
+               offset_of(struct ui_walk, first) == 32 && offset_of(struct ui_walk, last) == 40 &&
+               offset_of(struct ui_walk, pixels) == 48 && offset_of(struct ui_walk, pitch) == 56 &&
+               offset_of(struct ui_walk, pen_x) == 64 && offset_of(struct ui_walk, ui_top) == 72 &&
+               offset_of(struct ui_walk, ui_bottom) == 80 && offset_of(struct ui_walk, ui_height) == 88 &&
+               offset_of(struct ui_walk, band_top) == 96 && offset_of(struct ui_walk, band_bottom) == 104 &&
+               offset_of(struct ui_walk, paper) == 112 && offset_of(struct ui_walk, ground) == 120 &&
+               offset_of(struct ui_walk, flip) == 128 && offset_of(struct ui_walk, stroke) == 136 &&
+               offset_of(struct ui_walk, ramp) == 144,
                "ui_run_walk reads struct ui_walk at fixed offsets");
-_Static_assert(__builtin_offsetof(struct ui_ramp, tone) == 16 && __builtin_offsetof(struct ui_ramp, over) == 1040 &&
-               __builtin_offsetof(struct ui_ramp, known) == 2064 && __builtin_offsetof(struct ui_ramp, made) == 2096,
+_Static_assert(offset_of(struct ui_ramp, tone) == 16 && offset_of(struct ui_ramp, over) == 1040 &&
+               offset_of(struct ui_ramp, known) == 2064 && offset_of(struct ui_ramp, made) == 2096,
                "ui_run_walk reads struct ui_ramp at fixed offsets");
 
 // The walk's out-of-line parts: a cover's tone, and its over the ground, made the first time it is met, and the blend.

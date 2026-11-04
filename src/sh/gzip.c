@@ -3368,23 +3368,23 @@ typedef struct
 
 /* The offsets deflate_parse_fast reads, and the table's alignment it needs
    for its eight-byte buckets. */
-_Static_assert(__builtin_offsetof(gzip_fast_job, base) == 0 &&
-                       __builtin_offsetof(gzip_fast_job, fast) == 8 &&
-                       __builtin_offsetof(gzip_fast_job, total) == 16 &&
-                       __builtin_offsetof(gzip_fast_job, start) == 24 &&
-                       __builtin_offsetof(gzip_fast_job, pos) == 32 &&
-                       __builtin_offsetof(gzip_fast_job, limit) == 40 &&
-                       __builtin_offsetof(gzip_fast_job, nice) == 48 &&
-                       __builtin_offsetof(gzip_fast_job, pairs) == 56 &&
-                       __builtin_offsetof(gzip_fast_job, mpos) == 64 &&
-                       __builtin_offsetof(gzip_fast_job, mlen) == 72 &&
-                       __builtin_offsetof(gzip_fast_job, mdist) == 80 &&
-                       __builtin_offsetof(gzip_fast_job, lit_freq) == 88 &&
-                       __builtin_offsetof(gzip_fast_job, dist_freq) == 96 &&
-                       __builtin_offsetof(gzip_fast_job, hash) == 104 &&
-                       __builtin_offsetof(gzip_fast_job, pairs_max) == 112,
+_Static_assert(offset_of(gzip_fast_job, base) == 0 &&
+                       offset_of(gzip_fast_job, fast) == 8 &&
+                       offset_of(gzip_fast_job, total) == 16 &&
+                       offset_of(gzip_fast_job, start) == 24 &&
+                       offset_of(gzip_fast_job, pos) == 32 &&
+                       offset_of(gzip_fast_job, limit) == 40 &&
+                       offset_of(gzip_fast_job, nice) == 48 &&
+                       offset_of(gzip_fast_job, pairs) == 56 &&
+                       offset_of(gzip_fast_job, mpos) == 64 &&
+                       offset_of(gzip_fast_job, mlen) == 72 &&
+                       offset_of(gzip_fast_job, mdist) == 80 &&
+                       offset_of(gzip_fast_job, lit_freq) == 88 &&
+                       offset_of(gzip_fast_job, dist_freq) == 96 &&
+                       offset_of(gzip_fast_job, hash) == 104 &&
+                       offset_of(gzip_fast_job, pairs_max) == 112,
                "deflate_parse_fast's job layout");
-_Static_assert(__builtin_offsetof(gzip_encoder, fast) % 8 == 0,
+_Static_assert(offset_of(gzip_encoder, fast) % 8 == 0,
                "the fast finder's buckets are read as eight bytes");
 
 static __attribute__((noinline)) positive gzip_parse_fast(gzip_encoder address_to e,
@@ -3564,38 +3564,38 @@ typedef struct
 
 /* The offsets deflate_parse_chain reads, and the tables it indexes from one
    base: head4, then head3, then prev. */
-_Static_assert(__builtin_offsetof(gzip_chain_job, base) == 0 &&
-                       __builtin_offsetof(gzip_chain_job, tab) == 8 &&
-                       __builtin_offsetof(gzip_chain_job, total) == 16 &&
-                       __builtin_offsetof(gzip_chain_job, start) == 24 &&
-                       __builtin_offsetof(gzip_chain_job, pos) == 32 &&
-                       __builtin_offsetof(gzip_chain_job, limit) == 40 &&
-                       __builtin_offsetof(gzip_chain_job, slid) == 48 &&
-                       __builtin_offsetof(gzip_chain_job, nice) == 56 &&
-                       __builtin_offsetof(gzip_chain_job, depth) == 64 &&
-                       __builtin_offsetof(gzip_chain_job, least) == 72 &&
-                       __builtin_offsetof(gzip_chain_job, far) == 80 &&
-                       __builtin_offsetof(gzip_chain_job, mode) == 88 &&
-                       __builtin_offsetof(gzip_chain_job, pairs) == 96 &&
-                       __builtin_offsetof(gzip_chain_job, mpos) == 104 &&
-                       __builtin_offsetof(gzip_chain_job, mlen) == 112 &&
-                       __builtin_offsetof(gzip_chain_job, mdist) == 120 &&
-                       __builtin_offsetof(gzip_chain_job, lit_freq) == 128 &&
-                       __builtin_offsetof(gzip_chain_job, dist_freq) == 136 &&
-                       __builtin_offsetof(gzip_chain_job, fresh) == 144 &&
-                       __builtin_offsetof(gzip_chain_job, tokens) == 152 &&
-                       __builtin_offsetof(gzip_chain_job, recount) == 160 &&
-                       __builtin_offsetof(gzip_chain_job, h3) == 168 &&
-                       __builtin_offsetof(gzip_chain_job, h4) == 176 &&
-                       __builtin_offsetof(gzip_chain_job, pairs_max) == 184 &&
-                       __builtin_offsetof(gzip_chain_job, split_lo) == 192 &&
-                       __builtin_offsetof(gzip_chain_job, split_hi) == 200 &&
+_Static_assert(offset_of(gzip_chain_job, base) == 0 &&
+                       offset_of(gzip_chain_job, tab) == 8 &&
+                       offset_of(gzip_chain_job, total) == 16 &&
+                       offset_of(gzip_chain_job, start) == 24 &&
+                       offset_of(gzip_chain_job, pos) == 32 &&
+                       offset_of(gzip_chain_job, limit) == 40 &&
+                       offset_of(gzip_chain_job, slid) == 48 &&
+                       offset_of(gzip_chain_job, nice) == 56 &&
+                       offset_of(gzip_chain_job, depth) == 64 &&
+                       offset_of(gzip_chain_job, least) == 72 &&
+                       offset_of(gzip_chain_job, far) == 80 &&
+                       offset_of(gzip_chain_job, mode) == 88 &&
+                       offset_of(gzip_chain_job, pairs) == 96 &&
+                       offset_of(gzip_chain_job, mpos) == 104 &&
+                       offset_of(gzip_chain_job, mlen) == 112 &&
+                       offset_of(gzip_chain_job, mdist) == 120 &&
+                       offset_of(gzip_chain_job, lit_freq) == 128 &&
+                       offset_of(gzip_chain_job, dist_freq) == 136 &&
+                       offset_of(gzip_chain_job, fresh) == 144 &&
+                       offset_of(gzip_chain_job, tokens) == 152 &&
+                       offset_of(gzip_chain_job, recount) == 160 &&
+                       offset_of(gzip_chain_job, h3) == 168 &&
+                       offset_of(gzip_chain_job, h4) == 176 &&
+                       offset_of(gzip_chain_job, pairs_max) == 184 &&
+                       offset_of(gzip_chain_job, split_lo) == 192 &&
+                       offset_of(gzip_chain_job, split_hi) == 200 &&
                        sizeof(gzip_chain_job) == 208,
                "deflate_parse_chain's job layout");
-_Static_assert(__builtin_offsetof(gzip_encoder, head3) == __builtin_offsetof(gzip_encoder, head4) +
+_Static_assert(offset_of(gzip_encoder, head3) == offset_of(gzip_encoder, head4) +
                                                                   sizeof(((gzip_encoder *)0)->head4) &&
-                       __builtin_offsetof(gzip_encoder, prev) ==
-                               __builtin_offsetof(gzip_encoder, head3) +
+                       offset_of(gzip_encoder, prev) ==
+                               offset_of(gzip_encoder, head3) +
                                        sizeof(((gzip_encoder *)0)->head3) &&
                        sizeof(((gzip_encoder *)0)->head4) == 0x20000 &&
                        sizeof(((gzip_encoder *)0)->head3) == 0x10000,

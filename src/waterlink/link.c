@@ -776,49 +776,49 @@ positive waterlink_fill(struct waterlink_link address_to link,
                         address_any out, p64 now, bool address_to alone);
 
 _Static_assert(sizeof(struct waterlink_slot) == 1200 &&
-                       __builtin_offsetof(struct waterlink_slot, serial) == 8 &&
-                       __builtin_offsetof(struct waterlink_slot, sequence) == 16 &&
-                       __builtin_offsetof(struct waterlink_slot, next) == 20 &&
-                       __builtin_offsetof(struct waterlink_slot, prior) == 24 &&
-                       __builtin_offsetof(struct waterlink_slot, length) == 32 &&
-                       __builtin_offsetof(struct waterlink_slot, key) == 34 &&
-                       __builtin_offsetof(struct waterlink_slot, flags) == 35 &&
-                       __builtin_offsetof(struct waterlink_slot, state) == 36 &&
-                       __builtin_offsetof(struct waterlink_slot, tries) == 37 &&
-                       __builtin_offsetof(struct waterlink_slot, payload) == 38 &&
-                       __builtin_offsetof(struct waterlink_slot, probed) == 1197,
+                       offset_of(struct waterlink_slot, serial) == 8 &&
+                       offset_of(struct waterlink_slot, sequence) == 16 &&
+                       offset_of(struct waterlink_slot, next) == 20 &&
+                       offset_of(struct waterlink_slot, prior) == 24 &&
+                       offset_of(struct waterlink_slot, length) == 32 &&
+                       offset_of(struct waterlink_slot, key) == 34 &&
+                       offset_of(struct waterlink_slot, flags) == 35 &&
+                       offset_of(struct waterlink_slot, state) == 36 &&
+                       offset_of(struct waterlink_slot, tries) == 37 &&
+                       offset_of(struct waterlink_slot, payload) == 38 &&
+                       offset_of(struct waterlink_slot, probed) == 1197,
                "fill reads a slot at these places");
 _Static_assert(sizeof(struct waterlink_held) == 1172 &&
-                       __builtin_offsetof(struct waterlink_held, next) == 8 &&
+                       offset_of(struct waterlink_held, next) == 8 &&
                        sizeof(struct waterlink_sending) == 16 &&
-                       __builtin_offsetof(struct waterlink_sending, first) == 4 &&
-                       __builtin_offsetof(struct waterlink_sending, flying) == 12 &&
+                       offset_of(struct waterlink_sending, first) == 4 &&
+                       offset_of(struct waterlink_sending, flying) == 12 &&
                        sizeof(struct waterlink_receiving) == 12 &&
-                       __builtin_offsetof(struct waterlink_receiving, first) == 4,
+                       offset_of(struct waterlink_receiving, first) == 4,
                "fill reads the key tables at these places");
-_Static_assert(__builtin_offsetof(struct waterlink_link, held) == 0x4b000 &&
-                       __builtin_offsetof(struct waterlink_link, sending) == 0x6fa00 &&
-                       __builtin_offsetof(struct waterlink_link, receiving) == 0x6fe00 &&
-                       __builtin_offsetof(struct waterlink_link, acking) == 0x70210 &&
-                       __builtin_offsetof(struct waterlink_link, head) == 0x70218 &&
-                       __builtin_offsetof(struct waterlink_link, tail) == 0x70220 &&
-                       __builtin_offsetof(struct waterlink_link, requeue) == 0x70228 &&
-                       __builtin_offsetof(struct waterlink_link, flight_head) == 0x7023c &&
-                       __builtin_offsetof(struct waterlink_link, flight_tail) == 0x70240 &&
-                       __builtin_offsetof(struct waterlink_link, clock) == 0x70248 &&
-                       __builtin_offsetof(struct waterlink_link, serial) == 0x70250 &&
-                       __builtin_offsetof(struct waterlink_link, in_flight) == 0x70268 &&
-                       __builtin_offsetof(struct waterlink_link, window) == 0x70270 &&
-                       __builtin_offsetof(struct waterlink_link, smoothed) == 0x70280 &&
-                       __builtin_offsetof(struct waterlink_link, pace) == 0x70290 &&
-                       __builtin_offsetof(struct waterlink_link, owed) == 0x702a0 &&
-                       __builtin_offsetof(struct waterlink_link, owed_count) == 0x702a8 &&
-                       __builtin_offsetof(struct waterlink_link, owed_now) == 0x702ac &&
-                       __builtin_offsetof(struct waterlink_link, probes) == 0x702b4 &&
-                       __builtin_offsetof(struct waterlink_link, sent) == 0x702e0 &&
-                       __builtin_offsetof(struct waterlink_link, retransmitted) == 0x702e8 &&
-                       __builtin_offsetof(struct waterlink_link, banded) == 0x70320 &&
-                       __builtin_offsetof(struct waterlink_link, queued) == 0x70328,
+_Static_assert(offset_of(struct waterlink_link, held) == 0x4b000 &&
+                       offset_of(struct waterlink_link, sending) == 0x6fa00 &&
+                       offset_of(struct waterlink_link, receiving) == 0x6fe00 &&
+                       offset_of(struct waterlink_link, acking) == 0x70210 &&
+                       offset_of(struct waterlink_link, head) == 0x70218 &&
+                       offset_of(struct waterlink_link, tail) == 0x70220 &&
+                       offset_of(struct waterlink_link, requeue) == 0x70228 &&
+                       offset_of(struct waterlink_link, flight_head) == 0x7023c &&
+                       offset_of(struct waterlink_link, flight_tail) == 0x70240 &&
+                       offset_of(struct waterlink_link, clock) == 0x70248 &&
+                       offset_of(struct waterlink_link, serial) == 0x70250 &&
+                       offset_of(struct waterlink_link, in_flight) == 0x70268 &&
+                       offset_of(struct waterlink_link, window) == 0x70270 &&
+                       offset_of(struct waterlink_link, smoothed) == 0x70280 &&
+                       offset_of(struct waterlink_link, pace) == 0x70290 &&
+                       offset_of(struct waterlink_link, owed) == 0x702a0 &&
+                       offset_of(struct waterlink_link, owed_count) == 0x702a8 &&
+                       offset_of(struct waterlink_link, owed_now) == 0x702ac &&
+                       offset_of(struct waterlink_link, probes) == 0x702b4 &&
+                       offset_of(struct waterlink_link, sent) == 0x702e0 &&
+                       offset_of(struct waterlink_link, retransmitted) == 0x702e8 &&
+                       offset_of(struct waterlink_link, banded) == 0x70320 &&
+                       offset_of(struct waterlink_link, queued) == 0x70328,
                "fill reads the link at these places");
 _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_ACK_MOST == 17 &&
                        WATERLINK_FRAME_MAX < 16384 && WATERLINK_BANDS == 2 &&
@@ -1806,9 +1806,9 @@ bipolar waterlink_judge(address_any body, positive length,
                         struct waterlink_part address_to parts);
 
 _Static_assert(sizeof(struct waterlink_part) == 16 &&
-                       __builtin_offsetof(struct waterlink_part, at) == 2 &&
-                       __builtin_offsetof(struct waterlink_part, number) == 4 &&
-                       __builtin_offsetof(struct waterlink_part, more) == 8,
+                       offset_of(struct waterlink_part, at) == 2 &&
+                       offset_of(struct waterlink_part, number) == 4 &&
+                       offset_of(struct waterlink_part, more) == 8,
                "the judge writes a part as two words");
 _Static_assert(WATERLINK_PAYLOAD == 1168 && WATERLINK_FRAME_MAX == 1159 &&
                        WATERLINK_KEYS == 64 && WATERLINK_FRAME_ACK == 8 &&
@@ -2050,26 +2050,26 @@ fn waterlink_apply(struct waterlink_link address_to link, address_any body,
                    struct waterlink_part address_to parts, positive count,
                    p64 now, waterlink_sink sink, address_any context);
 
-_Static_assert(__builtin_offsetof(struct waterlink_slot, chain) == 28 &&
-                       __builtin_offsetof(struct waterlink_receiving, over) == 8 &&
-                       __builtin_offsetof(struct waterlink_receiving, paused) == 9 &&
-                       __builtin_offsetof(struct waterlink_sending, last) == 8 &&
+_Static_assert(offset_of(struct waterlink_slot, chain) == 28 &&
+                       offset_of(struct waterlink_receiving, over) == 8 &&
+                       offset_of(struct waterlink_receiving, paused) == 9 &&
+                       offset_of(struct waterlink_sending, last) == 8 &&
                        sizeof(struct waterlink_frame) == 8 &&
-                       __builtin_offsetof(struct waterlink_frame, length) == 4 &&
-                       __builtin_offsetof(struct waterlink_frame, key) == 6 &&
-                       __builtin_offsetof(struct waterlink_frame, flags) == 7,
+                       offset_of(struct waterlink_frame, length) == 4 &&
+                       offset_of(struct waterlink_frame, key) == 6 &&
+                       offset_of(struct waterlink_frame, flags) == 7,
                "apply reads these at these places");
-_Static_assert(__builtin_offsetof(struct waterlink_link, free) == 0x70230 &&
-                       __builtin_offsetof(struct waterlink_link, free_count) == 0x70234 &&
-                       __builtin_offsetof(struct waterlink_link, largest) == 0x70258 &&
-                       __builtin_offsetof(struct waterlink_link, recovery) == 0x70260 &&
-                       __builtin_offsetof(struct waterlink_link, threshold) == 0x70278 &&
-                       __builtin_offsetof(struct waterlink_link, variance) == 0x70288 &&
-                       __builtin_offsetof(struct waterlink_link, recent) == 0x70298 &&
-                       __builtin_offsetof(struct waterlink_link, backoff) == 0x702b0 &&
-                       __builtin_offsetof(struct waterlink_link, delivered) == 0x702d0 &&
-                       __builtin_offsetof(struct waterlink_link, stale) == 0x702d8 &&
-                       __builtin_offsetof(struct waterlink_link, acked) == 0x70300 &&
+_Static_assert(offset_of(struct waterlink_link, free) == 0x70230 &&
+                       offset_of(struct waterlink_link, free_count) == 0x70234 &&
+                       offset_of(struct waterlink_link, largest) == 0x70258 &&
+                       offset_of(struct waterlink_link, recovery) == 0x70260 &&
+                       offset_of(struct waterlink_link, threshold) == 0x70278 &&
+                       offset_of(struct waterlink_link, variance) == 0x70288 &&
+                       offset_of(struct waterlink_link, recent) == 0x70298 &&
+                       offset_of(struct waterlink_link, backoff) == 0x702b0 &&
+                       offset_of(struct waterlink_link, delivered) == 0x702d0 &&
+                       offset_of(struct waterlink_link, stale) == 0x702d8 &&
+                       offset_of(struct waterlink_link, acked) == 0x70300 &&
                        WATERLINK_SLOT_QUEUED == 1 && WATERLINK_SLOT_HELD == 3 &&
                        WATERLINK_SLOT_FREE == 0 && WATERLINK_FRAME_LAST == 4 &&
                        WATERLINK_FRAME_URGENT == 0x10 &&

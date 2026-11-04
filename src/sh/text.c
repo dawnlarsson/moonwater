@@ -610,7 +610,7 @@ typedef struct
 // src/build/spark.ld puts this on a page and text_out_buffer half a page
 // past its buffer, mod 4096, which it counts from here.
 static text_reader text_input TEXT_PLACED("text_input");
-_Static_assert(__builtin_offsetof(text_reader, buffer) == 56,
+_Static_assert(offset_of(text_reader, buffer) == 56,
                "spark.ld places text_out_buffer from where text_input's buffer starts on its page");
 /* pr -r is the one line tool which deliberately suppresses an open
    diagnostic.  Keep that policy at the shared reader boundary so its merge

@@ -4345,14 +4345,14 @@ typedef struct
 } zstd_seq_encode;
 
 _Static_assert(sizeof(zstd_enc_seq) == 16 &&
-               __builtin_offsetof(zstd_enc_seq, lit) == 0 &&
-               __builtin_offsetof(zstd_enc_seq, match) == 4 &&
-               __builtin_offsetof(zstd_enc_seq, off) == 8 &&
-               __builtin_offsetof(zstd_enc_seq, ll_code) == 12 &&
-               __builtin_offsetof(zstd_enc_seq, ml_code) == 13 &&
-               __builtin_offsetof(zstd_enc_seq, of_code) == 14 &&
-               __builtin_offsetof(zstd_ctable, delta_nb) == 1024 &&
-               __builtin_offsetof(zstd_ctable, delta_find) == 1240 &&
+               offset_of(zstd_enc_seq, lit) == 0 &&
+               offset_of(zstd_enc_seq, match) == 4 &&
+               offset_of(zstd_enc_seq, off) == 8 &&
+               offset_of(zstd_enc_seq, ll_code) == 12 &&
+               offset_of(zstd_enc_seq, ml_code) == 13 &&
+               offset_of(zstd_enc_seq, of_code) == 14 &&
+               offset_of(zstd_ctable, delta_nb) == 1024 &&
+               offset_of(zstd_ctable, delta_find) == 1240 &&
                sizeof(zstd_seq_encode) == 96 &&
                sizeof(zstd_sequence_codes) == 1100,
                "the layouts lib.c's zstd_sequences_encode reads");
@@ -4846,15 +4846,15 @@ typedef struct
 } zstd_fast_job;
 
 _Static_assert(sizeof(zstd_fast_job) == 104 &&
-               __builtin_offsetof(zstd_fast_job, seqs) == 16 &&
-               __builtin_offsetof(zstd_fast_job, lits) == 24 &&
-               __builtin_offsetof(zstd_fast_job, freq) == 32 &&
-               __builtin_offsetof(zstd_fast_job, from) == 40 &&
-               __builtin_offsetof(zstd_fast_job, hash_log) == 64 &&
-               __builtin_offsetof(zstd_fast_job, rep) == 88 &&
-               __builtin_offsetof(zstd_fast_job, anchor) == 96 &&
-               __builtin_offsetof(zstd_seq_freq, of) == 144 &&
-               __builtin_offsetof(zstd_seq_freq, ml) == 272,
+               offset_of(zstd_fast_job, seqs) == 16 &&
+               offset_of(zstd_fast_job, lits) == 24 &&
+               offset_of(zstd_fast_job, freq) == 32 &&
+               offset_of(zstd_fast_job, from) == 40 &&
+               offset_of(zstd_fast_job, hash_log) == 64 &&
+               offset_of(zstd_fast_job, rep) == 88 &&
+               offset_of(zstd_fast_job, anchor) == 96 &&
+               offset_of(zstd_seq_freq, of) == 144 &&
+               offset_of(zstd_seq_freq, ml) == 272,
                "the layouts lib.c's zstd_fast_parse reads");
 
 static p8 address_to zstd_parse_fast(zstd_encoder address_to e, p32 from,
@@ -4908,13 +4908,13 @@ typedef struct
 } zstd_dfast_job;
 
 _Static_assert(sizeof(zstd_dfast_job) == 112 &&
-               __builtin_offsetof(zstd_dfast_job, shorter) == 16 &&
-               __builtin_offsetof(zstd_dfast_job, seqs) == 24 &&
-               __builtin_offsetof(zstd_dfast_job, freq) == 40 &&
-               __builtin_offsetof(zstd_dfast_job, from) == 48 &&
-               __builtin_offsetof(zstd_dfast_job, hash_log) == 72 &&
-               __builtin_offsetof(zstd_dfast_job, rep) == 96 &&
-               __builtin_offsetof(zstd_dfast_job, anchor) == 104,
+               offset_of(zstd_dfast_job, shorter) == 16 &&
+               offset_of(zstd_dfast_job, seqs) == 24 &&
+               offset_of(zstd_dfast_job, freq) == 40 &&
+               offset_of(zstd_dfast_job, from) == 48 &&
+               offset_of(zstd_dfast_job, hash_log) == 72 &&
+               offset_of(zstd_dfast_job, rep) == 96 &&
+               offset_of(zstd_dfast_job, anchor) == 104,
                "the layouts lib.c's zstd_dfast_parse reads");
 
 static p8 address_to zstd_parse_dfast(zstd_encoder address_to e, p32 from,

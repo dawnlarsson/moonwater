@@ -4458,7 +4458,7 @@ _Static_assert(sizeof(argument_option) == sizeof(named_byte),
 
 /* A selection record contains byte fields. Each selected field receives the
    option letter; overlapping groups therefore retain independent answers. */
-#define ARGUMENT_SELECT(type, field) (1u << __builtin_offsetof(type, field))
+#define ARGUMENT_SELECT(type, field) (1u << offset_of(type, field))
 
 static fn argument_select(p8 address_to into, p16 selected, p8 letter)
 {
@@ -4535,27 +4535,27 @@ b32 argument_option_take(argument_cursor address_to cursor,
                          argument_match address_to match);
 
 _Static_assert(sizeof(argument_cursor) == 64 &&
-               __builtin_offsetof(argument_cursor, argc) == 0 &&
-               __builtin_offsetof(argument_cursor, argv) == 8 &&
-               __builtin_offsetof(argument_cursor, at) == 16 &&
-               __builtin_offsetof(argument_cursor, letters) == 24 &&
-               __builtin_offsetof(argument_cursor, word) == 32 &&
-               __builtin_offsetof(argument_cursor, operands_only) == 40 &&
-               __builtin_offsetof(argument_cursor, long_option) == 41 &&
-               __builtin_offsetof(argument_cursor, attached) == 48 &&
-               __builtin_offsetof(argument_cursor, name_length) == 56,
+               offset_of(argument_cursor, argc) == 0 &&
+               offset_of(argument_cursor, argv) == 8 &&
+               offset_of(argument_cursor, at) == 16 &&
+               offset_of(argument_cursor, letters) == 24 &&
+               offset_of(argument_cursor, word) == 32 &&
+               offset_of(argument_cursor, operands_only) == 40 &&
+               offset_of(argument_cursor, long_option) == 41 &&
+               offset_of(argument_cursor, attached) == 48 &&
+               offset_of(argument_cursor, name_length) == 56,
                "argument_option_take reads the cursor at these offsets");
 _Static_assert(sizeof(argument_option) == 16 &&
-               __builtin_offsetof(argument_option, letter) == 8 &&
-               __builtin_offsetof(argument_option, mode) == 9 &&
-               __builtin_offsetof(argument_option, selection) == 10,
+               offset_of(argument_option, letter) == 8 &&
+               offset_of(argument_option, mode) == 9 &&
+               offset_of(argument_option, selection) == 10,
                "argument_option_take reads a row at these offsets");
 _Static_assert(sizeof(argument_match) == 16 &&
-               __builtin_offsetof(argument_match, value) == 0 &&
-               __builtin_offsetof(argument_match, selection) == 8 &&
-               __builtin_offsetof(argument_match, letter) == 10 &&
-               __builtin_offsetof(argument_match, mode) == 11 &&
-               __builtin_offsetof(argument_match, optional) == 12,
+               offset_of(argument_match, value) == 0 &&
+               offset_of(argument_match, selection) == 8 &&
+               offset_of(argument_match, letter) == 10 &&
+               offset_of(argument_match, mode) == 11 &&
+               offset_of(argument_match, optional) == 12,
                "argument_option_take writes the match at these offsets");
 _Static_assert(ARGUMENT_END == 0 && ARGUMENT_OPERAND == 256 && ARGUMENT_UNKNOWN == -1 &&
                ARGUMENT_MISSING == -2 && ARGUMENT_UNEXPECTED == -3 &&

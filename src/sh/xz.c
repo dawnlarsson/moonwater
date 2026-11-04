@@ -1822,7 +1822,7 @@ static xz_decoder address_to xz_dec_new(void)
 
         if (!d)
                 return null;
-        memory_fill(d, 0, __builtin_offsetof(xz_decoder, in_buf));
+        memory_fill(d, 0, offset_of(xz_decoder, in_buf));
         d->job.model = address_of d->models;
         d->out_fd = -1;
         return d;
@@ -2872,17 +2872,17 @@ typedef struct
 } xz_tree_job;
 
 _Static_assert(sizeof(xz_tree_job) == 88 &&
-               __builtin_offsetof(xz_tree_job, cur) == 8 &&
-               __builtin_offsetof(xz_tree_job, matches) == 16 &&
-               __builtin_offsetof(xz_tree_job, pos) == 24 &&
-               __builtin_offsetof(xz_tree_job, cur_match) == 32 &&
-               __builtin_offsetof(xz_tree_job, depth) == 40 &&
-               __builtin_offsetof(xz_tree_job, cyclic_pos) == 48 &&
-               __builtin_offsetof(xz_tree_job, cyclic_size) == 56 &&
-               __builtin_offsetof(xz_tree_job, len_limit) == 64 &&
-               __builtin_offsetof(xz_tree_job, len_best) == 72 &&
-               __builtin_offsetof(xz_tree_job, find) == 80 &&
-               sizeof(xz_found) == 8 && __builtin_offsetof(xz_found, dist) == 4,
+               offset_of(xz_tree_job, cur) == 8 &&
+               offset_of(xz_tree_job, matches) == 16 &&
+               offset_of(xz_tree_job, pos) == 24 &&
+               offset_of(xz_tree_job, cur_match) == 32 &&
+               offset_of(xz_tree_job, depth) == 40 &&
+               offset_of(xz_tree_job, cyclic_pos) == 48 &&
+               offset_of(xz_tree_job, cyclic_size) == 56 &&
+               offset_of(xz_tree_job, len_limit) == 64 &&
+               offset_of(xz_tree_job, len_best) == 72 &&
+               offset_of(xz_tree_job, find) == 80 &&
+               sizeof(xz_found) == 8 && offset_of(xz_found, dist) == 4,
                "lzma_tree_walk's job layout");
 
 static inline INLINE xz_found address_to xz_tree_find(p32 address_to son, p8 address_to cur,
@@ -3384,7 +3384,7 @@ static fn xz_pipe_start(xz_encoder address_to e)
 
         xz_pipe address_to q = (xz_pipe address_to)e->pipe_area;
 
-        memory_fill(q, 0, __builtin_offsetof(xz_pipe, words));
+        memory_fill(q, 0, offset_of(xz_pipe, words));
         q->fin = e->fin;
         q->fin.matches = q->matches;
         q->count = e->input_n;
@@ -3493,22 +3493,22 @@ typedef struct
 
 _Static_assert(sizeof(xz_match_job) == 112 &&
                XZ_FULL_DIST == 128 && XZ_DIST_SLOTS == 64 &&
-               __builtin_offsetof(xz_encoder, opt_pos) - __builtin_offsetof(xz_encoder, opt_price) == 16448 &&
-               __builtin_offsetof(xz_encoder, opt_back) - __builtin_offsetof(xz_encoder, opt_pos) == 16448 &&
-               __builtin_offsetof(xz_encoder, opt_literal) - __builtin_offsetof(xz_encoder, opt_back) == 16448 &&
-               __builtin_offsetof(xz_match_job, matches) == 8 &&
-               __builtin_offsetof(xz_match_job, prices) == 16 &&
-               __builtin_offsetof(xz_match_job, dist_prices) == 24 &&
-               __builtin_offsetof(xz_match_job, slot_prices) == 32 &&
-               __builtin_offsetof(xz_match_job, align_prices) == 40 &&
-               __builtin_offsetof(xz_match_job, base) == 48 &&
-               __builtin_offsetof(xz_match_job, cur) == 56 &&
-               __builtin_offsetof(xz_match_job, index) == 64 &&
-               __builtin_offsetof(xz_match_job, count) == 72 &&
-               __builtin_offsetof(xz_match_job, len) == 80 &&
-               __builtin_offsetof(xz_match_job, avail) == 88 &&
-               __builtin_offsetof(xz_match_job, buf) == 96 &&
-               __builtin_offsetof(xz_match_job, stop) == 104,
+               offset_of(xz_encoder, opt_pos) - offset_of(xz_encoder, opt_price) == 16448 &&
+               offset_of(xz_encoder, opt_back) - offset_of(xz_encoder, opt_pos) == 16448 &&
+               offset_of(xz_encoder, opt_literal) - offset_of(xz_encoder, opt_back) == 16448 &&
+               offset_of(xz_match_job, matches) == 8 &&
+               offset_of(xz_match_job, prices) == 16 &&
+               offset_of(xz_match_job, dist_prices) == 24 &&
+               offset_of(xz_match_job, slot_prices) == 32 &&
+               offset_of(xz_match_job, align_prices) == 40 &&
+               offset_of(xz_match_job, base) == 48 &&
+               offset_of(xz_match_job, cur) == 56 &&
+               offset_of(xz_match_job, index) == 64 &&
+               offset_of(xz_match_job, count) == 72 &&
+               offset_of(xz_match_job, len) == 80 &&
+               offset_of(xz_match_job, avail) == 88 &&
+               offset_of(xz_match_job, buf) == 96 &&
+               offset_of(xz_match_job, stop) == 104,
                "lzma_match_prices' job layout");
 
 /* lzma_relax's job (lib.c documents each field). */
@@ -3524,11 +3524,11 @@ typedef struct
 } xz_relax_job;
 
 _Static_assert(sizeof(xz_relax_job) == 56 &&
-               __builtin_offsetof(xz_relax_job, first) == 16 &&
-               __builtin_offsetof(xz_relax_job, n) == 24 &&
-               __builtin_offsetof(xz_relax_job, base) == 32 &&
-               __builtin_offsetof(xz_relax_job, pos) == 40 &&
-               __builtin_offsetof(xz_relax_job, back) == 48,
+               offset_of(xz_relax_job, first) == 16 &&
+               offset_of(xz_relax_job, n) == 24 &&
+               offset_of(xz_relax_job, base) == 32 &&
+               offset_of(xz_relax_job, pos) == 40 &&
+               offset_of(xz_relax_job, back) == 48,
                "lzma_relax's job layout");
 
 /* Levels 0-3: the longest match, repeats preferred by a distance rule and

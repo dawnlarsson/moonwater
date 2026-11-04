@@ -2018,7 +2018,7 @@ static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long f
                 *error = PULSE_ERR_TOOLARGE;
                 return 0;
         }
-        __builtin_memset(s, 0, __builtin_offsetof(struct pulse_stream, voice));
+        __builtin_memset(s, 0, offset_of(struct pulse_stream, voice));
         s->ring_memory = p->host.alloc(p->host.context, (long)ring);
         if (!s->ring_memory)
         {
@@ -2579,7 +2579,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 if (!table)
                         return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
         }
-        __builtin_memset(rec, 0, __builtin_offsetof(struct pulse_record, rs));
+        __builtin_memset(rec, 0, offset_of(struct pulse_record, rs));
         rec->used = 1;
         rec->table = table;
         if (table)
@@ -3123,7 +3123,7 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         }
         if (mine >= PULSE_STREAMS_PER_CLIENT || !s)
                 return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
-        __builtin_memset(s, 0, __builtin_offsetof(struct pulse_stream, voice));
+        __builtin_memset(s, 0, offset_of(struct pulse_stream, voice));
         if (audio_voice_open(&s->voice, sample->format, sample->channels, sample->rate, sample->map, p->sink[sink].rate, sample->data, sample->bytes) < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
         s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size;

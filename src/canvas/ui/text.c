@@ -790,10 +790,10 @@ static p64 doc_line_count(const struct doc address_to doc)
 // walk below, which is the same code as before, so the answer is the same on every path.
 #if X64
 p64 doc_read(const struct doc address_to doc, p64 at, p8 address_to into, positive count);
-_Static_assert(__builtin_offsetof(struct doc, original) == 0 && __builtin_offsetof(struct doc, added) == 16 &&
-                       __builtin_offsetof(struct doc, nodes) == 40 && __builtin_offsetof(struct doc, root) == 64 &&
-                       __builtin_offsetof(struct doc_node, length) == 12 && __builtin_offsetof(struct doc_node, start) == 16 &&
-                       __builtin_offsetof(struct doc_node, buffer) == 36 && __builtin_offsetof(struct doc_node, sum.bytes) == 40 &&
+_Static_assert(offset_of(struct doc, original) == 0 && offset_of(struct doc, added) == 16 &&
+                       offset_of(struct doc, nodes) == 40 && offset_of(struct doc, root) == 64 &&
+                       offset_of(struct doc_node, length) == 12 && offset_of(struct doc_node, start) == 16 &&
+                       offset_of(struct doc_node, buffer) == 36 && offset_of(struct doc_node, sum.bytes) == 40 &&
                        sizeof(struct doc_node) == 80,
                "doc and doc_node layout the read walks");
 __asm__(

@@ -601,8 +601,8 @@ _Static_assert(sizeof(struct spark_settings) == SPARK_SETTINGS_SLOT,
                "spark settings slot ABI");
 _Static_assert(sizeof(struct spark_settings_entry) == SPARK_SETTINGS_ENTRY,
                "spark settings entry ABI");
-_Static_assert(__builtin_offsetof(struct spark_settings, sum) == 44 &&
-                   __builtin_offsetof(struct spark_settings, payload) ==
+_Static_assert(offset_of(struct spark_settings, sum) == 44 &&
+                   offset_of(struct spark_settings, payload) ==
                        SPARK_SETTINGS_HEADER,
                "spark settings header ABI");
 

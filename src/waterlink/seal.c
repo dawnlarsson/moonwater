@@ -73,7 +73,7 @@
         net.c's prepared key: the 176-byte schedule, then the GHASH table at
         192.
 */
-_Static_assert(__builtin_offsetof(crypto_aesgcm_key, table) == 192,
+_Static_assert(offset_of(crypto_aesgcm_key, table) == 192,
                "the seal bodies find the GHASH table at 192");
 
 fn waterlink_seal_box(crypto_aesgcm_key address_to key, p8 address_to datagram,

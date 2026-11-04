@@ -5436,7 +5436,7 @@ typedef struct file_change_tree_node
         {                                                                      \
                 positive length = 0;                                           \
                 type address_to node = file_tree_node_take(                    \
-                    parent, __builtin_offsetof(type, path),                    \
+                    parent, offset_of(type, path),                    \
                     parent ? parent->length : 0, name, name_length,            \
                     address_of length);                                        \
                                                                                \
@@ -17902,7 +17902,7 @@ static find_tree_node address_to find_tree_node_new(find_tree_node address_to pa
 {
         positive length = 0;
         find_tree_node address_to node = file_tree_node_take(
-            parent, __builtin_offsetof(find_tree_node, path),
+            parent, offset_of(find_tree_node, path),
             parent ? parent->length : 0, name, name_length, address_of length);
 
         if (!node)

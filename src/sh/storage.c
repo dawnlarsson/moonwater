@@ -102,8 +102,8 @@ typedef struct
 
 #define STORAGE_TAG(name, member, length_member, flag)                      \
         {(string_address)#name, sizeof(#name) - 1, STORAGE_SHOW_##flag,      \
-         __builtin_offsetof(storage_identity, member),                      \
-         __builtin_offsetof(storage_identity, length_member)}
+         offset_of(storage_identity, member),                      \
+         offset_of(storage_identity, length_member)}
 static const storage_tag_descriptor storage_tags[] = {
     STORAGE_TAG(LABEL, label, label_length, LABEL),
     STORAGE_TAG(UUID, uuid, uuid_length, UUID),
@@ -2526,17 +2526,17 @@ static PURE bool storage_type_match(string_address list, string_address type)
    A zero offset names a computed numeric column; every textual member begins
    after the two ids, so zero is an unambiguous sentinel. */
 #define STORAGE_COLUMNS(X)                                                   \
-        X(SOURCE, "SOURCE", __builtin_offsetof(storage_mount, source))      \
-        X(TARGET, "TARGET", __builtin_offsetof(storage_mount, target))      \
-        X(FSTYPE, "FSTYPE", __builtin_offsetof(storage_mount, type))        \
-        X(OPTIONS, "OPTIONS", __builtin_offsetof(storage_mount, options))   \
-        X(FSROOT, "FSROOT", __builtin_offsetof(storage_mount, root))        \
-        X(MAJMIN, "MAJ:MIN", __builtin_offsetof(storage_mount, device))     \
+        X(SOURCE, "SOURCE", offset_of(storage_mount, source))      \
+        X(TARGET, "TARGET", offset_of(storage_mount, target))      \
+        X(FSTYPE, "FSTYPE", offset_of(storage_mount, type))        \
+        X(OPTIONS, "OPTIONS", offset_of(storage_mount, options))   \
+        X(FSROOT, "FSROOT", offset_of(storage_mount, root))        \
+        X(MAJMIN, "MAJ:MIN", offset_of(storage_mount, device))     \
         X(ID, "ID", 0) X(PARENT, "PARENT", 0)                             \
         X(VFS_OPTIONS, "VFS-OPTIONS",                                      \
-          __builtin_offsetof(storage_mount, options))                        \
+          offset_of(storage_mount, options))                        \
         X(FS_OPTIONS, "FS-OPTIONS",                                        \
-          __builtin_offsetof(storage_mount, filesystem_options))
+          offset_of(storage_mount, filesystem_options))
 
 #define STORAGE_COLUMN_ENUM(symbol, name, offset) STORAGE_##symbol,
 enum storage_column

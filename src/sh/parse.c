@@ -645,9 +645,9 @@ enum
 */
 PURE b32 parse_keyword_of(const parse_token address_to token);
 
-_Static_assert(__builtin_offsetof(parse_token, kind) == 0 &&
-               __builtin_offsetof(parse_token, text) == 16 &&
-               __builtin_offsetof(parse_token, length) == 24 && PT_WORD == 1,
+_Static_assert(offset_of(parse_token, kind) == 0 &&
+               offset_of(parse_token, text) == 16 &&
+               offset_of(parse_token, length) == 24 && PT_WORD == 1,
                "parse_keyword_of reads the token at these offsets");
 _Static_assert(PARSE_KEYWORD_IF == 1 && PARSE_KEYWORD_WHILE == 2 &&
                PARSE_KEYWORD_UNTIL == 3 && PARSE_KEYWORD_FOR == 4 &&

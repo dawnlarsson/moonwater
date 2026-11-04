@@ -63,11 +63,11 @@ static const struct {
         unsigned char line_off;
 } moonwater_hook[MOONWATER_HOOKS] = {
         { "moonwater_init", MOONWATER_HOOK_INIT,
-          (unsigned char)__builtin_offsetof(struct moonwater_overlay, init_line) },
+          (unsigned char)offset_of(struct moonwater_overlay, init_line) },
         { "moonwater_event", MOONWATER_HOOK_EVENT,
-          (unsigned char)__builtin_offsetof(struct moonwater_overlay, event_line) },
+          (unsigned char)offset_of(struct moonwater_overlay, event_line) },
         { "moonwater_end", MOONWATER_HOOK_END,
-          (unsigned char)__builtin_offsetof(struct moonwater_overlay, end_line) },
+          (unsigned char)offset_of(struct moonwater_overlay, end_line) },
 };
 
 static inline unsigned short moonwater_overlay_line(const struct moonwater_overlay *overlay,
@@ -149,9 +149,9 @@ struct machine_script {
 };
 
 _Static_assert(sizeof(struct machine_script) == 80, "moonwater script ABI");
-_Static_assert(__builtin_offsetof(struct machine_script, overlay) == 24,
+_Static_assert(offset_of(struct machine_script, overlay) == 24,
                "moonwater script overlay");
-_Static_assert(__builtin_offsetof(struct moonwater_overlay, bind_line) == 10,
+_Static_assert(offset_of(struct moonwater_overlay, bind_line) == 10,
                "moonwater overlay arms");
 
 // _IOWR('s', 15, struct machine_script)
