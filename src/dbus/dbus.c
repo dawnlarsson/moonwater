@@ -158,8 +158,38 @@ static struct
         unsigned char stamped[DBUS_STAMPED];
 } dbus;
 
-/* ---- small things (no library) ---- */
+/*
+        ---- small things ----
 
+        THE LIBRARY'S LOOPS. Where lib.c is in the translation unit (the shell's sessionbus) the scans and the copies are
+        its, assembly on the three machines, where BENCH_dbus measured them faster than the C (x86_64, 9950X, ticks a
+        call): string_compare at the names a bus has (6.4 against 13.1), the UTF-8 validator from 8 bytes (8.3 against
+        17.3 at 8, 11.2 against 80.8 at 40; below 8 its walk loses, 11.1 against 4.6 at one byte, and the C walk stays),
+        memory_copy from 300 bytes (17.3 against 21.1 at 300, 32.0 against 64.2 at 1100; below that the compiler's own
+        loop is as fast or faster, 2.8 against 8.1 at 16). Each was then taken out of the engine alone and timed in its
+        rows: without the validator a ReadOne is 1210 ticks against 870, without string_compare 994 to 1050; string_length,
+        3.8 against 12.1 alone, made it 3% slower there (short names, where the inlined loop wins) and is not used. A
+        stand-alone compile of this file and the hosted check have the C, which is what they test; BENCH_dbus built with
+        -DDBUS_C_ONLY times the engine on its C beside lib.c, the before of each row.
+*/
+#if defined(STANDARD_MODERN_C) && !defined(DBUS_C_ONLY)
+#define DBUS_LIBRARY 1
+#else
+#define DBUS_LIBRARY 0
+#endif
+// The shortest text lib.c's validator takes, and the shortest copy memory_copy takes. arm64 has x86_64's (BENCH_dbus
+// under qemu: the validator 89% of the C's instructions at 8 bytes, the copy 83% at 300); riscv64 without V its own,
+// as qemu has its instructions (no hardware timing): the validator 101 to 109% at 8 to 12 bytes and 73% at 16, the
+// copy 50% at 100, since its byte loop is not made wide there.
+#if defined(__riscv)
+#define DBUS_UTF8_LIBRARY 16
+#define DBUS_COPY_LIBRARY 100
+#else
+#define DBUS_UTF8_LIBRARY 8
+#define DBUS_COPY_LIBRARY 300
+#endif
+
+// The C loop, inlined at its callers, which are short names: string_length in its place made a ReadOne 3% slower in the engine.
 static long dbus_length(const char *s)
 {
         long n = 0;
@@ -171,11 +201,15 @@ static long dbus_length(const char *s)
 
 static int dbus_equal(const char *a, const char *b)
 {
+#if DBUS_LIBRARY
+        return !string_compare((string_address)a, (string_address)b);
+#else
         long n = 0;
 
         while (a[n] && a[n] == b[n])
                 n++;
         return a[n] == b[n];
+#endif
 }
 
 static int dbus_starts(const char *text, const char *prefix)
@@ -187,13 +221,27 @@ static int dbus_starts(const char *text, const char *prefix)
         return !prefix[n];
 }
 
-static void dbus_copy(void *to, const void *from, long n)
+// n bytes, forward a byte at a time (so a move down, to a lower address, is safe too): the copy below DBUS_COPY_LIBRARY.
+static void dbus_bytes(void *to, const void *from, long n)
 {
         unsigned char *d = (unsigned char *)to;
         const unsigned char *s = (const unsigned char *)from;
 
         for (long at = 0; at < n; at++)
                 d[at] = s[at];
+}
+
+// n bytes; the two may overlap with `to` below `from` (a queue moved to its front), which memory_copy, a memmove, takes as well.
+static void dbus_copy(void *to, const void *from, long n)
+{
+#if DBUS_LIBRARY
+        if (n >= DBUS_COPY_LIBRARY)
+        {
+                memory_copy(to, from, (positive)n);
+                return;
+        }
+#endif
+        dbus_bytes(to, from, n);
 }
 
 static void dbus_text(char *to, long room, const char *from)
@@ -217,8 +265,8 @@ static unsigned long dbus_get32(const unsigned char *p)
 
 /* ---- grammar: UTF-8, names, paths, signatures ---- */
 
-// One valid UTF-8 text with no NUL: the shortest forms, no surrogates, nothing past U+10FFFF.
-static int dbus_utf8(const unsigned char *s, long n)
+// One valid UTF-8 text with no NUL: the shortest forms, no surrogates, nothing past U+10FFFF; the C walk, a character at a time.
+static int dbus_utf8_walk(const unsigned char *s, long n)
 {
         for (long at = 0; at < n;)
         {
@@ -245,6 +293,21 @@ static int dbus_utf8(const unsigned char *s, long n)
                 at += more + 1;
         }
         return 1;
+}
+
+/*
+        The same, for a text with a NUL after it (every caller's: a string of a message is checked for its NUL first, a
+        setting's is a C string): from DBUS_UTF8_LIBRARY bytes, lib.c's validator, which holds the same strictness (a lead
+        of C2 to F4, no overlong form, no surrogate, nothing past U+10FFFF), and its NUL is the length's, which stops at
+        the first.
+*/
+static int dbus_utf8(const unsigned char *s, long n)
+{
+#if DBUS_LIBRARY
+        if (n >= DBUS_UTF8_LIBRARY)
+                return memory_utf8_valid_span((address_any)s, (positive)n).x == (positive)n && string_length((const_string)s) == (positive)n;
+#endif
+        return dbus_utf8_walk(s, n);
 }
 
 static int dbus_letter(char c)

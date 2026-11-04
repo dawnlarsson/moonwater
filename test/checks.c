@@ -192644,6 +192644,492 @@ b32 main(void)
 }
 #endif /* BENCH_audiolib */
 
+#ifdef BENCH_dbus
+/*
+        The session bus's engine (src/dbus/dbus.c) with lib.c under it, as the sessionbus tool has it, in ticks: what the
+        bus does with a message and no socket (the socket's are test/dbus_bench.c's). The engine's rows: a ReadOne the bus
+        answers itself, one at a time and 64 in one read; a call from one client to another and its answer (two messages
+        routed); a signal to N clients whose rule it matches; the portal's SettingChanged to N listeners; a message of a
+        dictionary of 32 strings parsed whole. Then the loops: each C loop the engine has against the lib.c routine that
+        would take its place, at the sizes a bus sees (names of 10 to 40 bytes, bodies to 4 KiB).
+
+            sh test/run bench dbus           (or by hand: the freestanding flags of bench_target, -DBENCH_dbus)
+*/
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+#include "../src/dbus/dbus.c"
+
+#define BD_TRIES 9
+
+static volatile positive bd_sink;
+
+static void *bd_alloc(void *context, long bytes)
+{
+        long got = (long)system_call_6(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
+
+        (void)context;
+        return got < 0 && got > -4096 ? 0 : (void *)got;
+}
+
+static void bd_release(void *context, void *block, long bytes)
+{
+        (void)context;
+        system_call_2(syscall(munmap), (positive)block, (positive)bytes);
+}
+
+static long bd_now(void *context)
+{
+        (void)context;
+        return 1;
+}
+
+static void bd_random(void *context, unsigned char *bytes, long count)
+{
+        (void)context;
+        for (long at = 0; at < count; at++)
+                bytes[at] = (unsigned char)(at * 37 + 11);
+}
+
+static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0};
+static string_address bd_only; // a row to run alone (call, readone, setting), or every row
+
+static bool bd_want(string_address row)
+{
+        return !bd_only[0] || string_equals(bd_only, "engine") || string_equals(bd_only, row);
+}
+static unsigned long bd_serial;
+
+static void bd_feed(long slot, const unsigned char *bytes, long n)
+{
+        while (n > 0)
+        {
+                long room, take;
+                unsigned char *to = dbus_in_room(slot, &room);
+
+                if (!to || room <= 0)
+                        return;
+                take = n < room ? n : room;
+                memory_copy(to, bytes, (positive)take);
+                dbus_in_done(slot, take);
+                bytes += take;
+                n -= take;
+        }
+}
+
+static void bd_drain(long slot)
+{
+        const unsigned char *bytes;
+
+        dbus_sent(slot, dbus_out(slot, &bytes));
+}
+
+// A message of up to two strings, or with the body the caller writes after (body 0 to end it here); its length in into.
+static long bd_message(unsigned char *into, long room, unsigned type, unsigned flags, const char *path, const char *interface, const char *member,
+                       const char *destination, const char *signature, const char *a, const char *b, unsigned long reply)
+{
+        struct dbus_out w = {into, 0, room, 0};
+        struct dbus_fields f = {path, interface, member, "", destination, "", signature, reply, reply != 0};
+        long body;
+
+        dbus_o_header(&w, type, flags, ++bd_serial, &f);
+        body = w.length;
+        if (a)
+                dbus_o_string(&w, a);
+        if (b)
+                dbus_o_string(&w, b);
+        dbus_o_end(&w, body);
+        return w.bad ? -1 : w.length;
+}
+
+static long bd_connect(void)
+{
+        static const unsigned char auth[] = "\0AUTH EXTERNAL\r\nDATA\r\nBEGIN\r\n";
+        unsigned char hello[256];
+        long slot = dbus_connect(1, 0), n;
+
+        bd_feed(slot, auth, sizeof auth - 1);
+        n = bd_message(hello, sizeof hello, DBUS_CALL, 0, "/org/freedesktop/DBus", DBUS_NAME_BUS, "Hello", DBUS_NAME_BUS, "", 0, 0, 0);
+        bd_feed(slot, hello, n);
+        bd_drain(slot);
+        return slot;
+}
+
+static void bd_rule(long slot, const char *rule)
+{
+        unsigned char call[1024];
+        long n = bd_message(call, sizeof call, DBUS_CALL, 0, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", DBUS_NAME_BUS, "s", rule, 0, 0);
+
+        bd_feed(slot, call, n);
+        bd_drain(slot);
+}
+
+static unsigned char bd_one[512], bd_many[64 * 512], bd_echo[512], bd_answer[512], bd_signal[512], bd_dict[8192];
+static long bd_one_n, bd_many_n, bd_echo_n, bd_answer_n, bd_signal_n, bd_dict_n, bd_a, bd_b, bd_listeners[100], bd_count;
+
+static fn bd_readone(void)
+{
+        for (int k = 0; k < 1000; k++)
+        {
+                bd_feed(bd_a, bd_one, bd_one_n);
+                bd_drain(bd_a);
+        }
+}
+
+static fn bd_pipelined(void)
+{
+        for (int k = 0; k < 100; k++)
+        {
+                bd_feed(bd_a, bd_many, bd_many_n);
+                bd_drain(bd_a);
+        }
+}
+
+static fn bd_call(void)
+{
+        for (int k = 0; k < 1000; k++)
+        {
+                bd_feed(bd_a, bd_echo, bd_echo_n);
+                bd_drain(bd_b);
+                bd_feed(bd_b, bd_answer, bd_answer_n);
+                bd_drain(bd_a);
+        }
+}
+
+static fn bd_broadcast(void)
+{
+        for (int k = 0; k < 100; k++)
+        {
+                bd_feed(bd_a, bd_signal, bd_signal_n);
+                for (long l = 0; l < bd_count; l++)
+                        bd_drain(bd_listeners[l]);
+        }
+}
+
+static fn bd_setting(void)
+{
+        for (int k = 0; k < 100; k++)
+        {
+                dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1 + (k & 1), 0, 0);
+                for (long l = 0; l < bd_count; l++)
+                        bd_drain(bd_listeners[l]);
+        }
+}
+
+static fn bd_parse(void)
+{
+        struct dbus_message m;
+
+        for (int k = 0; k < 1000; k++)
+                bd_sink += (positive)dbus_parse(bd_dict, bd_dict_n, &m);
+}
+
+static fn bd_engine(void)
+{
+        long reply;
+
+        bd_count = bd_many_n = 0; // a run of its own each time: its own listeners and its own batch
+        dbus_start(&bd_host);
+        bd_a = bd_connect();
+        bd_b = bd_connect();
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        bd_one_n = bd_message(bd_one, sizeof bd_one, DBUS_CALL, 0, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadOne", DBUS_NAME_PORTAL, "ss",
+                              "org.freedesktop.appearance", "color-scheme", 0);
+        for (int k = 0; k < 64; k++)
+                bd_many_n += bd_message(bd_many + bd_many_n, (long)sizeof bd_many - bd_many_n, DBUS_CALL, 0, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings",
+                                        "ReadOne", DBUS_NAME_PORTAL, "ss", "org.freedesktop.appearance", "color-scheme", 0);
+        {
+                unsigned char call[256];
+                struct dbus_out w = {call, 0, sizeof call, 0};
+                struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "RequestName", "", DBUS_NAME_BUS, "", "su", 0, 0};
+                long body;
+
+                dbus_o_header(&w, DBUS_CALL, 0, ++bd_serial, &f);
+                body = w.length;
+                dbus_o_string(&w, "org.example.Echo");
+                dbus_o_u32(&w, 0);
+                dbus_o_end(&w, body);
+                bd_feed(bd_b, call, w.length);
+                bd_drain(bd_b);
+        }
+        bd_echo_n = bd_message(bd_echo, sizeof bd_echo, DBUS_CALL, 0, "/org/example", "org.example.Echo", "Echo", "org.example.Echo", "s", "a question", 0, 0);
+        reply = (long)bd_serial;
+        bd_answer_n = bd_message(bd_answer, sizeof bd_answer, DBUS_RETURN, DBUS_FLAG_NO_REPLY, "", "", "", dbus.client[bd_a]->unique, "s", "an answer", 0,
+                                 (unsigned long)reply);
+        bd_signal_n = bd_message(bd_signal, sizeof bd_signal, DBUS_SIGNAL, 0, "/org/example", "org.example.Signals", "Changed", "", "s", "payload", 0, 0);
+        {
+                struct dbus_out w = {bd_dict, 0, sizeof bd_dict, 0};
+                struct dbus_fields f = {"/org/example", "org.example.Dict", "Big", "", "", "", "a{sv}", 0, 0};
+                long body, length_at, first;
+                char key[16];
+
+                dbus_o_header(&w, DBUS_SIGNAL, 0, ++bd_serial, &f);
+                body = w.length;
+                dbus_o_u32(&w, 0);
+                length_at = w.length - 4;
+                dbus_o_pad(&w, 8);
+                first = w.length;
+                for (int k = 0; k < 32; k++)
+                {
+                        dbus_o_pad(&w, 8);
+                        key[0] = 'k', key[1] = (char)('a' + k % 26), key[2] = (char)('0' + k / 26), key[3] = 0;
+                        dbus_o_string(&w, key);
+                        dbus_o_sig(&w, "s");
+                        dbus_o_string(&w, "a value of a setting, as text, some forty bytes");
+                }
+                dbus_o_patch32(&w, length_at, (unsigned long)(w.length - first));
+                dbus_o_end(&w, body);
+                bd_dict_n = w.length;
+        }
+        if (bd_want("readone"))
+        {
+                bench_report("ReadOne, one at a time  ", bd_readone, BD_TRIES, 1000, "call");
+                bench_report("ReadOne, 64 in one read ", bd_pipelined, BD_TRIES, 6400, "call");
+        }
+        if (bd_want("call"))
+                bench_report("a call to a client, and its answer", bd_call, BD_TRIES, 1000, "call and answer");
+        if (bd_want("parse"))
+                bench_report("a dict of 32 strings parsed", bd_parse, BD_TRIES, 1000 * (positive)bd_dict_n, "byte");
+        if (!bd_want("setting"))
+        {
+                dbus_stop();
+                return;
+        }
+        for (int sizes = 0; sizes < 3; sizes++)
+        {
+                long want = sizes == 0 ? 1 : sizes == 1 ? 10 : 100;
+
+                while (bd_count < want)
+                {
+                        bd_listeners[bd_count] = bd_connect();
+                        bd_rule(bd_listeners[bd_count], "type='signal',interface='org.example.Signals'");
+                        bd_rule(bd_listeners[bd_count], "type='signal',sender='org.freedesktop.portal.Desktop',interface='org.freedesktop.portal.Settings',member='SettingChanged'");
+                        bd_count++;
+                }
+                string_format(log, "  %p listeners:\n", (positive)want);
+                bench_report("  a signal to them      ", bd_broadcast, BD_TRIES, 100, "signal");
+                bench_report("  SettingChanged to them", bd_setting, BD_TRIES, 100, "change");
+        }
+        dbus_stop();
+}
+
+/* ---- the loops ---- */
+
+static p8 bd_bytes[8192] __attribute__((aligned(64)));
+static p8 bd_into[8192] __attribute__((aligned(64)));
+static const char *bd_names[] = {"org.freedesktop.portal.Settings", "org.freedesktop.portal.Desktop", "org.freedesktop.appearance", "color-scheme",
+                                 "SettingChanged", "/org/freedesktop/portal/desktop", ":1.42", "org.gnome.desktop.interface"};
+
+// The engine's C as it was before lib.c took these (dbus_bytes and dbus_utf8_walk are still its own below the thresholds).
+__attribute__((noinline)) static long bd_former_length(const char *s)
+{
+        long n = 0;
+
+        while (s[n])
+                n++;
+        return n;
+}
+
+__attribute__((noinline)) static int bd_former_equal(const char *a, const char *b)
+{
+        long n = 0;
+
+        while (a[n] && a[n] == b[n])
+                n++;
+        return a[n] == b[n];
+}
+
+static p64 bd_run_copy(bool library, positive n, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        while (rounds--)
+        {
+                if (library)
+                        memory_copy(bd_into + (rounds & 7), bd_bytes + (rounds & 3), n);
+                else
+                        dbus_bytes(bd_into + (rounds & 7), bd_bytes + (rounds & 3), (long)n);
+                bd_sink += bd_into[n / 2];
+        }
+        return get_cpu_time() - start;
+}
+
+static p64 bd_run_utf8(bool library, positive n, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        while (rounds--)
+        {
+                if (library)
+                        bd_sink += memory_utf8_valid_span(bd_bytes, n).x == n && string_length((const_string)bd_bytes) == n;
+                else
+                        bd_sink += (positive)dbus_utf8_walk(bd_bytes, (long)n);
+        }
+        return get_cpu_time() - start;
+}
+
+static p64 bd_run_length(bool library, positive which, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        while (rounds--)
+        {
+                const char *s = bd_names[(which + rounds) & 7];
+
+                bd_sink += library ? string_length((const_string)s) : (positive)bd_former_length(s);
+        }
+        return get_cpu_time() - start;
+}
+
+static p64 bd_run_equal(bool library, positive which, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        while (rounds--)
+        {
+                const char *a = bd_names[(which + rounds) & 7], *b = bd_names[(which + rounds + (rounds & 1)) & 7];
+
+                bd_sink += library ? string_compare((string_address)a, (string_address)b) == 0 : (positive)bd_former_equal(a, b);
+        }
+        return get_cpu_time() - start;
+}
+
+/*
+        The engine's answers with lib.c under it, held to its C: dbus_utf8 (lib.c's validator from DBUS_UTF8_LIBRARY bytes)
+        against dbus_utf8_walk over texts of 0 to 80 bytes, most valid and of every length of sequence, some with a byte
+        changed (a bad lead, a cut, an overlong form, a surrogate, past U+10FFFF, a NUL inside); dbus_copy (memory_copy
+        from DBUS_COPY_LIBRARY) moving a block down onto itself, as the queue does; dbus_length and dbus_equal against the
+        former loops. The hosted CHECK_dbus has only the C, so this is where the library's side of each is proved.
+*/
+static positive bd_agree(void)
+{
+        static const unsigned long codes[] = {0x41, 0x7f, 0x80, 0x7ff, 0x800, 0xfffd, 0xffff, 0x10000, 0x10ffff, 0x1f600, 0xe9, 0x4e2d};
+        unsigned long state = 0x9e3779b97f4a7c15ul;
+        positive wrong = 0, cases = 0;
+        p8 text[96];
+
+        for (positive round = 0; round < 200000; round++)
+        {
+                positive n = 0, want;
+
+                state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+                want = (positive)(state % 80);
+                while (n < want)
+                {
+                        unsigned long code;
+
+                        state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+                        code = state % 3 ? 0x20 + state % 95 : codes[(state >> 8) % array_count(codes)];
+                        if (code < 0x80)
+                                text[n++] = (p8)code;
+                        else if (code < 0x800 && n + 2 <= want)
+                                text[n++] = (p8)(0xc0 | code >> 6), text[n++] = (p8)(0x80 | (code & 63));
+                        else if (code < 0x10000 && n + 3 <= want)
+                                text[n++] = (p8)(0xe0 | code >> 12), text[n++] = (p8)(0x80 | ((code >> 6) & 63)), text[n++] = (p8)(0x80 | (code & 63));
+                        else if (n + 4 <= want)
+                                text[n++] = (p8)(0xf0 | code >> 18), text[n++] = (p8)(0x80 | ((code >> 12) & 63)), text[n++] = (p8)(0x80 | ((code >> 6) & 63)),
+                                text[n++] = (p8)(0x80 | (code & 63));
+                        else
+                                text[n++] = 'z';
+                }
+                if (n && state % 4 == 0)
+                {
+                        static const p8 bad[] = {0x80, 0xc0, 0xc1, 0xe0, 0xed, 0xf4, 0xf5, 0xff, 0x00, 0xa0, 0x90, 0xbf};
+
+                        text[(state >> 20) % n] = bad[(state >> 40) % array_count(bad)];
+                }
+                text[n] = 0;
+                cases++;
+                wrong += dbus_utf8(text, (long)n) != dbus_utf8_walk(text, (long)n);
+        }
+        for (positive n = 0; n < 4096; n += 1 + n / 3)
+        {
+                for (positive k = 0; k < n + 64; k++)
+                        bd_bytes[k] = (p8)(k * 7 + n);
+                dbus_copy(bd_bytes, bd_bytes + 64, (long)n);
+                for (positive k = 0; k < n; k++)
+                        wrong += bd_bytes[k] != (p8)((k + 64) * 7 + n);
+                cases++;
+        }
+        for (positive k = 0; k < 64; k++)
+        {
+                const char *a = bd_names[k & 7], *b = bd_names[(k >> 3) & 7];
+
+                wrong += dbus_length(a) != bd_former_length(a) || dbus_equal(a, b) != bd_former_equal(a, b);
+                cases++;
+        }
+        string_format(log, "  the engine's library side against its C: %p cases, %p that differ\n", cases, wrong);
+        return wrong;
+}
+
+static fn bd_loop(string_address name, p64 (*one)(bool, positive, positive), positive n, positive rounds)
+{
+        p64 best_c = ~(p64)0, best_library = ~(p64)0;
+
+        for (positive trial = 0; trial < BD_TRIES; trial++)
+        {
+                p64 c, library;
+
+                if (trial & 1)
+                        library = one(true, n, rounds), c = one(false, n, rounds);
+                else
+                        c = one(false, n, rounds), library = one(true, n, rounds);
+                if (c < best_c)
+                        best_c = c;
+                if (library < best_library)
+                        best_library = library;
+        }
+        string_format(log, "  %s %p:  C %p  lib.c %p ticks/1000  lib.c/C %p%%\n", name, n, best_c * 1000 / rounds, best_library * 1000 / rounds,
+                      best_library * 100 / (best_c ? best_c : 1));
+}
+
+static fn bd_loops(void)
+{
+        static const positive copies[] = {16, 40, 100, 160, 200, 256, 300, 1100, 4096}, texts[] = {1, 4, 6, 8, 10, 12, 16, 26, 40, 96, 400};
+
+        for (positive k = 0; k < sizeof bd_bytes; k++)
+                bd_bytes[k] = (p8)('a' + k % 26);
+        for (positive k = 0; k < array_count(copies); k++)
+                bd_loop("copy  ", bd_run_copy, copies[k], 100000);
+        for (positive k = 0; k < array_count(texts); k++)
+        {
+                bd_bytes[texts[k]] = 0;
+                bd_loop("utf8  ", bd_run_utf8, texts[k], 100000);
+                bd_bytes[texts[k]] = (p8)('a' + texts[k] % 26);
+        }
+        bd_loop("length", bd_run_length, 0, 100000);
+        bd_loop("equal ", bd_run_equal, 0, 100000);
+}
+
+// With an argument, `engine` or `loops`: that part alone (a profile of the engine is perf record of `engine`).
+b32 main(void)
+{
+        string_address only = program_argument_count() > 1 ? program_argument(1) : (string_address) "";
+
+        bd_only = only;
+
+        if (bd_agree())
+        {
+                log_flush();
+                return 1;
+        }
+        if (!string_equals(only, "loops"))
+        {
+                string_format(log, "the engine (ticks):\n");
+                for (int again = 0; again < (only[0] ? 20 : 1); again++)
+                        bd_engine();
+        }
+        if (!only[0] || string_equals(only, "loops"))
+        {
+                string_format(log, "the loops (C against lib.c):\n");
+                bd_loops();
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_dbus */
+
 #ifdef BENCH_translate_planes
 /* memory_translate_planes_u32_rect against the C loop it replaced in
    src/canvas/font.c (font_translate_lcd): a strip of a terminal row as
