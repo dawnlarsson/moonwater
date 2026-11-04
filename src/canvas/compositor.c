@@ -7447,6 +7447,9 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
         }
 }
 
+// Whether the present in hand was drawn by the card (set by compositor_gpu_present, read by compositor_metric_note; cleared at each present).
+static int compositor_present_on_card;
+
 #ifdef MOONWATER_GPU_C
 /*
         The present on the GPU (src/canvas/gpu.c): the frames of a present as the records of its scene (compositor_gpu_frames) and the pointer when the scene
