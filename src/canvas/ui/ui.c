@@ -9221,6 +9221,16 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
         ui_control_draw(ui, c);
+}
+
+// The column's bar, drawn last of the page (after the body's rows): its track lies across the seam, so the body's rows (their hover,
+// their chosen band, their ripple) are under its right half, and drawn after it they would be over it.
+static fn ui_page_column_bar(struct ui address_to ui, struct ui_page address_to p)
+{
+        if (!p->column_on)
+                return;
+        ui->top = p->top;
+        ui->bottom = p->bottom;
         ui_scroll_draw(ui, &p->column_scroll);
 }
 

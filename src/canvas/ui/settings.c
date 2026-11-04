@@ -4756,6 +4756,7 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0 && !settings.map.keys;
                 settings.list.keys = settings.focused && settings.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
+                ui_page_column_bar(ui, &settings.page);
         }
         // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
         if (settings.editing >= 0 && settings_edit_shown())

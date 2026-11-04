@@ -137109,6 +137109,23 @@ static fn check_settings_seam(void)
         check("settings seam: the row the keys are on is lit from the seam to the window's last pixel, and not left of the seam", ring_ends);
         check("settings seam: the list's track is drawn over the row's blank end: the row is lit on both sides of the thumb, and the thumb is over it", bar_over);
 
+        // The column's track lies across the seam, so its right half is over the list's rows: the row the keys are on is lit there, and the
+        // column's thumb is drawn over that row, not under it (the bars are the last things the page draws).
+        {
+                int column_top = 0, column_length = 0, middle_y = y + row / 2, inside, beside;
+                b32 column_over;
+
+                page->column_scroll.content = page->column_scroll.view * 2;
+                settings_seam_draw();
+                if (!ui_scroll_thumb(ui, &page->column_scroll, &column_top, &column_length))
+                        column_top = column_length = 0;
+                inside = settings_frames_whole[middle_y * SETTINGS_FRAMES_W + seam + 1];
+                beside = settings_frames_whole[middle_y * SETTINGS_FRAMES_W + seam + 3 * ui->scale / 100];
+                column_over = column_length > 0 && middle_y >= column_top && middle_y < column_top + column_length && beside != paper && inside != beside;
+                check("settings seam: the column's thumb, in the half of its track that is over the list, is drawn over the row the keys are on", column_over);
+                settings_layout();
+        }
+
         // Nothing but the rows' fills and the thumbs is drawn past the margins: between the list's words and the window's edge (but for the
         // track), and between the seam and the list's left margin, on every row but the one the keys are on.
         list->focus = -1;
