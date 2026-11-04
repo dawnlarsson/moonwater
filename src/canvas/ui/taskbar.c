@@ -390,34 +390,21 @@ static unsigned int taskbar_square(unsigned int position)
         return position == TASKBAR_TOP ? 1 | 2 : position == TASKBAR_LEFT ? 1 | 4 : position == TASKBAR_RIGHT ? 2 | 8 : 4 | 8;
 }
 
-static positive taskbar_fit(const struct taskbar_view *view, const font_face address_to const address_to faces,
-                            const char *text, p32 em, int room, char *fitted, positive capacity);
+// The band's text is the kit's (ui_cell_line, ui_cell_turned): its picture, engine and face are the band's, which taskbar_cell keeps.
+static struct ui taskbar_cell_ui;
 
-// One line of text in the band, at band-local x, y of its rectangle, in the tab's colour for ground. What is wider than the
-// tab is cut to fit it with dots after it, as a side band's is, and not at the tab's edge in the middle of a letter.
+static struct ui address_to taskbar_cell(const struct taskbar_view *view, int bw)
+{
+        taskbar_cell_ui.pixels = view->pixels, taskbar_cell_ui.pitch = (unsigned long)bw, taskbar_cell_ui.scale = view->scale;
+        taskbar_cell_ui.engine = view->engine, taskbar_cell_ui.regular = view->face;
+        return &taskbar_cell_ui;
+}
+
+// One line of text in the band, at band-local x, y of its rectangle, in the tab's colour for ground (ui_cell_line).
 static void taskbar_text_line(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
                               int height, const char *text, unsigned int ink, unsigned int ground)
 {
-        const font_face address_to faces[1] = {view->face};
-        p32 em = (p32)(height * 11 / 20) << 6;
-        font_metrics grid = font_metrics_at(view->face, em);
-        font_target here = {view->pixels + (long)(y - by) * bw + (x - bx), (positive)bw, width, height};
-        unsigned int scratch[1] = {0};
-        font_target nowhere = {scratch, 1, 1, 1};
-        char fitted[WINDOWS_TITLE + 4];
-        positive length = string_length((string_address)text);
-        int pad;
-
-        if ((int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) > width)
-        {
-                length = taskbar_fit(view, faces, text, em, width, fitted, sizeof(fitted));
-                text = fitted;
-        }
-        // How wide the run is, before it is put anywhere.
-        pad = (width - (int)(font_draw(view->engine, faces, 1, (const p8 address_to)text, length, em, 0,
-                                       &nowhere, 0, 0, ink, ground) >> 16)) / 2;
-        font_draw(view->engine, faces, 1, (const p8 address_to)text, length, em, 0, &here,
-                  (b32)(pad > 0 ? pad : 0) << 16, (height - grid.cell_height) / 2 + grid.baseline, ink, ground);
+        ui_cell_line(taskbar_cell(view, bw), x - bx, y - by, width, height, text, ink, ground);
 }
 
 /*
@@ -434,38 +421,6 @@ static unsigned int taskbar_turn(unsigned int position)
 }
 
 /*
-        A text cut to room pixels as the settings cut a label: whole when it
-        fits, else the longest beginning that ends before a character and fits
-        with "..." after it, found by halving (a beginning grows with its
-        length), else its first character alone. Written to fitted; answers
-        its length.
-*/
-// What a band's text is measured with: its view's engine, and the face and em the text is drawn at.
-struct taskbar_cut
-{
-        const struct taskbar_view *view;
-        const font_face address_to const address_to faces;
-        p32 em;
-};
-
-static int taskbar_cut_width(address_any by, string_address text)
-{
-        const struct taskbar_cut address_to c = by;
-
-        return (int)(font_extent(c->view->engine, c->faces, 1, (const p8 address_to)text, string_length(text), c->em, 0) >> 16);
-}
-
-static positive taskbar_fit(const struct taskbar_view *view, const font_face address_to const address_to faces,
-                            const char *text, p32 em, int room, char *fitted, positive capacity)
-{
-        struct taskbar_cut by = {view, faces, em};
-        positive length = string_length((string_address)text), cut = length;
-        unsigned char kind = ui_cut_by(taskbar_cut_width, &by, (string_address)text, length, room, fitted, capacity, &cut);
-
-        return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity);
-}
-
-/*
         One line of text in a slot of a band on a side, turned as taskbar_turn
         says: laid out as a bottom band lays a slot's text, along the slot's
         length and in the middle of its thickness, and turned onto it. What is
@@ -476,25 +431,7 @@ static positive taskbar_fit(const struct taskbar_view *view, const font_face add
 static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
                                 int height, const char *text, unsigned int ink, unsigned int ground)
 {
-        const font_face address_to faces[1] = {view->face};
-        p32 em = (p32)(width * 11 / 20) << 6;
-        font_metrics grid = font_metrics_at(view->face, em);
-        font_target here = {view->pixels + (long)(y - by) * bw + (x - bx), (positive)bw, width, height};
-        char fitted[WINDOWS_TITLE + 4];
-        int capital = (int)((grid.cap_height + 32768) >> 16), pad;
-        positive length = string_length((string_address)text);
-        int advance = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
-
-        if (advance > height)
-        {
-                length = taskbar_fit(view, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
-                text = fitted;
-                advance = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
-        }
-        pad = (height - advance) / 2;
-        font_draw_turned(view->engine, faces, 1, (const p8 address_to)text, length, em, 0, taskbar_turn(view->position),
-                         &here, (b32)(pad > 0 ? pad : 0) << 16, (width - grid.cell_height) / 2 + grid.baseline, ink,
-                         ground);
+        ui_cell_turned(taskbar_cell(view, bw), x - bx, y - by, width, height, text, taskbar_turn(view->position), ink, ground);
 }
 
 /*

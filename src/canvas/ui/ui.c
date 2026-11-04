@@ -7872,6 +7872,83 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
         return (string_address)fitted;
 }
 
+/*
+        A cell of a band (the taskbar's tabs, tray and their side bands): one line of text in a rectangle of the band's picture,
+        at x and y band-local (ui->pixels is the band's first pixel and ui->pitch its stride), drawn in the ink for ground.
+        ui_cell_line writes it along the rectangle's length, and ui_cell_turned turns it onto a side band's, turn being the way
+        its tops face (FONT_TOPS_LEFT or FONT_TOPS_RIGHT). What is wider than the rectangle is cut to fit it with dots after it
+        (ui_cell_fit), not at the rectangle's edge in the middle of a letter.
+*/
+struct ui_cell_cut
+{
+        struct ui address_to ui;
+        const font_face address_to const address_to faces;
+        p32 em;
+};
+
+static int ui_cell_cut_width(address_any by, string_address text)
+{
+        const struct ui_cell_cut address_to c = by;
+
+        return (int)(font_extent(c->ui->engine, c->faces, 1, (const p8 address_to)text, string_length(text), c->em, 0) >> 16);
+}
+
+static positive ui_cell_fit(struct ui address_to ui, const font_face address_to const address_to faces, const char *text, p32 em, int room,
+                            char *fitted, positive capacity)
+{
+        struct ui_cell_cut by = {ui, faces, em};
+        positive length = string_length((string_address)text), cut = length;
+        unsigned char kind = ui_cut_by(ui_cell_cut_width, &by, (string_address)text, length, room, fitted, capacity, &cut);
+
+        return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity);
+}
+
+static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int ink, unsigned int ground)
+{
+        const font_face address_to faces[1] = {ui->regular};
+        p32 em = (p32)(height * 11 / 20) << 6;
+        font_metrics grid = font_metrics_at(ui->regular, em);
+        font_target here = {ui->pixels + (long)y * (long)ui->pitch + x, (positive)ui->pitch, width, height};
+        unsigned int scratch[1] = {0};
+        font_target nowhere = {scratch, 1, 1, 1};
+        char fitted[WINDOWS_TITLE + 4];
+        positive length = string_length((string_address)text);
+        int pad;
+
+        if ((int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) > width)
+        {
+                length = ui_cell_fit(ui, faces, text, em, width, fitted, sizeof(fitted));
+                text = fitted;
+        }
+        // How wide the run is, before it is put anywhere.
+        pad = (width - (int)(font_draw(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, &nowhere, 0, 0, ink, ground) >> 16)) / 2;
+        font_draw(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, &here, (b32)(pad > 0 ? pad : 0) << 16,
+                  (height - grid.cell_height) / 2 + grid.baseline, ink, ground);
+}
+
+static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int turn, unsigned int ink,
+                           unsigned int ground)
+{
+        const font_face address_to faces[1] = {ui->regular};
+        p32 em = (p32)(width * 11 / 20) << 6;
+        font_metrics grid = font_metrics_at(ui->regular, em);
+        font_target here = {ui->pixels + (long)y * (long)ui->pitch + x, (positive)ui->pitch, width, height};
+        char fitted[WINDOWS_TITLE + 4];
+        int capital = (int)((grid.cap_height + 32768) >> 16), pad;
+        positive length = string_length((string_address)text);
+        int advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
+
+        if (advance > height)
+        {
+                length = ui_cell_fit(ui, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
+                text = fitted;
+                advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
+        }
+        pad = (height - advance) / 2;
+        font_draw_turned(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, turn, &here, (b32)(pad > 0 ? pad : 0) << 16,
+                         (width - grid.cell_height) / 2 + grid.baseline, ink, ground);
+}
+
 // A control's items, the words of words a blank apart, kept in its text: as many as fit, UI_ITEMS at most.
 static fn ui_items_words(struct ui_control address_to c, const char address_to words)
 {
