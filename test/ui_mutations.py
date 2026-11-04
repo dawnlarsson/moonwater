@@ -145,6 +145,8 @@ M = [
     # ---- the terminal's kit: its faces are the grid's, so the actions bar's labels measure and draw ----
     (TM, "terminal overlay's kit is the whole window (a knob hung below the last line writes past the picture)", "        kit.width = (int)terminal.width - (int)terminal.pad;\n        kit.height = kit.bottom = (int)terminal.height - (int)terminal.pad_y;\n", ""),
     (TM, "terminal's touch lift is never the controller's (the tap on the selection, the tap elsewhere)", "                if (!(event->flags & WINDOW_KEY_DOWN) && !s->finger && !(event->flags & WINDOW_KEY_HOLD))\n                        return false;\n", "                if (!(event->flags & WINDOW_KEY_DOWN))\n                        return false;\n"),
+    (C, "a second device's stale place moves the pointer while a finger is down (the hold is at the tablet's place)", "                if (compositor.touch.gesture.mode == UI_TOUCH_NONE)\n", "                if (1)\n"),
+    (C, "a long press is placed at the pointer, not the finger's place (the hold's place line removed)", "                                compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, compositor.touch.x, compositor.touch.y, now);\n", ""),
     (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
 ]
 

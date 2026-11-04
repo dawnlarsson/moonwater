@@ -133153,6 +133153,27 @@ static void check_touch_path(struct ui address_to wui)
     check("touch path: a finger on the end's handle moves that end by characters, the start staying",
           doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 13);
 
+    /*
+        A long press whose pointer a second device left elsewhere: a tablet's stale place arrives while the finger is held (the USB tablet
+        of a guest, the second pointing device of a machine), and the hold is placed at the finger's own place all the same: the pointer
+        is where the finger is, not where the tablet is.
+    */
+    {
+        int fx = TOUCH_PATH_LEFT + gx, fy = TOUCH_PATH_TOP + by;
+
+        touch_one(fx, fy, false);
+        touch_path_drain(wui, &t, &own, &px, &py, &asks);
+        compositor.tablet_x = 1200, compositor.tablet_y = 900, compositor.tablet_have = 3;
+        compositor_report((positive)touch_clock, (positive)touch_clock);
+        check("touch path: a tablet's place does not move the pointer off a finger that is down", compositor.pointer_x == fx && compositor.pointer_y == fy);
+        compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+        touch_path_drain(wui, &t, &own, &px, &py, &asks);
+        check("touch path: a long press is placed at the finger, whatever a tablet reported while the finger was down",
+              compositor.pointer_x == fx && compositor.pointer_y == fy);
+        touch_one(fx, fy, true);
+        touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    }
+
     ui_text_close(&t);
 }
 

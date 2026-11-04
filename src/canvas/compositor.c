@@ -3604,6 +3604,7 @@ struct compositor_touch
         int resumed;             // the press is being made again without the close button (compositor_touch_resume)
         int hold_row;            // the window a long press landed on, which its lift is told, or COMPOSITOR_NONE
         int holding;             // the long press's right button is being sent: its events carry WINDOW_KEY_HOLD
+        int x, y;                // the last place a finger reported: a long press is placed there, whatever the pointer is
         int pinch_row;           // the window a pinch began on (its focal point then), which its updates and end go to, or COMPOSITOR_NONE
         int pinch_level;         // a legacy window's pinch: the scale (1024ths) of the last Ctrl and wheel notch sent
 };
@@ -15406,14 +15407,19 @@ static int compositor_report(positive now, positive stamp)
         compositor_pointer_sync();
         if (compositor.tablet_have)
         {
-                if (compositor.tablet_have & 1)
-                        compositor.real_x = compositor.tablet_x;
-                if (compositor.tablet_have & 2)
-                        compositor.real_y = compositor.tablet_y;
+                // A finger on a touch screen has the pointer: an absolute device's place (a tablet the touch screen is not) waits for the
+                // last finger's lift, so a stale place of the tablet cannot put the pointer, and a press or a hold, elsewhere.
+                if (compositor.touch.gesture.mode == UI_TOUCH_NONE)
+                {
+                        if (compositor.tablet_have & 1)
+                                compositor.real_x = compositor.tablet_x;
+                        if (compositor.tablet_have & 2)
+                                compositor.real_y = compositor.tablet_y;
+                        compositor_predict_place(COMPOSITOR_PREDICT_PEN, compositor.real_x, compositor.real_y, now);
+                        compositor.absolute = 1;
+                        moved = 1;
+                }
                 compositor.tablet_have = 0;
-                compositor_predict_place(COMPOSITOR_PREDICT_PEN, compositor.real_x, compositor.real_y, now);
-                compositor.absolute = 1;
-                moved = 1;
         }
 
         if (compositor.raw_x || compositor.raw_y)
@@ -15862,6 +15868,7 @@ static void compositor_touch_button(unsigned int code, int down)
 
 static void compositor_touch_motion(int x, int y, positive now)
 {
+        compositor.touch.x = x, compositor.touch.y = y;
         compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, x, y, now);
         compositor.kept_x = compositor.real_x;
         compositor.kept_y = compositor.real_y;
@@ -16020,6 +16027,9 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         {
                                 int tab;
 
+                                // The hold is at the finger's own place (the last one it reported), not at the pointer, which a second
+                                // device may have left elsewhere.
+                                compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, compositor.touch.x, compositor.touch.y, now);
                                 compositor.touch.holding = 1;
                                 compositor_touch_cancel();
                                 compositor.touch.hold_row = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
