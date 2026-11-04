@@ -9734,6 +9734,68 @@ static void ui_centre(struct windows address_to table, unsigned int row, int wid
         table->y[row] = y + (screen_height - height) / 2 - offset;
 }
 
+/*
+        A window that opens beside a panel's button (the launcher from the panel with -a, a menu from a cell of the panel): the
+        rectangle the compositor wrote in the window table when the button was pressed, the edge the panel is along and the screen
+        it is on. ui_anchor_take reads it once, when the app was asked to open beside (asked); a table with no press in it, or a
+        screen or an edge that is none, leaves it unanchored, in the middle. ui_anchor_place finds where a width by height window
+        goes beside the button (above a bottom panel, below a top one, beside a left or right one, the other way kept where the
+        button is), kept inside the screen; ui_anchor_set asks the compositor for that place, with the picture it is for.
+*/
+struct ui_anchor
+{
+        b32 anchored;
+        int button[4], screen[4];  // the panel's button (x, y, width, height) and the screen's rectangle
+        unsigned int edge, number; // the edge the panel is along, and the screen's number
+};
+
+static void ui_anchor_place(unsigned int edge, const int address_to button, const int address_to screen, int width, int height,
+                            int address_to x, int address_to y)
+{
+        *x = button[0], *y = button[1];
+        if (edge == TASKBAR_BOTTOM)
+                *y = button[1] - height;
+        else if (edge == TASKBAR_TOP)
+                *y = button[1] + button[3];
+        else if (edge == TASKBAR_LEFT)
+                *x = button[0] + button[2];
+        else
+                *x = button[0] - width;
+        *x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;
+        *y = *y > screen[1] + screen[3] - height ? screen[1] + screen[3] - height : *y;
+        *x = *x < screen[0] ? screen[0] : *x;
+        *y = *y < screen[1] ? screen[1] : *y;
+}
+
+static void ui_anchor_take(struct ui_anchor address_to anchor, const struct windows address_to table, b32 asked)
+{
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+
+        if (!asked || !table->button_w || !table->button_h || table->button_edge > TASKBAR_RIGHT ||
+            table->button_screen >= (count ? count : 1))
+                return;
+        anchor->button[0] = table->button_x, anchor->button[1] = table->button_y;
+        anchor->button[2] = (int)table->button_w, anchor->button[3] = (int)table->button_h;
+        anchor->edge = table->button_edge, anchor->number = table->button_screen;
+        windows_output(table, anchor->number, &anchor->screen[0], &anchor->screen[1], &anchor->screen[2], &anchor->screen[3]);
+        anchor->anchored = true;
+}
+
+// The place asked of the compositor for the window in row, as a width by height window beside the button (ui_anchor_place).
+static void ui_anchor_set(const struct ui_anchor address_to anchor, struct windows address_to table, unsigned int row, int width, int height)
+{
+        struct window_place place;
+        int x, y;
+
+        memory_zero(&place, sizeof(place));
+        ui_anchor_place(anchor->edge, anchor->button, anchor->screen, width, height, &x, &y);
+        place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
+        place.x = x - anchor->screen[0], place.y = y - anchor->screen[1];
+        place.width = (unsigned int)width, place.height = (unsigned int)height;
+        place.screen = anchor->number;
+        windows_place_set(table, row, &place);
+}
+
 // Whether a process is the program name: its command name is name and a newline, as /proc/PID/comm has it.
 static b32 ui_is_program(unsigned int pid, string_address name)
 {

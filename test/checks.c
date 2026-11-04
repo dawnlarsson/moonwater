@@ -133604,7 +133604,7 @@ static fn check_launcher_anchor(void)
                                 case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
                                 default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
                                 }
-                                launcher_anchor_place(edges[at], button, screen, width, height, &x, &y);
+                                ui_anchor_place(edges[at], button, screen, width, height, &x, &y);
                                 beside &= edges[at] == TASKBAR_BOTTOM ? y + height == button[1] && x == button[0]
                                           : edges[at] == TASKBAR_TOP  ? y == button[1] + button[3] && x == button[0]
                                           : edges[at] == TASKBAR_LEFT ? x == button[0] + button[2] && y == button[1]
@@ -133615,11 +133615,11 @@ static fn check_launcher_anchor(void)
         {
                 int button[4] = {1900, 1056, 21, 24}, x, y;
 
-                launcher_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 300, &x, &y);
+                ui_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 300, &x, &y);
                 inside &= x == 1920 - 560 && y == 1056 - 300;
-                launcher_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 1200, &x, &y);
+                ui_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 1200, &x, &y);
                 inside &= x == 1920 - 560 && y == 0;
-                launcher_anchor_place(TASKBAR_RIGHT, (int[4]){1896, 4, 24, 21}, screens[0], 2400, 300, &x, &y);
+                ui_anchor_place(TASKBAR_RIGHT, (int[4]){1896, 4, 24, 21}, screens[0], 2400, 300, &x, &y);
                 inside &= x == 0 && y == 4;
         }
         check("launcher beside the button: the bar is above a bottom panel's button, below a top panel's and beside a side panel's, at every scale and on any screen", beside);
@@ -133638,23 +133638,23 @@ static fn check_launcher_anchor(void)
                 table.output_w[screen] = (unsigned int)screens[screen][2], table.output_h[screen] = (unsigned int)screens[screen][3];
         table.button_x = 1944, table.button_y = 696, table.button_w = 21, table.button_h = 24;
         table.button_edge = TASKBAR_BOTTOM, table.button_screen = 1;
-        launcher_anchor_take();
-        kept &= !launcher.anchored;
+        ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        kept &= !launcher.anchor.anchored;
         launcher.asked_beside = true;
         table.button_w = 0;
-        launcher_anchor_take();
-        kept &= !launcher.anchored;
+        ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        kept &= !launcher.anchor.anchored;
         table.button_w = 21, table.button_edge = TASKBAR_RIGHT + 1;
-        launcher_anchor_take();
-        kept &= !launcher.anchored;
+        ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        kept &= !launcher.anchor.anchored;
         table.button_edge = TASKBAR_BOTTOM, table.button_screen = 2;
-        launcher_anchor_take();
-        kept &= !launcher.anchored;
+        ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        kept &= !launcher.anchor.anchored;
         table.button_screen = 1;
-        launcher_anchor_take();
-        kept &= launcher.anchored && launcher.edge == TASKBAR_BOTTOM && launcher.number == 1 && launcher.anchor[0] == 1944 &&
-                launcher.anchor[1] == 696 && launcher.anchor[2] == 21 && launcher.anchor[3] == 24 && launcher.screen[0] == 1920 &&
-                launcher.screen[2] == 1280 && launcher.screen[3] == 720;
+        ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        kept &= launcher.anchor.anchored && launcher.anchor.edge == TASKBAR_BOTTOM && launcher.anchor.number == 1 && launcher.anchor.button[0] == 1944 &&
+                launcher.anchor.button[1] == 696 && launcher.anchor.button[2] == 21 && launcher.anchor.button[3] == 24 && launcher.anchor.screen[0] == 1920 &&
+                launcher.anchor.screen[2] == 1280 && launcher.anchor.screen[3] == 720;
         check("launcher beside the button: what the table says is taken once, with the screen it names, and only when it says something whole", kept);
 
         // The room: a bar beside a top or bottom panel is held to what the panel leaves, a side panel's to the output.
@@ -133662,29 +133662,29 @@ static fn check_launcher_anchor(void)
         launcher.width = 560;
         launcher_changed();
         kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 4 * UI_ROW + UI_GAP2 + UI_ROW;
-        launcher.anchor[1] = 100;
-        launcher.screen[1] = 0;
+        launcher.anchor.button[1] = 100;
+        launcher.anchor.screen[1] = 0;
         kept &= launcher_most_height() == 100;
         launcher_changed();
         kept &= launcher.height == 100;
-        launcher.edge = TASKBAR_TOP;
-        launcher.anchor[1] = 0;
-        launcher.screen[1] = 0, launcher.screen[3] = 720, launcher.anchor[3] = 24;
+        launcher.anchor.edge = TASKBAR_TOP;
+        launcher.anchor.button[1] = 0;
+        launcher.anchor.screen[1] = 0, launcher.anchor.screen[3] = 720, launcher.anchor.button[3] = 24;
         kept &= launcher_most_height() == 720 - 24;
-        launcher.edge = TASKBAR_LEFT;
+        launcher.anchor.edge = TASKBAR_LEFT;
         kept &= launcher_most_height() == 1080;
-        launcher.anchored = false;
+        launcher.anchor.anchored = false;
         kept &= launcher_most_height() == 1080;
         check("launcher beside the button: its height is held to the room the panel leaves above or below it, and to the output beside a side panel", kept);
 
         // The place it asks: the placement columns of its row, from its screen's top left, with the size.
-        launcher.anchored = true;
-        launcher.edge = TASKBAR_BOTTOM;
-        launcher.number = 1;
-        launcher.anchor[0] = 1944, launcher.anchor[1] = 696, launcher.anchor[2] = 21, launcher.anchor[3] = 24;
-        launcher.screen[0] = 1920, launcher.screen[1] = 0, launcher.screen[2] = 1280, launcher.screen[3] = 720;
+        launcher.anchor.anchored = true;
+        launcher.anchor.edge = TASKBAR_BOTTOM;
+        launcher.anchor.number = 1;
+        launcher.anchor.button[0] = 1944, launcher.anchor.button[1] = 696, launcher.anchor.button[2] = 21, launcher.anchor.button[3] = 24;
+        launcher.anchor.screen[0] = 1920, launcher.anchor.screen[1] = 0, launcher.anchor.screen[2] = 1280, launcher.anchor.screen[3] = 720;
         launcher.width = 560, launcher.height = 200;
-        launcher_place();
+        ui_anchor_set(&launcher.anchor, launcher.own.table, launcher.own.row, launcher.width, launcher.height);
         kept = table.place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table.place_x[3] == 24 && table.place_y[3] == 496 &&
                table.place_width[3] == 560 && table.place_height[3] == 200 && table.place_screen[3] == 1;
         check("launcher beside the button: it asks for its place and size as a placement, counted from its screen's top left", kept);
@@ -133703,12 +133703,12 @@ static fn check_launcher_anchor(void)
         launcher.moved = false;
         launcher_changed();
         kept &= !launcher.moved;
-        launcher.edge = TASKBAR_TOP;
+        launcher.anchor.edge = TASKBAR_TOP;
         string_copy_bounded((string_address)launcher.text, (string_address) "zzzz", sizeof(launcher.text));
         launcher_changed();
         kept &= !launcher.moved;
-        launcher.edge = TASKBAR_BOTTOM;
-        launcher.anchored = false;
+        launcher.anchor.edge = TASKBAR_BOTTOM;
+        launcher.anchor.anchored = false;
         launcher.text[0] = 0;
         launcher_changed();
         kept &= !launcher.moved;
