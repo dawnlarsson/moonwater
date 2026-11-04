@@ -56,6 +56,14 @@ M = [
     ("argN matches an object path", "(r->arg_mode[k] != 1 && m->signature[k] != 's')", "(0)"),
     ("a unique name with a leading zero", "name[3] < '1' || name[3] > '9'", "name[3] < '0' || name[3] > '9'"),
     ("the trace keeps a client's control bytes", "line[k] = '?';", "(void)k;"),
+    # ---- the names' table ----
+    ("a name released stays in its bucket", "        if (*link >= 0)\n                *link = n->next;", "        (void)link;"),
+    ("a name made in the wrong bucket", "        dbus.bucket[hash & (DBUS_NAME_BUCKETS - 1)] = (short)(n - dbus.name);",
+     "        dbus.bucket[(hash + 1) & (DBUS_NAME_BUCKETS - 1)] = (short)(n - dbus.name);"),
+    ("the name found last asked though it was released", "if (n && n->used && dbus_equal(n->text, name))", "if (n && dbus_equal(n->text, name))"),
+    ("the table only as large as it was", "#define DBUS_NAMES (DBUS_CLIENTS * DBUS_NAMES_PER + 1)", "#define DBUS_NAMES 256"),
+    ("the rules looked through stop one short", "for (long k = 0; k < c->rules; k++)", "for (long k = 0; k + 1 < c->rules; k++)"),
+    ("a rule removed leaves the count", "                        while (from->rules > 0 && !from->rule[from->rules - 1].used)\n                                from->rules--;", ""),
     # ---- the portal ----
     ("ReadAll's * wants a dot before it", "if (pattern[n - 1] != '*')", "if (n < 2 || pattern[n - 1] != '*' || pattern[n - 2] != '.')"),
     ("ReadAll's prefix one short", "if (k == n - 1)\n                        return 1;", "if (k >= n - 2)\n                        return 1;"),

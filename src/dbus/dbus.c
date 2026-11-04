@@ -58,8 +58,9 @@
 #define DBUS_OUT (2 * DBUS_MESSAGE + 16384)  // a client's output queue: what it asked for, and what others sent it
 #define DBUS_UNASKED (DBUS_STAMPED + 4096)   // the part of it others may fill unasked (their calls, signals): the largest message, stamped
 #define DBUS_STALL_MS 15000      // how long a client whose queue refused a message may go without reading
-#define DBUS_NAMES 256           // well-known names, all clients together
-#define DBUS_NAMES_PER 8
+#define DBUS_NAMES_PER 8         // well-known names one client owns
+#define DBUS_NAMES (DBUS_CLIENTS * DBUS_NAMES_PER + 1) // all together, the portal's too: room for every client's, so no uid's clients fill it for another's
+#define DBUS_NAME_BUCKETS 1024   // the names' hash table (a power of two)
 #define DBUS_RULES 64            // match rules one client holds
 #define DBUS_RULE_TEXT 1024      // the longest match rule read
 #define DBUS_PENDING_PER 64      // method calls of one client waiting for a reply
@@ -102,6 +103,7 @@ struct dbus_rule
         char sender[DBUS_NAME_TEXT], interface[DBUS_NAME_TEXT], member[64], path[128], path_namespace[128], destination[DBUS_NAME_TEXT];
         char arg[4][96];
         unsigned char arg_has, arg_mode[4]; // arg_mode: 0 the argument is the string, 1 a path of it (argNpath), 2 a name of its namespace (arg0namespace)
+        unsigned sender_hash;           // dbus_hash of sender, made once: a broadcast asks who owns it of every rule that names it
 };
 
 struct dbus_client
@@ -114,6 +116,7 @@ struct dbus_client
         long id;                                // the unique name is :1.id
         unsigned char hello, uid_ok, no_fds, want_data; // want_data: EXTERNAL was named with no data, and DATA is asked for
         long names, pending;
+        long rules;                             // rule[0, rules) holds every rule it has (a hole where one was removed): what a broadcast looks through
         char unique[16];
         struct dbus_rule rule[DBUS_RULES];
         unsigned char in[DBUS_MESSAGE + 16];
@@ -132,7 +135,9 @@ struct dbus_setting
 struct dbus_name
 {
         char text[DBUS_NAME_TEXT];
+        unsigned hash;                  // dbus_hash of text
         short owner;                    // a client's slot, DBUS_SERVICE for the service, -1 for none
+        short next;                     // the next name of its bucket, -1 for none
         unsigned char used, replaceable;
 };
 
@@ -149,6 +154,8 @@ static struct
         struct dbus_client *client[DBUS_CLIENTS];
         struct dbus_client service;     // the portal's record: no socket, a unique name and a name, its calls answered in here
         struct dbus_name name[DBUS_NAMES];
+        short bucket[DBUS_NAME_BUCKETS]; // the first name of each bucket (by its hash), -1 for none
+        short recent;                    // the name dbus_name_find found last, -1 for none (asked again only while it is used)
         struct dbus_pending pending[DBUS_PENDING];
         struct dbus_setting setting[DBUS_SETTINGS];
         long next_id, clients;
@@ -894,12 +901,81 @@ static long dbus_unique_slot(const char *name)
         return -1;
 }
 
-static struct dbus_name *dbus_name_find(const char *name)
+/*
+        The names: DBUS_NAMES of them, found by their DJB2 hash in DBUS_NAME_BUCKETS buckets, each a list through `next`.
+        A call to a well-known name, and a broadcast to every rule that names its sender, asks who owns a name; the table
+        was a scan of all of it, which at room for every client's names (1025) made a name not there, or late in it, a
+        walk of 1025 entries, a cost any client could put on every lookup by owning names. The hash is lib.c's
+        string_hash_33_length where lib.c is (a byte a shift and an add, a word at a time past eight; FNV-1a's chain of
+        multiplies made a ReadOne 12% slower), the same DJB2 in C where it is not; a rule's sender has its hash made
+        once, and a call to the portal or the bus goes to them by its name before any lookup.
+*/
+static unsigned dbus_hash(const char *s)
 {
-        for (long at = 0; at < DBUS_NAMES; at++)
-                if (dbus.name[at].used && dbus_equal(dbus.name[at].text, name))
+#if DBUS_LIBRARY
+        return (unsigned)string_hash_33_length((string_address)s).x;
+#else
+        unsigned long h = 5381;
+
+        while (*s)
+                h = (h << 5) + h + (unsigned char)*s++;
+        return (unsigned)h;
+#endif
+}
+
+static struct dbus_name *dbus_name_lookup(const char *name, unsigned hash)
+{
+        for (long at = dbus.bucket[hash & (DBUS_NAME_BUCKETS - 1)]; at >= 0; at = dbus.name[at].next)
+                if (dbus.name[at].hash == hash && dbus_equal(dbus.name[at].text, name))
                         return &dbus.name[at];
         return 0;
+}
+
+// A name by its text: the one found last is asked first (a program calls the same service again and again), then its bucket.
+static struct dbus_name *dbus_name_find(const char *name)
+{
+        struct dbus_name *n = dbus.recent >= 0 ? &dbus.name[dbus.recent] : 0;
+
+        if (n && n->used && dbus_equal(n->text, name))
+                return n;
+        n = dbus_name_lookup(name, dbus_hash(name));
+        if (n)
+                dbus.recent = (short)(n - dbus.name);
+        return n;
+}
+
+// A name made, owned by `owner`, and put in its bucket: the entry, or 0 when the table has no room.
+static struct dbus_name *dbus_name_add(const char *name, long owner, int replaceable)
+{
+        struct dbus_name *n = 0;
+        unsigned hash = dbus_hash(name);
+
+        for (long at = 0; at < DBUS_NAMES && !n; at++)
+                if (!dbus.name[at].used)
+                        n = &dbus.name[at];
+        if (!n)
+                return 0;
+        dbus_text(n->text, DBUS_NAME_TEXT, name);
+        n->hash = hash;
+        n->used = 1;
+        n->owner = (short)owner;
+        n->replaceable = (unsigned char)(replaceable != 0);
+        n->next = dbus.bucket[hash & (DBUS_NAME_BUCKETS - 1)];
+        dbus.bucket[hash & (DBUS_NAME_BUCKETS - 1)] = (short)(n - dbus.name);
+        return n;
+}
+
+// A name taken out of its bucket and freed (its text stays until the entry is made again, for the NameOwnerChanged after).
+static void dbus_name_remove(struct dbus_name *n)
+{
+        short *link = &dbus.bucket[n->hash & (DBUS_NAME_BUCKETS - 1)];
+
+        while (*link >= 0 && &dbus.name[*link] != n)
+                link = &dbus.name[*link].next;
+        if (*link >= 0)
+                *link = n->next;
+        n->used = 0;
+        n->owner = -1;
 }
 
 // The slot that owns a name (unique or well known), or -1.
@@ -1018,16 +1094,17 @@ static long dbus_arg_string(const struct dbus_message *m, long index, char *into
         return -1;
 }
 
-static int dbus_rule_sender_is(const char *wanted, long from)
+// Whether the sender a rule names is `from` (-1 for the bus): its unique name, or a well-known name it owns (by the rule's own hash of it).
+static int dbus_rule_sender_is(const struct dbus_rule *r, long from)
 {
         struct dbus_client *c = dbus_client_of(from);
         struct dbus_name *n;
 
         if (from < 0 || !c)
-                return dbus_equal(wanted, DBUS_NAME_BUS);
-        if (wanted[0] == ':')
-                return dbus_equal(wanted, c->unique);
-        n = dbus_name_find(wanted);
+                return dbus_equal(r->sender, DBUS_NAME_BUS);
+        if (r->sender[0] == ':')
+                return dbus_equal(r->sender, c->unique);
+        n = dbus_name_lookup(r->sender, r->sender_hash);
         return n && n->owner == from;
 }
 
@@ -1036,7 +1113,7 @@ static int dbus_rule_matches(const struct dbus_rule *r, long from, const struct 
 {
         if (r->type && r->type != m->type)
                 return 0;
-        if ((r->has & 1) && !dbus_rule_sender_is(r->sender, from))
+        if ((r->has & 1) && !dbus_rule_sender_is(r, from))
                 return 0;
         if ((r->has & 2) && !dbus_equal(r->interface, m->interface))
                 return 0;
@@ -1165,6 +1242,7 @@ static int dbus_rule_parse(const char *text, struct dbus_rule *r)
                 else
                         return -1;
         }
+        r->sender_hash = dbus_hash(r->sender);
         r->used = 1;
         return 0;
 }
@@ -1196,7 +1274,7 @@ static void dbus_broadcast(const unsigned char *bytes, long n, long from, const 
 
                 if (!c || !c->hello || c->dead)
                         continue;
-                for (long k = 0; k < DBUS_RULES; k++)
+                for (long k = 0; k < c->rules; k++)
                         if (c->rule[k].used && dbus_rule_matches(&c->rule[k], from, m))
                         {
                                 dbus_deliver(c, bytes, n, DBUS_UNASKED_FOR);
@@ -1328,8 +1406,7 @@ static void dbus_name_release(long slot, struct dbus_name *n)
 
         if (!n || !n->used || n->owner != slot)
                 return;
-        n->used = 0;
-        n->owner = -1;
+        dbus_name_remove(n);
         if (c && c->names > 0)
                 c->names--;
         dbus_name_changed(n->text, c ? c->unique : "", "");
@@ -1344,7 +1421,6 @@ static void dbus_name_release(long slot, struct dbus_name *n)
 static unsigned long dbus_request_name(struct dbus_client *c, const char *name, unsigned long flags)
 {
         struct dbus_name *n = dbus_name_find(name);
-        long free_at = -1;
 
         if (n)
         {
@@ -1370,15 +1446,8 @@ static unsigned long dbus_request_name(struct dbus_client *c, const char *name, 
                 dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0, DBUS_ASKED_FOR);
                 return 1;
         }
-        for (long at = 0; at < DBUS_NAMES && free_at < 0; at++)
-                if (!dbus.name[at].used)
-                        free_at = at;
-        if (free_at < 0 || c->names >= DBUS_NAMES_PER)
+        if (c->names >= DBUS_NAMES_PER || !dbus_name_add(name, c->slot, (flags & 1) != 0))
                 return 0;
-        dbus.name[free_at].used = 1;
-        dbus.name[free_at].owner = (short)c->slot;
-        dbus.name[free_at].replaceable = (flags & 1) != 0;
-        dbus_text(dbus.name[free_at].text, DBUS_NAME_TEXT, name);
         c->names++;
         dbus_name_changed(name, "", c->unique);
         dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0, DBUS_ASKED_FOR);
@@ -1636,6 +1705,8 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                                 return;
                         }
                         from->rule[free_at] = rule;
+                        if (from->rules < free_at + 1)
+                                from->rules = free_at + 1;
                 }
                 else if (found < 0)
                 {
@@ -1643,7 +1714,11 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         return;
                 }
                 else
+                {
                         from->rule[found].used = 0;
+                        while (from->rules > 0 && !from->rule[from->rules - 1].used)
+                                from->rules--;
+                }
                 dbus_reply_empty(from, m, DBUS_NAME_BUS);
                 return;
         }
@@ -2004,7 +2079,8 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                         dbus_bus_call(from, m);
                         return;
                 }
-                to = dbus_resolve(dest);
+                // the portal's name is the service's for as long as the bus runs: no lookup for the call most made
+                to = dbus_equal(dest, DBUS_NAME_PORTAL) ? DBUS_SERVICE : dbus_resolve(dest);
                 if (to == DBUS_SERVICE)
                 {
                         dbus_service_call(from, m);
@@ -2242,7 +2318,10 @@ DBUS_API int dbus_start(const struct dbus_host *host)
         dbus.host = host;
         dbus.next_id = 2;
         for (long at = 0; at < DBUS_NAMES; at++)
-                dbus.name[at].owner = -1;
+                dbus.name[at].owner = dbus.name[at].next = -1;
+        for (long at = 0; at < DBUS_NAME_BUCKETS; at++)
+                dbus.bucket[at] = -1;
+        dbus.recent = -1;
         host->random(host->context, random, 16);
         for (long k = 0; k < 16; k++)
         {
@@ -2253,9 +2332,7 @@ DBUS_API int dbus_start(const struct dbus_host *host)
         dbus.service.hello = 1;
         dbus.service.id = 1;
         dbus_text(dbus.service.unique, sizeof dbus.service.unique, ":1.1");
-        dbus.name[0].used = 1;
-        dbus.name[0].owner = DBUS_SERVICE;
-        dbus_text(dbus.name[0].text, DBUS_NAME_TEXT, DBUS_NAME_PORTAL);
+        dbus_name_add(DBUS_NAME_PORTAL, DBUS_SERVICE, 0);
         dbus.service.names = 1;
         return 0;
 }
@@ -2304,8 +2381,7 @@ DBUS_API void dbus_drop(long slot)
                 for (long at = 0; at < DBUS_NAMES; at++)
                         if (dbus.name[at].used && dbus.name[at].owner == slot)
                         {
-                                dbus.name[at].used = 0;
-                                dbus.name[at].owner = -1;
+                                dbus_name_remove(&dbus.name[at]);
                                 dbus_name_changed(dbus.name[at].text, c->unique, "");
                         }
                 for (long at = 0; at < DBUS_PENDING; at++)

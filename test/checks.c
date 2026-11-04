@@ -171042,6 +171042,19 @@ static void db_test_methods(void)
                 }
                 DBCHECK(count == 2 && bus == 1 && portal == 1 && !other, "and it is the bus and the portal once each, no client's name (%ld names)", count);
         }
+        {
+                // a broadcast looks through a client's rules up to its last: added three, removed the last two, it looks at one
+                db_rule(a, "type='signal',member='R1'");
+                db_rule(a, "type='signal',member='R2'");
+                db_rule(a, "type='signal',member='R3'");
+                db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "RemoveMatch", "s", "type='signal',member='R3'", 0);
+                db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "RemoveMatch", "s", "type='signal',member='R2'", 0);
+                db_drain(a);
+                DBCHECK(dbus.client[a]->rules == 1 && dbus.client[a]->rule[0].used, "the rules a broadcast looks through end at the last one kept (%ld)",
+                        dbus.client[a]->rules);
+                db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "RemoveMatch", "s", "type='signal',member='R1'", 0);
+                db_drain(a);
+        }
         db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", ":1.02", 0);
         DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "a unique name with a leading zero is no client's");
         db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", db_unique(b), 0);
@@ -171087,6 +171100,61 @@ static void db_test_methods(void)
         }
         dbus_drop(a);
         dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/*
+        One uid's clients, each owning all the names it may, leave room for another's (found by the sec-apps review: the
+        table held 256 names for 32 clients of 8 each, and after the clients went to 128 one uid's 96 could own all of
+        them, and RequestName was then LimitsExceeded for everyone else). The names are found by their hash: every one is
+        found again, released and taken again in its bucket.
+*/
+static void db_test_names_room(void)
+{
+        long many[DBUS_PER_UID], other, made = 0, owned = 0, found = 0;
+        struct db_seen s;
+        char name[48];
+
+        db_reset();
+        for (long k = 0; k < DBUS_PER_UID; k++)
+        {
+                many[k] = db_connect(1234);
+                if (many[k] < 0)
+                        continue;
+                made++;
+                db_hello(many[k]);
+                for (int n = 0; n < DBUS_NAMES_PER; n++)
+                {
+                        snprintf(name, sizeof name, "org.example.U%ld.N%d", k, n);
+                        db_request(many[k], name, 0);
+                }
+                while (db_find(many[k], &s, DBUS_RETURN, 0))
+                        owned += db_u32_body(&s) == 1;
+                db_drain(many[k]);
+        }
+        DBCHECK(made == DBUS_PER_UID && owned == (long)DBUS_PER_UID * DBUS_NAMES_PER, "one uid's %ld clients own %ld names, all they may", made, owned);
+        other = db_connect(1000);
+        db_hello(other);
+        db_drain(other);
+        db_request(other, "org.example.Mine", 0);
+        DBCHECK(db_find(other, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1, "and another uid's client still owns a name of its own");
+        for (long k = 0; k < DBUS_PER_UID; k += 7)
+        {
+                snprintf(name, sizeof name, "org.example.U%ld.N%d", k, (int)(k % DBUS_NAMES_PER));
+                found += dbus_name_find(name) && dbus_name_find(name)->owner == many[k];
+        }
+        DBCHECK(found == (DBUS_PER_UID + 6) / 7, "each name is found again by its hash, owned by its client (%ld)", found);
+        db_call(many[3], DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ReleaseName", "s", "org.example.U3.N3", 0);
+        db_drain(many[3]);
+        DBCHECK(!dbus_name_find("org.example.U3.N3") && dbus_name_find("org.example.U3.N2"), "a name released is gone from its bucket, and no other with it");
+        db_request(other, "org.example.U3.N3", 0);
+        DBCHECK(db_find(other, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1 && dbus_name_find("org.example.U3.N3")->owner == other,
+                "and is taken again by another");
+        for (long k = 0; k < DBUS_PER_UID; k++)
+                if (many[k] >= 0)
+                        dbus_drop(many[k]);
+        DBCHECK(dbus_name_find("org.example.Mine") && !dbus_name_find("org.example.U5.N1"), "the names of the clients gone are gone, the others' kept");
+        dbus_drop(other);
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
@@ -172275,6 +172343,15 @@ static void db_fuzz_books(void)
                         DBCHECK(0, "fuzz: client %ld counts %ld calls waiting, the table %ld", slot, c->pending, waiting);
                 if ((c->out_head > c->out_length || c->out_length > DBUS_OUT) && db_fuzz_failures++ < 5)
                         DBCHECK(0, "fuzz: client %ld's queue is [%ld, %ld)", slot, c->out_head, c->out_length);
+                {
+                        long top = 0;
+
+                        for (long k = 0; k < DBUS_RULES; k++)
+                                if (c->rule[k].used)
+                                        top = k + 1;
+                        if (c->rules != top && db_fuzz_failures++ < 5)
+                                DBCHECK(0, "fuzz: client %ld looks through %ld rules, its last is %ld", slot, c->rules, top);
+                }
         }
         for (long k = 0; k < DBUS_NAMES; k++)
                 if (dbus.name[k].used && dbus.name[k].owner != DBUS_SERVICE &&
@@ -172566,6 +172643,7 @@ int main(int argc, char **argv)
         db_test_reserved();
         db_test_allowed();
         db_test_methods();
+        db_test_names_room();
         db_test_read_all();
         db_test_trace();
         db_test_trace_room();
@@ -193403,6 +193481,23 @@ static void bd_rule(long slot, const char *rule)
         bd_drain(slot);
 }
 
+// RequestName of a name, no flags; its answer read and dropped.
+static void bd_request(long slot, const char *name)
+{
+        unsigned char call[256];
+        struct dbus_out w = {call, 0, sizeof call, 0};
+        struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "RequestName", "", DBUS_NAME_BUS, "", "su", 0, 0};
+        long body;
+
+        dbus_o_header(&w, DBUS_CALL, 0, ++bd_serial, &f);
+        body = w.length;
+        dbus_o_string(&w, name);
+        dbus_o_u32(&w, 0);
+        dbus_o_end(&w, body);
+        bd_feed(slot, call, w.length);
+        bd_drain(slot);
+}
+
 static unsigned char bd_one[512], bd_many[64 * 512], bd_echo[512], bd_answer[512], bd_signal[512], bd_dict[8192];
 static long bd_one_n, bd_many_n, bd_echo_n, bd_answer_n, bd_signal_n, bd_dict_n, bd_a, bd_b, bd_listeners[100], bd_count;
 
@@ -193477,20 +193572,7 @@ static fn bd_engine(void)
         for (int k = 0; k < 64; k++)
                 bd_many_n += bd_message(bd_many + bd_many_n, (long)sizeof bd_many - bd_many_n, DBUS_CALL, 0, DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings",
                                         "ReadOne", DBUS_NAME_PORTAL, "ss", "org.freedesktop.appearance", "color-scheme", 0);
-        {
-                unsigned char call[256];
-                struct dbus_out w = {call, 0, sizeof call, 0};
-                struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, "RequestName", "", DBUS_NAME_BUS, "", "su", 0, 0};
-                long body;
-
-                dbus_o_header(&w, DBUS_CALL, 0, ++bd_serial, &f);
-                body = w.length;
-                dbus_o_string(&w, "org.example.Echo");
-                dbus_o_u32(&w, 0);
-                dbus_o_end(&w, body);
-                bd_feed(bd_b, call, w.length);
-                bd_drain(bd_b);
-        }
+        bd_request(bd_b, "org.example.Echo");
         bd_echo_n = bd_message(bd_echo, sizeof bd_echo, DBUS_CALL, 0, "/org/example", "org.example.Echo", "Echo", "org.example.Echo", "s", "a question", 0, 0);
         reply = (long)bd_serial;
         bd_answer_n = bd_message(bd_answer, sizeof bd_answer, DBUS_RETURN, DBUS_FLAG_NO_REPLY, "", "", "", dbus.client[bd_a]->unique, "s", "an answer", 0,
@@ -193529,12 +193611,7 @@ static fn bd_engine(void)
                 bench_report("a call to a client, and its answer", bd_call, BD_TRIES, 1000, "call and answer");
         if (bd_want("parse"))
                 bench_report("a dict of 32 strings parsed", bd_parse, BD_TRIES, 1000 * (positive)bd_dict_n, "byte");
-        if (!bd_want("setting"))
-        {
-                dbus_stop();
-                return;
-        }
-        for (int sizes = 0; sizes < 3; sizes++)
+        for (int sizes = 0; sizes < 3 && bd_want("setting"); sizes++)
         {
                 long want = sizes == 0 ? 1 : sizes == 1 ? 10 : 100;
 
@@ -193548,6 +193625,35 @@ static fn bd_engine(void)
                 string_format(log, "  %p listeners:\n", (positive)want);
                 bench_report("  a signal to them      ", bd_broadcast, BD_TRIES, 100, "signal");
                 bench_report("  SettingChanged to them", bd_setting, BD_TRIES, 100, "change");
+        }
+        if (string_equals(bd_only, "full")) // a run of its own: after the listeners the table has room for 26 clients more
+        {
+                // the names as many as one uid's clients may own (96 of 8, or what the table takes), then a call to a name owned
+                // after all of them: what every lookup costs once a client has filled the table
+                long names = 0;
+
+                for (long k = 0; k < 96; k++)
+                {
+                        long slot = bd_connect();
+
+                        for (int n = 0; n < DBUS_NAMES_PER; n++)
+                        {
+                                char name[40] = "org.example.F000.N0";
+
+                                name[13] = (char)('0' + k / 100), name[14] = (char)('0' + k / 10 % 10), name[15] = (char)('0' + k % 10);
+                                name[18] = (char)('0' + n);
+                                bd_request(slot, name);
+                                names += dbus_name_find(name) != 0;
+                        }
+                }
+                bd_request(bd_b, "org.example.Late");
+                bd_echo_n = bd_message(bd_echo, sizeof bd_echo, DBUS_CALL, 0, "/org/example", "org.example.Echo", "Echo", "org.example.Late", "s", "a question", 0,
+                                       0);
+                reply = (long)bd_serial;
+                bd_answer_n = bd_message(bd_answer, sizeof bd_answer, DBUS_RETURN, DBUS_FLAG_NO_REPLY, "", "", "", dbus.client[bd_a]->unique, "s", "an answer", 0,
+                                         (unsigned long)reply);
+                string_format(log, "  %p names in the table:\n", (positive)names + 2);
+                bench_report("  a call to the last name, and its answer", bd_call, BD_TRIES, 1000, "call and answer");
         }
         dbus_stop();
 }
@@ -193747,7 +193853,8 @@ b32 main(void)
 
         bd_only = only;
 
-        if (bd_agree())
+        // the library side against its C first, but for a row timed alone (whose counts it would only dilute)
+        if ((!only[0] || string_equals(only, "loops") || string_equals(only, "engine")) && bd_agree())
         {
                 log_flush();
                 return 1;
