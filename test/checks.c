@@ -162963,6 +162963,1466 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_wayland */
 
+#ifdef CHECK_audio_mix
+/*
+        CHECK_audio_mix: the audio mixing core (src/audio/mix.c) against references written here, apart from it: sin and
+        the Bessel function against libm, every PCM format against its definition (G.711 from the standard's own
+        formula), the ring against a model of bytes, the channel map, mixing of known sines exact where the arithmetic is
+        integer (sums, clips, a volume of an eighth, the master gain) and to a stated bound where it is not, the ramps (no
+        step of a gain greater than its slope, every length), the fade of a stream that runs out, and the resampler's
+        quality (error against the sine itself at the output's times, gain, rejection above the lower Nyquist rate, the
+        same bits however the input is cut) and its speed. A fixed-seed run of random voices holds the invariants
+        (nothing but finite numbers in range; every ring and table taken is given back).
+
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_audio_mix test/checks.c -lm
+*/
+#include <math.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "../src/audio/mix.c"
+
+static unsigned au_checks, au_failures;
+
+#define AUCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                au_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        au_failures++;                                                                                \
+                        if (au_failures < 60)                                                                         \
+                        {                                                                                             \
+                                printf("  FAIL: ");                                                                   \
+                                printf(__VA_ARGS__);                                                                  \
+                                printf(" (line %d)\n", __LINE__);                                                     \
+                        }                                                                                             \
+                }                                                                                                     \
+        } while (0)
+
+static unsigned long long au_state = 0x9e3779b97f4a7c15ull;
+
+static unsigned long au_rand(void)
+{
+        au_state ^= au_state >> 12;
+        au_state ^= au_state << 25;
+        au_state ^= au_state >> 27;
+        return (unsigned long)(au_state * 0x2545f4914f6cdd1dull >> 11);
+}
+
+static double au_clock(void)
+{
+        struct timespec at;
+
+        clock_gettime(CLOCK_MONOTONIC, &at);
+        return (double)at.tv_sec + (double)at.tv_nsec * 1e-9;
+}
+
+/* ---- numbers ---- */
+
+static void au_test_numbers(void)
+{
+        double worst = 0, sworst = 0;
+
+        for (double x = -120; x < 120; x += 0.0137)
+        {
+                double e = fabs(audio_sin(x) - sin(x));
+
+                if (e > worst)
+                        worst = e;
+        }
+        AUCHECK(worst < 1e-12, "audio_sin is off libm's by %g", worst);
+        for (double x = 1e-12; x < 1e6; x *= 1.37)
+        {
+                double e = fabs(audio_sqrt(x) - sqrt(x)) / sqrt(x);
+
+                if (e > sworst)
+                        sworst = e;
+        }
+        AUCHECK(sworst < 1e-14, "audio_sqrt is off libm's by %g (relative)", sworst);
+        AUCHECK(audio_sqrt(0) == 0 && audio_sqrt(-4) == 0, "audio_sqrt of nothing and of a negative is nothing");
+        // I0 at points from its series, known to ten places.
+        AUCHECK(fabs(audio_bessel0(0) - 1.0) < 1e-15, "I0(0)");
+        AUCHECK(fabs(audio_bessel0(1) - 1.2660658777520084) < 1e-14, "I0(1) is %.16g", audio_bessel0(1));
+        AUCHECK(fabs(audio_bessel0(5) / 27.239871823604442 - 1) < 1e-14, "I0(5) is %.16g", audio_bessel0(5));
+        AUCHECK(fabs(audio_bessel0(10) / 2815.716628466254 - 1) < 1e-14, "I0(10) is %.16g", audio_bessel0(10));
+}
+
+static void au_test_volume(void)
+{
+        AUCHECK(audio_volume_gain(0) == 0.0f, "volume 0 is silence");
+        AUCHECK(audio_volume_gain(0x10000) == 1.0f, "100%% is a gain of one");
+        AUCHECK(audio_volume_gain(0x8000) == 0.125f, "50%% is an eighth (the cube), not a half");
+        AUCHECK(audio_volume_gain(0x20000) == 8.0f, "200%% is eight");
+        AUCHECK(audio_volume_gain(0xffffffffu) == 8.0f, "past the most is the most");
+        for (unsigned long v = 0; v <= 0x20000; v += 997)
+        {
+                double r = (double)v / 65536.0, want = r * r * r;
+
+                AUCHECK(fabs((double)audio_volume_gain(v) - want) <= want * 2e-7 + 1e-30, "volume %lu: %g against %g", v,
+                        (double)audio_volume_gain(v), want);
+        }
+}
+
+/* ---- formats ---- */
+
+// G.711 from the standard's formulas, not the decoder's: the 13- and 14-bit magnitudes of the tables, in 16-bit steps.
+static double au_alaw_reference(int code)
+{
+        int a = code ^ 0x55, e = (a >> 4) & 7, m = a & 15;
+        long magnitude = e == 0 ? 2 * m + 1 : (long)(2 * m + 33) << (e - 1);
+
+        return (double)((a & 0x80) ? magnitude * 8 : -magnitude * 8) / 32768.0;
+}
+
+static double au_ulaw_reference(int code)
+{
+        int u = ~code & 0xff, e = (u >> 4) & 7, m = u & 15;
+        long magnitude = (((long)(2 * m + 33)) << e) - 33;
+
+        return (double)((u & 0x80) ? -magnitude * 4 : magnitude * 4) / 32768.0;
+}
+
+static void au_test_laws(void)
+{
+        float plane[1], *planes[1] = {plane};
+        unsigned char byte;
+
+        audio_init();
+        for (int code = 0; code < 256; code++)
+        {
+                byte = (unsigned char)code;
+                audio_decode(AUDIO_FORMAT_ALAW, &byte, 1, 1, planes);
+                AUCHECK((double)plane[0] == au_alaw_reference(code), "A-law %02x: %g against %g", code, (double)plane[0],
+                        au_alaw_reference(code));
+                audio_decode(AUDIO_FORMAT_ULAW, &byte, 1, 1, planes);
+                AUCHECK((double)plane[0] == au_ulaw_reference(code), "mu-law %02x: %g against %g", code, (double)plane[0],
+                        au_ulaw_reference(code));
+        }
+        // The known ends of the two laws: 32124 and 32256 in 16 bits, and the byte that is silence is silence.
+        byte = 0x00;
+        audio_decode(AUDIO_FORMAT_ULAW, &byte, 1, 1, planes);
+        AUCHECK(plane[0] == -32124.0f / 32768.0f, "mu-law 0x00 is -32124");
+        byte = 0xaa;
+        audio_decode(AUDIO_FORMAT_ALAW, &byte, 1, 1, planes);
+        AUCHECK(plane[0] == 32256.0f / 32768.0f, "A-law 0xaa is +32256");
+        byte = audio_format_silence(AUDIO_FORMAT_ULAW);
+        audio_decode(AUDIO_FORMAT_ULAW, &byte, 1, 1, planes);
+        AUCHECK(plane[0] == 0.0f, "the mu-law silence is zero");
+        byte = audio_format_silence(AUDIO_FORMAT_ALAW);
+        audio_decode(AUDIO_FORMAT_ALAW, &byte, 1, 1, planes);
+        AUCHECK(plane[0] > 0.0f && plane[0] < 0.0003f, "the A-law silence is its smallest step");
+        byte = audio_format_silence(AUDIO_FORMAT_U8);
+        audio_decode(AUDIO_FORMAT_U8, &byte, 1, 1, planes);
+        AUCHECK(plane[0] == 0.0f, "the unsigned 8-bit silence is zero");
+}
+
+static void au_put_le(unsigned char *at, long long value, int bytes)
+{
+        for (int i = 0; i < bytes; i++)
+                at[i] = (unsigned char)(value >> (8 * i));
+}
+
+static void au_put_be(unsigned char *at, long long value, int bytes)
+{
+        for (int i = 0; i < bytes; i++)
+                at[bytes - 1 - i] = (unsigned char)(value >> (8 * i));
+}
+
+// Samples as integers of a format's own width, written the long way here and read by the core.
+static void au_test_formats(void)
+{
+        static const struct
+        {
+                int format, bytes, big, bits;
+        } kinds[] = {{AUDIO_FORMAT_S16LE, 2, 0, 16},   {AUDIO_FORMAT_S16BE, 2, 1, 16},   {AUDIO_FORMAT_S24LE, 3, 0, 24},
+                     {AUDIO_FORMAT_S24BE, 3, 1, 24},   {AUDIO_FORMAT_S24_32LE, 4, 0, 24}, {AUDIO_FORMAT_S24_32BE, 4, 1, 24},
+                     {AUDIO_FORMAT_S32LE, 4, 0, 32},   {AUDIO_FORMAT_S32BE, 4, 1, 32}};
+        static unsigned char bytes[AUDIO_BLOCK * 2 * 4];
+        static float left[AUDIO_BLOCK], right[AUDIO_BLOCK];
+        float *planes[2] = {left, right};
+
+        for (unsigned k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+        {
+                long long low = -(1ll << (kinds[k].bits - 1)), span = 1ll << kinds[k].bits;
+                long long want[2][AUDIO_BLOCK];
+
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                        for (int c = 0; c < 2; c++)
+                        {
+                                long long v = i < 4 ? (i == 0 ? low : i == 1 ? -low - 1 : i == 2 ? 0 : -1) : low + (long long)(au_rand() % (unsigned long)span);
+                                unsigned char *at = bytes + (i * 2 + c) * kinds[k].bytes;
+
+                                want[c][i] = v;
+                                if (kinds[k].format == AUDIO_FORMAT_S24_32LE || kinds[k].format == AUDIO_FORMAT_S24_32BE)
+                                        // The byte above the 24 bits is whatever; the sample is the low three.
+                                        v = (v & 0xffffff) | ((long long)(au_rand() & 0xff) << 24);
+                                if (kinds[k].big)
+                                        au_put_be(at, v, kinds[k].bytes);
+                                else
+                                        au_put_le(at, v, kinds[k].bytes);
+                        }
+                audio_decode(kinds[k].format, bytes, AUDIO_BLOCK, 2, planes);
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                        for (int c = 0; c < 2; c++)
+                        {
+                                float got = c ? right[i] : left[i], expect = (float)((double)want[c][i] / (double)span * 2.0);
+
+                                AUCHECK(got == expect, "format %d sample %ld/%d: %.9g against %.9g", kinds[k].format, i, c,
+                                        (double)got, (double)expect);
+                        }
+        }
+        // Unsigned 8 bits, and floats of both orders, including the ones a program must not be trusted with.
+        for (int i = 0; i < 256; i++)
+                bytes[i] = (unsigned char)i;
+        audio_decode(AUDIO_FORMAT_U8, bytes, 256, 1, planes);
+        for (int i = 0; i < 256; i++)
+                AUCHECK(left[i] == (float)(i - 128) / 128.0f, "u8 %d", i);
+        {
+                static const float samples[] = {0.0f, 1.0f, -1.0f, 0.5f, 1e-30f, 100.0f, -100.0f, 3.4e38f, -3.4e38f, 0.0f / 0.0f, 1.0f / 0.0f, -1.0f / 0.0f};
+                unsigned count = sizeof(samples) / sizeof(samples[0]);
+
+                for (unsigned i = 0; i < count; i++)
+                {
+                        unsigned int bits;
+
+                        memcpy(&bits, samples + i, 4);
+                        au_put_le(bytes + i * 4, bits, 4);
+                        au_put_be(bytes + 64 + i * 4, bits, 4);
+                }
+                audio_decode(AUDIO_FORMAT_F32LE, bytes, count, 1, planes);
+                audio_decode(AUDIO_FORMAT_F32BE, bytes + 64, count, 1, planes + 1);
+                for (unsigned i = 0; i < count; i++)
+                {
+                        float s = samples[i], expect = s != s ? 0.0f : s > 16.0f ? 16.0f : s < -16.0f ? -16.0f : s;
+
+                        AUCHECK(left[i] == expect, "float %u: %g gave %g, wanted %g", i, (double)s, (double)left[i], (double)expect);
+                        AUCHECK(right[i] == expect, "big-endian float %u", i);
+                        AUCHECK(left[i] == left[i] && fabsf(left[i]) <= 16.0f, "a program's float %u is a number in bounds", i);
+                }
+        }
+}
+
+static void au_test_encode(void)
+{
+        static unsigned char out[AUDIO_BLOCK * 8 * 4];
+        static float left[AUDIO_BLOCK], right[AUDIO_BLOCK];
+        static float planes_in[AUDIO_BLOCK];
+        float *plane_ptr[1] = {planes_in};
+
+        // Every 16-bit sample goes through the float bus and comes out itself.
+        for (long base = 0; base < 65536; base += AUDIO_BLOCK)
+        {
+                static unsigned char in[AUDIO_BLOCK * 2];
+
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                        au_put_le(in + i * 2, base + i - 32768, 2);
+                audio_decode(AUDIO_FORMAT_S16LE, in, AUDIO_BLOCK, 1, plane_ptr);
+                audio_encode(AUDIO_FORMAT_S16LE, out, AUDIO_BLOCK, 1, planes_in, planes_in);
+                AUCHECK(!memcmp(in, out, AUDIO_BLOCK * 2), "16-bit samples from %ld do not come out as they went in", base - 32768);
+        }
+        // 24 bits: all edges and a million drawn, through S24LE and S24_32LE.
+        for (int round = 0; round < 2048; round++)
+        {
+                static unsigned char in[AUDIO_BLOCK * 3], back[AUDIO_BLOCK * 4];
+
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                {
+                        long long v = round == 0 && i < 4 ? (i == 0 ? -8388608 : i == 1 ? 8388607 : i == 2 ? 0 : -1)
+                                                          : -8388608 + (long long)(au_rand() % 16777216ul);
+
+                        au_put_le(in + i * 3, v, 3);
+                }
+                audio_decode(AUDIO_FORMAT_S24LE, in, AUDIO_BLOCK, 1, plane_ptr);
+                audio_encode(AUDIO_FORMAT_S24LE, out, AUDIO_BLOCK, 1, planes_in, planes_in);
+                AUCHECK(!memcmp(in, out, AUDIO_BLOCK * 3), "24-bit samples round %d", round);
+                audio_encode(AUDIO_FORMAT_S24_32LE, back, AUDIO_BLOCK, 1, planes_in, planes_in);
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                {
+                        int word, expect = (int)((unsigned)in[i * 3] | (unsigned)in[i * 3 + 1] << 8 | (unsigned)in[i * 3 + 2] << 16);
+
+                        expect = (int)((unsigned)expect << 8) >> 8;
+                        memcpy(&word, back + i * 4, 4);
+                        AUCHECK(word == expect, "24-in-32 sample %ld of round %d: %d against %d", i, round, word, expect);
+                }
+        }
+        // 32 bits: the float has 24 of them, so the sample is within 64.
+        for (int round = 0; round < 64; round++)
+        {
+                static unsigned char in[AUDIO_BLOCK * 4];
+
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                        au_put_le(in + i * 4, (long long)(int)(unsigned)au_rand(), 4);
+                audio_decode(AUDIO_FORMAT_S32LE, in, AUDIO_BLOCK, 1, plane_ptr);
+                audio_encode(AUDIO_FORMAT_S32LE, out, AUDIO_BLOCK, 1, planes_in, planes_in);
+                for (long i = 0; i < AUDIO_BLOCK; i++)
+                {
+                        int a, b;
+
+                        memcpy(&a, in + i * 4, 4);
+                        memcpy(&b, out + i * 4, 4);
+                        AUCHECK(llabs((long long)a - b) <= 64 || (a > 2147483000 && b == 2147483647), "32-bit sample %d came out %d", a, b);
+                }
+        }
+        // Rounding is to even, clipping to the integer's ends, a float output is held to one.
+        left[0] = 0.5f / 32768.0f;
+        left[1] = 1.5f / 32768.0f;
+        left[2] = -0.5f / 32768.0f;
+        left[3] = -1.5f / 32768.0f;
+        left[4] = 2.5f / 32768.0f;
+        left[5] = 1.0f;
+        left[6] = -1.0f;
+        left[7] = 1.7f;
+        left[8] = -1.7f;
+        left[9] = 0.0f;
+        audio_encode(AUDIO_FORMAT_S16LE, out, 10, 1, left, left);
+        {
+                short want[10] = {0, 2, 0, -2, 2, 32767, -32768, 32767, -32768, 0}, got[10];
+
+                memcpy(got, out, sizeof(got));
+                for (int i = 0; i < 10; i++)
+                        AUCHECK(got[i] == want[i], "16-bit rounding %d: %d against %d", i, got[i], want[i]);
+        }
+        audio_encode(AUDIO_FORMAT_F32LE, out, 10, 1, left, left);
+        {
+                float got[10];
+
+                memcpy(got, out, sizeof(got));
+                AUCHECK(got[7] == 1.0f && got[8] == -1.0f && got[5] == 1.0f && got[1] == left[1], "the float output is held to one");
+        }
+        // Channels: a pair on the first two, silence after, the mean on a mono card.
+        for (long i = 0; i < 4; i++)
+        {
+                left[i] = 0.25f * (float)(i + 1);
+                right[i] = -0.125f * (float)(i + 1);
+        }
+        audio_encode(AUDIO_FORMAT_F32LE, out, 4, 6, left, right);
+        for (long i = 0; i < 4; i++)
+        {
+                float frame[6];
+
+                memcpy(frame, out + i * 24, 24);
+                AUCHECK(frame[0] == left[i] && frame[1] == right[i] && frame[2] == 0 && frame[3] == 0 && frame[4] == 0 && frame[5] == 0,
+                        "six channels, frame %ld", i);
+        }
+        audio_encode(AUDIO_FORMAT_F32LE, out, 4, 1, left, right);
+        for (long i = 0; i < 4; i++)
+        {
+                float one;
+
+                memcpy(&one, out + i * 4, 4);
+                AUCHECK(one == (left[i] + right[i]) * 0.5f, "a mono card gets the mean, frame %ld", i);
+        }
+}
+
+/* ---- the ring ---- */
+
+static void au_test_ring(void)
+{
+        static unsigned char memory[777 * 3], model[1 << 16];
+        static const long sizes[] = {777 * 3, 4 * 3, 3};
+        struct audio_ring ring;
+
+        for (unsigned s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++)
+        {
+                unsigned long frame = 3, size = (unsigned long)sizes[s];
+                unsigned long read = 0, write = 0, end = 0;
+
+                audio_ring_open(&ring, memory, size, frame, 0x11);
+                memset(model, 0, sizeof(model));
+                for (int step = 0; step < 40000; step++)
+                {
+                        unsigned long op = au_rand() % 6, n = (au_rand() % 40) * frame;
+                        unsigned char chunk[240];
+
+                        if (op < 2)
+                        {
+                                unsigned long room = size - (write - read), took, want = n < room ? n : room;
+
+                                for (unsigned long i = 0; i < n; i++)
+                                        chunk[i] = (unsigned char)au_rand();
+                                took = audio_ring_put(&ring, chunk, n);
+                                AUCHECK(took == want, "put %lu at room %lu took %lu", n, room, took);
+                                for (unsigned long i = 0; i < took; i++)
+                                        model[(write + i) % sizeof(model)] = chunk[i];
+                                write += took;
+                                if (write > end)
+                                        end = write;
+                        }
+                        else if (op == 2)
+                        {
+                                unsigned long fill = end - read, drop = n < fill ? n : fill;
+
+                                // What is read is what the model says.
+                                audio_ring_copy_out(&ring, read, chunk, drop < sizeof(chunk) ? drop : sizeof(chunk));
+                                for (unsigned long i = 0; i < drop && i < sizeof(chunk); i++)
+                                        AUCHECK(chunk[i] == model[(read + i) % sizeof(model)], "the byte at %lu", read + i);
+                                audio_ring_drop(&ring, drop);
+                                read += drop;
+                                if (write < read)
+                                        write = read;
+                        }
+                        else if (op == 3)
+                        {
+                                long mode = (long)(au_rand() % 5) - 0;
+                                long long offset = ((long long)(au_rand() % 61) - 30) * (long long)frame;
+                                long long base = mode == 0 ? (long long)write : mode == 2 ? (long long)read : mode == 3 ? (long long)end : 0;
+
+                                if (mode == 1)
+                                        offset += (long long)read; // an absolute place, near where the stream is
+                                long long target = base + offset;
+                                int good = mode <= 3 && (mode != 1 || offset >= 0) && target >= (long long)read &&
+                                           target - (long long)read <= (long long)size;
+                                int got = audio_ring_seek(&ring, mode, offset);
+
+                                AUCHECK((got == 0) == good, "seek mode %ld by %lld (read %lu write %lu end %lu): %d", mode, offset, read, write, end, got);
+                                if (good)
+                                {
+                                        for (unsigned long i = end; i < (unsigned long)target; i++)
+                                                model[i % sizeof(model)] = 0x11;
+                                        if ((unsigned long)target > end)
+                                                end = (unsigned long)target;
+                                        write = (unsigned long)target;
+                                }
+                        }
+                        else if (op == 4 && au_rand() % 16 == 0)
+                        {
+                                audio_ring_flush(&ring);
+                                read = write = end = end > write ? end : write;
+                        }
+                        AUCHECK(ring.read == read && ring.write == write && ring.end == end, "counts %lu %lu %lu against %lu %lu %lu", ring.read,
+                                ring.write, ring.end, read, write, end);
+                        AUCHECK(audio_ring_fill(&ring) == end - read && audio_ring_room(&ring) == size - (write - read), "fill and room");
+                }
+        }
+        // A frame off the grid and a hostile offset are refused.
+        audio_ring_open(&ring, memory, sizeof(memory), 3, 0);
+        AUCHECK(audio_ring_seek(&ring, 0, 1) < 0 && audio_ring_seek(&ring, 0, 1ll << 62) < 0 && audio_ring_seek(&ring, 1, -3) < 0 &&
+                    audio_ring_seek(&ring, 7, 0) < 0 && audio_ring_seek(&ring, -1, 0) < 0,
+                "seeks off the grid or out of bounds are refused");
+        AUCHECK(audio_ring_seek(&ring, 0, 30) == 0 && audio_ring_fill(&ring) == 30, "a seek forward makes silence to play");
+}
+
+/* ---- the channel map ---- */
+
+static void au_test_remix(void)
+{
+        float m[2][AUDIO_CHANNELS_MAX];
+        signed char map6[6] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT, AUDIO_POSITION_FRONT_CENTER, AUDIO_POSITION_LFE,
+                               AUDIO_POSITION_REAR_LEFT, AUDIO_POSITION_REAR_RIGHT};
+        signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT}, swapped[2] = {AUDIO_POSITION_FRONT_RIGHT, AUDIO_POSITION_FRONT_LEFT};
+        signed char mono[1] = {AUDIO_POSITION_MONO}, aux[4] = {AUDIO_POSITION_AUX0, AUDIO_POSITION_AUX0 + 1, AUDIO_POSITION_AUX0 + 2, AUDIO_POSITION_AUX0 + 3};
+        double sum = 1.0 + 0.7071067811865476 * 2;
+
+        AUCHECK(audio_remix_build(m, 1, mono) == 0 && m[0][0] == 1.0f && m[1][0] == 1.0f, "mono goes to both");
+        AUCHECK(audio_remix_build(m, 2, stereo) == 1 && m[0][0] == 1.0f && m[1][1] == 1.0f && m[0][1] == 0 && m[1][0] == 0, "stereo is straight");
+        AUCHECK(audio_remix_build(m, 2, swapped) == 0 && m[0][1] == 1.0f && m[1][0] == 1.0f && m[0][0] == 0, "swapped stereo is swapped");
+        audio_remix_build(m, 6, map6);
+        AUCHECK(fabs((double)m[0][0] - 1.0 / sum) < 1e-6 && fabs((double)m[0][2] - 0.7071067811865476 / sum) < 1e-6 &&
+                    fabs((double)m[0][4] - 0.7071067811865476 / sum) < 1e-6 && m[0][1] == 0 && m[0][3] == 0 && m[0][5] == 0,
+                "5.1 left row: %g %g %g %g %g %g", (double)m[0][0], (double)m[0][1], (double)m[0][2], (double)m[0][3], (double)m[0][4], (double)m[0][5]);
+        AUCHECK(fabs((double)m[1][1] - 1.0 / sum) < 1e-6 && fabs((double)m[1][2] - 0.7071067811865476 / sum) < 1e-6 &&
+                    fabs((double)m[1][5] - 0.7071067811865476 / sum) < 1e-6 && m[1][0] == 0 && m[1][3] == 0 && m[1][4] == 0,
+                "5.1 right row");
+        for (int o = 0; o < 2; o++)
+        {
+                double total = 0;
+
+                for (int c = 0; c < 6; c++)
+                        total += (double)m[o][c];
+                AUCHECK(total <= 1.0000001, "a remix row adds to no more than one: %g", total);
+        }
+        audio_remix_build(m, 4, aux);
+        AUCHECK(m[0][0] > 0 && m[1][1] > 0 && m[0][2] > 0 && m[1][3] > 0 && m[0][1] == 0 && m[1][0] == 0, "unknown positions alternate by number");
+        {
+                signed char rc[3] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT, AUDIO_POSITION_REAR_CENTER};
+
+                audio_remix_build(m, 3, rc);
+                AUCHECK(fabs((double)m[0][2] / (double)m[0][0] - 0.5) < 1e-6 && m[0][2] == m[1][2], "a rear centre is a half, to both");
+        }
+}
+
+/* ---- mixing ---- */
+
+static struct audio_sink au_sink;
+static struct audio_voice au_voice[3];
+static unsigned char au_memory[3][1 << 17];
+
+static void au_steady(struct audio_voice *voice)
+{
+        voice->now[0] = voice->target[0];
+        voice->now[1] = voice->target[1];
+}
+
+static long au_even(long long numerator, long long denominator)
+{
+        double q = (double)numerator / (double)denominator;
+
+        return (long)rint(q);
+}
+
+static long au_clip16(long v)
+{
+        return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+}
+
+// Two voices of sines at 48000, in whole blocks of an odd length, against integer arithmetic.
+static void au_test_mix_exact(void)
+{
+        static short a[2 * 4800], b[2 * 4800];
+        static unsigned char out[AUDIO_BLOCK * 2 * 2];
+        static const struct
+        {
+                unsigned long volume_a, volume_b;
+                long master_num, master_den; // a master gain of exactly num/den
+        } cases[] = {{0x10000, 0x10000, 1, 1}, {0x8000, 0x10000, 1, 1}, {0x10000, 0x8000, 1, 2}, {0x8000, 0x8000, 1, 1}, {0x10000, 0x10000, 1, 2}};
+
+        for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
+        {
+                long clips = 0, frames = 4800, done = 0, ga = (long)(audio_volume_gain(cases[c].volume_a) * 8.0f + 0.5f),
+                     gb = (long)(audio_volume_gain(cases[c].volume_b) * 8.0f + 0.5f);
+                long mnum = cases[c].master_num, mden = cases[c].master_den;
+
+                audio_sink_open(&au_sink, 48000, 2);
+                for (int v = 0; v < 2; v++)
+                {
+                        short *s = v ? b : a;
+
+                        for (long i = 0; i < frames; i++)
+                        {
+                                s[i * 2] = (short)rint(26000.0 * sin(2 * M_PI * (v ? 997.0 : 441.0) * (double)i / 48000.0));
+                                s[i * 2 + 1] = (short)rint(24000.0 * sin(2 * M_PI * (v ? 1333.0 : 3001.0) * (double)i / 48000.0));
+                        }
+                        AUCHECK(audio_voice_open(au_voice + v, AUDIO_FORMAT_S16LE, 2, 48000, 0, 48000, au_memory[v], sizeof(au_memory[v])) == 0, "voice opens");
+                        AUCHECK(audio_ring_put(&au_voice[v].ring, (const unsigned char *)s, (unsigned long)frames * 4) == (unsigned long)frames * 4, "the ring takes it");
+                        audio_voice_gain(au_voice + v, audio_volume_gain(v ? cases[c].volume_b : cases[c].volume_a), audio_volume_gain(v ? cases[c].volume_b : cases[c].volume_a));
+                        au_steady(au_voice + v);
+                }
+                au_sink.master_now = au_sink.master_target = (float)mnum / (float)mden;
+                while (done < frames)
+                {
+                        long n = frames - done < 241 ? frames - done : 241;
+
+                        audio_sink_begin(&au_sink, n);
+                        AUCHECK(audio_voice_mix(&au_sink, au_voice, n, 0) == n && audio_voice_mix(&au_sink, au_voice + 1, n, 0) == n, "both voices play the block");
+                        AUCHECK(audio_sink_end(&au_sink, out, AUDIO_FORMAT_S16LE, 2, n) == n * 4, "the block's bytes");
+                        for (long i = 0; i < n; i++)
+                        {
+                                int hit = 0;
+
+                                for (int ch = 0; ch < 2; ch++)
+                                {
+                                        // gain a is ga/8, gain b is gb/8, so the sum is (ga a + gb b)/8 and the master num/den.
+                                        long long total = (long long)ga * a[(done + i) * 2 + ch] + (long long)gb * b[(done + i) * 2 + ch];
+                                        long want = au_even(total * mnum, 8 * mden), unclipped = want;
+                                        short got;
+
+                                        want = au_clip16(want);
+                                        hit |= want != unclipped;
+                                        memcpy(&got, out + (i * 2 + ch) * 2, 2);
+                                        AUCHECK(got == want, "case %u frame %ld channel %d: %d against %ld", c, done + i, ch, got, want);
+                                }
+                                clips += hit;
+                        }
+                        done += n;
+                }
+                AUCHECK((long)au_sink.clips == clips, "case %u counted %lu clipped frames, %ld are", c, au_sink.clips, clips);
+                if (c == 0)
+                        AUCHECK(clips > 0, "the first case exercises the clip");
+                AUCHECK(audio_ring_fill(&au_voice[0].ring) == 0 && audio_ring_fill(&au_voice[1].ring) == 0, "the rings are empty");
+        }
+}
+
+// Every format through the whole chain to a float output, against the format's definition.
+static void au_test_mix_formats(void)
+{
+        static unsigned char in[AUDIO_BLOCK * 8 * 4], out[AUDIO_BLOCK * 2 * 4];
+        static const int formats[] = {AUDIO_FORMAT_U8,    AUDIO_FORMAT_ALAW,    AUDIO_FORMAT_ULAW,   AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S16BE,
+                                      AUDIO_FORMAT_F32LE, AUDIO_FORMAT_F32BE,   AUDIO_FORMAT_S32LE,  AUDIO_FORMAT_S32BE, AUDIO_FORMAT_S24LE,
+                                      AUDIO_FORMAT_S24BE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S24_32BE};
+        static float expect[2][AUDIO_BLOCK];
+
+        for (unsigned f = 0; f < sizeof(formats) / sizeof(formats[0]); f++)
+                for (int channels = 1; channels <= 2; channels++)
+                {
+                        long bytes = audio_format_bytes(formats[f]), n = 300;
+                        float *planes[2] = {expect[0], expect[1]};
+                        struct audio_voice *v = au_voice;
+
+                        for (long i = 0; i < n * channels * bytes; i++)
+                                in[i] = (unsigned char)au_rand();
+                        if (formats[f] == AUDIO_FORMAT_F32LE || formats[f] == AUDIO_FORMAT_F32BE)
+                                for (long i = 0; i < n * channels; i++)
+                                {
+                                        float x = (float)(((double)(au_rand() % 20000) - 10000.0) / 10000.0);
+                                        unsigned int bits;
+
+                                        memcpy(&bits, &x, 4);
+                                        if (formats[f] == AUDIO_FORMAT_F32BE)
+                                                au_put_be(in + i * 4, bits, 4);
+                                        else
+                                                au_put_le(in + i * 4, bits, 4);
+                                }
+                        audio_sink_open(&au_sink, 48000, 2);
+                        AUCHECK(audio_voice_open(v, formats[f], channels, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0])) == 0, "voice %d opens", formats[f]);
+                        audio_ring_put(&v->ring, in, (unsigned long)(n * channels * bytes));
+                        audio_decode(formats[f], in, n, channels, planes);
+                        au_steady(v);
+                        audio_sink_begin(&au_sink, n);
+                        AUCHECK(audio_voice_mix(&au_sink, v, n, 0) == n, "format %d plays", formats[f]);
+                        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, n);
+                        for (long i = 0; i < n; i++)
+                        {
+                                float l, r, want_l = expect[0][i], want_r = channels == 1 ? expect[0][i] : expect[1][i];
+
+                                memcpy(&l, out + i * 8, 4);
+                                memcpy(&r, out + i * 8 + 4, 4);
+                                want_l = want_l > 1.0f ? 1.0f : want_l < -1.0f ? -1.0f : want_l;
+                                want_r = want_r > 1.0f ? 1.0f : want_r < -1.0f ? -1.0f : want_r;
+                                AUCHECK(l == want_l && r == want_r, "format %d, %d channels, frame %ld: %g %g against %g %g", formats[f], channels, i, (double)l,
+                                        (double)r, (double)want_l, (double)want_r);
+                        }
+                        audio_voice_close(v);
+                }
+}
+
+// 5.1 down to the pair, against the matrix.
+static void au_test_mix_remix(void)
+{
+        static float in[AUDIO_BLOCK * 6];
+        static unsigned char out[AUDIO_BLOCK * 8];
+        signed char map6[6] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT, AUDIO_POSITION_FRONT_CENTER, AUDIO_POSITION_LFE,
+                               AUDIO_POSITION_REAR_LEFT, AUDIO_POSITION_REAR_RIGHT};
+        double sum = 1.0 + 0.7071067811865476 * 2, r = 0.7071067811865476;
+        long n = 400;
+
+        for (long i = 0; i < n; i++)
+                for (int c = 0; c < 6; c++)
+                        in[i * 6 + c] = (float)(0.1 * sin(0.01 * (double)(i * (c + 1))) + 0.01 * (double)c);
+        audio_sink_open(&au_sink, 48000, 2);
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 6, 48000, map6, 48000, au_memory[0], sizeof(au_memory[0])) == 0, "6 channels open");
+        audio_ring_put(&au_voice->ring, (const unsigned char *)in, (unsigned long)n * 24);
+        au_steady(au_voice);
+        audio_sink_begin(&au_sink, n);
+        AUCHECK(audio_voice_mix(&au_sink, au_voice, n, 0) == n, "5.1 plays");
+        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, n);
+        for (long i = 0; i < n; i++)
+        {
+                float l, rr;
+                double want_l = ((double)in[i * 6] + r * (double)in[i * 6 + 2] + r * (double)in[i * 6 + 4]) / sum,
+                       want_r = ((double)in[i * 6 + 1] + r * (double)in[i * 6 + 2] + r * (double)in[i * 6 + 5]) / sum;
+
+                memcpy(&l, out + i * 8, 4);
+                memcpy(&rr, out + i * 8 + 4, 4);
+                AUCHECK(fabs((double)l - want_l) < 1e-6 && fabs((double)rr - want_r) < 1e-6, "5.1 frame %ld: %g %g against %g %g", i, (double)l, (double)rr, want_l, want_r);
+        }
+        audio_voice_close(au_voice);
+        // A mono stream is both channels, a stream's balance is its two gains.
+        audio_sink_open(&au_sink, 48000, 2);
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0])) == 0, "mono opens");
+        audio_ring_put(&au_voice->ring, (const unsigned char *)in, 400 * 4);
+        audio_voice_gain(au_voice, 1.0f, 0.5f);
+        au_steady(au_voice);
+        audio_sink_begin(&au_sink, 400);
+        audio_voice_mix(&au_sink, au_voice, 400, 0);
+        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 400);
+        for (long i = 0; i < 400; i++)
+        {
+                float l, rr;
+
+                memcpy(&l, out + i * 8, 4);
+                memcpy(&rr, out + i * 8 + 4, 4);
+                AUCHECK(l == in[i] && rr == in[i] * 0.5f, "mono with a balance, frame %ld", i);
+        }
+        audio_voice_close(au_voice);
+}
+
+// Peaks are the greatest sample after the gain; the sink's after the master; clips count frames.
+static void au_test_peaks(void)
+{
+        static float in[2 * 300];
+        static unsigned char out[300 * 8];
+        float peak_l = 0, peak_r = 0, gain_l = 0.25f, gain_r = 2.0f;
+
+        for (long i = 0; i < 300; i++)
+        {
+                // One channel's greatest sample is a negative one, the other's a positive one: a peak is of the magnitude.
+                in[i * 2] = 0.8f * (float)sin(0.05 * (double)i) - 0.1f;
+                in[i * 2 + 1] = 0.3f * (float)cos(0.11 * (double)i) + 0.1f;
+        }
+        audio_sink_open(&au_sink, 48000, 2);
+        audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 2, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+        audio_ring_put(&au_voice->ring, (const unsigned char *)in, sizeof(in));
+        audio_voice_gain(au_voice, gain_l, gain_r);
+        au_steady(au_voice);
+        au_sink.master_now = au_sink.master_target = 0.5f;
+        audio_sink_begin(&au_sink, 300);
+        audio_voice_mix(&au_sink, au_voice, 300, 0);
+        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 300);
+        for (long i = 0; i < 300; i++)
+        {
+                float l = fabsf(in[i * 2] * gain_l), r = fabsf(in[i * 2 + 1] * gain_r);
+
+                peak_l = l > peak_l ? l : peak_l;
+                peak_r = r > peak_r ? r : peak_r;
+        }
+        AUCHECK(au_voice->peak[0] == peak_l && au_voice->peak[1] == peak_r, "voice peaks %g %g against %g %g", (double)au_voice->peak[0],
+                (double)au_voice->peak[1], (double)peak_l, (double)peak_r);
+        AUCHECK(au_sink.peak[0] == peak_l * 0.5f && au_sink.peak[1] == peak_r * 0.5f, "sink peaks %g %g", (double)au_sink.peak[0], (double)au_sink.peak[1]);
+        AUCHECK(au_sink.clips == 0, "nothing clipped (the right channel peaks at %g)", (double)(peak_r * 0.5f));
+        audio_voice_close(au_voice);
+}
+
+/* ---- ramps ---- */
+
+static void au_dc_level(struct audio_voice *voice, long frames, float level)
+{
+        static float ones[AUDIO_BLOCK * 8];
+
+        for (long i = 0; i < frames; i++)
+                ones[i] = level;
+        audio_ring_put(&voice->ring, (const unsigned char *)ones, (unsigned long)frames * 4);
+}
+
+static void au_dc(struct audio_voice *voice, long frames)
+{
+        au_dc_level(voice, frames, 1.0f);
+}
+
+// A constant stream whose gain is moved: the output is a ramp of the slope and no step is greater than it.
+static void au_test_ramps(void)
+{
+        static unsigned char out[AUDIO_BLOCK * 8];
+        static const struct
+        {
+                float from, to;
+        } moves[] = {{1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 0.125f}, {0.125f, 1.0f}, {0.0f, 3.375f}, {3.375f, 0.0f}, {1.0f, 3.375f}, {0.5f, 0.5f}};
+
+        for (unsigned m = 0; m < sizeof(moves) / sizeof(moves[0]); m++)
+        {
+                // The stream is a constant a quarter of full scale, so a gain of up to 3.375 stays in range and the output is the gain's own ramp.
+                float from = moves[m].from, to = moves[m].to, top = from > to ? from : to, level = 0.25f;
+                float slope = (top > 1.0f ? top : 1.0f) / (float)AUDIO_RAMP, last = from * level;
+                long first = -1, want = (long)ceil((double)fabsf(to - from) / (double)slope) - 1;
+
+                audio_sink_open(&au_sink, 48000, 2);
+                audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+                audio_voice_gain(au_voice, from, from);
+                au_steady(au_voice);
+                // The gain is moved in the middle of a stream; the block after it holds the ramp.
+                au_dc_level(au_voice, 400, level);
+                audio_voice_gain(au_voice, to, to);
+                audio_sink_begin(&au_sink, 400);
+                AUCHECK(audio_voice_mix(&au_sink, au_voice, 400, 0) == 400, "the ramp block plays");
+                audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 400);
+                for (long i = 0; i < 400; i++)
+                {
+                        float l;
+
+                        memcpy(&l, out + i * 8, 4);
+                        AUCHECK(fabsf(l - last) <= slope * level * 1.0001f, "gain %g to %g, frame %ld steps by %g (slope %g)", (double)from, (double)to, i,
+                                (double)fabsf(l - last), (double)(slope * level));
+                        AUCHECK(to >= from ? l >= last : l <= last, "gain %g to %g runs the wrong way at frame %ld", (double)from, (double)to, i);
+                        if (first < 0 && l == to * level)
+                                first = i;
+                        if (first >= 0)
+                                AUCHECK(l == to * level, "gain %g to %g leaves its target at frame %ld", (double)from, (double)to, i);
+                        last = l;
+                }
+                if (from != to)
+                        AUCHECK(first >= 0 && labs(first - want) <= 1, "gain %g to %g arrives at frame %ld, %ld wanted", (double)from, (double)to, first, want);
+                else
+                        AUCHECK(first == 0, "no move, no ramp");
+                audio_voice_close(au_voice);
+        }
+        // A new stream fades in: its first block rises from nothing by the slope, and never overshoots.
+        audio_sink_open(&au_sink, 48000, 2);
+        audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+        au_dc(au_voice, 300);
+        audio_sink_begin(&au_sink, 300);
+        audio_voice_mix(&au_sink, au_voice, 300, 0);
+        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 300);
+        {
+                float l0, l_end, last = 0;
+
+                memcpy(&l0, out, 4);
+                memcpy(&l_end, out + 299 * 8, 4);
+                AUCHECK(l0 > 0 && l0 <= 1.0f / (float)AUDIO_RAMP * 1.0001f, "the first frame of a stream is its first step: %g", (double)l0);
+                AUCHECK(l_end == 1.0f, "and it arrives at one");
+                for (long i = 0; i < 300; i++)
+                {
+                        float l;
+
+                        memcpy(&l, out + i * 8, 4);
+                        AUCHECK(l >= last && l - last <= 1.0f / (float)AUDIO_RAMP * 1.0001f && l <= 1.0f, "fade-in frame %ld", i);
+                        last = l;
+                }
+        }
+        audio_voice_close(au_voice);
+        // The sink's master gain ramps the same way: a mute is not a click.
+        audio_sink_open(&au_sink, 48000, 2);
+        audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+        au_steady(au_voice);
+        au_dc(au_voice, 300);
+        audio_sink_gain(&au_sink, 0.0f);
+        audio_sink_begin(&au_sink, 300);
+        audio_voice_mix(&au_sink, au_voice, 300, 0);
+        audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 300);
+        {
+                float last = 1.0f;
+
+                for (long i = 0; i < 300; i++)
+                {
+                        float l;
+
+                        memcpy(&l, out + i * 8, 4);
+                        AUCHECK(l <= last && last - l <= 1.0f / (float)AUDIO_RAMP * 1.0001f, "master mute frame %ld: %g after %g", i, (double)l, (double)last);
+                        last = l;
+                }
+                AUCHECK(last == 0.0f, "the master mute arrives at nothing");
+        }
+        audio_voice_close(au_voice);
+}
+
+// A stream that runs out of data ends in a fade; a corked one stops taking data; both start again from nothing.
+static void au_test_underrun(void)
+{
+        static unsigned char out[AUDIO_BLOCK * 8];
+        long have_counts[] = {100, 300, 10, 96, 97, 1};
+
+        for (unsigned h = 0; h < sizeof(have_counts) / sizeof(have_counts[0]); h++)
+        {
+                long have = have_counts[h], played, held = have < AUDIO_RAMP ? have : AUDIO_RAMP;
+                float last = 1.0f;
+
+                audio_sink_open(&au_sink, 48000, 2);
+                audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+                au_steady(au_voice);
+                au_dc(au_voice, have);
+                audio_sink_begin(&au_sink, 512);
+                played = audio_voice_mix(&au_sink, au_voice, 512, 0);
+                audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 512);
+                AUCHECK(played == have, "%ld frames of data play %ld", have, played);
+                for (long i = 0; i < 512; i++)
+                {
+                        float l;
+
+                        memcpy(&l, out + i * 8, 4);
+                        if (i < have - held)
+                                AUCHECK(l == 1.0f, "before the fade (data %ld) frame %ld is %g", have, i, (double)l);
+                        else if (i < have)
+                                AUCHECK(l <= last && last - l <= 1.0f / (float)held * 1.001f + 1e-6f, "data %ld: the fade steps from %g to %g at %ld", have, (double)last, (double)l, i);
+                        else
+                                AUCHECK(l == 0.0f, "after the data (%ld) there is silence at %ld", have, i);
+                        last = l;
+                }
+                {
+                        float end;
+
+                        memcpy(&end, out + (have - 1) * 8, 4);
+                        AUCHECK(end == 0.0f, "the data (%ld) ends at nothing, not %g", have, (double)end);
+                }
+                AUCHECK(audio_ring_fill(&au_voice->ring) == 0, "the ring is empty");
+                // More data comes: it rises from nothing.
+                au_dc(au_voice, 200);
+                audio_sink_begin(&au_sink, 200);
+                audio_voice_mix(&au_sink, au_voice, 200, 0);
+                audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 200);
+                {
+                        float first;
+
+                        memcpy(&first, out, 4);
+                        AUCHECK(first > 0 && first <= 1.0f / (float)AUDIO_RAMP * 1.0001f, "after the gap it starts from nothing: %g", (double)first);
+                }
+                audio_voice_close(au_voice);
+        }
+        // Corked: the gain goes to nothing over a ramp, then nothing is taken and nothing is played.
+        audio_sink_open(&au_sink, 48000, 2);
+        audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+        au_steady(au_voice);
+        au_dc(au_voice, 1000);
+        audio_voice_gain(au_voice, 0.0f, 0.0f);
+        audio_sink_begin(&au_sink, 200);
+        AUCHECK(audio_voice_mix(&au_sink, au_voice, 200, 0) == 200, "the ramp plays");
+        AUCHECK(au_voice->now[0] == 0.0f, "and reaches nothing");
+        AUCHECK(audio_ring_fill(&au_voice->ring) == (1000 - 200) * 4, "the ramp took %lu bytes", 4000 - audio_ring_fill(&au_voice->ring));
+        audio_sink_begin(&au_sink, 200);
+        AUCHECK(audio_voice_mix(&au_sink, au_voice, 200, 0) == 0 && audio_ring_fill(&au_voice->ring) == 800 * 4, "a silent voice takes nothing from its ring");
+        audio_voice_close(au_voice);
+}
+
+/* ---- the resampler ---- */
+
+static struct audio_resampler au_rs;
+static float au_out0[1 << 18], au_out1[1 << 18];
+
+// A sine of f at rin made into rout, as many output frames as asked, fed in pieces of the given size (0 for what is needed).
+static long au_resample(long rin, long rout, double f, long outputs, long piece, struct audio_table *table)
+{
+        long made = 0, fed = 0;
+
+        (void)rout;
+        audio_rs_open(&au_rs, table);
+        while (made < outputs)
+        {
+                long want = outputs - made < 512 ? outputs - made : 512, need = audio_rs_need(&au_rs, want), give = piece && piece < need ? piece : need;
+
+                if (piece && give < need)
+                {
+                        // Cut small: append a piece, make what is ready, repeat.
+                        for (long i = 0; i < give; i++)
+                        {
+                                float v = (float)(0.5 * sin(2 * M_PI * f * (double)(fed + i) / (double)rin));
+
+                                au_rs.buf[0][au_rs.have + i] = au_rs.buf[1][au_rs.have + i] = v;
+                        }
+                        au_rs.have += give;
+                        fed += give;
+                        {
+                                long ready = audio_rs_ready(&au_rs), n = ready < want ? ready : want;
+
+                                // Only whole wants are made: the output must not depend on the cut.
+                                if (n >= want)
+                                        made += audio_rs_run(&au_rs, au_out0 + made, au_out1 + made, want);
+                        }
+                        continue;
+                }
+                for (long i = 0; i < give; i++)
+                {
+                        float v = (float)(0.5 * sin(2 * M_PI * f * (double)(fed + i) / (double)rin));
+
+                        au_rs.buf[0][au_rs.have + i] = au_rs.buf[1][au_rs.have + i] = v;
+                }
+                au_rs.have += give;
+                fed += give;
+                made += audio_rs_run(&au_rs, au_out0 + made, au_out1 + made, want);
+        }
+        return made;
+}
+
+// SNR against the sine itself at the output's times, and the gain.
+static void au_measure(long rin, long rout, double f, double *snr, double *gain_db, long outputs)
+{
+        struct audio_table *table = audio_table_take(rin, rout);
+        long made, skip;
+        double step = (double)rin / (double)rout, se = 0, ss = 0, scc = 0, scs = 0, sss = 0, syc = 0, sys = 0;
+
+        if (!table)
+        {
+                *snr = *gain_db = -1000;
+                return;
+        }
+        made = au_resample(rin, rout, f, outputs, 0, table);
+        skip = (table->taps + 8) * (rout > rin ? (rout + rin - 1) / rin : 1) + 16;
+        for (long m = skip; m < made - skip; m++)
+        {
+                double ref = 0.5 * sin(2 * M_PI * f * (double)m * step / (double)rin), e = (double)au_out0[m] - ref, ph = 2 * M_PI * f * (double)m / (double)rout;
+
+                se += e * e;
+                ss += ref * ref;
+                scc += cos(ph) * cos(ph);
+                scs += cos(ph) * sin(ph);
+                sss += sin(ph) * sin(ph);
+                syc += (double)au_out0[m] * cos(ph);
+                sys += (double)au_out0[m] * sin(ph);
+        }
+        {
+                // The amplitude of the best sine of this frequency in the output, fitted, so a span that is not a whole number of cycles biases nothing.
+                double det = scc * sss - scs * scs, a = (syc * sss - sys * scs) / det, b = (sys * scc - syc * scs) / det;
+
+                *gain_db = 20 * log10(sqrt(a * a + b * b) / 0.5);
+        }
+        *snr = 10 * log10(ss / se);
+        audio_table_give(table);
+}
+
+static void au_test_resampler(void)
+{
+        static const long pairs[][2] = {{44100, 48000}, {48000, 44100}, {96000, 48000}, {22050, 48000}, {8000, 48000}, {192000, 48000},
+                                        {48000, 96000}, {32000, 48000}, {11025, 48000}, {88200, 44100}, {384000, 48000}, {48000, 8000 * 6}};
+        static const double fractions[] = {0.01, 0.1, 0.3, 0.6, 0.8, 0.88, 0.9};
+        double worst_snr = 1000, worst_gain = 0;
+
+        printf("  resampler: SNR against the sine itself, at 0.01 to 0.9 of the lower Nyquist rate\n");
+        for (unsigned p = 0; p < sizeof(pairs) / sizeof(pairs[0]); p++)
+        {
+                long rin = pairs[p][0], rout = pairs[p][1];
+                double nyquist = 0.5 * (double)(rin < rout ? rin : rout), low = 1000, high = -1000, gain_low = 1000, gain_high = -1000;
+                long outputs = rout / 4;
+
+                for (unsigned i = 0; i < sizeof(fractions) / sizeof(fractions[0]); i++)
+                {
+                        double snr, gain;
+                        // A tone of whole cycles in the span makes the gain exact.
+                        double f = nyquist * fractions[i];
+
+                        f = rint(f * (double)outputs / (double)rout) * (double)rout / (double)outputs;
+                        au_measure(rin, rout, f, &snr, &gain, outputs);
+                        low = snr < low ? snr : low;
+                        high = snr > high ? snr : high;
+                        gain_low = gain < gain_low ? gain : gain_low;
+                        gain_high = gain > gain_high ? gain : gain_high;
+                        AUCHECK(snr >= 96.0, "%ld to %ld at %.0f Hz: SNR %.1f dB", rin, rout, f, snr);
+                        AUCHECK(fabs(gain) <= 0.005, "%ld to %ld at %.0f Hz: gain %+.4f dB", rin, rout, f, gain);
+                }
+                printf("    %6ld -> %6ld  SNR %5.1f to %5.1f dB, gain %+.4f to %+.4f dB\n", rin, rout, low, high, gain_low, gain_high);
+                worst_snr = low < worst_snr ? low : worst_snr;
+                worst_gain = fabs(gain_low) > worst_gain ? fabs(gain_low) : worst_gain;
+                worst_gain = fabs(gain_high) > worst_gain ? fabs(gain_high) : worst_gain;
+        }
+        printf("  resampler: worst SNR %.1f dB, worst gain error %.4f dB\n", worst_snr, worst_gain);
+}
+
+// A tone above the lower Nyquist rate folds to a frequency below it; the filter must have taken it out.
+static void au_test_aliasing(void)
+{
+        static const struct
+        {
+                long rin, rout;
+                double f;
+        } tones[] = {{96000, 48000, 27000}, {96000, 48000, 30000}, {96000, 48000, 40000}, {96000, 48000, 47000}, {192000, 48000, 60000},
+                     {192000, 48000, 90000}, {48000, 44100, 23500}, {48000, 44100, 24000}, {48000, 32000, 18000}, {44100, 22050, 12500}};
+        double worst = -1000;
+
+        for (unsigned t = 0; t < sizeof(tones) / sizeof(tones[0]); t++)
+        {
+                long outputs = tones[t].rout / 2;
+                struct audio_table *table = audio_table_take(tones[t].rin, tones[t].rout);
+                double alias = fabs(tones[t].f - rint(tones[t].f / (double)tones[t].rout) * (double)tones[t].rout), sc = 0, sn = 0, count = 0, db;
+                long made, skip;
+
+                // A whole number of cycles of the alias in the span.
+                alias = rint(alias * (double)outputs / (double)tones[t].rout) * (double)tones[t].rout / (double)outputs;
+                made = au_resample(tones[t].rin, tones[t].rout, tones[t].f, outputs, 0, table);
+                skip = (table->taps + 8) * (tones[t].rout > tones[t].rin ? 2 : 1) + 16;
+                for (long m = skip; m < made - skip; m++)
+                {
+                        double ph = 2 * M_PI * alias * (double)m / (double)tones[t].rout;
+
+                        sc += (double)au_out0[m] * cos(ph);
+                        sn += (double)au_out0[m] * sin(ph);
+                        count += 1;
+                }
+                db = 20 * log10(2 * sqrt(sc * sc + sn * sn) / count / 0.5 + 1e-30);
+                worst = db > worst ? db : worst;
+                AUCHECK(db < -90.0, "%ld to %ld: %.0f Hz folds to %.0f Hz at %.1f dB", tones[t].rin, tones[t].rout, tones[t].f, alias, db);
+                audio_table_give(table);
+        }
+        printf("  resampler: tones above the lower Nyquist rate fold in at no more than %.1f dB\n", worst);
+}
+
+// The same bits however the input is cut, equal rates left alone, a constant kept, the tail given a drain.
+static void au_test_resampler_streaming(void)
+{
+        static float whole[1 << 15];
+        struct audio_table *table = audio_table_take(44100, 48000);
+        long made = au_resample(44100, 48000, 1234.5, 8192, 0, table);
+
+        memcpy(whole, au_out0, sizeof(float) * (unsigned long)made);
+        AUCHECK(made == 8192, "made all");
+        {
+                static const long pieces[] = {1, 7, 64, 100, 511};
+
+                for (unsigned p = 0; p < sizeof(pieces) / sizeof(pieces[0]); p++)
+                {
+                        long again = au_resample(44100, 48000, 1234.5, 8192, pieces[p], table);
+
+                        AUCHECK(again == 8192 && !memcmp(whole, au_out0, sizeof(float) * 8192), "input cut in pieces of %ld gives other bits", pieces[p]);
+                }
+        }
+        audio_table_give(table);
+        // A constant stays a constant.
+        {
+                struct audio_table *pair[] = {audio_table_take(44100, 48000), audio_table_take(48000, 44100), audio_table_take(8000, 48000), audio_table_take(192000, 48000)};
+
+                for (int t = 0; t < 4; t++)
+                {
+                        long n = 3000;
+
+                        audio_rs_open(&au_rs, pair[t]);
+                        for (long off = 0; off < n;)
+                        {
+                                long want = n - off < 512 ? n - off : 512, need = audio_rs_need(&au_rs, want);
+
+                                for (long i = 0; i < need; i++)
+                                        au_rs.buf[0][au_rs.have + i] = au_rs.buf[1][au_rs.have + i] = 0.75f;
+                                au_rs.have += need;
+                                off += audio_rs_run(&au_rs, au_out0 + off, au_out1 + off, want);
+                        }
+                        for (long i = 2000; i < n; i++)
+                                AUCHECK(fabsf(au_out0[i] - 0.75f) < 2e-6f && au_out0[i] == au_out1[i], "table %d: a constant moved to %.9g at %ld", t, (double)au_out0[i], i);
+                        audio_table_give(pair[t]);
+                }
+        }
+}
+
+// Through a voice: equal rates are bits, other rates drain to the last frame, the rate can be changed, the tables are all given back.
+static void au_test_voice_resampling(void)
+{
+        static float in[1 << 14], expected[1 << 14];
+        static unsigned char out[AUDIO_BLOCK * 8];
+        static float played[1 << 15];
+        long n = 4410, got = 0, calls = 0;
+
+        for (long i = 0; i < n; i++)
+                in[i] = (float)(0.5 * sin(2 * M_PI * 1000.0 * (double)i / 44100.0));
+        audio_sink_open(&au_sink, 48000, 2);
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 1, 44100, 0, 48000, au_memory[0], sizeof(au_memory[0])) == 0, "a resampling voice opens");
+        AUCHECK(audio_voice_delay(au_voice) == 32, "its latency is half its taps: %ld", audio_voice_delay(au_voice));
+        au_steady(au_voice);
+        audio_ring_put(&au_voice->ring, (const unsigned char *)in, (unsigned long)n * 4);
+        for (;;)
+        {
+                long played_now, left = audio_ring_fill(&au_voice->ring) ? 1 : 0;
+
+                audio_sink_begin(&au_sink, 480);
+                played_now = audio_voice_mix(&au_sink, au_voice, 480, 1);
+                audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, 480);
+                for (long i = 0; i < played_now && got + i < (long)(sizeof(played) / sizeof(played[0])); i++)
+                        memcpy(played + got + i, out + i * 8, 4);
+                got += played_now;
+                calls++;
+                if (played_now < 480 || calls > 100)
+                        break;
+                (void)left;
+        }
+        AUCHECK(audio_ring_fill(&au_voice->ring) == 0, "the drain took all the stream's bytes");
+        // 4410 frames at 44100 is 4800 at 48000, and the tail is flushed: within a frame of that.
+        AUCHECK(labs(got - 4800) <= 33, "drained to %ld frames, 4800 expected", got);
+        for (long i = 0; i < got; i++)
+                expected[i] = (float)(0.5 * sin(2 * M_PI * 1000.0 * (double)i / 48000.0));
+        {
+                double se = 0, ss = 0;
+
+                for (long i = 200; i < 4700 && i < got; i++)
+                {
+                        double e = (double)played[i] - (double)expected[i];
+
+                        se += e * e;
+                        ss += (double)expected[i] * (double)expected[i];
+                }
+                AUCHECK(10 * log10(ss / se) > 96.0, "voice resampling SNR %.1f dB", 10 * log10(ss / se));
+        }
+        // The rate changes at run time: a small change keeps the table, a large one takes another; back to the sink's own frees it.
+        {
+                int taken = 0;
+
+                for (int t = 0; t < AUDIO_TABLES; t++)
+                        taken += audio_tables[t].users;
+                AUCHECK(taken == 1, "one table in use: %d", taken);
+                AUCHECK(audio_voice_rate(au_voice, 44200) == 0 && au_voice->rate == 44200 && au_voice->rs.step == (unsigned long)(((unsigned long long)44200 << 32) / 48000), "a small change moves the step");
+                AUCHECK(audio_voice_rate(au_voice, 22050) == 0 && au_voice->table->rin == 22050, "a large change takes another table");
+                AUCHECK(audio_voice_rate(au_voice, 48000) == 0 && au_voice->table == 0, "the sink's own rate needs none");
+                AUCHECK(audio_voice_rate(au_voice, 0) < 0 && audio_voice_rate(au_voice, 400001) < 0, "a rate out of bounds is refused");
+                taken = 0;
+                for (int t = 0; t < AUDIO_TABLES; t++)
+                        taken += audio_tables[t].users;
+                AUCHECK(taken == 0, "no table is kept by a voice that needs none: %d", taken);
+        }
+        audio_voice_close(au_voice);
+        // Equal rates skip the filter: the bits of the stream are the bits of the sink.
+        {
+                static short s[2 * 480];
+                static unsigned char o[480 * 4];
+
+                for (long i = 0; i < 480; i++)
+                        s[i * 2] = (short)(i * 61 - 14000), s[i * 2 + 1] = (short)(9000 - i * 37);
+                audio_sink_open(&au_sink, 48000, 2);
+                audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+                AUCHECK(au_voice->table == 0 && audio_voice_delay(au_voice) == 0, "no filter, no delay");
+                au_steady(au_voice);
+                audio_ring_put(&au_voice->ring, (const unsigned char *)s, sizeof(s));
+                audio_sink_begin(&au_sink, 480);
+                audio_voice_mix(&au_sink, au_voice, 480, 0);
+                audio_sink_end(&au_sink, o, AUDIO_FORMAT_S16LE, 2, 480);
+                AUCHECK(!memcmp(o, s, sizeof(s)), "equal rates are the same bytes");
+                audio_voice_close(au_voice);
+        }
+}
+
+static void au_test_tables(void)
+{
+        struct audio_table *held[AUDIO_TABLES + 1];
+        struct audio_table *a, *b;
+
+        for (int t = 0; t < AUDIO_TABLES; t++)
+                AUCHECK(audio_tables[t].users == 0, "table %d is kept by nobody", t);
+        a = audio_table_take(44100, 48000);
+        b = audio_table_take(44100, 48000);
+        AUCHECK(a && a == b && a->users == 2, "the same rates share a table");
+        audio_table_give(a);
+        audio_table_give(b);
+        AUCHECK(a->users == 0, "and give it back");
+        audio_table_give(a);
+        AUCHECK(a->users == 0, "a table is not given back past nothing");
+        AUCHECK(audio_table_take(48000, 5000) == 0, "a ratio of more than eight is refused");
+        AUCHECK(audio_table_take(0, 48000) == 0 && audio_table_take(48000, 0) == 0 && audio_table_take(400000, 48000) == 0, "rates out of bounds are refused");
+        for (int t = 0; t < AUDIO_TABLES; t++)
+        {
+                held[t] = audio_table_take(30000 + 1000 * t, 48000);
+                AUCHECK(held[t] != 0, "table %d is made", t);
+        }
+        held[AUDIO_TABLES] = audio_table_take(31234, 48000);
+        AUCHECK(held[AUDIO_TABLES] == 0, "with every table in use another is refused");
+        for (int t = 0; t < AUDIO_TABLES; t++)
+                audio_table_give(held[t]);
+        AUCHECK((held[0] = audio_table_take(31234, 48000)) != 0, "once one is free it is taken over");
+        audio_table_give(held[0]);
+        // The rows add to one and the second half is the first turned around.
+        for (int t = 0; t < AUDIO_TABLES; t++)
+                if (audio_tables[t].rin)
+                {
+                        const struct audio_table *table = audio_tables + t;
+
+                        for (long p = 0; p <= table->phases; p += 7)
+                        {
+                                double sum = 0;
+
+                                for (long k = 0; k < table->taps; k++)
+                                        sum += (double)table->h[p * table->taps + k];
+                                AUCHECK(fabs(sum - 1.0) < 2e-6, "table %d row %ld adds to %.9f", t, p, sum);
+                        }
+                        for (long k = 0; k < table->taps; k++)
+                                AUCHECK(table->h[k] == table->h[table->phases * table->taps + table->taps - 1 - k], "table %d turned around at %ld", t, k);
+                }
+}
+
+static void au_test_open(void)
+{
+        signed char map[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
+
+        AUCHECK(audio_voice_open(au_voice, 99, 2, 48000, map, 48000, au_memory[0], 4096) < 0, "an unknown format is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 0, 48000, map, 48000, au_memory[0], 4096) < 0, "no channels is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 9, 48000, map, 48000, au_memory[0], 4096) < 0, "nine channels are refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 0, map, 48000, au_memory[0], 4096) < 0, "no rate is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 384001, map, 48000, au_memory[0], 4096) < 0, "too high a rate is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 48000, map, 48000, au_memory[0], 3) < 0, "a ring smaller than a frame is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 400000, map, 48000, au_memory[0], 4096) < 0, "400 kHz is refused");
+        AUCHECK(audio_voice_open(au_voice, AUDIO_FORMAT_S16LE, 2, 8000, map, 192000, au_memory[0], 4096) < 0 || au_voice->table, "8 kHz up to 192 kHz is a ratio of 24, which is refused or filtered");
+        audio_voice_close(au_voice);
+        for (int t = 0; t < AUDIO_TABLES; t++)
+                AUCHECK(audio_tables[t].users == 0, "a refused open keeps no table (%d)", t);
+}
+
+// Voices of every kind, drawn at random, driven for a long time: only numbers in range come out, the rings and tables balance.
+static void au_test_fuzz(void)
+{
+        static const long rates[] = {8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 192000, 384000, 12345, 47999};
+        static unsigned char out[AUDIO_BLOCK * 8 * 4];
+        static unsigned char noise[1 << 14];
+        long blocks = 0, plays = 0;
+
+        for (int round = 0; round < 40; round++)
+        {
+                long sink_rate = round % 3 == 0 ? 44100 : 48000, nv = 1 + (long)(au_rand() % 3);
+                long format_of[3], channels_of[3];
+                int open[3] = {0, 0, 0};
+
+                audio_sink_open(&au_sink, sink_rate, 2);
+                for (long v = 0; v < nv; v++)
+                {
+                        long format = (long)(au_rand() % AUDIO_FORMATS), channels = 1 + (long)(au_rand() % AUDIO_CHANNELS_MAX), rate = rates[au_rand() % (sizeof(rates) / sizeof(rates[0]))];
+
+                        format_of[v] = format;
+                        channels_of[v] = channels;
+                        if (audio_voice_open(au_voice + v, format, channels, rate, 0, sink_rate, au_memory[v], 1 + au_rand() % 40000) == 0)
+                                open[v] = 1;
+                }
+                for (int step = 0; step < 150; step++)
+                {
+                        audio_sink_begin(&au_sink, 1 + (long)(au_rand() % AUDIO_BLOCK));
+                        for (long v = 0; v < nv; v++)
+                        {
+                                long n = 1 + (long)(au_rand() % AUDIO_BLOCK);
+
+                                if (!open[v])
+                                        continue;
+                                for (unsigned i = 0; i < sizeof(noise); i++)
+                                        noise[i] = (unsigned char)au_rand();
+                                if (au_rand() % 3)
+                                        audio_ring_put(&au_voice[v].ring, noise, au_rand() % sizeof(noise));
+                                if (au_rand() % 5 == 0)
+                                {
+                                        unsigned long r = au_rand() % 400;
+
+                                        audio_voice_gain(au_voice + v, audio_volume_gain(r * 600), audio_volume_gain((au_rand() % 400) * 600));
+                                }
+                                if (au_rand() % 40 == 0)
+                                        audio_voice_rate(au_voice + v, rates[au_rand() % (sizeof(rates) / sizeof(rates[0]))]);
+                                if (au_rand() % 50 == 0)
+                                        audio_ring_seek(&au_voice[v].ring, (long)(au_rand() % 4), ((long long)(au_rand() % 41) - 20) * (long long)au_voice[v].frame);
+                                if (au_rand() % 30 == 0)
+                                        audio_ring_flush(&au_voice[v].ring);
+                                plays += audio_voice_mix(&au_sink, au_voice + v, n, (int)(au_rand() % 2)) > 0;
+                                AUCHECK(audio_ring_fill(&au_voice[v].ring) <= au_voice[v].ring.size, "a ring never holds more than it is");
+                                AUCHECK(au_voice[v].ring.read <= au_voice[v].ring.end && au_voice[v].ring.read <= au_voice[v].ring.write, "read stays behind write and end");
+                        }
+                        {
+                                long frames = 1 + (long)(au_rand() % AUDIO_BLOCK), channels = 1 + (long)(au_rand() % 8);
+                                long format = (long[]){AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S24LE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S32LE, AUDIO_FORMAT_F32LE}[au_rand() % 5];
+
+                                if (au_rand() % 9 == 0)
+                                        audio_sink_gain(&au_sink, audio_volume_gain(au_rand() % 0x30000));
+                                audio_sink_begin(&au_sink, frames);
+                                // A bus that nothing wrote is silence; the sink's end on it is the same.
+                                audio_sink_end(&au_sink, out, format, channels, frames);
+                                for (long i = 0; i < frames; i++)
+                                        AUCHECK(au_sink.mix[0][i] == au_sink.mix[0][i] && fabsf(au_sink.mix[0][i]) <= 1.0f, "the mix is a number in range");
+                                blocks++;
+                        }
+                }
+                for (long v = 0; v < nv; v++)
+                {
+                        if (open[v])
+                        {
+                                audio_voice_close(au_voice + v);
+                                (void)format_of[v];
+                                (void)channels_of[v];
+                        }
+                }
+                for (int t = 0; t < AUDIO_TABLES; t++)
+                        AUCHECK(audio_tables[t].users == 0, "round %d leaves table %d kept", round, t);
+        }
+        printf("  fuzz: %ld blocks, %ld voices played\n", blocks, plays);
+}
+
+// The mix of voices drawn at random, summed and clipped, kept to numbers in range with the bus itself checked.
+static void au_test_fuzz_range(void)
+{
+        static unsigned char out[AUDIO_BLOCK * 2 * 4];
+        static float noise[2 * 1024];
+        long frames = 512;
+
+        audio_sink_open(&au_sink, 48000, 2);
+        for (int v = 0; v < 3; v++)
+        {
+                audio_voice_open(au_voice + v, AUDIO_FORMAT_F32LE, 2, 48000, 0, 48000, au_memory[v], sizeof(au_memory[v]));
+                au_voice[v].target[0] = au_voice[v].target[1] = 8.0f;
+                au_steady(au_voice + v);
+        }
+        for (int step = 0; step < 100; step++)
+        {
+                audio_sink_begin(&au_sink, frames);
+                for (int v = 0; v < 3; v++)
+                {
+                        for (int i = 0; i < 2 * 1024; i++)
+                                noise[i] = (float)((double)(au_rand() % 65536) / 32768.0 - 1.0) * 16.0f;
+                        audio_ring_put(&au_voice[v].ring, (const unsigned char *)noise, sizeof(noise));
+                        audio_voice_mix(&au_sink, au_voice + v, frames, 0);
+                }
+                audio_sink_end(&au_sink, out, AUDIO_FORMAT_F32LE, 2, frames);
+                for (long i = 0; i < frames * 2; i++)
+                {
+                        float x;
+
+                        memcpy(&x, out + i * 4, 4);
+                        AUCHECK(x == x && x >= -1.0f && x <= 1.0f, "the output stays in range: %g", (double)x);
+                }
+        }
+        AUCHECK(au_sink.clips > 0, "and the clips are counted");
+        for (int v = 0; v < 3; v++)
+                audio_voice_close(au_voice + v);
+}
+
+/* ---- speed ---- */
+
+static void au_test_speed(void)
+{
+        static unsigned char in[AUDIO_BLOCK * 8 * 4], out[AUDIO_BLOCK * 2 * 4];
+        static const struct
+        {
+                long rin, rout, format, channels;
+                const char *name;
+        } kinds[] = {{48000, 48000, AUDIO_FORMAT_S16LE, 2, "s16 stereo, equal rates"},
+                     {44100, 48000, AUDIO_FORMAT_S16LE, 2, "s16 stereo, 44100 to 48000"},
+                     {96000, 48000, AUDIO_FORMAT_S16LE, 2, "s16 stereo, 96000 to 48000"},
+                     {48000, 48000, AUDIO_FORMAT_F32LE, 6, "f32 5.1, equal rates"},
+                     {22050, 48000, AUDIO_FORMAT_S16LE, 1, "s16 mono, 22050 to 48000"}};
+
+        for (unsigned k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+        {
+                long blocks = 3000, done = 0, per = AUDIO_BLOCK;
+                double begin, took;
+                signed char map6[6] = {1, 2, 3, 7, 5, 6};
+
+                for (unsigned i = 0; i < sizeof(in); i++)
+                        in[i] = (unsigned char)au_rand();
+                audio_sink_open(&au_sink, kinds[k].rout, 2);
+                audio_voice_open(au_voice, kinds[k].format, kinds[k].channels, kinds[k].rin, kinds[k].channels == 6 ? map6 : 0, kinds[k].rout, au_memory[0], sizeof(au_memory[0]));
+                au_steady(au_voice);
+                begin = au_clock();
+                for (long b = 0; b < blocks; b++)
+                {
+                        unsigned long bytes = (unsigned long)per * 8 * 4 / 4;
+
+                        if (bytes > sizeof(in))
+                                bytes = sizeof(in);
+                        audio_ring_put(&au_voice->ring, in, bytes - bytes % au_voice->frame);
+                        audio_sink_begin(&au_sink, per);
+                        done += audio_voice_mix(&au_sink, au_voice, per, 0);
+                        audio_sink_end(&au_sink, out, AUDIO_FORMAT_S16LE, 2, per);
+                        // Keep the ring from filling.
+                        if (audio_ring_fill(&au_voice->ring) > au_voice->ring.size / 2)
+                                audio_ring_flush(&au_voice->ring);
+                }
+                took = au_clock() - begin;
+                printf("  speed: %-28s %7.1f Mframes/s (%6.0fx real time at %ld Hz)\n", kinds[k].name, (double)done / took * 1e-6, (double)done / took / (double)kinds[k].rout, kinds[k].rout);
+                // Far under what any machine does, an emulated one too: a floor against a cliff, not a claim.
+                AUCHECK((double)done / took > 5.0 * (double)kinds[k].rout, "%s: only %.0fx real time", kinds[k].name, (double)done / took / (double)kinds[k].rout);
+                audio_voice_close(au_voice);
+        }
+        {
+                struct audio_table *table;
+                double begin = au_clock(), took;
+
+                audio_tables[0].rin = 0;
+                for (int t = 0; t < AUDIO_TABLES; t++)
+                        audio_tables[t].rin = audio_tables[t].rout = 0;
+                table = audio_table_take(44100, 48000);
+                took = au_clock() - begin;
+                printf("  speed: a table (%ld taps, %ld phases) is made in %.2f ms\n", table->taps, table->phases, took * 1000.0);
+                AUCHECK(took < 0.05, "a table takes %.1f ms", took * 1000.0);
+                audio_table_give(table);
+                begin = au_clock();
+                table = audio_table_take(192000, 48000);
+                took = au_clock() - begin;
+                printf("  speed: a table (%ld taps, %ld phases) is made in %.2f ms\n", table->taps, table->phases, took * 1000.0);
+                audio_table_give(table);
+        }
+}
+
+int main(void)
+{
+        au_test_numbers();
+        au_test_volume();
+        au_test_laws();
+        au_test_formats();
+        au_test_encode();
+        au_test_ring();
+        au_test_remix();
+        au_test_mix_exact();
+        au_test_mix_formats();
+        au_test_mix_remix();
+        au_test_peaks();
+        au_test_ramps();
+        au_test_underrun();
+        au_test_tables();
+        au_test_open();
+        au_test_resampler();
+        au_test_aliasing();
+        au_test_resampler_streaming();
+        au_test_voice_resampling();
+        au_test_fuzz();
+        au_test_fuzz_range();
+        au_test_speed();
+        printf("CHECK_audio_mix: %u checks, %u failures\n", au_checks, au_failures);
+        return au_failures ? 1 : 0;
+}
+#endif /* CHECK_audio_mix */
+
 
 #ifdef CHECK_stdio_buffer
 #include <stdio.h>

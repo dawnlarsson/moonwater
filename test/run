@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland audio"
 
 describe()
 {
@@ -256,6 +256,7 @@ describe()
         ranged)   echo "the call-site entries (__max_N, __room_N) on every body of three machines against pages that fault, and every call site naming one under the checked build" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
+        audio)    echo "the audio mixing core (src/audio/mix.c): formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, and a fixed-seed fuzz with everything given back" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
@@ -314,7 +315,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -355,7 +356,7 @@ seam_of_path()
         src/sh/registry.c) echo machine desktop ;;
         src/sh/host.c | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
         main.moonwater.sh) echo machine ;;
-        src/sh/edit.c | src/canvas/* | fonts/*) echo desktop ;;
+        src/sh/edit.c | src/canvas/* | src/audio/* | fonts/*) echo desktop ;;
         src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
         test/checks.c | test/run | test/differential.py) echo suite ;;
         test/codec_floor/*) echo compress ;;
@@ -6539,6 +6540,44 @@ lane_wayland()
         fi
 
         [ "$wayland_status" = 0 ]
+)
+
+#       The audio stack of Canvas's desktop (src/audio). mix.c, the mixing core, is plain C with no library, built with
+#       gcc and clang under -Wall -Wextra -Werror, and CHECK_audio_mix runs it against references written in the check:
+#       every PCM format against its definition, G.711 from the standard's own formula, the ring against a model of
+#       bytes, the channel map, mixing of known sines against integer arithmetic, the volume curve, the ramps and the
+#       fade of a stream that runs out, the resampler's error, gain and rejection against the sine itself, and a
+#       fixed-seed fuzz that gives every ring and table back.
+lane_audio()
+(
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        audio_status=0
+        audio_compilers=${CC:-gcc}
+        command -v clang > /dev/null 2>&1 && audio_compilers="$audio_compilers clang"
+
+        audio_row()
+        {
+                audio_name=$1
+                shift
+                if "$@" > "$work/$audio_name.out" 2>&1; then
+                        tally "audio-$audio_name" 1 1
+                else
+                        tally "audio-$audio_name" 0 1
+                        audio_status=1
+                        note "audio $audio_name failed:"
+                        tail -n 8 "$work/$audio_name.out" | sed 's/^/    /'
+                fi
+        }
+
+        for audio_cc in $audio_compilers; do
+                audio_warn="-std=gnu11 -O2 -Wall -Wextra -Werror"
+                audio_row "mix-engine-$audio_cc" $audio_cc $audio_warn -c src/audio/mix.c -o "$work/mix.o"
+                audio_row "mix-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
+                        -DCHECK_audio_mix test/checks.c -o '$work/check-mix-$audio_cc' -lm && '$work/check-mix-$audio_cc'"
+        done
+
+        [ "$audio_status" = 0 ]
 )
 
 #       The crcs and the hash cores, whose riscv64 floor bodies also run
