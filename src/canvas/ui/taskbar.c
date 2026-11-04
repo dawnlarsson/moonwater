@@ -591,6 +591,9 @@ static void taskbar_tray_file(const char *path, char *into, int room)
         into[at] = 0;
 }
 
+// The file {host} is read from: the kernel's host name. A check points it at a file of its own, as battery_root is.
+static const char *taskbar_host_file = "/proc/sys/kernel/hostname";
+
 // A whole number at the start of text, 0 with none.
 static long taskbar_tray_number(const char *text)
 {
@@ -733,7 +736,7 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
                 break;
         }
         case 15: // host
-                taskbar_tray_file("/proc/sys/kernel/hostname", word, 33);
+                taskbar_tray_file(taskbar_host_file, word, 33);
                 break;
         default:
                 break;
@@ -762,10 +765,15 @@ static void taskbar_tray_render(void)
                 return;
         for (int each = 0; format[each];)
         {
-                if (format[each] == '{' && format[each + 1] == '{')
-                        into[at++] = '{', into[at] = 0, each += 2;
-                else if (format[each] == '}' && format[each + 1] == '}')
-                        into[at++] = '}', into[at] = 0, each += 2;
+                // A brace itself, as every character, only where there is room for it and the end: a text the names filled
+                // to its end has no room for one more.
+                if ((format[each] == '{' || format[each] == '}') && format[each + 1] == format[each])
+                {
+                        if (at + 1 < room)
+                                into[at++] = format[each];
+                        into[at] = 0;
+                        each += 2;
+                }
                 else if (format[each] == '{')
                 {
                         int close = each + 1;

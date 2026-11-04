@@ -41,6 +41,32 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-153: a tray format of braces wrote past the tray's text in the compositor
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Out-of-bounds write (up to three bytes past a 384-byte buffer in the compositor's taskbar state); memory corruption from a setting |
+| Attacker | none without root: the format is `moonwater taskbar tray FORMAT` (root's), and the overflow needs a host name of 26 bytes or more (`moonwater name`, root's; a bowl's UTS namespace has its own) |
+| Moonwater exposure window | 2026-10-30 15:14 +01:00 (`85de761b`, the tray format) to the commit that adds this entry; no exposure to a program that is not root |
+| Fixed by | the commit that adds this entry (`src/canvas/ui/taskbar.c` `taskbar_tray_render`) |
+
+**What it was.** `taskbar_tray_render` fills `tray_text` (`4 * SETTING_TRAY_MOST`, 384 bytes) from the person's format
+(at most 96 bytes, which `setting_tray_valid` checks): a name in braces goes through `taskbar_tray_put`, which stops at
+the room, and a plain character through a branch that does too, but `{{` and `}}` (a brace itself) wrote the brace and
+the end after it with no look at the room. `{host}` is 6 bytes of format and up to 31 of text, so fifteen of them fill
+the 384 bytes, and each `{{` after them wrote a byte and a NUL one further past the buffer, into `tray_chars`; the count
+of characters that follows then read on past the text. The validator takes that format.
+
+**The fix.** The two branches write while there is room for the brace and the end, as every other branch does. The host
+name's file is `taskbar_host_file`, a seam a check points at a file of its own, as `battery_root` is.
+
+**Tests that fail without it.** CHECK_terminal, the tray format rows: `taskbar_host_file` at `/proc/version` (a first
+line of 31 printable bytes and more), a format of fifteen `{host}` and three `{{` (96 bytes, which the validator takes):
+the text must end inside its buffer and the field after it (`launcher`, a sentinel) must be untouched. Without the fix
+the 384 bytes hold no NUL (1 failure of 3655, gcc on the box); with it, none. The run without the fix is the mutant (the
+seam in, the guard out).
+
 ### MW-2026-152: the session bus's trace wrote two bytes past its line on the stack
 
 | | |

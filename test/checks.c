@@ -124555,6 +124555,30 @@ static void check_taskbar_tray(void)
           !taskbar_slot(&view, -3, &cx, &cy, &cw, &ch) && !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
     taskbar_tray_set("\xe6\x97\xa5\xe6\x9c\xac {host}");
     check("tray format: a character is counted once, not by its bytes", taskbar.tray_custom && taskbar.tray_chars >= 3);
+    {
+        // Fifteen host names of 31 bytes fill the tray's text to its end, and the three {{ after them have no room: the
+        // text ends inside its buffer and what follows it is untouched (it took one byte and its end past it for each).
+        // /proc/version's first line stands for a host name that long; the format is 96 bytes, which the setting takes.
+        char wide[SETTING_TRAY_MOST + 1];
+        int length = 0, ended = 0;
+
+        for (int each = 0; each < 15; each++)
+            for (const char *name = "{host}"; *name; name++)
+                wide[length++] = *name;
+        for (int each = 0; each < 6; each++)
+            wide[length++] = '{';
+        wide[length] = 0;
+        taskbar_host_file = "/proc/version";
+        taskbar.launcher = 0x5a5a5a5a;
+        taskbar_tray_set(wide);
+        for (unsigned int at = 0; at < sizeof(taskbar.tray_text); at++)
+            ended |= !taskbar.tray_text[at];
+        check("tray format: fifteen long host names and three braces end inside the tray's text, and nothing after it is written",
+              setting_tray_valid(wide, null) && taskbar.tray_custom && ended && taskbar.launcher == 0x5a5a5a5a &&
+                  taskbar.tray_chars < (int)sizeof(taskbar.tray_text));
+        taskbar.launcher = 0;
+        taskbar_host_file = "/proc/sys/kernel/hostname";
+    }
     taskbar_tray_set("{nope} is refused where it is kept, and if the file is edited by hand it is the standard");
     check("tray format: a file that holds what is refused is the standard", !taskbar.tray_custom);
     for (unsigned int at = 0; at < sizeof(long_format) - 1; at++)
