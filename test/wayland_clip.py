@@ -98,6 +98,31 @@ key(30)
 row(wait_for(third, "copy set") and wait_for(third, "sent"), "its own copy at a key is taken", read(third)[-300:])
 row(wait_for(first, "cancelled"), "and the first client's source is cancelled, as the text is another's", read(first)[-300:])
 
+# A paste whose reader keeps the lock of its pipe (test/wayland_hold.py, MW-2026-113): the compositor's write of the text waits
+# for the lock, and the compositor goes on all the same; when the reader lets go it gets the text.
+env = dict(os.environ, MOONWATER_ASKED="1")
+hold = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wayland_hold.py")],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+said = hold.stdout.readline().strip()
+if said == "ready":
+    key(30)
+    said = hold.stdout.readline().strip()
+time.sleep(0.5)
+try:
+    drawn = subprocess.run([client, "-n", "5", "-w", "100", "-h", "80", "-q"], capture_output=True, timeout=5).returncode == 0
+except subprocess.TimeoutExpired:
+    drawn = False
+row(said == "pasting" and drawn, "a paste whose reader holds its pipe's lock does not hold the compositor", "the reader said %r" % said)
+try:
+    hold.stdin.write("\n")
+    hold.stdin.flush()
+    got = hold.stdout.readline().strip()
+    hold.wait(10)
+except (OSError, subprocess.TimeoutExpired):
+    got = ""
+    hold.kill()
+row(got == "got %d" % len("third's text"), "and the text reaches it when it lets go of the lock", "it said %r" % got)
+
 for child in children:
     child.kill()
     child.wait()

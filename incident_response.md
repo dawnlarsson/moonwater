@@ -41,6 +41,32 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-113: a Wayland client's paste or copy pipe could hold the whole compositor
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | A root process blocked on a resource its peer controls (CWE-833 shape); denial of service of the desktop |
+| Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a paste or a copy is taken only then) |
+| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the transfers since `0a4629ac` (2026-11-03 19:44 +0100) |
+| Fixed by | the commit that adds this entry (`src/canvas/wayland_host.c`: `compositor_wl_transfer_run` and the transfers around it) |
+| Tests that fail without it | `test/wayland_clip.py` row "a paste whose reader holds its pipe's lock does not hold the compositor" (its reader is `test/wayland_hold.py`): red on the parent, where a client could draw no frame in 5 s while the paste waited; green with the fix, and the text reaches the reader when it lets go |
+
+**What it was.** The compositor read a copy's source from a pipe it made and wrote a paste to the pipe a client gave, on its
+one loop, when poll said the pipe was ready. Poll takes no lock, but every read and write of a pipe takes the pipe's lock
+first, whatever `O_NONBLOCK` says, and a program with an end of the pipe can keep that lock as long as it likes (a splice
+into the pipe from a socket that has nothing to say holds it while it waits; checked on the box's 7.2 kernel: poll says
+the pipe can be written, a write with `RWF_NOWAIT` is refused with `EOPNOTSUPP`, a reopen through `/proc/self/fd` waits too,
+and a plain write waits for the splice). So a client the person typed into could ask for a paste into such a pipe and the
+compositor's write waited in the kernel, unkillable, with every window, the pointer and the keys, for as long as the client
+held it.
+
+**Fix.** Each transfer's reads and writes are done on a thread of its own (`thread_start`), which waits with poll in
+slices of 50 ms, ends at its deadline or when the loop cancels it, and knocks on an eventfd the loop polls; the loop lets the
+transfer go or makes its text the selection there (`compositor_wl_transfers_done`), as it did before. A transfer whose
+pipe is held costs its place and its thread until it is let go; the loop never waits on a client's pipe. Open: the native
+window doors and the compositor's other FIFOs are read on the loop the same way (not this zone's; reported).
+
 ### MW-2026-112: one Wayland commit of a deep subsurface tree held the compositor for a quarter of a second
 
 | | |
@@ -49,7 +75,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 | Class | Work a client controls that grows faster than what it sends (CWE-407); denial of service of the desktop |
 | Attacker | any program that can connect to `/run/moonwater/wayland-0` |
 | Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the walk in every copy since `4563ba64` (2026-11-03 21:09 +0100) |
-| Fixed by | the commit that adds this entry (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
+| Fixed by | `f9393dbd` (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
 | Tests that fail without it | `CHECK_wayland` `test_tree_cost`: a root commit of a chain of 63 subsurfaces with eight damaged rectangles each, mean of three under 50 ms; `test/wayland_mutations.py` "every copy walks the window again" puts the walk back and the row is red (158 ms) |
 
 **What it was.** Each copy of a subsurface's picture into its window (`wayland_child_copy`) made the window's
