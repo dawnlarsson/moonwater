@@ -83,6 +83,18 @@ CONFIG = [
     ("protocols", "staging/xwayland-shell/xwayland-shell-v1.xml", [
         "xwayland_shell_v1", "xwayland_surface_v1",
     ]),
+    ("protocols", "staging/xdg-dialog/xdg-dialog-v1.xml", [
+        "xdg_wm_dialog_v1", "xdg_dialog_v1",
+    ]),
+    ("protocols", "staging/xdg-system-bell/xdg-system-bell-v1.xml", [
+        "xdg_system_bell_v1",
+    ]),
+    ("protocols", "staging/content-type/content-type-v1.xml", [
+        "wp_content_type_manager_v1", "wp_content_type_v1",
+    ]),
+    ("protocols", "staging/alpha-modifier/alpha-modifier-v1.xml", [
+        "wp_alpha_modifier_v1", "wp_alpha_modifier_surface_v1",
+    ]),
 ]
 
 

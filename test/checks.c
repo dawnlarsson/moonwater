@@ -167311,6 +167311,67 @@ static void test_axis_stop(void)
         wayland_stop();
 }
 
+/*
+        The hints a window is given, read by the compositor: an xdg_dialog's modal state (set, unset, and gone with the dialog),
+        a content type (set at once, none on destroy), an alpha multiplier (shown from the commit after it is set, opaque again on
+        destroy), and a bell ring that is taken. Each of the four is advertised at version 1.
+*/
+static void test_hints(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long dialogs, bells, contents, alphas, dialog, content, alpha;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        dialogs = wl_global(c, s.registry, WLI_xdg_wm_dialog_v1, 1);
+        bells = wl_global(c, s.registry, WLI_xdg_system_bell_v1, 1);
+        contents = wl_global(c, s.registry, WLI_wp_content_type_manager_v1, 1);
+        alphas = wl_global(c, s.registry, WLI_wp_alpha_modifier_v1, 1);
+        WLCHECK(dialogs && bells && contents && alphas, "the dialog, bell, content type and alpha modifier are offered");
+        wlc_forget(c);
+
+        dialog = wlc_id(c, WLI_xdg_dialog_v1, 1);
+        wlc_send(c, dialogs, WLQ_xdg_wm_dialog_v1_get_xdg_dialog, dialog, s.toplevel);
+        wlc_send(c, dialog, WLQ_xdg_dialog_v1_set_modal);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wayland_row_modal(0) == 1, "a dialog set modal is modal for its window");
+        wlc_send(c, dialog, WLQ_xdg_dialog_v1_unset_modal);
+        WLCHECK(wayland_row_modal(0) == 0, "and not when unset");
+        wlc_send(c, dialog, WLQ_xdg_dialog_v1_set_modal);
+        wlc_send(c, dialog, WLQ_xdg_dialog_v1_destroy);
+        WLCHECK(wayland_row_modal(0) == 0, "and not once the dialog is destroyed");
+
+        wlc_send(c, bells, WLQ_xdg_system_bell_v1_ring, s.surface);
+        WLCHECK(c->errors == 0, "a bell ring is taken");
+
+        content = wlc_id(c, WLI_wp_content_type_v1, 1);
+        wlc_send(c, contents, WLQ_wp_content_type_manager_v1_get_surface_content_type, content, s.surface);
+        WLCHECK(wayland_row_content(0) == WLN_wp_content_type_v1_type_none, "a window has no content type to begin with");
+        wlc_send(c, content, WLQ_wp_content_type_v1_set_content_type, (unsigned long)WLN_wp_content_type_v1_type_game);
+        WLCHECK(c->errors == 0 && wayland_row_content(0) == WLN_wp_content_type_v1_type_game, "a content type is set at once");
+        wlc_send(c, content, WLQ_wp_content_type_v1_destroy);
+        WLCHECK(wayland_row_content(0) == WLN_wp_content_type_v1_type_none, "and none once destroyed");
+
+        alpha = wlc_id(c, WLI_wp_alpha_modifier_surface_v1, 1);
+        wlc_send(c, alphas, WLQ_wp_alpha_modifier_v1_get_surface, alpha, s.surface);
+        wlc_send(c, alpha, WLQ_wp_alpha_modifier_surface_v1_set_multiplier, 0x80000000ul);
+        WLCHECK(wayland_row_alpha(0) == 0xffffffffu, "an alpha multiplier is shown from the commit after it is set");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_row_alpha(0) == 0x80000000u, "and it is shown at the commit");
+        wlc_send(c, alpha, WLQ_wp_alpha_modifier_surface_v1_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_row_alpha(0) == 0xffffffffu && c->errors == 0, "opaque again once the modifier is destroyed");
+        WLCHECK(wayland_row_alpha(7) == 0xffffffffu && wayland_row_modal(-1) == 0, "a row with no window is opaque and not modal");
+
+        wlc_end(c);
+        leak_check("hints");
+        wayland_stop();
+}
+
 static void test_presentation(void)
 {
         struct session s;
@@ -171057,6 +171118,7 @@ int main(int argc, char **argv)
         test_presentation();
         test_touch();
         test_axis_stop();
+        test_hints();
         test_text();
         test_popups();
         test_surface_rules();

@@ -339,6 +339,10 @@ struct wayland_surface
         unsigned int viewport_id, fractional_id;
         long dest_width, dest_height, source_x, source_y, source_width, source_height;
         long told120, told_whole, told_unit;
+        // The hints a client gives a surface: wp_content_type (set at once, the compositor reads it), wp_alpha_modifier (the
+        // pending multiplier, 0xffffffff for opaque, which a commit shows as alpha), and an xdg_dialog's modal state.
+        unsigned int content, alpha, pending_alpha;
+        unsigned char modal;
         // xdg.
         unsigned int xdg_id, role_id;
         unsigned int serial[WAYLAND_SERIALS];
@@ -910,6 +914,10 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_viewporter, 1},
     {WLI_wp_fractional_scale_manager_v1, 1},
     {WLI_wp_presentation, 1},
+    {WLI_xdg_wm_dialog_v1, 1},
+    {WLI_xdg_system_bell_v1, 1},
+    {WLI_wp_content_type_manager_v1, 1},
+    {WLI_wp_alpha_modifier_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -1741,6 +1749,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         s->damages = 0;
         s->damage_full = 0;
         s->transform = s->pending_transform;
+        s->alpha = s->pending_alpha;
         for (long at = 0; at < s->callbacks; at++)
                 if (s->readies < WAYLAND_CALLBACKS)
                         s->ready[s->readies++] = s->callback[at];
@@ -2029,6 +2038,7 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
         s->id = c->objects[a[0].slot].id;
         s->row = -1;
         s->scale = s->pending_scale = 1;
+        s->alpha = s->pending_alpha = 0xffffffffu;
         s->scale120 = WAYLAND_UNIT;
         c->objects[a[0].slot].link = (short)slot;
         c->objects[a[0].slot].aux = (unsigned short)s->gen;
@@ -2284,6 +2294,9 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
 {
         long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
+
+        // The alpha multiplier is the pending state at every commit, with or without a buffer (the protocol's double buffering).
+        s->alpha = s->pending_alpha;
 
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time.
         if (!wayland_budget_left(c))
@@ -5121,6 +5134,85 @@ static int wayland_presentation_request(struct wayland_client *c, struct wayland
         return WAYLAND_OK;
 }
 
+/*
+        An object made for a surface (a wp_content_type, a wp_alpha_modifier surface, an xdg_dialog) takes the surface's link and
+        generation, so wayland_surface_of finds the surface it is for, and is none once that surface is gone.
+*/
+static void wayland_hint_bind(struct wayland_client *c, long hint, struct wayland_surface *s)
+{
+        long base = wayland_find(c, s->id, WLI_wl_surface);
+
+        if (hint < 0 || base < 0)
+                return;
+        c->objects[hint].link = c->objects[base].link;
+        c->objects[hint].aux = c->objects[base].aux;
+}
+
+/*
+        The hints a client gives a window, none of which is drawn yet but all of which the compositor can read (wayland_row_*):
+        xdg_system_bell (a ring is taken and sounds nothing yet), xdg_dialog (modal or not, for the toplevel it was made for),
+        wp_content_type (the surface's kind of content, none by default and none on destroy), wp_alpha_modifier (the multiplier
+        a commit shows, opaque by default and again on destroy). A request that does not name a live surface is checked, not
+        taken: the protocol's refusals are the wire's, the rest is the hint.
+*/
+static int wayland_hints_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *s;
+
+        switch (self->iface)
+        {
+        case WLI_xdg_wm_dialog_v1:
+                if (op != WLQ_xdg_wm_dialog_v1_get_xdg_dialog)
+                        return WAYLAND_OK;
+                for (long at = 0; at < WAYLAND_SURFACES; at++)
+                        if (c->surfaces[at].live && c->surfaces[at].role_id == c->objects[a[1].slot].id)
+                        {
+                                wayland_hint_bind(c, a[0].slot, &c->surfaces[at]);
+                                return WAYLAND_OK;
+                        }
+                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "no such toplevel");
+        case WLI_xdg_dialog_v1:
+                s = wayland_surface_of(c, self - c->objects);
+                if (op == WLQ_xdg_dialog_v1_set_modal && s)
+                        s->modal = 1;
+                else if ((op == WLQ_xdg_dialog_v1_unset_modal || op == WLQ_xdg_dialog_v1_destroy) && s)
+                        s->modal = 0;
+                return WAYLAND_OK;
+        case WLI_wp_content_type_manager_v1:
+                if (op != WLQ_wp_content_type_manager_v1_get_surface_content_type)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                wayland_hint_bind(c, a[0].slot, s);
+                return WAYLAND_OK;
+        case WLI_wp_content_type_v1:
+                s = wayland_surface_of(c, self - c->objects);
+                if (op == WLQ_wp_content_type_v1_set_content_type && s)
+                        s->content = a[0].u <= WLN_wp_content_type_v1_type_game ? (unsigned int)a[0].u : WLN_wp_content_type_v1_type_none;
+                else if (op == WLQ_wp_content_type_v1_destroy && s)
+                        s->content = WLN_wp_content_type_v1_type_none;
+                return WAYLAND_OK;
+        case WLI_wp_alpha_modifier_v1:
+                if (op != WLQ_wp_alpha_modifier_v1_get_surface)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                wayland_hint_bind(c, a[0].slot, s);
+                return WAYLAND_OK;
+        case WLI_wp_alpha_modifier_surface_v1:
+                s = wayland_surface_of(c, self - c->objects);
+                if (op == WLQ_wp_alpha_modifier_surface_v1_set_multiplier && s)
+                        s->pending_alpha = (unsigned int)a[0].u;
+                else if (op == WLQ_wp_alpha_modifier_surface_v1_destroy && s)
+                        s->pending_alpha = 0xffffffffu;
+                return WAYLAND_OK;
+        default: // xdg_system_bell: a ring is taken
+                return WAYLAND_OK;
+        }
+}
+
 static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
@@ -5448,6 +5540,15 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_tearing_control_manager_v1:
                 case WLI_wp_tearing_control_v1:
                         status = wayland_games_request(c, o, op, a);
+                        break;
+                case WLI_xdg_wm_dialog_v1:
+                case WLI_xdg_dialog_v1:
+                case WLI_xdg_system_bell_v1:
+                case WLI_wp_content_type_manager_v1:
+                case WLI_wp_content_type_v1:
+                case WLI_wp_alpha_modifier_v1:
+                case WLI_wp_alpha_modifier_surface_v1:
+                        status = wayland_hints_request(c, o, op, a);
                         break;
                 case WLI_zwp_linux_dmabuf_v1:
                 case WLI_zwp_linux_buffer_params_v1:
@@ -6122,6 +6223,34 @@ WAYLAND_API long wayland_frame_wanted(void)
                                 return 1;
         }
         return 0;
+}
+
+/*
+        What the window in row was given as hints, for the compositor to read: the alpha multiplier its surface shows (opaque when
+        none), its content type, and whether its dialog is modal. A row with no window is opaque, of no content type, not modal.
+*/
+WAYLAND_API unsigned long wayland_row_alpha(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->alpha : 0xffffffffu;
+}
+
+WAYLAND_API long wayland_row_content(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? (long)s->content : WLN_wp_content_type_v1_type_none;
+}
+
+WAYLAND_API long wayland_row_modal(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->modal : 0;
 }
 
 /* The client a row belongs to, or -1: the compositor asks before it treats a row as a program's. */

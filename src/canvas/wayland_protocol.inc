@@ -64,6 +64,13 @@ enum {
         WLI_wp_tearing_control_v1,
         WLI_xwayland_shell_v1,
         WLI_xwayland_surface_v1,
+        WLI_xdg_wm_dialog_v1,
+        WLI_xdg_dialog_v1,
+        WLI_xdg_system_bell_v1,
+        WLI_wp_content_type_manager_v1,
+        WLI_wp_content_type_v1,
+        WLI_wp_alpha_modifier_v1,
+        WLI_wp_alpha_modifier_surface_v1,
         WLI_COUNT
 };
 
@@ -128,6 +135,13 @@ enum {
 #define WLV_wp_tearing_control_v1 1
 #define WLV_xwayland_shell_v1 1
 #define WLV_xwayland_surface_v1 1
+#define WLV_xdg_wm_dialog_v1 1
+#define WLV_xdg_dialog_v1 1
+#define WLV_xdg_system_bell_v1 1
+#define WLV_wp_content_type_manager_v1 1
+#define WLV_wp_content_type_v1 1
+#define WLV_wp_alpha_modifier_v1 1
+#define WLV_wp_alpha_modifier_surface_v1 1
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -623,6 +637,29 @@ enum {
 #define WLQ_xwayland_surface_v1_destroy 1
 #define WLN_xwayland_surface_v1_error_already_associated 0
 #define WLN_xwayland_surface_v1_error_invalid_serial 1
+#define WLQ_xdg_wm_dialog_v1_destroy 0
+#define WLQ_xdg_wm_dialog_v1_get_xdg_dialog 1
+#define WLN_xdg_wm_dialog_v1_error_already_used 0
+#define WLQ_xdg_dialog_v1_destroy 0
+#define WLQ_xdg_dialog_v1_set_modal 1
+#define WLQ_xdg_dialog_v1_unset_modal 2
+#define WLQ_xdg_system_bell_v1_destroy 0
+#define WLQ_xdg_system_bell_v1_ring 1
+#define WLQ_wp_content_type_manager_v1_destroy 0
+#define WLQ_wp_content_type_manager_v1_get_surface_content_type 1
+#define WLN_wp_content_type_manager_v1_error_already_constructed 0
+#define WLQ_wp_content_type_v1_destroy 0
+#define WLQ_wp_content_type_v1_set_content_type 1
+#define WLN_wp_content_type_v1_type_none 0
+#define WLN_wp_content_type_v1_type_photo 1
+#define WLN_wp_content_type_v1_type_video 2
+#define WLN_wp_content_type_v1_type_game 3
+#define WLQ_wp_alpha_modifier_v1_destroy 0
+#define WLQ_wp_alpha_modifier_v1_get_surface 1
+#define WLN_wp_alpha_modifier_v1_error_already_constructed 0
+#define WLQ_wp_alpha_modifier_surface_v1_destroy 0
+#define WLQ_wp_alpha_modifier_surface_v1_set_multiplier 1
+#define WLN_wp_alpha_modifier_surface_v1_error_no_surface 0
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -916,6 +953,21 @@ static const unsigned char wl_q_xwayland_shell_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_xwayland_shell_v1_get_xwayland_surface[] = {'n', WLI_xwayland_surface_v1, 'o', WLI_wl_surface, 0, 0};
 static const unsigned char wl_q_xwayland_surface_v1_set_serial[] = {'u', 0, 'u', 0, 0, 0};
 static const unsigned char wl_q_xwayland_surface_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_wm_dialog_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_wm_dialog_v1_get_xdg_dialog[] = {'n', WLI_xdg_dialog_v1, 'o', WLI_xdg_toplevel, 0, 0};
+static const unsigned char wl_q_xdg_dialog_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_dialog_v1_set_modal[] = {0, 0};
+static const unsigned char wl_q_xdg_dialog_v1_unset_modal[] = {0, 0};
+static const unsigned char wl_q_xdg_system_bell_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_xdg_system_bell_v1_ring[] = {'O', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_content_type_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_content_type_manager_v1_get_surface_content_type[] = {'n', WLI_wp_content_type_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_content_type_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_content_type_v1_set_content_type[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_wp_alpha_modifier_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_alpha_modifier_v1_get_surface[] = {'n', WLI_wp_alpha_modifier_surface_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_alpha_modifier_surface_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_alpha_modifier_surface_v1_set_multiplier[] = {'u', 0, 0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1375,6 +1427,35 @@ static const struct wl_message wl_requests_xwayland_surface_v1[] = {
         {1, 0, wl_q_xwayland_surface_v1_set_serial},
         {1, 1, wl_q_xwayland_surface_v1_destroy},
 };
+static const struct wl_message wl_requests_xdg_wm_dialog_v1[] = {
+        {1, 1, wl_q_xdg_wm_dialog_v1_destroy},
+        {1, 0, wl_q_xdg_wm_dialog_v1_get_xdg_dialog},
+};
+static const struct wl_message wl_requests_xdg_dialog_v1[] = {
+        {1, 1, wl_q_xdg_dialog_v1_destroy},
+        {1, 0, wl_q_xdg_dialog_v1_set_modal},
+        {1, 0, wl_q_xdg_dialog_v1_unset_modal},
+};
+static const struct wl_message wl_requests_xdg_system_bell_v1[] = {
+        {1, 1, wl_q_xdg_system_bell_v1_destroy},
+        {1, 0, wl_q_xdg_system_bell_v1_ring},
+};
+static const struct wl_message wl_requests_wp_content_type_manager_v1[] = {
+        {1, 1, wl_q_wp_content_type_manager_v1_destroy},
+        {1, 0, wl_q_wp_content_type_manager_v1_get_surface_content_type},
+};
+static const struct wl_message wl_requests_wp_content_type_v1[] = {
+        {1, 1, wl_q_wp_content_type_v1_destroy},
+        {1, 0, wl_q_wp_content_type_v1_set_content_type},
+};
+static const struct wl_message wl_requests_wp_alpha_modifier_v1[] = {
+        {1, 1, wl_q_wp_alpha_modifier_v1_destroy},
+        {1, 0, wl_q_wp_alpha_modifier_v1_get_surface},
+};
+static const struct wl_message wl_requests_wp_alpha_modifier_surface_v1[] = {
+        {1, 1, wl_q_wp_alpha_modifier_surface_v1_destroy},
+        {1, 0, wl_q_wp_alpha_modifier_surface_v1_set_multiplier},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1438,4 +1519,11 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_wp_tearing_control_v1] = {"wp_tearing_control_v1", 1, 2, 0, wl_requests_wp_tearing_control_v1, 0},
         [WLI_xwayland_shell_v1] = {"xwayland_shell_v1", 1, 2, 0, wl_requests_xwayland_shell_v1, 0},
         [WLI_xwayland_surface_v1] = {"xwayland_surface_v1", 1, 2, 0, wl_requests_xwayland_surface_v1, 0},
+        [WLI_xdg_wm_dialog_v1] = {"xdg_wm_dialog_v1", 1, 2, 0, wl_requests_xdg_wm_dialog_v1, 0},
+        [WLI_xdg_dialog_v1] = {"xdg_dialog_v1", 1, 3, 0, wl_requests_xdg_dialog_v1, 0},
+        [WLI_xdg_system_bell_v1] = {"xdg_system_bell_v1", 1, 2, 0, wl_requests_xdg_system_bell_v1, 0},
+        [WLI_wp_content_type_manager_v1] = {"wp_content_type_manager_v1", 1, 2, 0, wl_requests_wp_content_type_manager_v1, 0},
+        [WLI_wp_content_type_v1] = {"wp_content_type_v1", 1, 2, 0, wl_requests_wp_content_type_v1, 0},
+        [WLI_wp_alpha_modifier_v1] = {"wp_alpha_modifier_v1", 1, 2, 0, wl_requests_wp_alpha_modifier_v1, 0},
+        [WLI_wp_alpha_modifier_surface_v1] = {"wp_alpha_modifier_surface_v1", 1, 2, 0, wl_requests_wp_alpha_modifier_surface_v1, 0},
 };
