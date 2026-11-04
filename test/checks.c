@@ -178866,6 +178866,65 @@ static void au_test_format_matrix(void)
         printf("  quality: worst SINAD margin over the narrower format's floor %.1f dB\n", worst_margin);
 }
 
+
+/* ---- the filter follows the card: a 16-bit card gets the short filter, and nothing it can hear is lost ---- */
+
+static void au_test_narrow(void)
+{
+        static unsigned char ring[48000 * 4 * 2];
+        static unsigned char card[AUDIO_BLOCK * 2 * 2];
+        static float feed[AUDIO_BLOCK * 2];
+        struct audio_sink sink;
+        struct audio_voice voice;
+        struct audio_table *table;
+        long peak = 0, steady = 0;
+
+        audio_set_card_bits(16);
+        table = audio_table_take(44100, 48000);
+        AUCHECK(table && table->taps == AUDIO_TAPS_NARROW && table->narrow, "a 16-bit card's 44.1 to 48 kHz filter is %ld taps (want %d)", table ? table->taps : -1, AUDIO_TAPS_NARROW);
+        audio_table_give(table);
+        table = audio_table_take(96000, 48000);
+        AUCHECK(table && table->taps == 2 * AUDIO_TAPS_NARROW, "a 16-bit card's 96 to 48 kHz filter is %ld taps", table ? table->taps : -1);
+        audio_table_give(table);
+
+        // A 96 kHz stream with a 25 kHz tone (1 kHz above the output's Nyquist rate) into a 16-bit card: the alias must be under the
+        // card's least bit once the filter is steady, so every sample the card gets is within one step of silence.
+        audio_sink_open(&sink, 48000, 2);
+        AUCHECK(audio_voice_open(&voice, AUDIO_FORMAT_F32LE, 1, 96000, 0, 48000, ring, sizeof(ring)) == 0, "a 96 kHz voice does not open");
+        // The stream runs four blocks ahead of the mix, as the service keeps it: the filter's look-ahead is in the ring, so no
+        // block is short and no fade or restart puts a step into the output.
+        for (long block = 0; block < 4; block++)
+        {
+                for (long i = 0; i < AUDIO_BLOCK * 2; i++)
+                        feed[i] = (float)(0.5 * sin(2 * M_PI * 25000.0 * (double)(block * AUDIO_BLOCK * 2 + i) / 96000.0));
+                audio_ring_put(&voice.ring, (const unsigned char *)feed, AUDIO_BLOCK * 2 * 4);
+        }
+        for (long block = 0; block < 60; block++)
+        {
+                audio_sink_begin(&sink, AUDIO_BLOCK);
+                for (long i = 0; i < AUDIO_BLOCK * 2; i++)
+                        feed[i] = (float)(0.5 * sin(2 * M_PI * 25000.0 * (double)((block + 4) * AUDIO_BLOCK * 2 + i) / 96000.0));
+                audio_ring_put(&voice.ring, (const unsigned char *)feed, AUDIO_BLOCK * 2 * 4);
+                audio_voice_mix(&sink, &voice, AUDIO_BLOCK, 0);
+                audio_sink_end(&sink, card, AUDIO_FORMAT_S16LE, 2, AUDIO_BLOCK);
+                if (block >= 20)
+                        for (long i = 0; i < AUDIO_BLOCK * 2; i++)
+                        {
+                                short v = (short)(card[i * 2] | card[i * 2 + 1] << 8);
+                                long a = v < 0 ? -(long)v : (long)v;
+
+                                peak = a > peak ? a : peak;
+                                steady++;
+                        }
+        }
+        audio_voice_close(&voice);
+        AUCHECK(steady > 0 && peak <= 1, "a 25 kHz tone from 96 kHz into a 16-bit card reaches the card at %ld (the alias must be under one step)", peak);
+        audio_set_card_bits(0);
+        table = audio_table_take(96000, 48000);
+        AUCHECK(table && table->taps == 2 * AUDIO_TAPS && !table->narrow, "with no 16-bit card open the filter is the wide one (%ld taps)", table ? table->taps : -1);
+        audio_table_give(table);
+}
+
 /* ---- what a caller may hand the engine: a format it does not make, a gain that is not a number ---- */
 
 static void au_test_hardening(void)
@@ -178966,6 +179025,7 @@ int main(void)
         au_test_aliasing();
         au_test_hardening();
         au_test_format_matrix();
+        au_test_narrow();
         au_test_resampler_streaming();
         au_test_voice_resampling();
         au_test_fuzz();

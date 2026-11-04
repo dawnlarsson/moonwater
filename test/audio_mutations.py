@@ -30,6 +30,8 @@ M = [
     ("mix", "ring read off by one", "unsigned long from = voice->ring.read % voice->ring.size;", "unsigned long from = (voice->ring.read + voice->frame) % voice->ring.size;"),
     ("mix", "output channels swapped", "c == 0 ? left[i] : c == 1 ? right[i] : 0.0f", "c == 0 ? right[i] : c == 1 ? left[i] : 0.0f"),
     ("mix", "LFE mixed in", "case AUDIO_POSITION_LFE:\n                        break;", "case AUDIO_POSITION_LFE:\n                        side = 2;\n                        break;"),
+    ("mix", "a 32-bit card gets the short filter", "        audio_narrow = bits == 16;", "        audio_narrow = 1;"),
+    ("mix", "a 16-bit card gets 64 taps (aliases at 2:1)", "#define AUDIO_TAPS_NARROW 96 ", "#define AUDIO_TAPS_NARROW 64 "),
     ("mix", "ring put ignores room", "        if (n > room)\n                n = room;\n        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        memory_copy_apart(", "        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        memory_copy_apart("),
     ("mix", "table rows scaled by 1.001 (a gain error of 0.009 dB)", "row[k] = (float)((double)row[k] / sum);", "row[k] = (float)((double)row[k] / (sum * 1.001));"),
     ("mix", "clips not counted", "sink->clips += f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);", "(void)f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);"),

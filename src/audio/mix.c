@@ -65,7 +65,9 @@
 #define AUDIO_BLOCK 512            // the frames one mix call handles
 #define AUDIO_RATIO_MAX 8          // input rate over output rate, rounded up, that is resampled
 #define AUDIO_TAPS 128             // taps a phase at a ratio of one or less (the transition band is 0.1 of the lower Nyquist rate)
-#define AUDIO_KAISER_BETA 14.8     // a Kaiser window of about 144 dB: the 24-bit floor, not the 16-bit one (9.84 gave 98 dB)
+#define AUDIO_KAISER_BETA 14.8
+#define AUDIO_TAPS_NARROW 96        // taps a phase at a ratio of one or less for a 16-bit card (its floor is 98 dB; 64 aliased at 2:1)
+#define AUDIO_KAISER_NARROW 9.5     // about 96 dB: the 16-bit card's own floor     // a Kaiser window of about 144 dB: the 24-bit floor, not the 16-bit one (9.84 gave 98 dB)
 #define AUDIO_PHASES 512
 #define AUDIO_TABLE_FLOATS (AUDIO_TAPS * AUDIO_PHASES + AUDIO_TAPS * AUDIO_RATIO_MAX)
 #define AUDIO_TABLES 12
@@ -636,6 +638,7 @@ AUDIO_API int audio_remix_build(float matrix[2][AUDIO_CHANNELS_MAX], long channe
 
 struct audio_table
 {
+        int narrow;        // built for a 16-bit card: the shorter filter
         long rin, rout;    // the rates it is for; 0 when the slot is free
         long taps, phases; // taps a phase, and phases (the rows are phases + 1; an exact table has exactly phases rows)
         long exact;        // set: rin / rout is num / den in lowest terms and the table has a row for each of den places an output can be at
@@ -646,6 +649,12 @@ struct audio_table
 };
 
 static struct audio_table audio_tables[AUDIO_TABLES];
+// The precision of the card the tables are for: 16 bits takes the short filter. Set when a card opens (alsa.c), 0 when none is open.
+static int audio_narrow;
+AUDIO_API void audio_set_card_bits(long bits)
+{
+        audio_narrow = bits == 16;
+}
 static unsigned long audio_table_clock;
 
 /*
@@ -658,7 +667,7 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
 {
         long m, taps, phases, rows, exact = 0;
         unsigned long a, b, num, den;
-        double cutoff, beta = AUDIO_KAISER_BETA, base;
+        double cutoff, beta = table->narrow ? AUDIO_KAISER_NARROW : AUDIO_KAISER_BETA, base;
         const double pi = 3.14159265358979323846;
 
         if (rin <= 0 || rout <= 0 || rin > AUDIO_RATE_MAX || rout > AUDIO_RATE_MAX)
@@ -670,7 +679,7 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         // the Nyquist rate, so what folds into the passband is rejected (at the old cutoff, 22.5 kHz folded to 21.6 kHz at -19 dB).
         cutoff = 0.475 * (rin > rout ? (double)rout / (double)rin : 1.0);
         base = audio_bessel0(beta);
-        taps = AUDIO_TAPS * m;
+        taps = (table->narrow ? AUDIO_TAPS_NARROW : AUDIO_TAPS) * m;
         phases = AUDIO_PHASES / m;
         // Rates that reduce to num / den: an output is at one of den places between two inputs, and if there is room for a row
         // for each the table has exactly those, the rows are not mixed (no weight between two), and the position is counted in
@@ -726,7 +735,7 @@ AUDIO_API struct audio_table *audio_table_take(long rin, long rout)
         struct audio_table *pick = 0;
 
         for (int at = 0; at < AUDIO_TABLES; at++)
-                if (audio_tables[at].rin == rin && audio_tables[at].rout == rout)
+                if (audio_tables[at].rin == rin && audio_tables[at].rout == rout && audio_tables[at].narrow == audio_narrow)
                 {
                         pick = audio_tables + at;
                         break;
@@ -739,6 +748,7 @@ AUDIO_API struct audio_table *audio_table_take(long rin, long rout)
                 if (!pick)
                         return 0;
                 pick->rin = pick->rout = 0;
+                pick->narrow = audio_narrow;
                 if (audio_table_build(pick, rin, rout) < 0)
                         return 0;
         }

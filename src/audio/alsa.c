@@ -461,6 +461,9 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
         pcm->card = card;
         pcm->device = device;
         pcm->format = audio_alsa_formats[format_at].format;
+        // A 16-bit card gets the shorter resampling filter (its floor is 98 dB); the wider cards keep the 144 dB one.
+        if (stream == AUDIO_ALSA_PLAYBACK)
+                audio_set_card_bits(pcm->format == AUDIO_FORMAT_S16LE ? 16 : 32);
         pcm->channels = channels;
         pcm->rate = (long)audio_alsa_interval(&hw, AUDIO_ALSA_RATE)->min;
         pcm->frame_bytes = audio_alsa_formats[format_at].bytes * channels;
@@ -524,6 +527,8 @@ AUDIO_API void audio_pcm_close(struct audio_pcm *pcm)
 {
         if (pcm->fd >= 0)
         {
+                if (pcm->stream == AUDIO_ALSA_PLAYBACK)
+                        audio_set_card_bits(0);
                 audio_sys_ioctl(pcm->fd, AUDIO_ALSA_DROP, 0);
                 audio_sys_close(pcm->fd);
         }
