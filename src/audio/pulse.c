@@ -4063,18 +4063,23 @@ AUDIO_API int pulse_client_feed(struct pulse *p, long slot, const unsigned char 
                 c->in_have += take;
                 bytes += take;
                 count -= take;
+                // The frames that are whole are read from where the last one ended; what is left of the buffer is moved to its
+                // start once, after them, not after each (a feed of small frames would move its rest once per frame).
+                long at = 0;
+
                 for (;;)
                 {
+                        const unsigned char *frame = c->in + at;
                         unsigned long length, channel, flags;
                         long long offset;
                         int result;
 
-                        if (c->in_have < 20)
+                        if (c->in_have - at < 20)
                                 break;
-                        length = pulse_be32(c->in);
-                        channel = pulse_be32(c->in + 4);
-                        offset = (long long)((unsigned long long)pulse_be32(c->in + 8) << 32 | pulse_be32(c->in + 12));
-                        flags = pulse_be32(c->in + 16);
+                        length = pulse_be32(frame);
+                        channel = pulse_be32(frame + 4);
+                        offset = (long long)((unsigned long long)pulse_be32(frame + 8) << 32 | pulse_be32(frame + 12));
+                        flags = pulse_be32(frame + 16);
                         if (channel == PULSE_INVALID ? length > PULSE_FRAME_COMMAND : length > PULSE_FRAME_DATA)
                         {
                                 p->protocol_errors++;
@@ -4086,19 +4091,23 @@ AUDIO_API int pulse_client_feed(struct pulse *p, long slot, const unsigned char 
                                 p->protocol_errors++;
                                 return PULSE_DEAD;
                         }
-                        if (c->in_have < 20 + (long)length)
+                        if (c->in_have - at < 20 + (long)length)
                                 break;
                         if (channel == PULSE_INVALID)
-                                result = length ? pulse_command(p, slot, c->in + 20, (long)length) : PULSE_DEAD;
+                                result = length ? pulse_command(p, slot, frame + 20, (long)length) : PULSE_DEAD;
                         else
-                                result = pulse_data(p, slot, channel, offset, flags, c->in + 20, (long)length);
+                                result = pulse_data(p, slot, channel, offset, flags, frame + 20, (long)length);
                         if (result == PULSE_DEAD)
                         {
                                 p->protocol_errors++;
                                 return PULSE_DEAD;
                         }
-                        c->in_have -= 20 + (long)length;
-                        __builtin_memmove(c->in, c->in + 20 + length, (unsigned long)c->in_have);
+                        at += 20 + (long)length;
+                }
+                if (at)
+                {
+                        __builtin_memmove(c->in, c->in + at, (unsigned long)(c->in_have - at));
+                        c->in_have -= at;
                 }
         }
         return PULSE_DONE;

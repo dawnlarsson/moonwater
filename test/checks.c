@@ -177990,6 +177990,58 @@ static void pt_test_list_bounds(void)
         pulse_client_close(&pt_engine, slot);
 }
 
+/* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
+
+static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
+{
+        long found = 0;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        long slot = pt_connect(1000, 4500 + (long)chunk, 35, "split");
+        for (long at = 0; at < n; at += chunk)
+                pulse_client_feed(&pt_engine, slot, bytes + at, at + chunk <= n ? chunk : n - at);
+        pt_collect(slot);
+        for (int i = 0; i < pt_logged && found < room; i++)
+                if (pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].length >= 10)
+                        tags[found++] = pt_log[i].tag;
+        pulse_client_close(&pt_engine, slot);
+        return found;
+}
+
+static void pt_test_feed_cut(void)
+{
+        static unsigned char bytes[30 * 40];
+        static unsigned long whole[64], chunked[64], single[64];
+        long n = 0, found;
+
+        for (unsigned long tag = 1; tag <= 40; tag++, n += 30)
+        {
+                memset(bytes + n, 0, 30);
+                bytes[n + 3] = 10;
+                memset(bytes + n + 4, 0xff, 4);
+                bytes[n + 20] = 'L';
+                bytes[n + 24] = 13;
+                bytes[n + 25] = 'L';
+                bytes[n + 26] = (unsigned char)(tag >> 24);
+                bytes[n + 27] = (unsigned char)(tag >> 16);
+                bytes[n + 28] = (unsigned char)(tag >> 8);
+                bytes[n + 29] = (unsigned char)tag;
+        }
+        found = pt_split_tags(bytes, n, n, whole, 64);
+        PTCHECK(found == 40, "40 stats fed whole are answered 40 times (%ld)", found);
+        for (long i = 0; i < found; i++)
+                PTCHECK(whole[i] == (unsigned long)(i + 1), "answer %ld is for tag %ld", i, (long)whole[i]);
+        found = pt_split_tags(bytes, n, 7, chunked, 64);
+        PTCHECK(found == 40, "fed in sevens (which cut every frame) they are answered 40 times (%ld)", found);
+        for (long i = 0; i < found; i++)
+                PTCHECK(chunked[i] == whole[i], "fed in sevens, answer %ld is the same tag", i);
+        found = pt_split_tags(bytes, n, 1, single, 64);
+        PTCHECK(found == 40, "fed a byte at a time they are answered 40 times (%ld)", found);
+        for (long i = 0; i < found; i++)
+                PTCHECK(single[i] == whole[i], "fed a byte at a time, answer %ld is the same tag", i);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -177998,6 +178050,7 @@ int main(void)
         pt_test_handshake();
         pt_test_info();
         pt_test_list_bounds();
+        pt_test_feed_cut();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();
