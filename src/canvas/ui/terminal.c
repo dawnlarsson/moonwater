@@ -622,7 +622,6 @@ static void terminal_bar_step(void)
         struct ui kit = terminal.ui;
 
         kit.scale = terminal_scale();
-        ui_kit.now = (b64)clock_monotonic_nanoseconds();
         ui_kit.busy = 0;
         {
                 int edge;
@@ -758,7 +757,7 @@ static unsigned int terminal_caret_cover_at(positive now)
 // caret in the frame there is no cover, shape or mark to draw, so none is kept.
 static void terminal_caret_frame(void)
 {
-        terminal_caret_cover = terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(clock_monotonic_nanoseconds());
+        terminal_caret_cover = terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at((positive)ui_kit.now);
         terminal_caret_block = terminal_caret_index != ~0u && shown && shown_block;
         terminal_caret_marks = terminal_caret_index != ~0u && shown ? shown_marks : 0;
 }
@@ -3017,7 +3016,7 @@ static void terminal_on_pass(void)
         terminal.modes_fresh = false;
         if (!terminal.reading)
         {
-                positive read_now = clock_monotonic_nanoseconds();
+                positive read_now = (positive)ui_kit.now;
 
                 if (read_now - terminal.modes_at >= terminal_period())
                         terminal_modes_read(terminal.master, read_now);
@@ -3104,7 +3103,7 @@ static b32 terminal_pass_frame(void)
                 if (synchronized_output)
                         return false;
 
-                now = clock_monotonic_nanoseconds();
+                now = (positive)ui_kit.now;
                 if (terminal.changed && !terminal.reading && !column)
                 {
                         terminal.settle_since = terminal.settle_since ? terminal.settle_since : now;
@@ -3128,11 +3127,11 @@ static b32 terminal_pass_frame(void)
         {
                 terminal.dirty = false;
                 if (terminal.phase == TERMINAL_RUNNING)
-                        terminal.last_frame = clock_monotonic_nanoseconds();
+                        terminal.last_frame = (positive)ui_kit.now;
                 return true;
         }
 
-        now = clock_monotonic_nanoseconds();
+        now = (positive)ui_kit.now;
         if (!terminal.stalled_since)
                 terminal.stalled_since = now;
         else if (now - terminal.stalled_since >= (positive)TERMINAL_STALL_NANOSECONDS)
@@ -3269,7 +3268,7 @@ static long terminal_tick(long timeout, long address_to other)
         // The title is read when the far end has said something, at most once a frame period; a title a program sets is read as it is set.
         if (!terminal.reading && !terminal.gone && (terminal.changed || terminal.title_owed))
         {
-                positive title_now = clock_monotonic_nanoseconds();
+                positive title_now = (positive)ui_kit.now;
 
                 if (title_now - terminal.title_at >= terminal_period() || title_said != terminal.title_seen)
                 {
@@ -3294,7 +3293,7 @@ static long terminal_tick(long timeout, long address_to other)
         {
                 long sync;
 
-                now = clock_monotonic_nanoseconds();
+                now = (positive)ui_kit.now;
                 terminal.sync_since = terminal.sync_held ? terminal.sync_since : now;
                 terminal.sync_held = true;
 
@@ -3329,7 +3328,7 @@ static long terminal_tick(long timeout, long address_to other)
         {
                 b32 moved = true;
 
-                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.finger.drag, clock_monotonic_nanoseconds()),
+                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.finger.drag, (positive)ui_kit.now),
                                             &terminal.dirty, &moved))
                         terminal.gone = true;
                 if (!moved)
@@ -3340,13 +3339,13 @@ static long terminal_tick(long timeout, long address_to other)
 
         // A selection drag held past the grid scrolls the scrollback a step at a time (terminal_select_autoscroll).
         {
-                positive scroll_due = terminal_select_autoscroll(clock_monotonic_nanoseconds(), &terminal.dirty), scroll_now;
+                positive scroll_due = terminal_select_autoscroll((positive)ui_kit.now, &terminal.dirty), scroll_now;
 
                 if (scroll_due)
                 {
                         long left;
 
-                        scroll_now = clock_monotonic_nanoseconds();
+                        scroll_now = (positive)ui_kit.now;
                         left = scroll_due > scroll_now ? (long)(scroll_due - scroll_now) : 0;
                         timeout = timeout < 0 || left < timeout ? left : timeout;
                 }
@@ -3354,7 +3353,7 @@ static long terminal_tick(long timeout, long address_to other)
 
         if (terminal.title_owed)
         {
-                positive due = terminal.title_at + terminal_period(), owed_now = clock_monotonic_nanoseconds();
+                positive due = terminal.title_at + terminal_period(), owed_now = (positive)ui_kit.now;
                 long left = due > owed_now ? (long)(due - owed_now) : 0;
 
                 timeout = timeout < 0 || left < timeout ? left : timeout;
@@ -3362,7 +3361,7 @@ static long terminal_tick(long timeout, long address_to other)
 
         // The caret's blink: a move restarts it, and the wait ends when its cover next changes.
         if (terminal.phase == TERMINAL_RUNNING)
-                terminal_caret_step(clock_monotonic_nanoseconds(), &timeout);
+                terminal_caret_step((positive)ui_kit.now, &timeout);
 
         /*
                 Asleep until a key, a resize or the shell's output; and, with a picture waiting for a buffer, until the compositor has
@@ -3377,7 +3376,7 @@ static long terminal_tick(long timeout, long address_to other)
                 if (spare && timeout < 0)
                 {
                         // A spare is one the compositor has taken the last picture from; until it has, nothing is to be discarded.
-                        now = clock_monotonic_nanoseconds();
+                        now = (positive)ui_kit.now;
                         terminal.idle_since = terminal.idle_since ? terminal.idle_since : now;
                         if (now - terminal.idle_since >= (positive)TERMINAL_IDLE_NANOSECONDS)
                         {
@@ -3500,7 +3499,7 @@ static int terminal_start(void)
 
         cursor_show();
         terminal_frame();
-        terminal.last_frame = clock_monotonic_nanoseconds();
+        terminal.last_frame = (positive)ui_kit.now;
 
         terminal_text_said(terminal.reading);
 
