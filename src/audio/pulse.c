@@ -978,7 +978,9 @@ static void pulse_changed(struct pulse *p, int what, long sink)
 }
 
 // The event to every client that asked for it: the facility's bit in its mask, the kind and the index.
-static void pulse_event(struct pulse *p, unsigned long facility, unsigned long kind, unsigned long index)
+// The event to every client that asked for it, that may see the object it is about (a uid of -1 is an object of every user, or none): the
+// facility's bit in its mask, the kind and the index.
+static void pulse_event_to(struct pulse *p, unsigned long facility, unsigned long kind, unsigned long index, long uid)
 {
         for (int i = 0; i < PULSE_CLIENTS; i++)
         {
@@ -987,6 +989,8 @@ static void pulse_event(struct pulse *p, unsigned long facility, unsigned long k
 
                 if (!c || !c->authorized || !(c->subscribe & (1ul << facility)))
                         continue;
+                if (uid >= 0 && !pulse_may(c, uid))
+                        continue;
                 pulse_w_u32(&w, PULSE_COMMAND_SUBSCRIBE_EVENT);
                 pulse_w_u32(&w, PULSE_INVALID);
                 pulse_w_u32(&w, facility | kind);
@@ -994,6 +998,11 @@ static void pulse_event(struct pulse *p, unsigned long facility, unsigned long k
                 // A client that cannot take an event is dropped by the next call that finds its queue full; here it is only skipped.
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
+}
+
+static void pulse_event(struct pulse *p, unsigned long facility, unsigned long kind, unsigned long index)
+{
+        pulse_event_to(p, facility, kind, index, -1);
 }
 
 static int pulse_error(struct pulse *p, struct pulse_client *c, unsigned long tag, unsigned long code)
@@ -1219,7 +1228,7 @@ static void pulse_stream_free(struct pulse *p, struct pulse_stream *s)
 // A stream ends: its voice fades out first (a client that dies mid-stream does not click), and then it is freed.
 static void pulse_stream_end(struct pulse *p, struct pulse_stream *s)
 {
-        pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_REMOVE, s->index);
+        pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_REMOVE, s->index, s->uid);
         pulse_changed(p, PULSE_CHANGED_STREAMS, s->sink);
         s->dying = 1;
         s->client = -1;
@@ -1326,7 +1335,7 @@ static void pulse_record_end(struct pulse *p, struct pulse_record *r, int tell)
                 pulse_w_u32(&w, r->channel);
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
-        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index);
+        pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index, r->uid);
         pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);
         pulse_record_free(p, r);
 }
@@ -2237,7 +2246,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
                 pulse_w_format_info(&w);
         s->outstanding = s->tlength;
         err = pulse_reply_end(c, &w);
-        pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index);
+        pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index, s->uid);
         pulse_changed(p, PULSE_CHANGED_STREAMS, sink);
         return err;
 }
@@ -2278,7 +2287,7 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                         if (owner && pulse_app_key(owner, key, sizeof(key)))
                                 p->host.remember(p->host.context, key, volume[0], s->muted);
                 }
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
         }
         else if (command == PULSE_COMMAND_SET_SINK_VOLUME)
         {
@@ -2323,7 +2332,7 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                 for (long i = 0; i < n; i++)
                         rec->volume[i] = volume[i];
                 pulse_record_apply(rec);
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
         }
         else
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -2360,7 +2369,7 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
                         if (owner && pulse_app_key(owner, key, sizeof(key)))
                                 p->host.remember(p->host.context, key, s->volume[0], mute);
                 }
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
         }
         else if (command == PULSE_COMMAND_SET_SINK_MUTE)
         {
@@ -2396,7 +2405,7 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
                         return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
                 rec->muted = mute;
                 pulse_record_apply(rec);
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
         }
         else
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -2428,7 +2437,7 @@ static int pulse_record_move(struct pulse *p, struct pulse_record *r, long slot)
         pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);
         r->source = slot;
         pulse_changed(p, PULSE_CHANGED_RECORDS, slot);
-        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, r->index);
+        pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, r->index, r->uid);
         return 0;
 }
 
@@ -2625,7 +2634,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
         if (c->version >= 22)
                 pulse_w_format_info(&w);
         err = pulse_reply_end(c, &w);
-        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_NEW, rec->index);
+        pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_NEW, rec->index, rec->uid);
         pulse_changed(p, PULSE_CHANGED_RECORDS, source);
         return err;
 }
@@ -2663,7 +2672,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 rec->corked = cork;
                 rec->window[0] = rec->window[1] = 0;
                 rec->window_count = 0;
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
                 pulse_changed(p, PULSE_CHANGED_RECORDS, rec->source);
                 return pulse_ack(p, c, tag);
         }
@@ -2714,7 +2723,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:
@@ -2778,7 +2787,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 pulse_props_update(&rec->props, &props, mode);
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_REMOVE_RECORD_STREAM_PROPLIST:
@@ -2799,7 +2808,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);
+                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
                 return pulse_ack(p, c, tag);
         }
         default:
@@ -3037,7 +3046,7 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
                 old->condemned = 1;
                 pulse_sample_release(p, old);
         }
-        pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, old ? PULSE_EVENT_CHANGE : PULSE_EVENT_NEW, s->index);
+        pulse_event_to(p, PULSE_FACILITY_SAMPLE_CACHE, old ? PULSE_EVENT_CHANGE : PULSE_EVENT_NEW, s->index, s->uid);
         return pulse_ack(p, c, tag);
 }
 
@@ -3057,7 +3066,7 @@ static int pulse_command_remove_sample(struct pulse *p, long slot, struct pulse_
         if (!pulse_may(c, s->uid))
                 return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         s->condemned = 1;
-        pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_REMOVE, s->index);
+        pulse_event_to(p, PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_REMOVE, s->index, s->uid);
         pulse_sample_release(p, s);
         return pulse_ack(p, c, tag);
 }
@@ -3163,7 +3172,7 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         {
                 int err = pulse_reply_end(c, &w);
 
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index, s->uid);
                 pulse_changed(p, PULSE_CHANGED_STREAMS, sink);
                 return err;
         }
@@ -3211,7 +3220,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 if (cork)
                         s->underrun = 1;
                 pulse_stream_apply(s);
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_FLUSH_PLAYBACK_STREAM:
@@ -3309,7 +3318,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 pulse_props_set(&s->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_SAMPLE_RATE:
@@ -3387,7 +3396,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 pulse_props_update(&s->props, &props, mode);
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_REMOVE_PLAYBACK_STREAM_PROPLIST:
@@ -3408,7 +3417,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
         }
         default:
@@ -3532,7 +3541,7 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
         case PULSE_COMMAND_GET_SAMPLE_INFO:
         case PULSE_COMMAND_GET_SAMPLE_INFO_LIST:
                 for (int i = 0; i < PULSE_SAMPLES; i++)
-                        if (p->sample[i].used && !p->sample[i].condemned && (list || (name && name[0] ? pulse_equal(p->sample[i].name, name) : p->sample[i].index == index)))
+                        if (p->sample[i].used && !p->sample[i].condemned && pulse_may(c, p->sample[i].uid) && (list || (name && name[0] ? pulse_equal(p->sample[i].name, name) : p->sample[i].index == index)))
                         {
                                 pulse_fill_sample(&w, c, p->sample + i);
                                 if (!list)
@@ -3812,7 +3821,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                                         if (audio_voice_retarget(&s->voice, p->sink[sink].rate) == 0)
                                         {
                                                 s->sink = sink;
-                                                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                                                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                                         }
                                 }
                         // The default source is the monitor of the default sink while it is a monitor.
@@ -3867,7 +3876,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                                 return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
                         s->sink = sink;
                         s->owner_set = 1;
-                        pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
+                        pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 }
                 return pulse_ack(p, c, tag);
         }

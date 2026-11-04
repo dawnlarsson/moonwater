@@ -179817,6 +179817,85 @@ static void pt_test_remember_users(void)
         pulse_client_close(&pt_engine, mine);
 }
 
+/* ---- an event about another user's stream or sample is not sent to a program that may not see it ---- */
+
+// Whether an event of new (facility | kind == what) about index was queued for the client (the queue is taken by the call).
+static int pt_saw_event(long slot, unsigned long what, unsigned long index)
+{
+        pt_collect(slot);
+        for (int i = 0; i < pt_logged; i++)
+                if (pt_log[i].command == PULSE_COMMAND_SUBSCRIBE_EVENT && pt_log[i].length >= 20 && pulse_be32(pt_log[i].payload + 11) == what &&
+                    pulse_be32(pt_log[i].payload + 16) == index)
+                        return 1;
+        return 0;
+}
+
+static void pt_test_event_rights(void)
+{
+        static unsigned char data[16];
+        unsigned long channel, index, missing, sample_index;
+        long owner, other, person;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        owner = pt_connect(1000, 4900, 35, "Owner");
+        other = pt_connect(1001, 4901, 35, "Other");
+        person = pt_connect(0, 4902, 35, "Person");
+        {
+                struct pt_w w = {{0}, 0};
+
+                pt_u32(&w, (1ul << PULSE_FACILITY_SINK_INPUT) | (1ul << PULSE_FACILITY_SAMPLE_CACHE));
+                pt_command(other, PULSE_COMMAND_SUBSCRIBE, 40, &w);
+                pt_command(person, PULSE_COMMAND_SUBSCRIBE, 41, &w);
+                pt_collect(other);
+                pt_collect(person);
+        }
+        PTCHECK(pt_create(owner, 35, 42, 0, 0, 0, &channel, &index, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a stream of user 1000 is made");
+        PTCHECK(pt_saw_event(person, PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_NEW, index), "the person is told of it");
+        PTCHECK(!pt_saw_event(other, PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_NEW, index), "user 1001 is not told of user 1000's stream");
+        PTCHECK(pt_saw_event(owner, PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_NEW, index) || !pt_saw_event(owner, PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_NEW, index),
+                "the owner is not subscribed here (nothing to check)");
+
+        memset(data, 0x22, sizeof(data));
+        PTCHECK(pt_upload(owner, 35, 43, "private", AUDIO_FORMAT_S16LE, 2, 48000, 16, &channel, &missing) == 0 && pt_upload_send(owner, 44, channel, data, 16, 16) == 0, "a sound of user 1000 is uploaded");
+        sample_index = pulse_sample_named(&pt_engine, "private") ? pulse_sample_named(&pt_engine, "private")->index : 999;
+        PTCHECK(pt_saw_event(person, PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_NEW, sample_index), "the person is told of the sound");
+        PTCHECK(!pt_saw_event(other, PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_NEW, sample_index), "user 1001 is not told of user 1000's sound");
+        {
+                struct pt_w w = {{0}, 0};
+
+                // The sound's info by name is not user 1001's to see, nor is it in the list it asks for.
+                pt_u32(&w, PULSE_INVALID);
+                pt_str(&w, "private");
+                pt_command(other, PULSE_COMMAND_GET_SAMPLE_INFO, 45, &w);
+                pt_collect(other);
+                PTCHECK(pt_expect_error(45, PULSE_ERR_NOENTITY), "user 1001 is told the sound is not there");
+                pt_command(other, PULSE_COMMAND_GET_SAMPLE_INFO_LIST, 46, 0);
+                pt_collect(other);
+                {
+                        // A list with no entries is a reply of the tag alone: ten bytes.
+                        int empty = 0, answered = 0;
+
+                        for (int i = 0; i < pt_logged; i++)
+                                if (pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].tag == 46)
+                                        answered = 1, empty = pt_log[i].length == 10;
+                        PTCHECK(answered && empty, "and its list has no sound of user 1000's");
+                }
+                pt_command(person, PULSE_COMMAND_GET_SAMPLE_INFO, 47, &w);
+                pt_collect(person);
+                {
+                        int answered = 0;
+
+                        for (int i = 0; i < pt_logged; i++)
+                                answered |= pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].tag == 47;
+                        PTCHECK(answered, "the person is told of it");
+                }
+        }
+        pulse_client_close(&pt_engine, person);
+        pulse_client_close(&pt_engine, other);
+        pulse_client_close(&pt_engine, owner);
+}
+
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
 
 static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
@@ -180139,6 +180218,7 @@ int main(void)
         pt_test_samples_full();
         pt_test_no_move();
         pt_test_remember_users();
+        pt_test_event_rights();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();
