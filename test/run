@@ -174,7 +174,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus"
 
@@ -286,6 +286,7 @@ describe()
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
         ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say" ;;
+        sound)    echo "the sound server heard: the image booted with an Intel HDA card whose output is a wav file, a second of 440 Hz played through moonwater audio test, and the tone measured in the file (a codec starts muted; a server that leaves it so plays into silence) (NOT RUN without qemu-system-x86_64, python3, a wav audio backend or an image)" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
         esac
@@ -330,7 +331,7 @@ seam_apart()
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome" ;;
-        image) echo "ring0 tier usb firewall" ;;
+        image) echo "ring0 tier usb firewall sound" ;;
         engine) echo "gate" ;;
         *) ;;
         esac
@@ -15577,6 +15578,137 @@ says transcript "$tier: the second thread of a core" "$(rv "smt-$want_smt-end")"
 [ "$tier" != locked ] || says transcript "$tier: page table isolation on any processor" "$(rv "pti-1-end")"
 never transcript "$tier: no kernel panic" 'Kernel panic'
 never transcript "$tier: nothing warned" 'cut here'
+
+counted
+)
+
+#
+#       The sound server, heard. The image is booted under qemu with an Intel
+#       HDA card whose output goes to a wav file (-audiodev wav), the server
+#       the image started at boot plays a second of 440 Hz through
+#       `moonwater audio test`, and the wav is read back from the file: a
+#       codec starts with its own mixer muted, and a server that does not set
+#       it plays its frames into a card that makes no sound (read from the
+#       user's report: the mixer shows a volume and a device and nothing is
+#       heard, on a VM and on a Dell desktop). The tone is measured in the
+#       file, not read from anything the guest says: its peak is the tone's
+#       quarter of full scale, it is a sine (rms over peak), and it is 440 Hz
+#       (positive zero crossings in the middle half second). With the mixer
+#       step off (`audio -M` after the codec was muted) the same wav is
+#       silent: peak 0.0000, which is how this row was shown to be able to
+#       fail. The audio timer is 1 ms (timer-period=1000): at its 10 ms
+#       default the card's 512 frames, 10.7 ms, run dry between two ticks of
+#       the emulated controller and the tone has holes in it. x86-64 only:
+#       the card and the messages are its own.
+#
+lane_sound()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+case $image in
+*riscv64.efi|*aa64.efi) echo "  sound        NOT RUN -- the sound card of the guest is x86-64's"; exit 2 ;;
+esac
+for need in qemu-system-x86_64 timeout python3; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  sound        NOT RUN -- no $need"
+                exit 2
+        fi
+done
+if [ ! -f "$image" ]; then
+        echo "  sound        NOT RUN -- no image at $image"
+        exit 2
+fi
+if ! qemu-system-x86_64 -audiodev help 2>&1 | grep -q '^wav'; then
+        echo "  sound        NOT RUN -- this qemu has no wav audio backend"
+        exit 2
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
+counting sound 8 50
+
+#       The answers come back upper-cased by tr, so the typed command cannot
+#       be what was found. The server is up before the prompt on a quick
+#       boot, and waited for on a slow one.
+cat > "$work/commands" <<'COMMANDS'
+this line is eaten by the console
+for wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -S /run/moonwater/pulse/native ] && break; sleep 1; done
+sleep 1
+moonwater audio test 2>&1 | tr a-z A-Z
+sleep 2
+moonwater audio 2>&1 | tr a-z A-Z
+poweroff
+COMMANDS
+
+set -- -cpu Nehalem
+[ -w /dev/kvm ] && set -- -enable-kvm -cpu host
+rm -f "$work/serial.in"
+mkfifo "$work/serial.in" || exit 1
+timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
+        -no-reboot -display none -serial stdio -nic none \
+        -audiodev wav,id=snd0,path="$work/out.wav",timer-period=1000 -device intel-hda -device hda-output,audiodev=snd0 \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
+        < "$work/serial.in" > "$work/transcript" 2>&1 &
+booting=$!
+exec 9> "$work/serial.in"
+waited=0
+until grep -q -F ' $ ' "$work/transcript" 2> /dev/null; do
+        kill -0 "$booting" 2> /dev/null || break
+        [ "$waited" -lt 180 ] || break
+        sleep 1
+        waited=$((waited + 1))
+done
+cat "$work/commands" >&9
+exec 9>&-
+wait "$booting" 2> /dev/null || true
+tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
+mv "$work/said" "$work/transcript"
+
+#       The wav: QEMU leaves the sizes in its header at 0 until it ends, so
+#       the samples are everything after the 44 bytes of it.
+python3 - "$work/out.wav" > "$work/wav" <<'WAV'
+import math, struct, sys
+
+raw = open(sys.argv[1], 'rb').read()
+if len(raw) < 44 or raw[:4] != b'RIFF':
+    print('SOUND-NO-WAV')
+    sys.exit(0)
+rate, = struct.unpack_from('<I', raw, 24)
+channels, = struct.unpack_from('<H', raw, 22)
+count = (len(raw) - 44) // (2 * channels)
+left = [struct.unpack_from('<h', raw, 44 + 2 * channels * k)[0] / 32768.0 for k in range(count)]
+peak = max((abs(x) for x in left), default=0.0)
+print('SOUND-PEAK-%s' % ('OK' if 0.20 <= peak <= 0.30 else 'WRONG-%.4f' % peak))
+if peak < 0.05:
+    sys.exit(0)
+loud = [k for k, x in enumerate(left) if abs(x) > 0.05]
+first, last = loud[0], loud[-1]
+middle = left[first + (last - first) // 4:first + 3 * (last - first) // 4]
+rms = (sum(x * x for x in middle) / len(middle)) ** 0.5 if middle else 0.0
+top = max(abs(x) for x in middle) if middle else 1.0
+
+
+def amplitude(hz):
+    cosine = sum(x * math.cos(2 * math.pi * hz * k / rate) for k, x in enumerate(middle))
+    sine = sum(x * math.sin(2 * math.pi * hz * k / rate) for k, x in enumerate(middle))
+    return 2 * math.hypot(cosine, sine) / len(middle)
+
+
+best = max(range(380, 501), key=amplitude)
+print('SOUND-SINE-%s' % ('OK' if 0.66 <= rms / top <= 0.75 else 'WRONG-%.3f' % (rms / top)))
+print('SOUND-440-%s' % ('OK' if abs(best - 440) <= 1 and amplitude(best) >= 0.2 else 'WRONG-%d-%.3f' % (best, amplitude(best))))
+print('SOUND-SECOND-%s' % ('OK' if 0.9 <= (last - first) / rate <= 1.1 else 'WRONG-%.2f' % ((last - first) / rate)))
+WAV
+
+says transcript "the tone is played on the card"        "PLAYED A SECOND OF 440 HZ ON HDA INTEL"
+never transcript "no card open"                          "NO SOUND CARD IS OPEN"
+never transcript "no switch that stays off"              "WOULD NOT TAKE IT ON"
+never transcript "no kernel panic"                       "Kernel panic"
+says wav "the wav has sound in it, a quarter of full scale" "SOUND-PEAK-OK"
+says wav "and it is a sine"                              "SOUND-SINE-OK"
+says wav "at 440 Hz"                                     "SOUND-440-OK"
+says wav "for a second"                                  "SOUND-SECOND-OK"
 
 counted
 )
