@@ -1054,27 +1054,11 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
 }
 
 /*
-        A click's count, the kit's one rule for every text and the terminal: a press within UI_CLICK_NS (450 ms) of the last
-        one, and within UI_CLICK_PX (4 logical px) of where it was, is the next click of its run (a double click, then a
-        triple, then the first again); any other press is the first of a run.
+        A click's count (ui_click_again, motion.h: the one double-press rule) at the kit's scale.
 */
-#define UI_CLICK_NS 450000000ull
-#define UI_CLICK_PX 4
-
-struct ui_click
-{
-        b64 at;
-        int x, y, count;
-};
-
 static int ui_click_count(const struct ui address_to ui, struct ui_click address_to k, b64 now, int x, int y)
 {
-        long dx = (long)x - k->x, dy = (long)y - k->y, reach = UI_CLICK_PX * (long)ui->scale / 100;
-        b32 again = k->count && now - k->at < UI_CLICK_NS && dx * dx + dy * dy <= reach * reach;
-
-        k->count = again ? k->count % 3 + 1 : 1;
-        k->at = now, k->x = x, k->y = y;
-        return k->count;
+        return ui_click_again(k, now, x, y, ui->scale);
 }
 
 

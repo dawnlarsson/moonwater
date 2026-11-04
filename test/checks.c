@@ -126409,7 +126409,7 @@ static void check_compositor_tray(void)
     compositor_button(COMPOSITOR_BTN_MIDDLE, 0);
     check("tray: nor does the middle button after it", compositor.focus == 1 && !compositor.settings_asked);
 
-    compositor.tray_ns = 0;
+    compositor.tray_click = (struct ui_click){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
@@ -126417,16 +126417,16 @@ static void check_compositor_tray(void)
     check("tray: two presses bring up the settings window that is open, and ask for no other", compositor.focus == 2 && !compositor.settings_asked);
 
     compositor_focus(1);
-    compositor.tray_ns = 0;
+    compositor.tray_click = (struct ui_click){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
-    compositor.tray_ns -= COMPOSITOR_AGAIN_NS + 1;
+    compositor.tray_click.at -= UI_CLICK_NS + 1;
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     check("tray: two too far apart are two single presses", compositor.focus == 1 && !compositor.settings_asked);
 
     memory_zero((void *)table->name[2], WINDOWS_NAME);
-    compositor.tray_ns = 0;
+    compositor.tray_click = (struct ui_click){0};
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
@@ -129658,7 +129658,9 @@ static void check_compositor_restore(void)
     screens_hand(128, 30, -1);
     compositor.press = COMPOSITOR_NONE;
 
-    /* A double click with a shaking hand: a 3 px jitter between the press and the release is still a click. */
+    /* A double click with a shaking hand: a 3 px jitter between the press and the release is still a click. The presses of the
+       checks above are a few milliseconds ago, so the click count starts afresh, as a click after a pause does. */
+    compositor.press_click = (struct ui_click){0};
     compositor_arrange(1, COMPOSITOR_MAXIMIZED);
     screens_hand(128, 10, 1);
     screens_hand(130, 12, 0);
@@ -146177,22 +146179,23 @@ static fn check_kit_anchor_flip(void)
         check("kit anchor: an exact place is clamped to the screen and not flipped", x == 800 && y == 500);
 }
 
-// ui_pair_press: the second press within the gap of the first is the pair; a pair clears the mark (so a third is a first),
-// and a press after the gap is a first.
-static fn check_kit_pair_press(void)
+// ui_click_again, the one double-press rule (the text, the terminal, the tray and the windows' tops): a press within 450 ms of
+// the last and within 4 px (scaled) of it is the next of its run: double, triple, then the first again. Each row is a press.
+static fn check_kit_double_press(void)
 {
-        positive mark = 0;
-        int pairs = 0;
-        b32 first = ui_pair_press(&mark, 1000000000ull, 400000000ull);
-        b32 edge = ui_pair_press(&mark, 1400000000ull, 400000000ull);
-        b32 third = ui_pair_press(&mark, 1450000000ull, 400000000ull);
-        b32 late = ui_pair_press(&mark, 2000000000ull, 400000000ull);
-        b32 after = ui_pair_press(&mark, 2400000000ull, 400000000ull);
+        struct ui_click k = {0};
+        int one = ui_click_again(&k, 1000000000ll, 10, 10, 100);
+        int two = ui_click_again(&k, 1449000000ll, 14, 10, 100);   // 449 ms and 4 px: the double (the window is under 450 ms)
+        int three = ui_click_again(&k, 1549000000ll, 14, 14, 100); // 100 ms, 4 px down: the triple
+        int four = ui_click_again(&k, 2001000000ll, 14, 14, 100);  // over 450 ms after: the first of a new run
+        int far = ui_click_again(&k, 4000000000ll, 10, 10, 100);   // a run of its own
+        int five = ui_click_again(&k, 4100000000ll, 15, 10, 100);  // 5 px away: not a double
+        int scaled = ui_click_again(&k, 5000000000ll, 10, 10, 200);
+        int eight = ui_click_again(&k, 5100000000ll, 18, 10, 200); // 8 px at 200%: the double
 
-        pairs = first + edge + third + late + after;
-        check("kit pair: the second press within the gap is the pair, and the first press is not", !first && edge);
-        check("kit pair: a pair clears the mark, so a third press within the gap is a first and not a pair", !third);
-        check("kit pair: a press more than the gap after the last is a first, and one at the gap exactly is a pair", !late && after && pairs == 2);
+        check("kit double press: a press within 450 ms and 4 px of the last is the double, and the triple after it", one == 1 && two == 2 && three == 3);
+        check("kit double press: a press 451 ms after the last is the first of a run, and one 5 px away is too", four == 1 && far == 1 && five == 1);
+        check("kit double press: the 4 px are scaled, so at 200% 8 px is still the double", scaled == 1 && eight == 2);
 }
 
 // ui_notch_take: 120ths add up across turns, a notch is taken whole and the rest kept, and a backward turn takes notches back.
@@ -156674,7 +156677,7 @@ b32 main()
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
-        check_kit_pair_press();
+        check_kit_double_press();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

@@ -3397,9 +3397,7 @@ struct compositor_poll
 #define COMPOSITOR_SLEPT_NS 50000000ull
 #define COMPOSITOR_WAKE_FIRST_NS 500000000ull
 #define COMPOSITOR_WAKE_SECOND_NS 2000000000ull
-// Two presses on a window's top are a pair when the second comes this soon after the first,
-// and a drag that ends this near the edge of the output fills it or half of it.
-#define COMPOSITOR_AGAIN_NS 400000000ull
+// A drag that ends this near the edge of the output fills it or half of it. (Double presses are the kit's click count, ui_click_again.)
 #define COMPOSITOR_TRAY (-2) // taskbar_hit's answer for the tray
 
 // The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
@@ -3721,8 +3719,8 @@ static struct
         font_engine *engine;
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
-        positive press_ns; // when the last press on a window's top was
-        positive tray_ns;  // when the last press on the tray was (0 after the second of a pair)
+        struct ui_click press_click; // the presses on a window's top: a double press is the kit's click count
+        struct ui_click tray_click;  // the presses on the tray: two of a run open the settings
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         unsigned int launcher_asked; // the times the script was asked for the launcher by its button (compositor_launcher_open)
         int drag_x, drag_y;
@@ -13782,7 +13780,8 @@ static void compositor_button(unsigned int code, int down)
         // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
         if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)
         {
-                if (ui_pair_press(&compositor.tray_ns, clock_monotonic_nanoseconds(), COMPOSITOR_AGAIN_NS))
+                if (ui_click_again(&compositor.tray_click, clock_monotonic_nanoseconds(), compositor.pointer_x, compositor.pointer_y,
+                                   compositor.scale) == 2)
                         compositor_settings_open();
                 return;
         }
@@ -13872,10 +13871,11 @@ static void compositor_button(unsigned int code, int down)
 
                 if (alt || top)
                 {
-                        int again = under == compositor.press && now - compositor.press_ns <= COMPOSITOR_AGAIN_NS;
+                        // The count is kept for every press on a top (the second of a run of two, on the same window, is the pair).
+                        int run = ui_click_again(&compositor.press_click, now, compositor.pointer_x, compositor.pointer_y, compositor.scale);
+                        int again = run == 2 && under == compositor.press;
 
                         compositor.press = under;
-                        compositor.press_ns = now;
                         if (again)
                         {
                                 compositor.press = COMPOSITOR_NONE;

@@ -114,18 +114,29 @@ static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
         return ui_bezier_y(e, t);
 }
 
-// A press that is the second of a pair: within gap of the press that was the first (mark is that press's time, 0 for none).
-// A pair clears the mark, so a third press within the gap is a first, and a press after the gap is a first. The compositor's
-// tray opens the settings on a pair; a count of clicks is ui_click_count's, which also wants the place.
-static inline int ui_pair_press(positive *mark, positive now, positive gap)
+/*
+        A click's count, the kit's one double-press rule for every text, the terminal, the panel's tray and the windows' tops: a
+        press within UI_CLICK_NS (450 ms) of the last one, and within UI_CLICK_PX (4 logical px) of where it was, is the next
+        click of its run (a double click, then a triple, then the first again); any other press is the first of a run. The
+        place is the pointer's, in the desktop's pixels, and scale is the kit's percent (the px are scaled by it).
+*/
+#define UI_CLICK_NS 450000000ull
+#define UI_CLICK_PX 4
+
+struct ui_click
 {
-        if (*mark && now - *mark <= gap)
-        {
-                *mark = 0;
-                return 1;
-        }
-        *mark = now;
-        return 0;
+        b64 at;
+        int x, y, count;
+};
+
+static inline int ui_click_again(struct ui_click *k, b64 now, int x, int y, int scale)
+{
+        long dx = (long)x - k->x, dy = (long)y - k->y, reach = UI_CLICK_PX * (long)scale / 100;
+        b32 again = k->count && now - k->at < UI_CLICK_NS && dx * dx + dy * dy <= reach * reach;
+
+        k->count = again ? k->count % 3 + 1 : 1;
+        k->at = now, k->x = x, k->y = y;
+        return k->count;
 }
 
 // The whole notches a turn of a wheel makes, its 120ths added to the rest kept from the turns before (the rest is what is left
