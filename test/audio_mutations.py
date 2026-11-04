@@ -334,6 +334,16 @@ M = [
     ("socket", "every part of an answer given the whole timeout", "c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0", "c->transport.receive(c->transport.context, frame, 20, c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS) < 0"),
     ("socket", "a call's budget never begun", "        c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "        (void)0;"),
     ("socket", "a transport with no clock called through null", "return c->transport.now ? c->transport.now(c->transport.context) : 0;", "return c->transport.now(c->transport.context);"),
+    # ---- state.c: the page is untrusted (CHECK_audio_state) ----
+    ("state", "a stream count not clamped", "copy->streams = copy->streams > AUDIO_STATE_STREAMS ? AUDIO_STATE_STREAMS : copy->streams;", "(void)0;"),
+    ("state", "a device count not clamped", "copy->devices = copy->devices > AUDIO_STATE_DEVICES ? AUDIO_STATE_DEVICES : copy->devices;", "(void)0;"),
+    ("state", "a record count not clamped", "copy->records = copy->records > AUDIO_STATE_RECORDS ? AUDIO_STATE_RECORDS : copy->records;", "(void)0;"),
+    ("state", "the device name left unended", "audio_state_end(copy->device, sizeof(copy->device));", "(void)0;"),
+    ("state", "a stream's icon left unended", "audio_state_end(copy->stream[k].icon, sizeof(copy->stream[k].icon));", "(void)0;"),
+    ("state", "a record's media left unended", "audio_state_end(copy->record[k].media, sizeof(copy->record[k].media));", "(void)0;"),
+    ("state", "a device description left unended", "audio_state_end(copy->device_list[k].description, sizeof(copy->device_list[k].description));", "(void)0;"),
+    ("state", "an output_why that names no reason kept", "copy->output_why = 0;", "(void)0;"),
+    ("state", "the trust not applied to a read", "audio_state_trust(copy);\n                        return", "return"),
     # ---- alsa.c: a negative count is refused before the card is asked (CHECK_audio_alsa) ----
     ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write("),
     ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read("),

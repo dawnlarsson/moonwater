@@ -184792,6 +184792,131 @@ int main(void)
 }
 #endif /* CHECK_audio_control */
 
+#ifdef CHECK_audio_state
+/*
+        CHECK_audio_state: the state page's reader (src/audio/state.c) on a page the reader must not trust: every string unended
+        (filled to its last byte), every count past its array, an output_why that names no reason. The copy it returns has every
+        string ended inside its array, every count within its array, and an output_why of 0; a well-formed page keeps its text and
+        its reason; a page that is being written is not read; the copy is safe to read field by field.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-comment -D_GNU_SOURCE -DCHECK_audio_state test/checks.c
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// The library's names state.c calls, as the hosted build has them.
+typedef unsigned long positive;
+#define memory_copy_apart(to, from, size) memmove((to), (from), (size))
+
+#include "../src/audio/state.c"
+
+static unsigned st_checks, st_failures;
+
+#define STCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                st_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        st_failures++;                                                                                \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
+        } while (0)
+
+// Every string field of the copy: its last byte is a null, so a reader stops inside it.
+static int st_all_ended(const struct audio_state *s)
+{
+        for (unsigned int k = 0; k < AUDIO_STATE_DEVICES; k++)
+                if (s->device_list[k].name[sizeof(s->device_list[k].name) - 1] || s->device_list[k].description[sizeof(s->device_list[k].description) - 1])
+                        return 0;
+        for (unsigned int k = 0; k < AUDIO_STATE_INPUTS; k++)
+                if (s->input_list[k].name[sizeof(s->input_list[k].name) - 1] || s->input_list[k].description[sizeof(s->input_list[k].description) - 1])
+                        return 0;
+        for (unsigned int k = 0; k < AUDIO_STATE_STREAMS; k++)
+                if (s->stream[k].app[sizeof(s->stream[k].app) - 1] || s->stream[k].media[sizeof(s->stream[k].media) - 1] ||
+                    s->stream[k].icon[sizeof(s->stream[k].icon) - 1])
+                        return 0;
+        for (unsigned int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                if (s->record[k].app[sizeof(s->record[k].app) - 1] || s->record[k].media[sizeof(s->record[k].media) - 1] ||
+                    s->record[k].icon[sizeof(s->record[k].icon) - 1])
+                        return 0;
+        return s->device[sizeof(s->device) - 1] == 0 && s->name[sizeof(s->name) - 1] == 0 && s->input[sizeof(s->input) - 1] == 0 &&
+               s->input_name[sizeof(s->input_name) - 1] == 0 && s->hw_note[sizeof(s->hw_note) - 1] == 0;
+}
+
+// A page that the server wrote, with each string as the test says and each count and reason as the test says.
+static struct audio_state st_page;
+
+static void st_seal(void)
+{
+        st_page.magic = AUDIO_STATE_MAGIC;
+        st_page.version = AUDIO_STATE_VERSION;
+        st_page.bytes = sizeof(st_page);
+        st_page.seq = 2;
+}
+
+static void st_test_hostile(void)
+{
+        static struct audio_state copy;
+
+        // Every byte a letter: no string is ended, and every count is past its array.
+        memset((void *)&st_page, 'A', sizeof(st_page));
+        st_seal();
+        st_page.streams = 0xffffffffu;
+        st_page.devices = 1000;
+        st_page.inputs = 99;
+        st_page.records = 0x80000000u;
+        st_page.output_why = 0x12345;
+        STCHECK(audio_state_read((const volatile struct audio_state *)&st_page, &copy) == 1, "a hostile page with a good header is read");
+        STCHECK(copy.streams == AUDIO_STATE_STREAMS && copy.devices == AUDIO_STATE_DEVICES && copy.inputs == AUDIO_STATE_INPUTS &&
+                    copy.records == AUDIO_STATE_RECORDS, "every count is held to its array (%u %u %u %u)", copy.streams, copy.devices, copy.inputs, copy.records);
+        STCHECK(st_all_ended(&copy), "every string of the copy ends inside its array");
+        STCHECK(copy.output_why == 0, "an output_why that names no reason is 0 (%u)", copy.output_why);
+}
+
+static void st_test_well_formed(void)
+{
+        static struct audio_state copy;
+
+        memset((void *)&st_page, 0, sizeof(st_page));
+        st_seal();
+        strcpy(st_page.device, "Speakers");
+        strcpy(st_page.name, "alsa_output.card0");
+        strcpy(st_page.stream[0].app, "Firefox");
+        strcpy(st_page.stream[0].media, "Tab one");
+        st_page.streams = 1;
+        st_page.devices = 0;
+        st_page.output_why = AUDIO_STATE_WHY_ANALOG;
+        STCHECK(audio_state_read((const volatile struct audio_state *)&st_page, &copy) == 1, "a well-formed page is read");
+        STCHECK(strcmp(copy.device, "Speakers") == 0 && strcmp(copy.name, "alsa_output.card0") == 0, "its names are kept");
+        STCHECK(strcmp(copy.stream[0].app, "Firefox") == 0 && strcmp(copy.stream[0].media, "Tab one") == 0 && copy.streams == 1, "its stream is kept");
+        STCHECK(copy.output_why == AUDIO_STATE_WHY_ANALOG, "a reason in range is kept (%u)", copy.output_why);
+        STCHECK(st_all_ended(&copy), "a well-formed page's strings end inside their arrays");
+}
+
+static void st_test_unstable(void)
+{
+        static struct audio_state copy;
+
+        memset((void *)&st_page, 0, sizeof(st_page));
+        st_seal();
+        st_page.seq = 3; // being written: odd
+        STCHECK(audio_state_read((const volatile struct audio_state *)&st_page, &copy) == 0, "a page that is being written is not read");
+}
+
+int main(void)
+{
+        st_test_hostile();
+        st_test_well_formed();
+        st_test_unstable();
+        printf("CHECK_audio_state: %u checks, %u failures\n", st_checks, st_failures);
+        return st_failures ? 1 : 0;
+}
+#endif /* CHECK_audio_state */
+
 
 #ifdef CHECK_stdio_buffer
 #include <stdio.h>

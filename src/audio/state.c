@@ -122,6 +122,54 @@ _Static_assert(sizeof(struct audio_state) <= AUDIO_STATE_BYTES, "the state page 
         (at most eight times: the writer is not stopped, and a page that cannot be copied whole in eight tries is not returned).
         Answers 1 with *copy filled, 0 for a page that is not the server's or is never still.
 */
+// A string of the copy ends inside its own array whatever the page said: the last byte is made a null.
+static void audio_state_end(char *text, unsigned long size)
+{
+        text[size - 1] = 0;
+}
+
+/*
+        The page is root's and mode 0600, but a reader treats what it holds as untrusted: every count is held within its array,
+        every string of the copy ends inside its array (a string the server did not end is cut where its array ends), and an
+        output_why that names no reason is 0. After this the copy can be read field by field without a bound of its own.
+*/
+static void audio_state_trust(struct audio_state *copy)
+{
+        copy->streams = copy->streams > AUDIO_STATE_STREAMS ? AUDIO_STATE_STREAMS : copy->streams;
+        copy->devices = copy->devices > AUDIO_STATE_DEVICES ? AUDIO_STATE_DEVICES : copy->devices;
+        copy->inputs = copy->inputs > AUDIO_STATE_INPUTS ? AUDIO_STATE_INPUTS : copy->inputs;
+        copy->records = copy->records > AUDIO_STATE_RECORDS ? AUDIO_STATE_RECORDS : copy->records;
+        audio_state_end(copy->device, sizeof(copy->device));
+        audio_state_end(copy->name, sizeof(copy->name));
+        audio_state_end(copy->input, sizeof(copy->input));
+        audio_state_end(copy->input_name, sizeof(copy->input_name));
+        audio_state_end(copy->hw_note, sizeof(copy->hw_note));
+        for (unsigned int k = 0; k < AUDIO_STATE_DEVICES; k++)
+        {
+                audio_state_end(copy->device_list[k].name, sizeof(copy->device_list[k].name));
+                audio_state_end(copy->device_list[k].description, sizeof(copy->device_list[k].description));
+        }
+        for (unsigned int k = 0; k < AUDIO_STATE_INPUTS; k++)
+        {
+                audio_state_end(copy->input_list[k].name, sizeof(copy->input_list[k].name));
+                audio_state_end(copy->input_list[k].description, sizeof(copy->input_list[k].description));
+        }
+        for (unsigned int k = 0; k < AUDIO_STATE_STREAMS; k++)
+        {
+                audio_state_end(copy->stream[k].app, sizeof(copy->stream[k].app));
+                audio_state_end(copy->stream[k].media, sizeof(copy->stream[k].media));
+                audio_state_end(copy->stream[k].icon, sizeof(copy->stream[k].icon));
+        }
+        for (unsigned int k = 0; k < AUDIO_STATE_RECORDS; k++)
+        {
+                audio_state_end(copy->record[k].app, sizeof(copy->record[k].app));
+                audio_state_end(copy->record[k].media, sizeof(copy->record[k].media));
+                audio_state_end(copy->record[k].icon, sizeof(copy->record[k].icon));
+        }
+        if (copy->output_why > AUDIO_STATE_WHY_NOTHING)
+                copy->output_why = 0;
+}
+
 static int audio_state_read(const volatile struct audio_state *page, struct audio_state *copy)
 {
         for (int tries = 0; tries < 8; tries++)
@@ -134,7 +182,10 @@ static int audio_state_read(const volatile struct audio_state *page, struct audi
                 __atomic_thread_fence(__ATOMIC_ACQUIRE);
                 after = __atomic_load_n(&page->seq, __ATOMIC_ACQUIRE);
                 if (before == after)
+                {
+                        audio_state_trust(copy);
                         return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy);
+                }
         }
         return 0;
 }
