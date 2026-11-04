@@ -213381,6 +213381,18 @@ b32 main(void)
                               !(compositor_gpu_picture(&f) && compositor_gpu_frames(&f, 1, ground) && gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH)));
                         GPU_HOSTILE("the present after one that named a map of pages let go of maps them afresh", reused, 256, 0);
                 }
+                // A picture of 2 GiB or more (three rows 2^28 pixels apart): the kernels' 32-bit offsets cannot reach its last row, so it is the processor's,
+                // refused before a map is asked for. (On this box the map would be refused too, as no 2 GiB are mapped there; the guard does not need that.)
+                {
+                        struct compositor_frame big;
+                        unsigned int held = gpu_map_count;
+
+                        memory_zero(&big, sizeof(big));
+                        big.x = 40, big.y = 40, big.width = 200, big.height = 3, big.scale = 100, big.pitch = 1ull << 28, big.pixels = (const unsigned int address_to)grown;
+                        check("gpu hostile: a picture of 2 GiB or more is the processor's", !compositor_gpu_picture(&big) && gpu_map_count == held);
+                        big.pitch = 1ull << 40;
+                        check("gpu hostile: a pitch whose product would wrap is the processor's", !compositor_gpu_picture(&big) && gpu_map_count == held);
+                }
 #undef GPU_HOSTILE
         }
 

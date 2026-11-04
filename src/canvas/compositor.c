@@ -6990,11 +6990,18 @@ static positive compositor_gpu_output(void)
 // A frame's picture, wholly, reachable by the GPU: mapped the first time it is asked for.
 static int compositor_gpu_picture(const struct compositor_frame *f)
 {
+        positive bytes;
+
         if (f->builtin)
                 return 1;
-        if (!f->pixels || f->width <= 0 || f->height <= 0)
+        if (!f->pixels || f->width <= 0 || f->height <= 0 || f->pitch >= 1ull << 29)
                 return 0;
-        return compositor_gpu_va(f) || (gpu_map(f->pixels, 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width)) && compositor_gpu_va(f));
+        // The kernels reach a picture's pixels by a 32-bit signed offset from the first they are given (gpu.asm's image, mix, close and turn ops):
+        // a picture of 2 GiB or more would wrap to bytes before it, so it is the processor's.
+        bytes = 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width);
+        if (bytes >= 1ull << 31)
+                return 0;
+        return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it.
