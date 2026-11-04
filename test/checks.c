@@ -154670,15 +154670,15 @@ static fn check_kit_defaults(struct ui address_to wui)
                 int twice, once, thrice, far;
 
                 memory_zero(&k, sizeof(k));
-                twice = ui_click_count(&ui, &k, 1000000000ll, 10, 10);
-                twice = ui_click_count(&ui, &k, 1000000000ll + 449000000ll, 14, 10);
-                thrice = ui_click_count(&ui, &k, 1000000000ll + 898000000ll, 14, 10);
+                twice = (ui_kit.now = (b64)(1000000000ll), ui_click_count(&ui, &k, 10, 10));
+                twice = (ui_kit.now = (b64)(1000000000ll + 449000000ll), ui_click_count(&ui, &k, 14, 10));
+                thrice = (ui_kit.now = (b64)(1000000000ll + 898000000ll), ui_click_count(&ui, &k, 14, 10));
                 memory_zero(&k, sizeof(k));
-                ui_click_count(&ui, &k, 1000000000ll, 10, 10);
-                far = ui_click_count(&ui, &k, 1000000000ll + 100000000ll, 15, 10);
+                (ui_kit.now = (b64)(1000000000ll), ui_click_count(&ui, &k, 10, 10));
+                far = (ui_kit.now = (b64)(1000000000ll + 100000000ll), ui_click_count(&ui, &k, 15, 10));
                 memory_zero(&k, sizeof(k));
-                ui_click_count(&ui, &k, 1000000000ll, 10, 10);
-                once = ui_click_count(&ui, &k, 1000000000ll + 451000000ll, 10, 10);
+                (ui_kit.now = (b64)(1000000000ll), ui_click_count(&ui, &k, 10, 10));
+                once = (ui_kit.now = (b64)(1000000000ll + 451000000ll), ui_click_count(&ui, &k, 10, 10));
                 clicks_ok = twice == 2 && thrice == 3 && far == 1 && once == 1;
         }
         check("kit clicks: a second click 450 ms and 4 px on counts two, a third three, and a slow or far one starts over", clicks_ok);

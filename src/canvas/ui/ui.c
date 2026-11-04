@@ -1058,8 +1058,10 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
 /*
         A click's count (ui_click_again, motion.h: the one double-press rule) at the kit's scale.
 */
-static int ui_click_count(const struct ui address_to ui, struct ui_click address_to k, b64 now, int x, int y)
+static positive ui_kit_time(void);
+static int ui_click_count(const struct ui address_to ui, struct ui_click address_to k, int x, int y)
 {
+        b64 now = (b64)ui_kit_time();
         return ui_click_again(k, now, x, y, ui->scale);
 }
 
@@ -12440,8 +12442,7 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
         drags are here; a finger's are ui_text_finger's, further on.
 */
 static b32 ui_text_selected(const struct ui_text address_to t, p64 offset);
-static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y,
-                          positive now);
+static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y);
 static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, int x, int y);
 
 // How long the view stays still after it moved before the actions bar comes back, and how long the bar takes to fade in.
@@ -12464,6 +12465,7 @@ static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, i
 
 static int ui_select_kind(int clicks)
 {
+        positive now = (positive)ui_kit_time();
         return clicks == 3 ? UI_SELECT_LINES : clicks == 2 ? UI_SELECT_WORDS : UI_SELECT_CHARS;
 }
 
@@ -12535,9 +12537,9 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         // (WINDOW_KEY_HOLD), and its moves while it holds something. A two fingers' right button is a mouse's, and asks the menu.
         if (event->type == WINDOW_EVENT_BUTTON && ((event->a == 0x110 && (event->flags & WINDOW_KEY_TOUCH)) ||
                                                    (event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD))))
-                return ui_text_finger(ui, t, event, x, y, now);
+                return ui_text_finger(ui, t, event, x, y);
         if (event->type == WINDOW_EVENT_MOTION && t->finger)
-                return event->flags & WINDOW_KEY_TOUCH ? ui_text_finger(ui, t, event, x, y, now) : 0;
+                return event->flags & WINDOW_KEY_TOUCH ? ui_text_finger(ui, t, event, x, y) : 0;
         if (event->type == WINDOW_EVENT_BUTTON)
         {
                 b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
@@ -12583,7 +12585,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 {
                         p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
 
-                        t->clicks = ui_click_count(ui, &t->click, now, x, y);
+                        t->clicks = ui_click_count(ui, &t->click, x, y);
                         t->drag_box = false;
                         // A masked field has no words: a double click takes it all, as a triple does.
                         if (t->clicks == 2 && t->masked)
@@ -13120,8 +13122,9 @@ static p32 ui_text_pick(struct ui address_to ui, struct ui_text address_to t, p6
 
 // A finger lands: on the bar's item it shows pressed; on a handle it takes that end; on the text it is a press (a tap, or the start of
 // a scroll), a second tap a word and a third a line, and a caret where it landed when nothing is selected.
-static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_to t, int x, int y, positive now)
+static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_to t, int x, int y)
 {
+        positive now = (positive)ui_kit_time();
         int item = ui_text_bar_item(t, x, y), grab = item < 0 ? ui_text_handle_hit(ui, t, x, y) : 0, clicks;
         p64 at;
         b32 on;
@@ -13151,7 +13154,7 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
         if (!ui_text_inside(t, x, y))
                 return 0;
         at = ui_text_hit(ui, t, x, y);
-        clicks = ui_click_count(ui, &t->click, now, x, y);
+        clicks = ui_click_count(ui, &t->click, x, y);
         if (clicks >= 2)
                 return ui_text_pick(ui, t, at, clicks, false);
         // On the selection, or on the caret of none, a tap shows the bar; anywhere else it puts the caret there, which a tap with
@@ -13171,8 +13174,9 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
 }
 
 // A finger that holds something moves.
-static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_to t, int x, int y, positive now)
+static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_to t, int x, int y)
 {
+        positive now = (positive)ui_kit_time();
         if (t->finger == UI_TEXT_FINGER_BAR)
         {
                 int was = t->bar_down;
@@ -13213,8 +13217,9 @@ static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_t
 }
 
 // A finger lifts, or the compositor takes its press back (cancelled), or the lift is a long press's (hold).
-static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to t, int x, int y, b32 cancelled, b32 hold, positive now)
+static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to t, int x, int y, b32 cancelled, b32 hold)
 {
+        positive now = (positive)ui_kit_time();
         int finger = t->finger, tapped;
         p32 asks = UI_TEXT_MOVED;
 
@@ -13284,13 +13289,13 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
 }
 
 // What a finger does on the widget: its left button's press, lift and cancel, the right button of its long press, and its moves.
-static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y,
-                          positive now)
+static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
+        positive now = (positive)ui_kit_time();
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
 
         if (event->type == WINDOW_EVENT_MOTION)
-                return ui_text_finger_move(ui, t, x, y, now);
+                return ui_text_finger_move(ui, t, x, y);
         if (event->a == 0x111)
         {
                 // The long press's right button: on the text it selects the word; a finger on a handle or the bar only says it was
@@ -13305,8 +13310,8 @@ static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, 
                 return ui_text_inside(t, x, y) ? ui_text_pick(ui, t, ui_text_hit(ui, t, x, y), 2, true) : 0;
         }
         if (down)
-                return ui_text_finger_down(ui, t, x, y, now);
-        return ui_text_finger_up(ui, t, x, y, (event->flags & WINDOW_KEY_CANCEL) != 0, (event->flags & WINDOW_KEY_HOLD) != 0, now);
+                return ui_text_finger_down(ui, t, x, y);
+        return ui_text_finger_up(ui, t, x, y, (event->flags & WINDOW_KEY_CANCEL) != 0, (event->flags & WINDOW_KEY_HOLD) != 0);
 }
 
 /*

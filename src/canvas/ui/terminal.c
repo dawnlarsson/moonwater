@@ -2524,7 +2524,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
-                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, ui_kit.now, terminal_at_x(), terminal_at_y());
+                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, terminal_at_x(), terminal_at_y());
                 if (shift && terminal.selecting && terminal.clicks == 1)
                 {
                         terminal.select_active_line = line, terminal.select_active_column = at;
