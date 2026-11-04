@@ -522,8 +522,13 @@ static fn editor_tabs_draw(struct ui address_to ui, int height)
         // The dot is the kit's badge dot (ui_kit_dot), its inset the kit's UI_DOT_IN from the tab's right edge.
         for (int at = 0; at < editor.count; at++)
                 if (doc_dirty(&editor.tabs[at].view.doc))
-                        ui_kit_dot(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, UI_DOT_IN), height / 2 - ui_px(ui, UI_DOT / 2),
+                {
+                        int left = ui_dev(ui, ui_tab_left(ui, c, at)), wide = ui_dev(ui, ui_tab_width(ui, c, at));
+
+                        // After the name: at the tab's right end, or its left reading from the right.
+                        ui_kit_dot(ui, ui_mirror(left + wide - ui_px(ui, UI_DOT_IN), ui_px(ui, UI_DOT), left, wide), height / 2 - ui_px(ui, UI_DOT / 2),
                                    ui_role(UI_ON_SURFACE) | 0xff000000u);
+                }
 }
 
 /*
@@ -611,15 +616,15 @@ static fn editor_draw(unsigned int address_to pixels)
 
                 ui_fill(ui, 0, y, editor.width, bar, ui_role(UI_SURFACE_CONTAINER) | 0xff000000u);
                 editor_status_text(text, sizeof(text), doc);
-                ui_kit_text(ui, ui_px(ui, UI_INSET), ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM),
-                            (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                ui_kit_text_flipped(ui, ui_px(ui, UI_INSET), ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM),
+                                    (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
                 if (tab->changed_on_disk || editor.status[0])
                 {
                         const char address_to say = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status;
 
-                        ui_kit_text(ui, editor.width - ui_px(ui, UI_INSET) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
-                                    ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
-                                    ui_role(tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT), 0);
+                        ui_kit_text_flipped(ui, editor.width - ui_px(ui, UI_INSET) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
+                                            ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
+                                            ui_role(tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
                 }
         }
         // A finger's selection: its handles and actions bar, over everything, the find bar's and then the code view's.

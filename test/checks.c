@@ -121113,6 +121113,10 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #endif
 #include "../src/canvas/compositor.c"
 #include "../src/canvas/ui/features.h"
+#ifdef CHECK_terminal
+static void rtl_keep_add(int x, int y, int w, int h);
+#define UI_KEEP(x, y, w, h) rtl_keep_add((x), (y), (w), (h))
+#endif
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
 #endif
@@ -136763,6 +136767,341 @@ static fn check_battery(void)
         battery_root = (string_address)BATTERY_ROOT;
         return;
 }
+/*
+        A window that reads from the right is the window that reads from the left, mirrored. Every view the kit draws is
+        drawn twice at the same size and the same time, once with ui_kit.rtl clear and once set, and the second picture
+        must be the first one flipped about its vertical middle, pixel for pixel, with the places named in rtl_keep
+        left out (a check mark, a clock's hands and a play triangle are not mirrored: their box is, their picture is
+        not). The text is what a mirror cannot judge, a glyph is not its own mirror image: so the faces are made here, one
+        block a code point, as wide as its advance and as tall as a capital, the same width for every code point. A line
+        of text is then a bar, and a bar laid at the start of a box on the right is the mirror of a bar laid at the start
+        of the same box on the left, when the width of the text is what the layout believes it is. The font engine's own
+        bidirectional text, shaping and fallback are held by CHECK_font_shape; this holds the kit's layout to its sides.
+*/
+static p8 rtl_font_bytes[1 << 15];
+static positive rtl_font_size;
+
+static fn rtl_u16(positive address_to at, p32 value)
+{
+        rtl_font_bytes[(*at)++] = (p8)(value >> 8);
+        rtl_font_bytes[(*at)++] = (p8)value;
+}
+
+static fn rtl_u32(positive address_to at, p32 value)
+{
+        rtl_u16(at, value >> 16);
+        rtl_u16(at, value & 0xffff);
+}
+
+// The font: a block of 1000 by 700 units, in a 1000 unit em, for every code point from U+0020 to U+2FFF (and the missing glyph).
+static fn rtl_font_make(void)
+{
+        static const p32 tags[9] = {FONT_TAG('O', 'S', '/', '2'), FONT_TAG('c', 'm', 'a', 'p'), FONT_TAG('g', 'l', 'y', 'f'),
+                                    FONT_TAG('h', 'e', 'a', 'd'), FONT_TAG('h', 'h', 'e', 'a'), FONT_TAG('h', 'm', 't', 'x'),
+                                    FONT_TAG('l', 'o', 'c', 'a'), FONT_TAG('m', 'a', 'x', 'p'), FONT_TAG('p', 'o', 's', 't')};
+        positive at = 12 + 16 * 9, start[9], length[9];
+
+        memory_zero(rtl_font_bytes, sizeof(rtl_font_bytes));
+        rtl_font_bytes[1] = 1;
+        rtl_font_bytes[5] = 9;
+        for (positive table = 0; table < 9; table++)
+        {
+                start[table] = at;
+                switch (table)
+                {
+                case 0: // OS/2, version 4, typo metrics used
+                        rtl_u16(&at, 4);
+                        at = start[table] + 62;
+                        rtl_u16(&at, 0x80), rtl_u16(&at, 0x20), rtl_u16(&at, 0x2fff);
+                        rtl_u16(&at, 800), rtl_u16(&at, (p32)-200 & 0xffff), rtl_u16(&at, 0);
+                        rtl_u16(&at, 800), rtl_u16(&at, 200);
+                        rtl_u32(&at, 1), rtl_u32(&at, 0);
+                        rtl_u16(&at, 500), rtl_u16(&at, 700);
+                        at = start[table] + 96;
+                        break;
+                case 1: // cmap: format 4, (3, 1); U+0020 to U+2FFF through the glyph array, all of them glyph 1
+                        rtl_u16(&at, 0), rtl_u16(&at, 1), rtl_u16(&at, 3), rtl_u16(&at, 1), rtl_u32(&at, 12);
+                        rtl_u16(&at, 4), rtl_u16(&at, 32 + 2 * 0x2fe0), rtl_u16(&at, 0);
+                        rtl_u16(&at, 4), rtl_u16(&at, 4), rtl_u16(&at, 1), rtl_u16(&at, 0);
+                        rtl_u16(&at, 0x2fff), rtl_u16(&at, 0xffff), rtl_u16(&at, 0);
+                        rtl_u16(&at, 0x20), rtl_u16(&at, 0xffff);
+                        rtl_u16(&at, 0), rtl_u16(&at, 1);
+                        rtl_u16(&at, 4), rtl_u16(&at, 0);
+                        for (p32 code = 0x20; code <= 0x2fff; code++)
+                                rtl_u16(&at, 1);
+                        break;
+                case 2: // glyf: the block, twice
+                        for (positive glyph = 0; glyph < 2; glyph++)
+                        {
+                                rtl_u16(&at, 1), rtl_u16(&at, 0), rtl_u16(&at, 0), rtl_u16(&at, 1000), rtl_u16(&at, 700);
+                                rtl_u16(&at, 3), rtl_u16(&at, 0);
+                                for (positive point = 0; point < 4; point++)
+                                        rtl_font_bytes[at++] = 1;
+                                rtl_u16(&at, 0), rtl_u16(&at, 0), rtl_u16(&at, 1000), rtl_u16(&at, 0);
+                                rtl_u16(&at, 0), rtl_u16(&at, 700), rtl_u16(&at, 0), rtl_u16(&at, (p32)-700 & 0xffff);
+                                at = (at + 3) & ~(positive)3;
+                        }
+                        break;
+                case 3: // head: 1000 units, a long loca
+                        rtl_u32(&at, 0x00010000), rtl_u32(&at, 0x00010000), rtl_u32(&at, 0), rtl_u32(&at, 0x5f0f3cf5);
+                        rtl_u16(&at, 0), rtl_u16(&at, 1000);
+                        at = start[table] + 50;
+                        rtl_u16(&at, 1), rtl_u16(&at, 0);
+                        break;
+                case 4: // hhea
+                        rtl_u32(&at, 0x00010000), rtl_u16(&at, 800), rtl_u16(&at, (p32)-200 & 0xffff), rtl_u16(&at, 0);
+                        rtl_u16(&at, 1000);
+                        at = start[table] + 34;
+                        rtl_u16(&at, 2);
+                        break;
+                case 5: // hmtx
+                        rtl_u16(&at, 1000), rtl_u16(&at, 0), rtl_u16(&at, 1000), rtl_u16(&at, 0);
+                        break;
+                case 6: // loca
+                        rtl_u32(&at, 0), rtl_u32(&at, 36), rtl_u32(&at, 72);
+                        break;
+                case 7: // maxp
+                        rtl_u32(&at, 0x00005000), rtl_u16(&at, 2);
+                        break;
+                default: // post
+                        rtl_u32(&at, 0x00030000), rtl_u32(&at, 0);
+                        rtl_u16(&at, (p32)-100 & 0xffff), rtl_u16(&at, 50), rtl_u32(&at, 0);
+                        at = start[table] + 32;
+                        break;
+                }
+                length[table] = at - start[table];
+                at = (at + 3) & ~(positive)3;
+        }
+        for (positive table = 0; table < 9; table++)
+        {
+                positive record = 12 + 16 * table;
+
+                rtl_u32(&record, tags[table]);
+                rtl_u32(&record, 0);
+                rtl_u32(&record, (p32)start[table]);
+                rtl_u32(&record, (p32)length[table]);
+        }
+        rtl_font_size = at;
+}
+
+// The places a mirror does not turn over: a picture whose box moves and whose drawing does not (LTR coordinates of the first picture).
+struct rtl_keep
+{
+        int left, top, right, bottom;
+};
+
+static struct rtl_keep rtl_keeps[64];
+static unsigned int rtl_first_pair[2];
+static int rtl_keep_count;
+
+static void rtl_keep_add(int x, int y, int w, int h)
+{
+        if (rtl_keep_count < (int)(sizeof(rtl_keeps) / sizeof(rtl_keeps[0])))
+                rtl_keeps[rtl_keep_count++] = (struct rtl_keep){x, y, x + w, y + h};
+}
+
+static inline b32 rtl_kept(int x, int y)
+{
+        for (int k = 0; k < rtl_keep_count; k++)
+                if (x >= rtl_keeps[k].left && x < rtl_keeps[k].right && y >= rtl_keeps[k].top && y < rtl_keeps[k].bottom)
+                        return true;
+        return false;
+}
+
+// Two pixels of one cover, give or take a level in a channel: the painter's rounding of a round corner's cover is not the same at a box's
+// two ends (one level, on one row of a pill of the 56 pixels of a switch at scale 2); a box a pixel off its place is far more.
+static inline b32 rtl_close(unsigned int a, unsigned int b)
+{
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+        {
+                int one = (int)(a >> shift & 255), other = (int)(b >> shift & 255);
+
+                if (one - other > 1 || other - one > 1)
+                        return false;
+        }
+        return true;
+}
+
+// How many pixels of the second picture are not the first one flipped, and the first of them (set in the result's pointers).
+static positive rtl_compare(const unsigned int address_to left, const unsigned int address_to right, positive stride, int width, int height,
+                            int address_to first_x, int address_to first_y)
+{
+        positive wrong = 0;
+
+        for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                        if (!rtl_close(left[(positive)y * stride + (positive)x], right[(positive)y * stride + (positive)(width - 1 - x)]) && !rtl_kept(width - 1 - x, y))
+                        {
+                                unsigned int a = left[(positive)y * stride + (positive)x], b = right[(positive)y * stride + (positive)(width - 1 - x)];
+
+                                if (!wrong)
+                                        *first_x = x, *first_y = y, rtl_first_pair[0] = a, rtl_first_pair[1] = b;
+                                wrong++;
+                        }
+        return wrong;
+}
+
+static unsigned int rtl_first[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
+static p8 rtl_settings_kept[sizeof(settings)], rtl_kit_kept[sizeof(ui_kit)];
+
+// The window in group (a number, or -1 for the kit's gallery) drawn whole at the kit's time, right to left or not.
+static fn rtl_draw(int group, int scale, b32 rtl)
+{
+        ui_kit.rtl = rtl ? 1 : 0;
+        ui_kit_settle();
+        settings.ui.scale = scale * 100;
+        settings_gallery.on = group < 0;
+        if (group < 0)
+        {
+                settings_gallery_build();
+                settings.width = ui_px(&settings.ui, SETTINGS_GALLERY_W);
+                settings.height = ui_px(&settings.ui, SETTINGS_GALLERY_H);
+                settings_gallery.scroll.scroll = 0;
+        }
+        else
+        {
+                settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
+                settings.group = group;
+                settings.filter_length = 0, settings.filter[0] = 0;
+                settings.view = 0, settings.editing = -1, settings.choice = -1;
+                settings.focused = 0;
+                settings_refilter();
+        }
+        ui_kit.now = 5000000000ull;
+        ui_kit.busy = 0;
+        settings_draw_rows(settings_frames_whole, 0, 0);
+}
+
+// A picture as a PPM in the work directory: turned over when asked, and the pixels that are not the other picture's mirror red.
+static fn rtl_ppm(const p8 address_to base, string_address tail, const unsigned int address_to pixels, const unsigned int address_to other, b32 turned)
+{
+        p8 path[128], head[32];
+        static p8 row[3 * SETTINGS_FRAMES_W];
+        positive length = 0;
+        bipolar handle;
+
+        string_copy_bounded(path, (string_address)base, sizeof(path));
+        string_append_bounded((string_address)path, tail, sizeof(path));
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return;
+        string_copy(head, (string_address) "P6\n");
+        length = 3;
+        length += positive_into_string(head + length, (positive)settings.width);
+        head[length++] = ' ';
+        length += positive_into_string(head + length, (positive)settings.height);
+        string_copy(head + length, (string_address) "\n255\n");
+        length += 5;
+        system_write_once((b32)handle, head, length);
+        for (int y = 0; y < settings.height; y++)
+        {
+                for (int x = 0; x < settings.width; x++)
+                {
+                        unsigned int pixel = pixels[(positive)y * SETTINGS_FRAMES_W + (positive)(turned ? settings.width - 1 - x : x)];
+
+                        if (other && !rtl_close(other[(positive)y * SETTINGS_FRAMES_W + (positive)(settings.width - 1 - x)], pixel) && !rtl_kept(x, y))
+                                pixel = 0xffff0000u;
+                        row[x * 3] = (p8)(pixel >> 16), row[x * 3 + 1] = (p8)(pixel >> 8), row[x * 3 + 2] = (p8)pixel;
+                }
+                system_write_once((b32)handle, row, (positive)settings.width * 3);
+        }
+        system_close(handle);
+}
+
+// One view at one scale: its picture right to left against the one left to right, mirrored.
+static b32 rtl_view(string_address name, int group, int scale)
+{
+        int x = 0, y = 0;
+        positive wrong;
+
+        rtl_draw(group, scale, false);
+        memory_copy(rtl_first, settings_frames_whole, sizeof(rtl_first));
+        rtl_keep_count = 0;
+        rtl_draw(group, scale, true);
+        wrong = rtl_compare(rtl_first, settings_frames_whole, SETTINGS_FRAMES_W, settings.width, settings.height, &x, &y);
+        if (wrong)
+        {
+                p8 path[96];
+                positive named = 0;
+
+                string_format(log, "  rtl mirror: %s at scale %b: %p pixels are not the mirror of the picture left to right, the first at %b,%b (%p, %p)\n",
+                              name, (bipolar)scale, wrong, (bipolar)x, (bipolar)y, (positive)rtl_first_pair[0], (positive)rtl_first_pair[1]);
+                // The picture right to left with the places that are not the mirror in red, and the left to right one turned over, for whoever looks
+                // (written to the work directory when there is one).
+                for (const char address_to prefix = "scratch/rtl-"; *prefix; prefix++)
+                        path[named++] = (p8)*prefix;
+                for (positive k = 0; name[k] && named < 80; k++)
+                        path[named++] = (p8)(name[k] == ' ' || name[k] == '\'' || name[k] == '/' ? '-' : name[k]);
+                path[named] = 0;
+                string_append_bounded((string_address)path, (string_address)(scale == 2 ? "-2" : "-1"), sizeof(path));
+                rtl_ppm(path, (string_address) "-rtl.ppm", settings_frames_whole, rtl_first, false);
+                rtl_ppm(path, (string_address) "-ltr.ppm", rtl_first, null, true);
+        }
+        return !wrong;
+}
+
+static fn check_rtl_mirror(void)
+{
+        static font_face face;
+        static p8 atlas[1024 * 1024];
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        b32 gallery, groups = true;
+
+        rtl_font_make();
+        if ((engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
+            font_load(&face, rtl_font_bytes, rtl_font_size, 0) != 0)
+        {
+                check("rtl mirror: the block face, the engine and the window load", false);
+                return;
+        }
+        memory_copy(rtl_settings_kept, &settings, sizeof(settings));
+        memory_copy(rtl_kit_kept, &ui_kit, sizeof(ui_kit));
+        settings_frames.table = (struct windows address_to)table;
+        settings_frames.table->stride = SETTINGS_FRAMES_W;
+        settings_frames.table->buffer = buffer;
+        settings_frames.table->output_width = 4096;
+        settings_frames.table->output_height = 4096;
+        settings.own = (struct window_row){settings_frames.table, 0, -1, -1, WINDOWS_HEADER + 2 * buffer, buffer, SETTINGS_FRAMES_W, 4096, 4096};
+        memory_zero(&settings.ui, sizeof(settings.ui));
+        settings.ui.engine = (font_engine address_to)engine;
+        font_start(settings.ui.engine, atlas, 1024, 1024);
+        settings.ui.regular = &face;
+        settings.ui.bold = null;
+        settings.ui.scale = 100;
+        settings.ui.opaque = 1;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        ui_inks(&settings.ui, 0x101012u);
+        ui_kit_inks(&settings.ui);
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+
+                if (row->kind == SETTINGS_SWITCH)
+                        continue;
+                settings.state[at] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[at], (string_address)(row->standard ? row->standard : "1"), SETTINGS_VALUE);
+        }
+        settings.shown = -1;
+        settings.pane = 0;
+        // The cuts the kit remembers are of the faces the checks before this one drew with.
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        gallery = rtl_view("the kit's gallery", -1, 1);
+        for (int scale = 1; scale <= 2; scale++)
+                for (int group = 0; group < settings_groups(); group++)
+                        groups &= rtl_view(settings_group_name(group), group, scale);
+        check("rtl mirror: the kit's gallery, every control of it, right to left is its picture left to right flipped", gallery);
+        check("rtl mirror: every group of the Settings window, at scales 1 and 2, right to left is its picture left to right flipped", groups);
+        ui_kit.rtl = 0;
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        memory_copy(&settings, rtl_settings_kept, sizeof(settings));
+        memory_copy(&ui_kit, rtl_kit_kept, sizeof(ui_kit));
+}
+
 #endif
 
 // A code point as UTF-8, into bytes; the count of bytes it takes.
@@ -152537,6 +152876,7 @@ b32 main()
         check_settings_keys();
         check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                               program_argument_count() > 4 ? program_argument(4) : null);
+        check_rtl_mirror();
         check_display_section();
         check_battery();
 #endif

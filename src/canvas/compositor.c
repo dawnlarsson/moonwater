@@ -15071,6 +15071,35 @@ static positive compositor_map_file(string_address path, positive address_to siz
         return (positive)mapped;
 }
 
+/*
+        The faces behind the chain every engine draws with: Noto Sans Arabic and Noto Sans Hebrew, each regular and bold, which the
+        font engine reaches for when the chain has no glyph for a code point (font_fallback). Mapped once for the program, by the
+        first engine that asks, and put behind each engine after that; a file the image does not have leaves the chain as it was.
+*/
+static void compositor_fallbacks(font_engine address_to engine)
+{
+        static const string_address paths[4] = {"/usr/share/fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf",
+                                                "/usr/share/fonts/noto-sans-arabic/NotoSansArabic-Bold.ttf",
+                                                "/usr/share/fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf",
+                                                "/usr/share/fonts/noto-sans-hebrew/NotoSansHebrew-Bold.ttf"};
+        static font_face faces[4];
+        static b32 loaded[4], tried;
+
+        if (!tried)
+        {
+                tried = 1;
+                for (int at = 0; at < 4; at++)
+                {
+                        positive size = 0, bytes = compositor_map_file(paths[at], address_of size);
+
+                        loaded[at] = bytes && font_load(&faces[at], (const p8 address_to)bytes, size, 0) == 0;
+                }
+        }
+        for (int pair = 0; pair < 2; pair++)
+                if (loaded[2 * pair])
+                        font_fallback(engine, &faces[2 * pair], loaded[2 * pair + 1] ? &faces[2 * pair + 1] : null);
+}
+
 // The face the tabs are written in and the band they are drawn into; without one the tabs are shapes.
 static void compositor_font(string_address path)
 {
@@ -15098,6 +15127,7 @@ static void compositor_font(string_address path)
 
         compositor.engine = (font_engine address_to)engine;
         font_start(compositor.engine, atlas, 128, 128);
+        compositor_fallbacks(compositor.engine);
         compositor.band = (unsigned int *)band;
         compositor.band_bytes = band_bytes;
         compositor.glass = (unsigned int *)glass;

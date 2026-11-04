@@ -1308,7 +1308,7 @@ static void settings_map_place(void)
         settings.map.field_w = settings.map.w - 2 * pad, settings.map.field_h = settings.map.h - strip - pad;
         c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address)WORDS(settings_identify_screens);
         c->w = button_w * 100 / ui->scale, c->h = button_h * 100 / ui->scale;
-        c->x = (settings.map.x + settings.map.w - pad - button_w) * 100 / ui->scale;
+        c->x = ui_mirror(settings.map.x + settings.map.w - pad - button_w, button_w, settings.map.x, settings.map.w) * 100 / ui->scale;
         c->y = (settings.map.y + (strip - button_h) / 2) * 100 / ui->scale;
 }
 
@@ -1475,6 +1475,8 @@ static void settings_map_draw(struct ui address_to ui)
         const char address_to hint = settings_map_hint(count);
 
         ui_round(ui, settings.map.x, settings.map.y, settings.map.w, settings.map.h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
+        // The screens are where they are on the desk, left is left whichever way the window reads: the field is not turned over.
+        UI_KEEP(settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h);
         for (unsigned int at = 0; count && at < count; at++)
         {
                 struct settings_map_view view;
@@ -1500,11 +1502,11 @@ static void settings_map_draw(struct ui address_to ui)
                             ui_kit_baseline(ui, y + (height - ui_px(ui, ui_types[UI_TITLE_LARGE].line)) / 2, UI_TITLE_LARGE), (string_address)text,
                             UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0);
                 if (height >= 3 * line)
-                        ui_kit_text(ui, x + pad, ui_kit_baseline(ui, y + height - pad - line, UI_LABEL_MEDIUM),
-                                    (string_address)settings.own.table->output_name[at], UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                        ui_kit_text_flipped(ui, x + pad, ui_kit_baseline(ui, y + height - pad - line, UI_LABEL_MEDIUM),
+                                            (string_address)settings.own.table->output_name[at], UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, x, width);
         }
-        ui_kit_text(ui, settings.map.x, ui_kit_baseline(ui, caption, UI_LABEL_MEDIUM), (string_address)hint, UI_LABEL_MEDIUM,
-                    ui_role(UI_ON_SURFACE_VARIANT), 0);
+        ui_kit_text_flipped(ui, settings.map.x, ui_kit_baseline(ui, caption, UI_LABEL_MEDIUM), (string_address)hint, UI_LABEL_MEDIUM,
+                            ui_role(UI_ON_SURFACE_VARIANT), 0, settings.map.x, settings.map.w);
         ui_control_draw(ui, &settings.map.identify);
 }
 
@@ -1550,7 +1552,8 @@ static fn settings_layout(void)
         ui_list_layout(ui, &settings.list);
         ui_scroll_clamp(&settings.list.scroll);
         // The card has the body's band and the whole width: the column is not shown with it.
-        settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
+        settings.card.x = ui_rtl() ? settings.page.left - ui_px(ui, UI_SCROLL_WIDTH) - (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2
+                                   : settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
         settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
         settings.card.content = ui_lines_height(ui, settings.card_lines);
         // A card that scrolls stretches at its ends like a list (ui_scroll_span), and at its top when it fits.
@@ -3204,7 +3207,7 @@ static fn settings_menu_open(int row)
                 int top = ui_list_row_y(&settings.list, at);
 
                 ui_popmenu_size(&measure, m, settings.height);
-                x = settings.page.right - ui_px(&settings.ui, UI_INSET) - m->width;
+                x = ui_rtl() ? settings.page.left + ui_px(&settings.ui, UI_INSET) : settings.page.right - ui_px(&settings.ui, UI_INSET) - m->width;
                 x = x < sizes.margin ? sizes.margin : x;
                 y = top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, UI_GAP1);
         }
@@ -4211,7 +4214,15 @@ static fn settings_gallery_draw(struct ui address_to ui)
                 }
                 c->y = y - scroll;
                 if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height * 100 / ui->scale)
+                {
+                        // The page is laid out left to right and turned over its width, as a window is, for a window that reads from the right.
+                        int placed = c->x;
+
+                        ui_control_size(ui, c);
+                        c->x = ui_mirror(c->x, c->w, 0, SETTINGS_GALLERY_W);
                         ui_control_draw(ui, c);
+                        c->x = placed;
+                }
                 c->y = y;
                 if (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD)
                         right = c->x + c->w, row_y = c->y;
@@ -4228,7 +4239,7 @@ static fn settings_gallery_place(void)
 {
         struct ui_scroll address_to s = &settings_gallery.scroll;
 
-        s->x = settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
+        s->x = ui_rtl() ? 0 : settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
         s->inset = UI_CLOSE_BOTTOM; // the window's close button is at its top right: the bar starts below it
         s->content = ui_px(&settings.ui, SETTINGS_GALLERY_H);
         ui_scroll_clamp(s);

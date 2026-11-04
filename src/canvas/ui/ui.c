@@ -41,6 +41,15 @@
 // What the windows say, in the language chosen: the table of words and the file of each other language (language.c).
 #include "language.c"
 
+/*
+        A place where something is drawn that reading from the right does not turn over (a check mark, a signal's bars): its
+        place is mirrored with its box, its drawing is not. The kit says so here, in device pixels, and a build says nothing of it;
+        test/checks.c defines it before this file to hold the rest of a window to its mirror.
+*/
+#ifndef UI_KEEP
+#define UI_KEEP(x, y, w, h) ((void)0)
+#endif
+
 #define UI_ROW 40      // a row of a list or a column
 #define UI_PAD 16      // the window's margin
 #define UI_INSET 14    // a row's text in from its edges
@@ -537,6 +546,22 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
         is the advance font_draw answers for the run so far, kerning and all.
         The same steps font_draw takes, without the coverage.
 */
+/*
+        Which way the window reads: from the right when the language taken says so (language_rtl), ui_kit.rtl. The kit is laid
+        out by start and end and not by left and right, through these three and nothing else: a box of w that is `in` from the
+        start edge of a container (ui_start_x), or from its end (ui_end_x), and a box already placed in LTR coordinates mirrored
+        inside its container (ui_mirror). Mirroring is in the layout, before a painter is called: no painter knows a direction.
+        The text is the font engine's (FONT_RTL is the paragraph's direction, so a label and its neighbours read in order).
+*/
+static inline b32 ui_rtl(void);
+static inline int ui_dir(void);
+
+// The font engine's flags for a run of the kit's: its paragraph direction, and bold for the fallback faces of a bold run.
+static inline p32 ui_font_flags(const struct ui address_to ui, const font_face address_to face)
+{
+        return (ui_rtl() ? FONT_RTL : 0) | (face && face == ui->bold && ui->bold != ui->regular ? FONT_BOLD : 0);
+}
+
 struct ui_pen
 {
         b64 reach;        // the pen after the last glyph, in 16.16
@@ -576,18 +601,7 @@ static int ui_pen_width(const struct ui_pen address_to pen)
 static int ui_advance(struct ui address_to ui, const font_face address_to const address_to faces, string_address text,
                       positive length, p32 em)
 {
-        struct ui_pen pen;
-        positive at = 0;
-
-        ui_pen_start(faces, em, &pen);
-        while (at < length)
-        {
-                p32 code;
-
-                at = font_decode((const p8 address_to)text, length, at, &code);
-                ui_pen_step(ui, faces, em, code, &pen);
-        }
-        return ui_pen_width(&pen);
+        return (int)(font_extent(ui->engine, faces, 2, (const p8 address_to)text, length, em, ui_font_flags(ui, faces[0])) >> 16);
 }
 
 /*
@@ -816,7 +830,7 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
         {
                 font_target line = {ui->scratch, (positive)wide, wide, rows};
 
-                font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, 0, &line, (b32)left << 16, above,
+                font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, ui_font_flags(ui, faces[0]), &line, (b32)left << 16, above,
                           light ? 0xffffffu : 0, paper);
         }
 
@@ -2024,6 +2038,7 @@ static struct ui_kit
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
+        unsigned int rtl;                  // 1 when the language taken reads from the right: every window is laid out mirrored
         b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
@@ -2045,10 +2060,58 @@ static fn ui_kit_caret_take(const struct windows address_to table)
         ui_kit.caret_thick = table->caret_thick ? table->caret_thick - 1 : UI_CARET_MID;
 }
 
-// The language the table says, taken wherever the theme is: the one place a window of this program learns it.
+static inline b32 ui_rtl(void)
+{
+        return ui_kit.rtl;
+}
+
+static inline int ui_dir(void)
+{
+        return ui_kit.rtl ? -1 : 1;
+}
+
+// A horizontal arrow key, as the way it goes along what is read: +1 toward the end (Right, or Left reading from the right), -1 toward the start.
+// A text goes by what is on the screen (Left is left) and does not ask; a row of buttons, a menu's submenus and a stepper do.
+static inline int ui_arrow(int key)
+{
+        return key == 106 ? ui_dir() : -ui_dir();
+}
+
+// A box w wide at x (as laid out left to right) inside the container [left, left + width), mirrored in it when the window reads from the right.
+static inline int ui_mirror(int x, int w, int left, int width)
+{
+        return ui_kit.rtl ? 2 * left + width - x - w : x;
+}
+
+// A device pixel x of the container [left, left + width) where it is across the container from the other end, when the window reads from the right.
+static inline int ui_point(int x, int left, int width)
+{
+        return ui_kit.rtl ? 2 * left + width - 1 - x : x;
+}
+
+// A box w wide that is `in` from the start edge of the container [left, left + width): the left one reading from the left, the right one from the right.
+static inline int ui_start_x(int left, int width, int in, int w)
+{
+        return ui_kit.rtl ? left + width - in - w : left + in;
+}
+
+// And `in` from its end edge.
+static inline int ui_end_x(int left, int width, int in, int w)
+{
+        return ui_kit.rtl ? left + in : left + width - in - w;
+}
+
+static fn ui_kit_settle(void);
+
+// The language the table says, taken wherever the theme is: the one place a window of this program learns it, with the way it reads.
 static fn ui_kit_language_take(const struct windows address_to table)
 {
         language_take(table->language);
+        if (ui_kit.rtl != (unsigned int)language_rtl())
+        {
+                ui_kit.rtl = language_rtl();
+                ui_kit_settle();
+        }
 }
 
 // Rows top to bottom (logical pixels) of the control being drawn move this frame.
@@ -2205,6 +2268,18 @@ struct ui_box
         b32 x0, y0, x1, y1; // the edges, 256ths of a device pixel
         b32 rx, ry;         // each corner's radii
 };
+
+// A box (device 256ths) turned over the vertical middle of a container whose left and right edges (256ths) add to sum, when the window reads from the right.
+static inline void ui_flip(struct ui_box address_to box, b32 sum)
+{
+        if (ui_kit.rtl)
+        {
+                b32 x0 = sum - box->x1;
+
+                box->x1 = sum - box->x0;
+                box->x0 = x0;
+        }
+}
 
 static unsigned short ui_kit_line[UI_KIT_LINE], ui_kit_clip[UI_KIT_LINE];
 
@@ -2784,6 +2859,23 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
         }
 }
 
+
+// A box laid down in the coordinates a control works in (as if the window read from the left), turned over the control's middle
+// (sum: its left and right edges added, device 256ths) when it reads from the right; the box that clips it turned with it.
+static fn ui_kit_fill_in(struct ui address_to ui, struct ui_box box, unsigned int argb, const struct ui_box address_to clip, b32 sum)
+{
+        struct ui_box clipped;
+
+        ui_flip(&box, sum);
+        if (clip)
+        {
+                clipped = *clip;
+                ui_flip(&clipped, sum);
+                clip = &clipped;
+        }
+        ui_kit_fill(ui, &box, argb, clip);
+}
+
 // A ring: the box less the box inset by thickness (256ths), in one colour (an outline, a hairline).
 static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb)
 {
@@ -3014,14 +3106,20 @@ static const struct ui_type
 
 // Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke, cut at high (device
 // pixels: the window's width, or a control's right edge); its width.
-static int ui_kit_text_width(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
-                             unsigned int stroke, int high)
+static int ui_kit_text_between(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
+                               unsigned int stroke, int low, int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular,
                                                ui->regular};
 
-        return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, 0, high, stroke);
+        return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, low, high, stroke);
+}
+
+static int ui_kit_text_width(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
+                             unsigned int stroke, int high)
+{
+        return ui_kit_text_between(ui, x, baseline, text, type, argb, stroke, 0, high);
 }
 
 // Whether any of the rows top to bottom (device pixels) may be written: in the picture, the region and a repaint's band.
@@ -3036,9 +3134,9 @@ static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom)
         outside those the ui may write -- a repaint's band, the region's top and bottom -- writes nothing there, and
         is not measured either. A repaint of a row of a list was measuring every other row's every word.
 */
-// The same, cut at high (device pixels): a control's text is cut at its own box, not at the window's edge.
-static fn ui_kit_text_clip(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
-                           int high)
+// The same, cut between low and high (device pixels): a control's text is cut at its own box, not at the window's edges.
+static fn ui_kit_text_in(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                         int low, int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
@@ -3047,7 +3145,13 @@ static fn ui_kit_text_clip(struct ui address_to ui, int x, int baseline, string_
 
         rows = rows > UI_SCRATCH_ROWS * ui->scale / 100 ? UI_SCRATCH_ROWS * ui->scale / 100 : rows;
         if (ui_rows_seen(ui, top, top + rows))
-                ui_kit_text_width(ui, x, baseline, text, type, argb, stroke, high);
+                ui_kit_text_between(ui, x, baseline, text, type, argb, stroke, low, high);
+}
+
+static fn ui_kit_text_clip(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                           int high)
+{
+        ui_kit_text_in(ui, x, baseline, text, type, argb, stroke, 0, high);
 }
 
 static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke)
@@ -3062,6 +3166,28 @@ static int ui_kit_measure(struct ui address_to ui, string_address text, int type
                                                ui->regular};
 
         return ui_run_in(ui, faces, 0, 0, text, t->size, 0, 0, 0, ui->width, 0);
+}
+
+// A run laid out as if the window read from the left, with its left end at x in the container [left, left + span), mirrored in
+// it when the window reads from the right; the width of the run. A row of a list works left to right and draws through this.
+static int ui_kit_text_flipped(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                               int left, int span)
+{
+        int width;
+
+        if (!ui_rtl())
+                return ui_kit_text_width(ui, x, baseline, text, type, argb, stroke, ui->width);
+        width = ui_kit_measure(ui, text, type);
+        ui_kit_text(ui, ui_mirror(x, width, left, span), baseline, text, type, argb, stroke);
+        return width;
+}
+
+// A run that starts at `edge` (device pixels): its left end there reading from the left, its right end reading from the right,
+// cut between low and high. The run is the font engine's, whole in either direction; only the place of its box is the layout's.
+static fn ui_kit_start(struct ui address_to ui, int edge, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                       int low, int high)
+{
+        ui_kit_text_in(ui, ui_rtl() ? edge - ui_kit_measure(ui, text, type) : edge, baseline, text, type, argb, stroke, low, high);
 }
 
 // The baseline of a role's line box whose top is top (device pixels): the line's half-leading above the face's ascent.
@@ -3380,8 +3506,14 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
 // cut at the control's right edge (its width, when it has one; a control whose width is not yet set is cut at the window).
 static inline fn ui_control_label(struct ui address_to ui, const struct ui_control address_to c, int dx, int dy, int type, unsigned int ink)
 {
-        ui_kit_text_clip(ui, ui_dev(ui, c->x + dx), ui_kit_baseline(ui, ui_dev(ui, c->y + dy), type), (string_address)c->label, type, ink, 0,
-                         c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
+        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y + dy), type);
+
+        // Reading from the right it starts dx in from the control's right edge and is cut at its left (a control with no width yet reads from the left).
+        if (ui_rtl() && c->w > 0)
+                ui_kit_start(ui, ui_dev(ui, c->x + c->w - dx), baseline, (string_address)c->label, type, ink, 0, ui_dev(ui, c->x), ui_dev(ui, c->x + c->w));
+        else
+                ui_kit_text_clip(ui, ui_dev(ui, c->x + dx), baseline, (string_address)c->label, type, ink, 0,
+                                 c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
 }
 
 /*
@@ -3557,7 +3689,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         b32 tx, ty, live = 0;
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
         b32 ox = rx + rw / 2, oy = ry + rh / 2;
-        b32 bx = rx + rw - ui_q8(ui, 52), by = oy - ui_q8(ui, 14), bw = ui_q8(ui, 52), bh = ui_q8(ui, 28);
+        b32 bx = ui_rtl() ? rx : rx + rw - ui_q8(ui, 52), by = oy - ui_q8(ui, 14), bw = ui_q8(ui, 52), bh = ui_q8(ui, 28);
         b32 gap = 0, fill_w, rest_w, origin_x;
         struct ui_box fill, rest, clip;
         unsigned int label;
@@ -3588,6 +3720,12 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         rest_w = bw - (b32)ui_qmul(extent, bw) - gap;
         fill = (struct ui_box){bx, by, bx + (fill_w > 0 ? fill_w : 0), by + bh, ui_q8(ui, 14), ui_q8(ui, 14)};
         rest = (struct ui_box){bx + bw - (rest_w > 0 ? rest_w : 0), by, bx + bw, by + bh, ui_q8(ui, 14), ui_q8(ui, 14)};
+        // Reading from the right the pill fills from its right end: the two bars are each other's places.
+        if (ui_rtl())
+        {
+                fill.x0 = bx + bw - (fill_w > 0 ? fill_w : 0), fill.x1 = bx + bw;
+                rest.x0 = bx, rest.x1 = bx + (rest_w > 0 ? rest_w : 0);
+        }
         // The bars' own transform: scaleX(--sw-squish) then the hover scale, about the squish's origin (the middle at rest).
         origin_x = c->squish_origin > 0 ? bx : c->squish_origin < 0 ? bx + bw : bx + bw / 2;
         fill = ui_box_transform(fill, ui_qmul(UI_ONE + squish, scale), scale, origin_x, oy, 0, 0);
@@ -3615,7 +3753,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         // laid at whole pixels where the stretch takes the box's middle.
         width = ui_kit_measure(ui, (string_address)c->label, UI_BODY_LARGE);
         {
-                b32 left = rx, middle = left + width * 128, anchor = c->dom_origin > 0 ? left : left + width * 256;
+                b32 left = ui_rtl() ? rx + rw - width * 256 : rx, middle = left + width * 128, anchor = c->dom_origin > 0 ? left : left + width * 256;
                 b64 stretch = UI_ONE + ui_qmul(dom - UI_ONE, UI_Q2(60));
 
                 middle = anchor + (b32)ui_qmul(middle - anchor, stretch);
@@ -3623,9 +3761,10 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
                 x = middle / 256 - width / 2;
         }
         baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, 12), UI_BODY_LARGE);
-        // Cut before the pill (its 52 and a gap of 12 at the right): a long label is not written under the bars.
-        ui_kit_text_clip(ui, x, baseline, (string_address)c->label, UI_BODY_LARGE, c->disabled ? ui_mix(label, 38, 0) : label,
-                         (unsigned int)(ui_kit_tween(&c->stroke) >> UI_Q), c->w > 64 ? ui_dev(ui, c->x + c->w - 64) : ui->width);
+        // Cut before the pill (its 52 and a gap of 12 at its end): a long label is not written under the bars.
+        ui_kit_text_in(ui, x, baseline, (string_address)c->label, UI_BODY_LARGE, c->disabled ? ui_mix(label, 38, 0) : label,
+                       (unsigned int)(ui_kit_tween(&c->stroke) >> UI_Q), ui_rtl() && c->w > 64 ? ui_dev(ui, c->x + 64) : 0,
+                       !ui_rtl() && c->w > 64 ? ui_dev(ui, c->x + c->w - 64) : ui->width);
         // The ripple, in the accent, over the row: its clip is the label's last child, so it lies over the bars and the text.
         {
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
@@ -3658,7 +3797,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         static const struct ui_stop press[] = {{0, UI_ONE}, {UI_Q2(42), UI_Q2(82)}, {UI_ONE, UI_ONE}};
         b64 sx, sy, pip_y, psx = UI_ONE, psy = UI_ONE;
         b32 tx, ty, live = 0;
-        b32 cx = ui_q8(ui, c->x + c->w - 12 - 14); // the circles' middle: 12 in from the row's right, 28 wide
+        b32 cx = ui_q8(ui, ui_rtl() ? c->x + 12 + 14 : c->x + c->w - 12 - 14); // the circles' middle: 12 in from the row's end, 28 wide
 
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
         for (int item = 0; item < c->count; item++)
@@ -3698,7 +3837,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                         ui_kit_fill(ui, &r, ui_role(UI_CONTROL_OFF), null);
                 }
                 label = ui_kit_colour(&c->item_ink[item]);
-                x = (rx + row_tx) / 256;
+                x = ui_rtl() ? (rx + rw + row_tx) / 256 - ui_kit_measure(ui, (string_address)c->items[item], UI_BODY_LARGE) : (rx + row_tx) / 256;
                 {
                         // The label stretches 0.55 of the row's along y about the same origin: its line moves with it.
                         b64 stretch = UI_ONE + ui_qmul(dom - UI_ONE, UI_Q2(55));
@@ -3807,7 +3946,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         b64 sx, sy, value, ratio, squish = 0;
         b32 tx, ty, live = 0;
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
-        b32 ox = rx + rw / 2, oy = ry + rh / 2;
+        b32 ox = rx + rw / 2, oy = ry + rh / 2, sum = 2 * rx + rw;
         b32 line = c->variant & UI_SLIDER_LINE;
         int thumb = line ? 20 : c->down ? 12 : c->hover ? 20 : 16;
         int bar = line ? (c->down ? 4 : c->hover ? 8 : 6) : thumb;
@@ -3853,7 +3992,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         c->last_frame = ui_kit.now;
         ui_kit.busy |= live;
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
-        origin = c->squish_origin > 0 ? rx : c->squish_origin < 0 ? rx + rw : rx + rw / 2;
+        // The squish's side is the hand's (left or right of the window); this works as if reading from the left, so it is turned like the rest.
+        origin = (ui_rtl() ? -c->squish_origin : c->squish_origin) > 0 ? rx : (ui_rtl() ? -c->squish_origin : c->squish_origin) < 0 ? rx + rw : rx + rw / 2;
 
         // The spot under the hand.
         {
@@ -3872,7 +4012,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                                 unsigned int share = (unsigned int)((spot * 100 + UI_HALF) >> UI_Q) * 100 / 8 / 100;
 
                                 e = ui_box_transform(e, sx, sy, ox, oy, tx, ty);
-                                ui_kit_fill(ui, &e, ui_mix(accent, share ? share : 1, 0), null);
+                                ui_kit_fill_in(ui, e, ui_mix(accent, share ? share : 1, 0), null, sum);
                         }
                 }
         }
@@ -3886,13 +4026,13 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         fill = ui_box_transform(ui_box_transform(fill, UI_ONE + squish, UI_ONE, origin, track_y, 0, 0), sx, sy, ox, oy, tx, ty);
         rest = ui_box_transform(ui_box_transform(rest, UI_ONE + squish, UI_ONE, origin, track_y, 0, 0), sx, sy, ox, oy, tx, ty);
         if (ratio < UI_ONE)
-                ui_kit_fill(ui, &rest, off, null);
+                ui_kit_fill_in(ui, rest, off, null, sum);
         if (ratio > 0)
-                ui_kit_fill(ui, &fill, accent, null);
+                ui_kit_fill_in(ui, fill, accent, null, sum);
 
         // The thumb's halo: the pointer on the thumb (its box, 20 hovered), a ring of 10 at 8% round it; pressed, 14 at 12%.
         {
-                b32 thumb_x = rx + stop, hx = c->pointer_x * 256;
+                b32 thumb_x = rx + stop, hx = ui_point(c->pointer_x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 256;
                 b32 on_thumb = (c->hover || c->down) && hx >= thumb_x - ui_q8(ui, thumb) / 2 && hx < thumb_x + ui_q8(ui, thumb) / 2;
                 b64 halo;
 
@@ -3906,7 +4046,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
 
                         ring = ui_box_transform(ring, sx, sy, ox, oy, tx, ty);
                         // The ring and the thumb's own background, both the accent at the halo's share.
-                        ui_kit_fill(ui, &ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null);
+                        ui_kit_fill_in(ui, ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null, sum);
                 }
         }
 
@@ -3943,7 +4083,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
 
                         g = ui_box_transform(g, sx, sy, ox, oy, tx, ty);
                         g.y0 = bar_box.y0, g.y1 = bar_box.y1;
-                        ui_kit_fill(ui, &g, ghost, &bar_box);
+                        ui_kit_fill_in(ui, g, ghost, &bar_box, sum);
                 }
         }
 
@@ -3970,7 +4110,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                         if (!line && k == here && k != 0 && k != steps)
                                 continue;
                         dot = ui_box_transform(dot, sx, sy, ox, oy, tx, ty);
-                        ui_kit_fill(ui, &dot, filled && !line ? ui_mix(0xffffffffu, 90, 0) : ui_mix(ui_role(UI_ON_SURFACE), 22, 0), null);
+                        ui_kit_fill_in(ui, dot, filled && !line ? ui_mix(0xffffffffu, 90, 0) : ui_mix(ui_role(UI_ON_SURFACE), 22, 0), null, sum);
                 }
         }
 
@@ -3978,7 +4118,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         ink = c->hover || c->down ? accent : ui_role(UI_ON_SURFACE);
         baseline = ui_kit_baseline(ui, (ry + ui_q8(ui, 8) + ty) / 256, UI_BODY_LARGE);
         {
-                b32 lx = origin + (b32)ui_qmul(rx - origin, UI_ONE + squish);
+                // The label is at the start of the control and the value at its end: reading from the right, the label is at its right edge.
+                b32 lx = origin + (b32)ui_qmul((ui_rtl() ? rx + rw - ui_kit_measure(ui, (string_address)c->label, UI_BODY_LARGE) * 256 : rx) - origin, UI_ONE + squish);
 
                 ui_kit_text(ui, (ox + tx + (b32)ui_qmul(lx - ox, sx)) / 256, baseline, (string_address)c->label, UI_BODY_LARGE, ink,
                             c->hover || c->down ? 64 : 0);
@@ -3995,7 +4136,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 length += positive_into_string((p8 address_to)shown + length, (positive)whole);
                 shown[length] = 0;
                 width = ui_kit_measure(ui, (string_address)shown, UI_BODY_LARGE);
-                vx = origin + (b32)ui_qmul(rx + rw - width * 256 - origin, UI_ONE + squish);
+                vx = origin + (b32)ui_qmul((ui_rtl() ? rx : rx + rw - width * 256) - origin, UI_ONE + squish);
                 ui_kit_text(ui, (ox + tx + (b32)ui_qmul(vx - ox, sx)) / 256, baseline, (string_address)shown, UI_BODY_LARGE,
                             c->hover || c->down ? accent : ui_role(UI_ON_SURFACE_VARIANT), c->hover || c->down ? 64 : 0);
         }
@@ -4015,11 +4156,22 @@ static int ui_tab_width(struct ui address_to ui, const struct ui_control address
 
 static int ui_tab_left(struct ui address_to ui, const struct ui_control address_to c, int item)
 {
-        int x = c->x;
+        int x = c->x, gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
 
         for (int k = 0; k < item; k++)
-                x += ui_tab_width(ui, c, k) + (c->variant == UI_TABS_SEGMENTED ? 4 : 2);
-        return x;
+                x += ui_tab_width(ui, c, k) + gap;
+        // Reading from the right the first tab is at the box's right end, and the strip runs to the left from it.
+        return ui_rtl() ? c->x + c->w - (x - c->x) - ui_tab_width(ui, c, item) : x;
+}
+
+// The length of the strip's tabs and the gaps between them, whichever way it reads.
+static int ui_tabs_length(struct ui address_to ui, const struct ui_control address_to c)
+{
+        int length = 0;
+
+        for (int k = 0; k < c->count; k++)
+                length += ui_tab_width(ui, c, k) + (k ? (c->variant == UI_TABS_SEGMENTED ? 4 : 2) : 0);
+        return length;
 }
 
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
@@ -4188,8 +4340,8 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 }
                 // The text at whole pixels where the stretch takes the item's middle.
                 middle = anchor + (b32)ui_qmul(by + bh / 2 - anchor, dom);
-                ui_kit_text(ui, ui_dev(ui, c->x + 12), ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
-                            (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0);
+                ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 12) : ui_dev(ui, c->x + 12), ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
+                             (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0, 0, ui->width);
                 // Its stretch, its colour, its state layer or its ripple moving: the item's rows.
                 if (ui_kit.busy)
                         ui_kit_reach(y, y + c->h);
@@ -4590,9 +4742,14 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         if (c->edit)
                 ui_text_field_draw(ui, c, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), fy, fy + ui_dev(ui, tall));
         else if (c->items[0])
-                ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, ui_dev(ui, c->x + 14), baseline,
-                          (string_address)c->items[0], 15, ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu, 92, ui_dev(ui, c->x + 14),
-                          ui_dev(ui, c->x + c->w - 14), 0);
+        {
+                const font_face address_to faces[2] = {ui->regular, ui->regular};
+                int start = ui_rtl() ? ui_dev(ui, c->x + c->w - 14) - ui_run_in(ui, faces, 0, 0, (string_address)c->items[0], 15, 0, 0, 0, ui->width, 0)
+                                     : ui_dev(ui, c->x + 14);
+
+                ui_run_in(ui, faces, start, baseline, (string_address)c->items[0], 15, ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu, 92,
+                          ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), 0);
+        }
 }
 
 /*
@@ -4612,7 +4769,7 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
                 b64 left = -UI_Q2(34) + ui_qmul(UI_Q2(134), ui_bezier_at(&ui_ease, ui_progress(at, period)));
 
                 fill = ui_box_of(ui, ui_q(c->x) + ui_qmul(left, ui_q(c->w)), ui_q(c->y), ui_qmul(UI_Q2(34), ui_q(c->w)), ui_q(6), ui_q(3));
-                ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY), &track);
+                ui_kit_fill_in(ui, fill, ui_role(UI_PRIMARY), &track, track.x0 + track.x1);
                 if (!ui_kit.motion)
                         ui_kit.busy = 1;
                 return;
@@ -4620,7 +4777,7 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
         ui_kit_number_to(&c->extent, ui_progress_whole(c->value), 450, &ui_ease);
         fill.x1 = fill.x0 + (b32)ui_qmul(ui_kit_tween(&c->extent), track.x1 - track.x0);
         if (fill.x1 > fill.x0)
-                ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY), null);
+                ui_kit_fill_in(ui, fill, ui_role(UI_PRIMARY), null, track.x0 + track.x1);
 }
 
 /*
@@ -4642,9 +4799,31 @@ static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
                                          ui_px(ui, UI_DOT / 2) * 256}, argb, null);
 }
 
+// A badge, a tag or a key takes the width of its words: what its draw sets (c->w, logical pixels), said first for a layout that places it.
+static fn ui_control_size(struct ui address_to ui, struct ui_control address_to c)
+{
+        int width;
+
+        switch (c->kind)
+        {
+        case UI_BADGE:
+                c->w = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM) * 100 / ui->scale + 18 + (c->on ? 2 * UI_DOT : 0);
+                c->h = 22;
+                break;
+        case UI_TAG:
+                c->w = ui_kit_measure(ui, (string_address)c->label, UI_MONO) * 100 / ui->scale + 20;
+                c->h = 26;
+                break;
+        case UI_KBD:
+                width = ui_kit_measure(ui, (string_address)c->label, UI_MONO) * 100 / ui->scale + 10;
+                c->w = width < 20 ? 20 : width;
+                break;
+        }
+}
+
 static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
-        int role = c->role, width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM), dot = c->on ? 2 * UI_DOT : 0;
+        int role = c->role, dot = c->on ? 2 * UI_DOT : 0;
         // A role's container is the next role, except the error's: its on-colour is laid before its container (role + 2).
         unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER)
                             : role < 0         ? 0
@@ -4654,26 +4833,23 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 
         if (role == UI_SURFACE_HIGHEST)
                 fill = ui_role(UI_SURFACE_HIGHEST), ink = ui_role(UI_ON_SURFACE_VARIANT);
-        c->w = width * 100 / ui->scale + 18 + dot;
-        c->h = 22;
+        ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(22), ui_q(6));
         if (fill)
                 ui_kit_fill(ui, &box, fill, null);
         if (role < 0)
                 ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         if (dot)
-                ui_kit_dot(ui, ui_dev(ui, c->x + 9), ui_dev(ui, c->y + 8), ink);
+                ui_kit_dot(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 9) - ui_px(ui, UI_DOT) : ui_dev(ui, c->x + 9), ui_dev(ui, c->y + 8), ink);
         ui_control_label(ui, c, 9 + dot, 3, UI_LABEL_MEDIUM, ink);
 }
 
 static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
 {
-        int width = ui_kit_measure(ui, (string_address)c->label, UI_MONO);
         unsigned int ink = c->on ? ui_role(UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT);
         struct ui_box box;
 
-        c->w = width * 100 / ui->scale + 20;
-        c->h = 26;
+        ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(26), ui_q(6));
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOW), null);
         ui_kit_outline(ui, &box, ui_q8(ui, 1), c->on ? ui_mix(ui_role(UI_PRIMARY), 35, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT));
@@ -4696,8 +4872,8 @@ static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c
                 struct ui_box ring = ui_box_of(ui, ui_q(c->x + size - 8 - 2), ui_q(c->y + size - 8 - 2), ui_q(13), ui_q(13), ui_q(7));
                 struct ui_box dot = ui_box_of(ui, ui_q(c->x + size - 8), ui_q(c->y + size - 8), ui_q(9), ui_q(9), ui_q(5));
 
-                ui_kit_fill(ui, &ring, ui_role(UI_SURFACE_LOW), null);
-                ui_kit_fill(ui, &dot, ui_role(UI_SUCCESS), null);
+                ui_kit_fill_in(ui, ring, ui_role(UI_SURFACE_LOW), null, box.x0 + box.x1);
+                ui_kit_fill_in(ui, dot, ui_role(UI_SUCCESS), null, box.x0 + box.x1);
         }
 }
 
@@ -4711,6 +4887,8 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
         b64 sine, cosine;
         b32 first = (cx - outer) >> 8, last = (cx + outer + 255) >> 8;
 
+        // It turns the way a clock's hands do whichever way the window reads: its place is mirrored, its picture is not.
+        UI_KEEP(first, (cy - outer) >> 8, last - first, ((cy + outer + 255) >> 8) - ((cy - outer) >> 8));
         ui_sincos(ui_qmul(turn, 6746518852ll), &sine, &cosine); // 2 pi
         // The ring, and the top quarter of it (45 to 135 degrees, mitred as a border's corners are) turned.
         ui_kit_ring(ui, &(struct ui_box){cx - outer, cy - outer, cx + outer, cy + outer, outer, outer}, outer - inner, ui_role(UI_SURFACE_HIGHEST));
@@ -4790,8 +4968,8 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
         ui_kit_outline(ui, &box, ui_q8(ui, 1), line);
         ui_control_label(ui, c, 16, 14, UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE));
         if (c->text[0])
-                ui_kit_text_clip(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM), (string_address)c->text,
-                                 UI_BODY_MEDIUM, ink, 0, ui_dev(ui, c->x + c->w));
+                ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 16) : ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM),
+                             (string_address)c->text, UI_BODY_MEDIUM, ink, 0, ui_rtl() ? ui_dev(ui, c->x) : 0, ui_dev(ui, c->x + c->w));
 }
 
 static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -4805,8 +4983,8 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         ui_control_label(ui, c, 14, 10, UI_MONO, ui_role(UI_ON_SURFACE_VARIANT));
         for (int k = 0; k < c->count; k++)
-                ui_kit_text_clip(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE),
-                                 (string_address)c->items[k], UI_CODE, ui_role(UI_ON_SURFACE), 0, ui_dev(ui, c->x + c->w));
+                ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 14) : ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE),
+                             (string_address)c->items[k], UI_CODE, ui_role(UI_ON_SURFACE), 0, ui_rtl() ? ui_dev(ui, c->x) : 0, ui_dev(ui, c->x + c->w));
 }
 
 static fn ui_kbd_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -4814,7 +4992,7 @@ static fn ui_kbd_draw(struct ui address_to ui, struct ui_control address_to c)
         int width = ui_kit_measure(ui, (string_address)c->label, UI_MONO);
         struct ui_box box, foot;
 
-        c->w = width * 100 / ui->scale + 10 < 20 ? 20 : width * 100 / ui->scale + 10;
+        ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(20), ui_q(3));
         foot = box;
         foot.y1 -= ui_q8(ui, 1);
@@ -4972,11 +5150,12 @@ static int ui_swatches_left(const struct ui address_to ui, const struct ui_contr
 static int ui_swatch_at(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
         int left = ui_swatches_left(ui, c) - ui_dev(ui, UI_SWATCH_GAP) / 2, step = ui_dev(ui, UI_SWATCH + UI_SWATCH_GAP);
+        int along = ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)); // as if reading from the left
 
-        if (!c->count || x < left || x >= left + c->count * step ||
+        if (!c->count || along < left || along >= left + c->count * step ||
             !ui_hit(ui, ui_kit_touch, x, y, 0, ui_dev(ui, c->y + c->h / 2 - UI_SWATCH / 2), ui->width, ui_dev(ui, UI_SWATCH)))
                 return -1;
-        return (x - left) / step;
+        return (along - left) / step;
 }
 
 static fn ui_swatches_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -4987,7 +5166,7 @@ static fn ui_swatches_draw(struct ui address_to ui, struct ui_control address_to
         for (int k = 0; k < c->count; k++)
         {
                 long colour = window_colour_parse((string_address)c->items[k]);
-                b32 x = (left + k * step) * 256;
+                b32 x = ui_mirror(left + k * step, size, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 256;
                 struct ui_box dot = {x, y, x + s, y + s, s / 2, s / 2}, ring = {x - out, y - out, x + s + out, y + s + out, s / 2 + out, s / 2 + out};
 
                 ui_kit_fill(ui, &dot, 0xff000000u | (unsigned int)(colour < 0 ? 0 : colour), null);
@@ -5024,8 +5203,12 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
         case UI_CARD:
         case UI_WINDOW: ui_surface_draw(ui, c); break;
         case UI_HEADING:
-                ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                                 ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
+                if (ui_rtl() && c->w > 0)
+                        ui_kit_start(ui, ui_dev(ui, c->x + c->w), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
+                                     ui_role(c->role), 0, ui_dev(ui, c->x), ui_dev(ui, c->x + c->w));
+                else
+                        ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
+                                         ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
                 break;
         case UI_RULE:
                 ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y) + ui_stroke(ui), 0, 0},
@@ -5086,7 +5269,7 @@ static b32 ui_control_live(const struct ui_control address_to c)
 // The slider's value under a device x: ui.js's a(), the track's whole width, snapped to the step.
 static b64 ui_slider_at(struct ui address_to ui, const struct ui_control address_to c, int x)
 {
-        b64 ratio = ui_qdiv(ui_q(x - ui_dev(ui, c->x)), ui_q(ui_dev(ui, c->w)));
+        b64 ratio = ui_qdiv(ui_q(ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) - ui_dev(ui, c->x)), ui_q(ui_dev(ui, c->w)));
 
         ratio = ratio < 0 ? 0 : ratio > UI_ONE ? UI_ONE : ratio;
         return ui_slider_snap(c, c->low + ui_qmul(ratio, c->high - c->low));
@@ -5162,7 +5345,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         }
                         else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
                         {
-                                b32 right = dx > 0, toward = right != (c->kind == UI_RADIOS ? c->item == c->at : c->on);
+                                b32 right = dx > 0, toward = (right != ui_rtl()) != (c->kind == UI_RADIOS ? c->item == c->at : c->on);
                                 b64 fill;
 
                                 if (!c->moved && dx < 3 * ui->scale / 100 && dx > -3 * ui->scale / 100 && dy < 3 * ui->scale / 100 && dy > -3 * ui->scale / 100)
@@ -5170,7 +5353,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->moved = 1;
                                 if (c->kind != UI_RADIOS)
                                 {
-                                        fill = (c->on ? UI_ONE : 0) + ldx / 100;
+                                        fill = (c->on ? UI_ONE : 0) + (ui_rtl() ? -ldx : ldx) / 100;
                                         fill = fill < 0 ? 0 : fill > UI_ONE ? UI_ONE : fill;
                                         ui_tween_put(&c->extent, fill, UI_TWEEN_NUMBER);
                                 }
@@ -5188,7 +5371,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->moved = 1;
                                 c->sliding = 0;
                                 c->value = ui_slider_at(ui, c, x);
-                                c->spot_x = x * 100 / ui->scale - c->x;
+                                c->spot_x = ui_point(x, left, right - left) * 100 / ui->scale - c->x;
                                 changed = c;
                                 over = x < left ? ui_q(left - x) : x > right ? ui_q(x - right) : 0;
                                 c->bend_target = over > 0 ? ui_qmul(ui_squash_curve(ui_qdiv(over, ui_q(right - left)) * 2), UI_Q2(130)) : 0;
@@ -5216,7 +5399,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->item = hit;
                         }
                         if (c->kind == UI_SLIDER)
-                                c->hover_x = hit >= 0 ? x : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
+                                c->hover_x = hit >= 0 ? ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
                 }
                 return null;
         }
@@ -5370,7 +5553,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                         c->on = !c->on;
                                         changed = c;
                                         // The change: the row stretches toward where the knob went.
-                                        c->dom_origin = c->on ? 1 : -1;
+                                        c->dom_origin = (c->on ? 1 : -1) * ui_dir();
                                         if (!ui_kit.motion)
                                                 ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
                                 }
@@ -6221,6 +6404,7 @@ static b32 ui_engine_open_sized(struct ui address_to ui, positive atlas)
                 return false;
         ui->engine = (font_engine address_to)engine;
         font_start(ui->engine, (p8 address_to)(engine + atlas_at), (p32)atlas, (p32)atlas);
+        compositor_fallbacks(ui->engine);
         return true;
 }
 
@@ -6427,7 +6611,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         m->rows_shown = (m->height - 2 * sizes.pad) / sizes.row;
         m->scroll.content = height - 2 * sizes.pad;
         m->scroll.view = m->height - 2 * sizes.pad;
-        m->scroll.x = m->width - ui_dev(ui, UI_SCROLL_WIDTH), m->scroll.y = sizes.pad, m->scroll.height = m->height - 2 * sizes.pad;
+        m->scroll.x = ui_mirror(m->width - ui_dev(ui, UI_SCROLL_WIDTH), ui_dev(ui, UI_SCROLL_WIDTH), 0, m->width), m->scroll.y = sizes.pad, m->scroll.height = m->height - 2 * sizes.pad;
         m->scroll.unit = 0;
         m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
         m->scroll.held = m->scroll.hover = 0;
@@ -6520,25 +6704,30 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         ui_popmenu_ripple(ui, m, y);
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
-                        ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale / 100, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                        ui_kit_text_flipped(ui, (UI_MENU_PAD + 12) * ui->scale / 100, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, 0, m->width);
                 else
-                        ui_kit_text(ui, sizes.pad + sizes.inset, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                        ui_kit_text_flipped(ui, sizes.pad + sizes.inset, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0, 0, m->width);
                 if ((item->flags & (UI_MENU_CHECK | UI_MENU_RADIO)) && (item->flags & UI_MENU_ON))
                 {
                         int cx = (UI_MENU_PAD + 15) * ui->scale / 100, cy = y + sizes.row / 2;
 
                         if (item->flags & UI_MENU_RADIO)
-                                ui_round(ui, cx - 3 * ui->scale / 100, cy - 3 * ui->scale / 100, 6 * ui->scale / 100, 6 * ui->scale / 100, 3 * ui->scale / 100, ui_tone(ink & 0xffffffu, alpha));
+                                ui_round(ui, ui_mirror(cx - 3 * ui->scale / 100, 6 * ui->scale / 100, 0, m->width), cy - 3 * ui->scale / 100, 6 * ui->scale / 100, 6 * ui->scale / 100, 3 * ui->scale / 100, ui_tone(ink & 0xffffffu, alpha));
                         else
-                                ui_kit_text(ui, cx - 5 * ui->scale / 100, baseline, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                        {
+                                int tick = ui_kit_measure(ui, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM), tick_x = ui_mirror(cx - 5 * ui->scale / 100, tick, 0, m->width);
+
+                                UI_KEEP(tick_x, baseline - ui_capital(ui, 14), tick, ui_capital(ui, 14));
+                                ui_kit_text(ui, tick_x, baseline, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                        }
                 }
                 if (item->keys)
-                        ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale / 100 - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
-                                    (string_address)item->keys, UI_BODY_MEDIUM,
-                                    (alpha << 24) | ((ui->glass && at == m->hot ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT)) & 0xffffffu), 0);
+                        ui_kit_text_flipped(ui, m->width - (UI_MENU_PAD + 14) * ui->scale / 100 - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
+                                            (string_address)item->keys, UI_BODY_MEDIUM,
+                                            (alpha << 24) | ((ui->glass && at == m->hot ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT)) & 0xffffffu), 0, 0, m->width);
                 if (item->flags & UI_MENU_SUBMENU)
-                        ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale / 100, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
-                                    (alpha << 24) | (ink & 0xffffffu), 0);
+                        ui_kit_text_flipped(ui, m->width - (UI_MENU_PAD + 14) * ui->scale / 100, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
+                                            (alpha << 24) | (ink & 0xffffffu), 0, 0, m->width);
                 y += sizes.row;
         }
         if (m->scroll.content > m->scroll.view)
@@ -7045,6 +7234,15 @@ static fn ui_buttons_place(struct ui address_to ui, struct ui_buttons address_to
         b->line.kind = UI_HEADING, b->line.variant = UI_BODY_MEDIUM, b->line.role = UI_ON_SURFACE_VARIANT;
         b->line.x = left * 100 / ui->scale, b->line.y = row + (UI_ROW - ui_types[UI_BODY_MEDIUM].line) / 2;
         b->line.w = b->button[0].x - UI_GAP2 - b->line.x;
+        // Reading from the right the row is the same row turned over its width: the buttons at its left, the first of them at its right end of them.
+        if (ui_rtl())
+        {
+                int across = left * 100 / ui->scale, span = (left + width) * 100 / ui->scale - across;
+
+                for (int k = 0; k < b->count; k++)
+                        b->button[k].x = ui_mirror(b->button[k].x, UI_BUTTONS_W, across, span);
+                b->line.x = ui_mirror(b->line.x, b->line.w, across, span);
+        }
 }
 
 // keys: the window has the keys, so the focused button shows its ring.
@@ -7100,7 +7298,7 @@ static p32 ui_buttons_key(struct ui_buttons address_to b, const struct window_ev
         ui_confirm_drop(&b->confirm);
         if (key == UI_KEY_LEFT || key == UI_KEY_RIGHT)
         {
-                at += key == UI_KEY_LEFT ? -1 : 1;
+                at += ui_arrow(key);
                 b->keys = (at < 0 ? 0 : at >= b->count ? b->count - 1 : at) + 1;
         }
         else if (key == UI_KEY_TAB)
@@ -7190,6 +7388,7 @@ struct ui_cut
         positive length, cut, capacity;
         int type, room, scale;
         unsigned char kind; // 1 whole, 2 the first cut bytes and the dots, 3 the first cut bytes alone
+        unsigned char rtl;  // the window read from the right when it was cut: the same words are another width there
 };
 
 static struct ui_cut address_to ui_cuts;
@@ -7278,9 +7477,10 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 for (positive at = 0; at < length; at++)
                         hash = (hash ^ (unsigned char)text[at]) * 16777619u;
                 hash = (((hash ^ (unsigned int)type) * 16777619u ^ (unsigned int)room) * 16777619u ^ (unsigned int)ui->scale) * 16777619u;
+                hash = (hash ^ (unsigned int)ui_kit.rtl) * 16777619u;
                 memo = &ui_cuts[(hash ^ hash >> 15) & (UI_CUTS - 1)];
                 if (memo->kind && memo->length == length && memo->type == type && memo->room == room && memo->scale == ui->scale &&
-                    memo->capacity == capacity && !memory_compare(memo->text, text, length))
+                    memo->rtl == ui_kit.rtl && memo->capacity == capacity && !memory_compare(memo->text, text, length))
                         kind = memo->kind, cut = memo->cut;
         }
         if (!kind)
@@ -7291,7 +7491,7 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
-                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale;
+                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->rtl = (unsigned char)ui_kit.rtl;
                         memo->capacity = capacity, memo->cut = cut, memo->kind = kind;
                 }
         }
@@ -7330,10 +7530,16 @@ static fn ui_items_words(struct ui_control address_to c, const char address_to w
         The bars of a signal, its right edge at right and their middle on middle: four, as many in the ink as bars says
         and the rest in the outline.
 */
+static int ui_signal_width(const struct ui address_to ui)
+{
+        return 4 * ui_dev(ui, 3) + 3 * ui_dev(ui, 2);
+}
+
 static fn ui_signal(struct ui address_to ui, int right, int middle, int bars)
 {
         int width = ui_dev(ui, 3), gap = ui_dev(ui, 2), bottom = middle + ui_dev(ui, 7);
 
+        UI_KEEP(right - ui_signal_width(ui), bottom - ui_dev(ui, 13), ui_signal_width(ui), ui_dev(ui, 13));
         for (int bar = 0; bar < 4; bar++)
         {
                 int height = ui_dev(ui, 4 + 3 * bar), x = right - 4 * width - 3 * gap + bar * (width + gap);
@@ -7469,7 +7675,9 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
 static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to l, int x, int y, int w, int h)
 {
         l->x = x, l->y = y, l->w = w, l->h = h;
-        l->scroll.x = x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
+        // The bar is in the margin at the content's end: its right, or its left reading from the right (the mirror of the box).
+        l->scroll.x = ui_rtl() ? x - ui_dev(ui, UI_SCROLL_WIDTH) - (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2
+                               : x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         l->scroll.y = y, l->scroll.height = h, l->scroll.view = h;
         l->scroll.content = l->content;
         l->scroll.bounds = 1, l->scroll.scale = ui->scale;
@@ -7670,7 +7878,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                 c->items[0] = row->placeholder;
                 c->y = (y + ui_dev(ui, 6)) * 100 / ui->scale, c->h = (height - ui_dev(ui, 12)) * 100 / ui->scale;
                 c->w = (room > ui_dev(ui, UI_ROW_FIELD_W) && !row->head ? ui_dev(ui, UI_ROW_FIELD_W) : room < ui_dev(ui, UI_ROW_FIELD_LEAST) ? ui_dev(ui, UI_ROW_FIELD_LEAST) : room) * 100 / ui->scale;
-                c->x = right * 100 / ui->scale - c->w;
+                c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
                 return c;
         }
         ui_items_words(c, row->words);
@@ -7686,14 +7894,14 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                                 c->at = row->at;
                 }
                 c->x = 0;
-                c->w = c->count ? ui_tab_left(ui, c, c->count - 1) + ui_tab_width(ui, c, c->count - 1) : 0;
+                c->w = ui_tabs_length(ui, c);
         }
         else
         {
                 c->at = row->at;
                 c->w = c->count * (UI_SWATCH + UI_SWATCH_GAP) - UI_SWATCH_GAP;
         }
-        c->x = right * 100 / ui->scale - c->w;
+        c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
         c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y);
         c->hover = c->item >= 0 && l->hover == id;
         return c;
@@ -7753,7 +7961,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if (kind == UI_SWITCH)
                 {
                         own->on = row.on;
-                        own->x = right * 100 / ui->scale - 52, own->w = 52;
+                        own->x = ui_mirror(right * 100 / ui->scale - 52, 52, x * 100 / ui->scale, w * 100 / ui->scale), own->w = 52;
                         own->y = (y + height / 2) * 100 / ui->scale - 24, own->h = 48;
                 }
                 ui_control_draw(ui, own);
@@ -7761,7 +7969,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if (row.mark)
         {
                 int dot = ui_dev(ui, 7);
-                struct ui_box box = {text_left * 256, (y + (height - dot) / 2) * 256, (text_left + dot) * 256, (y + (height + dot) / 2) * 256, dot * 128, dot * 128};
+                int dot_x = ui_mirror(text_left, dot, x, w);
+                struct ui_box box = {dot_x * 256, (y + (height - dot) / 2) * 256, (dot_x + dot) * 256, (y + (height + dot) / 2) * 256, dot * 128, dot * 128};
 
                 ui_kit_fill(ui, &box, ui_role(UI_PRIMARY), null);
                 text_left += ui_dev(ui, 17);
@@ -7769,7 +7978,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // The trailing pieces from the right: the signal, then the control or the value, then the note.
         if (row.bars > 0)
         {
-                ui_signal(ui, right, y + height / 2, row.bars);
+                // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
+                ui_signal(ui, ui_mirror(right - ui_signal_width(ui), ui_signal_width(ui), x, w) + ui_signal_width(ui), y + height / 2, row.bars);
                 right -= ui_dev(ui, 18) + gap;
         }
         if (row.kind == UI_ROW_TABS || row.kind == UI_ROW_SWATCHES)
@@ -7779,9 +7989,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
         // motion is read, and no word measured: its label's width places only its value and a field's well.
         if (row.label && (seen || row.kind == UI_ROW_FIELD))
-                wide = ui_kit_text_width(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
-                                                                  label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
-                                   UI_BODY_MEDIUM, ink, 0, ui->width);
+                wide = ui_kit_text_flipped(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
+                                                                           label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
+                                           UI_BODY_MEDIUM, ink, 0, x, w);
         if (trailing)
         {
                 ui_control_draw(ui, trailing);
@@ -7807,22 +8017,22 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 {
                         int size = ui_dev(ui, 4);
 
-                        ui_chevron(ui, right - size, baseline - ui_dev(ui, 5), size, quiet);
+                        ui_chevron(ui, ui_mirror(right - 2 * size, 2 * size + 1, x, w) + size, baseline - ui_dev(ui, 5), size, quiet);
                         right -= 2 * size + ui_dev(ui, 8);
                 }
                 else if (row.kind == UI_ROW_STEP)
                 {
                         marks = ui_kit_measure(ui, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE);
-                        ui_kit_text(ui, right - marks, baseline, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE, quiet, 0);
+                        ui_kit_text_flipped(ui, right - marks, baseline, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE, quiet, 0, x, w);
                         right -= marks + ui_dev(ui, 8);
                         room -= 2 * (marks + ui_dev(ui, 8));
                 }
                 room = row.kind == UI_ROW_CHOICE ? room - ui_dev(ui, 16) : room;
                 shown = ui_fit(ui, (string_address)row.value, UI_BODY_MEDIUM, room < ui_dev(ui, 24) ? ui_dev(ui, 24) : room, cut, sizeof(cut));
                 width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
-                ui_kit_text(ui, right - width, baseline, shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0);
+                ui_kit_text_flipped(ui, right - width, baseline, shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0, x, w);
                 if (row.kind == UI_ROW_STEP)
-                        ui_kit_text(ui, right - width - ui_dev(ui, 8) - marks, baseline, (string_address) "\xe2\x80\xb9", UI_LABEL_LARGE, quiet, 0);
+                        ui_kit_text_flipped(ui, right - width - ui_dev(ui, 8) - marks, baseline, (string_address) "\xe2\x80\xb9", UI_LABEL_LARGE, quiet, 0, x, w);
                 right -= width + (marks ? marks + ui_dev(ui, 8) : 0) + gap;
         }
         if (row.note)
@@ -7830,8 +8040,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 int width = ui_kit_measure(ui, (string_address)row.note, UI_LABEL_MEDIUM);
 
                 if (right - width > text_left + wide + gap)
-                        ui_kit_text(ui, right - width, ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)row.note,
-                                    UI_LABEL_MEDIUM, row.mark ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0);
+                        ui_kit_text_flipped(ui, right - width, ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)row.note,
+                                            UI_LABEL_MEDIUM, row.mark ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0, x, w);
         }
 }
 
@@ -7844,8 +8054,8 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         ui->top = l->y;
         ui->bottom = l->y + l->h;
         if (!l->count && l->empty)
-                ui_kit_text(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, l->y + (row_height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM),
-                            (string_address)l->empty, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, l->y + (row_height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM),
+                                    (string_address)l->empty, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
         for (int at = 0; at < l->count; at++)
         {
                 int y, height;
@@ -7856,8 +8066,8 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         struct ui_row row;
 
                         ui_list_describe(l, l->id[at], &row);
-                        ui_kit_text(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
-                                    (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                        ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
+                                            (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
                 }
                 if (y + height > l->y && y < l->y + l->h)
                         ui_list_row(ui, l, l->id[at], y, height);
@@ -7938,7 +8148,7 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 struct ui_row row;
 
                 ui_list_describe(l, id, &row);
-                if (row.kind == UI_ROW_STEP && x < l->x + l->w - ui_dev(ui, UI_INSET + 40))
+                if (row.kind == UI_ROW_STEP && ui_point(x, l->x, l->w) < l->x + l->w - ui_dev(ui, UI_INSET + 40))
                         l->way = -1;
         }
         own = ui_list_control(l, id, 0);
@@ -8055,6 +8265,15 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
         p->right = width - pad;
         p->column_scroll.x = pad + p->column_w + (ui_dev(ui, UI_COLUMN_GUTTER) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         p->seam = p->column_on ? p->column_scroll.x + ui_dev(ui, UI_SCROLL_WIDTH) / 2 : 0;
+        // Reading from the right it is the same page turned over the window's middle: the column at the right edge, the body to its left.
+        if (ui_rtl())
+        {
+                int left = p->left;
+
+                p->left = width - p->right, p->right = width - left;
+                p->column_scroll.x = width - p->column_scroll.x - ui_dev(ui, UI_SCROLL_WIDTH);
+                p->seam = p->column_on ? width - p->seam : 0;
+        }
         // The column scrolls as a list does: its ends squash under a pull or a wheel turn (ui_scroll_span, the same for every region).
         p->column_scroll.bounds = 1, p->column_scroll.scale = ui->scale;
         p->column_scroll.y = p->top, p->column_scroll.height = p->bottom - p->top, p->column_scroll.view = p->bottom - p->top;
@@ -8070,8 +8289,8 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
 */
 static fn ui_page_rows(const struct ui_page address_to p, struct ui_list address_to l)
 {
-        l->row_x = p->column_on ? p->seam : 0;
-        l->row_w = p->width - l->row_x;
+        l->row_x = p->column_on && !ui_rtl() ? p->seam : 0;
+        l->row_w = p->column_on && ui_rtl() ? p->seam : p->width - l->row_x;
 }
 
 // A page's bottom edge moved from the layout's (an app's body runs to the window's edge): the column's view follows it, so its
@@ -8084,11 +8303,17 @@ static fn ui_page_set_bottom(struct ui_page address_to p, int bottom)
 }
 
 // The group under a point of the window, or -1.
+// Whether a device x of the window is in the column's side of the page: left of the seam, or right of it reading from the right.
+static inline b32 ui_page_in_column(const struct ui_page address_to p, int x)
+{
+        return ui_rtl() ? x >= p->seam && x < p->width : x >= 0 && x < p->seam;
+}
+
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
 {
         int group = (y - p->top + p->column_scroll.scroll) / ui_dev(ui, UI_ROW);
 
-        if (!p->column_on || y < p->top || y >= p->bottom || x < 0 || x >= p->seam || group >= p->column.count)
+        if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x) || group >= p->column.count)
                 return -1;
         return group;
 }
@@ -8151,14 +8376,16 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
                 c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
                 c->at = chosen;
         }
-        c->x = UI_PAD;
+        c->x = ui_rtl() ? p->width * 100 / ui->scale - UI_PAD - p->column_w * 100 / ui->scale : UI_PAD;
         c->span = &p->column_scroll;
         c->y = (p->top - p->column_scroll.scroll) * 100 / ui->scale;
         c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
         // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
         // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
-        c->row_x = 0, c->row_w = (p->seam * 100 + ui->scale - 1) / ui->scale;
+        c->row_x = 0, c->row_w = ((ui_rtl() ? p->width - p->seam : p->seam) * 100 + ui->scale - 1) / ui->scale;
+        if (ui_rtl())
+                c->row_x = p->width * 100 / ui->scale - c->row_w;
         c->disabled = disabled;
         c->focused = keys;
         c->item = ui_control_hit(ui, c, p->pointer_x, p->pointer_y);
@@ -8175,7 +8402,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
 */
 static struct ui_scroll address_to ui_page_region(const struct ui address_to ui, struct ui_page address_to p, int x, int y)
 {
-        if (p->column_on && x < p->seam)
+        if (p->column_on && ui_page_in_column(p, x))
                 return &p->column_scroll;
         return p->body;
 }
@@ -8252,8 +8479,8 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
         ui->bottom = p->height;
         ui_clear(ui);
         if (p->title)
-                ui_kit_text(ui, left, ui_kit_baseline(ui, ui_dev(ui, 8) + (p->top - ui_dev(ui, 8) - ui_dev(ui, 28)) / 2, UI_TITLE_LARGE),
-                            (string_address)p->title, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0);
+                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, ui_dev(ui, 8) + (p->top - ui_dev(ui, 8) - ui_dev(ui, 28)) / 2, UI_TITLE_LARGE),
+                                    (string_address)p->title, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0, 0, p->width);
         if (p->search.items[0])
         {
                 struct ui_control address_to c = &p->search;
@@ -8264,7 +8491,7 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
                         ui_control_start(c);
                 }
                 c->w = UI_SEARCH_W, c->h = UI_FIELD_H;
-                c->x = (p->width - pad) * 100 / ui->scale - c->w - UI_SEARCH_RIGHT, c->y = UI_SEARCH_Y;
+                c->x = ui_mirror((p->width - pad) * 100 / ui->scale - c->w - UI_SEARCH_RIGHT, c->w, 0, p->width * 100 / ui->scale), c->y = UI_SEARCH_Y;
                 c->focused = keys;
                 // Its own clip: the title band. A field drawn past the band's edge was cut where the list below repaints.
                 ui->bottom = p->top;
@@ -8280,8 +8507,8 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
 
                 if (ui_kit_measure(ui, (string_address)p->status, UI_LABEL_MEDIUM) <= room || length >= sizeof(first))
                 {
-                        ui_kit_text(ui, left, ui_kit_baseline(ui, p->bottom + (foot - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)p->status,
-                                    UI_LABEL_MEDIUM, quiet, 0);
+                        ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + (foot - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)p->status,
+                                            UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
                         return;
                 }
                 for (positive at = 1; at < length; at++)
@@ -8297,10 +8524,10 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
                 cut = cut ? cut : length;
                 memory_copy(first, p->status, cut);
                 first[cut] = 0;
-                ui_kit_text(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2 - ui_dev(ui, 16), UI_LABEL_MEDIUM), (string_address)first,
-                            UI_LABEL_MEDIUM, quiet, 0);
-                ui_kit_text(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2, UI_LABEL_MEDIUM), (string_address)p->status + cut + (cut < length),
-                            UI_LABEL_MEDIUM, quiet, 0);
+                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2 - ui_dev(ui, 16), UI_LABEL_MEDIUM), (string_address)first,
+                                    UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
+                ui_kit_text_flipped(ui, left, ui_kit_baseline(ui, p->bottom + foot / 2, UI_LABEL_MEDIUM), (string_address)p->status + cut + (cut < length),
+                                    UI_LABEL_MEDIUM, quiet, 0, 0, p->width);
         }
 }
 
@@ -8333,8 +8560,8 @@ static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, 
                 if (drawn + span <= ui->top || drawn >= ui->bottom)
                         continue;
                 shift = drawn + span / 2 - (y + height / 2);
-                ui_kit_text(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y + shift, UI_BODY_MEDIUM), (string_address)line(at, text, sizeof(text)),
-                            UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0);
+                ui_kit_text_flipped(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y + shift, UI_BODY_MEDIUM), (string_address)line(at, text, sizeof(text)),
+                                    UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
         }
         ui_scroll_draw(ui, s);
 }
