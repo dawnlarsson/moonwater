@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater kan inte ansluta till det som nätverket kr�
 settings_cannot_run	954f	moonwater-kommandot kunde inte köras
 settings_card_back	db52	Escape eller ett klick går tillbaka
 settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
+settings_copied	0bd7	kopierat till urklippet
 settings_device_name	5f12	Enhetens namn
 settings_done	8071	klart
 settings_edit_keys	d161	Enter ställer in, Escape lämnar som det var, ett klick utanför ställer också in

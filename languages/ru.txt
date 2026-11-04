@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater не может подключиться к 
 settings_cannot_run	954f	команду moonwater не удалось выполнить
 settings_card_back	db52	Escape или щелчок — назад
 settings_card_stopped	e24d	остановлено: Escape или щелчок — назад
+settings_copied	0bd7	скопировано в буфер обмена
 settings_device_name	5f12	Имя устройства
 settings_done	8071	готово
 settings_edit_keys	d161	Enter задаёт, Escape оставляет как было, щелчок снаружи тоже задаёт

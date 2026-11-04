@@ -8280,6 +8280,24 @@ static fn ui_chevron(struct ui address_to ui, int cx, int cy, int size, unsigned
         }
 }
 
+/*
+        A row's expander chevron: down when its lines show (ui_chevron), else pointing right, or left reading from the right (flip), centred on
+        cx, cy, size to a side. The same two strokes as ui_chevron, turned.
+*/
+static fn ui_chevron_shut(struct ui address_to ui, int cx, int cy, int size, unsigned int argb, b32 flip)
+{
+        b32 thick = ui_stroke(ui) + 128;
+
+        for (int step = 0; step <= size; step++)
+        {
+                int x = flip ? (cx + size - step) * 256 : (cx - size + step) * 256;
+                int top = (cy - size + step) * 256, bottom = (cy + size - step + 1) * 256;
+
+                ui_kit_fill(ui, &(struct ui_box){x, top, x + ui_stroke(ui), top + thick, 0, 0}, argb, null);
+                ui_kit_fill(ui, &(struct ui_box){x, bottom - thick, x + ui_stroke(ui), bottom, 0, 0}, argb, null);
+        }
+}
+
 /* ---- a speaker, a level meter and strips of both: what a mixer is made of ---- */
 /*
         A speaker, a level meter and the strips of both (the mixer's composite): ui_speaker, ui_level_* (the meter's feed and
@@ -9058,6 +9076,9 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
 #define UI_ROW_BADGE_ERROR 2
+// A row's expander (ui_row.expander): a chevron pointing right when the lines under the row are hidden, down when they show.
+#define UI_ROW_EXPANDER_SHUT 1
+#define UI_ROW_EXPANDER_OPEN 2
 
 // What a row shows, said by the app whenever the kit asks (ui_list.describe); what is not said is none.
 struct ui_row
@@ -9080,6 +9101,7 @@ struct ui_row
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
         b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
+        int expander;                      // UI_ROW_EXPANDER_*: a chevron at the row's right (left of its badge), and whether the lines under it show
 };
 
 struct ui_list
@@ -9402,7 +9424,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room, across, across_w;
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null, address_to badge = null;
-        int badge_w = 0, badge_right = 0;
+        int badge_w = 0, badge_right = 0, chevron_w = 0;
         char cut[UI_CUT_TEXT];
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
@@ -9495,11 +9517,25 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_control_draw(ui, badge);
                 }
         }
+        // The expander's chevron, left of the badge: pointing right while the lines under the row are hidden, down while they show (left
+        // reading from the right). A row that is a switch has its chevron left of the switch and its badge.
+        if (row.expander)
+        {
+                int size = ui_dev(ui, 4), edge = row.kind == UI_ROW_SWITCH ? right - ui_dev(ui, 52) - gap - badge_w : right;
+
+                chevron_w = 2 * size + gap;
+                if (row.expander == UI_ROW_EXPANDER_OPEN)
+                        ui_chevron(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet);
+                else
+                        ui_chevron_shut(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet, ui_rtl());
+                if (row.kind != UI_ROW_SWITCH)
+                        right -= chevron_w;
+        }
         label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap
                                          : row.kind == UI_ROW_FIELD && row.head ? (w - 2 * inset) * 2 / 3 : (w - 2 * inset) / 3);
         // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
         // motion is read, and no word measured: its label's width places only its value and a field's well.
-        label_room -= row.kind == UI_ROW_SWITCH ? badge_w : 0;
+        label_room -= row.kind == UI_ROW_SWITCH ? badge_w + chevron_w : 0;
         if (row.label && (seen || row.kind == UI_ROW_FIELD))
                 wide = ui_kit_text_flipped(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
                                                                            label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
@@ -9555,6 +9591,20 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_kit_text_flipped(ui, right - width, ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)row.note,
                                             UI_LABEL_MEDIUM, row.mark ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0, x, w);
         }
+}
+
+// Whether a press at px (device pixels) is on the expander of row id: the chevron and the badge at the row's right end (its left end reading from
+// the right), which open and close its lines rather than acting on the row.
+static b32 ui_list_expander_at(const struct ui address_to ui, const struct ui_list address_to l, int id, int px)
+{
+        struct ui_row row;
+        int across, wide, width = ui_dev(ui, 150);
+
+        ui_list_describe(l, id, &row);
+        if (!row.expander)
+                return false;
+        ui_list_across(l, &across, &wide);
+        return ui_rtl() ? px >= across && px < across + width : px >= across + wide - width && px < across + wide;
 }
 
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.

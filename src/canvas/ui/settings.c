@@ -769,6 +769,7 @@ static fn settings_changed(int top, int bottom)
 /* ---- the issue board: each row's badge and the lines under it (window.c's windows_issue_*) ---- */
 static int settings_section_start(int row);
 static fn settings_rebuild(void);
+static fn settings_say(string_address text);
 /*
         A row whose option has issues on the board (its key is the row's verb, "canvas gpu") shows a badge at its right, the worst severity,
         and the lines under it: one for each issue, its message and then its detail (the kernel's words, copyable as text). The GPU's row
@@ -790,6 +791,7 @@ struct settings_sub
 static struct settings_sub settings_sub[SETTINGS_SUBS];
 static int settings_sub_count;
 static struct windows_issues settings_board;
+static unsigned char settings_expanded[SETTINGS_ALL]; // each row's expander: 1 when the lines under it show (the GPU's, or a row with an issue)
 static positive settings_board_due;
 static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SUB_TEXT];
 static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
@@ -816,6 +818,37 @@ static b32 settings_key_of(int row, char address_to key, positive room)
                 string_append_bounded((string_address)key, (string_address)which->read[k], room);
         }
         return true;
+}
+
+// The expander a row has (UI_ROW_EXPANDER_*), or none: a row whose key has an issue on the board, and the GPU row always (its status and its
+// metrics are under it). The row's own state is settings_open.
+static int settings_expander(int row)
+{
+        char key[WINDOWS_ISSUE_KEY];
+
+        if (row < 0 || row >= SETTINGS_ANY || !settings_key_of(row, key, sizeof(key)))
+                return 0;
+        if (!windows_issues_worst(&settings_board, key, null) && !string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU))
+                return 0;
+        return settings_expanded[row] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+}
+
+// Opens or shuts a row's lines, and lists them again.
+static fn settings_toggle(int row)
+{
+        if (row < 0 || row >= SETTINGS_ANY)
+                return;
+        settings_expanded[row] = !settings_expanded[row];
+        settings_rebuild();
+}
+
+// A line under a row is copied to the clipboard as its text (a press on it): the message, or the detail, as it stands.
+static void settings_copy(int at)
+{
+        if (at < 0 || at >= settings_sub_count)
+                return;
+        windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, settings_sub[at].text, string_length((string_address)settings_sub[at].text));
+        settings_say(WORDS(settings_copied));
 }
 
 // The row's badge, when the board has an issue under its key: the worst severity, its words.
@@ -942,7 +975,8 @@ static int settings_sub_rows(int row, int count)
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         int section;
 
-        if (!settings_key_of(row, key, sizeof(key)))
+        // The lines show when the row is open: each issue's message and its detail, and the GPU's status and metrics first.
+        if (!settings_key_of(row, key, sizeof(key)) || !settings_expanded[row] || !settings_expander(row))
                 return count;
         section = settings_section_start(row);
         if (string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU) && which && which->kind == SETTINGS_SWITCH)
@@ -3822,6 +3856,18 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_card_key(event);
                 return true;
         }
+        // Right opens the lines under the row the keys are on, and Left shuts them (an expander's keys); any other key is the row's.
+        if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings.list.focus < SETTINGS_ANY && settings_editing() < 0)
+        {
+                int expander = settings_expander(settings.list.focus);
+
+                if (expander && (event->a == UI_KEY_RIGHT) == (expander == UI_ROW_EXPANDER_SHUT))
+                {
+                        settings_toggle(settings.list.focus);
+                        ui_page_redraw(&settings.page);
+                        return true;
+                }
+        }
         // A key between a confirm and its next press drops it: Enter or Space fires a command's, Delete a forget's.
         if (settings.confirm.what < 0 ? event->a != UI_KEY_DELETE
                                       : event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD && event->a != UI_KEY_SPACE)
@@ -3934,7 +3980,10 @@ static fn settings_describe(int id, struct ui_row address_to row)
         row->header = language_of(settings_section(id));
         row->label = settings_label_shown(id);
         if (which)
+        {
                 settings_badge(id, row);
+                row->expander = settings_expander(id);
+        }
         if (id == settings_editing())
         {
                 const struct settings_generic address_to generic = settings_generic_of(id);
@@ -4202,6 +4251,18 @@ static fn settings_press_at(void)
                 settings_edit_end();
         if (row < 0)
                 return;
+        if (row >= (int)SETTINGS_ALL)
+        {
+                settings_copy(row - (int)SETTINGS_ALL);
+                ui_page_redraw(&settings.page);
+                return;
+        }
+        if (row < SETTINGS_ANY && ui_list_expander_at(&settings.ui, &settings.list, row, x))
+        {
+                settings_toggle(row);
+                ui_page_redraw(&settings.page);
+                return;
+        }
         if (row != before)
         {
                 ui_confirm_drop(&settings.confirm);

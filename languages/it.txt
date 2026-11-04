@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater non può soddisfare ciò che questa rete ric
 settings_cannot_run	954f	impossibile eseguire il comando moonwater
 settings_card_back	db52	Escape o un clic torna indietro
 settings_card_stopped	e24d	interrotto: Escape o un clic torna indietro
+settings_copied	0bd7	copiato negli appunti
 settings_device_name	5f12	Nome del dispositivo
 settings_done	8071	fatto
 settings_edit_keys	d161	Enter lo imposta, Escape lo lascia com'era, anche un clic fuori lo imposta

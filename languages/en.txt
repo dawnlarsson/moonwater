@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater cannot join what that network asks for
 settings_cannot_run	954f	the moonwater command could not be run
 settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
+settings_copied	0bd7	copied to the clipboard
 settings_device_name	5f12	Name of the device
 settings_done	8071	done
 settings_edit_keys	d161	Enter sets it, Escape keeps it, a click outside sets it too

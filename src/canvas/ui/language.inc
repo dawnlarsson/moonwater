@@ -90,6 +90,7 @@ LANGUAGE_ID(settings_cannot_join, "moonwater cannot join what that network asks 
 LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run")
 LANGUAGE_ID(settings_card_back, "Escape or a press goes back")
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back")
+LANGUAGE_ID(settings_copied, "copied to the clipboard")
 LANGUAGE_ID(settings_device_name, "Name of the device")
 LANGUAGE_ID(settings_done, "done")
 LANGUAGE_ID(settings_edit_keys, "Enter sets it, Escape keeps it, a click outside sets it too")

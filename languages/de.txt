@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater kann nicht erfüllen, was dieses Netzwerk ve
 settings_cannot_run	954f	der moonwater-Befehl ließ sich nicht ausführen
 settings_card_back	db52	Escape oder ein Klick geht zurück
 settings_card_stopped	e24d	angehalten: Escape oder ein Klick geht zurück
+settings_copied	0bd7	in die Zwischenablage kopiert
 settings_device_name	5f12	Name des Geräts
 settings_done	8071	erledigt
 settings_edit_keys	d161	Enter übernimmt es, Escape lässt es, ein Klick daneben übernimmt es auch

@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater não pode entrar no que essa rede pede
 settings_cannot_run	954f	não foi possível executar o comando moonwater
 settings_card_back	db52	Escape ou um clique volta
 settings_card_stopped	e24d	interrompido: Escape ou um clique volta
+settings_copied	0bd7	copiado para a área de transferência
 settings_device_name	5f12	Nome do dispositivo
 settings_done	8071	concluído
 settings_edit_keys	d161	Enter aplica, Escape mantém como estava, um clique fora também aplica

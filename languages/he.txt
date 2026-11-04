@@ -80,6 +80,7 @@ settings_cannot_join	dfa4	moonwater לא יכול לעמוד בדרישות הר
 settings_cannot_run	954f	לא ניתן היה להריץ את פקודת moonwater
 settings_card_back	db52	Escape או לחיצה לחזרה
 settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
+settings_copied	0bd7	הועתק ללוח הגזירים
 settings_device_name	5f12	שם ההתקן
 settings_done	8071	בוצע
 settings_edit_keys	d161	Enter קובע, Escape משאיר כפי שהיה, ולחיצה בחוץ קובעת גם כן

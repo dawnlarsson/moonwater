@@ -222931,6 +222931,25 @@ static void iss_rows_metrics(void)
         check("metrics: a sample in the ring is its worst, and the mean follows it", worst == 40000 && mean == 5 + (40000 - 5) / 128);
         check("metrics: a rate is the count per second over the nanoseconds it took", windows_metric_rate(10, 2000000000ull) == 5 && windows_metric_rate(0, 1000) == 0);
         check("metrics: no time at all is no rate, not a division by zero", windows_metric_rate(10, 0) == 0);
+
+        // The expander's lines (windows_issue_lines): none while shut, a message and a detail each while open.
+        {
+                struct windows_issues board;
+
+                memory_zero(&board, sizeof(board));
+                board.issue[0].used = 1, board.issue[0].severity = WINDOWS_ISSUE_WARNING, board.issue[0].code = WINDOWS_ISSUE_GPU_LISTS;
+                string_copy_bounded((string_address)board.issue[0].key, (string_address)"canvas gpu", WINDOWS_ISSUE_KEY);
+                board.issue[1].used = 1, board.issue[1].severity = WINDOWS_ISSUE_ERROR, board.issue[1].code = WINDOWS_ISSUE_GPU_MAP;
+                string_copy_bounded((string_address)board.issue[1].key, (string_address)"canvas gpu", WINDOWS_ISSUE_KEY);
+                string_copy_bounded((string_address)board.issue[1].detail, (string_address)"the kernel's words", WINDOWS_ISSUE_DETAIL);
+                board.issue[2].used = 1, board.issue[2].severity = WINDOWS_ISSUE_WARNING, board.issue[2].code = WINDOWS_ISSUE_GPU_REQUIRES;
+                string_copy_bounded((string_address)board.issue[2].key, (string_address)"canvas gpu", WINDOWS_ISSUE_KEY);
+                string_copy_bounded((string_address)board.issue[2].detail, (string_address)"a fix the message says", WINDOWS_ISSUE_DETAIL);
+                check("expander lines: a shut expander shows none", windows_issue_lines(&board, "canvas gpu", 0) == 0);
+                check("expander lines: three issues open show a message each, and the detail of those that have one (not a prerequisite's fix)",
+                      windows_issue_lines(&board, "canvas gpu", 1) == 4);
+                check("expander lines: another key's issues are none of these", windows_issue_lines(&board, "audio device", 1) == 0);
+        }
 }
 
 b32 main(void)

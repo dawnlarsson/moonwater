@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater kan niet voldoen aan wat dat netwerk vraagt
 settings_cannot_run	954f	de moonwater-opdracht kon niet worden uitgevoerd
 settings_card_back	db52	Escape of een klik gaat terug
 settings_card_stopped	e24d	gestopt: Escape of een klik gaat terug
+settings_copied	0bd7	gekopieerd naar het klembord
 settings_device_name	5f12	Naam van het apparaat
 settings_done	8071	klaar
 settings_edit_keys	d161	Enter stelt het in, Escape laat het zoals het was, een klik ernaast stelt het ook in

@@ -80,6 +80,7 @@ settings_cannot_join	dfa4	لا يستطيع moonwater تلبية ما تطلبه
 settings_cannot_run	954f	تعذر تشغيل أمر moonwater
 settings_card_back	db52	Escape أو نقرة للرجوع
 settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
+settings_copied	0bd7	نُسخ إلى الحافظة
 settings_device_name	5f12	اسم الجهاز
 settings_done	8071	تم
 settings_edit_keys	d161	Enter يضبطه، Escape يبقيه كما كان، والنقر خارجه يضبطه أيضا

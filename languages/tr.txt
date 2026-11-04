@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater bu ağın istediğine katılamıyor
 settings_cannot_run	954f	moonwater komutu çalıştırılamadı
 settings_card_back	db52	Escape veya bir tıklama geri döner
 settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
+settings_copied	0bd7	panoya kopyalandı
 settings_device_name	5f12	Aygıtın adı
 settings_done	8071	tamam
 settings_edit_keys	d161	Enter ayarlar, Escape olduğu gibi bırakır, dışarıya tıklamak da ayarlar

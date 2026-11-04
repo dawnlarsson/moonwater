@@ -80,6 +80,7 @@ settings_cannot_join	dfa4	moonwater اس نیٹ ورک کے مطالبے کے م
 settings_cannot_run	954f	moonwater کمانڈ چلائی نہ جا سکی
 settings_card_back	db52	Escape یا کلک واپسی کے لیے
 settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
+settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
 settings_device_name	5f12	ڈیوائس کا نام
 settings_done	8071	ہو گیا
 settings_edit_keys	d161	Enter اسے لاگو کرتا ہے، Escape پہلے جیسا رکھتا ہے، اور باہر کلک بھی لاگو کرتا ہے

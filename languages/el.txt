@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	το moonwater δεν μπορεί να συνδεθε
 settings_cannot_run	954f	η εντολή moonwater δεν μπόρεσε να εκτελεστεί
 settings_card_back	db52	Το Escape ή ένα κλικ επιστρέφει
 settings_card_stopped	e24d	διακόπηκε: το Escape ή ένα κλικ επιστρέφει
+settings_copied	0bd7	αντιγράφηκε στο πρόχειρο
 settings_device_name	5f12	Όνομα της συσκευής
 settings_done	8071	έγινε
 settings_edit_keys	d161	το Enter το ορίζει, το Escape το αφήνει όπως ήταν, και ένα κλικ έξω το ορίζει

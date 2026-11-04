@@ -80,6 +80,7 @@ settings_cannot_join	dfa4	moonwater نمی‌تواند خواسته‌های آ
 settings_cannot_run	954f	فرمان moonwater اجرا نشد
 settings_card_back	db52	Escape یا کلیک برای بازگشت
 settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
+settings_copied	0bd7	در کلیپ‌بورد کپی شد
 settings_device_name	5f12	نام دستگاه
 settings_done	8071	انجام شد
 settings_edit_keys	d161	Enter آن را اعمال می‌کند، Escape مقدار قبلی را نگه می‌دارد، و کلیک بیرون هم اعمال می‌کند

@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater ne peut pas rejoindre ce que ce réseau dema
 settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
 settings_card_back	db52	Escape ou un clic revient en arrière
 settings_card_stopped	e24d	arrêté : Escape ou un clic revient en arrière
+settings_copied	0bd7	copié dans le presse-papiers
 settings_device_name	5f12	Nom de l'appareil
 settings_done	8071	terminé
 settings_edit_keys	d161	Enter l'applique, Escape le laisse tel quel, un clic à côté l'applique aussi

@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater nie może spełnić wymagań tej sieci
 settings_cannot_run	954f	nie można uruchomić polecenia moonwater
 settings_card_back	db52	Escape lub kliknięcie wraca
 settings_card_stopped	e24d	zatrzymano: Escape lub kliknięcie wraca
+settings_copied	0bd7	skopiowano do schowka
 settings_device_name	5f12	Nazwa urządzenia
 settings_done	8071	gotowe
 settings_edit_keys	d161	Enter ustawia, Escape zostawia bez zmian, kliknięcie obok też ustawia

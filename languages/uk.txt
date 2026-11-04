@@ -79,6 +79,7 @@ settings_cannot_join	dfa4	moonwater не може підключитися до 
 settings_cannot_run	954f	команду moonwater не вдалося виконати
 settings_card_back	db52	Escape або клацання — назад
 settings_card_stopped	e24d	зупинено: Escape або клацання — назад
+settings_copied	0bd7	скопійовано до буфера обміну
 settings_device_name	5f12	Назва пристрою
 settings_done	8071	готово
 settings_edit_keys	d161	Enter задає, Escape залишає як було, клацання поза полем теж задає

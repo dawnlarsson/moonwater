@@ -1260,6 +1260,18 @@ static int windows_issues_read(const struct windows *table, struct windows_issue
         return 0;
 }
 
+// The lines an expander shows under a key: when open, each issue's message and, when it has a detail that is not the GPU's prerequisite's fix
+// (which the message says), the detail too; none when shut.
+static unsigned int windows_issue_lines(const struct windows_issues *all, const char *key, unsigned int open)
+{
+        unsigned int lines = 0;
+
+        for (int i = 0; open && all && key && i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && windows_issue_same(all->issue[i].key, key))
+                        lines += 1 + (all->issue[i].detail[0] && all->issue[i].code != WINDOWS_ISSUE_GPU_REQUIRES);
+        return lines;
+}
+
 // The worst severity of a key's issues on a copy (0 none, WINDOWS_ISSUE_WARNING or WINDOWS_ISSUE_ERROR), and how many there are.
 static unsigned int windows_issues_worst(const struct windows_issues *all, const char *key, unsigned int *count)
 {
