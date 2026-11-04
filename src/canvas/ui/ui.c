@@ -10661,7 +10661,7 @@ struct ui_text
         struct ui_click click;                  // the kit's click count (ui_click_count): a double click and a triple
         b32 dragging, drag_box;
         b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
-        struct ui_press tap;                    // a finger's press: a lift with no drag is a tap (target 0 the text, 1 the selection, 2 a handle)
+        struct ui_finger grab;                  // a finger on the text: its press (a lift with no drag is a tap: 0 the text, 1 the selection, 2 a handle) and its drag (the throw, grab.drag)
         p64 tap_at;                             // the offset a tap went down on
         int finger;                             // what a finger on it holds (UI_TEXT_FINGER_*), 0 none
         b32 handles;                            // a touch selection: its two ends show handles a finger drags (ui_text_overlay)
@@ -10679,7 +10679,6 @@ struct ui_text
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
-        struct ui_drag kinetic;
         p8 search_last[UI_TEXT_SEARCH];         // the search key ui_text_search_changed last answered, and its length
         positive search_length;
         int finger_left;                        // the finger's or throw's pixels not yet a line, up positive
@@ -11544,7 +11543,7 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
 {
         positive due, scroll, bar;
 
-        if (t->kinetic.flying)
+        if (t->grab.drag.flying)
         {
                 p64 was = t->top_line;
                 b32 flying = ui_text_fling(t, now);
@@ -12117,13 +12116,13 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 // A thrown finger's scroll, a frame at a time: whether it still moves.
 static b32 ui_text_fling(struct ui_text address_to t, positive now)
 {
-        int moved = ui_drag_step(&t->kinetic, now);
+        int moved = ui_drag_step(&t->grab.drag, now);
         long lines = ui_text_lines_moved(t, -moved);
         b64 to = (b64)t->top_line + lines;
 
         if (lines)
                 t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
-        return t->kinetic.flying;
+        return t->grab.drag.flying;
 }
 
 /*
@@ -12435,7 +12434,7 @@ static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, i
 static b32 ui_text_bar_still(const struct ui_text address_to t, positive now)
 {
         return t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT &&
-               !(t->finger == UI_TEXT_FINGER_TEXT && t->tap.dragged) && !t->kinetic.flying && now >= t->quiet_at;
+               !(t->finger == UI_TEXT_FINGER_TEXT && t->grab.press.dragged) && !t->grab.drag.flying && now >= t->quiet_at;
 }
 
 /*
@@ -12576,10 +12575,10 @@ static p32 ui_text_pick(struct ui address_to ui, struct ui_text address_to t, p6
                 start = 0, finish = doc_length(&t->doc);
         else
                 doc_word_at(&t->doc, at, &start, &finish);
-        ui_drag_stop(&t->kinetic);
+        ui_drag_stop(&t->grab.drag);
         doc_select_set(&t->doc, start, finish);
         t->finger = UI_TEXT_FINGER_SELECT, t->holding = holding, t->dragging = true, t->drag_box = false;
-        t->handles = true, t->bar = false, t->tap.down = false;
+        t->handles = true, t->bar = false, t->grab.press.down = false;
         t->drag_kind = clicks == 3 ? 3 : 2, t->drag_start = start, t->drag_end = finish;
         ui_text_reveal(ui, t);
         ui_text_wake(t);
@@ -12598,7 +12597,7 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
         if (item >= 0)
         {
                 t->finger = UI_TEXT_FINGER_BAR, t->dragging = true, t->bar_down = item + 1;
-                ui_press_begin(&t->tap, x, y, item, true);
+                ui_press_begin(&t->grab.press, x, y, item, true);
                 return UI_TEXT_MOVED;
         }
         if (grab)
@@ -12610,9 +12609,9 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
                 // The other end stays; the finger holds this one where it took it, so the end does not jump to the finger.
                 t->drag_kind = 1, t->drag_start = t->drag_end = grab == 2 ? doc_sel_start(s) : doc_sel_end(s);
                 t->grab_dx = hx - x, t->grab_dy = top + t->line_height / 2 - y;
-                ui_drag_stop(&t->kinetic);
+                ui_drag_stop(&t->grab.drag);
                 t->finger = UI_TEXT_FINGER_HANDLE, t->dragging = true, t->drag_box = false;
-                ui_press_begin(&t->tap, x, y, 2, true);
+                ui_press_begin(&t->grab.press, x, y, 2, true);
                 ui_text_wake(t);
                 return UI_TEXT_MOVED;
         }
@@ -12626,9 +12625,9 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
         // a selection waits for the lift to do (the finger may be about to scroll).
         on = doc_any_selected(&t->doc) ? ui_text_selected(t, at) : at == t->doc.selections[t->doc.primary].active;
         t->finger = UI_TEXT_FINGER_TEXT, t->dragging = true, t->tap_at = at;
-        ui_drag_start(&t->kinetic, y, now);
+        ui_drag_start(&t->grab.drag, y, now);
         t->finger_left = 0;
-        ui_press_begin(&t->tap, x, y, on, true);
+        ui_press_begin(&t->grab.press, x, y, on, true);
         if (!doc_any_selected(&t->doc) && !on)
         {
                 doc_select_set(&t->doc, at, at);
@@ -12645,22 +12644,22 @@ static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_t
         {
                 int was = t->bar_down;
 
-                ui_press_move(ui, &t->tap, x, y);
-                t->bar_down = !t->tap.dragged && ui_text_bar_item(t, x, y) == t->tap.target ? t->tap.target + 1 : 0;
+                ui_press_move(ui, &t->grab.press, x, y);
+                t->bar_down = !t->grab.press.dragged && ui_text_bar_item(t, x, y) == t->grab.press.target ? t->grab.press.target + 1 : 0;
                 return was != t->bar_down ? UI_TEXT_MOVED : 0;
         }
         if (t->finger == UI_TEXT_FINGER_TEXT)
         {
                 // The text follows the finger, a line at a time as its pixels make lines; the bar goes as the press turns to a drag.
-                b32 was = t->tap.dragged;
-                int moved = ui_drag_follow(&t->kinetic, y, now);
+                b32 was = t->grab.press.dragged;
+                int moved = ui_drag_follow(&t->grab.drag, y, now);
                 long lines = ui_text_lines_moved(t, -moved);
                 b64 to = (b64)t->top_line + lines;
 
-                ui_press_move(ui, &t->tap, x, y);
+                ui_press_move(ui, &t->grab.press, x, y);
                 if (lines)
                         t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
-                return lines || was != t->tap.dragged ? UI_TEXT_MOVED : 0;
+                return lines || was != t->grab.press.dragged ? UI_TEXT_MOVED : 0;
         }
         {
                 // A handle's end, or a selection by words, follows the finger: the end is where the finger plus what it took the handle
@@ -12671,7 +12670,7 @@ static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_t
                 int edge_y = ey < t->top ? t->top : ey >= t->bottom ? t->bottom - 1 : ey;
 
                 if (handle)
-                        ui_press_move(ui, &t->tap, x, y);
+                        ui_press_move(ui, &t->grab.press, x, y);
                 t->drag_x = ex, t->drag_y = ey;
                 t->edge.past = t->mode == UI_TEXT_FIELD ? (x < t->left + band ? x - (t->left + band) : x >= t->right - band ? x - (t->right - band) + 1 : 0)
                                  : y < t->top + band ? y - (t->top + band) : y >= t->bottom - band ? y - (t->bottom - band) + 1 : 0;
@@ -12692,7 +12691,7 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
         {
                 if (finger == UI_TEXT_FINGER_TEXT)
                 {
-                        ui_press_end(&t->tap, true);
+                        ui_press_end(&t->grab.press, true);
                         t->finger = 0, t->dragging = false;
                 }
                 return 0;
@@ -12700,7 +12699,7 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
         t->finger = 0, t->dragging = false, t->holding = false, t->edge.past = 0;
         if (finger == UI_TEXT_FINGER_TEXT)
         {
-                tapped = ui_press_end(&t->tap, cancelled);
+                tapped = ui_press_end(&t->grab.press, cancelled);
                 if (tapped >= 0)
                 {
                         // A tap on the selection is the bar's, to show or take away; anywhere else it puts the caret.
@@ -12714,11 +12713,11 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
                         }
                         return asks;
                 }
-                return ui_drag_let_go(&t->kinetic, now) ? asks : 0;
+                return ui_drag_let_go(&t->grab.drag, now) ? asks : 0;
         }
         if (finger == UI_TEXT_FINGER_HANDLE)
         {
-                tapped = ui_press_end(&t->tap, cancelled);
+                tapped = ui_press_end(&t->grab.press, cancelled);
                 t->bar = tapped >= 0 ? !t->bar : true;
                 if (tapped < 0 && doc_any_selected(&t->doc))
                         ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
@@ -12726,7 +12725,7 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
         }
         if (finger == UI_TEXT_FINGER_BAR)
         {
-                tapped = ui_press_end(&t->tap, cancelled);
+                tapped = ui_press_end(&t->grab.press, cancelled);
                 t->bar_down = 0;
                 if (tapped >= 0 && tapped < t->bar_count && tapped == ui_text_bar_item(t, x, y))
                 {
@@ -12787,7 +12786,7 @@ static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 
 
         if (want != t->bar_want)
                 *redraw = true;
-        if (t->bar && now < t->quiet_at && t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT && !t->kinetic.flying)
+        if (t->bar && now < t->quiet_at && t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT && !t->grab.drag.flying)
                 return t->quiet_at;
         return 0;
 }

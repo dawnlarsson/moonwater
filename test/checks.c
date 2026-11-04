@@ -131933,10 +131933,10 @@ static void check_field_flick(struct ui address_to wui)
     }
     ui_kit.now = now += 16000000ull;
     ui_field_event(wui, &field, null, &up, x, y - 400);
-    thrown = field.kinetic.flying;
+    thrown = field.grab.drag.flying;
     for (int step = 1; step <= 150; step++)
         ui_text_timeout(wui, &field, -1, now += 16000000ull, &redraw);
-    check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.kinetic.flying);
+    check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.grab.drag.flying);
     ui_text_close(&field);
 }
 
@@ -131965,7 +131965,7 @@ static void check_throw_last_step(struct ui address_to wui)
     }
     ui_kit.now = now += 16000000ull;
     ui_text_event(wui, &view, &up, x, y - 400);
-    for (int step = 1; step <= 300 && view.kinetic.flying; step++)
+    for (int step = 1; step <= 300 && view.grab.drag.flying; step++)
     {
         p64 was = view.top_line;
         b32 redraw = false;
@@ -131975,7 +131975,7 @@ static void check_throw_last_step(struct ui address_to wui)
             moved = true, moved_unasked |= !redraw;
     }
     check("code view throw: it moves the lines, and each tick that moves them asks for the picture, the one that stops it too",
-          moved && !moved_unasked && !view.kinetic.flying);
+          moved && !moved_unasked && !view.grab.drag.flying);
     ui_text_close(&view);
 }
 
@@ -150480,7 +150480,7 @@ static p64 ts_code(struct ui address_to wui, int scale)
                 got |= (p64)(ts_view.top_line < 20 && ts_is(&ts_view, ts_line_start[23], ts_line_start[23] + 4) && ts_view.handles) << TS_SCROLLS;
                 got |= (p64)(ts_view.bar && !ts_view.bar_up) << TS_BAR_HIDES;
                 ts_up(wui, &ts_view, fx, fy + 5 * lh);
-                for (int step = 1; step < 600 && ts_view.kinetic.flying; step++)
+                for (int step = 1; step < 600 && ts_view.grab.drag.flying; step++)
                         ui_text_fling(&ts_view, clock_monotonic_nanoseconds() + (positive)step * 16000000ull);
                 ui_text_bar_tick(&ts_view, clock_monotonic_nanoseconds() + 1000000000ull, &redraw);
                 ts_view.top_line = 20;
