@@ -10440,6 +10440,8 @@ struct ui_edge
         long owed;
 };
 
+#define UI_TEXT_SEARCH 64 // a search key's room: the folded text of a field, at most this many bytes less one
+
 struct ui_text
 {
         struct doc doc;
@@ -10479,6 +10481,8 @@ struct ui_text
         p64 drag_start, drag_end;
         p64 box_line, box_column;
         struct ui_drag kinetic;
+        p8 search_last[UI_TEXT_SEARCH];         // the search key ui_text_search_changed last answered, and its length
+        positive search_length;
         int finger_left;                        // the finger's or throw's pixels not yet a line, up positive
         positive blink_at;                      // where the caret's phase restarted (ui_text_wake): a key or a move
         unsigned int caret_fade;                // how far the caret has faded: 0 solid, UI_CARET_FULL gone (0 new, so drawn)
@@ -10595,6 +10599,42 @@ static positive ui_text_string(const struct ui_text address_to t, p8 address_to 
         if (room)
                 into[length] = 0;
         return length;
+}
+
+/*
+        The field's text as a search key: folded to lower case, its blanks at either end left off, into room bytes (at most room - 1
+        of them); its length. It is read from the text each time, so it is never stale; the kit keeps the last key it was asked for
+        (ui_text_search_changed), for the change a key event made to what a search matches.
+*/
+static positive ui_text_search(const struct ui_text address_to t, p8 address_to into, positive room)
+{
+        positive length, start = 0;
+
+        if (!room)
+                return 0;
+        length = ui_text_string(t, into, room);
+        while (start < length && into[start] == ' ')
+                start++;
+        while (length > start && into[length - 1] == ' ')
+                length--;
+        length -= start;
+        for (positive at = 0; at < length; at++)
+                into[at] = (p8)byte_to_lower((b8)into[start + at]);
+        into[length] = 0;
+        return length;
+}
+
+// Whether the search key changed since it was last asked: the kit keeps the key it answered, so a change that folds to the same
+// key (a blank typed at the end) is no change.
+static b32 ui_text_search_changed(struct ui_text address_to t)
+{
+        p8 key[UI_TEXT_SEARCH];
+        positive length = ui_text_search(t, key, sizeof(key));
+        b32 changed = length != t->search_length || memory_compare(key, t->search_last, length);
+
+        memory_copy(t->search_last, key, length + 1);
+        t->search_length = length;
+        return changed;
 }
 
 // The text replaced, the caret at its end: what an app that sets a field does.

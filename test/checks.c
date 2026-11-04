@@ -133252,6 +133252,15 @@ static b32 settings_type_code(unsigned int code)
 }
 
 // One key as the window sends it: a key in a, none in b.
+// The filter's key is the word given (the kit's key of the field, folded and trimmed).
+static b32 check_filter_says(const char address_to word)
+{
+        p8 key[SETTINGS_FILTER];
+
+        settings_filter_text(key, sizeof(key));
+        return string_equals((string_address)key, (string_address)word);
+}
+
 static b32 settings_press(int key)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, key, 0};
@@ -134929,7 +134938,7 @@ static fn check_settings(string_address regular, string_address bold)
                 // The filter: letters typed with no field open, Backspace, and Escape clearing before it closes.
                 settings.ui.scale = 100;
                 settings.editing = -1;
-                settings.filter_length = 0;
+                settings_filter_clear();
                 settings.page.chosen = 0;
                 settings.page.pane = 1;
                 settings_refilter();
@@ -134948,7 +134957,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_type_code('f');
                 settings_type_code('i');
                 check("settings: letters typed with no field open are the filter, in small letters",
-                      string_equals((string_address)settings.filter, (string_address) "wifi") && settings.list.count < settings_rows_count());
+                      check_filter_says("wifi") && settings.list.count < settings_rows_count());
                 {
                         b32 structured = false, generic = false, each = true;
 
@@ -134962,8 +134971,8 @@ static fn check_settings(string_address regular, string_address bold)
                 }
                 check("settings: the focus goes to the first row that shows", settings.list.focus == settings.list.id[0]);
                 settings_press(UI_KEY_BACKSPACE);
-                check("settings: Backspace takes a letter off it", string_equals((string_address)settings.filter, (string_address) "wif"));
-                check("settings: Escape clears it and keeps the window", settings_press(UI_KEY_ESCAPE) && !settings.filter_length &&
+                check("settings: Backspace takes a letter off it", check_filter_says("wif"));
+                check("settings: Escape clears it and keeps the window", settings_press(UI_KEY_ESCAPE) && !settings_filter_length() &&
                                                                               settings.list.count < settings_rows_count() &&
                                                                               settings_group_of(settings.list.id[0]) == settings.page.chosen);
                 check("settings: and Escape with none typed closes it", !settings_press(UI_KEY_ESCAPE));
@@ -134972,7 +134981,7 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: a filter nothing matches shows no row", settings.list.count == 0);
                 settings_press(UI_KEY_ESCAPE);
                 settings_type_code(' ');
-                check("settings: a blank is no letter of it", !settings.filter_length);
+                check("settings: a blank is no letter of it", !settings_filter_length());
 
                 // The groups at the left, the rows at the right, and the keys between them.
                 settings.ui.scale = 100;
@@ -135023,11 +135032,11 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_TAB);
                         settings_type_code('a');
                         check("settings: a letter typed in the column is the filter, and the keys are in the rows",
-                              settings.page.pane == 1 && settings.filter_length == 1 && settings.list.count > settings_rows_count() / 4);
+                              settings.page.pane == 1 && settings_filter_length() == 1 && settings.list.count > settings_rows_count() / 4);
                         settings_press(UI_KEY_TAB);
                         settings_press(UI_KEY_UP);
                         check("settings: moving in the column clears the filter and shows the group chosen",
-                              !settings.filter_length && settings.page.chosen == 2 && settings_group_of(settings.list.id[0]) == 2);
+                              !settings_filter_length() && settings.page.chosen == 2 && settings_group_of(settings.list.id[0]) == 2);
                         settings_press(UI_KEY_ENTER);
                         {
                                 int clock_row = settings_row_named("Set the clock from the network");
@@ -135335,8 +135344,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.height = SETTINGS_HEIGHT;
                         settings.page.card = false;
                         settings.editing = -1;
-                        settings.filter_length = 0;
-                        settings.filter[0] = 0;
+                        settings_filter_clear();
                         settings.page.chosen = settings_group_of(kb);
                         settings.page.pane = 1;
                         settings.child = 1;
@@ -135380,7 +135388,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_TAB);
                         settings_menu_press(UI_KEY_TAB);
                         check("settings: the list takes every key: no group is chosen, no row moved, nothing is typed as a filter",
-                              settings.choice == kb && settings.page.pane == 1 && settings.page.chosen == settings_group_of(kb) && !settings.filter_length &&
+                              settings.choice == kb && settings.page.pane == 1 && settings.page.chosen == settings_group_of(kb) && !settings_filter_length() &&
                                   settings.queued == 0);
                         check("settings: Escape closes it and leaves the row as it was, and keeps the window",
                               settings_menu_press(UI_KEY_ESCAPE) && settings.choice < 0 && settings.queued == 0 &&
@@ -135883,7 +135891,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.page.chosen = bt_group;
                         settings.page.card = false;
                         settings.editing = -1;
-                        settings.filter_length = 0;
+                        settings_filter_clear();
                         settings.queued = 0;
                         settings.help = 2;
                         settings.child = 0;
@@ -135900,9 +135908,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.page.chosen = 0;
                         check("settings: nor while the group shown has none", settings_feed_tick() == -1);
                         settings.page.chosen = bt_group;
-                        settings.filter_length = 1;
+                        ui_text_set(settings_filter_field(), (const p8 address_to) "x", 1), ui_text_search_changed(settings_filter_field());
                         check("settings: nor while what is typed filters the rows of every group", settings_feed_tick() == -1);
-                        settings.filter_length = 0;
+                        settings_filter_clear();
                         settings.editing = 0;
                         check("settings: nor while a field is typed in", settings_feed_tick() == -1);
                         settings.editing = -1;
@@ -136020,8 +136028,7 @@ static fn check_settings_edges(void)
         settings.editing = -1;
         settings.queued = 0;
         settings.child = 0;
-        settings.filter_length = 0;
-        settings.filter[0] = 0;
+        settings_filter_clear();
         settings_refilter();
 }
 
@@ -136033,8 +136040,7 @@ static fn check_settings_keys(void)
         settings.width = SETTINGS_WIDTH;
         settings.height = SETTINGS_HEIGHT;
         settings.page.pane = 1;
-        settings.filter_length = 0;
-        settings.filter[0] = 0;
+        settings_filter_clear();
         settings.editing = -1;
         settings.choice = -1;
         settings.page.card = 0;
@@ -136233,7 +136239,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].kind == SETTINGS_SWITCH)
@@ -136347,7 +136353,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         settings.page.chosen = group;
@@ -136554,7 +136560,7 @@ static fn settings_fit_check(void)
         int group = 0, fewest = 1 << 30, thumb_top = 0, thumb_length = 0, seen = 0;
         b32 still = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136587,7 +136593,7 @@ static fn settings_column_fit_check(void)
         int heights[2] = {520, 560};
         b32 ends = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         for (int k = 0; k < 2; k++)
         {
@@ -136607,7 +136613,7 @@ static fn settings_group_glide_check(void)
         struct ui_scroll address_to list = &settings.list.scroll;
         int other;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         settings_size(SETTINGS_WIDTH, 300);
         other = settings.page.chosen == 0 ? 1 : 0;
@@ -136625,7 +136631,7 @@ static fn settings_column_check(void)
         int most, edge = 0, x, y, at_bottom = 0, at_top = 0;
         b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.ui.scale = 100;
         ui_kit_settle();
@@ -136667,7 +136673,7 @@ static fn settings_end_check(void)
         int group = 0, best = -1, expected = 0, track_top = 0, track_height = 0, last = 0;
         b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136755,7 +136761,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         int most, group = 0, best = -1;
         b32 settled;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136801,7 +136807,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
         int most, group = 0, best = -1, x, y;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
+        settings_filter_clear(), (void)0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -137042,7 +137048,7 @@ static fn check_display_section(void)
         check("display section: no separate displays window: no row runs settings displays", !window);
 
         // The map is shown above the Display group only: its panel is placed at the page's top, the list under it.
-        settings.page.chosen = settings_group_of(screen_row), settings.filter_length = 0, settings.page.card = false;
+        settings.page.chosen = settings_group_of(screen_row), settings_filter_clear(), settings.page.card = false;
         settings.page.top = 100, settings.page.left = 0, settings.page.right = 700;
         settings.ui.scale = 100;
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.page.chosen == settings_group_of(screen_row));
@@ -137082,7 +137088,7 @@ static fn check_display_section(void)
 
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
-                settings_gallery.on = 0, settings.choice = -1, settings.editing = -1, settings.page.card = false, settings.filter_length = 0;
+                settings_gallery.on = 0, settings.choice = -1, settings.editing = -1, settings.page.card = false, settings_filter_clear();
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event(&touch);
@@ -137159,7 +137165,7 @@ static fn check_display_section(void)
                 grid_count = settings_map_load(grid, grid_number);
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
-                settings.popup.open = 0, settings.editing = -1, settings.page.card = false, settings.filter_length = 0, settings.map.keys = false;
+                settings.popup.open = 0, settings.editing = -1, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
                 settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event(&event);
@@ -137193,7 +137199,7 @@ static fn check_display_section(void)
                 memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
                 settings.page.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.page.card = false;
-                settings.filter_length = 0, settings.choice = -1;
+                settings_filter_clear(), (void)0, settings.choice = -1;
                 key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_UP, 0};
                 settings_key(&key);
                 check("display section: Up from the Screen row goes up to the map, which then has the keys", settings.map.keys && settings.list.focus == screen_row);
@@ -137343,11 +137349,9 @@ static fn check_display_section(void)
 // What is typed in the filter, as the keys would have left it: folded to lower case, and the rows that have it listed.
 static fn settings_groups_filter(const char address_to text, positive length)
 {
-        length = length < sizeof(settings.filter) ? length : sizeof(settings.filter) - 1;
-        for (positive at = 0; at < length; at++)
-                settings.filter[at] = (char)(text[at] >= 'A' && text[at] <= 'Z' ? text[at] + 32 : text[at]);
-        settings.filter[length] = 0;
-        settings.filter_length = length;
+        length = length < SETTINGS_FILTER - 1 ? length : SETTINGS_FILTER - 1;
+        ui_text_set(settings_filter_field(), (const p8 address_to)text, length);
+        ui_text_search_changed(settings_filter_field());
         settings_rebuild();
 }
 
@@ -137446,7 +137450,7 @@ static fn check_settings_groups(void)
 
         settings.ui.scale = 100;
         settings.page.card = 0, settings.editing = -1, settings.choice = -1, settings.page.pane = 1;
-        settings.filter_length = 0, settings.filter[0] = 0;
+        settings_filter_clear(), (void)0;
         for (positive at = 0; at < sizeof(placed) / sizeof(placed[0]); at++)
         {
                 int row = settings_row_named(placed[at].label), want = settings_groups_named(placed[at].group);
@@ -137459,7 +137463,7 @@ static fn check_settings_groups(void)
                         continue;
                 }
                 by_name &= settings_group_of(row) == want;
-                settings.filter_length = 0, settings.filter[0] = 0;
+                settings_filter_clear(), (void)0;
                 settings.page.chosen = want;
                 settings_rebuild();
                 listed &= settings_pos(row) >= 0;
@@ -137472,7 +137476,7 @@ static fn check_settings_groups(void)
                         word++;
                 settings_groups_filter(first, word);
                 found &= settings_pos(row) >= 0;
-                settings.filter_length = 0, settings.filter[0] = 0;
+                settings_filter_clear(), (void)0;
         }
         check("settings groups: the rows moved out of Machine are named in the groups of what they do (Input, Canvas, Time, Display)", by_name);
         check("settings groups: each is listed when its group is chosen", listed);
@@ -137481,7 +137485,7 @@ static fn check_settings_groups(void)
 
         // Machine holds only what the machine is called, and the language it speaks.
         settings.page.chosen = 0;
-        settings.filter_length = 0, settings.filter[0] = 0;
+        settings_filter_clear(), (void)0;
         settings_rebuild();
         for (int at = 0; at < settings.list.count; at++)
         {
@@ -137516,7 +137520,7 @@ static fn check_settings_groups(void)
         }
         check("settings groups: the filter lists every row of every group, by a word of its label and by its group's name", every);
 
-        settings.filter_length = 0, settings.filter[0] = 0;
+        settings_filter_clear(), (void)0;
         settings.page.chosen = 0;
         settings_refilter();
 }
@@ -137551,7 +137555,7 @@ static fn check_settings_seam(void)
         unsigned int paper;
         b32 geometry, hits, joined, ring_ends, bar_over, margins;
 
-        settings.focused = 1, settings.page.pane = 1, settings.editing = -1, settings.choice = -1, settings.filter_length = 0, settings.filter[0] = 0;
+        settings.focused = 1, settings.page.pane = 1, settings.editing = -1, settings.choice = -1, settings_filter_clear(), (void)0;
         settings_group_choose(0);
         ui_scroll_set(&list->scroll, 0);
         ui_scroll_set(&page->column_scroll, 0);
@@ -138378,7 +138382,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
         {
                 settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
                 settings.page.chosen = group;
-                settings.filter_length = 0, settings.filter[0] = 0;
+                settings_filter_clear(), (void)0;
                 settings.page.card = 0, settings.editing = -1, settings.choice = -1;
                 settings.focused = 0;
                 settings_refilter();
@@ -153675,13 +153679,13 @@ static fn check_field_hands(string_address regular)
                         for (positive at = 0; at < settings.list.count; at++)
                                 listed |= settings.list.id[at] == wifi, each &= settings_matches(settings.list.id[at]);
                         check("settings: Left moves the caret in the filter, and a blank typed there parts its words: wi fi lists Wi-Fi",
-                              string_equals((string_address)settings.filter, (string_address) "wi fi") && listed && each);
+                              check_filter_says((const char address_to) "wi fi") && listed && each);
                 }
                 settings_chord(FIELD_KEY_HOME, 0, WINDOW_KEY_SHIFT);
                 settings_type_code('n');
-                check("settings: Shift and Home select in the filter, and a letter replaces what is selected", string_equals((string_address)settings.filter, (string_address) "nfi"));
+                check("settings: Shift and Home select in the filter, and a letter replaces what is selected", check_filter_says((const char address_to) "nfi"));
                 settings_press(FIELD_KEY_ESCAPE);
-                check("settings: Escape clears the filter", !settings.filter_length);
+                check("settings: Escape clears the filter", !settings_filter_length());
 
                 // The name, typed in its row: a click puts the caret, and Enter sets what the field holds.
                 settings.state[name] = SETTINGS_READ;

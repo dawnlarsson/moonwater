@@ -697,10 +697,7 @@ static struct
         char accents[SETTINGS_VALUE]; // the accents' colours, a blank apart, as the swatches' words
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
         positive battery_menu_count;
-        char filter[SETTINGS_FILTER];
-        positive filter_length;
-        // The filter as typed, in a field of the text engine (copied, folded to lower case, into filter as it changes),
-        // which is the page's search field.
+        // The filter as typed, in a field of the text engine, which is the page's search field (its key is the kit's).
         struct ui_text filter_edit;
         b32 filter_open;
         // The field a row is typed in (the engine's, with the row's rules: a name's characters, a passphrase's dots, the
@@ -984,10 +981,28 @@ static b32 settings_matches_word(int row, const char address_to word, positive s
         Whether a row has every word typed in the filter: the words are split at blanks, in any order, and each
         is found in the row's label, its section, its verb or its value, whatever the case.
 */
+// The filter's key: the field's text folded and trimmed by the kit (ui_text_search), into room bytes; none while no field is open.
+static positive settings_filter_text(p8 address_to into, positive room)
+{
+        if (!room)
+                return 0;
+        into[0] = 0;
+        return settings.filter_open ? ui_text_search(&settings.filter_edit, into, room) : 0;
+}
+
+// The length of the filter's key: the rows are filtered while it is not none.
+static positive settings_filter_length(void)
+{
+        p8 key[SETTINGS_FILTER];
+
+        return settings_filter_text(key, sizeof(key));
+}
+
 static b32 settings_matches(int row)
 {
-        const char address_to text = settings.filter;
-        positive at = 0, length = settings.filter_length;
+        p8 key[SETTINGS_FILTER];
+        const char address_to text = (const char address_to)key;
+        positive at = 0, length = settings_filter_text(key, sizeof(key));
 
         if (!length)
                 return true;
@@ -1261,7 +1276,7 @@ static b32 settings_map_on(void)
 {
         int row = settings_output_row(SETTINGS_OUT_SCREEN);
 
-        return row >= 0 && !settings.page.card && !settings.filter_length && settings_group_of(row) == settings.page.chosen;
+        return row >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(row) == settings.page.chosen;
 }
 
 static int settings_map_height(void)
@@ -1568,7 +1583,7 @@ static fn settings_rebuild(void)
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
+                if (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
                         settings.list.id[count++] = (unsigned short)row;
         // The rows of a list come after, each in the group of its feed.
         for (int list = 0; list < SETTINGS_LISTS; list++)
@@ -1576,7 +1591,7 @@ static fn settings_rebuild(void)
                 {
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
-                        if (settings.filter_length ? settings_matches(row) : settings_group_of(row) == settings.page.chosen)
+                        if (settings_filter_length() ? settings_matches(row) : settings_group_of(row) == settings.page.chosen)
                                 settings.list.id[count++] = (unsigned short)row;
                 }
         settings.list.count = count;
@@ -2622,7 +2637,7 @@ static long settings_feed_tick(void)
         string_address words[SETTINGS_WORDS];
         positive count = 1;
 
-        if (feed < 0 || settings.page.card || settings.editing >= 0 || settings.filter_length ||
+        if (feed < 0 || settings.page.card || settings.editing >= 0 || settings_filter_length() ||
             (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued ||
             settings_unread_any() || settings.help == 1)
                 return -1;
@@ -3423,7 +3438,7 @@ static b32 settings_filter_typed(void);
 static fn settings_group_choose(int group)
 {
         int last = settings_groups() - 1, before = settings.page.chosen;
-        b32 typed = settings.filter_length != 0 || settings_filter_typed();
+        b32 typed = settings_filter_length() != 0 || settings_filter_typed();
 
         group = group < 0 ? 0 : group > last ? last : group;
         if (group == before && !typed)
@@ -3539,34 +3554,20 @@ static b32 settings_filter_typed(void)
         return settings.filter_open && doc_length(&settings.filter_edit.doc) != 0;
 }
 
-// The filter's text as the rows are matched against it: the field's, folded to lower case, its blanks at either end left off.
+// Whether the filter's key changed with the last event (the kit keeps the key it last answered: a blank typed at the end is none).
 static b32 settings_filter_take(void)
 {
-        p8 typed[SETTINGS_FILTER];
-        positive length = ui_text_string(settings_filter_field(), typed, sizeof(typed)), start = 0;
-
-        while (start < length && typed[start] == ' ')
-                start++;
-        while (length > start && typed[length - 1] == ' ')
-                length--;
-        length -= start;
-        for (positive at = 0; at < length; at++)
-                typed[at] = (p8)byte_to_lower((b8)typed[start + at]);
-        typed[length] = 0;
-        if (length == settings.filter_length && !memory_compare(typed, settings.filter, length))
-                return false;
-        memory_copy(settings.filter, typed, length + 1);
-        settings.filter_length = length;
-        return true;
+        return ui_text_search_changed(settings_filter_field());
 }
 
 // The filter emptied: its field, and the rows of the group chosen again.
 static fn settings_filter_clear(void)
 {
         if (settings.filter_open)
+        {
                 ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
-        settings.filter[0] = 0;
-        settings.filter_length = 0;
+                ui_text_search_changed(&settings.filter_edit);
+        }
 }
 
 /*
@@ -4562,12 +4563,12 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         else
         {
                 ui_page_groups(ui, &settings.page, settings_group_text, settings_groups());
-                ui_page_column(ui, &settings.page, settings.focused && !settings.page.pane, settings.filter_length != 0);
+                ui_page_column(ui, &settings.page, settings.focused && !settings.page.pane, settings_filter_length() != 0);
                 if (settings_map_on())
                         settings_map_draw(ui);
                 // A row typed in is a field on the page, not a band: its well is the only thing lit there.
                 // The map has the keys while it is focused, so no row is lit or has the focus then.
-                settings.list.lit = (settings.page.pane || settings.filter_length) && settings.editing < 0 && !settings.map.keys;
+                settings.list.lit = (settings.page.pane || settings_filter_length()) && settings.editing < 0 && !settings.map.keys;
                 settings.list.keys = settings.focused && settings.page.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
                 ui_page_column_bar(ui, &settings.page);
