@@ -145476,6 +145476,33 @@ static void burst_shape(const struct burst_run address_to run, long address_to p
         }
 }
 
+// ui_spring_go gives a spring the same motion whatever memory it was in: pace was never set by it, so a spring on the
+// stack read whatever was there (gcc's stack held zero, clang's did not: the release spring check failed under clang).
+static fn check_kit_spring_fresh(void)
+{
+        static const unsigned char fills[] = {0x00, 0x5a, 0xa5, 0xff};
+        b64 first[4][12];
+        int same = 1;
+
+        for (int f = 0; f < 4; f++)
+        {
+                struct ui_spring spring;
+
+                memset(&spring, fills[f], sizeof(spring));
+                ui_spring_go(&spring, 322122547ll, -10737418ll);
+                spring.speed[0] = 1073741824ll * 2;
+                for (int k = 0; k < 12; k++)
+                {
+                        ui_spring_at(&spring, (b64)k * 16000000ll + 1000000000ll);
+                        first[f][k] = spring.value[0] ^ spring.value[1] * 3;
+                }
+        }
+        for (int f = 1; f < 4; f++)
+                for (int k = 0; k < 12; k++)
+                        same &= first[f][k] == first[0][k];
+        check("kit spring: a spring that is started is the same whatever memory it was in: the pace it starts at is the clock's", same);
+}
+
 // ui_notch_take: 120ths add up across turns, a notch is taken whole and the rest kept, and a backward turn takes notches back.
 static fn check_kit_notch_take(void)
 {
@@ -155750,6 +155777,7 @@ b32 main()
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
+        check_kit_spring_fresh();
         check_kit_wheel_burst();
         check_terminal_wheel_curve();
         check_kit_turn();

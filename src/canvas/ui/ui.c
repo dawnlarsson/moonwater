@@ -1563,6 +1563,7 @@ static fn ui_spring_go(struct ui_spring address_to s, b64 scale, b64 nudge)
         s->amplitude[0] = s->value[0] = scale;
         s->amplitude[1] = s->value[1] = nudge;
         s->speed[0] = s->speed[1] = 0;
+        s->pace = 0; // ui.js's clock; a caller that wants another sets it after this call (the scroll's back spring does)
         s->start = 0;
         s->live = 1; // the first frame says whether any of it is past rest
 }
