@@ -432,22 +432,14 @@ static fn mixer_draw(unsigned int address_to pixels)
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
+static void mixer_draw_whole(unsigned int address_to pixels)
+{
+        mixer_draw(pixels);
+}
+
 static b32 mixer_frame(void)
 {
-        struct windows address_to table = mixer.own.table;
-        unsigned int row = mixer.own.row;
-        int slot = mixer.shown < 0 ? 0 : 1 - mixer.shown;
-
-        if (mixer.shown >= 0 && !windows_ready(&mixer.own))
-                return false;
-        mixer_draw(windows_buffer(table, row, (unsigned int)slot));
-        table->width[row] = (unsigned int)mixer.width;
-        table->height[row] = (unsigned int)mixer.height;
-        table->damage_width[row] = 0;
-        windows_show(&mixer.own, (unsigned int)slot);
-        mixer.shown = slot;
-        mixer.dirty = false;
-        return true;
+        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole, null);
 }
 
 // Another program started apart: in a session of its own and a process nobody waits for, its input and output nowhere, as the machine
@@ -607,7 +599,6 @@ static int mixer_open(void)
                 ui_anchor_set(&mixer.anchor, table, row, mixer.width, mixer.height);
         else
                 ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
-        language_listen(mixer_language);
         mixer_frame();
         return -1;
 }
@@ -632,6 +623,7 @@ static struct ui_app mixer_app = {
         .ground = &mixer.ground,
         .open = mixer_open,
         .frame = mixer_frame,
+        .language = mixer_language,
         .event = mixer_event,
         .changed = mixer_dirty,
         .size = mixer_size,

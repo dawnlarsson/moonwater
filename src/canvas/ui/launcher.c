@@ -955,11 +955,6 @@ static fn launcher_draw(unsigned int address_to pixels)
 }
 
 // The bar's picture, drawn whole into the buffer the kit gives (every frame is due whole: the bar has no rows to draw apart).
-static fn launcher_paint(unsigned int address_to pixels, int top, int bottom)
-{
-        (void)top, (void)bottom;
-        launcher_draw(pixels);
-}
 
 // A new height of a bar that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
 static fn launcher_placed(void)
@@ -975,14 +970,11 @@ static fn launcher_placed(void)
         }
 }
 
-// One picture, into the buffer the compositor is not reading; false when there is none yet.
+// One picture, into the buffer the compositor is not reading; false when there is none yet (the kit's frame; the bar's moved place is
+// asked with the picture, before the buffer is shown).
 static b32 launcher_frame(void)
 {
-        ui_buffers_all(&launcher.buffers);
-        if (!ui_buffers_present(&launcher.buffers, &launcher.own, launcher.width, launcher.height, launcher_paint, launcher_placed))
-                return false;
-        launcher.dirty = false;
-        return true;
+        return ui_app_present(&launcher.own, &launcher.buffers.shown, &launcher.dirty, launcher.width, launcher.height, launcher_draw, launcher_placed);
 }
 
 /* ---- the program ---- */
@@ -1057,7 +1049,6 @@ static int launcher_open(void)
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
         // change with the scan and needs no second frame; a key read after this sees every name.
-        language_listen(launcher_language);
         launcher_scan(launcher_path_variable());
         return -1;
 }
@@ -1090,6 +1081,7 @@ static struct ui_app launcher_app = {
         .ground = &launcher.ground,
         .open = launcher_open,
         .frame = launcher_frame,
+        .language = launcher_language,
         .event = launcher_event,
         .dismiss = true,        // a temporary overlay: the keys went elsewhere after it had them, so it is put away (ui_app_keys)
         .size = launcher_size,

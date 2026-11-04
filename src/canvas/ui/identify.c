@@ -132,13 +132,15 @@ static fn identify_picture(unsigned int address_to pixels, int top, int bottom)
 
 // One picture: the badge, whole, into the buffer the compositor is not reading (ui_buffers_present). False when that buffer
 // is still being read, and the picture is due again.
+// The badge's picture, whole: its band is the whole window.
+static fn identify_draw(unsigned int address_to pixels)
+{
+        identify_picture(pixels, 0, identify.height);
+}
+
 static b32 identify_frame(void)
 {
-        ui_buffers_all(&identify.buffers);
-        if (!ui_buffers_present(&identify.buffers, &identify.own, identify.width, identify.height, identify_picture, null))
-                return false;
-        identify.dirty = false;
-        return true;
+        return ui_app_present(&identify.own, &identify.buffers.shown, &identify.dirty, identify.width, identify.height, identify_draw, null);
 }
 
 /*

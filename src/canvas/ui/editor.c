@@ -670,7 +670,7 @@ static fn editor_draw(unsigned int address_to pixels)
 
 static b32 editor_frame(void)
 {
-        return ui_app_present(&editor.own, &editor.shown, &editor.dirty, editor.width, editor.height, editor_draw);
+        return ui_app_present(&editor.own, &editor.shown, &editor.dirty, editor.width, editor.height, editor_draw, null);
 }
 
 // A command the view answered the app's: the files, the find bar, the tabs.

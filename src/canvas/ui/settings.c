@@ -4508,7 +4508,6 @@ static int settings_open(void)
                 ui_centre(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
         }
         settings_say((string_address) "");
-        language_listen(settings_language);
 
         settings_ask_all();
         settings.help = 1;
@@ -4615,6 +4614,7 @@ static struct ui_app settings_app = {
         .ground = &settings.ground,
         .open = settings_open,
         .frame = settings_frame,
+        .language = settings_language,
         .event = settings_event,
         .buffers = &settings.page.buffers,
         .size = settings_size,
