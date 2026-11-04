@@ -5785,6 +5785,8 @@ struct ui_scroll
         b32 bounds;
         int edge, scale;
         b64 notch;                 // when the region last took a notch of the wheel, ns (ui_wheel_rate)
+        b64 pulled_at;             // when the hand took the region, ns: a wheel's pull springs home at its apex (UI_NOTCH_APEX_NS)
+        b32 absorb;                // a wheel's burst has had its bump at an end: the notches that go on pushing there are taken and move nothing
         b32 hand;                  // a notch past an end or a precise input has the region in hand (ui_scroll_hand)
         b32 precise;               // the hand is a trackpad's: its release throws on its speed. A wheel's notches are no finger, and throw nothing
         struct ui_drag hand_drag;  // the hand's reports, fitted for the release's speed (ui_scroll_release)
@@ -5998,6 +6000,8 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
 #define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
+#define UI_NOTCH_APEX_NS 120000000l  // a wheel's pull grows this long, then springs home though the notches go on (a Mac's trackpad sends them for a second)
+#define UI_NOTCH_BURST_NS 150000000l // notches closer than this are one burst: a burst bumps an end once, and what goes on pushing there is taken
 #define UI_RUBBER_CARRY 400          // the most a release carries past an end, in px a second: the spring's first frames run on from it
 #define UI_FLING_MAX 6000            // the fastest a throw may be, in px a second: a release is a flick, not a jump
 #define UI_SCROLL_VIEW_PAST 1        // the hand may hold the overscroll up to a view past the end
@@ -6145,7 +6149,7 @@ static b32 ui_scroll_set(struct ui_scroll address_to s, int scroll)
         s->scroll = scroll;
         s->at = s->aim = (b64)scroll << 8;
         s->gliding = s->dragging = s->back.live = 0;
-        s->hand = 0;
+        s->hand = s->absorb = 0;
         s->speed = s->stamp = 0;
         return scroll != before || moving;
 }
@@ -6234,7 +6238,7 @@ static void ui_scroll_stop(struct ui_scroll address_to s)
                 ui_spring_stop(&s->back);
                 s->speed = s->stamp = 0;
         }
-        s->hand = 0;
+        s->hand = s->absorb = 0;
 }
 
 // The finger let go: a pull springs back to the end it is past, carrying the release's speed outward, and a throw glides on from
@@ -6305,6 +6309,9 @@ static void ui_scroll_release(struct ui_scroll address_to s)
 
         s->hand = 0;
         ui_scroll_let_go(s, thrown, speed);
+        // A wheel's notches have no release of their own: the gap that ended the hand is not the end of the burst (a trackpad's momentum
+        // goes on for a second), so what goes on pushing at the end is taken (ui_scroll_wheel) and the stretch goes home once.
+        s->absorb = !s->precise && s->bounds && s->back.live;
 }
 
 // The hand's move, in 256ths of a device pixel (positive: the content moves down the region). It takes the region from where it is
@@ -6325,6 +6332,7 @@ static void ui_scroll_hand(struct ui_scroll address_to s, b64 move, positive now
                         ui_scroll_rest(s);
                 s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
                 s->hand = 1;
+                s->pulled_at = now;
                 ui_drag_start(&s->hand_drag, (int)(s->at >> 8), now);
         }
         s->at += move;
@@ -6343,6 +6351,7 @@ static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll add
                 return false;
         s->notch = now;
         s->precise = 1;
+        s->absorb = 0;
         ui_scroll_hand(s, -(b64)q, now);
         return s->scroll != before || s->bounds;
 }
@@ -6468,13 +6477,14 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
 {
         long total = (long)s->wheel + (long)delta * (s->unit > 0 ? 1 : UI_ROW * ui->scale / 100);
         int steps = (int)(total / 120);
-        b64 base, aim, now, rate, reach, lim, pos, most, unit = s->unit > 0 ? s->unit : 1;
+        b64 base, aim, now, rate, reach, lim, pos, most, last, unit = s->unit > 0 ? s->unit : 1;
 
         s->wheel = (int)(total - (long)steps * 120);
         if (!steps)
                 return false;
         now = ui_wheel_clock();
         rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s, now);
+        last = s->notch;
         s->notch = now;
         most = ui_scroll_most256(s);
         pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
@@ -6482,8 +6492,24 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         {
                 // The hand moves one notch's distance at the wheel's unit, with no acceleration: a notch past an end is a pull, not a spin.
                 b64 move = -(b64)steps * unit * UI_SCROLL_SCALE;
+                b32 held = s->hand && s->dragging && (s->at < 0 || s->at > most), past = held || pos + move < 0 || pos + move > most;
 
-                if ((s->hand && s->dragging && (s->at < 0 || s->at > most)) || pos + move < 0 || pos + move > most)
+                // A burst bumps an end once. Its pull grows for UI_NOTCH_APEX_NS and the stretch goes home from its apex, whatever is still
+                // coming (a Mac's trackpad, through the machine's tablet, sends a notch to every report of its finger and of the momentum
+                // after it: a second of them held the pull at its largest and then fought the spring home in pieces); the notches that
+                // push at the end after that, and within UI_NOTCH_BURST_NS of each other, are taken. A notch back, or a pause, ends it.
+                if (s->absorb && (!past || now - last >= UI_NOTCH_BURST_NS))
+                        s->absorb = 0;
+                if (s->absorb)
+                        return false;
+                if (held && !s->precise && now - s->pulled_at >= UI_NOTCH_APEX_NS)
+                {
+                        s->hand = 0;
+                        ui_scroll_let_go(s, 0, 0);
+                        s->absorb = s->back.live;
+                        return true;
+                }
+                if (past)
                 {
                         s->precise = 0;
                         ui_scroll_hand(s, move, now);

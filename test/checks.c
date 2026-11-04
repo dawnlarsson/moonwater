@@ -144960,8 +144960,9 @@ static fn check_kit_scroll_ends(void)
         ends_run(&ui, &bottom, 1, &t);
         check("kit ends: a trackpad's notches to a list's bottom: the drawn position never passes the end, and the list rests at it",
               t.monotone && t.inside && bottom.scroll == 800 && bottom.at == 800 * UI_SCROLL_SCALE);
-        check("kit ends: the bottom's overscroll rises with the notches and falls once, no notch that moves it is held (held frames)",
-              t.held == 0 && t.turns <= 1);
+        string_format(log, "  kit ends: the bottom's overscroll: %p frames held, %p turns\n", (positive)t.held, (positive)t.turns);
+        check("kit ends: the bottom's overscroll rises with the notches and falls once, and at most one frame (the spring's first, at the apex) is held",
+              t.held <= 1 && t.turns <= 1);
         check("kit ends: after the momentum tail the bottom springs home and settles idle at its end", t.idle);
 
         memory_zero(&top, sizeof(top));
@@ -144970,8 +144971,9 @@ static fn check_kit_scroll_ends(void)
         ends_run(&ui, &top, -1, &t);
         check("kit ends: a trackpad's notches to a list's top: the drawn position never passes the end, and the list rests at it",
               t.monotone && t.inside && top.scroll == 0 && top.at == 0);
-        check("kit ends: the top's overscroll rises with the notches and falls once, no notch that moves it is held (held frames)",
-              t.held == 0 && t.turns <= 1);
+        string_format(log, "  kit ends: the top's overscroll: %p frames held, %p turns\n", (positive)t.held, (positive)t.turns);
+        check("kit ends: the top's overscroll rises with the notches and falls once, and at most one frame (the spring's first, at the apex) is held",
+              t.held <= 1 && t.turns <= 1);
         check("kit ends: after the momentum tail the top springs home and settles idle at its end", t.idle);
 
         // A finger's flick to the bottom clamps there as a throw does, and a slow pull past it springs home from the pull.
@@ -145246,6 +145248,150 @@ static fn check_kit_wheel_near_end(void)
         check("kit wheel near an end: one more notch never leaves the content farther from the end", count_bad == 0);
         check("kit wheel near an end: a stream back from the end goes as it does from an end that was never pulled, after the stretch has sprung home",
               residue_bad == 0);
+}
+
+/*
+        A burst of notches at an end bumps it once. A Mac's trackpad, as the machine's tablet gives it, is a notch to every report of the
+        finger and to every report of the momentum after it: sixty a second for a second or more, all pushing the same way. The pull
+        grew with them and was held at its largest until they stopped (the stretch froze there), and then the spring home was fought
+        by the notches that came after the first gap (it came back in pieces). Now the pull grows for UI_NOTCH_APEX_NS and the stretch
+        goes home from there in one fall, the notches that go on pushing are taken, and a notch back or a pause begins afresh.
+
+          one bump     the stretch's peak is reached with the pull (no later than its apex and a frame), and from there it never rises
+          no freeze    it is not held within a thirtieth of its peak for more than four frames
+          at rest      a quarter second after the last notch nothing is stretched or going
+          sparse       a notch every 100 ms at the end is one bump too
+          again        a second burst after a pause bumps as far as the first
+          a notch back a notch the other way within the burst is the glide's, and the content goes back
+*/
+struct burst_run
+{
+        long stretch[160];
+        int frames, scroll;
+        b32 going;
+};
+
+static void wheel_burst(const struct wheel_note address_to notes, int count, struct burst_run address_to out)
+{
+        struct ui ui = terminal.ui;
+        struct ui_scroll s;
+        long last = 0;
+        int next = 0, edge;
+
+        ui.scale = 100;
+        memory_zero(&s, sizeof(s));
+        memory_zero(out, sizeof(*out));
+        s.x = 100, s.y = 10, s.height = 200, s.content = 1000, s.view = 200, s.bounds = 1, s.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_scroll_set(&s, 800);
+        for (int k = 0; k < count; k++)
+                last = notes[k].us > last ? notes[k].us : last;
+        for (int frame = 0; frame < 160; frame++)
+        {
+                long us = (long)frame * 16667;
+
+                ui_kit.now = 9000000000ll + us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                while (next < count && notes[next].us <= us)
+                {
+                        struct window_event turn = {WINDOW_EVENT_WHEEL, 0, notes[next].a, 0};
+
+                        ui_wheel_turn(&ui, &s, &turn);
+                        next++;
+                }
+                ui_scroll_glide(&ui, &s);
+                out->stretch[frame] = (long)ui_scroll_stretched(&s, &edge);
+                out->frames = frame + 1;
+        }
+        ui_kit.wheel_clock = 0;
+        out->scroll = s.scroll;
+        out->going = ui_scroll_going(&s) || s.hand || s.dragging;
+        (void)last;
+}
+
+// The frame of the stretch's peak, how many bumps it made (a rise after a fall begins another; a frame that is level is neither), and the
+// longest run of frames held within a thirtieth of the peak after it.
+static void burst_shape(const struct burst_run address_to run, long address_to peak, int address_to peak_at, int address_to bumps, int address_to held)
+{
+        long tol = (1ll << 30) / 2000;
+        int run_length = 0;
+        b32 fell = true;
+
+        *peak = 0, *peak_at = 0, *bumps = 0, *held = 0;
+        for (int k = 0; k < run->frames; k++)
+                if (run->stretch[k] > *peak)
+                        *peak = run->stretch[k], *peak_at = k;
+        for (int k = 1; k < run->frames; k++)
+        {
+                long step = run->stretch[k] - run->stretch[k - 1];
+
+                if (step > tol)
+                        *bumps += fell, fell = false;
+                else if (step < -tol)
+                        fell = true;
+        }
+        for (int k = *peak_at + 1; k < run->frames; k++)
+        {
+                run_length = run->stretch[k] + *peak / 30 >= *peak ? run_length + 1 : 0;
+                *held = run_length > *held ? run_length : *held;
+        }
+}
+
+static fn check_kit_wheel_burst(void)
+{
+        static struct wheel_note notes[100];
+        static struct burst_run run;
+        long peak;
+        int at, bumps, held, again_ok, count;
+        b32 flood_one, flood_free, flood_rest, sparse_one, back_ok;
+
+        // A second of notches, 16 ms apart, from 100 ms.
+        for (int k = 0; k < 60; k++)
+                notes[k].us = 100000 + k * 16000, notes[k].a = -120;
+        wheel_burst(notes, 60, &run);
+        burst_shape(&run, &peak, &at, &bumps, &held);
+        flood_one = peak > 0 && at * 16667 <= 100000 + UI_NOTCH_APEX_NS / 1000 + 3 * 16667 && bumps == 1;
+        flood_free = held <= 4;
+        flood_rest = run.stretch[run.frames - 1] == 0 && !run.going && run.scroll == 800;
+        string_format(log, "  kit wheel burst: a second of notches at 16 ms: stretch peaks at %b ms (%p of 1e6), %p bump(s), held %p frames, at rest %b\n",
+                      (bipolar)(at * 16667 / 1000), (positive)(peak * 1000000 >> 30), (positive)bumps, (positive)held, (bipolar)flood_rest);
+        check("kit wheel burst: a second of notches at an end bumps it once: the stretch peaks with the pull and does not rise again", flood_one);
+        check("kit wheel burst: and it is not held at its peak: the fall from it starts at once", flood_free);
+        check("kit wheel burst: and a quarter second after the last notch nothing is stretched or going", flood_rest);
+
+        // A notch every 100 ms.
+        for (int k = 0; k < 10; k++)
+                notes[k].us = 100000 + k * 100000, notes[k].a = -120;
+        wheel_burst(notes, 10, &run);
+        burst_shape(&run, &peak, &at, &bumps, &held);
+        sparse_one = peak > 0 && bumps == 1 && run.stretch[run.frames - 1] == 0;
+        check("kit wheel burst: a notch every 100 ms at an end is one bump too, not one a notch", sparse_one);
+
+        // Two bursts of eight, 800 ms apart: the second bumps as the first does.
+        count = 0;
+        for (int k = 0; k < 8; k++)
+                notes[count].us = 100000 + k * 16000, notes[count++].a = -120;
+        for (int k = 0; k < 8; k++)
+                notes[count].us = 1000000 + k * 16000, notes[count++].a = -120;
+        wheel_burst(notes, count, &run);
+        {
+                long second = 0;
+
+                for (int k = 50; k < run.frames; k++)
+                        second = run.stretch[k] > second ? run.stretch[k] : second;
+                peak = 0;
+                for (int k = 0; k < 50; k++)
+                        peak = run.stretch[k] > peak ? run.stretch[k] : peak;
+                again_ok = peak > 0 && second * 10 >= peak * 8;
+        }
+        check("kit wheel burst: a second burst after a pause bumps the end as far as the first", again_ok);
+
+        // Twelve notches at 16 ms into the end, then one back at 210 ms, inside the burst: the content goes back.
+        for (int k = 0; k < 12; k++)
+                notes[k].us = 100000 + k * 16000, notes[k].a = -120;
+        notes[12].us = 300000, notes[12].a = 120;
+        wheel_burst(notes, 13, &run);
+        back_ok = run.scroll < 800 - 20;
+        check("kit wheel burst: a notch back within the burst is taken by the glide: the content goes back from the end", back_ok);
 }
 
 /*
@@ -155121,6 +155267,7 @@ b32 main()
         check_kit_confirm_repeat();
         check_kit_hand();
         check_kit_wheel_near_end();
+        check_kit_wheel_burst();
         check_terminal_wheel_curve();
         check_kit_turn();
         check_kit_tab_ripple();
