@@ -13612,8 +13612,12 @@ static void compositor_take(int row)
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
+                // A popup lands as a window does (its size grows back about its middle), so a menu opens rather than appearing whole.
                 if (compositor_popup_first(row))
+                {
+                        compositor_land(row);
                         return;
+                }
                 compositor_first_put(row, x, y);
                 compositor_raise(row);
                 // Raised over the others, but given the keys only when the person asked for the program (its launch
