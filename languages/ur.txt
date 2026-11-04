@@ -213,6 +213,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	بڑا پوائنٹر کتنی دیر رہے (ms یا default)
 =Launcher	44b1	لانچر
+=Left edge	9ce5	بائیں کنارہ
 =Machine	be0e	کمپیوٹر
 =Mixer	123a	مکسر
 =Motion	7647	حرکت
@@ -237,6 +238,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
+=Right edge	279a	دائیں کنارہ
 =Rotation	777f	گردش
 =Scale of this screen	e4ca	اس اسکرین کا اسکیل
 =Screen	c631	اسکرین
@@ -295,6 +297,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =green	ecbc	سبز
 =kernel log	415a	کرنل لاگ
 =kernel log klog dmesg messages	1a8d	کرنل لاگ klog dmesg پیغامات
+=launcher	8391	لانچر
 =left	ec70	بائیں
 =light	1e2f	روشن
 =light-grey	ed41	ہلکا خاکستری
@@ -321,7 +324,9 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =top	dc3c	اوپر
 =unlock	1f55	ان لاک
 =violet	57f2	بنفشی
+=volume	698f	آواز
 =white	0766	سفید
 =wifi	6448	Wi-Fi
+=windows	26ea	ونڈوز
 =wired	bfb4	وائرڈ
 =ymd	faad	ymd

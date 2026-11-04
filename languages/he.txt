@@ -213,6 +213,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Language	db9b	שפה
 =Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
 =Launcher	44b1	משגר
+=Left edge	9ce5	קצה שמאלי
 =Machine	be0e	מחשב
 =Mixer	123a	מערבל
 =Motion	7647	תנועה
@@ -237,6 +238,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Predict touch and pen	e2b7	חיזוי מגע ועט
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
+=Right edge	279a	קצה ימני
 =Rotation	777f	סיבוב
 =Scale of this screen	e4ca	קנה המידה של המסך הזה
 =Screen	c631	מסך
@@ -295,6 +297,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =green	ecbc	ירוק
 =kernel log	415a	יומן הליבה
 =kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
+=launcher	8391	מפעיל
 =left	ec70	שמאל
 =light	1e2f	בהיר
 =light-grey	ed41	אפור בהיר
@@ -321,7 +324,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =top	dc3c	למעלה
 =unlock	1f55	בטל נעילה
 =violet	57f2	סגול
+=volume	698f	עוצמת קול
 =white	0766	לבן
 =wifi	6448	Wi-Fi
+=windows	26ea	חלונות
 =wired	bfb4	קווי
 =ymd	faad	ymd

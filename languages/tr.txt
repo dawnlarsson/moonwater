@@ -212,6 +212,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Language	db9b	Dil
 =Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
 =Launcher	44b1	Başlatıcı
+=Left edge	9ce5	Sol kenar
 =Machine	be0e	Makine
 =Mixer	123a	Karıştırıcı
 =Motion	7647	Hareket
@@ -236,6 +237,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et
 =Refresh rate	bf6e	Yenileme hızı
 =Remembered devices	abbc	Hatırlanan aygıtlar
+=Right edge	279a	Sağ kenar
 =Rotation	777f	Döndürme
 =Scale of this screen	e4ca	Bu ekranın ölçeği
 =Screen	c631	Ekran
@@ -294,6 +296,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =green	ecbc	yeşil
 =kernel log	415a	çekirdek günlüğü
 =kernel log klog dmesg messages	1a8d	çekirdek günlüğü klog dmesg iletiler
+=launcher	8391	başlatıcı
 =left	ec70	solda
 =light	1e2f	açık
 =light-grey	ed41	açık gri
@@ -320,7 +323,9 @@ ui_field_full	fe02	daha fazlası sığmaz
 =top	dc3c	üstte
 =unlock	1f55	kilidi aç
 =violet	57f2	mor
+=volume	698f	ses
 =white	0766	beyaz
 =wifi	6448	Wi-Fi
+=windows	26ea	pencereler
 =wired	bfb4	kablolu
 =ymd	faad	ymd

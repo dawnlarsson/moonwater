@@ -213,6 +213,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
 =Launcher	44b1	راه‌انداز
+=Left edge	9ce5	لبه چپ
 =Machine	be0e	رایانه
 =Mixer	123a	میکسر
 =Motion	7647	حرکت
@@ -237,6 +238,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
+=Right edge	279a	لبه راست
 =Rotation	777f	چرخش
 =Scale of this screen	e4ca	مقیاس این نمایشگر
 =Screen	c631	نمایشگر
@@ -295,6 +297,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =green	ecbc	سبز
 =kernel log	415a	گزارش هسته
 =kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
+=launcher	8391	راه‌انداز
 =left	ec70	چپ
 =light	1e2f	روشن
 =light-grey	ed41	خاکستری روشن
@@ -321,7 +324,9 @@ ui_field_full	fe02	بیش از این جا ندارد
 =top	dc3c	بالا
 =unlock	1f55	بازکردن قفل
 =violet	57f2	بنفش
+=volume	698f	صدا
 =white	0766	سفید
 =wifi	6448	Wi-Fi
+=windows	26ea	پنجره‌ها
 =wired	bfb4	سیمی
 =ymd	faad	ymd

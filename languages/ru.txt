@@ -212,6 +212,7 @@ ui_field_full	fe02	больше не помещается
 =Language	db9b	Язык
 =Large pointer stays (ms, or default)	5626	Крупный указатель остаётся (мс или default)
 =Launcher	44b1	Запуск
+=Left edge	9ce5	Левый край
 =Machine	be0e	Компьютер
 =Mixer	123a	Микшер
 =Motion	7647	Движение
@@ -236,6 +237,7 @@ ui_field_full	fe02	больше не помещается
 =Predict touch and pen	e2b7	Предсказывать касание и перо
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
+=Right edge	279a	Правый край
 =Rotation	777f	Поворот
 =Scale of this screen	e4ca	Масштаб этого экрана
 =Screen	c631	Экран
@@ -294,6 +296,7 @@ ui_field_full	fe02	больше не помещается
 =green	ecbc	зелёный
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
+=launcher	8391	запуск
 =left	ec70	слева
 =light	1e2f	светлая
 =light-grey	ed41	светло-серый
@@ -320,7 +323,9 @@ ui_field_full	fe02	больше не помещается
 =top	dc3c	вверху
 =unlock	1f55	разблокировать
 =violet	57f2	фиолетовый
+=volume	698f	громкость
 =white	0766	белый
 =wifi	6448	Wi-Fi
+=windows	26ea	окна
 =wired	bfb4	проводная
 =ymd	faad	ymd

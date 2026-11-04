@@ -212,6 +212,7 @@ ui_field_full	fe02	більше не вміщається
 =Language	db9b	Мова
 =Large pointer stays (ms, or default)	5626	Великий вказівник залишається (мс або default)
 =Launcher	44b1	Запуск
+=Left edge	9ce5	Лівий край
 =Machine	be0e	Комп'ютер
 =Mixer	123a	Мікшер
 =Motion	7647	Рух
@@ -236,6 +237,7 @@ ui_field_full	fe02	більше не вміщається
 =Predict touch and pen	e2b7	Передбачати дотик і перо
 =Refresh rate	bf6e	Частота оновлення
 =Remembered devices	abbc	Запам'ятовані пристрої
+=Right edge	279a	Правий край
 =Rotation	777f	Поворот
 =Scale of this screen	e4ca	Масштаб цього екрана
 =Screen	c631	Екран
@@ -294,6 +296,7 @@ ui_field_full	fe02	більше не вміщається
 =green	ecbc	зелений
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg повідомлення
+=launcher	8391	запуск
 =left	ec70	ліворуч
 =light	1e2f	світла
 =light-grey	ed41	світло-сірий
@@ -320,7 +323,9 @@ ui_field_full	fe02	більше не вміщається
 =top	dc3c	угорі
 =unlock	1f55	розблокувати
 =violet	57f2	фіолетовий
+=volume	698f	гучність
 =white	0766	білий
 =wifi	6448	Wi-Fi
+=windows	26ea	вікна
 =wired	bfb4	дротова
 =ymd	faad	ymd

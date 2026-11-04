@@ -96,6 +96,8 @@
 #define SETTING_TASKBAR_LAUNCHER_PATH "/root/taskbar.launcher"
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
+#define SETTING_TOUCH_LEFT_PATH "/root/canvas.touch.left"
+#define SETTING_TOUCH_RIGHT_PATH "/root/canvas.touch.right"
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
@@ -360,6 +362,19 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
+    //  The screen's side edges (ui/touch.h, compositor.c): a swipe in from the left edge runs the window switcher or opens the
+    //  launcher, one in from the right runs the switcher or opens the volume popup. Off by default: a swipe from a side is then
+    //  the window's, as a touch.
+    SETTING_PLAIN_ROW(null, "Left edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "left"), "left ", "off windows launcher",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_LEFT_PATH, .standard = "off", .reset = "off",
+                      .need = "how Canvas draws", .refusal = "the left edge is off, windows or launcher, not %s\n",
+                      .usage = "canvas touch left [off|windows|launcher]",
+                      .help = "a swipe in from the left edge runs the window switcher, or opens the launcher [off]"),
+    SETTING_PLAIN_ROW(null, "Right edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "right"), "right ", "off windows volume",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_RIGHT_PATH, .standard = "off", .reset = "off",
+                      .need = "how Canvas draws", .refusal = "the right edge is off, windows or volume, not %s\n",
+                      .usage = "canvas touch right [off|windows|volume]",
+                      .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]"),
     //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
     //  when a program (the mixer, the tray, a volume key) changes the volume, so a row here and a slider there are one value.
     //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume

@@ -212,6 +212,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Language	db9b	Język
 =Large pointer stays (ms, or default)	5626	Duży wskaźnik pozostaje (ms lub default)
 =Launcher	44b1	Uruchamianie
+=Left edge	9ce5	Lewa krawędź
 =Machine	be0e	Maszyna
 =Mixer	123a	Mikser
 =Motion	7647	Ruch
@@ -236,6 +237,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik
 =Refresh rate	bf6e	Częstotliwość odświeżania
 =Remembered devices	abbc	Zapamiętane urządzenia
+=Right edge	279a	Prawa krawędź
 =Rotation	777f	Obrót
 =Scale of this screen	e4ca	Skala tego ekranu
 =Screen	c631	Ekran
@@ -294,6 +296,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =green	ecbc	zielony
 =kernel log	415a	dziennik jądra
 =kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
+=launcher	8391	uruchamiacz
 =left	ec70	po lewej
 =light	1e2f	jasny
 =light-grey	ed41	jasnoszary
@@ -320,7 +323,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =top	dc3c	na górze
 =unlock	1f55	odblokuj
 =violet	57f2	fioletowy
+=volume	698f	głośność
 =white	0766	biały
 =wifi	6448	Wi-Fi
+=windows	26ea	okna
 =wired	bfb4	przewodowa
 =ymd	faad	ymd

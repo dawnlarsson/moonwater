@@ -212,6 +212,7 @@ ui_field_full	fe02	that is as much as it holds
 =Language	db9b	Language
 =Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
 =Launcher	44b1	Launcher
+=Left edge	9ce5	Left edge
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Motion	7647	Motion
@@ -236,6 +237,7 @@ ui_field_full	fe02	that is as much as it holds
 =Predict touch and pen	e2b7	Predict touch and pen
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
+=Right edge	279a	Right edge
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Scale of this screen
 =Screen	c631	Screen
@@ -294,6 +296,7 @@ ui_field_full	fe02	that is as much as it holds
 =green	ecbc	green
 =kernel log	415a	kernel log
 =kernel log klog dmesg messages	1a8d	kernel log klog dmesg messages
+=launcher	8391	launcher
 =left	ec70	left
 =light	1e2f	light
 =light-grey	ed41	light-grey
@@ -320,7 +323,9 @@ ui_field_full	fe02	that is as much as it holds
 =top	dc3c	top
 =unlock	1f55	unlock
 =violet	57f2	violet
+=volume	698f	volume
 =white	0766	white
 =wifi	6448	wifi
+=windows	26ea	windows
 =wired	bfb4	wired
 =ymd	faad	ymd

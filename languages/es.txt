@@ -212,6 +212,7 @@ ui_field_full	fe02	no cabe más
 =Language	db9b	Idioma
 =Large pointer stays (ms, or default)	5626	El puntero grande permanece (ms o default)
 =Launcher	44b1	Lanzador
+=Left edge	9ce5	Borde izquierdo
 =Machine	be0e	Equipo
 =Mixer	123a	Mezclador
 =Motion	7647	Movimiento
@@ -236,6 +237,7 @@ ui_field_full	fe02	no cabe más
 =Predict touch and pen	e2b7	Predecir el tacto y el lápiz
 =Refresh rate	bf6e	Frecuencia de actualización
 =Remembered devices	abbc	Dispositivos recordados
+=Right edge	279a	Borde derecho
 =Rotation	777f	Rotación
 =Scale of this screen	e4ca	Escala de esta pantalla
 =Screen	c631	Pantalla
@@ -294,6 +296,7 @@ ui_field_full	fe02	no cabe más
 =green	ecbc	verde
 =kernel log	415a	registro del kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg mensajes
+=launcher	8391	lanzador
 =left	ec70	izquierda
 =light	1e2f	claro
 =light-grey	ed41	gris claro
@@ -320,7 +323,9 @@ ui_field_full	fe02	no cabe más
 =top	dc3c	arriba
 =unlock	1f55	desbloquear
 =violet	57f2	violeta
+=volume	698f	volumen
 =white	0766	blanco
 =wifi	6448	Wi-Fi
+=windows	26ea	ventanas
 =wired	bfb4	cableada
 =ymd	faad	ymd

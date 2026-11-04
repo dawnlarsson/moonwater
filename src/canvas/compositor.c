@@ -3642,6 +3642,10 @@ struct compositor_touch
 #define COMPOSITOR_SWIPE_SWIPED 2
 #define COMPOSITOR_SWIPE_ARM_NS 2000000000ull // a second swipe into a window that covers its screen, within this, is the system's
 #define COMPOSITOR_SWIPE_LAUNCHER_DP 48       // the launcher's rectangle when a swipe opens it: its width, beside the finger
+// What a side edge runs, as the settings say it (0 off, the default): the window switcher's step, or on the left the launcher and on the right the volume popup.
+#define COMPOSITOR_SIDE_OFF 0
+#define COMPOSITOR_SIDE_WINDOWS 1
+#define COMPOSITOR_SIDE_ACT 2
 struct compositor_swipe
 {
         int state;                     // COMPOSITOR_SWIPE_NONE, _UNDECIDED or _SWIPED
@@ -4161,7 +4165,7 @@ static struct
         struct compositor_touch touch;
         struct compositor_swipe swipe; // a finger the screen's edges may take (compositor_swipe_report)
         struct compositor_chip chip;   // what a swipe shows over the desktop (compositor_chip_*)
-        int side_edges;                // a swipe in from the left or the right edge is the system's: the window switcher, and the mixer (off by default)
+        int side_left, side_right;     // what a swipe in from the left or the right edge runs (COMPOSITOR_SIDE_*, from the settings Left edge and Right edge)
         // The prediction a frame ahead, per class (COMPOSITOR_PREDICT_*), and the classes `moonwater canvas predict` turned off.
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
@@ -16360,6 +16364,17 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
 
 // `moonwater canvas touch`, read with the other settings the compositor takes at once: on (the row's standard, nothing
 // kept or a file that says default) or off, which takes every mark away.
+// What a side edge's setting runs (COMPOSITOR_SIDE_*): the choice's index, off for a file that names none.
+static int compositor_side_read(const char *path)
+{
+        char word[16];
+        long value;
+
+        compositor_word(path, word, sizeof(word));
+        compositor_setting_kept(path, word, &value);
+        return value < COMPOSITOR_SIDE_OFF || value > COMPOSITOR_SIDE_ACT ? COMPOSITOR_SIDE_OFF : (int)value;
+}
+
 static void compositor_touch_settings_read(void)
 {
         char word[16];
@@ -16372,6 +16387,8 @@ static void compositor_touch_settings_read(void)
         if (!on && compositor.spots_on)
                 compositor_spots_clear();
         compositor.spots_on = on;
+        compositor.side_left = compositor_side_read(SETTING_TOUCH_LEFT_PATH);
+        compositor.side_right = compositor_side_read(SETTING_TOUCH_RIGHT_PATH);
 }
 
 /*
@@ -16693,7 +16710,7 @@ static int compositor_swipe_landing(unsigned int at, positive now, const struct 
                 side = ui_edge_band_side(x, y, rect, band);
                 if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
                 {
-                        if (!compositor.side_edges)
+                        if ((side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right) == COMPOSITOR_SIDE_OFF)
                                 return 0;
                 }
                 else if (side != UI_EDGE_TOP && side != UI_EDGE_BOTTOM)
@@ -16767,15 +16784,15 @@ static void compositor_chip_press(int cell)
                 compositor_arrange(row, COMPOSITOR_MAXIMIZED);
 }
 
-// A swipe in from a side edge (compositor.side_edges): the window switcher's step, or the mixer's popup beside the finger. Where a language
-// reads from the right the sides change places, as the swipe's own direction does (a swipe in from the right is then the switcher).
+// A swipe in from a side edge that its setting runs something for: the window switcher's step, or on the left the launcher and on the right
+// the volume popup, beside the finger. The launcher's rectangle is a panel's thickness along its edge, as the bottom one's is.
 static void compositor_swipe_side(int side, int y, const int *rect, int number)
 {
         struct windows *table = compositor.table;
-        int rtl = language_rtl() ? 1 : 0, switcher = (side == UI_EDGE_LEFT) != (rtl != 0);
+        int what = side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right;
         int w = COMPOSITOR_PANEL * compositor.scale / 100, h = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100;
 
-        if (switcher)
+        if (what == COMPOSITOR_SIDE_WINDOWS)
         {
                 compositor_focus_step();
                 compositor_focus_commit();
@@ -16788,7 +16805,13 @@ static void compositor_swipe_side(int side, int y, const int *rect, int number)
                 table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
                 table->button_edge = side == UI_EDGE_RIGHT ? TASKBAR_RIGHT : TASKBAR_LEFT, table->button_screen = (unsigned int)number;
         }
-        compositor_script_say("volume_button");
+        if (side == UI_EDGE_LEFT)
+        {
+                compositor.launcher_asked++;
+                compositor_script_say("launcher_button");
+        }
+        else
+                compositor_script_say("volume_button");
 }
 
 // A swipe decided: the system's gesture. Up from the bottom opens the launcher beside the finger; down on a window shows its controls and

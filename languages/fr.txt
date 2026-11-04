@@ -212,6 +212,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Language	db9b	Langue
 =Large pointer stays (ms, or default)	5626	Le grand pointeur reste (ms ou default)
 =Launcher	44b1	Lanceur
+=Left edge	9ce5	Bord gauche
 =Machine	be0e	Machine
 =Mixer	123a	Mélangeur
 =Motion	7647	Animation
@@ -236,6 +237,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
+=Right edge	279a	Bord droit
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Échelle de cet écran
 =Screen	c631	Écran
@@ -294,6 +296,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =green	ecbc	vert
 =kernel log	415a	journal du noyau
 =kernel log klog dmesg messages	1a8d	journal noyau klog dmesg messages
+=launcher	8391	lanceur
 =left	ec70	à gauche
 =light	1e2f	clair
 =light-grey	ed41	gris clair
@@ -320,7 +323,9 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =top	dc3c	en haut
 =unlock	1f55	déverrouiller
 =violet	57f2	violet
+=volume	698f	volume
 =white	0766	blanc
 =wifi	6448	Wi-Fi
+=windows	26ea	fenêtres
 =wired	bfb4	filaire
 =ymd	faad	ymd

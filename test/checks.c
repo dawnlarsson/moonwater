@@ -134378,7 +134378,15 @@ static void check_compositor_edges(void)
 {
     struct windows address_to table;
     unsigned int head;
+    long value = -1;
     int band_rect[4] = {0, 0, 256, 256}, second_rect[4] = {256, 0, 1920, 1080};
+
+    /* The Settings rows' words are the choices the compositor reads: off, windows, and the launcher (left) or the volume popup (right). */
+    check("edge settings: the Left edge and Right edge words are the choices the compositor reads",
+          compositor_setting_kept(SETTING_TOUCH_LEFT_PATH, "windows", &value) && value == COMPOSITOR_SIDE_WINDOWS &&
+              compositor_setting_kept(SETTING_TOUCH_LEFT_PATH, "launcher", &value) && value == COMPOSITOR_SIDE_ACT &&
+              compositor_setting_kept(SETTING_TOUCH_RIGHT_PATH, "volume", &value) && value == COMPOSITOR_SIDE_ACT &&
+              (compositor_setting_kept(SETTING_TOUCH_RIGHT_PATH, "off", &value), value == COMPOSITOR_SIDE_OFF));
 
     /* The judge and the bands, alone. */
     check("edge judge: a straight swipe up from the bottom band, 60 px, is a swipe",
@@ -134631,7 +134639,8 @@ static void check_compositor_edges(void)
     table = compositor.table;
     layout_show(1, 0, 40, 120, 160);
     layout_show(2, 130, 40, 120, 160);
-    compositor.side_edges = 1;
+    compositor.side_left = COMPOSITOR_SIDE_WINDOWS;
+    compositor.side_right = COMPOSITOR_SIDE_ACT;
     compositor.focus = 1;
     head = table->event_head[1];
     edge_at(5, 100, 0, 10000);
@@ -134646,7 +134655,19 @@ static void check_compositor_edges(void)
     check("edge sides: a swipe in from the right is the mixer's popup, on the right edge, beside the finger",
           table->button_edge == TASKBAR_RIGHT && table->button_w > 0 && table->button_y <= 100 && table->button_y + (int)table->button_h > 100);
     edge_at(190, 100, 1, 10000);
-    compositor.side_edges = 0;
+    /* The left edge's launcher (a setting's choice): the launcher opens beside the finger on the left edge of its screen. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 40, 120, 160);
+    compositor.side_left = COMPOSITOR_SIDE_ACT;
+    table->button_edge = TASKBAR_BOTTOM;
+    edge_at(5, 100, 0, 10000);
+    edge_drag(5, 100, 60, 100, 6, 10000);
+    check("edge sides: the left edge set to the launcher opens it on the left edge, beside the finger",
+          compositor.launcher_asked == 1 && table->button_edge == TASKBAR_LEFT && table->button_w > 0);
+    edge_at(60, 100, 1, 10000);
+    compositor.side_left = COMPOSITOR_SIDE_OFF;
+    compositor.side_right = COMPOSITOR_SIDE_OFF;
 }
 
 static void check_compositor_touch(void)
@@ -140045,7 +140066,8 @@ static fn check_settings_groups(void)
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
             {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
-            {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Time zone", "Time"},
+            {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
+            {"Time zone", "Time"},
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
             {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},

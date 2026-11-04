@@ -212,6 +212,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Language	db9b	Sprache
 =Large pointer stays (ms, or default)	5626	Großer Zeiger bleibt (ms oder default)
 =Launcher	44b1	Starter
+=Left edge	9ce5	Linker Rand
 =Machine	be0e	Gerät
 =Mixer	123a	Mixer
 =Motion	7647	Bewegung
@@ -236,6 +237,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen
 =Refresh rate	bf6e	Bildwiederholrate
 =Remembered devices	abbc	Gemerkte Geräte
+=Right edge	279a	Rechter Rand
 =Rotation	777f	Drehung
 =Scale of this screen	e4ca	Skalierung dieses Bildschirms
 =Screen	c631	Bildschirm
@@ -294,6 +296,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =green	ecbc	Grün
 =kernel log	415a	Kernel-Protokoll
 =kernel log klog dmesg messages	1a8d	kernel protokoll klog dmesg meldungen
+=launcher	8391	Starter
 =left	ec70	Links
 =light	1e2f	Hell
 =light-grey	ed41	Hellgrau
@@ -320,7 +323,9 @@ ui_field_full	fe02	mehr passt nicht hinein
 =top	dc3c	Oben
 =unlock	1f55	Entsperren
 =violet	57f2	Violett
+=volume	698f	Lautstärke
 =white	0766	Weiß
 =wifi	6448	WLAN
+=windows	26ea	Fenster
 =wired	bfb4	Kabelgebunden
 =ymd	faad	ymd

@@ -212,6 +212,7 @@ ui_field_full	fe02	mer ryms inte
 =Language	db9b	Språk
 =Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
 =Launcher	44b1	Startare
+=Left edge	9ce5	Vänster kant
 =Machine	be0e	Maskin
 =Mixer	123a	Mixer
 =Motion	7647	Rörelse
@@ -236,6 +237,7 @@ ui_field_full	fe02	mer ryms inte
 =Predict touch and pen	e2b7	Förutse touch och penna
 =Refresh rate	bf6e	Uppdateringsfrekvens
 =Remembered devices	abbc	Ihågkomna enheter
+=Right edge	279a	Höger kant
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Den här skärmens skala
 =Screen	c631	Skärm
@@ -294,6 +296,7 @@ ui_field_full	fe02	mer ryms inte
 =green	ecbc	grön
 =kernel log	415a	kärnlogg
 =kernel log klog dmesg messages	1a8d	kärnlogg klog dmesg meddelanden
+=launcher	8391	startprogram
 =left	ec70	till vänster
 =light	1e2f	ljust
 =light-grey	ed41	ljusgrå
@@ -320,7 +323,9 @@ ui_field_full	fe02	mer ryms inte
 =top	dc3c	överst
 =unlock	1f55	lås upp
 =violet	57f2	violett
+=volume	698f	volym
 =white	0766	vit
 =wifi	6448	Wi-Fi
+=windows	26ea	fönster
 =wired	bfb4	trådbundet
 =ymd	faad	ymd

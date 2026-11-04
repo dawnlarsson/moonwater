@@ -212,6 +212,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Language	db9b	Γλώσσα
 =Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
 =Launcher	44b1	Εκκινητής
+=Left edge	9ce5	Αριστερό άκρο
 =Machine	be0e	Μηχάνημα
 =Mixer	123a	Μίκτης
 =Motion	7647	Κίνηση
@@ -236,6 +237,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
+=Right edge	279a	Δεξιό άκρο
 =Rotation	777f	Περιστροφή
 =Scale of this screen	e4ca	Κλίμακα αυτής της οθόνης
 =Screen	c631	Οθόνη
@@ -294,6 +296,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =green	ecbc	πράσινο
 =kernel log	415a	αρχείο καταγραφής πυρήνα
 =kernel log klog dmesg messages	1a8d	πυρήνας καταγραφή klog dmesg μηνύματα
+=launcher	8391	εκκινητής
 =left	ec70	αριστερά
 =light	1e2f	φωτεινό
 =light-grey	ed41	ανοιχτό γκρι
@@ -320,7 +323,9 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =top	dc3c	πάνω
 =unlock	1f55	ξεκλείδωμα
 =violet	57f2	βιολετί
+=volume	698f	ένταση
 =white	0766	λευκό
 =wifi	6448	Wi-Fi
+=windows	26ea	παράθυρα
 =wired	bfb4	ενσύρματη
 =ymd	faad	ymd

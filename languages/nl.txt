@@ -212,6 +212,7 @@ ui_field_full	fe02	meer past er niet in
 =Language	db9b	Taal
 =Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
 =Launcher	44b1	Starter
+=Left edge	9ce5	Linkerrand
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Motion	7647	Beweging
@@ -236,6 +237,7 @@ ui_field_full	fe02	meer past er niet in
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
+=Right edge	279a	Rechterrand
 =Rotation	777f	Rotatie
 =Scale of this screen	e4ca	Schaal van dit scherm
 =Screen	c631	Scherm
@@ -294,6 +296,7 @@ ui_field_full	fe02	meer past er niet in
 =green	ecbc	groen
 =kernel log	415a	kernellogboek
 =kernel log klog dmesg messages	1a8d	kernel logboek klog dmesg berichten
+=launcher	8391	starter
 =left	ec70	links
 =light	1e2f	licht
 =light-grey	ed41	lichtgrijs
@@ -320,7 +323,9 @@ ui_field_full	fe02	meer past er niet in
 =top	dc3c	bovenaan
 =unlock	1f55	ontgrendelen
 =violet	57f2	violet
+=volume	698f	volume
 =white	0766	wit
 =wifi	6448	wifi
+=windows	26ea	vensters
 =wired	bfb4	bekabeld
 =ymd	faad	ymd

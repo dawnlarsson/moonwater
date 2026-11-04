@@ -213,6 +213,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Language	db9b	اللغة
 =Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
 =Launcher	44b1	المشغل
+=Left edge	9ce5	الحافة اليسرى
 =Machine	be0e	الحاسوب
 =Mixer	123a	خلاط الصوت
 =Motion	7647	الحركة
@@ -237,6 +238,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Predict touch and pen	e2b7	توقع اللمس والقلم
 =Refresh rate	bf6e	معدل التحديث
 =Remembered devices	abbc	الأجهزة المحفوظة
+=Right edge	279a	الحافة اليمنى
 =Rotation	777f	الدوران
 =Scale of this screen	e4ca	مقياس هذه الشاشة
 =Screen	c631	الشاشة
@@ -295,6 +297,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =green	ecbc	أخضر
 =kernel log	415a	سجل النواة
 =kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
+=launcher	8391	المُشغِّل
 =left	ec70	يسار
 =light	1e2f	فاتح
 =light-grey	ed41	رمادي فاتح
@@ -321,7 +324,9 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =top	dc3c	أعلى
 =unlock	1f55	إلغاء القفل
 =violet	57f2	بنفسجي
+=volume	698f	الصوت
 =white	0766	أبيض
 =wifi	6448	Wi-Fi
+=windows	26ea	النوافذ
 =wired	bfb4	سلكي
 =ymd	faad	ymd
