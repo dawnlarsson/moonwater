@@ -7674,10 +7674,6 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 
-// Whether the present in hand was drawn by the card (set by compositor_gpu_present, read by compositor_metric_note; cleared at each present). Outside the
-// card's code: a build with none reads it too.
-static int compositor_present_on_card;
-
 #ifdef MOONWATER_GPU_C
 /*
         A finger's mark as records (compositor_spot_draw): the inner fill's mix of the line's ink over the disc, then the edge's, each cover a table of the
