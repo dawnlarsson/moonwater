@@ -1219,75 +1219,6 @@ static int ui_px(const struct ui address_to ui, int logical)
 }
 
 /*
-        A finger, and a press. A finger on a touch screen (WINDOW_KEY_TOUCH on what the compositor sends) is wider than
-        a pointer and shakes as it lands, so what it can press is at least UI_TARGET logical pixels each way however
-        small it is drawn, the drawn shape in the middle of that (ui_hit); a press held moves nothing until it is
-        UI_SLOP from where it went down, and past that it is a drag (the list follows the finger, ui_drag) and no
-        click; and a press the compositor takes back (WINDOW_KEY_CANCEL: a second finger, or one held for the right
-        button) is no click either. What is under a press is shown pressed the moment it goes down, not when it comes
-        up, for a mouse's press as for a finger's; the app numbers what can be pressed as it likes (a row, a button):
-
-            ui_press_begin(press, x, y, target, touch)  a button or a finger went down on target (-1 for nothing)
-            ui_press_move(ui, press, x, y)              true once the press is a drag: target is pressed no more
-            ui_press_end(press, cancelled)              what was clicked as the press comes up, or -1
-            ui_press_release(press, cancelled, at)      the same, and -1 unless the release is on at (a pointer's press)
-            ui_pressed(press, target)                   whether target is shown pressed now
-
-        How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
-*/
-#define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
-
-struct ui_press
-{
-        int x, y, target;        // where it went down and on what (-1 nothing)
-        b32 down, touch, dragged;
-};
-
-static fn ui_press_begin(struct ui_press address_to press, int x, int y, int target, b32 touch)
-{
-        press->x = x, press->y = y, press->target = target;
-        press->down = true, press->touch = touch, press->dragged = false;
-}
-
-// Whether x, y is past the slop from x0, y0: the one slop of every press (UI_SLOP logical pixels at the scale).
-static b32 ui_press_past(const struct ui address_to ui, int x0, int y0, int x, int y)
-{
-        long dx = (long)x - x0, dy = (long)y - y0, slop = UI_SLOP * (long)ui->scale / 100;
-
-        return dx * dx + dy * dy >= slop * slop;
-}
-
-static b32 ui_press_move(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
-{
-        if (press->down && !press->dragged && ui_press_past(ui, press->x, press->y, x, y))
-                press->dragged = true;
-        return press->down && press->dragged;
-}
-
-static int ui_press_end(struct ui_press address_to press, b32 cancelled)
-{
-        int clicked = press->down && !press->dragged && !cancelled ? press->target : -1;
-
-        press->down = false;
-        press->target = -1;
-        return clicked;
-}
-
-// The release of a press where it is at (a list's row under the pointer, a page's target, a menu's choice): the target it went down on
-// when that is clicked there, else -1. The one click rule for a pointer's press.
-static int ui_press_release(struct ui_press address_to press, b32 cancelled, int at)
-{
-        int clicked = ui_press_end(press, cancelled);
-
-        return clicked >= 0 && clicked == at ? clicked : -1;
-}
-
-static b32 ui_pressed(const struct ui_press address_to press, int target)
-{
-        return press->down && !press->dragged && target >= 0 && press->target == target;
-}
-
-/*
         A click's count (ui_click_again, motion.h: the one double-press rule) at the kit's scale.
 */
 static positive ui_kit_time(void);
@@ -1296,7 +1227,6 @@ static int ui_click_count(const struct ui address_to ui, struct ui_click address
         b64 now = (b64)ui_kit_time();
         return ui_click_again(k, now, x, y, ui->scale);
 }
-
 
 /*
         A press again to confirm, the kit's one default for an action that is not undone (a forget, a command that asks, a
@@ -1652,6 +1582,80 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
         drag->rate = 0;
 }
 
+/*
+        A press: a button or a finger that went down, and what it is on. A finger on a touch screen (WINDOW_KEY_TOUCH on what the
+        compositor sends) is wider than a pointer and shakes as it lands, so what it can press is at least UI_TARGET logical pixels
+        each way however small it is drawn, the drawn shape in the middle of that (ui_hit); a press held moves nothing until it is
+        UI_SLOP from where it went down, and past that it is a drag (the list follows the finger, ui_drag) and no click; and a press
+        the compositor takes back (WINDOW_KEY_CANCEL: a second finger, or one held for the right button) is no click either. What is
+        under a press is shown pressed the moment it goes down, not when it comes up, for a mouse's press as for a finger's; the app
+        numbers what can be pressed as it likes (a row, a button). A finger's press also drags a scroll region (ui_press_down): its
+        pixels move the region, and its lift throws it (ui_press_follow, ui_press_lift), so a page, a terminal's grid and a text
+        grab are all this one recogniser:
+
+            ui_press_begin(press, x, y, target, touch)  a button or a pointer went down on target (-1 for nothing)
+            ui_press_move(ui, press, x, y)              true once the press is a drag: target is pressed no more
+            ui_press_end(press, cancelled)              what was clicked as the press comes up, or -1
+            ui_press_release(press, cancelled, at)      the same, and -1 unless the release is on at (a pointer's press)
+            ui_pressed(press, target)                   whether target is shown pressed now
+            ui_press_down, ui_press_follow, ui_press_lift   a finger: the region it drags, the pixels it moved, and its lift
+
+        How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
+*/
+#define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
+
+struct ui_press
+{
+        int x, y, target;                    // where it went down and on what (-1 nothing)
+        b32 down, touch, dragged;
+        struct ui_drag drag;                 // a finger's reports, fitted for the throw its lift makes (ui_press_follow, ui_press_lift)
+        struct ui_scroll address_to region;  // the scroll region a finger drags, or null
+};
+
+static fn ui_press_begin(struct ui_press address_to press, int x, int y, int target, b32 touch)
+{
+        press->x = x, press->y = y, press->target = target;
+        press->down = true, press->touch = touch, press->dragged = false;
+        press->region = null;
+}
+
+// Whether x, y is past the slop from x0, y0: the one slop of every press (UI_SLOP logical pixels at the scale).
+static b32 ui_press_past(const struct ui address_to ui, int x0, int y0, int x, int y)
+{
+        long dx = (long)x - x0, dy = (long)y - y0, slop = UI_SLOP * (long)ui->scale / 100;
+
+        return dx * dx + dy * dy >= slop * slop;
+}
+
+static b32 ui_press_move(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
+{
+        if (press->down && !press->dragged && ui_press_past(ui, press->x, press->y, x, y))
+                press->dragged = true;
+        return press->down && press->dragged;
+}
+
+static int ui_press_end(struct ui_press address_to press, b32 cancelled)
+{
+        int clicked = press->down && !press->dragged && !cancelled ? press->target : -1;
+
+        press->down = false;
+        press->target = -1;
+        return clicked;
+}
+
+// The release of a press where it is at (a list's row under the pointer, a page's target, a menu's choice): the target it went down on
+// when that is clicked there, else -1. The one click rule for a pointer's press.
+static int ui_press_release(struct ui_press address_to press, b32 cancelled, int at)
+{
+        int clicked = ui_press_end(press, cancelled);
+
+        return clicked >= 0 && clicked == at ? clicked : -1;
+}
+
+static b32 ui_pressed(const struct ui_press address_to press, int target)
+{
+        return press->down && !press->dragged && target >= 0 && press->target == target;
+}
 
 /* ---- kit: motion ---- */
 /*
@@ -9751,52 +9755,40 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         return ui_press_release(&l->press, (event->flags & WINDOW_KEY_CANCEL) != 0, ui_list_hit(ui, l, x, y));
 }
 
-/* ---- a finger on a page ---- */
+/* ---- a finger's press: what it drags, and what its lift throws ---- */
 /*
-        A finger on a page: ui_finger_down, ui_finger_move and ui_finger_up (a target, a drag, a throw into the page's scroll
-        region). A finger grab is ui_press_begin with touch set. The text view keeps its own grab (ui_text_finger_*): a
-        duplicate, on the list in ui-audit-kit-2026-11-04.
+        A finger's press (ui_press): ui_press_down takes it where the finger lands, the region it drags is held where it is drawn;
+        ui_press_follow moves it (past the slop it is a drag: the region follows the finger, one for one, and a pull past an end gives
+        as the hand's does from its first pixel, whatever the finger's speed), and answers the pixels the region moved by, which a
+        region-less press (the terminal's grid) moves by itself; ui_press_lift throws the region at the finger's fitted speed (floored
+        and capped) and answers the press's click (ui_press_end). A press taken back (WINDOW_KEY_CANCEL) is no click.
 */
-
-/*
-        A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the region it went
-        down on, which follows it; up, the press is done where it went down if it did not move off it, and the region
-        is thrown if it was moving; a press taken back does nothing. The region's moves are answered, to be drawn.
-*/
-struct ui_finger
+static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region)
 {
-        struct ui_press press;
-        struct ui_drag drag;
-        struct ui_scroll address_to region;
-};
-
-static fn ui_finger_down(struct ui_finger address_to f, int x, int y, int target, struct ui_scroll address_to region)
-{
-        ui_drag_stop(&f->drag);
-        f->region = region;
+        ui_drag_stop(&press->drag);
         if (region)
                 ui_scroll_hold(region);
-        ui_press_begin(&f->press, x, y, target, true);
+        ui_press_begin(press, x, y, target, true);
+        press->region = region;
 }
 
 // The finger moved: past the slop its press is a drag, and the drag's pixels since the last report are answered (0 before it is one).
 // The region moves by them, one for one, and a pull past an end gives as the hand's does from its first pixel, whatever the finger's
-// speed (a stretch that came and went with the speed popped in and out under a finger crossing the end). A region-less finger (the
-// terminal's grid) is moved by its caller by the same pixels.
-static int ui_finger_move(const struct ui address_to ui, struct ui_finger address_to f, int x, int y)
+// speed (a stretch that came and went with the speed popped in and out under a finger crossing the end).
+static int ui_press_follow(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
 {
         int moved = 0;
 
-        if (!f->press.down)
+        if (!press->down)
                 return 0;
         // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
-        if (!f->press.dragged && ui_press_move(ui, &f->press, x, y))
-                ui_drag_start(&f->drag, y);
-        if (f->press.dragged)
+        if (!press->dragged && ui_press_move(ui, press, x, y))
+                ui_drag_start(&press->drag, y);
+        if (press->dragged)
         {
-                moved = ui_drag_follow(&f->drag, y);
-                if (f->region)
-                        ui_scroll_drag(f->region, -moved);
+                moved = ui_drag_follow(&press->drag, y);
+                if (press->region)
+                        ui_scroll_drag(press->region, -moved);
         }
         return moved;
 }
@@ -9819,40 +9811,29 @@ static const char address_to ui_throw_reason(const struct ui_drag address_to dra
         return window_trace_reason_thrown;
 }
 
-// The finger lifted: what it pressed, done, or -1.
-static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
+// The finger lifted: a dragged region is thrown on the finger's speed, and the press is done: what it pressed, or -1.
+static int ui_press_lift(struct ui_press address_to press, b32 cancelled)
 {
-        if (f->press.dragged)
+        if (press->dragged)
         {
                 positive now = ui_drag_now(); // the event's own time (ui_event_context)
                 // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
-                // region moves the other way (ui_finger_move).
-                long speed = ui_drag_velocity(&f->drag, now);
+                // region moves the other way (ui_press_follow).
+                long speed = ui_drag_velocity(&press->drag, now);
 
-                positive first = f->drag.samples > 0 ? f->drag.when[0] : now;
+                positive first = press->drag.samples > 0 ? press->drag.when[0] : now;
 
                 WINDOW_TRACE_START();
                 WINDOW_TRACE_PART("kit lift: speed %b px/s from %p samples over the last %p ms (horizon %p ms), ", (bipolar)speed,
-                                  (positive)f->drag.samples, now > first ? (positive)((now - first) / 1000000) : 0,
+                                  (positive)press->drag.samples, now > first ? (positive)((now - first) / 1000000) : 0,
                                   (positive)(UI_FLING_NS / 1000000));
-                window_trace_word(ui_throw_reason(&f->drag, now, speed, f->region ? f->region->scale : 100));
-                WINDOW_TRACE_PART(", cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(f->region && ui_throws(speed, f->region->scale)));
+                window_trace_word(ui_throw_reason(&press->drag, now, speed, press->region ? press->region->scale : 100));
+                WINDOW_TRACE_PART(", cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(press->region && ui_throws(speed, press->region->scale)));
                 WINDOW_TRACE_END();
-                if (f->region)
-                        ui_scroll_let_go(f->region, ui_throws(speed, f->region->scale), -speed);
+                if (press->region)
+                        ui_scroll_let_go(press->region, ui_throws(speed, press->region->scale), -speed);
         }
-        return f->press.down ? ui_press_end(&f->press, cancelled) : -1;
-}
-
-// Whether the finger is down on the widget it went down on, and whether it has moved past the slop as a drag (ui_finger_move).
-static b32 ui_finger_held(const struct ui_finger address_to f)
-{
-        return f->press.down;
-}
-
-static b32 ui_finger_dragged(const struct ui_finger address_to f)
-{
-        return f->press.dragged;
+        return press->down ? ui_press_end(press, cancelled) : -1;
 }
 
 /* ---- a page ---- */
@@ -9890,8 +9871,7 @@ struct ui_page
         struct ui_control column;          // the column: the kit's tabs on end
         struct ui_scroll column_scroll;
         char names[UI_ITEMS][UI_WORD];
-        struct ui_press press;             // a mouse's press on the page: what it went down on, done on its release (ui_page_pointer)
-        struct ui_finger finger;           // a finger on the page: its press and the region it drags
+        struct ui_press press;             // the page's press: a mouse's (done on its release) or a finger's (the region it drags, thrown on its lift)
         b32 card;                          // the body is a card, not a list: no row is hit and a press on it is its one target
         int chosen;                        // the column's group chosen (the body's rows are its rows)
         b32 pane;                          // where the keys are: 0 the column of groups, 1 the body
@@ -10141,7 +10121,7 @@ static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to
 {
         struct ui_scroll address_to region = ui_page_region(ui, p, ui_kit.pointer_x, ui_kit.pointer_y);
 
-        ui_drag_stop(&p->finger.drag);
+        ui_drag_stop(&p->press.drag);
 
         if (region && ui_wheel_turn(ui, region, event))
                 ui_page_moved(ui, p, region);
@@ -10372,7 +10352,7 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
 // A key or a turn of the wheel takes a finger's drag from the page.
 static fn ui_page_stop(struct ui_page address_to p)
 {
-        ui_drag_stop(&p->finger.drag);
+        ui_drag_stop(&p->press.drag);
 }
 
 // The page's body changed in rows [top, bottom) (device pixels): the picture is due, and those rows are drawn again.
@@ -10433,15 +10413,15 @@ static fn ui_page_press_done(const struct ui address_to ui, struct ui_page addre
 // A finger's motion: its press becomes a drag past the slop, and the region it drags follows it.
 static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int x, int y)
 {
-        b32 dragged = p->finger.press.dragged;
+        b32 dragged = p->press.dragged;
 
-        if (!ui_finger_held(&p->finger))
+        if (!p->press.down)
                 return;
-        ui_finger_move(ui, &p->finger, x, y);
-        if (!dragged && p->finger.press.dragged)
+        ui_press_follow(ui, &p->press, x, y);
+        if (!dragged && p->press.dragged)
                 ui_list_let_go(ui, l);
-        if (p->finger.press.dragged)
-                ui_page_moved(ui, p, p->finger.region);
+        if (p->press.dragged)
+                ui_page_moved(ui, p, p->press.region);
 }
 
 // A finger's button: down, its target shows pressed and nothing is done yet; up, the press is done where it went down if it
@@ -10455,7 +10435,7 @@ static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page ad
         {
                 int target = ui_page_target(ui, p, l, x, y);
 
-                ui_finger_down(&p->finger, x, y, target, ui_page_region(ui, p, x, y));
+                ui_press_down(&p->press, x, y, target, ui_page_region(ui, p, x, y));
                 ui_page_press_show(ui, p, l, target, x, y);
                 ui_page_changed(p);
                 return;
@@ -10463,8 +10443,8 @@ static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page ad
         {
                 int clicked, release_x = x, release_y = y;
 
-                x = p->finger.press.x, y = p->finger.press.y;
-                clicked = ui_finger_up(&p->finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                x = p->press.x, y = p->press.y;
+                clicked = ui_press_lift(&p->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
                 ui_list_let_go(ui, l);
                 ui_page_changed(p);
                 if (clicked >= 0 && clicked == ui_page_target(ui, p, l, x, y))
@@ -10530,7 +10510,7 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
                 // A mouse's press began: its target shows pressed. A press on nothing is done at once.
                 int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
 
-                ui_drag_stop(&p->finger.drag);
+                ui_drag_stop(&p->press.drag);
                 if (target < 0)
                 {
                         done();
@@ -11751,7 +11731,7 @@ struct ui_select
         p64 drag_start, drag_end, tap_at;
         struct ui_edge edge;           // the drag's edge: how far past the box it is, and its autoscroll
         struct ui_click click;         // the kit's click count
-        struct ui_finger grab;         // a finger: its press (a tap, a handle, the bar) and its drag (a scroll's throw)
+        struct ui_press grab;          // a finger: its press (a tap, a handle, the bar) and its drag (a scroll's throw)
         positive bar_since, quiet_at;  // when the bar was first drawn (its fade), and when the view last moved
 };
 static struct ui_select address_to ui_text_sel(struct ui_text address_to t);
@@ -13392,7 +13372,7 @@ static p32 ui_select_pick(struct ui address_to ui, struct ui_select address_to s
         ui_select_start(s, at, clicks, true);
         ui_drag_stop(&s->grab.drag);
         s->finger = UI_SELECT_FINGER_SELECT, s->holding = holding, s->dragging = true, s->boxed = false;
-        s->handles = true, s->bar = false, s->grab.press.down = false;
+        s->handles = true, s->bar = false, s->grab.down = false;
         s->ops->moved(ui, s->self, true);
         return UI_TEXT_MOVED;
 }
@@ -13404,7 +13384,7 @@ static b32 ui_select_bar_still(const struct ui_select address_to s)
         positive now = (positive)ui_kit_clock();
 
         return s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT &&
-               !(s->finger == UI_SELECT_FINGER_TEXT && s->grab.press.dragged) && !s->grab.drag.flying && now >= s->quiet_at;
+               !(s->finger == UI_SELECT_FINGER_TEXT && s->grab.dragged) && !s->grab.drag.flying && now >= s->quiet_at;
 }
 
 // The label of an item of the actions bar.
@@ -13603,7 +13583,7 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
         if (item >= 0)
         {
                 s->finger = UI_SELECT_FINGER_BAR, s->dragging = true, s->bar_down = item + 1;
-                ui_press_begin(&s->grab.press, x, y, item, true);
+                ui_press_begin(&s->grab, x, y, item, true);
                 return UI_TEXT_MOVED;
         }
         if (grab)
@@ -13621,7 +13601,7 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
                 s->grab_dx = hx - x, s->grab_dy = top + bx.line_height / 2 - y;
                 ui_drag_stop(&s->grab.drag);
                 s->finger = UI_SELECT_FINGER_HANDLE, s->dragging = true, s->boxed = false;
-                ui_press_begin(&s->grab.press, x, y, 2, true);
+                ui_press_begin(&s->grab, x, y, 2, true);
                 s->ops->moved(ui, s->self, false);
                 return UI_TEXT_MOVED;
         }
@@ -13638,7 +13618,7 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
         s->finger = UI_SELECT_FINGER_TEXT, s->dragging = true, s->tap_at = at;
         ui_drag_start(&s->grab.drag, y);
         s->finger_left = 0;
-        ui_press_begin(&s->grab.press, x, y, on, true);
+        ui_press_begin(&s->grab, x, y, on, true);
         if (!s->ops->any(s->self) && !on)
         {
                 s->ops->set(s->self, at, at);
@@ -13655,21 +13635,21 @@ static p32 ui_select_finger_move(struct ui address_to ui, struct ui_select addre
         {
                 int was = s->bar_down;
 
-                ui_press_move(ui, &s->grab.press, x, y);
-                s->bar_down = !s->grab.press.dragged && ui_select_bar_item(s, x, y) == s->grab.press.target ? s->grab.press.target + 1 : 0;
+                ui_press_move(ui, &s->grab, x, y);
+                s->bar_down = !s->grab.dragged && ui_select_bar_item(s, x, y) == s->grab.target ? s->grab.target + 1 : 0;
                 return was != s->bar_down ? UI_TEXT_MOVED : 0;
         }
         if (s->finger == UI_SELECT_FINGER_TEXT)
         {
                 // The text follows the finger, a line at a time as its pixels make lines; the bar goes as the press turns to a drag.
-                b32 was = s->grab.press.dragged;
+                b32 was = s->grab.dragged;
                 int moved = s->scrolls ? ui_drag_follow(&s->grab.drag, y) : 0;
                 long lines = s->scrolls ? ui_select_lines_moved(s, -moved) : 0;
 
-                ui_press_move(ui, &s->grab.press, x, y);
+                ui_press_move(ui, &s->grab, x, y);
                 if (lines)
                         s->ops->scroll(ui, s->self, lines, false);
-                return lines || was != s->grab.press.dragged ? UI_TEXT_MOVED : 0;
+                return lines || was != s->grab.dragged ? UI_TEXT_MOVED : 0;
         }
         {
                 // A handle's end, or a selection by words, follows the finger: the end is where the finger plus what it took the handle
@@ -13679,7 +13659,7 @@ static p32 ui_select_finger_move(struct ui address_to ui, struct ui_select addre
                 p64 at;
 
                 if (handle)
-                        ui_press_move(ui, &s->grab.press, x, y);
+                        ui_press_move(ui, &s->grab, x, y);
                 at = ui_select_track(ui, s, x, y, ex, ey, ui_dev(ui, UI_TARGET) / 2, true);
                 ui_select_drag_to(ui, s, at, s->edge.past == 0);
                 return UI_TEXT_MOVED;
@@ -13698,7 +13678,7 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
         {
                 if (finger == UI_SELECT_FINGER_TEXT)
                 {
-                        ui_press_end(&s->grab.press, true);
+                        ui_press_end(&s->grab, true);
                         s->finger = 0, s->dragging = false;
                 }
                 return 0;
@@ -13706,7 +13686,7 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
         s->finger = 0, s->dragging = false, s->holding = false, s->edge.past = 0;
         if (finger == UI_SELECT_FINGER_TEXT)
         {
-                tapped = ui_press_end(&s->grab.press, cancelled);
+                tapped = ui_press_end(&s->grab, cancelled);
                 if (tapped >= 0)
                 {
                         // A tap on the selection is the bar's, to show or take away; anywhere else it puts the caret.
@@ -13724,7 +13704,7 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
         }
         if (finger == UI_SELECT_FINGER_HANDLE)
         {
-                tapped = ui_press_end(&s->grab.press, cancelled);
+                tapped = ui_press_end(&s->grab, cancelled);
                 s->bar = tapped >= 0 ? !s->bar : true;
                 if (tapped < 0 && s->ops->any(s->self))
                         s->ops->copy(s->self, WINDOWS_CLIP_PRIMARY);
@@ -13732,7 +13712,7 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
         }
         if (finger == UI_SELECT_FINGER_BAR)
         {
-                tapped = ui_press_end(&s->grab.press, cancelled);
+                tapped = ui_press_end(&s->grab, cancelled);
                 s->bar_down = 0;
                 if (tapped >= 0 && tapped < s->bar_count && tapped == ui_select_bar_item(s, x, y))
                 {

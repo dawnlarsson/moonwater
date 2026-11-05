@@ -123577,7 +123577,7 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &land, &dirty);
                 terminal_deliver(-1, &lift, &dirty);
                 check("pointer: a finger's tap is a click where it landed, the press and the release",
-                      to_shell_length == 0 && !ui_finger_held(&terminal.finger) && !ui_finger_dragged(&terminal.finger));
+                      to_shell_length == 0 && !terminal.finger.down && !terminal.finger.dragged);
                 to_shell_length = 0;
         }
 
@@ -138571,10 +138571,10 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event_at(&finger);
                                 settings_event_at(&land);
                                 check("settings: a finger on a choice row shows it pressed at once and opens nothing yet",
-                                      settings.page.menu_row < 0 && ui_pressed(&settings.page.finger.press, kb));
+                                      settings.page.menu_row < 0 && ui_pressed(&settings.page.press, kb));
                                 settings_event_at(&lift);
                                 check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
-                                      settings.page.menu_row == kb && settings.popup.menu.touch && !ui_pressed(&settings.page.finger.press, kb) &&
+                                      settings.page.menu_row == kb && settings.popup.menu.touch && !ui_pressed(&settings.page.press, kb) &&
                                           settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > settings.height
                                                                          ? settings.height
                                                                          : 13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD)));
@@ -148475,7 +148475,7 @@ static fn check_kit_ripple_cover(void)
         goes on, never pops its stretch, a gesture that came to rest throws nothing, a flick throws alike at every rate, a new touch
         on a throw takes it where it is drawn, and everything comes to rest. A stream is one finger's motion (a speed profile of up,
         level and down) given to the region as a trackpad's precise reports (one for one, through ui_wheel_turn) or as a finger's
-        moves (ui_finger_down, ui_finger_move, ui_finger_up), at 60, 90, 125 and 240 reports a second, each at its own time, joined at
+        moves (ui_press_down, ui_press_follow, ui_press_lift), at 60, 90, 125 and 240 reports a second, each at its own time, joined at
         the frame, or held 30 ms and let out at once. The kit's clock is the test's: every handler is given the time of the event.
 */
 #define RB_GESTURES 7
@@ -148528,7 +148528,7 @@ static long rb_abs(long v)
 
 // One report to the region at the kit's clock: a trackpad's precise turn, the sum of what it has had made whole (a device's report
 // is whole units of a 120th of a notch, its remainder carried), or a finger's move to where it is.
-static void rb_give(int kind, struct ui address_to ui, struct ui_scroll address_to region, struct ui_finger address_to finger, b32 address_to down,
+static void rb_give(int kind, struct ui address_to ui, struct ui_scroll address_to region, struct ui_press address_to finger, b32 address_to down,
                     long want, long address_to sent)
 {
         if (kind == 0)
@@ -148545,8 +148545,8 @@ static void rb_give(int kind, struct ui address_to ui, struct ui_scroll address_
                 return;
         }
         if (!*down)
-                ui_finger_down(finger, 100, 300, 0, region), *down = true;
-        ui_finger_move(ui, finger, 100, 300 - (int)((want + 128) >> 8));
+                ui_press_down(finger, 100, 300, 0, region), *down = true;
+        ui_press_follow(ui, finger, 100, 300 - (int)((want + 128) >> 8));
 }
 
 // kind 0 a trackpad, 1 a finger; hz the report rate; delivery 0 at its own time, 1 joined at the frame, 2 held 30 ms mid-gesture.
@@ -148557,7 +148557,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
         static struct rb_report reports[RB_MOVES];
         struct ui ui;
         struct ui_scroll region;
-        struct ui_finger finger;
+        struct ui_press finger;
         long frame_us = 16666, event_us = 1000000l / hz, total = g->up + g->hold + g->down, count = 0, previous = 0, sent = 0;
         long lift_us, second_us = 0, last_arrive = 0, frames = 0, next = 0, first_scroll, lag_allowed, end_input_frame = 0, settled = 0;
         long final_scroll = 0, at_rest_frame = -1, delivered_at_lift = 0;
@@ -148608,7 +148608,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         next++;
                 }
                 // A touchpad's fingers lift at lift_us, and the pad says so (WINDOW_WHEEL_STOP): the region in hand lets go then, with the
-                // pause rule. A finger's lift is ui_finger_up.
+                // pause rule. A finger's lift is ui_press_lift.
                 if (kind == 0 && !lifted && next == count && tf >= lift_us)
                 {
                         struct window_event stop = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
@@ -148621,7 +148621,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 if (kind == 1 && down && !lifted && next == count && tf >= lift_us)
                 {
                         ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.stamp = ui_kit.now;
-                        ui_finger_up(&finger, false);
+                        ui_press_lift(&finger, false);
                         lifted = true;
                         delivered_at_lift = region.scroll - first_scroll;
                 }
@@ -148638,8 +148638,8 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         }
                         else
                         {
-                                ui_finger_down(&finger, 100, 300, 0, &region);
-                                ui_finger_move(&ui, &finger, 100, 295);
+                                ui_press_down(&finger, 100, 300, 0, &region);
+                                ui_press_follow(&ui, &finger, 100, 295);
                         }
                         out->regrab_jump = rb_abs(region.scroll - before);
                         second = true;
@@ -148910,7 +148910,7 @@ static fn check_kit_page_pointer(void)
         ui_page_pointer(&ui, &p, &l, &finger_down, check_kit_pointer_done);
         ui_event_context(&finger_drag);
         ui_page_pointer(&ui, &p, &l, &finger_drag, check_kit_pointer_done);
-        drag_held = p.finger.press.dragged;
+        drag_held = p.press.dragged;
         ui_event_context(&finger_up);
         ui_page_pointer(&ui, &p, &l, &finger_up, check_kit_pointer_done);
         drag_done = kit_pointer_done == 0;
@@ -149943,7 +149943,7 @@ static fn check_kit_axis_swipe(void)
         drag.a = 172, drag.b = 186;
         axis_event(&ui, &sl, &p, &l, &drag, 172, 186, false);
         check("kit axis: a vertical swipe on a horizontal slider lets the slider go, keeps its value, and the page's finger drags",
-              ui_kit_held == null && sl.value == before && !sl.down && p.finger.press.dragged);
+              ui_kit_held == null && sl.value == before && !sl.down && p.press.dragged);
         axis_event(&ui, &sl, &p, &l, &up, 172, 186, false);
 
         /* A horizontal drag on the same slider moves it, and the page does not get the finger. */
@@ -149954,7 +149954,7 @@ static fn check_kit_axis_swipe(void)
         drag.a = 230, drag.b = 158;
         axis_event(&ui, &sl, &p, &l, &drag, 230, 158, false);
         check("kit axis: a horizontal drag on a horizontal slider moves it, and the page is not given the finger",
-              ui_kit_held == &sl && sl.value != before && !p.finger.press.dragged);
+              ui_kit_held == &sl && sl.value != before && !p.press.dragged);
         axis_event(&ui, &sl, &p, &l, &up, 230, 158, false);
 
         /* A diagonal one follows the dominant axis: 30 across to 14 down is the slider's, 10 across to 44 down is the page's. */
@@ -149965,7 +149965,7 @@ static fn check_kit_axis_swipe(void)
         axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
         drag.a = 200, drag.b = 170;
         axis_event(&ui, &sl, &p, &l, &drag, 200, 170, false);
-        check("kit axis: a diagonal drag with the wider move across is the slider's", ui_kit_held == &sl && !p.finger.press.dragged);
+        check("kit axis: a diagonal drag with the wider move across is the slider's", ui_kit_held == &sl && !p.press.dragged);
         axis_event(&ui, &sl, &p, &l, &up, 200, 170, false);
         memory_zero(&sl, sizeof(sl));
         sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
@@ -149974,7 +149974,7 @@ static fn check_kit_axis_swipe(void)
         axis_event(&ui, &sl, &p, &l, &down, 170, 156, true);
         drag.a = 180, drag.b = 200;
         axis_event(&ui, &sl, &p, &l, &drag, 180, 200, false);
-        check("kit axis: a diagonal drag with the taller move down is the page's, and the slider lets go", ui_kit_held == null && p.finger.press.dragged);
+        check("kit axis: a diagonal drag with the taller move down is the page's, and the slider lets go", ui_kit_held == null && p.press.dragged);
         axis_event(&ui, &sl, &p, &l, &up, 180, 200, false);
 
         /* A switch: a vertical swipe starting on it scrolls the page and does not toggle it; a horizontal drag still moves it. */
@@ -149986,7 +149986,7 @@ static fn check_kit_axis_swipe(void)
         axis_event(&ui, &sw, &p, &l, &down, 60, 320, true);
         drag.a = 62, drag.b = 368;
         axis_event(&ui, &sw, &p, &l, &drag, 62, 368, false);
-        check("kit axis: a vertical swipe that starts on a switch lets the switch go and the page drags", ui_kit_held == null && !sw.on && p.finger.press.dragged);
+        check("kit axis: a vertical swipe that starts on a switch lets the switch go and the page drags", ui_kit_held == null && !sw.on && p.press.dragged);
         axis_event(&ui, &sw, &p, &l, &up, 62, 368, false);
         memory_zero(&sw, sizeof(sw));
         sw.kind = UI_SWITCH, sw.x = 20, sw.y = 300, sw.w = 80, sw.h = 40, sw.label = "Wi-Fi";
@@ -150005,7 +150005,7 @@ static fn check_kit_axis_swipe(void)
         axis_event(&ui, &vs, &p, &l, &down, 354, 200, true);
         drag.a = 394, drag.b = 204;
         axis_event(&ui, &vs, &p, &l, &drag, 394, 204, false);
-        check("kit axis: a horizontal swipe on a vertical slider lets it go", ui_kit_held == null && p.finger.press.dragged);
+        check("kit axis: a horizontal swipe on a vertical slider lets it go", ui_kit_held == null && p.press.dragged);
         axis_event(&ui, &vs, &p, &l, &up, 394, 204, false);
 
         /* A text field keeps any press: its drag (the selection's) is not an axis of the control's, so it is not let go. */

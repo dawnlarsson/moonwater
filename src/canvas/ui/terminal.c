@@ -163,11 +163,11 @@ static struct
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         /*
-                A finger on the paper (a touch) with no program that asked for the pointer: the kit's finger (ui_finger) for its press,
+                A finger on the paper (a touch) with no program that asked for the pointer: the kit's finger (ui_press) for its press,
                 slop and speed. Where the grid scrolls its drag moves the body (ui_body_track, and ui_body_let_go at the lift). On the
                 alternate screen its drag is the arrows', line by line as its pixels make lines (finger_left, what is under a line).
         */
-        struct ui_finger finger;
+        struct ui_press finger;
         int finger_left;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
@@ -2393,10 +2393,10 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         *handled = false;
         if (!ui_kit_touch || mouse_mode || terminal.bar.held)
                 return true;
-        if (event->type == WINDOW_EVENT_MOTION && ui_finger_held(&terminal.finger))
+        if (event->type == WINDOW_EVENT_MOTION && terminal.finger.down)
         {
                 // The slop is the kit's, at the scale the terminal draws at (its own ui may not have one yet). The finger's move is
-                // the kit's (ui_finger_move), and its pixels move the grid or the view.
+                // the kit's (ui_press_follow), and its pixels move the grid or the view.
                 int moved_px;
 
                 kit = terminal.ui;
@@ -2409,17 +2409,17 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 
                         if (terminal_extent(&first, &shown, &total) && total > shown)
                                 terminal_bar_place(first, shown, total);
-                        moved_px = ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
+                        moved_px = ui_press_follow(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                         // The grid moves one for one with the finger, up for a finger that goes down (the tracker's reports are kept
                         // where the grid fits, for a drag that finds it scrolling later). Past an end the body's rubber band draws it.
-                        if (ui_finger_dragged(&terminal.finger))
+                        if (terminal.finger.dragged)
                                 ui_body_finger(&terminal.bar.body, -(b64)moved_px * UI_ONE, ui_kit_time());
                         if (terminal_bar_out() | (terminal_grid_shift() != shift))
                                 *dirty = true;
                         return true;
                 }
-                moved_px = ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
-                if (!ui_finger_dragged(&terminal.finger))
+                moved_px = ui_press_follow(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
+                if (!terminal.finger.dragged)
                         return true;
                 return terminal_finger_scroll(master, moved_px, dirty, &moved);
         }
@@ -2432,16 +2432,16 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->flags & WINDOW_KEY_DOWN)
         {
                 // Whatever was moving the grid stops where it is drawn, and the press is where the finger is.
-                ui_finger_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, null);
+                ui_press_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, null);
                 if (!alternate)
                         ui_body_hold(&terminal.bar.body, ui_kit_time());
                 terminal.finger_left = 0;
                 return true;
         }
-        if (!ui_finger_held(&terminal.finger))
+        if (!terminal.finger.down)
                 return true;
-        dragged = ui_finger_dragged(&terminal.finger);
-        ui_finger_up(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
+        dragged = terminal.finger.dragged;
+        ui_press_lift(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
         if (!dragged)
                 return true;
         if (!alternate)
