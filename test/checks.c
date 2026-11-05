@@ -133646,7 +133646,7 @@ static void check_touch_path(struct ui address_to wui)
     asks = 0;
     touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, false);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
     check("touch path: a long press selects the word under the finger", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 10);
     check("touch path: and the long press asks for no menu", !(asks & UI_TEXT_MENU));
@@ -133692,7 +133692,7 @@ static void check_touch_path(struct ui address_to wui)
         compositor.tablet_x = 1200, compositor.tablet_y = 900, compositor.tablet_have = 3;
         compositor_report((positive)touch_clock, (positive)touch_clock);
         check("touch path: a tablet's place does not move the pointer off a finger that is down", compositor.pointer_x == fx && compositor.pointer_y == fy);
-        compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+        compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
         touch_path_drain(wui, &t, &own, &px, &py, &asks);
         check("touch path: a long press is placed at the finger, whatever a tablet reported while the finger was down",
               compositor.pointer_x == fx && compositor.pointer_y == fy);
@@ -133877,7 +133877,7 @@ static void scroll_code_touch(struct ui address_to wui, struct ui_text address_t
     row = t->top + 2 * t->line_height + t->line_height / 2;
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + row, false);
     scroll_drain(wui, t, own, &px, &py, 0);
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     scroll_drain(wui, t, own, &px, &py, 0);
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + target_y, false);
     scroll_drain(wui, t, own, &px, &py, 0);
@@ -133922,7 +133922,7 @@ static void scroll_field_touch(struct ui address_to wui, struct ui_text address_
     a->before = (int)t->scroll_x;
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + y, false);
     scroll_drain(wui, t, own, &px, &py, 1);
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     scroll_drain(wui, t, own, &px, &py, 1);
     touch_one(SCROLL_LEFT + target_x, SCROLL_TOP + y, false);
     scroll_drain(wui, t, own, &px, &py, 1);
@@ -134895,7 +134895,7 @@ static void check_compositor_edges(void)
     edge_at(128, 252, 0, 10000);
     check("edge: a finger in the band is due at its deadline, for the tick", compositor.swipe.state == COMPOSITOR_SWIPE_UNDECIDED &&
               compositor_touch_due() == compositor.swipe.deadline);
-    compositor_touch_tick(touch_clock * 1000 + UI_EDGE_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     check("edge: at its time, still, the window has the press (the kit's long press comes after it)",
           touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 1 && compositor.swipe.state == COMPOSITOR_SWIPE_NONE && compositor.launcher_asked == 0);
     edge_at(128, 252, 1, 10000);
@@ -135467,8 +135467,8 @@ static void check_compositor_touch(void)
         for (unsigned int at = head1; at != table->event_head[1]; at++)
             if (table->event_type[1][at % WINDOWS_EVENTS] == WINDOW_EVENT_WHEEL && !table->event_b[1][at % WINDOWS_EVENTS])
                 sum += table->event_a[1][at % WINDOWS_EVENTS];
-        check("touch: two fingers moved 48 pixels down together are a notch of the wheel up, what is under them following them",
-              sum == 120 && touch_buttons(1, head1) == 0x11011102);
+        check("touch: two fingers moved 48 pixels down together are 144 of the wheel up (a notch is UI_NOTCH's 40 px, so 120), what is under them following them",
+              sum == 144 && touch_buttons(1, head1) == 0x11011102);
         touch_clock += 10000;
         touch_report(2, lifted);
         head1 = table->event_head[1];
@@ -135481,15 +135481,15 @@ static void check_compositor_touch(void)
     }
 
     /*
-        Held still for a long press (UI_TOUCH_HOLD_NS), a finger is the right button there, flagged as a long press;
+        Held still for a long press (UI_HOLD_NS), a finger is the right button there, flagged as a long press;
         its left press is taken back first. The finger may move on from there, the pointer following it, and its lift is
         the release that ends the press (cancelled, touch and held), told to the window it landed on.
     */
     head1 = table->event_head[1];
     touch_one(100, 80, false);
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS - 1000000);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS - 1000000);
     unchanged = touch_buttons(1, head1) == 0x1101;
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     check("touch: held still a long press's time, a finger is the right button, its left press taken back first",
           unchanged && touch_buttons(1, head1) == 0x1101110211111110ul);
     flags = 0;
@@ -135516,7 +135516,7 @@ static void check_compositor_touch(void)
     */
     table->hover_off[1] = 1;
     touch_one(100, 80, false);
-    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_HOLD_NS);
     head2 = table->event_head[1];
     touch_one(120, 80, false);
     unchanged = touch_seen(1, head2, WINDOW_EVENT_MOTION, -1, null) > 0;
@@ -149446,6 +149446,7 @@ static void touch_rig_apply(struct touch_rig *r, const struct ui_touch_out *out)
                 case UI_TOUCH_RESUME: c = 'U'; break;
                 case UI_TOUCH_RIGHT: c = 'r'; break;
                 case UI_TOUCH_WHEEL: c = 'w', r->wheel += e->horizontal ? 0 : e->v120, r->sideways += e->horizontal ? e->v120 : 0; break;
+                case UI_TOUCH_TURN_END: c = 'T'; break;
                 case UI_TOUCH_HOLD: c = 'H'; break;
                 case UI_TOUCH_HOLD_END: c = 'E'; break;
                 case UI_TOUCH_IDLE: c = 'I'; break;
@@ -149565,7 +149566,7 @@ static fn check_kit_touch_gestures(void)
         touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 20000000ll);
         touch_row("kit touch: a wobble of 7 px does not move the pointer: the finger is a tap", &r, "SPIR", -1);
 
-        // A long press: still for UI_TOUCH_HOLD_NS (not before it), the hold; moved on while held, the pointer follows; lifted, the end.
+        // A long press: still for UI_HOLD_NS (not before it), the hold; moved on while held, the pointer follows; lifted, the end.
         touch_rig_reset(&r, 0);
         touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
         touch_rig_tick(&r, t0 + 499000000ll, 1);
@@ -149602,8 +149603,8 @@ static fn check_kit_touch_gestures(void)
         touch_rig_down(&r, 0, 100, 112), touch_rig_down(&r, 1, 200, 112), touch_rig_frame(&r, t0 + 20000000ll);
         touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 30000000ll);
         touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 40000000ll);
-        touch_row("kit touch: a second finger takes the press back (a cancel), and the two moved 12 px down are a wheel of 30 notches' 120ths (48 px a notch at 100%), and lifted they are nothing",
-                  &r, "SPCwI", 30);
+        touch_row("kit touch: a second finger takes the press back (a cancel), and the two moved 12 px down are a precise wheel of 36 of UI_NOTCH's 120ths (40 px is 120 at 100%), and lifted they end the turn (T)",
+                  &r, "SPCwIT", 36);
 
         // Two fingers lifted soon, neither moved: a right click, at the pointer, on the second finger's landing's time.
         touch_rig_reset(&r, 0);
@@ -149673,7 +149674,8 @@ static fn check_kit_touch_gestures(void)
         touch_rig_down(&r, 0, 100, 148), touch_rig_down(&r, 1, 200, 148), touch_rig_frame(&r, t0 + 50000000ll);
         touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 60000000ll);
         touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 70000000ll);
-        touch_row("kit touch: two fingers moved down together are the wheel (120 for 48 px at 100%), and never a pinch", &r, "SPCwwwwI", 120);
+        // The two's turn is precise now (UI_NOTCH, 40 px, at 100 percent: 120 is a notch of it), one for one with the middle: 48 px is 144.
+        touch_row("kit touch: two fingers moved down together 48 px are a precise wheel of 144 (120 is UI_NOTCH's 40 px), ended by the lift (T), and never a pinch", &r, "SPCwwwwIT", 144);
         touch_ok("kit touch: a parallel scroll never reports a pinch", r.pinch_begin == 0 && r.pinch_last == 0);
 
         // A pinch with the middle moved: the pan is in the focal point, and turns no wheel.

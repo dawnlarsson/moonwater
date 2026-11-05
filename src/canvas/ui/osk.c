@@ -15,7 +15,7 @@
         for every letter, one more tap lets go. Backspace and the arrows repeat while their key is held (after OSK_HOLD_NS, every
         OSK_REPEAT_NS). A key's feedback is the kit's: its ripple, its press and its hover.
 
-        A letter held for the kit's hold (UI_TOUCH_HOLD_NS) shows its accents (osk_accents, the Latin letters of the Settings languages) in a
+        A letter held for the kit's hold (UI_HOLD_NS) shows its accents (osk_accents, the Latin letters of the Settings languages) in a
         row above the key, or over it on the top row. The letter is typed on the press, as any key's; lifting on an accent takes that
         letter back with one Backspace and types the accent on the key's own code; lifting anywhere else sends nothing more.
 
@@ -423,7 +423,7 @@ static void osk_press(int index)
                 if (osk_accents_of(key->ch))
                 {
                         osk.long_key = index;
-                        osk.long_at = ui_kit.now + UI_TOUCH_HOLD_NS;
+                        osk.long_at = ui_kit.now + UI_HOLD_NS;
                         osk.long_capital = osk_character(key) != key->ch;
                 }
                 if (osk.shift == 1)

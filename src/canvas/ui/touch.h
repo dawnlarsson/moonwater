@@ -8,7 +8,7 @@
         left button where it went down, and it moves nothing until it is UI_SLOP past where it went down (a tap is a click where it
         landed); a second finger before the first has moved makes the two a wheel from their middle (the left press is taken back
         with a release that says it was no click), and the two lifted soon, neither moved, are a click of the right button; a long
-        press (UI_TOUCH_HOLD_NS, still, with the left button taken) is the right button, held, and the finger may move on until it
+        press (UI_HOLD_NS, still, with the left button taken) is the right button, held, and the finger may move on until it
         lifts, which ends the press. A window's close button under the finger is the caller's: it marks the press pending
         (ui_touch_pend), and a lift unmoved then is UI_TOUCH_CLOSE, a move past the slop UI_TOUCH_RESUME.
 
@@ -32,9 +32,7 @@
 #define UI_TOUCH_ONE 1                     // the first finger is down: the pointer's, and its press is made
 #define UI_TOUCH_TWO 2                     // two fingers: the wheel, or the right button when they are lifted soon
 #define UI_TOUCH_HELD 3                    // a long press: nothing more until every finger is up
-#define UI_TOUCH_HOLD_NS 500000000ull      // still this long from its landing, the first finger is a long press (Android's and iOS's 500 ms)
 #define UI_TOUCH_TAP_NS 400000000ull       // two fingers lifted within this of the second landing, neither moved, are a right click
-#define UI_TOUCH_NOTCH 48                  // the fingers' pixels a notch of the wheel is (120ths), at the scale of 100 percent
 #define UI_TOUCH_EVENTS 12                 // the most events one call answers
 #define UI_TOUCH_PINCH_ONE 1024            // a pinch's scale of 1.0, in 1024ths (the scale is span over the span it began from)
 #define UI_TOUCH_PINCH_MAX 8192            // the largest scale a pinch reports: 8 times the span it began from
@@ -50,7 +48,8 @@ enum ui_touch_kind
         UI_TOUCH_CLOSE,    // a pending press lifted unmoved: the window whose close button it was closes
         UI_TOUCH_RESUME,   // a pending press moved past the slop: the press is made again, without the close button
         UI_TOUCH_RIGHT,    // a click of the right button at the pointer
-        UI_TOUCH_WHEEL,    // a turn of the wheel at the pointer, v120 in 120ths of a notch, horizontal or vertical
+        UI_TOUCH_WHEEL,    // a precise turn at the pointer's window: v120 in 120ths of UI_NOTCH (the two fingers' motion, one for one), horizontal or vertical
+        UI_TOUCH_TURN_END, // the two fingers' turn is over (a lift): the window's precise hand lets go, and throws on its speed
         UI_TOUCH_HOLD,     // a long press: the left press is taken back, the right button goes down held at the pointer
         UI_TOUCH_HOLD_END, // the lift that ends a long press
         UI_TOUCH_PINCH_BEGIN,  // two fingers changed their span past the pinch slop: a pinch begins at scale 1024 about x, y
@@ -77,7 +76,8 @@ struct ui_touch_out
 struct ui_touch
 {
         int mode, first, count, tcount;      // the mode; the first finger's slot; the fingers down, and in the two's last report
-        int moved, two_moved, pending;       // the first finger is past the slop; the two's wheel has turned; a close is pending
+        int moved, two_moved, pending;       // the first finger is past the slop; the two have moved (a wheel or a pinch); a close is pending
+        int turned;                          // the two's wheel has sent a precise turn, whose stop (UI_TOUCH_TURN_END) is owed when they lift
         int start_x, start_y, mid_x, mid_y;  // the first finger's landing; the two's middle, where the wheel last counted from
         int left_x, left_y;                  // what the wheel has not yet turned, in 120ths times the pixels of a notch
         int span_ref, span_now;              // the span the pinch is measured from (set when the two are two, or change their count); the span last told
@@ -109,34 +109,29 @@ static inline int ui_touch_slop(int scale)
         return UI_SLOP * scale / 100;
 }
 
-static inline void ui_touch_put(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y)
+static inline void ui_touch_emit(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int v120, int horizontal, int scale)
 {
         if (out->count < UI_TOUCH_EVENTS)
         {
                 struct ui_touch_event *e = &out->event[out->count++];
 
-                e->kind = kind, e->x = x, e->y = y, e->v120 = 0, e->horizontal = 0, e->scale = 0;
+                e->kind = kind, e->x = x, e->y = y, e->v120 = v120, e->horizontal = horizontal, e->scale = scale;
         }
+}
+
+static inline void ui_touch_put(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y)
+{
+        ui_touch_emit(out, kind, x, y, 0, 0, 0);
 }
 
 static inline void ui_touch_put_wheel(struct ui_touch_out *out, int v120, int horizontal)
 {
-        if (out->count < UI_TOUCH_EVENTS)
-        {
-                struct ui_touch_event *e = &out->event[out->count++];
-
-                e->kind = UI_TOUCH_WHEEL, e->x = e->y = 0, e->v120 = v120, e->horizontal = horizontal, e->scale = 0;
-        }
+        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, v120, horizontal, 0);
 }
 
 static inline void ui_touch_put_pinch(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int scale)
 {
-        if (out->count < UI_TOUCH_EVENTS)
-        {
-                struct ui_touch_event *e = &out->event[out->count++];
-
-                e->kind = kind, e->x = x, e->y = y, e->v120 = 0, e->horizontal = 0, e->scale = scale;
-        }
+        ui_touch_emit(out, kind, x, y, 0, 0, scale);
 }
 
 // The integer square root (floor), by the bit loop: a finger's span is the root of the squares of its two offsets.
@@ -257,7 +252,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                         t->tcount = count;
                         t->mid_x = (f->x[other] + f->x[first]) / 2;
                         t->mid_y = (f->y[other] + f->y[first]) / 2;
-                        t->left_x = t->left_y = 0;
+                        t->left_x = t->left_y = t->turned = 0;
                         t->span_ref = t->span_now = ui_touch_span(f, first, other);
                         t->pinching = 0, t->pinch_scale = UI_TOUCH_PINCH_ONE;
                 }
@@ -282,13 +277,15 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                 {
                         if (t->pinching)
                                 ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
+                        if (t->turned)
+                                ui_touch_put(out, UI_TOUCH_TURN_END, 0, 0);
                         if (!t->two_moved && f->now - t->two_at <= UI_TOUCH_TAP_NS)
                                 ui_touch_put(out, UI_TOUCH_RIGHT, 0, 0);
                         t->mode = UI_TOUCH_NONE;
                 }
                 else if (count >= 2)
                 {
-                        int one = f->id[t->first] >= 0 ? t->first : other, per = UI_TOUCH_NOTCH * f->scale / 100;
+                        int one = f->id[t->first] >= 0 ? t->first : other, per = UI_NOTCH * f->scale / 100;
                         int mid_x, mid_y, span, slop2 = UI_TOUCH_PINCH_SLOP * slop;
 
                         ui_touch_fingers(f, one, &other);
@@ -327,7 +324,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                                 long right = (long)t->left_x - (long)(mid_x - t->mid_x) * 120;
                                 int turn_y = (int)(down / per), turn_x = (int)(right / per);
 
-                                t->two_moved = 1;
+                                t->two_moved = t->turned = 1;
                                 t->left_y = (int)(down - (long)turn_y * per);
                                 t->left_x = (int)(right - (long)turn_x * per);
                                 t->mid_x = mid_x, t->mid_y = mid_y;
@@ -364,7 +361,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
 // When the first finger is a long press: its time when it is one (still, the left button pressed and not a close), or 0.
 static inline b64 ui_touch_due(const struct ui_touch *t, int pressed)
 {
-        return t->mode == UI_TOUCH_ONE && !t->moved && !t->pending && pressed ? t->start + (b64)UI_TOUCH_HOLD_NS : 0;
+        return t->mode == UI_TOUCH_ONE && !t->moved && !t->pending && pressed ? t->start + (b64)UI_HOLD_NS : 0;
 }
 
 // The tick: at or after the long press's time, the first finger is a hold (UI_TOUCH_HOLD) and the press is HELD.
@@ -393,6 +390,8 @@ static inline void ui_touch_drop(struct ui_touch *t, struct ui_touch_out *out)
                 ui_touch_put(out, UI_TOUCH_CANCEL, 0, 0);
         if (t->mode == UI_TOUCH_TWO && t->pinching)
                 ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
+        if (t->mode == UI_TOUCH_TWO && t->turned)
+                ui_touch_put(out, UI_TOUCH_TURN_END, 0, 0);
         t->mode = UI_TOUCH_NONE;
         t->pending = 0;
         t->pinching = 0;
@@ -413,7 +412,7 @@ static inline void ui_touch_reset(struct ui_touch *t)
         travelled UI_EDGE_SWIPE inward within a cone of about 30 degrees (SWIPED: the system's gesture, and the window under it
         gets nothing); whether it has gone back past the slop, or strayed sideways past the slop out of the cone (FAILED: the
         press is the window's, as if no band were there); or neither yet (UNDECIDED). The caller fails a finger still
-        UI_EDGE_NS after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
+        UI_HOLD_NS after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
         when it lifts. A finger on a control of the window's controls (UI_EDGE_CONTROL) is judged by travel alone: any travel
         past the slop fails it, a lift without travel is the control's. Sides are the screen's own, from its rectangle in the
         desktop's pixels, so a screen turned is judged in its own orientation.
@@ -421,7 +420,6 @@ static inline void ui_touch_reset(struct ui_touch *t)
 #define UI_EDGE_BAND 12                  // dp: the band at each edge of a screen where a swipe begins
 #define UI_EDGE_SWIPE 48                 // dp: the travel inward that decides a swipe
 #define UI_EDGE_CONE 60                  // hundredths: the sideways travel a swipe may not pass of its inward travel (about 30 degrees)
-#define UI_EDGE_NS 500000000ull          // a finger still this long after it landed is not a swipe (the kit's long press)
 #define UI_EDGE_CONTROL_SLOP 8           // dp: a finger's slop about the window's controls, above and below their row
 #define UI_EDGE_CONTROL_CELL 40          // dp: a window control's cell, wide (three to a strip)
 

@@ -3652,8 +3652,6 @@ struct compositor_pad
 #define COMPOSITOR_ABS_MT_POSITION_Y 0x36u
 #define COMPOSITOR_ABS_MT_TRACKING_ID 0x39u
 #define COMPOSITOR_BTN_TOOL_PEN 0x140u
-// The fingers a touch screen says at once that are followed.
-#define UI_TOUCH_SLOTS 10
 
 struct compositor_touch_screen
 {
@@ -3695,7 +3693,7 @@ struct compositor_touch
         is decided: the kit is not told of it (COMPOSITOR_SWIPE_UNDECIDED), and the window under it gets nothing. A decided swipe is
         the system's (COMPOSITOR_SWIPE_SWIPED) until every finger is up. A finger that is not a swipe after all is handed to the
         kit as it would have been without the band: its landing, then the report as it is (compositor_swipe_hand). The landing
-        frame is kept for that, and the deadline (UI_EDGE_NS) is the time a finger in the band may take to be decided.
+        frame is kept for that, and the deadline (UI_HOLD_NS) is the time a finger in the band may take to be decided.
         A window that covers its screen (COMPOSITOR_MAXIMIZED) takes a first swipe as its own, with an indicator at the edge;
         a second within COMPOSITOR_SWIPE_ARM_NS is the system's.
 */
@@ -3799,8 +3797,6 @@ struct compositor_poll
 #define COMPOSITOR_INPUTS 32 // a lid, the audio jacks and a power button take one each, and a mouse plugged in later needs one
 #define COMPOSITOR_WHEEL_JOIN 960 // eight notches, in 120ths: the most one wheel event joined from several holds
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
-// How long the processor is kept out of its deep idle states after the last thing a person did.
-#define COMPOSITOR_HOLD_NS 500000000ull
 // A machine slept when the clock that runs through a sleep got this far ahead of the one that does
 // not, and the screen is drawn again then, at half a second and at two and a half: a card's driver
 // is still settling after a wake, and the later passes are the ones that land.
@@ -3824,11 +3820,12 @@ struct compositor_poll
         either side, and the close and the minimise button are the finger's within COMPOSITOR_TOUCH_BUTTON_SLOP of their disc
         (the window goes when the finger lifts from the X: one that moves past the slop was making the press the corner or the
         titlebar gives, and makes it). It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
-        where it landed and not a drag. Held UI_TOUCH_HOLD_NS without moving it is a long press: the right button,
+        where it landed and not a drag. Held UI_HOLD_NS without moving it is a long press: the right button,
         flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
         press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within UI_TOUCH_TAP_NS
-        of the second landing, neither moved, are the right button too; two that move are the wheel, a notch to
-        UI_TOUCH_NOTCH, what is under them following them.
+        of the second landing, neither moved, are the right button too; two that move are a precise turn of the wheel in
+        UI_NOTCH's 120ths, one for one with the fingers' middle, what is under them following them (the same path as a
+        trackpad's two fingers, compositor_pad_apply).
 */
 #define COMPOSITOR_TOUCH_GRIP 16
 #define COMPOSITOR_TOUCH_GRIP_IN 8
@@ -14757,7 +14754,7 @@ static void compositor_hold_touch(positive now)
 {
         int zero = 0;
 
-        compositor.hold_until = now + COMPOSITOR_HOLD_NS;
+        compositor.hold_until = now + UI_HOLD_NS;
         if (compositor.hold >= 0 || compositor.holds == ~0ul)
                 return;
 
@@ -17791,8 +17788,11 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         break;
                 case UI_TOUCH_WHEEL:
                         compositor.touching = 1;
-                        compositor_wheel(e->v120, e->horizontal);
+                        compositor_wheel_precise(e->v120, e->horizontal);
                         wheel = 1;
+                        break;
+                case UI_TOUCH_TURN_END:
+                        compositor_wheel_flags(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
                         break;
                 case UI_TOUCH_HOLD:
                         // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
@@ -17930,31 +17930,40 @@ static int compositor_swipe_landing(unsigned int at, positive now, const struct 
         swipe->side = side, swipe->cell = cell, swipe->row = row, swipe->screen = number;
         memory_copy(swipe->rect, rect, sizeof(rect));
         swipe->x0 = x, swipe->y0 = y;
-        swipe->deadline = now + UI_EDGE_NS;
+        swipe->deadline = now + UI_HOLD_NS;
         memory_copy(&swipe->landing, frame, sizeof(*frame));
         return 1;
+}
+
+/*
+        The kit's gesture fed a report: the first finger down, begun from the landing frame (ui_touch_begin: START and PRESS),
+        then the frame as it is then (its pointer and busy hold, which the press may have moved), each answer applied as it
+        comes; and the Wayland clients are told. Both the device's report and a swipe's held finger take this path.
+*/
+static void compositor_touch_feed(unsigned int at, positive now, const struct ui_touch_frame *landing, struct ui_touch_frame *report)
+{
+        struct ui_touch_out out;
+
+        ui_touch_begin(&compositor.touch.gesture, landing, &out);
+        compositor_touch_apply(at, &out, now);
+        report->pointer_x = compositor.pointer_x, report->pointer_y = compositor.pointer_y;
+        report->busy = compositor.drag >= 0 || compositor.resize >= 0;
+        ui_touch_report(&compositor.touch.gesture, report, &out);
+        compositor_touch_apply(at, &out, now);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_touch_report(at, 0);
+#endif
 }
 
 // The finger is not the system's after all, or was not decided in time: the kit is given it as it would have been without the band, its landing,
 // then the report as it is now. Nothing reached the window before this.
 static void compositor_swipe_hand(unsigned int at, positive now, const struct ui_touch_frame *frame)
 {
-        struct compositor_touch *touch = &compositor.touch;
         struct ui_touch_frame report;
-        struct ui_touch_out out;
 
         compositor.swipe.state = COMPOSITOR_SWIPE_NONE;
         memory_copy(&report, frame, sizeof(report));
-        ui_touch_begin(&touch->gesture, &compositor.swipe.landing, &out);
-        compositor_touch_apply(at, &out, now);
-        // The pointer is read after the landing's events: the start moved it to the finger's landing.
-        report.pointer_x = compositor.pointer_x, report.pointer_y = compositor.pointer_y;
-        report.busy = compositor.drag >= 0 || compositor.resize >= 0;
-        ui_touch_report(&touch->gesture, &report, &out);
-        compositor_touch_apply(at, &out, now);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_touch_report(at, 0);
-#endif
+        compositor_touch_feed(at, now, &compositor.swipe.landing, &report);
 }
 
 // The launcher, opened by a swipe up: its rectangle is a panel's thickness along the bottom of its screen, beside the finger, as the launcher
@@ -18186,23 +18195,11 @@ static void compositor_touch_report(unsigned int at, positive now)
                 return;
         }
 
-        // The first finger down: the pointer goes to it, hidden, and its left press is made there (the kit's START and PRESS).
-        ui_touch_begin(&touch->gesture, &frame, &out);
-        compositor_touch_apply(at, &out, now);
-
-        // The report as it is then: a press may have begun a drag, or marked a close, or moved the pointer to the landing.
-        frame.pointer_x = compositor.pointer_x, frame.pointer_y = compositor.pointer_y;
-        frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
-        ui_touch_report(&touch->gesture, &frame, &out);
-        compositor_touch_apply(at, &out, now);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_touch_report(at, 0);
-#endif
-
+        compositor_touch_feed(at, now, &frame, &frame);
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }
 
-// When the first finger is a long press, or 0: the kit's time for it (a press still for UI_TOUCH_HOLD_NS, the left button down there).
+// When the first finger is a long press, or 0: the kit's time for it (a press still for UI_HOLD_NS, the left button down there).
 static positive compositor_touch_due(void)
 {
         positive due = ui_touch_due(&compositor.touch.gesture, compositor.button_down & 1);
