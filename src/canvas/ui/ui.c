@@ -6136,6 +6136,11 @@ struct ui_scroll
         b32 hand;                  // a notch past an end or a precise input has the region in hand (ui_scroll_hand)
         b32 precise;               // the hand is a trackpad's: its release throws on its speed. A wheel's notches are no finger, and throw nothing
         long precise_rest;         // 120ths of a 256th a precise turn has not moved whole, carried to the next turn (ui_wheel_turn)
+        b32 smooth;                // a stream's hand: its notches add to the target (to) and the position follows it each frame (ui_scroll_step)
+        b64 to;                    // the stream's target, in 256ths of a device pixel, where the position is going
+        b64 step_at;               // when the position last followed the target (0: the frame that starts the clock)
+        b64 gaps[4];               // the last four intervals between a stream's notches, ns, the newest first (the rate's and the decay's)
+        struct ui_drag stream_drag; // the stream's target at each of its notches: the fingers' motion, which is the throw's speed (not the lagged position)
         struct ui_drag hand_drag;  // the hand's reports, fitted for the release's speed (ui_scroll_release)
 };
 
@@ -6347,6 +6352,9 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
 #define UI_PRECISE_MOST (1l << 24)     // the most one precise turn moves a region, in 256ths of a device pixel (65536 px)
 #define UI_PRECISE_NOTCH 40            // a precise turn's notch, in device pixels at 100 percent: 120ths of it are its share (a fixed px, not the row's)
+#define UI_STREAM_TAU_NS 40000000l     // a stream's position follows its target with this time constant at a notch every 33 ms or slower (ui_stream_tau)
+#define UI_STREAM_GAP_NS 33000000l     // the notch interval the time constant is for: at a faster stream it shortens in proportion
+#define UI_STREAM_TAU_MIN_NS 12000000l // and never shorter than this
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
 #define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
@@ -6512,8 +6520,12 @@ static void ui_scroll_limit(struct ui_scroll address_to s)
         s->speed = s->speed > lim ? lim : s->speed < -lim ? -lim : s->speed;
 }
 
+static void ui_scroll_flush(struct ui_scroll address_to s);
+static void ui_scroll_hand(struct ui_scroll address_to s, b64 move);
+
 static void ui_scroll_glide_to(struct ui_scroll address_to s, b64 aim, b64 tau)
 {
+        ui_scroll_flush(s);
         s->aim = ui_scroll_fit(s, aim);
         s->tau = tau;
         s->gliding = 1;
@@ -6535,6 +6547,7 @@ static b32 ui_scroll_set(struct ui_scroll address_to s, int scroll)
         s->at = s->aim = (b64)scroll << 8;
         s->gliding = s->dragging = s->back.live = 0;
         s->hand = s->absorb = 0;
+        s->smooth = 0;
         s->speed = s->stamp = 0;
         return scroll != before || moving;
 }
@@ -6575,6 +6588,8 @@ static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
 {
         int before = s->scroll;
 
+        ui_scroll_flush(s);
+
         if (s->unit > 0)
         {
                 long total = (long)s->left + pixels;
@@ -6612,10 +6627,70 @@ static b64 ui_scroll_past_at(const struct ui_scroll address_to s)
         return s->edge < 0 ? edge - past : edge + past;
 }
 
+/*
+        A stream's hand (ui_scroll_stream): each notch adds its pixels to the target, and each frame the position moves toward it as an
+        exponential does, with a time constant of UI_STREAM_TAU_NS at a notch every UI_STREAM_GAP_NS, shorter as the notches come faster.
+        The distance is the notches' whole: the target is their sum, and the position reaches it. A flush puts the position at the target
+        at once (a stream's end, a finger, a jump), so nothing of a stream is left to come after it.
+*/
+static b64 ui_stream_tau(const struct ui_scroll address_to s)
+{
+        b64 tau = s->gaps[0] ? UI_STREAM_TAU_NS * (b64)s->gaps[0] / UI_STREAM_GAP_NS : UI_STREAM_TAU_NS;
+
+        return tau < UI_STREAM_TAU_MIN_NS ? UI_STREAM_TAU_MIN_NS : tau > UI_STREAM_TAU_NS ? UI_STREAM_TAU_NS : tau;
+}
+
+static void ui_scroll_flush(struct ui_scroll address_to s)
+{
+        if (s->smooth)
+                s->at = s->to;
+        s->smooth = 0;
+        s->step_at = 0;
+}
+
+// The position follows the target over the frame's time (the glide's clock, now).
+static void ui_scroll_step(struct ui_scroll address_to s, b64 now)
+{
+        b64 dt, e, d = s->to - s->at, tau = ui_stream_tau(s);
+
+        if (!s->step_at || now <= s->step_at)
+        {
+                s->step_at = now;
+                return;
+        }
+        dt = now - s->step_at;
+        s->step_at = now;
+        e = ui_exp_neg(dt * UI_ONE / tau);
+        s->at = s->to - ui_qmul(d, e);
+        if (s->at - s->to < UI_SCROLL_REST && s->to - s->at < UI_SCROLL_REST)
+                s->at = s->to;
+}
+
+// A stream's notch of q (256ths, positive: the content moves down): the hand takes the region where it is, if it is not a stream's
+// already, and the notch adds to the target, held inside the region's ends as a hand's place is (UI_SCROLL_VIEW_PAST views past).
+static void ui_scroll_stream(struct ui_scroll address_to s, b64 move)
+{
+        b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
+
+        if (!s->smooth || !s->dragging || !s->hand)
+        {
+                ui_scroll_flush(s);
+                ui_scroll_hand(s, 0);
+                s->to = s->at;
+                s->smooth = 1;
+                s->step_at = 0;
+                ui_drag_start(&s->stream_drag, (int)(s->to >> 8));
+        }
+        s->to += move;
+        s->to = s->to < -lim ? -lim : s->to > most + lim ? most + lim : s->to;
+        ui_drag_follow(&s->stream_drag, (int)(s->to >> 8));
+}
+
 // A finger on the region: whatever was moving it stops where it is drawn, and the drag takes it from there. A stretch being sprung
 // home stops past its end by what the spring still holds, so nothing jumps.
 static void ui_scroll_stop(struct ui_scroll address_to s)
 {
+        ui_scroll_flush(s);
         if (s->gliding || s->back.live)
         {
                 s->at = s->aim = s->bounds && s->back.live ? ui_scroll_past_at(s) : ui_scroll_shown(s);
@@ -6694,13 +6769,20 @@ static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
         long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
         b32 thrown;
 
+        // A stream's speed is its fingers' (the target's notches), not the position's, which is still catching up when the notches stop.
+        if (s->smooth && s->stream_drag.samples > 0)
+                speed = ui_drag_velocity(&s->stream_drag, s->stream_drag.when[s->stream_drag.samples - 1]);
+
         // A finger that was still for UI_HAND_PAUSE_NS before it lifted throws nothing: the speed at its last report is the speed it
         // had before it stopped (a stop carries the slope of its deceleration, which the gap release read as a throw).
         b32 paused = lifted && last && now > last && now - last > UI_HAND_PAUSE_NS;
 
         if (paused)
                 speed = 0;
+        // A stream's end (no lift): its remainder is flushed below.
         thrown = s->precise && ui_throws(speed, s->scale);
+        if (s->smooth)
+                ui_scroll_flush(s);
         WINDOW_TRACE_START();
         WINDOW_TRACE_PART("kit hand release (");
         window_trace_word(lifted ? "lift" : "gap");
@@ -6763,6 +6845,9 @@ static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int hei
 static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
 {
         positive now = ui_drag_now();
+
+        // A stream's remainder is the stream's: a hand that moves the region at once takes it first (ui_scroll_flush).
+        ui_scroll_flush(s);
         b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
 
         if (!s->dragging || !s->hand)
@@ -6786,13 +6871,26 @@ static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
 }
 
 // A precise input (256ths of a device pixel, positive: the content moves down): one for one, with no notch and no glide.
-static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll address_to s, int q)
+static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll address_to s, int q, b32 stream)
 {
         int before = s->scroll;
         b64 now = ui_event_clock();
 
         if (!q)
                 return false;
+        if (stream)
+        {
+                // The intervals between a stream's notches: a new stream (or none) starts them afresh, and the newest is first.
+                if (!s->smooth || !s->notch || now <= s->notch)
+                        s->gaps[0] = s->gaps[1] = s->gaps[2] = s->gaps[3] = 0;
+                else
+                        s->gaps[3] = s->gaps[2], s->gaps[2] = s->gaps[1], s->gaps[1] = s->gaps[0], s->gaps[0] = now - s->notch;
+                s->notch = now;
+                s->precise = 1;
+                s->absorb = 0;
+                ui_scroll_stream(s, -(b64)q);
+                return true;
+        }
         s->notch = now;
         s->precise = 1;
         s->absorb = 0;
@@ -6835,6 +6933,8 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
                         ui_scroll_release(s);
                 if (s->dragging)
                 {
+                        if (s->smooth)
+                                ui_scroll_step(s, now);
                         ui_scroll_show(s);
                         ui_scroll_busy(ui, s);
                         return true;
@@ -7012,7 +7112,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
 
                 s->precise_rest = total - q * 120;
                 q = q > UI_PRECISE_MOST ? UI_PRECISE_MOST : q < -UI_PRECISE_MOST ? -UI_PRECISE_MOST : q;
-                return ui_scroll_precise(ui, s, (int)q);
+                return ui_scroll_precise(ui, s, (int)q, (event->flags & WINDOW_WHEEL_STREAM) != 0);
         }
 }
 

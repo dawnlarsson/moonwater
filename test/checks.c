@@ -150410,8 +150410,98 @@ static fn check_stream_notch(void)
                 ui_kit.now = 9000000000ll + (100000 + k * 16000) * 1000ll, ui_kit.test_clock = ui_kit.now;
                 ui_wheel_turn(&p.ui, &p.s, &turn);
         }
+        // A stream's notches go to a target that the position follows (ui_scroll_step): the whole is there at the stream's release, where
+        // the flush puts the position at the target.
+        {
+                long us = 100000 + 99 * 16000;
+
+                for (; p.s.hand && us < 100000 + 99 * 16000 + 300000; us += 16667)
+                        precise_frames(&p, us, us);
+        }
         ok &= (long)p.s.at - (50000l << 8) == 1600 * UI_SCROLL_SCALE;
-        check("stream notch: a stream of 100 notches moves the region 800 px at 100 percent and 1600 px at 200 percent (the output scale)", ok);
+        check("stream notch: a stream of 100 notches moves the region 800 px at 100 percent and 1600 px at 200 percent (the output scale), all there at its release", ok);
+}
+
+// A stream's notch through the kit's stream path (the window's flags as the compositor sends them).
+static void stream_turn(struct precise_region address_to p, long us, int a)
+{
+        struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, a, 0};
+
+        ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now;
+        ui_wheel_turn(&p->ui, &p->s, &turn);
+}
+
+// The stream's smoothing and end (ui_scroll_step, ui_scroll_flush, ui_scroll_decaying): at 60 notches a second, 8 px a notch, the
+// position moves a frame at a time and never a whole notch in one frame; the stream's whole is at its release; a stream whose
+// intervals grow (a Mac's momentum decaying) throws nothing at its end; an abrupt stop at 60 a second (32 px a notch) throws like a
+// flick, about half a second's speed; and no notch, however large or many, takes the region past its span's reach.
+static fn check_stream_smooth(void)
+{
+        struct precise_region p;
+        long start = 50000l << 8, us, worst = 0, release_us = 0, at_release = 0, after = 0, coast = 0;
+        int frames_moving = 0;
+
+        // Thirty notches of 8 px, 16.7 ms apart: every frame moves less than a notch, and the stream's end is exact.
+        precise_setup(&p, 100000, 50000);
+        for (us = 100000; us < 100000 + 30 * 16667 + 3000000; us += 16667)
+        {
+                long before = (long)p.s.at;
+                int k = (int)((us - 100000) / 16667);
+
+                if (k < 30 && (us - 100000) % 16667 == 0)
+                        stream_turn(&p, us, -24);
+                ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_scroll_glide(&p.ui, &p.s);
+                if (k < 30 && (long)p.s.at - before > worst)
+                        worst = (long)p.s.at - before;
+                if ((long)p.s.at != before)
+                        frames_moving++;
+                if (!release_us && !p.s.hand)
+                        release_us = us, at_release = (long)p.s.at;
+        }
+        string_format(log, "  stream smooth: 8 px notches at 60 a second: the largest frame %b of 256ths (a notch is 2048), %p frames moving, released at %p us\n",
+                      (bipolar)worst, (positive)frames_moving, (positive)release_us);
+        check("stream smooth: thirty notches of 8 px at 60 a second move the region a frame at a time, no frame moving more than 1.5 notches (3072 of 256ths)",
+              worst > 0 && worst < 3072 && frames_moving > 30);
+        check("stream smooth: the whole of the stream is at its release, 30 x 8 px (61440 of 256ths), the flush carrying the remainder",
+              release_us && at_release - start == 30 * 2048);
+
+        // An abrupt stop at 60 a second, 32 px a notch (the rate's gain at its top): a throw, about 1920 px a second for half a second.
+        precise_setup(&p, 100000, 50000);
+        {
+                long end_us = 0, rest_at = 0;
+
+                for (us = 100000, release_us = 0; us < 100000 + 30 * 16667; us += 16667)
+                {
+                        if ((us - 100000) % 16667 == 0)
+                                stream_turn(&p, us, -96), end_us = us;
+                        ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                        ui_scroll_glide(&p.ui, &p.s);
+                }
+                for (long t = end_us + 16667; t < end_us + 3000000; t += 16667)
+                {
+                        long before = (long)p.s.scroll;
+
+                        precise_frames(&p, t, t);
+                        if (!release_us && !p.s.hand)
+                                release_us = t, rest_at = (long)p.s.scroll;
+                        (void)before;
+                }
+                coast = (long)p.s.scroll - rest_at;
+        }
+        string_format(log, "  stream smooth: an abrupt stop at 60 notches a second (32 px a notch) coasts %b px\n", (bipolar)coast);
+        check("stream smooth: an abrupt stop at 60 a second throws like a flick: about 1920 px a second for half a second, 800 to 1100 px",
+              coast >= 800 && coast <= 1100);
+
+        // Hostile: a huge notch and a flood at one instant hold the target inside the span.
+        precise_setup(&p, 1000, 400);
+        stream_turn(&p, 100000, -1073741824);
+        for (int k = 0; k < 5000; k++)
+                stream_turn(&p, 100000, k & 1 ? -96 : 96);
+        for (long t = 100000 + 16667; t < 1000000; t += 16667)
+                precise_frames(&p, t, t);
+        check("stream smooth: a huge notch and a flood at one instant leave the region inside its reach (a view past each end)",
+              p.s.scroll >= 0 && p.s.scroll <= 800 && p.s.to >= -200 * UI_SCROLL_SCALE && p.s.to <= (800 + 200) * UI_SCROLL_SCALE);
 }
 
 static fn check_kit_precise_stream(void)
@@ -161712,6 +161802,7 @@ b32 main()
         check_trackpad_speed();
         check_wheel_report();
         check_stream_gain();
+        check_stream_smooth();
         check_stream_fling();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
