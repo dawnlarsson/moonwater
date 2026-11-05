@@ -19215,8 +19215,10 @@ static b32 compositor_main()
                                 compositor.keymap.layout = (unsigned char)layout, compositor.layout_given = 1;
                 }
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'i'))
+                        // Read and write, so that a fifo has a writer (the compositor's own) while the driver that feeds it has none between its steps: opened
+                        // for reading alone, it answers every poll at once with a hangup and a read of nothing, and the loop turns at 100 percent of a core.
                         extra = (int)system_open_at(AT_FDCWD, program_argument(++at),
-                                                    FILE_READ | O_CLOEXEC | O_NONBLOCK);
+                                                    FILE_READ_WRITE | O_CLOEXEC | O_NONBLOCK);
         }
 
         compositor_keys_read();
