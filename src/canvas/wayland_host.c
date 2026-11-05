@@ -2510,7 +2510,7 @@ static void compositor_wl_drain(int row)
                         wayland_pointer_axis_stop(row);
                 else
                         // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward.
-                        wayland_pointer_axis(row, b != 0, b ? a : -a, (flags & WINDOW_WHEEL_PRECISE) != 0);
+                        wayland_pointer_axis(row, b != 0, b ? a : -a, (flags & WINDOW_WHEEL_PRECISE) != 0 && !(flags & WINDOW_WHEEL_STREAM));
         }
         __atomic_store_n(&table->event_tail[row], tail, __ATOMIC_RELEASE);
 }

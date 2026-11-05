@@ -3599,11 +3599,23 @@ struct compositor_absinfo
         the pad it is the right button. The rates are of the hand, by the pad's resolution: a millimetre a
         finger moves is COMPOSITOR_PAD_COUNTS of a mouse's counts (half of what a 1000 dpi mouse says), which
         the pointer's curve and sensitivity then take as they take a mouse's, and a millimetre two fingers move
-        is COMPOSITOR_PAD_WHEEL 120ths of a notch, a notch to six millimetres. A pad that does not say its
+        is COMPOSITOR_PAD_WHEEL 120ths of a notch. A notch is a row (40 device pixels at 100 percent, the kit's UI_ROW), so 12
+        is four device pixels a millimetre at 100 percent: a two-finger swipe of 40 mm moves the content 160 px, as far as the
+        same finger would move on a 21.5 inch 1920 by 1080 panel (1920 px over 476 mm is 4.03 px a mm). A pad that does not say its
         resolution is taken as a hundred millimetres wide, its height in the same units.
 */
 #define COMPOSITOR_PAD_COUNTS 20
-#define COMPOSITOR_PAD_WHEEL 20
+#define COMPOSITOR_PAD_WHEEL 12
+
+/*
+        A wheel's events from one device that come no more than COMPOSITOR_WHEEL_STREAM_NS apart are a stream: a trackpad's
+        motion as the wheel reports it (a notch to every report, sixty a second, or hi-res 120ths of a finger's pixels). A
+        stream's notches are the finger's motion (WINDOW_WHEEL_PRECISE: one for one, no step and no glide), and it ends when
+        no notch comes for that long (the kit's gap release throws on the hand's speed, as the touch path does). A notch after
+        a longer gap is a mouse's: a stepped notch, as it has always been. The first notch of a stream is stepped too, since
+        nothing says yet that a stream has begun.
+*/
+#define COMPOSITOR_WHEEL_STREAM_NS 40000000ull
 #define COMPOSITOR_PAD_WIDTH_MM 100
 
 struct compositor_pad
@@ -4204,6 +4216,7 @@ static struct
         int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
+        positive wheel_at[COMPOSITOR_INPUTS];   // when the device's last wheel event came, ns (compositor_wheel_stream: a stream's gap)
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
         struct compositor_pad pad[COMPOSITOR_INPUTS];
         // The device is a touch screen (compositor_touch_report), and its fingers; what they are doing; and whether the
@@ -11061,6 +11074,7 @@ static void compositor_input_add(unsigned int number)
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
+        compositor.wheel_at[at] = 0;
         // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
         // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
         {
@@ -16786,6 +16800,17 @@ static void compositor_wheel_precise(int v120, int horizontal)
         compositor_wheel_flags(v120, horizontal, WINDOW_WHEEL_PRECISE);
 }
 
+// Whether a wheel event of device at, read at now, is a stream's (COMPOSITOR_WHEEL_STREAM_NS from the device's last one). The
+// device's last is kept either way, so a stream that began is one for each notch after it.
+static int compositor_wheel_stream(unsigned int at, positive now)
+{
+        positive last = compositor.wheel_at[at];
+        int stream = last && now >= last && now - last <= COMPOSITOR_WHEEL_STREAM_NS;
+
+        compositor.wheel_at[at] = now;
+        return stream;
+}
+
 static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab;
@@ -18206,9 +18231,16 @@ static void compositor_input_read(unsigned int at)
                                 // A wheel that reports in 120ths is read from those, and its notches are not counted again.
                                 if (fine || !(compositor.hires[at] >> sideways & 1))
                                 {
+                                        // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
+                                        int stream = compositor_wheel_stream(at, now);
+
                                         compositor.table->input_wheel_used[at]++;
-                                        compositor_wheel(compositor_counts(0, fine ? (long long)event->value : (long long)event->value * 120),
-                                                         sideways);
+                                        int v120 = compositor_counts(0, fine ? (long long)event->value : (long long)event->value * 120);
+
+                                        if (stream)
+                                                compositor_wheel_flags(v120, sideways, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM);
+                                        else
+                                                compositor_wheel(v120, sideways);
                                 }
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)

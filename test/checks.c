@@ -133054,30 +133054,31 @@ static void check_compositor_wheel(void)
         check("pad: after the kernel dropped reports, the finger's next place is no jump of the pointer",
               compositor.pointer_x == 100 && compositor.pointer_y == 40);
         compositor.pointer_x = compositor.kept_x = 100;
-        // A second finger, and the two six millimetres up: a notch of the wheel up, and no move of the pointer.
+        // A second finger, and the two ten millimetres up (12 of the wheel's 120ths a millimetre): a notch of the wheel up, and no move
+        // of the pointer.
         table->event_tail[1] = table->event_head[1];
         wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 0);
         wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_DOUBLETAP, 1);
         wheel_feed(COMPOSITOR_EV_ABS, 1, 3000);
         wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
-        for (int step = 1; step <= 6; step++)
+        for (int step = 1; step <= 10; step++)
         {
             wheel_feed(COMPOSITOR_EV_ABS, 1, 3000 - step * 40);
             wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
         }
         compositor_input_read(0);
         sum = wheel_unread(1, &events, &last);
-        check("pad: two fingers six millimetres up are a notch of the wheel up, and the pointer stays",
+        check("pad: two fingers ten millimetres up are a notch of the wheel up, and the pointer stays",
               sum == 120 && compositor.pointer_x == 100 && compositor.pointer_y == 40);
         table->event_tail[1] = table->event_head[1];
-        for (int step = 1; step <= 12; step++)
+        for (int step = 1; step <= 20; step++)
         {
-            wheel_feed(COMPOSITOR_EV_ABS, 1, 2760 + step * 40);
+            wheel_feed(COMPOSITOR_EV_ABS, 1, 2600 + step * 40);
             wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
         }
         compositor_input_read(0);
         sum = wheel_unread(1, &events, &last);
-        check("pad: and twelve millimetres down are two notches down", sum == -240);
+        check("pad: and twenty millimetres down are two notches down", sum == -240);
         // The pad pressed with two fingers on it is the right button, let go as the right.
         table->event_tail[1] = table->event_head[1];
         head = table->event_head[1];
@@ -150026,6 +150027,163 @@ static fn check_pad_pinch(void)
                      (table->event_flags[row][(head + 3) % WINDOWS_EVENTS] & WINDOW_PINCH_END));
 }
 
+/*
+        A stream of precise turns: a notch's 120ths are a row's share, carried from one turn to the next, and the hand takes the
+        region from where it is. The rows: a trackpad's two fingers at 4 px a millimetre (COMPOSITOR_PAD_WHEEL), 40 mm one for one;
+        a stream of single 120ths adds up exactly; a stream's end is the gap's release, which throws on the hand's speed as a
+        touch drag's lift does; overscroll is the touch drag's; and no value (huge, negative, a flood) moves past the region.
+*/
+struct precise_region
+{
+        struct ui ui;
+        struct ui_scroll s;
+};
+
+static void precise_setup(struct precise_region address_to p, int content, int start)
+{
+        p->ui = terminal.ui;
+        p->ui.scale = 100;
+        memory_zero(&p->s, sizeof(p->s));
+        p->s.x = 100, p->s.y = 10, p->s.height = 200, p->s.content = content, p->s.view = 200, p->s.bounds = 1, p->s.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
+        ui_scroll_set(&p->s, start);
+}
+
+static void precise_turn(struct precise_region address_to p, long us, int a)
+{
+        struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, a, 0};
+
+        ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now;
+        ui_wheel_turn(&p->ui, &p->s, &turn);
+}
+
+// Frames a display period apart from us to until, the kit's clock on; each frame is the glide's.
+static void precise_frames(struct precise_region address_to p, long from, long until)
+{
+        for (long us = from; us <= until; us += 16667)
+        {
+                ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_scroll_glide(&p->ui, &p->s);
+        }
+}
+
+static fn check_pad_scroll(void)
+{
+        struct compositor_pad *pad = &compositor.pad[0];
+        struct precise_region p;
+        long total = 0, sum_v = 0;
+        int x, y, kind, reports = 0, kinds_wrong = 0;
+
+        memory_zero(&compositor, sizeof(compositor));
+        memory_zero(pad, sizeof(*pad));
+        pad->per_mm_x = pad->per_mm_y = 100;
+        pad->touching = 1, pad->fingers = 2, pad->moving = 1;
+        precise_setup(&p, 100000, 50000);
+        // 40 mm of a two-finger swipe, up, as 400 reports of a tenth of a millimetre each.
+        for (int k = 0; k < 400; k++)
+        {
+                pad->next_y = pad->at_y + 10;
+                kind = compositor_pad_report(pad, &x, &y);
+                kinds_wrong += kind != 2 || x != 0;
+                sum_v += y, reports++;
+                if (y)
+                        precise_turn(&p, 100000 + k * 8000, y);
+        }
+        total = (long)p.s.at - (50000l << 8);
+        string_format(log, "  pad scroll: 40 mm up in %p reports: the wheel %p 120ths, the region moved %p 256ths (%p px at 100 percent)\n",
+                      (positive)reports, (positive)(sum_v < 0 ? -sum_v : sum_v), (positive)(total < 0 ? -total : total), (positive)((total < 0 ? -total : total) / 256));
+        check("pad scroll: a two-finger swipe of 40 mm is 480 120ths of a notch (12 a millimetre), each report's remainder carried",
+              kinds_wrong == 0 && (sum_v == -480 || sum_v == 480));
+        check("pad scroll: 40 mm moves the content 160 px at 100 percent, exactly (40960 of 256ths: as far as the finger goes on a 1920 px panel)",
+              (total == 40960 || total == -40960));
+}
+
+static fn check_wheel_stream(void)
+{
+        int ok = 1, two = 0;
+        positive t = 1000000000ull;
+
+        memory_zero(&compositor, sizeof(compositor));
+        ok &= !compositor_wheel_stream(0, t);                                       // the first of a device is stepped
+        ok &= compositor_wheel_stream(0, t + 16000000);                             // 16 ms after: a stream
+        ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000);                // 100 ms after: a mouse's notch, stepped
+        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000);      // and the notch after that begins a stream
+        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000);      // the same instant: a stream still
+        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + COMPOSITOR_WHEEL_STREAM_NS);     // exactly the gap: a stream
+        ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + 2 * COMPOSITOR_WHEEL_STREAM_NS + 1); // one ns over: stepped
+        ok &= !compositor_wheel_stream(0, t);                                       // a clock that went back is no stream
+        check("wheel stream: a notch within 40 ms of the device's last is a stream, one after a longer gap is a mouse's (stepped)", ok);
+        two = compositor_wheel_stream(1, t + 16000000) == 0 && compositor_wheel_stream(1, t + 32000000);
+        check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
+}
+
+static fn check_kit_precise_stream(void)
+{
+        struct precise_region p, t;
+        long at0 = 50000l << 8, speed, rel_us = 0, glide_p, glide_t;
+
+        // Thirty turns of a third of a notch (-40 120ths, 13.3 px) eight milliseconds apart: 400 px at 100 percent.
+        precise_setup(&p, 100000, 50000);
+        for (int k = 0; k < 30; k++)
+                precise_turn(&p, 100000 + k * 8000, -40);
+        check("precise stream: 30 turns of 40 of 120ths (400 px at 100 percent) move the region 400 px, in 256ths exactly",
+              (long)p.s.at - at0 == 102400 && p.s.hand && p.s.precise && p.s.dragging);
+
+        // The stream stops: the gap (40 ms) releases the hand at the first frame past it, and the release throws on its speed
+        // (1666 px a second), as a touch drag's lift does. The touch path's release of the same speed from the same place,
+        // at the same frame, glides the same distance.
+        for (long us = 100000 + 29 * 8000 + 16667; us < 100000 + 29 * 8000 + 200000 && !rel_us; us += 16667)
+        {
+                precise_frames(&p, us, us);
+                if (!p.s.hand)
+                        rel_us = us;
+        }
+        speed = p.s.speed / UI_SCROLL_SCALE;
+        check("precise stream: the gap releases the hand and throws: the speed is the stream's, 1666 px a second, and the region glides on",
+              rel_us && !p.s.hand && p.s.gliding && speed > 1500 && speed < 1800);
+        t = p;
+        t.s.hand = t.s.precise = t.s.gliding = t.s.back.live = 0;
+        t.s.dragging = 1;
+        ui_scroll_let_go(&t.s, 1, speed);
+        for (long us = rel_us; us < rel_us + 2000000; us += 16667)
+        {
+                precise_frames(&p, us, us);
+                precise_frames(&t, us, us);
+        }
+        glide_p = (long)p.s.scroll, glide_t = (long)t.s.scroll;
+        check("precise stream: the lift fling travels the touch fling's distance for the same speed, to within a pixel",
+              glide_p - glide_t <= 1 && glide_t - glide_p <= 1 && glide_p - 50400 > 300);
+        string_format(log, "  precise stream: the lift at %p px/s glides the region to %p (the touch path to %p)\n",
+                      (positive)speed, (positive)glide_p, (positive)glide_t);
+
+        // Overscroll: three turns up past the top (120 px) are the touch drag's pull by the same pixels, drawn the same.
+        precise_setup(&p, 1000, 0);
+        precise_setup(&t, 1000, 0);
+        for (int k = 0; k < 3; k++)
+                precise_turn(&p, 100000 + k * 8000, 120);
+        ui_scroll_drag(&t.s, -120);
+        {
+                int edge_p, edge_t;
+                b64 stretch_p = ui_scroll_stretched(&p.s, &edge_p), stretch_t = ui_scroll_stretched(&t.s, &edge_t);
+
+                check("precise stream: a pull past the top stretches the region as a touch drag does, by the same pixels and the same edge",
+                      p.s.at == t.s.at && stretch_p == stretch_t && edge_p == edge_t && edge_p == -1);
+        }
+
+        // Hostile: a turn past any span, one of each sign, and a flood in one millisecond: the region stays inside its ends.
+        precise_setup(&p, 1000, 400);
+        precise_turn(&p, 100000, 1073741824);
+        check("precise stream: a turn of 2^30 120ths is held to the region's span (no wrap, no past its end)",
+              p.s.scroll >= 0 && p.s.scroll <= 800 && p.s.at <= (800 + 200) * UI_SCROLL_SCALE + 1);
+        precise_turn(&p, 100000, -1073741824);
+        check("precise stream: and back the other way, the region stays in its span", p.s.scroll >= 0 && p.s.scroll <= 800);
+        for (int k = 0; k < 10000; k++)
+                precise_turn(&p, 200000, k & 1 ? -40 : 40);
+        check("precise stream: a flood of 10000 turns in one millisecond is held inside the region (up to a view past each end)",
+              p.s.at >= -200 * UI_SCROLL_SCALE && p.s.at <= (800 + 200) * UI_SCROLL_SCALE);
+        ui_kit.test_clock = 0;
+}
+
 // The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
 static fn check_kit_cell_rules(void)
 {
@@ -161250,6 +161408,9 @@ b32 main()
         check_pinch_delivery();
         check_kit_axis_swipe();
         check_pad_pinch();
+        check_pad_scroll();
+        check_wheel_stream();
+        check_kit_precise_stream();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

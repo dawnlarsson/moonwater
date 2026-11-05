@@ -6143,6 +6143,7 @@ struct ui_scroll
         b32 absorb;                // a wheel's burst has had its bump at an end: the notches that go on pushing there are taken and move nothing
         b32 hand;                  // a notch past an end or a precise input has the region in hand (ui_scroll_hand)
         b32 precise;               // the hand is a trackpad's: its release throws on its speed. A wheel's notches are no finger, and throw nothing
+        long precise_rest;         // 120ths of a 256th a precise turn has not moved whole, carried to the next turn (ui_wheel_turn)
         struct ui_drag hand_drag;  // the hand's reports, fitted for the release's speed (ui_scroll_release)
 };
 
@@ -6352,6 +6353,7 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_SCROLL_TAU_NS 36000000l     // a wheel notch's and a throw's glide: its speed falls by e in this long (a notch settles in 158 ms at 1x)
 #define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
+#define UI_PRECISE_MOST (1l << 24)     // the most one precise turn moves a region, in 256ths of a device pixel (65536 px)
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
 #define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
@@ -7009,7 +7011,16 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 return ui_scroll_end(s);
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || s->unit > 0)
                 return ui_scroll_wheel(ui, s, event->a);
-        return ui_scroll_precise(ui, s, (int)((long)event->a * UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE / 120));
+        {
+                // The turn is a row's share of its 120ths, in 256ths of a pixel. What a turn does not move whole (120ths of a 256th)
+                // is carried to the next, so a stream of single 120ths adds up exactly. Clamped to a span no region holds, so no
+                // value makes the cast wrap.
+                long total = (long)event->a * UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE + s->precise_rest, q = total / 120;
+
+                s->precise_rest = total - q * 120;
+                q = q > UI_PRECISE_MOST ? UI_PRECISE_MOST : q < -UI_PRECISE_MOST ? -UI_PRECISE_MOST : q;
+                return ui_scroll_precise(ui, s, (int)q);
+        }
 }
 
 /* ---- end of the kit's controls ---- */
