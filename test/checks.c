@@ -150821,11 +150821,24 @@ static void check_kit_body(void)
         string_format(log, "  kit body: touch T02's top dip: lowest %b px (recorded -22), worst error %p px\n", (bipolar)dip_low, (positive)worst_dip);
         check("kit body: a coast into the top is pushed past it, drawn as the rubber band, and springs home within 3 px of the recorded dip", dip_ok && dip_low < -15);
 
+        ui_kit.scroll_off = 0;
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
         ui_body_driven(&b, 1000ll << UI_Q, 0);
         drawn = ui_body_drawn(&b) >> UI_Q;
         driven_ok = drawn >= 319 && drawn <= 321;
-        check("kit body: an OS momentum delta of 1000 moves the view 220 (the 0.22 the view shows)", driven_ok);
+        check("kit body: momentum on, an OS momentum delta of 1000 moves the view 220 (the 0.22 the view shows)", driven_ok);
+
+        ui_kit.scroll_off = WINDOW_SCROLL_STOPS;
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
+        ui_body_driven(&b, 1000ll << UI_Q, 0);
+        check("kit body: momentum off, an OS momentum delta of 1000 moves nothing: the body stays at 100 where the fingers left it",
+              ui_body_drawn(&b) == 100ll << UI_Q && b.state != BODY_DRIVEN);
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
+        ui_body_track(&b, -300ll << UI_Q, 0);
+        ui_body_let_go(&b, 0, 0);
+        ui_body_step(&b, 2000000000ll);
+        check("kit body: momentum off, a finger 300 px past the top still springs home to 0", ui_body_drawn(&b) == 0 && !ui_body_going(&b));
+        ui_kit.scroll_off = 0;
 
         reach_small = ui_body_rubber(&b, 50ll << UI_Q);
         reach_big = ui_body_rubber(&b, 5000ll << UI_Q);

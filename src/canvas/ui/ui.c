@@ -6112,8 +6112,8 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 
         The Scrolling group's switches are read here, from ui_kit.scroll_off (the table's, WINDOW_SCROLL_*): natural direction turns the
         sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_q), momentum off makes a release's coast 0
-        (ui_body_let_go, so the body settles where it is and a pull past an end still springs home), and the rubber band off holds the
-        position inside the ends as it moves (ui_body_pin, ui_body_clamp), so nothing is drawn past an end and nothing springs.
+        and an OS momentum delta move nothing (ui_body_let_go, ui_body_driven: the body settles where it is, and a pull past an end still
+        springs home), and the rubber band off holds the position inside the ends as it moves (ui_body_pin, ui_body_clamp).
         The thumb's own drag and a reveal are not turned: they move the body to where the hand or the view puts it.
 */
 #define BODY_CARRY (UI_ONE * 7 / 10)         // the coast's first speed, of the lift's (fit 0.70; the free-coast rows hold to 35 percent of the travel)
@@ -6271,9 +6271,11 @@ static void ui_body_finger(struct ui_body address_to b, b64 delta, b64 at)
         ui_body_track(b, ui_body_sign(delta), at);
 }
 
-// an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end
+// an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end; momentum off, nothing
 static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
 {
+        if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS)
+                return;
         ui_body_step(b, at);
         b->raw += ui_qmul(delta, BODY_VIEW_FACTOR);
         ui_body_pin(b);
