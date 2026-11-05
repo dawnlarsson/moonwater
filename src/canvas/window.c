@@ -117,7 +117,7 @@
 /*
         A motion that is no step the hand made: a finger's or a pen's lead (the place it was told at, a frame ahead of where it is)
         taken away at its lift or in a frame with no report, so the window knows where the hand is. It is a place and not a speed: a
-        program that reads the hand's velocity off its moves leaves it out (the kit does, ui_drag_follow), as the step back it is
+        program that reads the hand's velocity off its moves leaves it out (the kit does, ui_press_track), as the step back it is
         would read as the hand turning.
 */
 #define WINDOW_KEY_SETTLE 4096u
@@ -2690,7 +2690,7 @@ struct window_event
         unsigned int type, flags;
         int a, b;
         // When the device made it (its evdev stamp, CLOCK_MONOTONIC nanoseconds), or 0 when none was given: a drag, its velocity and
-        // its late lift read this, not the time the program dispatched the event (ui_drag_now), so a batch of reports is its own speed.
+        // its late lift read this, not the time the program dispatched the event (ui_press_now), so a batch of reports is its own speed.
         unsigned long long when;
 };
 
@@ -2923,14 +2923,6 @@ static void window_trace_flush(void)
                 window_trace_out(window_trace_text, window_trace_length);
         window_trace_length = 0;
 }
-
-// The reasons a release throws or does not, as the trace names them (ui_throw_reason answers one).
-static const char address_to __attribute__((unused)) window_trace_reason_thrown = "thrown";
-static const char address_to __attribute__((unused)) window_trace_reason_below = "below the floor";
-static const char address_to __attribute__((unused)) window_trace_reason_late = "late lift, decayed";
-static const char address_to __attribute__((unused)) window_trace_reason_rested = "rested before the lift";
-static const char address_to __attribute__((unused)) window_trace_reason_samples = "no samples";
-static const char address_to __attribute__((unused)) window_trace_reason_slope = "no slope";
 
 // A word of text (a reason), appended as it is. string_format's %s does not come out through this writer, so a line with a word in it
 // is made of parts: WINDOW_TRACE_START, WINDOW_TRACE_PART (the formatter's numbers), window_trace_word, WINDOW_TRACE_END.

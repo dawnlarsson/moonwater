@@ -1303,29 +1303,16 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
 }
 
 /*
-        A list dragged by a finger follows it, and let go while moving it goes on, slowing as a thing thrown does,
-        until it stops. Speeds are pixels a second, times are the monotonic clock's nanoseconds, all whole numbers. The
-        time of a call is the kit's (ui_kit_time: the pass's, or the event's), except ui_drag_velocity and ui_drag_fling,
-        which take the time they are asked for (a hand's release reads the velocity at its last report, not now).
-
-            ui_drag_start(drag, at)   the finger took the list at at (a y, or an x)
-            ui_drag_follow(drag, at)  the finger is at at: how far the list moves, the finger's move since the last
-            ui_drag_let_go(drag)      the finger lifted: whether the list is thrown (ui_drag_step moves it then)
-            ui_drag_step(drag)        a throw's move since the last step, and 0 once it stopped (flying is false);
-                                           the app steps it again UI_DRAG_FRAME_NS later while it flies
-            ui_drag_stop(drag)             it stops at once: a press, a key, the end of the list
+        A hand's reports are kept in its press (struct ui_press, the one tracker): a finger's on a list, a page, a grid or a text, and a
+        trackpad's in a region (ui_scroll.hand). The hand took the region at a place (ui_press_track_start); each report moves it by the
+        pixels since the last one (ui_press_track); and the release's speed is fitted over the reports (ui_press_velocity), the one
+        velocity estimate. The throw is the body's: ui_body_let_go carries a region on that speed, and ui_body_free a throw with no
+        ends. A call's time is the kit's (ui_kit_time) or the event's (ui_press_now: the device's stamp, so a batch is its own speed).
 */
 #include "motion.h"
 static inline b64 ui_qmul(b64 a, b64 b);
 static b64 ui_exp_neg(b64 x);
-#define UI_DRAG_FRAME_NS 16000000l
-#define UI_DRAG_THROW 300   // the least speed a finger lets go at that throws the list, in dp a second (300 at 100%, as it was in px; Android's
-                            // minimum is 50 dp/s, held up until a trackpad's stop-and-hold residual is judged by a pause rule: see the memory note)
-#define UI_THROW_MAX 8000   // the fastest a throw may be, in dp a second (Android's maximum fling velocity, 8000 dp/s)
-#define UI_DRAG_STILL 20    // the speed a throw stops at
-#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel's rule)
-
-#define UI_DRAG_SAMPLES 16
+#define UI_PRESS_SAMPLES 16
 #define UI_FLING_NS 40000000ul // the horizon a flick's velocity is fitted over: the reports of its last 40 ms (at least three)
 #define UI_FLING_STALE_NS 60000000ul // a lift this long after the last report is late: what the finger was doing at that report has begun to fall
 #define UI_FLING_LATE_NS 120000000ul // and falls by e in this long past it: a panel tells its finger's lift late (optical and resistive ones by 50 to 150 ms,
@@ -1334,107 +1321,70 @@ static b64 ui_exp_neg(b64 x);
 
 // The kit's time as the pass or the event set it (ui_kit.now), for the motion functions that take none.
 static positive ui_kit_time(void);
-static positive ui_drag_now(void); // the time a drag reads for its event: the device's stamp, else ui_kit_time (defined with the kit's state)
+static positive ui_press_now(void); // the time a hand reads for its event: the device's stamp, else ui_kit_time (defined with the kit's state)
 
-struct ui_drag
+struct ui_press
 {
-        int last;          // where the finger was at the last move
-        long speed;        // pixels a second, signed
-        b64 owed;          // a throw's move not yet given, in Q30 pixels
-        b64 rate;          // a throw's speed in Q30 pixels a second, the one the steps fall by e of
-        positive at;       // when the last move or step was
-        b32 flying;
-        int samples;       // the finger's last reports, oldest first: when, and where it was
-        positive when[UI_DRAG_SAMPLES];
-        int where[UI_DRAG_SAMPLES];
-        int batch;         // the first of the reports handed over together (within 2 ms of batch_at), whose time is shared out
-        positive batch_at; // when the batch came
+        int x, y, target;                    // where it went down and on what (-1 nothing)
+        b32 down, touch, dragged;
+        int last;                            // where the hand was at its last report
+        int samples;                         // the hand's last reports, oldest first: when, and where it was
+        positive when[UI_PRESS_SAMPLES];
+        int where[UI_PRESS_SAMPLES];
+        int batch;                           // the first of the reports handed over together (within 2 ms of batch_at), whose time is shared out
+        positive batch_at;                   // when the batch came
+        struct ui_scroll address_to region;  // the scroll region a finger drags, or null
 };
 
-static fn ui_drag_start(struct ui_drag address_to drag, int at)
+// The hand took the region at at (a y, or an x): its reports start again.
+static fn ui_press_track_start(struct ui_press address_to press, int at)
 {
-        positive now = ui_drag_now();
-        drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
-        drag->samples = 0, drag->batch = 0, drag->batch_at = 0;
+        press->last = at, press->samples = 0, press->batch = 0, press->batch_at = 0;
 }
 
-static int ui_drag_follow(struct ui_drag address_to drag, int at)
+// The hand moved to at: the report keeps its place and its time, and the pixels since the last report are answered. A retaken hand
+// (ui_kit_retract: the compositor's taking back of the lead, at the lift or in a frame with no report) puts the place where the hand
+// is, and is no report of speed.
+static int ui_press_track(struct ui_press address_to press, int at)
 {
-        positive now = ui_drag_now();
-        int moved = at - drag->last;
-        long gap = now > drag->at ? (long)(now - drag->at) : 0;
+        positive now = ui_press_now();
+        int moved = at - press->last;
 
-        // The compositor's taking back of the finger's lead (at its lift, or in a frame with no report) puts the hand where it is: the
-        // list goes with it, but it is no report of how fast the finger goes, and a step back at the lift read as the finger turning.
         if (ui_kit_retract)
         {
-                drag->last = at;
+                press->last = at;
                 return moved;
         }
-
         {
                 // Reports handed over together (a window that was busy, or a compositor that joins what came within a frame) carry
                 // the time they were handed over at, which is no time at all: the time since the report before them is shared out
                 // evenly among them, so a burst of four reads as four steps and not as one finger that stopped.
-                b32 joined = drag->samples && drag->batch_at && now >= drag->batch_at && now - drag->batch_at < 2000000ul;
+                b32 joined = press->samples && press->batch_at && now >= press->batch_at && now - press->batch_at < 2000000ul;
 
-                if (drag->samples == UI_DRAG_SAMPLES)
+                if (press->samples == UI_PRESS_SAMPLES)
                 {
-                        for (int k = 1; k < UI_DRAG_SAMPLES; k++)
-                                drag->when[k - 1] = drag->when[k], drag->where[k - 1] = drag->where[k];
-                        drag->samples--;
-                        drag->batch = drag->batch > 0 ? drag->batch - 1 : 0;
+                        for (int k = 1; k < UI_PRESS_SAMPLES; k++)
+                                press->when[k - 1] = press->when[k], press->where[k - 1] = press->where[k];
+                        press->samples--;
+                        press->batch = press->batch > 0 ? press->batch - 1 : 0;
                 }
-                drag->when[drag->samples] = now, drag->where[drag->samples] = at, drag->samples++;
+                press->when[press->samples] = now, press->where[press->samples] = at, press->samples++;
                 if (!joined)
-                        drag->batch = drag->samples - 1, drag->batch_at = now;
-                else if (drag->batch > 0)
+                        press->batch = press->samples - 1, press->batch_at = now;
+                else if (press->batch > 0)
                 {
-                        positive from = drag->when[drag->batch - 1];
-                        long count = drag->samples - drag->batch;
+                        positive from = press->when[press->batch - 1];
+                        long count = press->samples - press->batch;
 
                         for (long j = 0; j < count; j++)
-                                drag->when[drag->batch + j] = from + (now - from) * (positive)(j + 1) / (positive)count;
+                                press->when[press->batch + j] = from + (now - from) * (positive)(j + 1) / (positive)count;
                 }
         }
-
-        // The speed is the moves of the last few reports, the newest weighed most.
-        if (gap > 0)
-        {
-                long seen = (long)moved * 1000000000l / (gap < 4000000l ? 4000000l : gap);
-
-                drag->speed = gap > 100000000l ? seen : (drag->speed * 2 + seen * 3) / 5;
-        }
-        drag->last = at;
-        drag->at = now;
+        press->last = at;
         return moved;
 }
 
-/*
-        The finger's velocity at its lift, pixels a second, signed: the derivative at its last report of a parabola fitted (least squares)
-        through the reports of the UI_FLING_NS before it (at least the last three). A line through a window is the window's mean, and a
-        finger that slowed to a stop in it still has a mean: the parabola's slope at the end is what the finger was doing as it let go,
-        so a gesture that came to rest throws nothing and a flick that is still fast keeps its speed, at any report rate. Fitted rather
-        than differenced, so one jittery report does not set the throw. Two reports give the line through them; none, one, a stale last
-        report (the lift is more than UI_FLING_GONE_NS after it: the finger rested) or a slope that goes the other way than the line
-        gives 0; a lift later than UI_FLING_STALE_NS after the last report gets the speed it had there, fallen by e for every
-        UI_FLING_LATE_NS more (ui_drag_late: a finger that came to rest has a slope near nothing at its last report and still throws
-        nothing, and a flick whose lift the device told late still rolls); and the speed is never more than a quarter over the fastest
-        step between two of the reports. Times are in ms before the
-        last report, which keeps the sums in 64 bits (at most sixteen reports in 100 ms); a slope in pixels a ms is a thousand times that
-        a second. Reports handed over together have the time since the report before them shared out evenly (ui_drag_follow), so a
-        batch handed over at once is not a speed made of equal times.
-*/
-// A speed (pixels a second) at the last report of a finger, for a lift that came gap ns after that report: as it was up to
-// UI_FLING_STALE_NS, then fallen by e for every UI_FLING_LATE_NS.
-static long ui_drag_late(long speed, positive gap)
-{
-        if (gap <= UI_FLING_STALE_NS)
-                return speed;
-        return (long)ui_qmul((b64)speed, ui_exp_neg((b64)(gap - UI_FLING_STALE_NS) * UI_ONE / (b64)UI_FLING_LATE_NS));
-}
-
-static long ui_drag_slope(long address_to num, long address_to den)
+static long ui_press_slope(long address_to num, long address_to den)
 {
         long whole, rest, unit;
 
@@ -1446,25 +1396,39 @@ static long ui_drag_slope(long address_to num, long address_to den)
         return whole * 1000 + (unit ? rest / unit : rest * 1000 / *den);
 }
 
-static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
+/*
+        The release's velocity, pixels a second, signed: the derivative at the hand's last report of a parabola fitted (least squares)
+        through the reports of the UI_FLING_NS before it (at least the last three). A line through a window is the window's mean, and a
+        finger that slowed to a stop in it still has a mean: the parabola's slope at the end is what the finger was doing as it let go,
+        so a gesture that came to rest throws nothing and a flick that is still fast keeps its speed, at any report rate. Fitted rather
+        than differenced, so one jittery report does not set the throw. Two reports give the line through them; none, one, a stale last
+        report (the lift is more than UI_FLING_GONE_NS after it: the finger rested) or a slope that goes the other way than the line
+        gives 0; a lift later than UI_FLING_STALE_NS after the last report gets the speed it had there, fallen by e for every
+        UI_FLING_LATE_NS more (a finger that came to rest has a slope near nothing at its last report and still throws nothing, and a
+        flick whose lift the device told late still rolls); and the speed is never more than a quarter over the fastest step between two
+        of the reports. Times are in ms before the last report, which keeps the sums in 64 bits (at most sixteen reports in 100 ms); a slope
+        in pixels a ms is a thousand times that a second. Reports handed over together have the time since the report before them shared
+        out evenly (ui_press_track), so a batch handed over at once is not a speed made of equal times.
+*/
+static long ui_press_velocity(const struct ui_press address_to press, positive now)
 {
-        long t[UI_DRAG_SAMPLES], y[UI_DRAG_SAMPLES], n = 0, st = 0, sy = 0, stt = 0, sty = 0, fastest = 0, line_num, line_den, line, speed;
+        long t[UI_PRESS_SAMPLES], y[UI_PRESS_SAMPLES], n = 0, st = 0, sy = 0, stt = 0, sty = 0, fastest = 0, line_num, line_den, line, speed;
         positive last;
 
-        if (drag->samples < 2)
+        if (press->samples < 2)
                 return 0;
-        last = drag->when[drag->samples - 1];
+        last = press->when[press->samples - 1];
         if (now > last && now - last > UI_FLING_GONE_NS)
                 return 0;
         // The newest first: those within the horizon, and at least the last three while they are within 100 ms.
-        for (int k = drag->samples - 1; k >= 0; k--)
+        for (int k = press->samples - 1; k >= 0; k--)
         {
-                positive age = last - drag->when[k];
+                positive age = last - press->when[k];
 
-                if (drag->when[k] > last || age > 100000000ul || (age > UI_FLING_NS && n >= 3))
+                if (press->when[k] > last || age > 100000000ul || (age > UI_FLING_NS && n >= 3))
                         break;
                 t[n] = -(long)((age + 500000ul) / 1000000ul);
-                y[n] = (long)drag->where[k] - (long)drag->where[drag->samples - 1];
+                y[n] = (long)press->where[k] - (long)press->where[press->samples - 1];
                 n++;
         }
         if (n < 2)
@@ -1480,7 +1444,7 @@ static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
                 }
         }
         line_num = n * sty - st * sy, line_den = n * stt - st * st;
-        line = ui_drag_slope(&line_num, &line_den);
+        line = ui_press_slope(&line_num, &line_den);
         speed = line;
         if (n >= 3)
         {
@@ -1492,101 +1456,22 @@ static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
                 det = n * (stt * s4 - s3 * s3) - st * (st * s4 - s3 * stt) + stt * (st * s3 - stt * stt);
                 det_b = n * (sty * s4 - s3 * s2y) - sy * (st * s4 - s3 * stt) + stt * (st * s2y - sty * stt);
                 if (det > 0)
-                        speed = ui_drag_slope(&det_b, &det);
+                        speed = ui_press_slope(&det_b, &det);
         }
         if (speed == 0 || (speed > 0) != (line > 0))
                 return 0;
         fastest += fastest / 4;
         speed = speed > fastest ? fastest : speed < -fastest ? -fastest : speed;
-        return ui_drag_late(speed, now > last ? now - last : 0);
-}
-
-// The release's velocity, for every drag (a finger, a trackpad's hand, a terminal's scrollback): the fit over its last reports, fallen
-// for a lift that came late, and none when the finger rested before it lifted (no report for UI_FLING_GONE_NS).
-static long ui_drag_velocity(const struct ui_drag address_to drag, positive now)
-{
-        if (now > drag->at && now - drag->at > UI_FLING_GONE_NS)
-                return 0;
-        return ui_drag_fling(drag, now);
-}
-
-// The throw's floor and cap in device pixels a second at the scale (a dp is a logical pixel): the same speed is the same flick on
-// every screen, whatever its scale (a 2x screen throws at 2x the pixels, not at a fixed 300 of them).
-static long ui_throw_least(int scale)
-{
-        return UI_DRAG_THROW * (long)(scale > 0 ? scale : 100) / 100;
-}
-
-static long ui_throw_most(int scale)
-{
-        return UI_THROW_MAX * (long)(scale > 0 ? scale : 100) / 100;
-}
-
-static b32 ui_throws(long speed, int scale)
-{
-        return speed >= ui_throw_least(scale) || speed <= -ui_throw_least(scale);
-}
-
-// The finger lifted, at the scale the drag is drawn at (a list's, a terminal's): ui_drag_let_go is that at the standard scale.
-static b32 ui_drag_throw_let_go(struct ui_drag address_to drag, int scale)
-{
-        positive now = ui_drag_now();
-        // A finger that stopped before it lifted throws nothing, and one whose lift came late throws what it was doing, less (ui_drag_late).
-        if (now > drag->at && now - drag->at > UI_FLING_GONE_NS)
-                drag->speed = 0;
-        else
-                drag->speed = ui_drag_late(drag->speed, now > drag->at ? now - drag->at : 0);
-        drag->flying = ui_throws(drag->speed, scale);
-        drag->owed = 0;
-        drag->rate = (b64)drag->speed * UI_ONE;
-        drag->at = now;
-        return drag->flying;
-}
-
-static b32 ui_drag_let_go(struct ui_drag address_to drag)
-{
-        return ui_drag_throw_let_go(drag, 100);
-}
-
-static int ui_drag_step(struct ui_drag address_to drag)
-{
-        positive now = (positive)ui_kit_time();
-        long gap = now > drag->at ? (long)(now - drag->at) : 0, whole;
-        b64 e, moved;
-
-        if (!drag->flying)
-                return 0;
-        gap = gap > 100000000l ? 100000000l : gap;
-        // The speed falls by e in UI_DRAG_SLOW_NS, from where it is, as the wheel's speed does: the move is the speed's
-        // integral over the gap and the speed after is its fall's end. So a step of any length moves the same distance, and
-        // a throw stepped at 60 Hz covers what it covers at 120 Hz (a floor per step made the faster steps slow down less).
-        e = ui_exp_neg((b64)gap * UI_ONE / UI_DRAG_SLOW_NS);
-        moved = ui_qmul(ui_qmul(drag->rate, UI_DRAG_SLOW_NS * UI_ONE / 1000000000ll), UI_ONE - e);
-        drag->owed += moved;
-        whole = (long)(drag->owed / UI_ONE);
-        drag->owed -= (b64)whole * UI_ONE;
-        drag->rate = ui_qmul(drag->rate, e);
-        drag->speed = (long)(drag->rate / UI_ONE);
-        drag->at = now;
-        // It stops when it is slower than a pixel's share a second: the stop is the speed, not a round-down in the steps.
-        if (drag->rate < UI_DRAG_STILL * UI_ONE && drag->rate > -UI_DRAG_STILL * UI_ONE)
-                drag->flying = false;
-        return (int)whole;
-}
-
-static fn ui_drag_stop(struct ui_drag address_to drag)
-{
-        drag->flying = false;
-        drag->speed = 0;
-        drag->owed = 0;
-        drag->rate = 0;
+        if (now > last && now - last > UI_FLING_STALE_NS)
+                speed = (long)ui_qmul((b64)speed, ui_exp_neg((b64)(now - last - UI_FLING_STALE_NS) * UI_ONE / (b64)UI_FLING_LATE_NS));
+        return speed;
 }
 
 /*
         A press: a button or a finger that went down, and what it is on. A finger on a touch screen (WINDOW_KEY_TOUCH on what the
         compositor sends) is wider than a pointer and shakes as it lands, so what it can press is at least UI_TARGET logical pixels
         each way however small it is drawn, the drawn shape in the middle of that (ui_hit); a press held moves nothing until it is
-        UI_SLOP from where it went down, and past that it is a drag (the list follows the finger, ui_drag) and no click; and a press
+        UI_SLOP from where it went down, and past that it is a drag (the list follows the finger, ui_press_follow) and no click; and a press
         the compositor takes back (WINDOW_KEY_CANCEL: a second finger, or one held for the right button) is no click either. What is
         under a press is shown pressed the moment it goes down, not when it comes up, for a mouse's press as for a finger's; the app
         numbers what can be pressed as it likes (a row, a button). A finger's press also drags a scroll region (ui_press_down): its
@@ -1603,14 +1488,6 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
         How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
 */
 #define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
-
-struct ui_press
-{
-        int x, y, target;                    // where it went down and on what (-1 nothing)
-        b32 down, touch, dragged;
-        struct ui_drag drag;                 // a finger's reports, fitted for the throw its lift makes (ui_press_follow, ui_press_lift)
-        struct ui_scroll address_to region;  // the scroll region a finger drags, or null
-};
 
 static fn ui_press_begin(struct ui_press address_to press, int x, int y, int target, b32 touch)
 {
@@ -2403,7 +2280,7 @@ static struct ui_kit
         int reach_top, reach_bottom;
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
-        b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a drag reads its time from it (ui_drag_now)
+        b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a hand reads its time from it (ui_press_now)
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
 
 static positive ui_kit_time(void)
@@ -2411,9 +2288,9 @@ static positive ui_kit_time(void)
         return (positive)ui_kit.now;
 }
 
-// The time a drag reads for the event it is handed: the device's stamp of the event (ui_kit.stamp, set by ui_event_context), or the
+// The time a hand reads for the event it is handed: the device's stamp of the event (ui_kit.stamp, set by ui_event_context), or the
 // kit's time when the event has none. The dispatch time is when the program got to it, which for a batch is one time for many reports.
-static positive ui_drag_now(void)
+static positive ui_press_now(void)
 {
         return ui_kit.stamp ? (positive)ui_kit.stamp : (positive)ui_kit.now;
 }
@@ -6131,6 +6008,8 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
 #define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
+#define BODY_FREE_AT ((b64)1 << 50)          // a free throw starts 2^20 pixels along, and its far end is as far again (ui_body_free)
+#define UI_BODY_FRAME_NS 16000000l           // a body that moves is stepped again this long later: a frame
 
 #define BODY_NOTCH_OMEGA 22                  // a wheel's notches move a target, and the position follows it critically damped at this rate, per second: it eases in from rest, and a notch on a notch keeps its speed
 #define BODY_NOTCH_PULL 2                    // a notch's travel past an end counts this many times, so that a wheel at an end stretches the band as a pad's pull does
@@ -6153,6 +6032,7 @@ struct ui_body
         b64 at;              // when the body was last stepped, ns
         b64 target;          // a notch's target, units (Q30): where the position is going while BODY_NOTCH
         b64 pushed;          // when the last notch moved the target, ns: past an end the band is held while notches keep coming
+        b64 sent;            // a free throw's position already given as whole pixels (ui_body_given)
 };
 
 static b64 ui_body_far(const struct ui_body address_to b)
@@ -6404,15 +6284,35 @@ static void ui_body_settle(struct ui_body address_to b)
                 b->state = BODY_IDLE;
 }
 
-// a finger lets go at a speed (units a second, positive toward the far end) on a screen at the scale: a speed under BODY_STILL throws
-// nothing, and one over the cap (ui_throw_most) is thrown at the cap
+/*
+        The throw's floor and cap, in dp a second at the scale (a dp is a logical pixel): the same speed is the same flick on every screen,
+        whatever its scale. The body judges both (ui_body_let_go): a release under the floor throws nothing, and one over the cap is thrown
+        at the cap. These are the only two throw numbers.
+*/
+#define UI_THROW_LEAST 300  // the least speed a release throws at, in dp a second (300 at 100%, as it was in px; Android's minimum is 50 dp/s, held up until a trackpad's stop-and-hold residual is judged by a pause rule: see the memory note)
+#define UI_THROW_MAX 8000   // the fastest a throw may be, in dp a second (Android's maximum fling velocity, 8000 dp/s)
+
+static long ui_throw_most(int scale)
+{
+        return UI_THROW_MAX * (long)(scale > 0 ? scale : 100) / 100;
+}
+
+static b32 ui_throws(long speed, int scale)
+{
+        long least = UI_THROW_LEAST * (long)(scale > 0 ? scale : 100) / 100;
+
+        return speed >= least || speed <= -least;
+}
+
+// a finger lets go at a speed (units a second, positive toward the far end) on a screen at the scale: a speed under BODY_STILL, or under
+// the floor (ui_throws), throws nothing, and one over the cap (ui_throw_most) is thrown at the cap
 static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at, int scale)
 {
         b64 far, most = (b64)ui_throw_most(scale) * UI_ONE;
         b32 edge;
 
         ui_body_step(b, at);
-        if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS)
+        if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS || !ui_throws((long)(speed / UI_ONE), scale))
                 speed = 0;
         speed = speed > most ? most : speed < -most ? -most : speed;
         far = ui_body_far(b);
@@ -6489,6 +6389,28 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
 }
 
 /*
+        A throw with no ends: the alternate screen's arrows and a text's lines are moved by whole pixels (ui_body_given), and no place
+        of it is an end. It starts BODY_FREE_AT units along, with its far end as far again, so the throw never reaches either one.
+*/
+static void ui_body_free(struct ui_body address_to b, long speed, b64 at, int scale)
+{
+        ui_body_set(b, UI_ONE, BODY_FREE_AT * 2, BODY_FREE_AT, at);
+        b->sent = BODY_FREE_AT;
+        ui_body_let_go(b, (b64)speed * UI_ONE, at, scale);
+}
+
+// The whole pixels a free throw has moved since they were last given, stepped to at: the caller moves its lines by them.
+static long ui_body_given(struct ui_body address_to b, b64 at)
+{
+        b64 whole;
+
+        ui_body_step(b, at);
+        whole = (b->raw - b->sent) / UI_ONE;
+        b->sent += whole * UI_ONE;
+        return (long)whole;
+}
+
+/*
         The scrollbar, every scrolling region's (ui.css's ::-webkit-scrollbar): a
         track 10 wide at the region's right edge, a clear 3 round a pill thumb (4
         wide), the ink at .18 and .30 while hovered or held, shown whenever what
@@ -6519,7 +6441,7 @@ struct ui_scroll
         b32 hover, held;
         int grab;                    // where in the thumb the hand took it
         struct ui_body body;         // the position (its extent is the region's: ui_scroll_extent)
-        struct ui_drag drag;         // a trackpad's hand: its reports, fitted for the release's speed (ui_scroll_release)
+        struct ui_press hand;        // a trackpad's hand: its reports (the one tracker), fitted for the release's speed (ui_scroll_release)
         b64 notch;                   // when the trackpad's hand last reported, ns (the gap that lets it go)
         b32 precise;                 // the body is a trackpad's hand: its release throws on its speed (a wheel's notches throw nothing)
         struct ui_tween ink, grow;   // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
@@ -6789,30 +6711,27 @@ static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
         return true;
 }
 
-// The finger let go, or a trackpad's hand: the body's release carries a throw on its speed (pixels a second, toward the far end) and a
-// pull springs home from where it is drawn. A body that is not held lets go of nothing.
-static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long speed)
+// The finger let go, or a trackpad's hand: the body's release carries a throw on its speed (pixels a second, toward the far end; the
+// body floors and caps it) and a pull springs home from where it is drawn. A body that is not held lets go of nothing.
+static void ui_scroll_let_go(struct ui_scroll address_to s, long speed)
 {
         if (s->body.state != BODY_TRACK)
                 return;
         ui_scroll_extent(s);
-        ui_body_let_go(&s->body, thrown ? (b64)speed * UI_ONE : 0, ui_kit_time(), s->scale);
+        ui_body_let_go(&s->body, (b64)speed * UI_ONE, ui_kit_time(), s->scale);
         s->precise = 0;
         ui_scroll_show(s);
 }
 
-// The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it when
-// the speed is a throw. A finger still for UI_HAND_GAP_NS before its lift throws nothing (a stop carries the slope of its
-// deceleration, which the fit reads as a throw).
+// The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it. A
+// finger still for UI_HAND_GAP_NS before its lift throws nothing (a stop carries the slope of its deceleration, which the fit reads as a throw).
 static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
 {
-        positive last = s->drag.samples > 0 ? s->drag.when[s->drag.samples - 1] : 0, now = ui_drag_now();
-        long speed = last ? ui_drag_velocity(&s->drag, last) : 0;
+        positive last = s->hand.samples > 0 ? s->hand.when[s->hand.samples - 1] : 0, now = ui_press_now();
+        long speed = last ? ui_press_velocity(&s->hand, last) : 0;
         b32 paused = lifted && last && now > last && now - last > UI_HAND_GAP_NS;
 
-        if (paused)
-                speed = 0;
-        ui_scroll_let_go(s, s->precise && ui_throws(speed, s->scale), speed);
+        ui_scroll_let_go(s, s->precise && !paused ? speed : 0);
 }
 
 /*
@@ -6871,10 +6790,10 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 {
                         ui_scroll_hold(s);
                         s->precise = 1;
-                        ui_drag_start(&s->drag, (int)(s->body.raw >> UI_Q));
+                        ui_press_track_start(&s->hand, (int)(s->body.raw >> UI_Q));
                 }
                 ui_body_track(&s->body, q, now);
-                ui_drag_follow(&s->drag, (int)(s->body.raw >> UI_Q));
+                ui_press_track(&s->hand, (int)(s->body.raw >> UI_Q));
                 s->notch = now;
         }
         ui_scroll_show(s);
@@ -9765,7 +9684,6 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
 */
 static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region)
 {
-        ui_drag_stop(&press->drag);
         if (region)
                 ui_scroll_hold(region);
         ui_press_begin(press, x, y, target, true);
@@ -9783,55 +9701,35 @@ static int ui_press_follow(const struct ui address_to ui, struct ui_press addres
                 return 0;
         // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
         if (!press->dragged && ui_press_move(ui, press, x, y))
-                ui_drag_start(&press->drag, y);
+                ui_press_track_start(press, y);
         if (press->dragged)
         {
-                moved = ui_drag_follow(&press->drag, y);
+                moved = ui_press_track(press, y);
                 if (press->region)
                         ui_scroll_drag(press->region, -moved);
         }
         return moved;
 }
 
-// Why a release throws or does not, for the touch trace (WINDOW_TRACE): the same tests the velocity and the throw make, in order.
-static const char address_to ui_throw_reason(const struct ui_drag address_to drag, positive now, long speed, int scale)
-{
-        positive last = drag->samples > 0 ? drag->when[drag->samples - 1] : 0;
-
-        if (drag->samples < 2)
-                return window_trace_reason_samples;
-        if (now > last && now - last > UI_FLING_GONE_NS)
-                return window_trace_reason_rested;
-        if (now > last && now - last > UI_FLING_STALE_NS)
-                return window_trace_reason_late;
-        if (speed == 0)
-                return window_trace_reason_slope;
-        if (!ui_throws(speed, scale))
-                return window_trace_reason_below;
-        return window_trace_reason_thrown;
-}
-
-// The finger lifted: a dragged region is thrown on the finger's speed, and the press is done: what it pressed, or -1.
+// The finger lifted: a dragged region is thrown on the hand's speed, and the press is done: what it pressed, or -1.
 static int ui_press_lift(struct ui_press address_to press, b32 cancelled)
 {
         if (press->dragged)
         {
-                positive now = ui_drag_now(); // the event's own time (ui_event_context)
-                // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
-                // region moves the other way (ui_press_follow).
-                long speed = ui_drag_velocity(&press->drag, now);
-
-                positive first = press->drag.samples > 0 ? press->drag.when[0] : now;
+                positive now = ui_press_now(); // the event's own time (ui_event_context)
+                // The throw's speed is the hand's velocity over its last reports (ui_press_velocity), down the screen positive; the
+                // region moves the other way (ui_press_follow), and the body floors and caps the throw (ui_body_let_go).
+                long speed = ui_press_velocity(press, now);
+                positive first = press->samples > 0 ? press->when[0] : now;
 
                 WINDOW_TRACE_START();
                 WINDOW_TRACE_PART("kit lift: speed %b px/s from %p samples over the last %p ms (horizon %p ms), ", (bipolar)speed,
-                                  (positive)press->drag.samples, now > first ? (positive)((now - first) / 1000000) : 0,
+                                  (positive)press->samples, now > first ? (positive)((now - first) / 1000000) : 0,
                                   (positive)(UI_FLING_NS / 1000000));
-                window_trace_word(ui_throw_reason(&press->drag, now, speed, press->region ? press->region->scale : 100));
-                WINDOW_TRACE_PART(", cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(press->region && ui_throws(speed, press->region->scale)));
+                WINDOW_TRACE_PART("cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(press->region && ui_throws(speed, press->region->scale)));
                 WINDOW_TRACE_END();
                 if (press->region)
-                        ui_scroll_let_go(press->region, ui_throws(speed, press->region->scale), -speed);
+                        ui_scroll_let_go(press->region, -speed);
         }
         return press->down ? ui_press_end(press, cancelled) : -1;
 }
@@ -10121,8 +10019,6 @@ static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to
 {
         struct ui_scroll address_to region = ui_page_region(ui, p, ui_kit.pointer_x, ui_kit.pointer_y);
 
-        ui_drag_stop(&p->press.drag);
-
         if (region && ui_wheel_turn(ui, region, event))
                 ui_page_moved(ui, p, region);
 }
@@ -10156,7 +10052,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                 // The thumb released: a held thumb lets the body go, so a pull past an end springs home. Only a thumb that was held lets
                 // go: a finger dragging the content has the region dragging too, and its own release throws it.
                 if (type == WINDOW_EVENT_BUTTON && !down && held && bars[k]->body.state == BODY_TRACK && !bars[k]->precise)
-                        ui_scroll_let_go(bars[k], 0, 0);
+                        ui_scroll_let_go(bars[k], 0);
                 if (scroll >= 0 || lit != bars[k]->hover)
                         ui_page_moved(ui, p, bars[k]);
         }
@@ -10349,12 +10245,6 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
 #define UI_PAGE_GROUP 0x1000
 #define UI_PAGE_CARD 0x2000
 
-// A key or a turn of the wheel takes a finger's drag from the page.
-static fn ui_page_stop(struct ui_page address_to p)
-{
-        ui_drag_stop(&p->press.drag);
-}
-
 // The page's body changed in rows [top, bottom) (device pixels): the picture is due, and those rows are drawn again.
 static fn ui_page_damage(struct ui_page address_to p, int top, int bottom)
 {
@@ -10510,7 +10400,6 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
                 // A mouse's press began: its target shows pressed. A press on nothing is done at once.
                 int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
 
-                ui_drag_stop(&p->press.drag);
                 if (target < 0)
                 {
                         done();
@@ -11731,7 +11620,8 @@ struct ui_select
         p64 drag_start, drag_end, tap_at;
         struct ui_edge edge;           // the drag's edge: how far past the box it is, and its autoscroll
         struct ui_click click;         // the kit's click count
-        struct ui_press grab;          // a finger: its press (a tap, a handle, the bar) and its drag (a scroll's throw)
+        struct ui_press grab;          // a finger: its press (a tap, a handle, the bar) and its reports (a text's throw is fitted from them)
+        struct ui_body fling;          // a text's throw: its lines are moved by whole pixels (ui_select_fling)
         positive bar_since, quiet_at;  // when the bar was first drawn (its fade), and when the view last moved
 };
 static struct ui_select address_to ui_text_sel(struct ui_text address_to t);
@@ -12683,15 +12573,15 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
         positive now = (positive)ui_kit_clock();
         positive due, scroll, bar;
 
-        if (s->grab.drag.flying)
+        if (ui_body_going(&s->fling))
         {
                 p64 was = t->top_line;
                 b32 flying = ui_select_fling(ui, s);
 
                 if (t->top_line != was)
                         *redraw = true;
-                if (flying && (timeout < 0 || (long)UI_DRAG_FRAME_NS < timeout))
-                        timeout = UI_DRAG_FRAME_NS;
+                if (flying && (timeout < 0 || (long)UI_BODY_FRAME_NS < timeout))
+                        timeout = UI_BODY_FRAME_NS;
         }
         due = ui_text_tick(t, redraw), scroll = ui_select_autoscroll(ui, s, redraw), bar = ui_select_bar_tick(s, redraw);
         if (due && (timeout < 0 || (long)(due - now) < timeout))
@@ -13370,7 +13260,7 @@ static long ui_select_lines_moved(struct ui_select address_to s, int up)
 static p32 ui_select_pick(struct ui address_to ui, struct ui_select address_to s, p64 at, int clicks, b32 holding)
 {
         ui_select_start(s, at, clicks, true);
-        ui_drag_stop(&s->grab.drag);
+        ui_body_hold(&s->fling, ui_kit_time());
         s->finger = UI_SELECT_FINGER_SELECT, s->holding = holding, s->dragging = true, s->boxed = false;
         s->handles = true, s->bar = false, s->grab.down = false;
         s->ops->moved(ui, s->self, true);
@@ -13384,7 +13274,7 @@ static b32 ui_select_bar_still(const struct ui_select address_to s)
         positive now = (positive)ui_kit_clock();
 
         return s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT &&
-               !(s->finger == UI_SELECT_FINGER_TEXT && s->grab.dragged) && !s->grab.drag.flying && now >= s->quiet_at;
+               !(s->finger == UI_SELECT_FINGER_TEXT && s->grab.dragged) && !ui_body_going(&s->fling) && now >= s->quiet_at;
 }
 
 // The label of an item of the actions bar.
@@ -13599,7 +13489,7 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
                 // The other end stays; the finger holds this one where it took it, so the end does not jump to the finger.
                 s->drag_kind = UI_SELECT_CHARS, s->drag_start = s->drag_end = grab == 2 ? start : finish;
                 s->grab_dx = hx - x, s->grab_dy = top + bx.line_height / 2 - y;
-                ui_drag_stop(&s->grab.drag);
+                ui_body_hold(&s->fling, ui_kit_time());
                 s->finger = UI_SELECT_FINGER_HANDLE, s->dragging = true, s->boxed = false;
                 ui_press_begin(&s->grab, x, y, 2, true);
                 s->ops->moved(ui, s->self, false);
@@ -13616,7 +13506,8 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
         s->ops->get(s->self, &anchor, &active);
         on = s->ops->any(s->self) ? s->ops->within(s->self, at) : at == active;
         s->finger = UI_SELECT_FINGER_TEXT, s->dragging = true, s->tap_at = at;
-        ui_drag_start(&s->grab.drag, y);
+        ui_press_track_start(&s->grab, y);
+        ui_body_hold(&s->fling, ui_kit_time());
         s->finger_left = 0;
         ui_press_begin(&s->grab, x, y, on, true);
         if (!s->ops->any(s->self) && !on)
@@ -13643,7 +13534,7 @@ static p32 ui_select_finger_move(struct ui address_to ui, struct ui_select addre
         {
                 // The text follows the finger, a line at a time as its pixels make lines; the bar goes as the press turns to a drag.
                 b32 was = s->grab.dragged;
-                int moved = s->scrolls ? ui_drag_follow(&s->grab.drag, y) : 0;
+                int moved = s->scrolls ? ui_press_track(&s->grab, y) : 0;
                 long lines = s->scrolls ? ui_select_lines_moved(s, -moved) : 0;
 
                 ui_press_move(ui, &s->grab, x, y);
@@ -13700,7 +13591,8 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
                         }
                         return asks;
                 }
-                return ui_drag_let_go(&s->grab.drag) ? asks : 0;
+                ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale);
+                return ui_body_going(&s->fling) ? asks : 0;
         }
         if (finger == UI_SELECT_FINGER_HANDLE)
         {
@@ -13766,12 +13658,12 @@ static p32 ui_select_finger(struct ui address_to ui, struct ui_select address_to
 // A thrown finger's scroll, a frame at a time: whether it still moves.
 static b32 ui_select_fling(struct ui address_to ui, struct ui_select address_to s)
 {
-        int moved = ui_drag_step(&s->grab.drag);
+        int moved = (int)ui_body_given(&s->fling, ui_kit_time());
         long lines = ui_select_lines_moved(s, -moved);
 
         if (lines)
                 s->ops->scroll(ui, s->self, lines, false);
-        return s->grab.drag.flying;
+        return ui_body_going(&s->fling);
 }
 
 /*
@@ -13795,13 +13687,13 @@ static positive ui_select_autoscroll(struct ui address_to ui, struct ui_select a
         }
         steps = ui_edge_steps(&s->edge, ui->scale, b.field ? 1000l : 1000l * b.line_height);
         if (steps <= 0)
-                return now + UI_DRAG_FRAME_NS;
+                return now + UI_BODY_FRAME_NS;
         s->ops->scroll(ui, s->self, s->edge.past < 0 ? -steps : steps, true);
         edge_x = s->drag_x < b.left ? b.left : s->drag_x >= b.right ? b.right - 1 : s->drag_x;
         edge_y = s->drag_y < b.top ? b.top : s->drag_y >= b.bottom ? b.bottom - 1 : s->drag_y;
         ui_select_drag_to(ui, s, s->ops->place(ui, s->self, edge_x, edge_y), false);
         *redraw = true;
-        return now + UI_DRAG_FRAME_NS;
+        return now + UI_BODY_FRAME_NS;
 }
 
 // The bar's coming and going as a tick sees it: it is wanted and the view is still and it was not shown (or the other way round),
@@ -13813,7 +13705,7 @@ static positive ui_select_bar_tick(struct ui_select address_to s, b32 address_to
 
         if (want != s->bar_want)
                 *redraw = true;
-        if (s->bar && now < s->quiet_at && s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT && !s->grab.drag.flying)
+        if (s->bar && now < s->quiet_at && s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT && !ui_body_going(&s->fling))
                 return s->quiet_at;
         return 0;
 }

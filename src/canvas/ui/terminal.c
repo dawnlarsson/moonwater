@@ -164,11 +164,13 @@ static struct
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         /*
                 A finger on the paper (a touch) with no program that asked for the pointer: the kit's finger (ui_press) for its press,
-                slop and speed. Where the grid scrolls its drag moves the body (ui_body_track, and ui_body_let_go at the lift). On the
-                alternate screen its drag is the arrows', line by line as its pixels make lines (finger_left, what is under a line).
+                slop and speed. Where the grid scrolls its drag moves the body (ui_body_finger, and ui_body_let_go at the lift). On the
+                alternate screen its drag is the arrows', line by line as its pixels make lines (finger_left), and its lift throws the
+                arrows on the free body alt (ui_body_free, whose whole pixels ui_body_given hands out).
         */
         struct ui_press finger;
         int finger_left;
+        struct ui_body alt;             // the alternate screen's throw: its arrows, by whole pixels (ui_body_given)
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
@@ -2433,8 +2435,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         {
                 // Whatever was moving the grid stops where it is drawn, and the press is where the finger is.
                 ui_press_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, null);
-                if (!alternate)
-                        ui_body_hold(&terminal.bar.body, ui_kit_time());
+                ui_body_hold(alternate ? &terminal.alt : &terminal.bar.body, ui_kit_time());
                 terminal.finger_left = 0;
                 return true;
         }
@@ -2444,17 +2445,19 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         ui_press_lift(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
         if (!dragged)
                 return true;
-        if (!alternate)
+        // The lift throws the view at the finger's fitted speed (the one velocity, ui_press_velocity), down the screen positive: the
+        // grid's body carries it the other way, and the alternate screen's arrows go on the free body. The body floors and caps it.
         {
-                // The lift throws the grid at the finger's fitted speed (the tracker's, down the screen positive), and a speed under the
-                // throw's floor, at the scale, throws nothing.
-                long speed = ui_drag_velocity(&terminal.finger.drag, ui_drag_now());
+                long speed = ui_press_velocity(&terminal.finger, ui_press_now());
 
-                ui_body_let_go(&terminal.bar.body, ui_throws(speed, terminal_scale()) ? -(b64)speed * UI_ONE : 0, ui_kit_time(), terminal_scale());
-                terminal.dirty = true;
-                return true;
+                if (!alternate)
+                {
+                        ui_body_let_go(&terminal.bar.body, -(b64)speed * UI_ONE, ui_kit_time(), terminal_scale());
+                        terminal.dirty = true;
+                }
+                else
+                        ui_body_free(&terminal.alt, speed, ui_kit_time(), terminal_scale());
         }
-        ui_drag_throw_let_go(&terminal.finger.drag, terminal_scale()); // the event's own time (ui_event_context)
         return true;
 }
 
@@ -3153,7 +3156,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         return sent;
         }
         if (event->type == WINDOW_EVENT_KEY || event->type == WINDOW_EVENT_WHEEL)
-                ui_drag_stop(&terminal.finger.drag);
+                ui_body_hold(&terminal.alt, ui_kit_time());
 
         switch (event->type)
         {
@@ -3765,21 +3768,21 @@ static long terminal_tick(long timeout, long address_to other)
         if (ui_body_going(&terminal.bar.body))
         {
                 terminal_bar_step();
-                timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
+                timeout = timeout < 0 || timeout > UI_BODY_FRAME_NS ? UI_BODY_FRAME_NS : timeout;
         }
 
         // The view a finger threw on the alternate screen goes on a frame at a time, slowing, until it is still.
-        if (terminal.finger.drag.flying)
+        if (ui_body_going(&terminal.alt))
         {
                 b32 moved = true;
 
-                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.finger.drag),
+                if (!terminal_finger_scroll(terminal.master, (int)ui_body_given(&terminal.alt, ui_kit_time()),
                                             &terminal.dirty, &moved))
                         terminal.gone = true;
                 if (!moved)
-                        ui_drag_stop(&terminal.finger.drag);
-                if (terminal.finger.drag.flying)
-                        timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
+                        ui_body_hold(&terminal.alt, ui_kit_time());
+                if (ui_body_going(&terminal.alt))
+                        timeout = timeout < 0 || timeout > UI_BODY_FRAME_NS ? UI_BODY_FRAME_NS : timeout;
         }
 
         // The actions bar comes back when the view has been still for a while (ui_select_bar_tick).

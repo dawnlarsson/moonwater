@@ -4313,7 +4313,6 @@ static b32 settings_event(const struct window_event address_to event)
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
-                ui_page_stop(&settings.page);
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
         case WINDOW_EVENT_BUTTON:
