@@ -2397,34 +2397,33 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 return true;
         if (event->type == WINDOW_EVENT_MOTION && ui_finger_held(&terminal.finger))
         {
-                // The slop is the kit's, at the scale the terminal draws at (its own ui may not have one yet).
+                // The slop is the kit's, at the scale the terminal draws at (its own ui may not have one yet). The finger's move is
+                // the kit's (ui_finger_move), and its pixels move the grid or the view.
+                int moved_px;
+
                 kit = terminal.ui;
                 kit.scale = terminal_scale();
                 *handled = true;
                 if (!alternate)
                 {
                         unsigned int first, shown, total;
-                        int shift = terminal_grid_shift(), moved_px;
+                        int shift = terminal_grid_shift();
 
                         if (terminal_extent(&first, &shown, &total) && total > shown)
                                 terminal_bar_place(first, shown, total);
-                        ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
+                        moved_px = ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                         // The grid moves one for one with the finger, up for a finger that goes down (the tracker's reports are kept
                         // where the grid fits, for a drag that finds it scrolling later). Past an end the body's rubber band draws it.
                         if (ui_finger_dragged(&terminal.finger))
-                        {
-                                moved_px = ui_drag_follow(&terminal.finger.drag, terminal_at_y());
                                 ui_body_finger(&terminal.body, -(b64)moved_px * UI_ONE, ui_kit_time());
-                        }
                         if (terminal_bar_out() | (terminal_grid_shift() != shift))
                                 *dirty = true;
                         return true;
                 }
-                ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
+                moved_px = ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                 if (!ui_finger_dragged(&terminal.finger))
                         return true;
-                return terminal_finger_scroll(master, ui_drag_follow(&terminal.finger.drag, terminal_at_y()),
-                                              dirty, &moved);
+                return terminal_finger_scroll(master, moved_px, dirty, &moved);
         }
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
                 return true;

@@ -9746,28 +9746,26 @@ static fn ui_finger_down(struct ui_finger address_to f, int x, int y, int target
         ui_press_begin(&f->press, x, y, target, true);
 }
 
-// The finger moved: true when what it shows changed (its press became a drag, or the region moved).
-static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger address_to f, int x, int y)
+// The finger moved: past the slop its press is a drag, and the drag's pixels since the last report are answered (0 before it is one).
+// The region moves by them, one for one, and a pull past an end gives as the hand's does from its first pixel, whatever the finger's
+// speed (a stretch that came and went with the speed popped in and out under a finger crossing the end). A region-less finger (the
+// terminal's grid) is moved by its caller by the same pixels.
+static int ui_finger_move(const struct ui address_to ui, struct ui_finger address_to f, int x, int y)
 {
-        b32 changed = false;
+        int moved = 0;
 
         if (!f->press.down)
-                return false;
+                return 0;
+        // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
         if (!f->press.dragged && ui_press_move(ui, &f->press, x, y))
-        {
-                // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
                 ui_drag_start(&f->drag, y);
-                changed = true;
-        }
-        if (f->press.dragged && f->region)
+        if (f->press.dragged)
         {
-                // A pull past an end gives as the hand's does, from its first pixel, whatever the finger's speed: a stretch that
-                // came and went with the speed popped in and out under a finger crossing the end.
-                int moved = ui_drag_follow(&f->drag, y);
-
-                changed |= ui_scroll_drag(f->region, -moved);
+                moved = ui_drag_follow(&f->drag, y);
+                if (f->region)
+                        ui_scroll_drag(f->region, -moved);
         }
-        return changed;
+        return moved;
 }
 
 // Why a release throws or does not, for the touch trace (WINDOW_TRACE): the same tests the velocity and the throw make, in order.
@@ -10432,12 +10430,13 @@ static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page addr
 {
         b32 dragged = p->finger.press.dragged;
 
-        if (ui_finger_move(ui, &p->finger, x, y))
-        {
-                if (!dragged && p->finger.press.dragged)
-                        ui_list_let_go(ui, l);
+        if (!ui_finger_held(&p->finger))
+                return;
+        ui_finger_move(ui, &p->finger, x, y);
+        if (!dragged && p->finger.press.dragged)
+                ui_list_let_go(ui, l);
+        if (p->finger.press.dragged)
                 ui_page_moved(ui, p, p->finger.region);
-        }
 }
 
 // A finger's button: down, its target shows pressed and nothing is done yet; up, the press is done where it went down if it
