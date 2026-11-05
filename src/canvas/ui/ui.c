@@ -6353,15 +6353,11 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
 #define UI_SCROLL_BORDER 3
 #define UI_SCROLL_LEAST 24
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel (the checks read a region's place in them)
-#define UI_PRECISE_NOTCH 40            // a precise turn's notch, in device pixels at 100 percent: 120ths of it are its share (a fixed px, not the row's)
-#define UI_HAND_GAP_NS 40000000l       // a trackpad's hand is let go this long after its last report, when no lift came
-#define UI_HAND_PAUSE_NS 40000000l     // a finger still this long before its lift throws nothing (Android's ASSUME_POINTER_STOPPED_TIME, 40 ms: the tracker
-                                       // clears when the last sample is older than that at ACTION_UP); a pad's lift is exact, so this is its rule
 
 /*
         A scroll region: a track down its x and a thumb in it, and a position that is the body's (ui_body, s->body) drawn in whole
         device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
-        of (ui_scroll_release), a wheel's notch is a target the body follows (ui_body_wheel), a jump is a body set, a reveal is a notch,
+        of (ui_scroll_release), a wheel's notch is a target the body follows (ui_wheel_turn), a jump is a body set, a reveal is a notch,
         and the bar's thumb is the body's place, drawn where the body is, past an end too. The names of the region's callers are thin
         wrappers over the body.
 */
@@ -6684,13 +6680,13 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
 }
 
 // The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it when
-// the speed is a throw. A finger still for UI_HAND_PAUSE_NS before its lift throws nothing (a stop carries the slope of its
+// the speed is a throw. A finger still for UI_HAND_GAP_NS before its lift throws nothing (a stop carries the slope of its
 // deceleration, which the fit reads as a throw).
 static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
 {
         positive last = s->drag.samples > 0 ? s->drag.when[s->drag.samples - 1] : 0, now = ui_drag_now();
         long speed = last ? ui_drag_velocity(&s->drag, last) : 0;
-        b32 paused = lifted && last && now > last && now - last > UI_HAND_PAUSE_NS;
+        b32 paused = lifted && last && now > last && now - last > UI_HAND_GAP_NS;
 
         if (paused)
                 speed = 0;
@@ -6717,27 +6713,25 @@ static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int hei
         s->content = content, s->view = view, s->scale = scale;
 }
 
-// The wheel's notch, in a body's units: a notch (UI_ROW, or its share of UI_PRECISE_NOTCH for a precise turn) at the scale, moved
-// toward the far end when the notch goes down. Answers whether the body was given a notch.
-static b32 ui_body_wheel(int scale, struct ui_body address_to b, const struct window_event address_to event, b64 at)
+// A wheel's notch in a body's units (Q30), negated: a notch down moves the position toward the far end. A stepped notch is a row at the
+// scale; a precise turn, and so a stream's notch, is its share of UI_NOTCH (the 120ths of the one notch the compositor sends).
+static b64 ui_wheel_q(int scale, const struct window_event address_to event)
 {
-        b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_PRECISE_NOTCH : UI_ROW) * (b64)scale / 100;
+        b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_NOTCH : UI_ROW) * (b64)scale / 100;
 
-        if (event->b || !event->a || (event->flags & WINDOW_WHEEL_STOP))
-                return false;
-        ui_body_notch(b, -(b64)event->a * per * UI_ONE / 120, at);
-        return true;
+        return -(b64)event->a * per * UI_ONE / 120;
 }
 
 /*
         The wheel turns a region by its vertical notches, the one rule for every list and page: a horizontal notch (event->b) turns
-        nothing. A notch moves the body's target and the position follows it (ui_body_wheel); with the wheel smooth off
-        (ui_kit.wheel_off) it is one row at once. A trackpad's motion (WINDOW_WHEEL_PRECISE) is one for one, the hand, whose release
-        (WINDOW_WHEEL_STOP) throws on its speed; a stream of it (WINDOW_WHEEL_STREAM) follows as a notch does. Answers whether it moved.
+        nothing. A stepped notch is a row, and a stream's notch is UI_NOTCH (WINDOW_WHEEL_STREAM): each moves the body's target, which
+        the position follows (ui_body_notch). With the wheel smooth off (ui_kit.wheel_off) a stepped notch is one row at once. A
+        trackpad's motion (WINDOW_WHEEL_PRECISE) is one for one, the hand, whose release (WINDOW_WHEEL_STOP) throws on its speed.
+        Answers whether it moved.
 */
 static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
 {
-        b64 now = ui_kit_time(), q = -(b64)event->a * UI_PRECISE_NOTCH * ui->scale / 100 * UI_ONE / 120;
+        b64 now = ui_kit_time(), q = ui_wheel_q(ui->scale, event);
 
         if (event->b)
                 return false;
@@ -6751,22 +6745,16 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         if (!event->a)
                 return false;
         ui_scroll_extent(s);
-        if (!(event->flags & WINDOW_WHEEL_PRECISE))
+        if (!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM))
         {
-                if (!ui_body_wheel(ui->scale, &s->body, event, now))
-                        return false;
-                if (ui_kit.wheel_off)
+                ui_body_notch(&s->body, q, now);
+                // A stepped notch with the wheel smooth off is one row at once: the target inside the ends, and the body at rest there.
+                if (!(event->flags & WINDOW_WHEEL_PRECISE) && ui_kit.wheel_off)
                 {
-                        // A notch moves the row at once: the target inside the ends, and the body at rest there.
                         b64 far = ui_body_far(&s->body), aim = s->body.target < 0 ? 0 : far && s->body.target > far ? far : s->body.target;
 
                         ui_body_set(&s->body, s->body.view, s->body.content, aim, now);
                 }
-                s->precise = 0;
-        }
-        else if (event->flags & WINDOW_WHEEL_STREAM)
-        {
-                ui_body_notch(&s->body, q, now);
                 s->precise = 0;
         }
         else

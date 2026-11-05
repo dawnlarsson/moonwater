@@ -624,8 +624,11 @@ static void terminal_bar_turn(const struct window_event address_to event, b32 ad
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
                 return;
         terminal_bar_place(first, shown, total);
-        if (ui_body_wheel(terminal_scale(), &terminal.body, event, ui_kit_time()))
+        if (!event->b && event->a && !(event->flags & WINDOW_WHEEL_STOP))
+        {
+                ui_body_notch(&terminal.body, ui_wheel_q(terminal_scale(), event), ui_kit_time());
                 *dirty = true;
+        }
 }
 
 // The body's motion, a frame: a notch's glide, a finger's throw, a pull's spring, and the view and the bar with it. A change of the

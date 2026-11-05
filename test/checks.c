@@ -134516,7 +134516,7 @@ static void check_kit_throw_dp(void)
 
 /*
     A touchpad's precise motion stops and its fingers lift p ms after the last report (WINDOW_WHEEL_STOP). A finger still for more than
-    UI_HAND_PAUSE_NS before its lift throws nothing; one that lifts within it throws what it was doing.
+    UI_HAND_GAP_NS (the one gate, 60 ms: the pause was 40 ms of its own) before its lift throws nothing; one that lifts within it throws what it was doing.
 */
 static b32 check_pause_lift(long pause_ms)
 {
@@ -134679,10 +134679,11 @@ static void check_touch_trace(void)
 
 static void check_kit_pause_rule(void)
 {
-    b32 soon = check_pause_lift(10), later = check_pause_lift(60), longer = check_pause_lift(160);
+    b32 soon = check_pause_lift(10), edge = check_pause_lift(60), later = check_pause_lift(80), longer = check_pause_lift(160);
 
     check("kit pause rule: a pad whose fingers lift 10 ms after its last move throws (its speed is what it was doing)", soon);
-    check("kit pause rule: a pad that stops and holds 60 ms before its lift throws nothing (Android's 40 ms rule)", !later);
+    check("kit pause rule: a hold of exactly the gate, 60 ms, has not passed it, so it still throws", edge);
+    check("kit pause rule: a pad that stops and holds 80 ms, past the gate, before its lift throws nothing", !later);
     check("kit pause rule: and one that holds 160 ms throws nothing", !longer);
     ui_kit.test_clock = 0;
 }
@@ -150153,7 +150154,7 @@ static fn check_pad_scroll(void)
 static fn check_wheel_stream(void)
 {
         int ok = 1, two = 0;
-        positive t = 1000000000ull, g = COMPOSITOR_WHEEL_STREAM_NS;
+        positive t = 1000000000ull, g = UI_HAND_GAP_NS;
 
         memory_zero(&compositor, sizeof(compositor));
         ok &= !compositor_wheel_stream(0, t);                              // the first of a device is stepped
@@ -150173,7 +150174,7 @@ static fn check_wheel_stream(void)
 // it is a row step. Long gaps (a mouse's) never make a stream, so they never promote.
 static fn check_wheel_memory(void)
 {
-        positive t = 2000000000ull, g = COMPOSITOR_WHEEL_STREAM_NS, m = COMPOSITOR_WHEEL_MEMORY_NS;
+        positive t = 2000000000ull, g = UI_HAND_GAP_NS, m = COMPOSITOR_WHEEL_MEMORY_NS;
         int ok = 1, never = 1, mouse = 1, late = 1, memo = 1;
 
         memory_zero(&compositor, sizeof(compositor));
@@ -150225,15 +150226,17 @@ static fn check_wheel_memory(void)
         (void)g;
 }
 
+#define STREAM_NOTCH_8PX 24 // 8 px at 100 percent in 120ths of UI_NOTCH (40 px): written as the oracle's number, not read from the producer
+
 // A stream's end (no notch for UI_HAND_GAP_NS): the hand lets go and the region throws on the stream's speed, as a touch flick does. A
-// stream of 8 px notches at 8, 16 and 50 ms apart is 1000, 500 and 160 px a second; each one's coast is that times half a second
-// (UI_FLING_TAU_NS), so 500, 250 and 80 px at most, never hundreds of rows. The coast moves on from the last notch with no jump: the
-// first frame after the release moves less than the speed for its own time, and nothing goes back. A stream with a 50 ms gap is
-// released by the gap and taken again by the next notch: the region still moves on, and the total is the notches' plus the coast.
+// stream of 8 px notches at 8, 16 and 80 ms apart is 1000, 500 and 100 px a second; each one's coast is that times half a second
+// (UI_FLING_TAU_NS), so 500, 250 and 50 px at most, never hundreds of rows. The coast moves on from the last notch with no jump: the
+// first frame after the release moves less than the speed for its own time, and nothing goes back. An 80 ms gap is past the gate, so
+// it releases the hand and the next notch takes it again: the region still moves on, and the total is the notches' plus the coast.
 static fn check_stream_fling(void)
 {
-        static const long gaps[] = {8000, 16000, 50000};
-        static const int expect_px[] = {500, 250, 80};
+        static const long gaps[] = {8000, 16000, 80000};
+        static const int expect_px[] = {500, 250, 50};
 
         for (int g = 0; g < 3; g++)
         {
@@ -150249,7 +150252,7 @@ static fn check_stream_fling(void)
                 {
                         while (notches < 40 && next <= us)
                         {
-                                precise_turn(&p, next, -(int)COMPOSITOR_STREAM_V); // 8 px, down the region
+                                precise_turn(&p, next, -(int)STREAM_NOTCH_8PX); // 8 px, down the region
                                 last_us = next, last_notch_at = next, before_stop = p.s.scroll;
                                 next += gaps[g];
                                 notches++;
@@ -150272,7 +150275,7 @@ static fn check_stream_fling(void)
                         first_ok = 0;
                 string_format(log, "  stream fling: notches %p ms apart: the coast after the last is %b px (at most %p px), the first frame %b px, %p frames back\n",
                               (positive)(gaps[g] / 1000), (bipolar)rest_px, (positive)expect_px[g], (bipolar)first_jump, (positive)back);
-                // 50 ms apart is 160 px a second: under the throw's floor (300 dp/s), so no coast is thrown and the region rests there.
+                // 80 ms apart is 100 px a second: under the throw's floor (300 dp/s), so no coast is thrown and the region rests there.
                 check("stream fling: a stream's end throws a coast of at most half a second's speed, and no more than that",
                       rest_px >= 0 && rest_px <= expect_px[g] + 4 && (g == 2 || rest_px >= expect_px[g] / 3));
                 check("stream fling: the coast starts from the last notch with no jump, and the region does not go back on the way", first_ok && back == 0);
@@ -150426,7 +150429,7 @@ static fn check_trackpad_speed(void)
         compositor.trackpad_speed = 0;
 }
 
-// A stream's notch is COMPOSITOR_STREAM_V 120ths: 8 px at 100 percent and 16 at 200, exactly, however many; a hi-res wheel's
+// A stream's notch is STREAM_NOTCH_8PX 120ths: 8 px at 100 percent and 16 at 200, exactly, however many; a hi-res wheel's
 // 120ths carry what they do not turn whole, so eight of 15 are one notch; and no value wraps.
 static fn check_stream_notch(void)
 {
@@ -150438,11 +150441,11 @@ static fn check_stream_notch(void)
         for (int k = 0; k < 100; k++)
                 sum += compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0);
         check("stream notch: a hundred stream notches are 2400 of the wheel's 120ths: 8 px each at 100 percent, exactly",
-              sum == 100 * COMPOSITOR_STREAM_V);
+              sum == 100 * STREAM_NOTCH_8PX);
         for (int k = 0; k < 8; k++)
                 hires += compositor_stream_turn(1, 15, COMPOSITOR_GAIN_BASE, 0);
         check("stream notch: eight hi-res 120ths of 15 are one notch's stream turn (what does not come whole is carried)",
-              hires == COMPOSITOR_STREAM_V);
+              hires == STREAM_NOTCH_8PX);
         huge = compositor_stream_turn(2, 1000000000000ll, COMPOSITOR_GAIN_BASE, 1);
         check("stream notch: a value of a trillion 120ths is a turn clamped to the window's coordinates, not a wrap",
               compositor_counts(0, huge) == WINDOW_COORD_MAX || compositor_counts(0, huge) == -WINDOW_COORD_MAX);
@@ -150450,13 +150453,13 @@ static fn check_stream_notch(void)
         // The kit moves what the stream turns: 100 turns of 24 at 100 percent are 800 px, and at 200 percent 1600 px.
         precise_setup(&p, 100000, 50000);
         for (int k = 0; k < 100; k++)
-                precise_turn(&p, 100000 + k * 16000, -(int)COMPOSITOR_STREAM_V);
+                precise_turn(&p, 100000 + k * 16000, -(int)STREAM_NOTCH_8PX);
         ok = (long)scroll_at(&p.s) - (50000l << 8) == 800 * UI_SCROLL_SCALE;
         precise_setup(&p, 100000, 50000);
         p.ui.scale = 200;
         for (int k = 0; k < 100; k++)
         {
-                struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, -(int)COMPOSITOR_STREAM_V, 0};
+                struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, -(int)STREAM_NOTCH_8PX, 0};
 
                 ui_kit.now = 9000000000ll + (100000 + k * 16000) * 1000ll, ui_kit.test_clock = ui_kit.now;
                 ui_wheel_turn(&p.ui, &p.s, &turn);
@@ -150593,7 +150596,7 @@ static fn check_kit_precise_stream(void)
         check("precise stream: 30 turns of 40 of 120ths (400 px at 100 percent) move the region 400 px, to a 256th (Q30 shares)",
               (long)scroll_at(&p.s) - at0 >= 102399 && (long)scroll_at(&p.s) - at0 <= 102401 && scroll_hand(&p.s) && p.s.precise && scroll_dragging(&p.s));
 
-        // The stream stops: the gap (40 ms) releases the hand at the first frame past it, and the release throws on its speed
+        // The stream stops: the gap (UI_HAND_GAP_NS, 60 ms) releases the hand at the first frame past it, and the release throws on its speed
         // (1666 px a second), as a touch drag's lift does. The body carries 0.7 of that speed for its 260 ms, about 300 px.
         for (long us = 100000 + 29 * 8000 + 16667; us < 100000 + 29 * 8000 + 200000 && !rel_us; us += 16667)
         {

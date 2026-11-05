@@ -3608,21 +3608,17 @@ struct compositor_absinfo
 #define COMPOSITOR_PAD_WHEEL 12
 
 /*
-        A wheel's events from one device that come no more than COMPOSITOR_WHEEL_STREAM_NS apart are a stream: a trackpad's
-        motion as the wheel reports it (a notch to every report, tens to 120 a second, or hi-res 120ths of a finger's pixels).
-        A stream's notch is a small fixed amount, not a row: COMPOSITOR_STREAM_V 120ths of a notch, which is 8 px at 100 percent
-        (the kit's notch is 40 px, UI_PRECISE_NOTCH, so 120ths of it are 1/3 px each). The stream's notches are the finger's motion (WINDOW_WHEEL_PRECISE: no step, no glide), and it ends
-        when no notch comes for UI_HAND_GAP_NS (40 ms): the kit's gap release throws on the hand's speed, as the touch path
-        does. A notch after a longer gap is a lone notch: stepped, a row, as it has always been. The first notch of a stream
-        is stepped too, since nothing says yet that a stream has begun.
+        A wheel's events from one device that come no more than UI_HAND_GAP_NS apart are a stream: a trackpad's motion as the wheel
+        reports it (a notch to every report, tens to 120 a second, or hi-res 120ths of a finger's pixels). A stream's notch is the
+        gain's pixels (compositor_stream_gain, 8 to 32 px a notch) in 120ths of UI_NOTCH, sent as a precise turn (WINDOW_WHEEL_PRECISE
+        and WINDOW_WHEEL_STREAM) that the body follows. A notch after a longer gap is a lone notch, stepped as a row, and so is the
+        first notch of a stream, since nothing says yet that a stream has begun.
 */
-#define COMPOSITOR_WHEEL_STREAM_NS 60000000ull
 #define COMPOSITOR_WHEEL_STREAMS 3          // stream notches in a gesture before the device is known to stream
 #define COMPOSITOR_WHEEL_MEMORY_NS 3000000000ull // how long a device that streamed keeps the stream for its next gesture's first notch
-#define COMPOSITOR_STREAM_V 24              // a stream notch at rest, in the wheel's 120ths: 8 px at 100 percent (the kit's notch is 40 px)
-#define COMPOSITOR_GAIN_BASE 2048           // the same, in 256ths of a device pixel: 8 px
+#define COMPOSITOR_GAIN_BASE 2048           // the base gain, in 256ths of a device pixel a notch: 8 px
 #define COMPOSITOR_STREAM_HIST 6            // the stream notches the rate is measured over (about 50 to 100 ms)
-#define COMPOSITOR_GAIN_TURN 1024000        // the stream turn's units: 120ths of a notch times 256ths of a pixel times 100 percent, over 40 px
+#define COMPOSITOR_GAIN_TURN (256 * 100 * UI_NOTCH) // the stream turn's divisor: 120ths of a notch, 256ths of a pixel, percent, over the notch's pixels
 #define COMPOSITOR_PAD_WIDTH_MM 100
 
 struct compositor_pad
@@ -16833,12 +16829,12 @@ static void compositor_wheel_precise(int v120, int horizontal)
         compositor_wheel_flags(v120, horizontal, WINDOW_WHEEL_PRECISE);
 }
 
-// Whether a wheel event of device at, read at now, is a stream's (COMPOSITOR_WHEEL_STREAM_NS from the device's last one). The
+// Whether a wheel event of device at, read at now, is a stream's (UI_HAND_GAP_NS from the device's last one). The
 // device's last is kept either way, so a stream that began is one for each notch after it.
 static int compositor_wheel_stream(unsigned int at, positive now)
 {
         positive last = compositor.wheel_at[at], since = compositor.wheel_stream_at[at];
-        int within = last && now >= last && now - last <= COMPOSITOR_WHEEL_STREAM_NS, stream = within;
+        int within = last && now >= last && now - last <= UI_HAND_GAP_NS, stream = within;
 
         // A device that has streamed (COMPOSITOR_WHEEL_STREAMS notches in a gesture) keeps the stream for three seconds after its last
         // stream notch: the first notch of its next gesture is the stream's, not a row step. A device that has never streamed, or whose
@@ -16902,9 +16898,9 @@ static long long compositor_stream_gain_at(unsigned int at, positive now)
 }
 
 /*
-        A stream's turn in 120ths of a notch, for a notch of value120 (a notch is 120, the hi-res wheel's 120ths are as they are) at gain
-        (256ths of a pixel at 100 percent) and the trackpad's speed. A pixel is three of the wheel's 120ths at 100 percent (the kit's notch
-        is 40 px), so the turn is value120 x gain x percent over COMPOSITOR_GAIN_TURN. What does not come whole is kept for the next turn.
+        A stream's turn in 120ths of UI_NOTCH, for a notch of value120 (a notch is 120, the hi-res wheel's 120ths are as they are) at gain
+        (256ths of a pixel a notch at 100 percent) and the trackpad's speed: value120 x gain x percent over COMPOSITOR_GAIN_TURN. What does
+        not come whole is kept for the next turn.
 */
 static long long compositor_stream_turn(unsigned int at, long long value120, long long gain, int horizontal)
 {

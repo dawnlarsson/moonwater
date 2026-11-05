@@ -669,9 +669,9 @@ struct windows_issue
 // moves one for one with it, at its own scale (ui_wheel_turn), and no glide is put on it.
 #define WINDOW_WHEEL_PRECISE 4096u
 // A precise gesture is over: a touchpad's fingers have all lifted (a is 0). A region in hand lets go now, with the pause rule
-// (ui_scroll_end: a finger still for UI_HAND_PAUSE_NS before its lift throws nothing), and not after the gap the reports left.
+// (ui_scroll_release: a finger still for UI_HAND_GAP_NS before its lift throws nothing), and not after the gap the reports left.
 #define WINDOW_WHEEL_STOP 8192u
-// A precise turn that is a wheel's stream (a notch to every report, the compositor's COMPOSITOR_WHEEL_STREAM_NS): the kit takes it as a
+// A precise turn that is a wheel's stream (a notch to every report, within UI_HAND_GAP_NS of the last): the kit takes it as a
 // trackpad's motion (WINDOW_WHEEL_PRECISE), and a Wayland client takes it as the wheel it is (value120), not as a pad's fingers.
 #define WINDOW_WHEEL_STREAM 16384u // shares the bit of WINDOW_PINCH_BEGIN: the event's type says which meaning a flag has
 /*

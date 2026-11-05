@@ -80,6 +80,8 @@
 #define UI_CLOSE_IN 5
 #define UI_CLOSE_BOTTOM (UI_CLOSE + UI_CLOSE_IN)
 #define UI_TARGET 48 // a finger's least target in logical pixels, 48 dp as Material has it (Android), scaled with the display; iOS's is 44 pt
+#define UI_NOTCH 40 // a wheel's notch in device pixels at 100 percent: the one notch a precise turn's 120ths are read in (the body, the stream and its gain)
+#define UI_HAND_GAP_NS 60000000ull // the one gate of a device's gesture: no report for this long ends it (a stream's notches, a trackpad's hand, and its still before its lift throws nothing; Android's 40 ms, widened so 50 ms notches stay one stream)
 
 /*
         A finger's target, the one rule: a finger on a touch screen is wider than a pointer and shakes as it lands, so what it
