@@ -309,6 +309,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Time	e404	Czas
 =Time server (auto for the pool)	67e5	Serwer czasu (auto dla puli)
 =Time zone	741a	Strefa czasowa
+=Trackpad scroll speed	3bc1	Prędkość przewijania gładzika
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo

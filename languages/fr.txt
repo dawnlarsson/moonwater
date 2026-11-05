@@ -309,6 +309,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Time	e404	Heure
 =Time server (auto for the pool)	67e5	Serveur de temps (auto pour le pool)
 =Time zone	741a	Fuseau horaire
+=Trackpad scroll speed	3bc1	Vitesse de défilement du pavé tactile
 =Turned by the screen	ea45	Pivoté par l'écran
 =Turned left	507c	Pivoté à gauche
 =Turned right	7a49	Pivoté à droite

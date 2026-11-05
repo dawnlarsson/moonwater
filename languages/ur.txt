@@ -310,6 +310,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Time	e404	وقت
 =Time server (auto for the pool)	67e5	ٹائم سرور (auto پول کے لیے)
 =Time zone	741a	ٹائم زون
+=Trackpad scroll speed	3bc1	ٹریک پیڈ اسکرول کی رفتار
 =Turned by the screen	ea45	اسکرین کی طرف سے گھمایا گیا
 =Turned left	507c	بائیں گھمایا گیا
 =Turned right	7a49	دائیں گھمایا گیا

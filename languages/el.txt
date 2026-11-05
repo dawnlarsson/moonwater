@@ -309,6 +309,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Time	e404	Ώρα
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
+=Trackpad scroll speed	3bc1	Ταχύτητα κύλισης της επιφάνειας αφής
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά

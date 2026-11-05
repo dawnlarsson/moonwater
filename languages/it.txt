@@ -309,6 +309,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Time	e404	Ora
 =Time server (auto for the pool)	67e5	Server dell'ora (auto per il pool)
 =Time zone	741a	Fuso orario
+=Trackpad scroll speed	3bc1	Velocità di scorrimento del trackpad
 =Turned by the screen	ea45	Ruotato dallo schermo
 =Turned left	507c	Ruotato a sinistra
 =Turned right	7a49	Ruotato a destra

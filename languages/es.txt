@@ -309,6 +309,7 @@ ui_field_full	fe02	no cabe más
 =Time	e404	Hora
 =Time server (auto for the pool)	67e5	Servidor de hora (auto para el grupo)
 =Time zone	741a	Zona horaria
+=Trackpad scroll speed	3bc1	Velocidad de desplazamiento del panel táctil
 =Turned by the screen	ea45	Lo gira la pantalla
 =Turned left	507c	Girada a la izquierda
 =Turned right	7a49	Girada a la derecha

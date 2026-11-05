@@ -4220,6 +4220,7 @@ static struct
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
         positive wheel_at[COMPOSITOR_INPUTS];   // when the device's last wheel event came, ns (compositor_wheel_stream: a stream's gap)
         long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, in 120ths, per axis (compositor_stream_turn)
+        unsigned int trackpad_speed; // the setting `canvas trackpad speed`: 0 normal (what a zeroed compositor is), 1 slow, 2 fast
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
         struct compositor_pad pad[COMPOSITOR_INPUTS];
         // The device is a touch screen (compositor_touch_report), and its fingers; what they are doing; and whether the
@@ -10755,6 +10756,10 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
         compositor_wheel_publish(smooth != 0);
+        // The trackpad's speed: normal when nothing is kept, or what is kept is none of the words.
+        compositor_word(SETTING_TRACKPAD_SPEED_PATH, word, sizeof(word));
+        compositor.trackpad_speed = string_equals((string_address)word, (string_address) "slow") ? 1
+                                    : string_equals((string_address)word, (string_address) "fast") ? 2 : 0;
         compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
@@ -16454,10 +16459,22 @@ static void compositor_pad_key(struct compositor_pad *pad, unsigned int code, in
         with two fingers or more on it as the wheel in 120ths (x sideways, y up). Which it was: 1 a move, 2 the
         wheel, and 0 neither, as the first report of a touch is, which says only where the finger is.
 */
+// The trackpad's speed setting as an index into compositor_stream_v and compositor_pad_pct (0 normal, 1 slow, 2 fast).
+// A stream notch in 120ths: 24 is 8 px at 100 percent, so 12 is 4 px and 42 is 14 px (the kit's notch is 40 px). A pad's
+// millimetre is COMPOSITOR_PAD_WHEEL of them at 100 percent, and that times the percent.
+static const int compositor_stream_v[3] = {COMPOSITOR_STREAM_V, 12, 42};
+static const int compositor_pad_pct[3] = {100, 60, 160};
+
+static unsigned int compositor_speed(void)
+{
+        return compositor.trackpad_speed < 3 ? compositor.trackpad_speed : 0;
+}
+
 static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
 {
         long dx = (long)pad->next_x - pad->at_x, dy = (long)pad->next_y - pad->at_y;
-        int kind = pad->fingers >= 2 ? 2 : 1, per = kind == 2 ? COMPOSITOR_PAD_WHEEL : COMPOSITOR_PAD_COUNTS;
+        int kind = pad->fingers >= 2 ? 2 : 1;
+        int per = kind == 2 ? COMPOSITOR_PAD_WHEEL * compositor_pad_pct[compositor_speed()] / 100 : COMPOSITOR_PAD_COUNTS;
         long left_x, left_y;
 
         *x = *y = 0;
@@ -16819,7 +16836,7 @@ static int compositor_wheel_stream(unsigned int at, positive now)
 static long long compositor_stream_turn(unsigned int at, long long value120, int horizontal)
 {
         int axis = horizontal ? 1 : 0;
-        long long total = value120 * COMPOSITOR_STREAM_V + compositor.wheel_rest[at][axis], turn = total / 120;
+        long long total = value120 * compositor_stream_v[compositor_speed()] + compositor.wheel_rest[at][axis], turn = total / 120;
 
         compositor.wheel_rest[at][axis] = total - turn * 120;
         return turn;

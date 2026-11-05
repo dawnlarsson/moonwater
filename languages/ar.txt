@@ -310,6 +310,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Time	e404	الوقت
 =Time server (auto for the pool)	67e5	خادم الوقت (auto للمجموعة)
 =Time zone	741a	المنطقة الزمنية
+=Trackpad scroll speed	3bc1	سرعة التمرير على لوحة اللمس
 =Turned by the screen	ea45	التدوير بواسطة الشاشة
 =Turned left	507c	مدار لليسار
 =Turned right	7a49	مدار لليمين

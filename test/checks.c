@@ -140437,7 +140437,7 @@ static fn check_settings_groups(void)
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
-            {{"canvas", "wheel"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
+            {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"usb"}, "USB"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
@@ -140449,7 +140449,7 @@ static fn check_settings_groups(void)
         } placed[] = {
             {"Keyboard", "Input"}, {"On-screen keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
-            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
+            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Trackpad scroll speed", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
             {"Time zone", "Time"},
@@ -150115,6 +150115,46 @@ static fn check_wheel_stream(void)
         check("wheel stream: a notch within 60 ms of the device's last is a stream, one after a longer gap is a lone notch (stepped)", ok);
         two = compositor_wheel_stream(1, t + 16000000) == 0 && compositor_wheel_stream(1, t + 32000000);
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
+}
+
+// The trackpad's speed setting: a two-finger swipe of 40 mm is 480 of the wheel's 120ths at normal, 280 at slow (60 percent) and
+// 760 at fast (160 percent); a stream notch is 24, 12 or 42. Zero is normal, so a compositor that was never read is normal.
+static long pad_swipe_sum(void)
+{
+        struct compositor_pad *pad = &compositor.pad[0];
+        long sum = 0;
+        int x, y;
+
+        memory_zero(pad, sizeof(*pad));
+        pad->per_mm_x = pad->per_mm_y = 100;
+        pad->touching = 1, pad->fingers = 2, pad->moving = 1;
+        for (int k = 0; k < 400; k++)
+        {
+                pad->next_y = pad->at_y + 10;
+                compositor_pad_report(pad, &x, &y);
+                sum += y < 0 ? -(long)y : y;
+        }
+        return sum;
+}
+
+static fn check_trackpad_speed(void)
+{
+        long pads[3], stream[3];
+        int ok;
+
+        memory_zero(&compositor, sizeof(compositor));
+        for (unsigned int speed = 0; speed < 3; speed++)
+        {
+                compositor.trackpad_speed = speed;
+                pads[speed] = pad_swipe_sum();
+                compositor.wheel_rest[0][0] = 0;
+                stream[speed] = (long)compositor_stream_turn(0, 120, 0);
+        }
+        ok = pads[0] == 480 && pads[1] == 280 && pads[2] == 760 && stream[0] == 24 && stream[1] == 12 && stream[2] == 42;
+        check("trackpad speed: normal is 480 of 120ths for 40 mm and 24 a stream notch; slow 280 and 12; fast 760 and 42", ok);
+        compositor.trackpad_speed = 7;
+        check("trackpad speed: a value that is none of the three is normal", pad_swipe_sum() == 480 && compositor_stream_turn(0, 120, 0) == 24);
+        compositor.trackpad_speed = 0;
 }
 
 // A stream's notch is COMPOSITOR_STREAM_V 120ths: 8 px at 100 percent and 16 at 200, exactly, however many; a hi-res wheel's
@@ -161451,6 +161491,7 @@ b32 main()
         check_wheel_stream();
         check_kit_precise_stream();
         check_stream_notch();
+        check_trackpad_speed();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

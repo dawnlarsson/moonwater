@@ -309,6 +309,7 @@ ui_field_full	fe02	більше не вміщається
 =Time	e404	Час
 =Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
 =Time zone	741a	Часовий пояс
+=Trackpad scroll speed	3bc1	Швидкість прокрутки тачпада
 =Turned by the screen	ea45	Повертає екран
 =Turned left	507c	Повернуто ліворуч
 =Turned right	7a49	Повернуто праворуч

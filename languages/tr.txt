@@ -309,6 +309,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Time	e404	Saat
 =Time server (auto for the pool)	67e5	Zaman sunucusu (havuz için auto)
 =Time zone	741a	Saat dilimi
+=Trackpad scroll speed	3bc1	Dokunmatik yüzey kaydırma hızı
 =Turned by the screen	ea45	Ekran tarafından döndürülür
 =Turned left	507c	Sola döndürülmüş
 =Turned right	7a49	Sağa döndürülmüş

@@ -310,6 +310,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Time	e404	زمان
 =Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
 =Time zone	741a	منطقه زمانی
+=Trackpad scroll speed	3bc1	سرعت پیمایش صفحه‌لمسی
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست

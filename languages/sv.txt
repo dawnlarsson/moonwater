@@ -309,6 +309,7 @@ ui_field_full	fe02	mer ryms inte
 =Time	e404	Tid
 =Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
 =Time zone	741a	Tidszon
+=Trackpad scroll speed	3bc1	Rullningshastighet för styrplattan
 =Turned by the screen	ea45	Vänds av skärmen
 =Turned left	507c	Vriden åt vänster
 =Turned right	7a49	Vriden åt höger

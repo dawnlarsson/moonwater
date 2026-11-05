@@ -310,6 +310,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Time	e404	זמן
 =Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
 =Time zone	741a	אזור זמן
+=Trackpad scroll speed	3bc1	מהירות גלילה של משטח המגע
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה

@@ -309,6 +309,7 @@ ui_field_full	fe02	meer past er niet in
 =Time	e404	Tijd
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
+=Trackpad scroll speed	3bc1	Scrollsnelheid van het trackpad
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid
