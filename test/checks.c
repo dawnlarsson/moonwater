@@ -220982,8 +220982,17 @@ static b32 gpu_route_rows(void)
         unsigned int address_to mem, address_to pic;
         positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, dst;
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
-        long mapped, other;
+        long mapped, other, probe = system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC);
 
+        // The route is udmabuf and PRIME: a user the device refuses (the box's dawn, EACCES; root opens it) cannot run it, and says so.
+        if (probe < 0)
+        {
+                string_format(log, "  gpu route: /dev/udmabuf does not open for this user: the route rows are not run\n");
+                if (fd >= 0)
+                        system_close((int)fd);
+                return true;
+        }
+        system_close((int)probe);
         if (fd < 0)
         {
                 check("gpu route: a memfd for the table's pages", false);
