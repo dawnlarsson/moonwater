@@ -79,7 +79,7 @@ moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggb
 moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
 moonwater canvas wheel smooth [on|off]  a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]
 moonwater canvas trackpad speed [slow|normal|fast]  how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]
-moonwater canvas scroll natural [on|off]  the content moves with the fingers, as on a touch screen; off, a wheel notch and a drag move it the other way [on]
+moonwater canvas scroll natural [on|off]  a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]
 moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]
 moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]

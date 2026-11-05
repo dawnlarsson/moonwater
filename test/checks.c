@@ -147327,8 +147327,8 @@ static fn check_kit_place(void)
 
                         check("kit notch: a wheel notch aims one row on, and the body reaches it over several frames from below, never past it, in 256ths",
                       aimed && steps && reached && notch_monotone && !overshot && idle && fine);
-                check("kit notch: a wheel notch settles in 150 to 200 ms, to half a device pixel from one row (the body's 40 ms notch time constant)",
-                      settle_ms >= 150 && settle_ms <= 200);
+                check("kit notch: a wheel notch settles in 250 to 450 ms, to half a device pixel from one row (the body's critically damped follow, 22 a second)",
+                      settle_ms >= 250 && settle_ms <= 450);
                 check("kit body: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
                 check("kit reveal: a keyboard reveal notches the body to the row it shows, from where it is, and a row in view is not moved",
                       revealed && !shown_again);
@@ -148226,8 +148226,8 @@ static void check_terminal_stretch(void)
 }
 
 /*
-    A burst of six notches on the terminal's bar: each is a row of the kit's (UI_ROW at the scale), the body follows the target they make by
-    e in BODY_NOTCH_TAU_NS, and the view is the body's offset to the nearest row.
+    A burst of six notches on the terminal's bar: each is a row of the kit's (UI_ROW at the scale), the body follows the target they make
+    critically damped (BODY_NOTCH_OMEGA), and the view is the body's offset to the nearest row.
 */
 static void check_terminal_wheel_curve(void)
 {
@@ -148992,8 +148992,8 @@ static fn check_kit_scroll_ends(void)
         check("kit ends: a trackpad's notches to a list's bottom: the drawn position never passes a view past the end, and the list rests at it",
               t.monotone && t.inside && bottom.scroll == 800 && scroll_at(&bottom) == 800 * UI_SCROLL_SCALE);
         string_format(log, "  kit ends: the bottom's overscroll: %p frames held, %p turns\n", (positive)t.held, (positive)t.turns);
-        check("kit ends: the bottom's overscroll rises with the notches and falls once, and at most one frame (the spring's first, at the apex) is held",
-              t.held <= 1 && t.turns <= 1);
+        check("kit ends: the bottom's overscroll rises with the notches and falls once, and at most four frames (the cap's plateau while the notches still come, 66 ms) are held",
+              t.held <= 4 && t.turns <= 1);
         check("kit ends: after the momentum tail the bottom springs home and settles idle at its end", t.idle);
 
         memory_zero(&top, sizeof(top));
@@ -149003,8 +149003,8 @@ static fn check_kit_scroll_ends(void)
         check("kit ends: a trackpad's notches to a list's top: the drawn position never passes a view past the end, and the list rests at it",
               t.monotone && t.inside && top.scroll == 0 && scroll_at(&top) == 0);
         string_format(log, "  kit ends: the top's overscroll: %p frames held, %p turns\n", (positive)t.held, (positive)t.turns);
-        check("kit ends: the top's overscroll rises with the notches and falls once, and at most one frame (the spring's first, at the apex) is held",
-              t.held <= 1 && t.turns <= 1);
+        check("kit ends: the top's overscroll rises with the notches and falls once, and at most four frames (the cap's plateau while the notches still come, 66 ms) are held",
+              t.held <= 4 && t.turns <= 1);
         check("kit ends: after the momentum tail the top springs home and settles idle at its end", t.idle);
 
         // A finger's flick to the bottom clamps there as a throw does, and a slow pull past it springs home from the pull.
@@ -150485,7 +150485,7 @@ static fn check_stream_notch(void)
                 ui_kit.now = 9000000000ll + (100000 + k * 16000) * 1000ll, ui_kit.test_clock = ui_kit.now;
                 ui_wheel_turn(&p.ui, &p.s, &turn);
         }
-        // A stream's notches go to a target that the position follows (the body's notch, BODY_NOTCH_TAU_NS): the whole is there once the
+        // A stream's notches go to a target that the position follows (the body's notch, BODY_NOTCH_OMEGA): the whole is there once the
         // position has caught the target, which it does in a few frames after the last notch.
         {
                 long us = 100000 + 99 * 16000;
@@ -150731,8 +150731,53 @@ static fn check_kit_notch_take(void)
         at each 50 ms; an OS momentum delta moves the view's share of it (0.22); the rubber band draws less past the end than
         it reaches for. The recording is refitted when it grows: the constants live in ui.c, the series here.
 */
+// The wheel on the body, as the picture a person sees: the drawn offset from where it began, every 20 ms for 600 ms, for one notch and a burst of
+// five in the middle of a long list, and for one notch and a burst of eight at its top, where a notch goes out past the end.
+static void check_wheel_body_curve(void)
+{
+        static const struct { long start; int notches; long gap_ms, delta; } cases[] = {
+            {5000, 1, 0, 40}, {5000, 5, 16, 40}, {0, 1, 0, -40}, {0, 8, 16, -40}};
+        long drawn[4][31];
+        b32 eased, whole, monotone = true, pulse, burst, turns = true;
+
+        for (int c = 0; c < 4; c++)
+        {
+                struct ui_body w;
+                int sent = 0;
+
+                ui_kit.scroll_off = 0;
+                ui_body_set(&w, 772ll << UI_Q, 30000ll << UI_Q, (b64)cases[c].start << UI_Q, 0);
+                for (int k = 0; k <= 30; k++)
+                {
+                        b64 now = (b64)k * 20000000ll;
+
+                        while (sent < cases[c].notches && (b64)sent * cases[c].gap_ms * 1000000ll <= now)
+                        {
+                                ui_body_notch(&w, (b64)cases[c].delta << UI_Q, (b64)sent * cases[c].gap_ms * 1000000ll);
+                                sent++;
+                        }
+                        ui_body_step(&w, now);
+                        drawn[c][k] = (long)((ui_body_drawn(&w) >> UI_Q) - cases[c].start);
+                }
+        }
+        eased = drawn[0][1] <= 5 && drawn[0][5] >= 18 && drawn[0][5] <= 30 && drawn[0][10] >= 35;
+        whole = drawn[0][30] == 40 && drawn[1][30] == 200;
+        for (int k = 1; k <= 30; k++)
+                monotone = monotone && drawn[0][k] >= drawn[0][k - 1] && drawn[1][k] >= drawn[1][k - 1];
+        check("kit wheel: one notch eases in from rest (5 px or less in 20 ms, over half the way in 100 ms, nearly there in 200) and rests on its 40 px, and five on top of each other on their 200",
+              eased && whole && monotone);
+        pulse = drawn[2][9] <= -15 && drawn[2][9] >= -35 && drawn[2][30] >= -3 && drawn[2][30] <= 0;
+        burst = drawn[3][12] <= -30 && drawn[3][12] >= -60 && drawn[3][30] > drawn[3][12] + 25;
+        for (int c = 2; c < 4; c++)
+                for (int k = 13; k <= 30; k++)
+                        turns = turns && drawn[c][k] <= 0 && drawn[c][k] >= drawn[c][k - 1];
+        check("kit wheel: a notch up at the top stretches the band 15 to 35 px and springs home, and eight in 130 ms stretch it 30 to 60 and fall once",
+              pulse && burst && turns);
+}
+
 static void check_kit_body(void)
 {
+        check_wheel_body_curve();
         static const long finger_00[] = { 1, 8, 25, 33, 30, 23, 20, 13, 10, 9, 6 };
         static const long coast_06[] = { 4026, 3924, 3839, 3770, 3715, 3672, 3638, 3617 };
         static const long dip_02[] = { -21, -21, -17, -12, -8, -5, -4, -2, -2, -1, 0, 0 };
@@ -150838,15 +150883,16 @@ static void check_kit_body(void)
         check("kit body: a finger 300 px past the top is drawn in the band (above the rest, nearer than 300) and springs to rest at 0",
               drawn < 0 && drawn > -(300ll << UI_Q) && ui_body_drawn(&b) == 0 && !ui_body_going(&b));
 
-        // A notch moves the target by its delta and the position follows by e in 40 ms, resting on the target exactly.
+        // A notch moves the target by its delta and the position follows it critically damped at 22 a second: from rest, 22 percent of the way in 40 ms
+        // (it eases in), resting on the target exactly.
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_notch(&b, 48ll << UI_Q, 0);
         ui_body_notch(&b, 48ll << UI_Q, 0);
         ui_body_step(&b, 40000000ll);
         reach_small = ui_body_drawn(&b) >> UI_Q;
         ui_body_step(&b, 1000000000ll);
-        check("kit body: two notches of 48 move the position 60 (about 63 percent of 96) in 40 ms, and rest on 96 exactly",
-              reach_small >= 59 && reach_small <= 62 && ui_body_drawn(&b) == 96ll << UI_Q && !ui_body_going(&b));
+        check("kit body: two notches of 48 move the position 21 (22 percent of 96, eased in) in 40 ms, and rest on 96 exactly",
+              reach_small >= 20 && reach_small <= 22 && ui_body_drawn(&b) == 96ll << UI_Q && !ui_body_going(&b));
 }
 
 /*

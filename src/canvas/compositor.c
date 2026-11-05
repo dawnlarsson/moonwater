@@ -10755,12 +10755,12 @@ static void compositor_scroll_publish(unsigned int off, unsigned int speed)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
-// The Scrolling group's four rows, read in one place: natural direction, momentum and the rubber band, each on when nothing is kept, and
+// The Scrolling group's four rows, read in one place: natural direction (off when nothing is kept), momentum and the rubber band (on), and
 // the trackpad's speed (normal when nothing is kept, or what is kept is none of the words), which compositor_speed takes for the pads.
 static void compositor_scroll_read(void)
 {
         char word[16];
-        long natural = 1, momentum = 1, rubber = 1;
+        long natural = 0, momentum = 1, rubber = 1;
 
         compositor_word(SETTING_SCROLL_NATURAL_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_SCROLL_NATURAL_PATH, word, &natural);
@@ -17806,7 +17806,9 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         break;
                 case UI_TOUCH_WHEEL:
                         compositor.touching = 1;
-                        compositor_wheel(e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
+                        // Fingers on glass are direct: the content goes with them whatever the Scrolling group's natural direction says of a wheel and
+                        // a pad, which the kit and the clients apply to every precise turn, so this one is turned the other way first.
+                        compositor_wheel(compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -e->v120 : e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
                         wheel = 1;
                         break;
                 case UI_TOUCH_TURN_END:

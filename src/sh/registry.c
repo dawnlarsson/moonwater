@@ -389,12 +389,13 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas touch right [off|windows|volume]",
                       .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]"),
     //  The scrolling group: how a wheel, a trackpad and a drag move the content (ui.c's scroll body). Natural direction turns
-    //  the way a notch and a drag move it; speed scales a trackpad's notches and streams (compositor_pad_pct, the speed row
-    //  that was in Input); momentum is the coast a release carries; the rubber band stretches past an end and springs home.
+    //  the way a wheel's notch and a pad's motion move it (a finger on the screen always takes the content with it); speed
+    //  scales a trackpad's notches and streams (compositor_pad_pct, the speed row that was in Input); momentum is the coast a
+    //  release carries; the rubber band stretches past an end and springs home.
     SETTING_PLAIN_ROW("Scrolling", "Natural direction", SETTINGS_SWITCH, 0, ("canvas", "scroll", "natural"), "natural ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_NATURAL_PATH, .standard = "on", .need = "how Canvas draws",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_NATURAL_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "canvas scroll natural [on|off]",
-                      .help = "the content moves with the fingers, as on a touch screen; off, a wheel notch and a drag move it the other way [on]"),
+                      .help = "a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]"),
     SETTING_PLAIN_ROW(null, "Scroll speed", SETTINGS_CHOICE, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
