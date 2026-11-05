@@ -5045,7 +5045,6 @@ static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c
 */
 #define UI_FIELD_BARE 1  // a field's variant: no label above it, the well at the control's top and its own height
 #define UI_FIELD_TINT 10 // a focused field's bright accent over its face (the old focus fill's mix), as alpha out of 255 (4%)
-#define UI_FIELD_LIT 2   // the focused rule's thickness at 100%, in logical pixels (the rest rule is one)
 
 struct ui_text;
 static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_to c, int left, int right, int top, int bottom);
@@ -5056,8 +5055,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         b32 bare = c->variant == UI_FIELD_BARE;
         int above = bare ? 0 : 24 + 6, tall = bare && c->h ? c->h : UI_FIELD_H;
         b32 fy = ui_dev(ui, c->y) + ui_dev(ui, above);
-        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), 0), rule;
-        int rest = ui_px(ui, 1), thick;
+        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), 0);
         int baseline;
 
         // The label above (a bare field has none).
@@ -5072,13 +5070,6 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         // The row's hover layer over it, and the same press layer a list row takes.
         ui_kit_layer_to(c, c->disabled);
         ui_kit_layer_fill(ui, &face, ui_text_colour(ui, UI_ON_SURFACE), ui_kit_layer(c));
-        // The rule along its foot: the outline's hairline at rest, the accent's line when focused (its thickness eased in
-        // with the colour, so the two move together).
-        ui_kit_number_to(&c->extent, c->focused ? UI_ONE : 0, 180, &ui_ease);
-        thick = rest + (int)(((b64)(ui_px(ui, UI_FIELD_LIT) - rest) * ui_kit_tween(&c->extent)) >> UI_Q);
-        ui_kit_colour_to(&c->ink, c->focused ? ui_role(UI_PRIMARY) : ui_role(UI_OUTLINE_VARIANT), 180, &ui_ease);
-        rule = (struct ui_box){face.x0, face.y1 - (b32)thick * 256, face.x1, face.y1, 0, 0};
-        ui_kit_fill(ui, &rule, ui_kit_colour(&c->ink), null);
         baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
         // What is in the well is the engine's: the text (dots when masked), its selection, its caret and its placeholder.
         // A field with no engine is one nothing can be typed in, and shows its placeholder and no caret.
@@ -7782,7 +7773,6 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
 #define UI_PAGE_FOOT 40      // its status line's band
 #define UI_PAGE_INSET 6      // the title and the status line in from the margin
 #define UI_SEARCH_W 190      // a page's search field, at the title's right
-#define UI_SEARCH_Y 8        // centred in the title band (UI_PAGE_TOP): the field is UI_FIELD_H (44) high, so it lies wholly in the band
 #define UI_SEARCH_RIGHT 46   // and ends this far from the window's right edge: clear of the close button (14 px, 5 in) and the minimise button beside it, with a gap of 8
 #define UI_COLUMN_SHARE 30   // a page's column: this share of the window,
 #define UI_COLUMN_LEAST 88   // no narrower than this, no wider than the most, and never more than half of the window
@@ -10756,8 +10746,9 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
                         c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
                         ui_control_start(c);
                 }
-                c->w = UI_SEARCH_W, c->h = UI_FIELD_H;
-                c->x = ui_mirror((p->width - pad) * 100 / ui->scale - c->w - UI_SEARCH_RIGHT, c->w, 0, p->width * 100 / ui->scale), c->y = UI_SEARCH_Y;
+                // The field is the title band's whole height (it melts into the band: no gap above or below it).
+                c->w = UI_SEARCH_W, c->h = UI_PAGE_TOP;
+                c->x = ui_mirror((p->width - pad) * 100 / ui->scale - c->w - UI_SEARCH_RIGHT, c->w, 0, p->width * 100 / ui->scale), c->y = 0;
                 c->focused = keys;
                 // Its own clip: the title band. A field drawn past the band's edge was cut where the list below repaints.
                 ui->bottom = p->top;
@@ -14658,7 +14649,7 @@ static fn ui_findbar_draw(struct ui address_to ui, struct ui_findbar address_to 
         struct ui_control address_to c = &bar->control;
 
         c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-        c->x = 0, c->y = (top + ui_px(ui, UI_GAP1)) * 100 / ui->scale, c->w = width * 100 / ui->scale, c->h = UI_FIELD_H; // the band's width, edge to edge
+        c->x = 0, c->y = top * 100 / ui->scale, c->w = width * 100 / ui->scale, c->h = UI_FINDBAR_H; // the band's width and height, edge to edge
         c->items[0] = hint;
         c->focused = bar->field.focused;
         c->edit = &bar->field;

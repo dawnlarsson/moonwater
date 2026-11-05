@@ -140710,8 +140710,8 @@ static fn check_settings_seam(void)
 }
 
 /*
-        The page's search field, as the settings frames just drew it: the kit's field, UI_FIELD_H high, wholly inside the
-        title band (UI_PAGE_TOP from the window's top, and not under the window's top inset), and clear of the close button
+        The page's search field, as the settings frames just drew it: the kit's field, the title band's whole height (UI_PAGE_TOP
+        from the window's top: it melts into the band, with no gap above or below), and clear of the close button
         and the minimise button beside it at the top right (their width and their inset from the edge). The band is the
         field's own clip: a field that crossed its bottom edge was cut where the list below repaints.
 */
@@ -140720,9 +140720,9 @@ static fn check_settings_search(void)
         const struct ui_control address_to c = &settings.page.search;
         int width = settings.width * 100 / settings.ui.scale;
 
-        check("settings search: the page's field is the kit's, UI_FIELD_H high, and drawn", c->kind == UI_INPUT && c->h == UI_FIELD_H && c->items[0] != null);
-        check("settings search: it lies wholly in the title band, below the window's top inset",
-              c->y >= UI_CLOSE_IN && c->y + c->h <= UI_PAGE_TOP);
+        check("settings search: the page's field is the kit's, the title band high, and drawn", c->kind == UI_INPUT && c->h == UI_PAGE_TOP && c->items[0] != null);
+        check("settings search: it fills the title band, from its top to its bottom",
+              c->y == 0 && c->y + c->h == UI_PAGE_TOP);
         check("settings search: it is clear of the close button and its minimise beside it, at the top right",
               width - (c->x + c->w) >= 2 * (UI_CLOSE + UI_CLOSE_IN));
 }
@@ -155514,10 +155514,10 @@ static fn check_glass_pieces(string_address regular)
         pad = ui_px(&launcher.ui, UI_PAD);
 #define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
         check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
-              GLASS_AT(2, 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, 2) == 0);
-        check("glass: the launcher's field is flat, with no shadow or ring above it (its face runs to the edges, so none is left of it)",
-              GLASS_AT(LAUNCHER_WIDTH / 2, pad - 1) == 0 && GLASS_AT(0, pad - 1) == 0);
-        check("glass: the launcher's field is a lit well over the glass, not clear, with its rule along its foot", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0 &&
+              GLASS_AT(2, launcher.height - 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, launcher.height - 2) == 0);
+        check("glass: the launcher's field runs to the panel's top and both edges (it melts into the panel: no gap above it, none left of it)",
+              GLASS_AT(LAUNCHER_WIDTH / 2, 0) > 0 && GLASS_AT(0, 0) > 0 && GLASS_AT(LAUNCHER_WIDTH - 1, 0) > 0);
+        check("glass: the launcher's field is a lit well over the glass, not clear, to where the list begins", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0 &&
               GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET - 1) > 0);
 #undef GLASS_AT
 
