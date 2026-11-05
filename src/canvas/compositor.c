@@ -3619,7 +3619,10 @@ struct compositor_absinfo
 #define COMPOSITOR_WHEEL_STREAM_NS 60000000ull
 #define COMPOSITOR_WHEEL_STREAMS 3          // stream notches in a gesture before the device is known to stream
 #define COMPOSITOR_WHEEL_MEMORY_NS 3000000000ull // how long a device that streamed keeps the stream for its next gesture's first notch
-#define COMPOSITOR_STREAM_V 24
+#define COMPOSITOR_STREAM_V 24              // a stream notch at rest, in the wheel's 120ths: 8 px at 100 percent (the kit's notch is 40 px)
+#define COMPOSITOR_GAIN_BASE 2048           // the same, in 256ths of a device pixel: 8 px
+#define COMPOSITOR_STREAM_HIST 6            // the stream notches the rate is measured over (about 50 to 100 ms)
+#define COMPOSITOR_GAIN_TURN 1024000        // the stream turn's units: 120ths of a notch times 256ths of a pixel times 100 percent, over 40 px
 #define COMPOSITOR_PAD_WIDTH_MM 100
 
 struct compositor_pad
@@ -4224,7 +4227,9 @@ static struct
         positive wheel_stream_at[COMPOSITOR_INPUTS]; // when its last stream notch came, ns: the memory's three seconds run from it
         unsigned int wheel_run[COMPOSITOR_INPUTS];   // the stream notches in its current gesture (compositor_wheel_stream)
         unsigned char wheel_streamed[COMPOSITOR_INPUTS]; // it has streamed: a gesture of COMPOSITOR_WHEEL_STREAMS stream notches
-        long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, in 120ths, per axis (compositor_stream_turn)
+        long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, per axis, in COMPOSITOR_GAIN_TURN units (compositor_stream_turn)
+        positive stream_hist[COMPOSITOR_INPUTS][COMPOSITOR_STREAM_HIST]; // the times of the device's last stream notches, a ring
+        unsigned int stream_hist_n[COMPOSITOR_INPUTS];                    // how many stream notches the gesture has had (the ring's count)
         unsigned int trackpad_speed; // the setting `canvas trackpad speed`: 0 normal (what a zeroed compositor is), 1 slow, 2 fast
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
         struct compositor_pad pad[COMPOSITOR_INPUTS];
@@ -11091,6 +11096,7 @@ static void compositor_input_add(unsigned int number)
         compositor.wheel_at[at] = compositor.wheel_stream_at[at] = 0;
         compositor.wheel_run[at] = 0, compositor.wheel_streamed[at] = 0;
         compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
+        compositor.stream_hist_n[at] = 0;
         // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
         // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
         {
@@ -16466,10 +16472,9 @@ static void compositor_pad_key(struct compositor_pad *pad, unsigned int code, in
         with two fingers or more on it as the wheel in 120ths (x sideways, y up). Which it was: 1 a move, 2 the
         wheel, and 0 neither, as the first report of a touch is, which says only where the finger is.
 */
-// The trackpad's speed setting as an index into compositor_stream_v and compositor_pad_pct (0 normal, 1 slow, 2 fast).
-// A stream notch in 120ths: 24 is 8 px at 100 percent, so 12 is 4 px and 42 is 14 px (the kit's notch is 40 px). A pad's
-// millimetre is COMPOSITOR_PAD_WHEEL of them at 100 percent, and that times the percent.
-static const int compositor_stream_v[3] = {COMPOSITOR_STREAM_V, 12, 42};
+// The trackpad's speed setting as an index into compositor_pad_pct (0 normal, 1 slow, 2 fast). A pad's millimetre is
+// COMPOSITOR_PAD_WHEEL of the wheel's 120ths at 100 percent, and that times the percent; a stream's notch is the gain
+// (compositor_stream_gain) times the same percent.
 static const int compositor_pad_pct[3] = {100, 60, 160};
 
 static unsigned int compositor_speed(void)
@@ -16847,18 +16852,69 @@ static int compositor_wheel_stream(unsigned int at, positive now)
                 compositor.wheel_stream_at[at] = now;
         }
         else
-                compositor.wheel_run[at] = 0;
+                compositor.wheel_run[at] = 0, compositor.stream_hist_n[at] = 0;
         compositor.wheel_at[at] = now;
         return stream;
 }
 
-// A stream's turn in 120ths: each notch is COMPOSITOR_STREAM_V of them, and what does not come whole is kept for the next turn.
-static long long compositor_stream_turn(unsigned int at, long long value120, int horizontal)
+/*
+        A stream's gain: the pixels a stream notch moves at 100 percent, in 256ths, as a function of the notches' rate in centi-notches a
+        second (compositor_stream_rate). Eight pixels up to 10 a second, then a gentle power curve, 3 x (rate - 10) / 50 to the 1.5, so
+        a notch is four times as far at 60 a second (32 px). Continuous, rising, and held at the top past 60; a rate of nothing is the base.
+*/
+static long long compositor_stream_gain(unsigned long long rate)
+{
+        long long x = rate > 100000 ? 100000 : rate > 1000 ? (long long)rate - 1000 : 0;
+        unsigned long long xq, f;
+
+        if (!x)
+                return COMPOSITOR_GAIN_BASE;
+        xq = (unsigned long long)x * 65536 / 5000;
+        xq = xq > 65536 ? 65536 : xq;
+        f = xq * ui_touch_isqrt(xq * 65536) / 65536; // x to the 1.5 in 65536ths
+        return COMPOSITOR_GAIN_BASE + COMPOSITOR_GAIN_BASE * 3 * (long long)f / 65536;
+}
+
+// The rate of the device's stream notches, in centi-notches a second, over the last COMPOSITOR_STREAM_HIST of them (the notch
+// that is being read is the last). Fewer than two notches, or a clock that went back, is no rate.
+static unsigned long long compositor_stream_rate(unsigned int at)
+{
+        unsigned int n = compositor.stream_hist_n[at], m = n < COMPOSITOR_STREAM_HIST ? n : COMPOSITOR_STREAM_HIST;
+        positive last, first;
+
+        if (m < 2)
+                return 0;
+        last = compositor.stream_hist[at][(n - 1) % COMPOSITOR_STREAM_HIST];
+        first = compositor.stream_hist[at][(n - m) % COMPOSITOR_STREAM_HIST];
+        if (last < first)
+                return 0;
+        return last == first ? 100000000000ull : (unsigned long long)(m - 1) * 100000000000ull / (last - first);
+}
+
+// The gain of a stream notch read at now: the notch goes into the device's history, then the rate of the history gives the gain.
+static long long compositor_stream_gain_at(unsigned int at, positive now)
+{
+        unsigned int slot = compositor.stream_hist_n[at] % COMPOSITOR_STREAM_HIST;
+
+        compositor.stream_hist[at][slot] = now;
+        compositor.stream_hist_n[at]++;
+        return compositor_stream_gain(compositor_stream_rate(at));
+}
+
+/*
+        A stream's turn in 120ths of a notch, for a notch of value120 (a notch is 120, the hi-res wheel's 120ths are as they are) at gain
+        (256ths of a pixel at 100 percent) and the trackpad's speed. A pixel is three of the wheel's 120ths at 100 percent (the kit's notch
+        is 40 px), so the turn is value120 x gain x percent over COMPOSITOR_GAIN_TURN. What does not come whole is kept for the next turn.
+*/
+static long long compositor_stream_turn(unsigned int at, long long value120, long long gain, int horizontal)
 {
         int axis = horizontal ? 1 : 0;
-        long long total = value120 * compositor_stream_v[compositor_speed()] + compositor.wheel_rest[at][axis], turn = total / 120;
+        long long pct = compositor_pad_pct[compositor_speed()], total, turn;
 
-        compositor.wheel_rest[at][axis] = total - turn * 120;
+        value120 = value120 > 1000000000ll ? 1000000000ll : value120 < -1000000000ll ? -1000000000ll : value120;
+        total = value120 * gain * pct + compositor.wheel_rest[at][axis];
+        turn = total / COMPOSITOR_GAIN_TURN;
+        compositor.wheel_rest[at][axis] = total - turn * COMPOSITOR_GAIN_TURN;
         return turn;
 }
 
@@ -18292,8 +18348,12 @@ static void compositor_input_read(unsigned int at)
                                         long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
 
                                         if (stream)
-                                                compositor_wheel_flags(compositor_counts(0, compositor_stream_turn(at, value120, sideways)), sideways,
+                                        {
+                                                long long gain = compositor_stream_gain_at(at, now);
+
+                                                compositor_wheel_flags(compositor_counts(0, compositor_stream_turn(at, value120, gain, sideways)), sideways,
                                                                        WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM);
+                                        }
                                         else
                                                 compositor_wheel(compositor_counts(0, value120), sideways);
                                 }

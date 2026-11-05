@@ -78,7 +78,7 @@ moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draw
 moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]
 moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
 moonwater canvas wheel smooth [on|off]  a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]
-moonwater canvas trackpad speed [slow|normal|fast]  how far a trackpad scroll moves the content: 8 px a stream notch at normal, 4 slow, 14 fast [normal]
+moonwater canvas trackpad speed [slow|normal|fast]  how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]

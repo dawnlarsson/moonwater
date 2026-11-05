@@ -344,13 +344,13 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
-    //  A trackpad's scroll: a stream notch is 4, 8 or 14 px at 100 percent, and a two-finger millimetre is 60, 100 or 160 percent of
+    //  A trackpad's scroll: a stream notch is 8 px at rest and grows with the notch rate, and a two-finger millimetre is 60, 100 or 160 percent of
     //  the pad's own (compositor_stream_v, compositor_pad_pct).
     SETTING_PLAIN_ROW(null, "Trackpad scroll speed", SETTINGS_CHOICE, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
                       .usage = "canvas trackpad speed [slow|normal|fast]",
-                      .help = "how far a trackpad scroll moves the content: 8 px a stream notch at normal, 4 slow, 14 fast [normal]"),
+                      .help = "how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",

@@ -150228,6 +150228,78 @@ static fn check_stream_fling(void)
         }
 }
 
+// The rate-adaptive gain (compositor_stream_gain): 8 px at 10 notches a second and below, 32 px at 60 and above, rising in between on a
+// curve with no step; a device's notches at 10, 30, 60 and 100 a second move px a second that follow the curve; and no rate, however
+// odd (none, the same instant, a clock backward, a huge notch), leaves the gain between the base and the top.
+static fn check_stream_gain(void)
+{
+        long long prev = compositor_stream_gain(0), worst = 0, top = COMPOSITOR_GAIN_BASE * 4;
+        int mono = 1, held = 1, bounded = 1;
+        double rate_px[4];
+        static const unsigned long long rates[4] = {1000, 3000, 6000, 10000};
+        static const long spacing[4] = {100000000l, 33333333l, 16666667l, 10000000l};
+
+        for (unsigned long long r = 1; r <= 15000; r++)
+        {
+                long long g = compositor_stream_gain(r);
+
+                mono &= g >= prev;
+                worst = g - prev > worst ? g - prev : worst;
+                prev = g;
+                bounded &= g >= COMPOSITOR_GAIN_BASE && g <= top;
+        }
+        held &= compositor_stream_gain(6000) == top && compositor_stream_gain(10000) == top && compositor_stream_gain(1000) == COMPOSITOR_GAIN_BASE;
+        check("stream gain: the curve rises with the rate, never falls, and has no step (at most 3 of 256ths a hundredth of a notch a second)",
+              mono && worst <= 3);
+        check("stream gain: 8 px at 10 a second and below, 32 px at 60 and above and held there, and between them between the two",
+              held && bounded);
+
+        memory_zero(&compositor, sizeof(compositor));
+        for (int k = 0; k < 4; k++)
+        {
+                long long sum_v = 0;
+                positive t = 1000000000ull;
+                int notches = 40;
+
+                memory_zero(&compositor.wheel_rest, sizeof(compositor.wheel_rest));
+                memory_zero(&compositor.stream_hist, sizeof(compositor.stream_hist));
+                compositor.stream_hist_n[0] = 0;
+                for (int n = 0; n < notches; n++, t += (positive)spacing[k])
+                {
+                        long long gain = compositor_stream_gain_at(0, t), v = compositor_stream_turn(0, 120, gain, 0);
+
+                        if (n >= 10)
+                                sum_v += v;
+                }
+                // thirty notches of the last forty, at this spacing: their pixels a second.
+                rate_px[k] = (double)sum_v / 3.0 / (30.0 * (double)spacing[k] / 1e9);
+        }
+        string_format(log, "  stream gain: px a second at 10, 30, 60 and 100 notches a second: %p, %p, %p, %p (the curve's gain there times the rate)\n",
+                      (positive)rate_px[0], (positive)rate_px[1], (positive)rate_px[2], (positive)rate_px[3]);
+        check("stream gain: a stream at 10, 30, 60 and 100 notches a second moves about 80, 420, 1900 and 3100 px a second, rising with the rate",
+              rate_px[0] > 72 && rate_px[0] < 88 && rate_px[1] > 400 && rate_px[1] < 440 && rate_px[2] > 1850 && rate_px[2] < 1990 &&
+              rate_px[3] > 3000 && rate_px[3] < 3250 && rate_px[0] < rate_px[1] && rate_px[1] < rate_px[2] && rate_px[2] < rate_px[3]);
+
+        // Hostile: the same instant (no span), a clock that went back, and a notch of a trillion.
+        {
+                long long sum = 0, v;
+                int bad = 0;
+
+                memory_zero(&compositor.stream_hist, sizeof(compositor.stream_hist));
+                compositor.stream_hist_n[1] = 0;
+                compositor_stream_gain_at(1, 5000000000ull);
+                bad |= compositor_stream_gain_at(1, 5000000000ull) != top;
+                compositor.stream_hist_n[2] = 0;
+                compositor_stream_gain_at(2, 9000000000ull);
+                bad |= compositor_stream_gain_at(2, 4000000000ull) != COMPOSITOR_GAIN_BASE;
+                v = compositor_stream_turn(3, 1000000000000ll, top, 0);
+                bad |= compositor_counts(0, v) != WINDOW_COORD_MAX && compositor_counts(0, v) != -WINDOW_COORD_MAX && compositor_counts(0, v) == 0;
+                sum = v;
+                check("stream gain: the same instant is the top, a clock backward is the base, and a trillion 120ths clamps (no wrap)",
+                      !bad && sum != 0);
+        }
+}
+
 // The readout (moonwater debug, window_wheel_report): the turns in the last five seconds of an input, how many were a stream's, the
 // most in a second, and the gaps between them. A turn ten seconds old is none; a ring that wrapped counts its last 1024; a turn stamped
 // after now is none.
@@ -150294,12 +150366,12 @@ static fn check_trackpad_speed(void)
                 compositor.trackpad_speed = speed;
                 pads[speed] = pad_swipe_sum();
                 compositor.wheel_rest[0][0] = 0;
-                stream[speed] = (long)compositor_stream_turn(0, 120, 0);
+                stream[speed] = (long)compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0);
         }
-        ok = pads[0] == 480 && pads[1] == 280 && pads[2] == 760 && stream[0] == 24 && stream[1] == 12 && stream[2] == 42;
-        check("trackpad speed: normal is 480 of 120ths for 40 mm and 24 a stream notch; slow 280 and 12; fast 760 and 42", ok);
+        ok = pads[0] == 480 && pads[1] == 280 && pads[2] == 760 && stream[0] == 24 && stream[1] == 14 && stream[2] == 38;
+        check("trackpad speed: normal is 480 of 120ths for 40 mm and 24 a stream notch at rest; slow 280 and 14 (0.6 x 8 px); fast 760 and 38 (1.6 x)", ok);
         compositor.trackpad_speed = 7;
-        check("trackpad speed: a value that is none of the three is normal", pad_swipe_sum() == 480 && compositor_stream_turn(0, 120, 0) == 24);
+        check("trackpad speed: a value that is none of the three is normal", pad_swipe_sum() == 480 && compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0) == 24);
         compositor.trackpad_speed = 0;
 }
 
@@ -150313,14 +150385,14 @@ static fn check_stream_notch(void)
 
         memory_zero(&compositor, sizeof(compositor));
         for (int k = 0; k < 100; k++)
-                sum += compositor_stream_turn(0, 120, 0);
+                sum += compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0);
         check("stream notch: a hundred stream notches are 2400 of the wheel's 120ths: 8 px each at 100 percent, exactly",
               sum == 100 * COMPOSITOR_STREAM_V);
         for (int k = 0; k < 8; k++)
-                hires += compositor_stream_turn(1, 15, 0);
+                hires += compositor_stream_turn(1, 15, COMPOSITOR_GAIN_BASE, 0);
         check("stream notch: eight hi-res 120ths of 15 are one notch's stream turn (what does not come whole is carried)",
               hires == COMPOSITOR_STREAM_V);
-        huge = compositor_stream_turn(2, 1000000000000ll, 1);
+        huge = compositor_stream_turn(2, 1000000000000ll, COMPOSITOR_GAIN_BASE, 1);
         check("stream notch: a value of a trillion 120ths is a turn clamped to the window's coordinates, not a wrap",
               compositor_counts(0, huge) == WINDOW_COORD_MAX || compositor_counts(0, huge) == -WINDOW_COORD_MAX);
 
@@ -161639,6 +161711,7 @@ b32 main()
         check_stream_notch();
         check_trackpad_speed();
         check_wheel_report();
+        check_stream_gain();
         check_stream_fling();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
