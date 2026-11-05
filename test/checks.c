@@ -150466,6 +150466,30 @@ static fn check_stream_smooth(void)
         check("stream smooth: the whole of the stream is at its release, 30 x 8 px (61440 of 256ths), the flush carrying the remainder",
               release_us && at_release - start == 30 * 2048);
 
+        // A decaying stream: intervals growing from 17 to about 200 ms, 600 ms of notches in all. It throws nothing at its end.
+        precise_setup(&p, 100000, 50000);
+        {
+                long gap = 16667, at = 100000;
+                long end_us = 0;
+
+                for (us = at; gap < 220000; us += gap, gap = gap * 109 / 100)
+                {
+                        stream_turn(&p, us, -24);
+                        end_us = us;
+                }
+                for (long t = end_us + 16667; t < end_us + 400000; t += 16667)
+                {
+                        precise_frames(&p, t, t);
+                        if (!release_us && !p.s.hand)
+                                release_us = t;
+                }
+                at_release = (long)p.s.scroll;
+                for (long t = end_us + 400000; t < end_us + 2000000; t += 16667)
+                        precise_frames(&p, t, t);
+                after = (long)p.s.scroll - at_release;
+        }
+        check("stream smooth: a decaying stream's end throws nothing: the region rests where its notches left it", after == 0);
+
         // An abrupt stop at 60 a second, 32 px a notch (the rate's gain at its top): a throw, about 1920 px a second for half a second.
         precise_setup(&p, 100000, 50000);
         {

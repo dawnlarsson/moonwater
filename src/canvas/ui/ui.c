@@ -6648,6 +6648,15 @@ static void ui_scroll_flush(struct ui_scroll address_to s)
         s->step_at = 0;
 }
 
+// The stream's decay: the last two intervals came a quarter slower than the two before (the rate is falling, a Mac's momentum), so a
+// stream that ends this way throws nothing. An abrupt stop (the intervals as they were) throws as a finger's lift does.
+static b32 ui_scroll_decaying(const struct ui_scroll address_to s)
+{
+        b64 recent = s->gaps[0] + s->gaps[1], older = s->gaps[2] + s->gaps[3];
+
+        return older && recent * 4 > older * 5;
+}
+
 // The position follows the target over the frame's time (the glide's clock, now).
 static void ui_scroll_step(struct ui_scroll address_to s, b64 now)
 {
@@ -6779,7 +6788,9 @@ static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
 
         if (paused)
                 speed = 0;
-        // A stream's end (no lift): its remainder is flushed below.
+        // A stream's end (no lift): a decaying stream throws nothing (its momentum is the stream's own), and its remainder is flushed.
+        if (s->smooth && !lifted && ui_scroll_decaying(s))
+                speed = 0;
         thrown = s->precise && ui_throws(speed, s->scale);
         if (s->smooth)
                 ui_scroll_flush(s);
