@@ -139677,12 +139677,48 @@ static fn settings_group_glide_check(void)
               list->scroll == 0 && list->at == 0 && list->aim == 0 && !list->gliding);
 }
 
-// The group column (the settings' tabs on end) squashes at its ends like a list: a wheel turn at its bottom stretches it from that
-// edge, a finger pulled past its top or bottom stretches it from that edge, and its items are drawn through the stretch.
+/*
+        The band's drawn share past an end, 256ths of a device pixel: how far a bounded region's content is drawn past the end it is
+        pulled past (edge -1 the top, 1 the bottom), and 0 inside its ends. It is the drawn position's distance past the end, the
+        rubber band's (ui_scroll_shown), so a pull of the list moves its rows by this and nothing else.
+*/
+static b64 band_past(const struct ui_scroll address_to s, int address_to edge)
+{
+        b64 most = ui_scroll_most256(s), shown = ui_scroll_shown(s);
+
+        *edge = 0;
+        if (!s->bounds)
+                return 0;
+        if (shown < 0)
+                return *edge = -1, -shown;
+        if (shown > most)
+                return *edge = 1, shown - most;
+        return 0;
+}
+
+// The band's share as whole device pixels, signed: negative past the top, positive past the bottom (the content's drawn move).
+static int band_px(const struct ui_scroll address_to s)
+{
+        int edge = 0;
+        int px = (int)((band_past(s, &edge) + 128) >> 8);
+
+        return edge < 0 ? -px : px;
+}
+
+// The most the band draws a bounded region past an end: a view's band, the hand's own reach (UI_SCROLL_VIEW_PAST views), in device pixels.
+static int band_view_px(const struct ui_scroll address_to s)
+{
+        b64 most = ui_scroll_most256(s), reach = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE;
+
+        return (int)((ui_scroll_band(s, most + reach) - most + 128) >> 8);
+}
+
+// The group column (the settings' tabs on end) takes a pull at its ends as a list does: a wheel turn at its bottom moves it past that
+// edge by the band, a finger pulled past its top or bottom moves it by the band from that edge, and its items are drawn at its scroll.
 static fn settings_column_check(void)
 {
         struct ui_scroll address_to col = &settings.page.column_scroll;
-        int most, edge = 0, x, y, at_bottom = 0, at_top = 0;
+        int most, edge = 0, x, y;
         b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
@@ -139694,28 +139730,25 @@ static fn settings_column_check(void)
         most = ui_scroll_most(col);
         x = ui_dev(&settings.ui, UI_PAD) + 10, y = settings.page.top + 30;
         ui_kit.pointer_x = x, ui_kit.pointer_y = y;
-#ifdef UI_LIST_STRETCH
         ui_scroll_set(col, most);
         {
                 struct window_event turn = {WINDOW_EVENT_WHEEL, 0, -120, 0};
 
                 ui_page_wheel(&settings.ui, &settings.page, &turn);
         }
-        wheel_ok = ui_scroll_stretched(col, &edge) > 0 && edge > 0;
+        wheel_ok = band_past(col, &edge) > 0 && edge > 0 && col->scroll > most;
         ui_scroll_set(col, most);
         ui_scroll_drag(col, 150);
-        pull_bottom_ok = ui_scroll_stretched(col, &edge) > 0 && edge > 0 && col->scroll == most;
-        at_bottom = ui_scroll_map(col, col->y + 5);
+        pull_bottom_ok = band_past(col, &edge) > 0 && edge > 0 && col->scroll - most == band_px(col);
+        items_ok = col->scroll - most == band_px(col) && col->scroll > most;
         ui_scroll_set(col, 0);
         ui_scroll_drag(col, -150);
-        pull_top_ok = ui_scroll_stretched(col, &edge) > 0 && edge < 0 && col->scroll == 0;
-        at_top = ui_scroll_map(col, col->y + col->view - 5);
-        items_ok = at_top != col->y + col->view - 5 && at_bottom != col->y + 5;
+        pull_top_ok = band_past(col, &edge) > 0 && edge < 0 && col->scroll == band_px(col) && col->scroll < 0;
+        items_ok = items_ok && col->scroll < 0;
         ui_scroll_let_go(col, 0, 0);
         ui_scroll_set(col, 0);
-#endif
-        check("settings column: a wheel turned at its bottom stretches the groups from that edge, as a list's does", wheel_ok);
-        check("settings column: a finger pulled past its bottom or top stretches the groups from that edge, and its items are drawn through the stretch",
+        check("settings column: a wheel turned at its bottom moves the groups by the band from that edge, as a list's does", wheel_ok);
+        check("settings column: a finger pulled past its bottom or top moves the groups by the band from that edge, and its items are drawn at its scroll",
               pull_bottom_ok && pull_top_ok && items_ok);
 }
 
@@ -139847,8 +139880,8 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         string_format(log, "  settings wheel end (%s): %p rows, last row at %p, scroll %p, drawn past it by %b, at past it by %b/256, back %p frames\n",
                       name, (positive)settings.list.count, (positive)most, (positive)settings.list.scroll.scroll, (bipolar)p.peak,
                       (bipolar)p.peak_at, (positive)p.returned);
-        check("settings wheel end: a wheel turned down to the last row never draws the list past it, and the list does not come back from it",
-              p.peak <= 0 && p.returned == 0);
+        check("settings wheel end: a wheel turned down to the last row draws the list past it by a band no more than a view's, and it does not come back up",
+              p.peak > 0 && p.peak <= band_view_px(&settings.list.scroll) && p.returned == 0);
         check("settings wheel end: it settles on the last row with nothing moving", settled);
 }
 
@@ -139906,7 +139939,10 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         string_format(log, "  settings flick (%s): %p rows, last row at %p, drawn past it by %b at most, moved back %p frames, rest at %p\n",
                       name, (positive)settings.list.count, (positive)most, (bipolar)p.peak, (positive)p.returned,
                       (positive)settings.list.scroll.scroll);
-        return p.peak <= 0 && p.returned == 0 && settings.list.scroll.scroll == most && !settings.list.scroll.back.live;
+        // A finger that goes past the last row draws the band there (a view's, at most); one that stops short draws no overshoot.
+        int limit = steps * step > start ? band_view_px(&settings.list.scroll) : 0;
+
+        return p.peak <= limit && p.returned == 0 && settings.list.scroll.scroll == most && !settings.list.scroll.back.live;
 }
 
 /*
@@ -146617,18 +146653,12 @@ static void bounds_list_make(const struct ui address_to ui, struct ui_list addre
         ui_list_layout(ui, l);
 }
 
-// Where a row is drawn: its top in device pixels, and its height. A stretch moves and sizes it; a list at rest puts it at its place.
+// Where a row is drawn: its top in device pixels, and its height. A pull moves it with the region's drawn position.
 static int bounds_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to height)
 {
-#ifdef UI_LIST_STRETCH
-        int top = 0;
-
-        ui_list_row_span(ui, l, at, &top, height);
-        return top;
-#else
-        *height = ui_dev(ui, UI_ROW);
+        (void)ui;
+        *height = l->tall[at];
         return ui_list_row_y(l, at);
-#endif
 }
 
 /*
@@ -147213,13 +147243,13 @@ static fn check_kit_place(void)
                 check("kit wheel: a fast spin's glide is held to 60 rows a second, and it settles on its aim without passing it", capped);
         }
 
-        // A card (a page of text, bounded like a list): a pull past its end squashes its lines from that edge, as a list's rows do,
-        // and a card that fits squashes at its top too; released, the squash springs back to scale 1 without overshoot. Each line is
-        // placed by ui_scroll_span, the card's own drawing (ui_lines_draw) takes the same spans.
+        // A card (a page of text, bounded like a list): a pull past its end moves its lines by the band from that edge, as a list's rows
+        // do, and a card that fits moves at its top too; released, they spring back without overshoot. Each line is drawn at the card's
+        // scroll (ui_lines_draw takes it the same way).
         {
                 static struct ui_scroll card, fits;
-                int drawn = 0, span = 0, most, frame, edge = 0;
-                b32 squashed = false, fits_squashed = false, eased = true, kept = true;
+                int most, frame, edge = 0;
+                b32 moved = false, fits_moved = false, eased = true, kept = true;
                 b64 stretch = 0, last = 0, lowest = 0;
 
                 ui_kit.now = 9500000000ll, ui_kit.busy = 0;
@@ -147230,42 +147260,28 @@ static fn check_kit_place(void)
                 most = ui_scroll_most(&card);
                 ui_scroll_set(&card, most);
                 ui_scroll_drag(&card, 150);
-#ifdef UI_LIST_STRETCH
-                ui_scroll_span(&card, card.y + 180, 20, &drawn, &span);
-                squashed = ui_scroll_stretched(&card, &edge) > 0 && edge > 0 && span > 20 && card.scroll == most;
-#endif
+                moved = band_past(&card, &edge) > 0 && edge > 0 && card.scroll - most == band_px(&card) && card.scroll > most;
                 ui_scroll_drag(&fits, -150);
-#ifdef UI_LIST_STRETCH
-                ui_scroll_span(&fits, fits.y, 20, &drawn, &span);
-                fits_squashed = ui_scroll_stretched(&fits, &edge) > 0 && edge < 0 && span > 20 && fits.scroll == 0;
-#endif
+                fits_moved = band_past(&fits, &edge) > 0 && edge < 0 && fits.scroll == band_px(&fits) && fits.scroll < 0;
                 ui_scroll_let_go(&card, 0, 0);
                 ui_scroll_let_go(&fits, 0, 0);
-#ifdef UI_LIST_STRETCH
-                last = ui_scroll_stretched(&card, &edge);
-#endif
+                last = band_past(&card, &edge);
                 for (frame = 0; frame < 240 && (card.gliding || card.back.live || fits.gliding || fits.back.live); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &card);
                         ui_scroll_glide(&ui, &fits);
-#ifdef UI_LIST_STRETCH
-                        stretch = ui_scroll_stretched(&card, &edge);
+                        stretch = band_past(&card, &edge);
                         eased = eased && stretch <= last;
                         lowest = stretch < lowest ? stretch : lowest;
                         last = stretch;
-#endif
-                        kept = kept && card.scroll == most && fits.scroll == 0;
                 }
-#ifdef UI_LIST_STRETCH
-                eased = eased && ui_scroll_stretched(&card, &edge) == 0 && ui_scroll_stretched(&fits, &edge) == 0;
-#else
-                eased = false;
-#endif
-                check("kit card: a pull past the end of a card that scrolls squashes its lines from that edge, and the card keeps its end",
-                      squashed && kept);
-                check("kit card: a card that fits squashes at its top when pulled, and released it springs back to scale 1 without overshoot",
-                      fits_squashed && eased && lowest >= 0);
+                eased = eased && band_past(&card, &edge) == 0 && band_past(&fits, &edge) == 0;
+                kept = card.scroll == most && fits.scroll == 0;
+                check("kit card: a pull past the end of a card that scrolls moves its lines by the band from that edge, and the card keeps its end",
+                      moved && kept);
+                check("kit card: a card that fits moves its lines at its top when pulled, and released they spring back without overshoot",
+                      fits_moved && eased && lowest >= 0);
         }
 
         // Every list: its scroll track runs the view's full height with the view's ends (its top at the view's top, its bottom at the
@@ -147367,14 +147383,13 @@ static fn check_kit_place(void)
                       short_list.scroll == most_short && peak_short == most_short && monotone && !short_list.gliding);
         }
 
-        // A scroll track squashes toward the wall it is pushed against: pulled past the top, its top stays at the top and its length
-        // shrinks; pulled past the bottom, its bottom stays at the bottom and it shrinks; the thumb's ends go the same way; released,
-        // the track is its full length again.
+        // A scroll track does not squash: under a pull the rubber band moves the content, and the bar keeps its track. Pulled past the top
+        // the thumb is at the top, past the bottom it is at the bottom, its ends are the track's own, and released the bar is whole at its end.
         {
                 static struct ui_scroll bar;
                 struct ui_box thumb_box;
-                int track_top = 0, track_height = 0, most, frame, thumb_top = 0, thumb_length = 0;
-                b32 shrank_top = false, shrank_bottom = false, thumb_follows = false, full_again = false;
+                int track_top = 0, track_height = 0, most, frame, thumb_top = 0, thumb_length = 0, edge = 0;
+                b32 pinned_top = false, pinned_bottom = false, thumb_follows = false, full_again = false;
 
                 ui_kit.now = 9800000000ll, ui_kit.busy = 0;
                 memory_zero(&bar, sizeof(bar));
@@ -147383,21 +147398,14 @@ static fn check_kit_place(void)
                 ui_scroll_track(&ui, &bar, &track_top, &track_height);
                 ui_scroll_set(&bar, 0);
                 ui_scroll_drag(&bar, -150);
-#ifdef UI_LIST_STRETCH
-                shrank_top = ui_scroll_track_map(&bar, track_top) == track_top &&
-                             ui_scroll_track_map(&bar, track_top + track_height) < track_top + track_height;
-#endif
+                pinned_top = band_past(&bar, &edge) > 0 && edge < 0 && ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length) && thumb_top == track_top;
                 ui_scroll_set(&bar, most);
                 ui_scroll_drag(&bar, 150);
-#ifdef UI_LIST_STRETCH
-                shrank_bottom = ui_scroll_track_map(&bar, track_top + track_height) == track_top + track_height &&
-                                ui_scroll_track_map(&bar, track_top) > track_top;
-                ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length);
+                pinned_bottom = band_past(&bar, &edge) > 0 && edge > 0 && ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length) &&
+                                thumb_top + thumb_length == track_top + track_height;
                 ui_scroll_box(&ui, &bar, thumb_top, thumb_length, &thumb_box);
-                thumb_follows = thumb_box.y0 == (b32)(ui_scroll_track_map(&bar, thumb_top + 3) * 256) &&
-                                thumb_box.y1 == (b32)(ui_scroll_track_map(&bar, thumb_top + thumb_length - 3) * 256) &&
-                                thumb_box.y0 > (b32)((thumb_top + 3) * 256);
-#endif
+                thumb_follows = thumb_box.y0 == (b32)((thumb_top + UI_SCROLL_BORDER) * 256) &&
+                                thumb_box.y1 == (b32)((thumb_top + thumb_length - UI_SCROLL_BORDER) * 256);
                 ui_scroll_drag(&bar, 0);
                 ui_scroll_let_go(&bar, 0, 0);
                 for (frame = 0; frame < 300 && (bar.gliding || bar.back.live); frame++)
@@ -147405,30 +147413,25 @@ static fn check_kit_place(void)
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &bar);
                 }
-#ifdef UI_LIST_STRETCH
-                full_again = ui_scroll_track_map(&bar, track_top) == track_top &&
-                             ui_scroll_track_map(&bar, track_top + track_height) == track_top + track_height && bar.scroll == most;
-#endif
-                check("kit track: pulled past the top the track stays at the top and shortens; pulled past the bottom it stays at the bottom and shortens",
-                      shrank_top && shrank_bottom);
-                check("kit track: the thumb's ends follow the track's squash, and released the track is its full length again",
+                full_again = band_past(&bar, &edge) == 0 && bar.scroll == most && ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length) &&
+                             thumb_top + thumb_length == track_top + track_height;
+                check("kit track: pulled past the top the thumb stays at the top, and pulled past the bottom it stays at the bottom: the track does not squash",
+                      pinned_top && pinned_bottom);
+                check("kit track: the thumb's ends are the track's own, and released the bar is whole, at its end",
                       thumb_follows && full_again);
         }
 
-        // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
-        // leaves its rows and its scroll where they are, and a finger's pull leaves its scroll at 0 and its first row put (the
-        // pull stretches it from the edge it is pulled past, under UI_LIST_STRETCH). A list that scrolls keeps its scroll at its
-        // end under a pull and stretches in its scroll axis only, rising with the pull; released, the stretch springs back to
-        // scale 1 with no overshoot. A wheel turn at its bottom stretches it briefly and returns, and the bar shows only while
-        // the list scrolls. Each is a frame at a time, as the kit's loop draws it.
+        // A list's bounds. A list that fits does not move under a wheel turn: its scroll and its rows stay where they are. A finger's pull
+        // past its top moves its rows down by the band and they spring home. A list that scrolls keeps its end under a pull by moving its
+        // rows by the band in the scroll axis only, rising with the pull; released, the band springs back without overshoot. A wheel turn at
+        // its bottom moves the rows briefly, and the bar shows only while the list scrolls. Each is a frame at a time, as the kit's loop draws it.
         {
                 static struct ui_list fits, tall;
-                int top = 0, height = 0, row2 = 0, first = 0, most, frame;
+                int top = 0, height = 0, row2 = 0, first = 0, most, frame, edge = 0;
                 b64 stretch = 0, last = 0, lowest = 0, peaks[3] = {0, 0, 0}, wheel_peak = 0;
                 b32 still = true, kept = true, bar_fits, bar_tall, rose = true, eased = true, settled = false, shown = true;
-                b32 wheel_moved, wheel_brief = false, wheel_back = false, rows_scaled = true;
-                b32 stretch_fits = false, stretch_tall = false, pulled_edge = false, wheel_edge = false;
-                int edge = 0;
+                b32 wheel_moved, wheel_brief = false, wheel_back = false, rows_moved = true;
+                b32 moved_fits = false, moved_tall = false, pulled_edge = false, wheel_edge = false;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0;
                 bounds_list_make(&ui, &fits, 3, 300 * ui.scale / 100);
@@ -147444,74 +147447,60 @@ static fn check_kit_place(void)
                         still = still && fits.scroll.scroll == 0 && !fits.scroll.gliding && !fits.scroll.back.live &&
                                 bounds_span(&ui, &fits, 2, &height) == row2;
                 }
-                // A finger pulls a list that fits past its top, and lets go: its scroll stays 0 all the way, and its first row stays put.
+                // A finger pulls a list that fits past its top: its rows move down by the band, and they spring home when it lets go.
                 ui_scroll_drag(&fits.scroll, -150 * ui.scale / 100);
+                moved_fits = band_past(&fits.scroll, &edge) > 0 && edge < 0 && fits.scroll.scroll == band_px(&fits.scroll) &&
+                             bounds_span(&ui, &fits, 0, &height) == first - fits.scroll.scroll;
                 for (frame = 0; frame < 30; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &fits.scroll);
-                        kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
                 }
-#ifdef UI_LIST_STRETCH
-                stretch_fits = ui_scroll_stretched(&fits.scroll, &edge) > 0 && edge < 0;
-#endif
                 ui_scroll_let_go(&fits.scroll, 0, 0);
                 for (frame = 0; frame < 240 && (fits.scroll.gliding || fits.scroll.back.live); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &fits.scroll);
-                        kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
                 }
-                kept = kept && bounds_span(&ui, &fits, 0, &height) == first;
+                kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
                 bar_fits = ui_scroll_thumb(&ui, &fits.scroll, &top, &height);
 
-                // A list that scrolls: a pull past its end keeps its scroll at the end and stretches its rows in their scroll axis.
+                // A list that scrolls: a pull past its end moves its rows by the band in the scroll axis, and the rows are the still ones moved.
                 most = ui_scroll_most(&tall.scroll);
                 bar_tall = ui_scroll_thumb(&ui, &tall.scroll, &top, &height);
                 for (int k = 0; k < 3; k++)
                 {
                         ui_scroll_set(&tall.scroll, most);
                         ui_scroll_drag(&tall.scroll, (40 * (k + 1)) * ui.scale / 100);
-#ifdef UI_LIST_STRETCH
-                        peaks[k] = ui_scroll_stretched(&tall.scroll, &edge);
+                        peaks[k] = band_past(&tall.scroll, &edge);
                         pulled_edge = pulled_edge || edge > 0;
-#endif
-                        shown = shown && tall.scroll.scroll == most;
+                        shown = shown && tall.scroll.scroll > most && tall.scroll.scroll - most == band_px(&tall.scroll);
                 }
                 ui_scroll_set(&tall.scroll, most);
                 ui_scroll_drag(&tall.scroll, 120 * ui.scale / 100);
-#ifdef UI_LIST_STRETCH
-                stretch = ui_scroll_stretched(&tall.scroll, &edge);
-                stretch_tall = stretch > 0 && edge > 0;
+                stretch = band_past(&tall.scroll, &edge);
+                moved_tall = stretch > 0 && edge > 0;
                 for (int at = 0; at < 40; at++)
                 {
-                        int drawn = 0, want = ui_dev(&ui, UI_ROW);
+                        int drawn = bounds_span(&ui, &tall, at, &height), rest = tall.y + tall.top[at] - most;
 
-                        bounds_span(&ui, &tall, at, &drawn);
-                        want = (int)(((b64)want * (UI_ONE + stretch)) >> 30);
-                        rows_scaled = rows_scaled && drawn - want <= 1 && want - drawn <= 1;
+                        rows_moved = rows_moved && drawn - rest == most - tall.scroll.scroll && drawn - rest == -band_px(&tall.scroll);
                 }
-#endif
                 ui_scroll_let_go(&tall.scroll, 0, 0);
                 last = stretch;
                 for (frame = 0; frame < 240 && (tall.scroll.gliding || tall.scroll.back.live); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &tall.scroll);
-#ifdef UI_LIST_STRETCH
-                        stretch = ui_scroll_stretched(&tall.scroll, &edge);
+                        stretch = band_past(&tall.scroll, &edge);
                         eased = eased && stretch <= last;
                         lowest = stretch < lowest ? stretch : lowest;
                         last = stretch;
-#endif
-                        shown = shown && tall.scroll.scroll == most;
                 }
-#ifdef UI_LIST_STRETCH
                 settled = last == 0 && !tall.scroll.back.live && tall.scroll.scroll == most && lowest >= 0;
                 rose = peaks[0] > 0 && peaks[0] < peaks[1] && peaks[1] < peaks[2];
-#endif
 
-                // A wheel turn at the bottom: no move, a brief stretch from the bottom edge, and back to rest within half a second.
+                // A wheel turn at the bottom: the rows move a little past it and come back to rest within half a second.
                 ui_scroll_set(&tall.scroll, most);
                 ui_kit.test_clock = ui_kit.now;
                 wheel_moved = ui_scroll_wheel(&ui, &tall.scroll, -120);
@@ -147520,45 +147509,30 @@ static fn check_kit_place(void)
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_kit.test_clock = ui_kit.now;
                         ui_scroll_glide(&ui, &tall.scroll);
-#ifdef UI_LIST_STRETCH
-                        stretch = ui_scroll_stretched(&tall.scroll, &edge);
+                        stretch = band_past(&tall.scroll, &edge);
                         wheel_peak = stretch > wheel_peak ? stretch : wheel_peak;
                         wheel_edge = wheel_edge || (stretch > 0 && edge > 0);
                         if (frame == 29)
                                 wheel_back = stretch == 0 && !tall.scroll.back.live;
-#endif
-                        shown = shown && tall.scroll.scroll == most;
                 }
                 ui_kit.test_clock = 0;
                 wheel_brief = wheel_peak > 0 && wheel_edge && wheel_back;
                 check("kit list: a list that fits does not move under a wheel turn: its scroll and its rows stay where they are, frame by frame",
                       still);
-                check("kit list: a finger's pull on a list that fits does not translate it: its scroll stays 0 and its first row stays put",
-                      kept);
-#ifdef UI_LIST_STRETCH
-                check("kit list: a list that fits stretches under a finger's pull from the edge it is pulled past, in its scroll axis", stretch_fits);
-#else
-                check("kit list: a list that fits stretches under a finger's pull from the edge it is pulled past, in its scroll axis", false);
-#endif
+                check("kit list: a list that fits moves its rows by the band under a finger's pull from the edge it is pulled past", moved_fits);
+                check("kit list: released, a list that fits springs back: its scroll is 0 and its first row is put again", kept);
                 check("kit list: the scroll bar shows on a list that scrolls and is hidden on one that fits", bar_tall && !bar_fits);
-#ifdef UI_LIST_STRETCH
-                check("kit list: a pull past the end of a list that scrolls keeps its scroll at the end and stretches its rows in the scroll axis only",
-                      shown && stretch_tall && pulled_edge && rows_scaled);
-                check("kit list: the stretch rises with the pull (40, 80 and 120 pixels) and never falls as it does", rose);
-                check("kit list: released, the stretch springs back to scale 1 without overshoot, and the list is at rest", settled && eased);
-                check("kit list: a wheel turn at the bottom of a list that scrolls stretches it briefly, from that edge, and back, with no move",
+                check("kit list: a pull past the end of a list that scrolls moves its rows by the band in the scroll axis only, and they are the still rows moved",
+                      shown && moved_tall && pulled_edge && rows_moved);
+                check("kit list: the band rises with the pull (40, 80 and 120 pixels) and never falls as it does", rose);
+                check("kit list: released, the band springs back to rest without overshoot, and the list is at rest", settled && eased);
+                check("kit list: a wheel turn at the bottom of a list that scrolls moves its rows briefly by the band, from that edge, and back",
                       wheel_brief && shown && wheel_moved);
-#else
-                check("kit list: a pull past the end of a list that scrolls keeps its scroll at the end and stretches its rows in the scroll axis only", false);
-                check("kit list: the stretch rises with the pull (40, 80 and 120 pixels) and never falls as it does", false);
-                check("kit list: released, the stretch springs back to scale 1 without overshoot, and the list is at rest", false);
-                check("kit list: a wheel turn at the bottom of a list that scrolls stretches it briefly, from that edge, and back, with no move", false);
-#endif
         }
 
-        // A held thumb dragged past the end of a list that scrolls stretches it from that edge, as a finger's pull does, one for one
-        // with the hand: the list's scroll stays at its end while it is held, and the release springs the stretch back to scale 1
-        // without overshoot. Each frame is drawn as the kit's loop draws it (UI_LIST_STRETCH; without it these checks are red).
+        // A held thumb dragged past the end of a list that scrolls moves its rows by the band from that edge, as a finger's pull does, one for
+        // one with the hand: the list keeps the band while it is held, and the release springs the band back without overshoot. Each frame is
+        // drawn as the kit's loop draws it.
         {
                 static struct ui_list held;
                 static struct ui_page page;
@@ -147577,42 +147551,34 @@ static fn check_kit_place(void)
                 page.body = &held.scroll;
                 ui_kit.pointer_x = x, ui_kit.pointer_y = y;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, true);
-                ui_kit.pointer_y = y +60 * ui.scale / 100;
+                ui_kit.pointer_y = y + 60 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
-#ifdef UI_LIST_STRETCH
-                stretched = ui_scroll_stretched(&held.scroll, &edge) > 0 && edge > 0;
-#endif
+                stretched = band_past(&held.scroll, &edge) > 0 && edge > 0 && held.scroll.scroll - most == band_px(&held.scroll);
                 for (frame = 0; frame < 20; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &held.scroll);
-                        kept = kept && held.scroll.scroll == most;
+                        kept = kept && held.scroll.scroll - most == band_px(&held.scroll) && held.scroll.scroll > most;
                 }
-                ui_kit.pointer_y = y +90 * ui.scale / 100;
+                ui_kit.pointer_y = y + 90 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
-                kept = kept && held.scroll.scroll == most;
+                kept = kept && held.scroll.scroll - most == band_px(&held.scroll);
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, false);
-#ifdef UI_LIST_STRETCH
-                stretch = last = ui_scroll_stretched(&held.scroll, &edge);
+                stretch = last = band_past(&held.scroll, &edge);
                 for (frame = 0; frame < 240 && (held.scroll.gliding || held.scroll.back.live); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &held.scroll);
-                        stretch = ui_scroll_stretched(&held.scroll, &edge);
+                        stretch = band_past(&held.scroll, &edge);
                         eased = eased && stretch <= last;
                         lowest = stretch < lowest ? stretch : lowest;
                         last = stretch;
-                        kept = kept && held.scroll.scroll == most;
                 }
                 lowest_ok = lowest >= 0;
                 eased = eased && stretch == 0 && !held.scroll.back.live && held.scroll.scroll == most && !held.scroll.dragging;
-#else
-                eased = false;
-                lowest_ok = false;
-#endif
-                check("kit list: a held thumb dragged past the end of a list stretches it from that edge, and the list keeps its end",
+                check("kit list: a held thumb dragged past the end of a list moves its rows by the band from that edge, and the list keeps the band while held",
                       stretched && kept);
-                check("kit list: released, the thumb's stretch springs back to scale 1 without overshoot, and the list stays at its end",
+                check("kit list: released, the thumb's band springs back to rest without overshoot, and the list stays at its end",
                       eased && lowest_ok);
         }
 
@@ -147834,8 +147800,8 @@ static void ends_note(struct ui_scroll address_to s, b64 address_to at_prev, b64
 
         if (s->hand && (sign > 0 ? d < 0 : d > 0))
                 t->monotone = false;
-        if (s->scroll < 0 || s->scroll > ui_scroll_most(s))
-                t->inside = false;
+        if (st > ui_scroll_band(s, (b64)ui_scroll_most(s) * 256 + (b64)(s->view > 0 ? s->view : 0) * 256) - (b64)ui_scroll_most(s) * 256)
+                t->inside = false; // past an end by no more than a view's band (the hand's own reach), however the band is drawn
         if (moved && st && st == *st_prev)
                 t->held++;
         if (st && *st_prev && st != *st_prev)
@@ -147873,7 +147839,7 @@ static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int
                         ui_wheel_turn(ui, s, &turn);
                 moved = s->at != before;
                 ui_scroll_glide(ui, s);
-                st = ui_scroll_stretched(s, &edge);
+                st = band_past(s, &edge);
                 ends_note(s, &at_prev, &st_prev, &dir, st, edge, sign, moved, t);
                 if (frame >= ENDS_FINGER + ENDS_TAIL && !s->gliding && !s->back.live && !s->hand)
                 {
@@ -147908,7 +147874,7 @@ static void ends_touch(struct ui address_to ui, struct ui_scroll address_to s, b
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
                 ui_scroll_glide(ui, s);
-                st = ui_scroll_stretched(s, &edge);
+                st = band_past(s, &edge);
                 ends_note(s, &at_prev, &st_prev, &dir, st, edge, 1, 0, t);
                 if (!s->gliding && !s->back.live)
                 {
@@ -148563,7 +148529,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 {
                         drawn[frames] = region.scroll - first_scroll;
                         ideal[frames] = (pos[ms > total ? total : ms] + 128) >> 8;
-                        stretch[frames] = (long)ui_scroll_stretched(&region, &edge);
+                        stretch[frames] = (long)band_past(&region, &edge);
                         if (ms <= total)
                                 end_input_frame = frames;
                         if (second && at_rest_frame < 0)
@@ -148594,7 +148560,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 long before = region.scroll;
 
                 ui_kit.now += frame_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                if (ui_scroll_glide(&ui, &region) || region.scroll != before || ui_scroll_stretched(&region, &edge))
+                if (ui_scroll_glide(&ui, &region) || region.scroll != before || band_past(&region, &edge))
                         out->busy_after++;
         }
         for (long i = 1; i <= end_input_frame && i < frames; i++)
@@ -148679,7 +148645,7 @@ static fn check_kit_scroll_robust(void)
         check("kit scroll matrix: the content is never ahead of the finger", over <= 2);
         check("kit scroll matrix: the content is never behind the finger by more than the reports it has not been given", lag <= 0);
         check("kit scroll matrix: the content never goes back while the finger goes on", back <= 1);
-        check("kit scroll matrix: the stretch past an end never pops (under 3 percent of the view in a frame)", pop <= (1ll << 30) * 3 / 100);
+        check("kit scroll matrix: the stretch past an end never pops (under 3 percent of the view in a frame)", pop <= 400ll * 256 * 3 / 100);
         check("kit scroll matrix: a gesture that came to rest throws nothing (under 4 px after 60 ms of rest)", phantom <= 4);
         check("kit scroll matrix: a new touch on a throw takes it where it is drawn (no jump, nothing carried)", jump <= 3 && going == 0);
         check("kit scroll matrix: everything comes to rest (a throw's 500 ms decay takes under 5 seconds), and reports nothing moving after", idle <= 5000 && busy == 0);
@@ -148998,7 +148964,7 @@ static fn check_kit_hand(void)
         {
                 hand_report(&ui, &minor, -4 * 256);
                 hand_frame(&ui, &minor);
-                st = ui_scroll_stretched(&minor, &edge);
+                st = band_past(&minor, &edge);
                 if (k == 0)
                         first_rose = st > 0;
                 if (k > 0)
@@ -149242,7 +149208,7 @@ static void wheel_burst(const struct wheel_note address_to notes, int count, str
                         next++;
                 }
                 ui_scroll_glide(&ui, &s);
-                out->stretch[frame] = (long)ui_scroll_stretched(&s, &edge);
+                out->stretch[frame] = (long)band_past(&s, &edge);
                 out->frames = frame + 1;
         }
         ui_kit.test_clock = 0;
@@ -149255,7 +149221,7 @@ static void wheel_burst(const struct wheel_note address_to notes, int count, str
 // longest run of frames held within a thirtieth of the peak after it.
 static void burst_shape(const struct burst_run address_to run, long address_to peak, int address_to peak_at, int address_to bumps, int address_to held)
 {
-        long tol = (1ll << 30) / 2000;
+        long tol = (1ll << 8) / 10; // a tenth of a device pixel a frame (the stretch is in 256ths)
         int run_length = 0;
         b32 fell = true;
 
@@ -150540,7 +150506,7 @@ static fn check_kit_precise_stream(void)
         ui_scroll_drag(&t.s, -120);
         {
                 int edge_p, edge_t;
-                b64 stretch_p = ui_scroll_stretched(&p.s, &edge_p), stretch_t = ui_scroll_stretched(&t.s, &edge_t);
+                b64 stretch_p = band_past(&p.s, &edge_p), stretch_t = band_past(&t.s, &edge_t);
 
                 check("precise stream: a pull past the top stretches the region as a touch drag does, by the same pixels and the same edge",
                       p.s.at == t.s.at && stretch_p == stretch_t && edge_p == edge_t && edge_p == -1);
@@ -150549,10 +150515,10 @@ static fn check_kit_precise_stream(void)
         // Hostile: a turn past any span, one of each sign, and a flood in one millisecond: the region stays inside its ends.
         precise_setup(&p, 1000, 400);
         precise_turn(&p, 100000, 1073741824);
-        check("precise stream: a turn of 2^30 120ths is held to the region's span (no wrap, no past its end)",
-              p.s.scroll >= 0 && p.s.scroll <= 800 && p.s.at <= (800 + 200) * UI_SCROLL_SCALE + 1);
+        check("precise stream: a turn of 2^30 120ths is held to the region's span and a view's band past it (no wrap)",
+              p.s.scroll >= -band_view_px(&p.s) && p.s.scroll <= 800 + band_view_px(&p.s) && p.s.at <= (800 + 200) * UI_SCROLL_SCALE + 1);
         precise_turn(&p, 100000, -1073741824);
-        check("precise stream: and back the other way, the region stays in its span", p.s.scroll >= 0 && p.s.scroll <= 800);
+        check("precise stream: and back the other way, the region stays in its span and its band", p.s.scroll >= -band_view_px(&p.s) && p.s.scroll <= 800 + band_view_px(&p.s));
         for (int k = 0; k < 10000; k++)
                 precise_turn(&p, 200000, k & 1 ? -40 : 40);
         check("precise stream: a flood of 10000 turns in one millisecond is held inside the region (up to a view past each end)",
@@ -150634,8 +150600,8 @@ static fn check_kit_wheel_burst(void)
         flood_one = peak > 0 && at * 16667 <= 100000 + UI_NOTCH_APEX_NS / 1000 + 3 * 16667 && bumps == 1;
         flood_free = held <= 4;
         flood_rest = run.stretch[run.frames - 1] == 0 && !run.going && run.scroll == 800;
-        string_format(log, "  kit wheel burst: a second of notches at 16 ms: stretch peaks at %b ms (%p of 1e6), %p bump(s), held %p frames, at rest %b\n",
-                      (bipolar)(at * 16667 / 1000), (positive)(peak * 1000000 >> 30), (positive)bumps, (positive)held, (bipolar)flood_rest);
+        string_format(log, "  kit wheel burst: a second of notches at 16 ms: stretch peaks at %b ms (%p px), %p bump(s), held %p frames, at rest %b\n",
+                      (bipolar)(at * 16667 / 1000), (positive)(peak >> 8), (positive)bumps, (positive)held, (bipolar)flood_rest);
         check("kit wheel burst: a second of notches at an end bumps it once: the stretch peaks with the pull and does not rise again", flood_one);
         check("kit wheel burst: and it is not held at its peak: the fall from it starts at once", flood_free);
         check("kit wheel burst: and a quarter second after the last notch nothing is stretched or going", flood_rest);
