@@ -1487,6 +1487,8 @@ static const char *const kernel_notice_quiet[] = {
     "Direct firmware load",   // an optional blob that is not there
     "RDSEED32 is broken",     // a CPU bug the kernel works around
     "kauditd_printk_skb",     // audit's count of the messages it suppressed
+    "Moonwater starting",     // the module's own banner, printed at the alert level so a quiet boot still shows it
+    "Spark format unregistered", // its farewell at the same level
     0};
 
 struct kernel_notices

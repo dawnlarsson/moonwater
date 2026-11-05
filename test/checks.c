@@ -223465,6 +223465,9 @@ struct iss_kernel_line { unsigned int level; const char *text; unsigned int code
 static const struct iss_kernel_line iss_kernel_lines[] = {
     {3, "amdgpu 0000:14:00.0: [drm] *ERROR* Unsupported screen format RA24 little-endian (0x34324152)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
     {3, "amdgpu 0000:14:00.0: [drm] *ERROR* LTTPR count is nonzero but invalid lane count reported. Assuming no LTTPR present.", 0, 0},
+    {1, "[moonwater] Moonwater starting...", 0, 0},
+    {1, "[moonwater] Spark format unregistered", 0, 0},
+    {1, "[moonwater] could not register /dev/spark: -16", WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR},
     {3, "amdgpu 0000:14:00.0: ring comp_1.0.0 timeout, signaled seq=1234, emitted seq=1235", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
     {4, "amdgpu 0000:14:00.0: Starting comp_1.0.0 ring reset", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING},
     {3, "amdgpu 0000:14:00.0: [gfxhub] page fault (src_id:0 ring:24 vmid:8 pasid:32768)", WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_ERROR},
@@ -223552,7 +223555,7 @@ static void iss_rows_kernel(void)
 
                 raised += kernel_notices_record(&k, record, n, 1000);
         }
-        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 26);
+        check("kernel notices: the lines that are raised are counted as records, and the others are not", raised == 27);
         memory_zero(&k, sizeof(k));
         k.fd = -2;
         check("kernel notices: a record with no semicolon is no record", kernel_notices_record(&k, "3,1,2,-", 7, 1) == 0);
