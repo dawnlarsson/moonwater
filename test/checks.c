@@ -134066,7 +134066,7 @@ static int scroll_run(const struct ui address_to ui, struct ui_scroll address_to
     {
         *now += 1000000ll;
         ui_kit.now = *now;
-        if (!ui_scroll_glide(ui, s))
+        if (!ui_scroll_frame(ui, s))
             break;
     }
     return k;
@@ -139823,7 +139823,7 @@ static fn settings_column_check(void)
                 for (int frame = 0; frame < 8; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&settings.ui, col);
+                        ui_scroll_frame(&settings.ui, col);
                 }
         }
         wheel_ok = band_past(col, &edge) > 0 && edge > 0 && col->scroll > most;
@@ -146712,7 +146712,7 @@ static void wheel_frame(const struct ui address_to ui, struct ui_scroll address_
         b64 now, step;
 
         ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
-        ui_scroll_glide(ui, s);
+        ui_scroll_frame(ui, s);
         now = scroll_shown(s);
         step = now > *prev ? now - *prev : *prev - now;
         run->fastest = step * 60 > run->fastest ? step * 60 : run->fastest;
@@ -147244,15 +147244,15 @@ static fn check_kit_place(void)
                 ui_kit.scroll_off = 0;
         }
 
-        // The glide: a wheel's notch aims one row on and the position reaches it over several frames, from below and never
-        // past it; a pull past an end is limited and springs back to that end when let go, at either end; a settled glide
-        // leaves the kit idle; a keyboard reveal glides to the row it shows, from where the region is, and a row in view
-        // is not moved. Each is a frame at a time, as the kit's loop draws it.
+        // The notch: a wheel's notch aims one row on and the body follows it over several frames, from below and never past it;
+        // a pull past an end is limited and springs back to that end when let go, at either end; a settled notch leaves the kit
+        // idle; a keyboard reveal (ui_body_reveal) notches the body to the row it shows, from where it is, and a row in view is
+        // not moved. Each is a frame at a time, as the kit's loop draws it.
         {
                 struct ui_scroll glide = {100, 10, 200, 1000, 200, 0, false, false, 0};
                 int last = 0, rising = 0, frame = 0;
                 b32 aimed = false, steps = false, notch_monotone = true, monotone = true, reached = false, overshot = false, idle = false;
-                b32 fine = false, thrown = false;
+                b32 fine = false;
                 b32 pulled = false, limited = false, sprang = false, passed = false, bottom = false;
                 b32 jumped = true, revealed = false, reveal_steps = false, shown_again = true;
                 b64 notch_clock = 0;
@@ -147265,7 +147265,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 240 && scroll_gliding(&glide); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &glide);
+                        ui_scroll_frame(&ui, &glide);
                         notch_monotone = notch_monotone && glide.scroll >= last;
                         overshot = overshot || glide.scroll > UI_ROW;
                         rising += glide.scroll > 0 && glide.scroll < UI_ROW;
@@ -147276,7 +147276,7 @@ static fn check_kit_place(void)
                 settle_ms = (int)((ui_kit.now - notch_clock) / 1000000);
                 steps = rising >= 3;
                 ui_kit.now += 16666667, ui_kit.busy = 0;
-                idle = !ui_scroll_glide(&ui, &glide) && !ui_kit.busy;
+                idle = !ui_scroll_frame(&ui, &glide) && !ui_kit.busy;
 
                 ui_scroll_set(&glide, 0);
                 ui_scroll_drag(&glide, -150);
@@ -147287,7 +147287,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 240 && scroll_back(&glide); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &glide);
+                        ui_scroll_frame(&ui, &glide);
                         monotone = monotone && glide.scroll >= last && glide.scroll <= 0;
                         passed = passed || glide.scroll > 0;
                         last = glide.scroll;
@@ -147301,47 +147301,36 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 240 && scroll_back(&glide); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &glide);
+                        ui_scroll_frame(&ui, &glide);
                         monotone = monotone && glide.scroll <= glide.content - glide.view;
                 }
                 bottom = bottom && !scroll_back(&glide) && glide.scroll == glide.content - glide.view;
 
                 ui_scroll_set(&glide, 0);
-                revealed = ui_scroll_reveal(&glide, 500, UI_ROW);
+                ui_scroll_extent(&glide);
+                revealed = ui_body_reveal(&glide.body, 500, UI_ROW, ui_kit.now);
                 jumped = glide.scroll == 0 && scroll_gliding(&glide);
                 last = 0;
                 rising = 0;
                 for (frame = 0; frame < 240 && scroll_gliding(&glide); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &glide);
+                        ui_scroll_frame(&ui, &glide);
                         monotone = monotone && glide.scroll >= last;
                         rising += glide.scroll > 0 && glide.scroll < 340;
                         last = glide.scroll;
                 }
                 reveal_steps = rising >= 3 && glide.scroll == 340;
-                shown_again = ui_scroll_reveal(&glide, 400, UI_ROW);
+                ui_scroll_extent(&glide);
+                shown_again = ui_body_reveal(&glide.body, 400, UI_ROW, ui_kit.now);
                 revealed = revealed && reveal_steps && jumped && glide.scroll + glide.view >= 500 + UI_ROW;
 
-                // A throw is a finger's let go at 600 pixels a second on a 1000 pixel list: the body carries 0.7 of the speed for its 260 ms
-                // time constant (BODY_CARRY, BODY_TAU_NS: 420 x 0.26 s, about 109 pixels, 104 as the body's own steps integrate it), and it stops there.
-                ui_scroll_set(&glide, 0);
-                ui_scroll_drag(&glide, 0);
-                ui_scroll_let_go(&glide, 1, 600);
-                for (frame = 0; frame < 240 && scroll_gliding(&glide); frame++)
-                {
-                        ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &glide);
-                }
-                thrown = !scroll_gliding(&glide) && glide.scroll >= 100 && glide.scroll <= 115;
-                        check("kit glide: a wheel notch aims one row on, and the position reaches it over several frames from below, never past it, in 256ths",
+                        check("kit notch: a wheel notch aims one row on, and the body reaches it over several frames from below, never past it, in 256ths",
                       aimed && steps && reached && notch_monotone && !overshot && idle && fine);
-                check("kit glide: a wheel notch settles in 150 to 200 ms, to half a device pixel from one row (36 ms a time constant)",
+                check("kit notch: a wheel notch settles in 150 to 200 ms, to half a device pixel from one row (the body's 40 ms notch time constant)",
                       settle_ms >= 150 && settle_ms <= 200);
-                check("kit glide: a throw glides on from the finger's let go, 0.7 of the speed for the body's 260 ms time constant (about 105 pixels), and stops there",
-                      thrown);
-                check("kit glide: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
-                check("kit glide: a keyboard reveal glides to the row it shows, from where the region is, and a row in view is not moved",
+                check("kit body: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
+                check("kit reveal: a keyboard reveal notches the body to the row it shows, from where it is, and a row in view is not moved",
                       revealed && !shown_again);
         }
 
@@ -147365,7 +147354,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 60; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &smooth);
+                        ui_scroll_frame(&ui, &smooth);
                         frames_between += smooth.scroll > 0 && smooth.scroll < row;
                         jump = smooth.scroll - last > jump ? smooth.scroll - last : jump;
                         last = smooth.scroll;
@@ -147389,47 +147378,6 @@ static fn check_kit_place(void)
                       glides && once);
                 check("kit wheel: a single slow notch is one row, and the same notches fired fast travel the same: a notch is a row at any rate (the body does not accelerate; the compositor sets the rate)", travel_ok);
                 check("kit wheel: a fast spin's glide is held to 60 rows a second, and it settles on its aim without passing it", capped);
-        }
-
-        // A card (a page of text, bounded like a list): a pull past its end moves its lines by the band from that edge, as a list's rows
-        // do, and a card that fits moves at its top too; released, they spring back without overshoot. Each line is drawn at the card's
-        // scroll (ui_lines_draw takes it the same way).
-        {
-                static struct ui_scroll card, fits;
-                int most, frame, edge = 0;
-                b32 moved = false, fits_moved = false, eased = true, kept = true;
-                b64 stretch = 0, last = 0, lowest = 0;
-
-                ui_kit.now = 9500000000ll, ui_kit.busy = 0;
-                memory_zero(&card, sizeof(card));
-                card.x = 100, card.y = 10, card.height = card.view = 200, card.content = 1000, card.scale = 1;
-                memory_zero(&fits, sizeof(fits));
-                fits.x = 100, fits.y = 10, fits.height = fits.view = 200, fits.content = 120, fits.scale = 1;
-                most = ui_scroll_most(&card);
-                ui_scroll_set(&card, most);
-                ui_scroll_drag(&card, 150);
-                moved = band_past(&card, &edge) > 0 && edge > 0 && card.scroll - most == band_px(&card) && card.scroll > most;
-                ui_scroll_drag(&fits, -150);
-                fits_moved = band_past(&fits, &edge) > 0 && edge < 0 && fits.scroll == band_px(&fits) && fits.scroll < 0;
-                ui_scroll_let_go(&card, 0, 0);
-                ui_scroll_let_go(&fits, 0, 0);
-                last = band_past(&card, &edge);
-                for (frame = 0; frame < 240 && (scroll_gliding(&card) || scroll_back(&card) || scroll_gliding(&fits) || scroll_back(&fits)); frame++)
-                {
-                        ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &card);
-                        ui_scroll_glide(&ui, &fits);
-                        stretch = band_past(&card, &edge);
-                        eased = eased && stretch <= last;
-                        lowest = stretch < lowest ? stretch : lowest;
-                        last = stretch;
-                }
-                eased = eased && band_past(&card, &edge) == 0 && band_past(&fits, &edge) == 0;
-                kept = card.scroll == most && fits.scroll == 0;
-                check("kit card: a pull past the end of a card that scrolls moves its lines by the band from that edge, and the card keeps its end",
-                      moved && kept);
-                check("kit card: a card that fits moves its lines at its top when pulled, and released they spring back without overshoot",
-                      fits_moved && eased && lowest >= 0);
         }
 
         // Every list: its scroll track runs the view's full height with the view's ends (its top at the view's top, its bottom at the
@@ -147501,14 +147449,14 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 900 && scroll_gliding(&long_fast); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &long_fast);
+                        ui_scroll_frame(&ui, &long_fast);
                 }
                 ui_scroll_drag(&long_slow, 0);
                 ui_scroll_let_go(&long_slow, 1, 400);
                 for (frame = 0; frame < 900 && scroll_gliding(&long_slow); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &long_slow);
+                        ui_scroll_frame(&ui, &long_slow);
                 }
 
                 memory_zero(&short_list, sizeof(short_list));
@@ -147519,7 +147467,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 900 && (scroll_gliding(&short_list) || scroll_back(&short_list)); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &short_list);
+                        ui_scroll_frame(&ui, &short_list);
                         peak_short = short_list.scroll > peak_short ? short_list.scroll : peak_short;
                         monotone = monotone && short_list.scroll >= 0 && short_list.scroll <= most_short;
                 }
@@ -147564,7 +147512,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 300 && (scroll_gliding(&bar) || scroll_back(&bar)); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &bar);
+                        ui_scroll_frame(&ui, &bar);
                 }
                 full_again = band_past(&bar, &edge) == 0 && bar.scroll == most && ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length) &&
                              thumb_top + thumb_length == track_top + track_height;
@@ -147596,7 +147544,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 60; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &fits.scroll);
+                        ui_scroll_frame(&ui, &fits.scroll);
                         still = still && fits.scroll.scroll == 0 && !scroll_gliding(&fits.scroll) && !scroll_back(&fits.scroll) &&
                                 bounds_span(&ui, &fits, 2, &height) == row2;
                 }
@@ -147607,13 +147555,13 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 30; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &fits.scroll);
+                        ui_scroll_frame(&ui, &fits.scroll);
                 }
                 ui_scroll_let_go(&fits.scroll, 0, 0);
                 for (frame = 0; frame < 240 && (scroll_gliding(&fits.scroll) || scroll_back(&fits.scroll)); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &fits.scroll);
+                        ui_scroll_frame(&ui, &fits.scroll);
                 }
                 kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
                 bar_fits = ui_scroll_thumb(&ui, &fits.scroll, &top, &height);
@@ -147644,7 +147592,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 240 && (scroll_gliding(&tall.scroll) || scroll_back(&tall.scroll)); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &tall.scroll);
+                        ui_scroll_frame(&ui, &tall.scroll);
                         stretch = band_past(&tall.scroll, &edge);
                         eased = eased && stretch <= last;
                         lowest = stretch < lowest ? stretch : lowest;
@@ -147661,7 +147609,7 @@ static fn check_kit_place(void)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_kit.test_clock = ui_kit.now;
-                        ui_scroll_glide(&ui, &tall.scroll);
+                        ui_scroll_frame(&ui, &tall.scroll);
                         stretch = band_past(&tall.scroll, &edge);
                         wheel_peak = stretch > wheel_peak ? stretch : wheel_peak;
                         wheel_edge = wheel_edge || (stretch > 0 && edge > 0);
@@ -147710,7 +147658,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 20; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &held.scroll);
+                        ui_scroll_frame(&ui, &held.scroll);
                         kept = kept && held.scroll.scroll - most == band_px(&held.scroll) && held.scroll.scroll > most;
                 }
                 ui_kit.pointer_y = y + 90 * ui.scale / 100;
@@ -147721,7 +147669,7 @@ static fn check_kit_place(void)
                 for (frame = 0; frame < 240 && (scroll_gliding(&held.scroll) || scroll_back(&held.scroll)); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &held.scroll);
+                        ui_scroll_frame(&ui, &held.scroll);
                         stretch = band_past(&held.scroll, &edge);
                         eased = eased && stretch <= last;
                         lowest = stretch < lowest ? stretch : lowest;
@@ -147906,7 +147854,7 @@ static int sweep_settle(struct ui address_to ui, struct ui_control address_to c)
 static b32 sweep_scroll_frame(struct ui address_to ui, struct ui_scroll address_to s)
 {
         ui_kit.now += SWEEP_FRAME, ui_kit.busy = 0;
-        ui_scroll_glide(ui, s);
+        ui_scroll_frame(ui, s);
         ui_scroll_draw(ui, s);
         return ui_kit.busy != 0;
 }
@@ -147991,7 +147939,7 @@ static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int
                 if (turn.a)
                         ui_wheel_turn(ui, s, &turn);
                 moved = scroll_at(s) != before;
-                ui_scroll_glide(ui, s);
+                ui_scroll_frame(ui, s);
                 st = band_past(s, &edge);
                 ends_note(s, &at_prev, &st_prev, &dir, st, edge, sign, moved, t);
                 if (frame >= ENDS_FINGER + ENDS_TAIL && !scroll_gliding(s) && !scroll_back(s) && !scroll_hand(s))
@@ -148016,7 +147964,7 @@ static void ends_touch(struct ui address_to ui, struct ui_scroll address_to s, b
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
                 ui_scroll_drag(s, flick ? 40 : 10);
-                ui_scroll_glide(ui, s);
+                ui_scroll_frame(ui, s);
         }
         ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
         ui_scroll_let_go(s, flick, flick ? 2400 : 0);
@@ -148024,7 +147972,7 @@ static void ends_touch(struct ui address_to ui, struct ui_scroll address_to s, b
         for (int frame = 0; frame < 240; frame++)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
-                ui_scroll_glide(ui, s);
+                ui_scroll_frame(ui, s);
                 st = band_past(s, &edge);
                 ends_note(s, &at_prev, &st_prev, &dir, st, edge, 1, 0, t);
                 if (!scroll_gliding(s) && !scroll_back(s))
@@ -148040,7 +147988,7 @@ static void hand_frame(struct ui address_to ui, struct ui_scroll address_to s)
 {
         ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
         ui_kit.test_clock = ui_kit.now;
-        ui_scroll_glide(ui, s);
+        ui_scroll_frame(ui, s);
 }
 
 // A precise report of q 256ths of a device pixel (positive: the content moves down), at the kit's clock, sent as the compositor
@@ -148676,7 +148624,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         second = true;
                 }
                 ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0, ui_kit.stamp = 0;
-                if (ui_scroll_glide(&ui, &region) || 1)
+                if (ui_scroll_frame(&ui, &region) || 1)
                 {
                         drawn[frames] = region.scroll - first_scroll;
                         ideal[frames] = (pos[ms > total ? total : ms] + 128) >> 8;
@@ -148711,7 +148659,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 long before = region.scroll;
 
                 ui_kit.now += frame_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                if (ui_scroll_glide(&ui, &region) || region.scroll != before || band_past(&region, &edge))
+                if (ui_scroll_frame(&ui, &region) || region.scroll != before || band_past(&region, &edge))
                         out->busy_after++;
         }
         for (long i = 1; i <= end_input_frame && i < frames; i++)
@@ -148974,7 +148922,7 @@ static fn check_kit_finger_pull(void)
         for (frames = 0; frames < 120; frames++)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0, ui_kit.test_clock = ui_kit.now;
-                if (!ui_scroll_glide(&ui, &s) && !scroll_back(&s))
+                if (!ui_scroll_frame(&ui, &s) && !scroll_back(&s))
                 {
                         home = s.scroll == 800;
                         break;
@@ -149132,7 +149080,7 @@ static fn check_kit_hand(void)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
                 ui_kit.test_clock = ui_kit.now;
-                ui_scroll_glide(&ui, &minor);
+                ui_scroll_frame(&ui, &minor);
                 if (scroll_back(&minor))
                 {
                         edge = 0;
@@ -149166,13 +149114,13 @@ static fn check_kit_hand(void)
         start = glide.scroll;
         ui_kit.now += 100000000ll;
         ui_kit.test_clock = ui_kit.now;
-        ui_scroll_glide(&ui, &glide); // the hand's gap passes, and the release is let go
+        ui_scroll_frame(&ui, &glide); // the hand's gap passes, and the release is let go
         speed_at_start = glide.body.vel >> 22;
         for (frame = 0; frame < 240 && (scroll_gliding(&glide) || scroll_back(&glide)); frame++)
         {
                 ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
                 ui_kit.test_clock = ui_kit.now;
-                ui_scroll_glide(&ui, &glide);
+                ui_scroll_frame(&ui, &glide);
                 if (frame == 15)
                         speed_at_half = glide.body.vel >> 22;
         }
@@ -149235,7 +149183,7 @@ static int wheel_stream(int content, int start, const struct wheel_note address_
                 if (us >= next_frame)
                 {
                         ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                        ui_scroll_glide(&ui, &s);
+                        ui_scroll_frame(&ui, &s);
                         next_frame += 16667;
                         if (next == count && us > last + 500000 && !scroll_gliding(&s) && !scroll_back(&s) && !scroll_dragging(&s) && !scroll_hand(&s))
                                 break;
@@ -149351,7 +149299,7 @@ static fn check_kit_wheel_flood(void)
         {
                 now += 16000000ll, ui_kit.now = now;
                 ui_wheel_turn(&ui, &s, &down);
-                ui_scroll_glide(&ui, &s);
+                ui_scroll_frame(&ui, &s);
                 peak = band_past(&s, &edge) > peak ? band_past(&s, &edge) : peak;
                 held = held && band_past(&s, &edge) <= (b64)s.view * 256;
         }
@@ -149365,7 +149313,7 @@ static fn check_kit_wheel_flood(void)
                 for (rise = 0; rise < 40; rise++)
                 {
                         now += 16666667ll, ui_kit.now = now;
-                        ui_scroll_glide(&ui, &s);
+                        ui_scroll_frame(&ui, &s);
                         st_now = band_past(&s, &edge);
                         if (st_now < last_st)
                                 break;
@@ -149380,7 +149328,7 @@ static fn check_kit_wheel_flood(void)
         {
                 now += 16000000ll, ui_kit.now = now;
                 ui_wheel_turn(&ui, &s, &down);
-                ui_scroll_glide(&ui, &s);
+                ui_scroll_frame(&ui, &s);
                 again = band_past(&s, &edge) > again ? band_past(&s, &edge) : again;
         }
         scroll_run(&ui, &s, &now, 2000);
@@ -149390,7 +149338,7 @@ static fn check_kit_wheel_flood(void)
         {
                 now += 100000000ll, ui_kit.now = now;
                 ui_wheel_turn(&ui, &s, &down);
-                ui_scroll_glide(&ui, &s);
+                ui_scroll_frame(&ui, &s);
                 sparse = sparse || band_past(&s, &edge) > 0;
         }
         scroll_run(&ui, &s, &now, 2000);
@@ -150167,7 +150115,7 @@ static void precise_frames(struct precise_region address_to p, long from, long u
         for (long us = from; us <= until; us += 16667)
         {
                 ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                ui_scroll_glide(&p->ui, &p->s);
+                ui_scroll_frame(&p->ui, &p->s);
         }
 }
 
@@ -150557,7 +150505,7 @@ static fn check_stream_smooth(void)
                 if (k < 30 && (us - 100000) % 16667 == 0)
                         stream_turn(&p, us, -24);
                 ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                ui_scroll_glide(&p.ui, &p.s);
+                ui_scroll_frame(&p.ui, &p.s);
                 if (k < 30 && (long)scroll_at(&p.s) - before > worst)
                         worst = (long)scroll_at(&p.s) - before;
                 if ((long)scroll_at(&p.s) != before)
@@ -150607,7 +150555,7 @@ static fn check_stream_smooth(void)
                         if ((us - 100000) % 16667 == 0)
                                 stream_turn(&p, us, -96), end_us = us;
                         ui_kit.now = 9000000000ll + us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
-                        ui_scroll_glide(&p.ui, &p.s);
+                        ui_scroll_frame(&p.ui, &p.s);
                 }
                 for (long t = end_us + 16667; t < end_us + 3000000; t += 16667)
                 {
@@ -153510,7 +153458,7 @@ static int fold_row = -1;
 static const b64 fold_frame_ns = 16666667;
 
 // The GPU row brought to the top of the list, so its lines show under it: the scroll is the row's top, held in range. The reveal of the
-// keys is a glide that frames move, and the shots are taken at once, so the scroll is set here.
+// keys is a notch the frames follow, and the shots are taken at once, so the scroll is set here.
 static void fold_scroll(void)
 {
         int at = ui_list_at(&settings.list, fold_row);
@@ -153738,7 +153686,7 @@ b32 main()
 
                 if (string_equals(what, (string_address) "scroll-step"))
                 {
-                        // The glide's frame alone: a region turned a notch, then its frame at a time to rest, count times over.
+                        // The body's frame alone: a region turned a notch, then its frame at a time to rest, count times over.
                         struct ui_scroll glide = {100, 10, 200, 1000, 200, 0, false, false, 0};
                         struct ui scroll_ui;
                         positive frames = 0;

@@ -1393,7 +1393,7 @@ static b64 ui_exp_neg(b64 x);
                             // minimum is 50 dp/s, held up until a trackpad's stop-and-hold residual is judged by a pause rule: see the memory note)
 #define UI_THROW_MAX 8000   // the fastest a throw may be, in dp a second (Android's maximum fling velocity, 8000 dp/s)
 #define UI_DRAG_STILL 20    // the speed a throw stops at
-#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel glide's rule)
+#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel's rule)
 
 #define UI_DRAG_SAMPLES 16
 #define UI_FLING_NS 40000000ul // the horizon a flick's velocity is fitted over: the reports of its last 40 ms (at least three)
@@ -1627,7 +1627,7 @@ static int ui_drag_step(struct ui_drag address_to drag)
         if (!drag->flying)
                 return 0;
         gap = gap > 100000000l ? 100000000l : gap;
-        // The speed falls by e in UI_DRAG_SLOW_NS, from where it is, as the wheel glide's speed does: the move is the speed's
+        // The speed falls by e in UI_DRAG_SLOW_NS, from where it is, as the wheel's speed does: the move is the speed's
         // integral over the gap and the speed after is its fall's end. So a step of any length moves the same distance, and
         // a throw stepped at 60 Hz covers what it covers at 120 Hz (a floor per step made the faster steps slow down less).
         e = ui_exp_neg((b64)gap * UI_ONE / UI_DRAG_SLOW_NS);
@@ -5614,9 +5614,9 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
 /* ---- the pointer ---- */
 /*
         The pointer and the scroll region. ui_event_context(event) is the one place an event's touch flag and time are taken
-        (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set, ui_scroll_show and ui_scroll_reveal place
-        it, ui_scroll_pointer and ui_wheel_turn take input, ui_scroll_draw paints the bar. The rubber band, the wheel's notch and the
-        hand are the body's (ui_body_*, s->body): an app forwards its input and keeps no stretch.
+        (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set and ui_scroll_show place it,
+        ui_body_reveal notches it to a span, ui_scroll_pointer and ui_wheel_turn take input, ui_scroll_draw paints the bar. The
+        rubber band, the wheel's notch and the hand are the body's (ui_body_*, s->body): an app forwards its input and keeps no stretch.
 */
 
 // Whether a device point is in a control's box (a radio group: which row; tabs: which tab), -1 when not.
@@ -6317,6 +6317,26 @@ static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
         ui_body_note(b);
 }
 
+/*
+        A key or a band brought into view (pixels): a notch of the body to where it shows, from where the body is going (its target
+        while it follows a notch). The body's extent is set first (ui_scroll_extent). False when it shows already.
+*/
+static b32 ui_body_reveal(struct ui_body address_to b, int top, int height, b64 at)
+{
+        b64 here = b->state == BODY_NOTCH ? b->target : b->raw;
+        int shown = (int)((here + UI_ONE / 2) >> UI_Q), aim = shown, view = (int)(b->view >> UI_Q), most = (int)(ui_body_far(b) >> UI_Q);
+
+        if (top < shown)
+                aim = top;
+        else if (top + height > shown + view)
+                aim = top + height - view;
+        aim = aim < 0 ? 0 : aim > most ? most : aim;
+        if (aim == shown)
+                return false;
+        ui_body_notch(b, ((b64)aim << UI_Q) - here, at);
+        return true;
+}
+
 // the body's extent: a view and a content, units (Q30), with the position left where it is
 static void ui_body_fit(struct ui_body address_to b, b64 view, b64 content)
 {
@@ -6661,7 +6681,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
 */
 static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted);
 
-static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll address_to s)
+static b32 ui_scroll_frame(const struct ui address_to ui, struct ui_scroll address_to s)
 {
         b64 now = ui_kit_time();
         b32 moving;
@@ -6719,28 +6739,6 @@ static void ui_scroll_follow(struct ui_scroll address_to s, const struct ui_body
 {
         s->body = *b;
         ui_scroll_show(s);
-}
-
-/*
-        A key or a band brought into view: a notch of the body to where it shows, from where the body is going (its target while it
-        follows a notch). False when it shows already.
-*/
-static b32 ui_scroll_reveal(struct ui_scroll address_to s, int top, int height)
-{
-        b64 here = s->body.state == BODY_NOTCH ? s->body.target : s->body.raw;
-        int at = (int)((here + UI_ONE / 2) >> UI_Q), aim = at, most = ui_scroll_most(s);
-
-        if (top < at)
-                aim = top;
-        else if (top + height > at + s->view)
-                aim = top + height - s->view;
-        aim = aim < 0 ? 0 : aim > most ? most : aim;
-        if (aim == at)
-                return false;
-        ui_scroll_extent(s);
-        ui_body_notch(&s->body, ((b64)aim << UI_Q) - here, ui_kit_time());
-        s->precise = 0;
-        return true;
 }
 
 // A finger's move of the region by pixels: the body is tracked by them, one for one, and past an end the rubber band draws it. True:
@@ -9269,8 +9267,10 @@ static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_
         top = l->top[at], height = l->tall[at];
         if (l->starts[at] & UI_LIST_HEADED)
                 top -= ui_dev(ui, UI_SECTION), height += ui_dev(ui, UI_SECTION);
-        if (!ui_scroll_reveal(&l->scroll, top, height))
+        ui_scroll_extent(&l->scroll);
+        if (!ui_body_reveal(&l->scroll.body, top, height, ui_kit_time()))
                 return false;
+        l->scroll.precise = 0;
         ui_list_damage_all(ui, l);
         return true;
 }
@@ -9565,7 +9565,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         UI_CALL();
         int row_height = ui_dev(ui, UI_ROW);
 
-        ui_scroll_glide(ui, &l->scroll);
+        ui_scroll_frame(ui, &l->scroll);
         ui->top = l->y;
         ui->bottom = l->y + l->h;
         if (!l->count && l->empty)
@@ -9969,7 +9969,11 @@ static fn ui_page_groups(struct ui address_to ui, struct ui_page address_to p, c
 // The group chosen kept in sight in a column that does not fit: true when it moved.
 static b32 ui_page_column_reveal(const struct ui address_to ui, struct ui_page address_to p, int group)
 {
-        return ui_scroll_reveal(&p->column_scroll, group * ui_dev(ui, UI_ROW), ui_dev(ui, UI_ROW));
+        ui_scroll_extent(&p->column_scroll);
+        if (!ui_body_reveal(&p->column_scroll.body, group * ui_dev(ui, UI_ROW), ui_dev(ui, UI_ROW), ui_kit_time()))
+                return false;
+        p->column_scroll.precise = 0;
+        return true;
 }
 
 /*
@@ -10049,7 +10053,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
 
         if (!p->column_on)
                 return;
-        ui_scroll_glide(ui, &p->column_scroll);
+        ui_scroll_frame(ui, &p->column_scroll);
         ui->top = p->top;
         ui->bottom = p->bottom;
         if (c->kind != UI_TABS)
@@ -10796,7 +10800,7 @@ static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, 
         int height = ui_dev(ui, UI_LINE), top;
         char text[512];
 
-        ui_scroll_glide(ui, s);
+        ui_scroll_frame(ui, s);
         top = s->y - s->scroll + ui_dev(ui, UI_LINES_PAD);
 
         ui->top = s->y;

@@ -167,7 +167,7 @@ static fn gallery_draw(struct ui address_to ui)
 {
         int right = 0, row_y = -1, scroll;
 
-        ui_scroll_glide(ui, &gallery.scroll);
+        ui_scroll_frame(ui, &gallery.scroll);
         scroll = gallery.scroll.scroll * 100 / ui->scale;
         ui->top = 0;
         ui->bottom = ui->height;
