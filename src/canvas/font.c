@@ -9526,6 +9526,79 @@ fn font_cell_plan(font_engine address_to e, const font_face address_to const add
         }
 }
 
+//      A cluster one cell wide: a base code point and its combining marks, several code points that are one cell. Each code point's
+//      glyph box is rasterized as font_cell_box does for a single cell (cells 1), placed at its own offset in the cell, and the boxes
+//      are combined into one cell-sized coverage in the caller's scratch by saturating add (min 255, a plus b), the rule the rig
+//      measured closest to font_draw's blend of the marks over the ground. The plan is font_cell_plan's known-ground branch with that
+//      coverage as its box, so font_plan_paint draws it and the recorder records the same plan: one coverage, drawn once.
+//      unknown: the background is FONT_UNKNOWN (font_draw blends it, not planned). empty: the cell is off the target.
+fn font_cluster_plan(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p32 address_to codes, p32 n,
+                     const font_metrics address_to grid, p32 size, p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
+                     p32 background, p8 address_to scratch, font_cell_plan_t address_to plan)
+{
+        b32 width = grid->cell_width, height = grid->cell_height;
+        b32 dx, dy;
+        b16 ink[2];
+
+        memory_zero(plan, sizeof(*plan));
+        plan->ground = background & 0xffffff;
+        if (background & FONT_UNKNOWN)
+        {
+                plan->unknown = true;
+                return;
+        }
+        flags = font_polarity(flags, colour, background);
+        memory_zero(scratch, (positive)width * (positive)height);
+        for (p32 i = 0; i < n; i++)
+        {
+                p64 chain = font_chain(faces, count, 1);
+                p32 ident = chain ? font_identify(e, chain, font_cell_shape(grid, count, 1), 1 << 3 | count) : 0;
+                font_bitmap box = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, font_cell_base(faces, count, size, flags), ident, &dx, &dy, ink);
+
+                for (b32 r = 0; r < box.height; r++)
+                        for (b32 c = 0; c < box.width; c++)
+                        {
+                                b32 cx = dx + c, cy = dy + r;
+                                p8 address_to at;
+                                unsigned int sum;
+
+                                if (cx < 0 || cy < 0 || cx >= width || cy >= height)
+                                        continue;
+                                at = scratch + (positive)cy * (positive)width + (positive)cx;
+                                sum = (unsigned int)*at + box.coverage[(positive)r * box.stride + c];
+                                *at = (p8)(sum > 255 ? 255 : sum);
+                        }
+        }
+
+        //      The cell's rectangle on the target, cut to it, and the coverage's box the whole cell.
+        plan->left = x < 0 ? 0 : x, plan->right = x + width > target->width ? target->width : x + width;
+        plan->top = y < 0 ? 0 : y, plan->bottom = y + height > target->height ? target->height : y + height;
+        if (plan->left >= plan->right || plan->top >= plan->bottom)
+        {
+                plan->empty = true;
+                return;
+        }
+        plan->from = plan->left, plan->to = plan->right, plan->above = plan->top, plan->below = plan->bottom;
+        plan->translate = true;
+        plan->coverage = scratch + (positive)(plan->above - y) * (positive)width + (plan->from - x);
+        plan->stride = (positive)width;
+        plan->strength = font_strength(e, size, flags);
+        plan->tones = font_tones(e, colour, background, plan->strength);
+}
+
+//      font_cell's known-ground drawing from a plan, one place for it: the rectangle on the ground, then the box translated through the tones.
+//      It is font_cell's result when the plan is font_cell_plan's or font_cluster_plan's (the rig checks both): the translate ignores what
+//      the rectangle was before.
+fn font_plan_paint(const font_cell_plan_t address_to plan, const font_target address_to target)
+{
+        if (plan->unknown || plan->empty)
+                return;
+        font_ground(target, plan->left, plan->top, plan->right, plan->bottom, plan->ground);
+        if (plan->translate)
+                memory_translate_u32_rect(target->pixels + (positive)plan->above * target->stride + plan->from, target->stride, plan->coverage,
+                                          plan->stride, (positive)(plan->to - plan->from), (positive)(plan->below - plan->above), plan->tones);
+}
+
 //      Rows from to from + rows of one cell's coverage, width bytes each,
 //      into the strip at into, stride bytes a row. A cell's own bitmap that
 //      is the whole cell is a copy a row: one 16-byte word for cells up to

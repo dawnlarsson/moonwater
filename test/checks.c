@@ -224016,6 +224016,128 @@ static void dl_wide_rows(void)
         check("draw list: a wide cell's replay is font_cell's two cells, bit for bit, at four scales, light and dark, CJK and fullwidth", bad == 0);
 }
 
+// A cluster of one cell (a base and its combining marks): font_cluster_plan's coverage painted by font_plan_paint is what the recorder replays
+// (ui_scene_cluster: fill and translate), at four scales, light and dark, for a Latin base with a combining acute and a diaeresis, and the
+// Hebrew and Arabic marks. The two rules that combine the marks' boxes are measured against font_draw of the same cluster over the ground (the
+// processor's previous marks path): saturating add (font_cluster_plan's) and max, the error summed per channel over the cell. Saturating add is
+// the processor's rule, so the check holds it to be no further from the blend than max.
+static b32 dl_utf8(p32 code, p8 address_to at)
+{
+        if (code < 0x80)
+                return at[0] = (p8)code, 1;
+        if (code < 0x800)
+                return at[0] = (p8)(0xc0 | code >> 6), at[1] = (p8)(0x80 | (code & 63)), 2;
+        at[0] = (p8)(0xe0 | code >> 12), at[1] = (p8)(0x80 | (code >> 6 & 63)), at[2] = (p8)(0x80 | (code & 63));
+        return 3;
+}
+
+static void dl_cluster_rows(void)
+{
+        static unsigned int want[DL_W * DL_H], got[DL_W * DL_H], draw[DL_W * DL_H], sumpaint[DL_W * DL_H], maxpaint[DL_W * DL_H];
+        static unsigned char cover[256 * 256], maxed[256 * 256];
+        const font_face address_to faces[2] = {&dl_face, &dl_face};
+        const unsigned int scales[4] = {100, 150, 200, 300};
+        const p32 clusters[3][2] = {{'e', 0x0301}, {0x05d0, 0x05b8}, {0x0628, 0x064e}};
+        const p32 grounds[2] = {0xf6f6f6u, 0x111113u}, inks[2] = {0x1d1d1fu, 0xdfe7efu};
+        long bad = 0, cases = 0, recorded = 0, err_sum = 0, err_max = 0;
+
+        for (int k = 0; k < 4; k++)
+                for (int light = 0; light < 2; light++)
+                        for (int c = 0; c < 3; c++)
+                        {
+                                p32 em = (13 * scales[k] / 100) << 6;
+                                font_metrics grid = font_metrics_at(faces[0], em);
+                                font_target ref = {want, DL_W, grid.cell_width + 6, grid.cell_height + 6};
+                                font_target probe = {dl_probe_pixels, DL_W, ref.width, ref.height};
+                                b32 x = 3, y = 2;
+                                font_cell_plan_t plan;
+                                struct ui probe_ui;
+                                p8 utf8[12];
+                                positive bytes = 0;
+
+                                // the processor's paint of the cluster over noise, and the recording replayed over the same noise
+                                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                        want[i] = dlc_rand();
+                                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                        got[i] = want[i];
+                                font_cluster_plan(&dl_engine, faces, 1, clusters[c], 2, &grid, em, 0, &ref, x, y, inks[light], grounds[light], cover, &plan);
+                                font_plan_paint(&plan, &ref);
+                                dl_probe_reset();
+                                dl_probe_ui(&probe_ui, 1);
+                                font_cluster_plan(&dl_engine, faces, 1, clusters[c], 2, &grid, em, 0, &probe, x, y, inks[light], grounds[light], cover, &plan);
+                                ui_scene_cluster(&probe_ui, &plan, inks[light], grounds[light], 0, 0);
+                                cases++;
+                                recorded += !dl_probe_scene.lost && dl_probe_scene.count > 0;
+                                if (dl_probe_scene.lost)
+                                        bad++;
+                                else
+                                {
+                                        dl_replay_translate(&dl_probe_scene, got);
+                                        for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                                if (want[i] != got[i])
+                                                {
+                                                        bad++;
+                                                        break;
+                                                }
+                                }
+
+                                // the marks' error against font_draw of the cluster over the ground, per rule
+                                for (int q = 0; q < 2; q++)
+                                        bytes += dl_utf8(clusters[c][q], utf8 + bytes);
+                                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                        draw[i] = sumpaint[i] = maxpaint[i] = grounds[light];
+                                {
+                                        font_target dt = {draw, DL_W, ref.width, ref.height};
+                                        font_target st = {sumpaint, DL_W, ref.width, ref.height};
+                                        font_target mt = {maxpaint, DL_W, ref.width, ref.height};
+                                        font_cell_plan_t maxplan;
+                                        p64 chain = font_chain(faces, 1, 1);
+                                        p32 flags = font_polarity(0, inks[light], grounds[light]);
+                                        int width = grid.cell_width, height = grid.cell_height;
+
+                                        font_draw(&dl_engine, faces, 2, utf8, bytes, em, 0, &dt, (b64)x * 65536, (b32)(y + grid.baseline), inks[light], FONT_UNKNOWN);
+                                        font_cluster_plan(&dl_engine, faces, 1, clusters[c], 2, &grid, em, 0, &st, x, y, inks[light], grounds[light], cover, &plan);
+                                        font_plan_paint(&plan, &st);
+                                        memory_zero(maxed, sizeof(maxed));
+                                        for (int q = 0; q < 2; q++)
+                                        {
+                                                p32 ident = chain ? font_identify(&dl_engine, chain, font_cell_shape(&grid, 1, 1), 1 << 3 | 1) : 0;
+                                                b16 ink[2];
+                                                b32 dx, dy;
+                                                font_bitmap box = font_cell_box(&dl_engine, faces, 1, clusters[c][q], 1, &grid, em, flags, font_cell_base(faces, 1, em, flags), ident, &dx, &dy, ink);
+
+                                                for (b32 r = 0; r < box.height; r++)
+                                                        for (b32 cc = 0; cc < box.width; cc++)
+                                                        {
+                                                                b32 cx = dx + cc, cy = dy + r;
+                                                                p8 address_to at;
+
+                                                                if (cx < 0 || cy < 0 || cx >= width || cy >= height)
+                                                                        continue;
+                                                                at = maxed + (positive)cy * (positive)width + (positive)cx;
+                                                                if (box.coverage[(positive)r * box.stride + cc] > (unsigned char)*at)
+                                                                        *at = box.coverage[(positive)r * box.stride + cc];
+                                                        }
+                                        }
+                                        maxplan = plan;
+                                        maxplan.coverage = (const p8 address_to)maxed + (positive)(plan.above - y) * (positive)width + (plan.from - x);
+                                        font_plan_paint(&maxplan, &mt);
+                                        for (int yy = (int)plan.top; yy < plan.bottom; yy++)
+                                                for (int xx = (int)plan.left; xx < plan.right; xx++)
+                                                        for (int ch = 0; ch < 24; ch += 8)
+                                                        {
+                                                                int d = (int)(draw[(positive)yy * DL_W + xx] >> ch & 255);
+
+                                                                err_sum += d - (int)(sumpaint[(positive)yy * DL_W + xx] >> ch & 255) < 0 ? (int)(sumpaint[(positive)yy * DL_W + xx] >> ch & 255) - d : d - (int)(sumpaint[(positive)yy * DL_W + xx] >> ch & 255);
+                                                                err_max += d - (int)(maxpaint[(positive)yy * DL_W + xx] >> ch & 255) < 0 ? (int)(maxpaint[(positive)yy * DL_W + xx] >> ch & 255) - d : d - (int)(maxpaint[(positive)yy * DL_W + xx] >> ch & 255);
+                                                        }
+                                }
+                        }
+        check("draw list: a cluster of one cell records without loss at 100, 150, 200 and 300 percent, light and dark", recorded == cases && cases == 24);
+        check("draw list: the saturating add of the marks is no further from font_draw than max (the rule kept)", err_sum <= err_max);
+        check("draw list: a cluster's replay is the processor's paint, bit for bit, at four scales, light and dark, Latin, Hebrew and Arabic marks", bad == 0);
+}
+
 static void dl_probes(void)
 {
         static struct ui probe;
@@ -224032,6 +224154,7 @@ static void dl_probes(void)
                 font_start(&dl_engine, dl_atlas, 512, 512);
         dl_cell_plan_rows();
         dl_wide_rows();
+        dl_cluster_rows();
 
         // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted.
         dl_probe_reset();

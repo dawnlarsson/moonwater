@@ -913,7 +913,8 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
 // (font_blend), a frame that is out of room, or a cell that does not fit sets lost: the frame is then the processor's.
 // The glyph of a cell plan, recorded for the GPU (op 10): its coverage copied into the pool once per frame and its tones (ui_scene_copy), then
 // the translate of the box. False when the frame has no room for it (scene->lost is set). The caller checks the room for the op.
-static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background, b32 ox, b32 oy)
+static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background, p64 cover_key,
+                              b32 ox, b32 oy)
 {
         static p8 rows[256 * 256];
         unsigned long tones_at = 0, cover_at = 0;
@@ -932,7 +933,7 @@ static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_
                 memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
         if (!ui_scene_copy(scene, scene->tone_slots, (p64)(unsigned long)plan->tones, (p64)colour << 32 | (background & 0xffffff), plan->strength,
                            plan->tones, 256 * sizeof(p32), &tones_at) ||
-            !ui_scene_copy(scene, scene->cover_slots, (p64)(unsigned long)plan->coverage, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
+            !ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
                            (unsigned long)w * (unsigned long)h, &cover_at))
         {
                 scene->lost = UI_LOST_POOL;
@@ -970,7 +971,7 @@ static void ui_scene_wide(struct ui address_to ui, const font_face address_to co
                 return;
         if (plan.left < plan.right && plan.top < plan.bottom)
                 ui_scene_record(scene, ox + plan.left, oy + plan.top, ox + plan.right, oy + plan.bottom, plan.ground, true);
-        ui_scene_translate(scene, &plan, colour, background, ox, oy);
+        ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ox, oy);
 }
 
 static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, const p32 address_to codes,
@@ -1000,9 +1001,51 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 }
                 if (!plan.translate)
                         continue;
-                if (!ui_scene_translate(scene, &plan, colour, background, ox, oy))
+                if (!ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ox, oy))
                         return;
         }
+}
+
+// A cluster of one cell (a base and its combining marks), recorded for the GPU: the cell's rectangle on the ground, then the coverage of the
+// cluster (one bitmap, font_cluster_plan's) translated through the tones. The cluster's bitmap is a scratch the processor reuses, so it is keyed
+// by the op it is recorded at, not by its pointer: no two clusters of a frame share a copy.
+static void ui_scene_cluster(struct ui address_to ui, const font_cell_plan_t address_to plan, p32 colour, p32 background, b32 ox, b32 oy)
+{
+        struct ui_scene address_to scene = ui->scene;
+
+        if (plan->unknown)
+        {
+                scene->lost = UI_LOST_GROUND;
+                return;
+        }
+        if (plan->empty)
+                return;
+        if (scene->count + 2 > scene->room)
+        {
+                scene->lost = UI_LOST_ROOM;
+                return;
+        }
+        ui_scene_record(scene, ox + plan->left, oy + plan->top, ox + plan->right, oy + plan->bottom, plan->ground, true);
+        ui_scene_translate(scene, plan, colour, background, (p64)(unsigned long)scene->ops + scene->count, ox, oy);
+}
+
+// The code points of a cluster (up to eight), from its bytes: false when a code point does not decode or there are more.
+static b32 ui_cluster_codes(const p8 address_to shown, positive size, p32 address_to codes, positive address_to count)
+{
+        positive at = 0;
+
+        *count = 0;
+        while (at < size)
+        {
+                p32 code;
+                positive took = doc_decode(shown + at, size - at, &code);
+
+                if (!took || *count >= 8)
+                        return false;
+                codes[(*count)++] = code;
+                at += took;
+        }
+        return *count > 1;
 }
 
 // A cluster of blanks (a tab's columns): font_draw of it draws no glyph.
@@ -14817,6 +14860,9 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 font_metrics grid = font_metrics_at(faces[0], ui_text_em(ui, t));
                 p32 codes[256];
                 positive token = 0;
+                static p8 cluster_cover[256 * 256];
+                p32 cluster[8];
+                positive cluster_n = 0;
 
                 for (p32 k = 0; k < l->count;)
                 {
@@ -14874,8 +14920,32 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                                                 font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y,
                                                                           ink & 0xffffffu, paper);
                                                 }
+                                                else if (l->x[k + 1] - l->x[k] == t->cell && ui_cluster_codes(l->shown + l->shown_at[k], size, cluster, &cluster_n))
+                                                {
+                                                        // A cluster of one cell (a base and its marks): its code points' boxes are one coverage (font_cluster_plan), drawn
+                                                        // as the recorder draws it (font_plan_paint, or the same plan in a frame).
+                                                        unsigned int paper = ui_text_paper(t, l->offset[k], ground);
+                                                        b32 cell_x = origin + l->x[k] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
+                                                        font_cell_plan_t plan;
+
+                                                        if (grid.cell_width * grid.cell_height > (b32)sizeof(cluster_cover))
+                                                        {
+                                                                if (ui->scene)
+                                                                        ui->scene->lost = UI_LOST_CELL;
+                                                                goto cluster_lost;
+                                                        }
+                                                        font_cluster_plan(ui->engine, faces, 2, cluster, cluster_n, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y,
+                                                                          ink & 0xffffffu, paper, cluster_cover, &plan);
+                                                        if (plan.unknown)
+                                                                goto cluster_lost;
+                                                        if (ui->scene)
+                                                                ui_scene_cluster(ui, &plan, ink & 0xffffffu, paper, t->left, t->top);
+                                                        else
+                                                                font_plan_paint(&plan, &target);
+                                                }
                                                 else
                                                 {
+cluster_lost:
                                                         if (ui->scene)
                                                                 ui->scene->lost = UI_LOST_MARKS;
                                                         font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
