@@ -150101,20 +150101,76 @@ static fn check_pad_scroll(void)
 static fn check_wheel_stream(void)
 {
         int ok = 1, two = 0;
-        positive t = 1000000000ull;
+        positive t = 1000000000ull, g = COMPOSITOR_WHEEL_STREAM_NS;
 
         memory_zero(&compositor, sizeof(compositor));
-        ok &= !compositor_wheel_stream(0, t);                                       // the first of a device is stepped
-        ok &= compositor_wheel_stream(0, t + 16000000);                             // 16 ms after: a stream
-        ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000);                // 100 ms after: a mouse's notch, stepped
-        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000);      // and the notch after that begins a stream
-        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000);      // the same instant: a stream still
-        ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + COMPOSITOR_WHEEL_STREAM_NS);     // exactly the gap: a stream
-        ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + 2 * COMPOSITOR_WHEEL_STREAM_NS + 1); // one ns over: stepped
-        ok &= !compositor_wheel_stream(0, t);                                       // a clock that went back is no stream
+        ok &= !compositor_wheel_stream(0, t);                              // the first of a device is stepped
+        ok &= compositor_wheel_stream(0, t + 16000000);                    // 16 ms after: a stream
+        ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000);       // 100 ms after: a lone notch, stepped (one stream notch is no gesture)
+        ok &= compositor_wheel_stream(0, t + 132000000);                   // 16 ms after that: a stream
+        ok &= compositor_wheel_stream(0, t + 132000000);                   // the same instant: a stream still
+        ok &= compositor_wheel_stream(0, t + 132000000 + g);               // exactly the gap: a stream (the third: the device streams)
+        ok &= !compositor_wheel_stream(0, t);                              // a clock that went back is no stream
         check("wheel stream: a notch within 60 ms of the device's last is a stream, one after a longer gap is a lone notch (stepped)", ok);
         two = compositor_wheel_stream(1, t + 16000000) == 0 && compositor_wheel_stream(1, t + 32000000);
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
+}
+
+// The memory (COMPOSITOR_WHEEL_MEMORY_NS): a device that has streamed (three stream notches in a gesture) has its next gesture's first
+// notch as a stream notch, if it comes within three seconds of the last stream notch; past that, or on a device that never streamed,
+// it is a row step. Long gaps (a mouse's) never make a stream, so they never promote.
+static fn check_wheel_memory(void)
+{
+        positive t = 2000000000ull, g = COMPOSITOR_WHEEL_STREAM_NS, m = COMPOSITOR_WHEEL_MEMORY_NS;
+        int ok = 1, never = 1, mouse = 1, late = 1, memo = 1;
+
+        memory_zero(&compositor, sizeof(compositor));
+        // Two stream notches and no third: the device has not streamed, so its next gesture's first notch is a row step.
+        compositor_wheel_stream(2, t);
+        ok &= compositor_wheel_stream(2, t + 16000000) && compositor_wheel_stream(2, t + 32000000);
+        never &= !compositor_wheel_stream(2, t + 32000000 + 1000000000ull);
+        check("wheel memory: a device whose gesture had two stream notches has not streamed: its next first notch is stepped", ok && never);
+
+        // Three in a gesture: streamed. Its next first notch, a second later, is a stream notch, and the gesture goes on as one.
+        memory_zero(&compositor, sizeof(compositor));
+        compositor_wheel_stream(3, t);
+        ok = compositor_wheel_stream(3, t + 16000000) && compositor_wheel_stream(3, t + 32000000) && compositor_wheel_stream(3, t + 48000000);
+        ok &= compositor_wheel_stream(3, t + 48000000 + 1000000000ull);
+        ok &= compositor_wheel_stream(3, t + 48000000 + 1000000000ull + 16000000);
+        check("wheel memory: a device that streamed: its next gesture's first notch, a second later, is a stream notch and so is the rest", ok);
+
+        // Three seconds after its last stream notch the memory has run out: a row step, as a new device's first is.
+        memory_zero(&compositor, sizeof(compositor));
+        compositor_wheel_stream(3, t);
+        compositor_wheel_stream(3, t + 16000000);
+        compositor_wheel_stream(3, t + 32000000);
+        compositor_wheel_stream(3, t + 48000000);
+        late &= !compositor_wheel_stream(3, t + 48000000 + m + 1);
+        memory_zero(&compositor, sizeof(compositor));
+        compositor_wheel_stream(3, t);
+        compositor_wheel_stream(3, t + 16000000);
+        compositor_wheel_stream(3, t + 32000000);
+        compositor_wheel_stream(3, t + 48000000);
+        memo &= compositor_wheel_stream(3, t + 48000000 + m);
+        check("wheel memory: three seconds after its last stream notch the memory is over (one nanosecond past it is stepped; exactly three seconds still a stream)",
+              late && memo);
+
+        // A mouse's long gaps: never a stream and never a stream's memory, however often it turns.
+        memory_zero(&compositor, sizeof(compositor));
+        for (int k = 0; k < 40; k++)
+                mouse &= !compositor_wheel_stream(4, t + (positive)k * 300000000ull);
+        mouse &= !compositor_wheel_stream(4, t + 40ull * 300000000ull + 1000000000ull);
+        check("wheel memory: a mouse's notches 300 ms apart are stepped, forty of them and then one a second later", mouse);
+
+        // Another device has its own memory: device 0 streamed, device 1 did not.
+        memory_zero(&compositor, sizeof(compositor));
+        compositor_wheel_stream(5, t);
+        compositor_wheel_stream(5, t + 16000000);
+        compositor_wheel_stream(5, t + 32000000);
+        compositor_wheel_stream(5, t + 48000000);
+        never = !compositor_wheel_stream(6, t + 48000000 + 500000000ull);
+        check("wheel memory: the memory is the device's own: another device's first notch a half second after is stepped", never);
+        (void)g;
 }
 
 // A stream's end (no notch for UI_HAND_GAP_NS): the hand lets go and the region throws on the stream's speed, as a touch flick does. A
@@ -161578,6 +161634,7 @@ b32 main()
         check_pad_pinch();
         check_pad_scroll();
         check_wheel_stream();
+        check_wheel_memory();
         check_kit_precise_stream();
         check_stream_notch();
         check_trackpad_speed();

@@ -3617,6 +3617,8 @@ struct compositor_absinfo
         is stepped too, since nothing says yet that a stream has begun.
 */
 #define COMPOSITOR_WHEEL_STREAM_NS 60000000ull
+#define COMPOSITOR_WHEEL_STREAMS 3          // stream notches in a gesture before the device is known to stream
+#define COMPOSITOR_WHEEL_MEMORY_NS 3000000000ull // how long a device that streamed keeps the stream for its next gesture's first notch
 #define COMPOSITOR_STREAM_V 24
 #define COMPOSITOR_PAD_WIDTH_MM 100
 
@@ -4219,6 +4221,9 @@ static struct
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
         positive wheel_at[COMPOSITOR_INPUTS];   // when the device's last wheel event came, ns (compositor_wheel_stream: a stream's gap)
+        positive wheel_stream_at[COMPOSITOR_INPUTS]; // when its last stream notch came, ns: the memory's three seconds run from it
+        unsigned int wheel_run[COMPOSITOR_INPUTS];   // the stream notches in its current gesture (compositor_wheel_stream)
+        unsigned char wheel_streamed[COMPOSITOR_INPUTS]; // it has streamed: a gesture of COMPOSITOR_WHEEL_STREAMS stream notches
         long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, in 120ths, per axis (compositor_stream_turn)
         unsigned int trackpad_speed; // the setting `canvas trackpad speed`: 0 normal (what a zeroed compositor is), 1 slow, 2 fast
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
@@ -11083,7 +11088,8 @@ static void compositor_input_add(unsigned int number)
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
-        compositor.wheel_at[at] = 0;
+        compositor.wheel_at[at] = compositor.wheel_stream_at[at] = 0;
+        compositor.wheel_run[at] = 0, compositor.wheel_streamed[at] = 0;
         compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
         // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
         // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
@@ -16826,9 +16832,22 @@ static void compositor_wheel_precise(int v120, int horizontal)
 // device's last is kept either way, so a stream that began is one for each notch after it.
 static int compositor_wheel_stream(unsigned int at, positive now)
 {
-        positive last = compositor.wheel_at[at];
-        int stream = last && now >= last && now - last <= COMPOSITOR_WHEEL_STREAM_NS;
+        positive last = compositor.wheel_at[at], since = compositor.wheel_stream_at[at];
+        int within = last && now >= last && now - last <= COMPOSITOR_WHEEL_STREAM_NS, stream = within;
 
+        // A device that has streamed (COMPOSITOR_WHEEL_STREAMS notches in a gesture) keeps the stream for three seconds after its last
+        // stream notch: the first notch of its next gesture is the stream's, not a row step. A device that has never streamed, or whose
+        // notches come long apart, is never promoted.
+        if (!within && compositor.wheel_streamed[at] && since && now >= since && now - since <= COMPOSITOR_WHEEL_MEMORY_NS)
+                stream = 1;
+        if (stream)
+        {
+                if (++compositor.wheel_run[at] >= COMPOSITOR_WHEEL_STREAMS)
+                        compositor.wheel_streamed[at] = 1;
+                compositor.wheel_stream_at[at] = now;
+        }
+        else
+                compositor.wheel_run[at] = 0;
         compositor.wheel_at[at] = now;
         return stream;
 }
