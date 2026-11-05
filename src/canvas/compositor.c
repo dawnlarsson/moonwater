@@ -3609,13 +3609,15 @@ struct compositor_absinfo
 
 /*
         A wheel's events from one device that come no more than COMPOSITOR_WHEEL_STREAM_NS apart are a stream: a trackpad's
-        motion as the wheel reports it (a notch to every report, sixty a second, or hi-res 120ths of a finger's pixels). A
-        stream's notches are the finger's motion (WINDOW_WHEEL_PRECISE: one for one, no step and no glide), and it ends when
-        no notch comes for that long (the kit's gap release throws on the hand's speed, as the touch path does). A notch after
-        a longer gap is a mouse's: a stepped notch, as it has always been. The first notch of a stream is stepped too, since
-        nothing says yet that a stream has begun.
+        motion as the wheel reports it (a notch to every report, tens to 120 a second, or hi-res 120ths of a finger's pixels).
+        A stream's notch is a small fixed amount, not a row: COMPOSITOR_STREAM_V 120ths of a notch, which is 8 px at 100 percent
+        (the kit's notch is 40 px, UI_PRECISE_NOTCH, so 120ths of it are 1/3 px each). The stream's notches are the finger's motion (WINDOW_WHEEL_PRECISE: no step, no glide), and it ends
+        when no notch comes for UI_HAND_GAP_NS (40 ms): the kit's gap release throws on the hand's speed, as the touch path
+        does. A notch after a longer gap is a lone notch: stepped, a row, as it has always been. The first notch of a stream
+        is stepped too, since nothing says yet that a stream has begun.
 */
-#define COMPOSITOR_WHEEL_STREAM_NS 40000000ull
+#define COMPOSITOR_WHEEL_STREAM_NS 60000000ull
+#define COMPOSITOR_STREAM_V 24
 #define COMPOSITOR_PAD_WIDTH_MM 100
 
 struct compositor_pad
@@ -4217,6 +4219,7 @@ static struct
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
         positive wheel_at[COMPOSITOR_INPUTS];   // when the device's last wheel event came, ns (compositor_wheel_stream: a stream's gap)
+        long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, in 120ths, per axis (compositor_stream_turn)
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
         struct compositor_pad pad[COMPOSITOR_INPUTS];
         // The device is a touch screen (compositor_touch_report), and its fingers; what they are doing; and whether the
@@ -11075,6 +11078,7 @@ static void compositor_input_add(unsigned int number)
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
         compositor.wheel_at[at] = 0;
+        compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
         // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
         // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
         {
@@ -16811,6 +16815,16 @@ static int compositor_wheel_stream(unsigned int at, positive now)
         return stream;
 }
 
+// A stream's turn in 120ths: each notch is COMPOSITOR_STREAM_V of them, and what does not come whole is kept for the next turn.
+static long long compositor_stream_turn(unsigned int at, long long value120, int horizontal)
+{
+        int axis = horizontal ? 1 : 0;
+        long long total = value120 * COMPOSITOR_STREAM_V + compositor.wheel_rest[at][axis], turn = total / 120;
+
+        compositor.wheel_rest[at][axis] = total - turn * 120;
+        return turn;
+}
+
 static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab;
@@ -18235,12 +18249,13 @@ static void compositor_input_read(unsigned int at)
                                         int stream = compositor_wheel_stream(at, now);
 
                                         compositor.table->input_wheel_used[at]++;
-                                        int v120 = compositor_counts(0, fine ? (long long)event->value : (long long)event->value * 120);
+                                        long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
 
                                         if (stream)
-                                                compositor_wheel_flags(v120, sideways, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM);
+                                                compositor_wheel_flags(compositor_counts(0, compositor_stream_turn(at, value120, sideways)), sideways,
+                                                                       WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM);
                                         else
-                                                compositor_wheel(v120, sideways);
+                                                compositor_wheel(compositor_counts(0, value120), sideways);
                                 }
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)

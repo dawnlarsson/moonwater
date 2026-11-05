@@ -150112,9 +150112,48 @@ static fn check_wheel_stream(void)
         ok &= compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + COMPOSITOR_WHEEL_STREAM_NS);     // exactly the gap: a stream
         ok &= !compositor_wheel_stream(0, t + 16000000 + 100000000 + 16000000 + 2 * COMPOSITOR_WHEEL_STREAM_NS + 1); // one ns over: stepped
         ok &= !compositor_wheel_stream(0, t);                                       // a clock that went back is no stream
-        check("wheel stream: a notch within 40 ms of the device's last is a stream, one after a longer gap is a mouse's (stepped)", ok);
+        check("wheel stream: a notch within 60 ms of the device's last is a stream, one after a longer gap is a lone notch (stepped)", ok);
         two = compositor_wheel_stream(1, t + 16000000) == 0 && compositor_wheel_stream(1, t + 32000000);
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
+}
+
+// A stream's notch is COMPOSITOR_STREAM_V 120ths: 8 px at 100 percent and 16 at 200, exactly, however many; a hi-res wheel's
+// 120ths carry what they do not turn whole, so eight of 15 are one notch; and no value wraps.
+static fn check_stream_notch(void)
+{
+        struct precise_region p;
+        long long sum = 0, hires = 0, huge;
+        int ok;
+
+        memory_zero(&compositor, sizeof(compositor));
+        for (int k = 0; k < 100; k++)
+                sum += compositor_stream_turn(0, 120, 0);
+        check("stream notch: a hundred stream notches are 2400 of the wheel's 120ths: 8 px each at 100 percent, exactly",
+              sum == 100 * COMPOSITOR_STREAM_V);
+        for (int k = 0; k < 8; k++)
+                hires += compositor_stream_turn(1, 15, 0);
+        check("stream notch: eight hi-res 120ths of 15 are one notch's stream turn (what does not come whole is carried)",
+              hires == COMPOSITOR_STREAM_V);
+        huge = compositor_stream_turn(2, 1000000000000ll, 1);
+        check("stream notch: a value of a trillion 120ths is a turn clamped to the window's coordinates, not a wrap",
+              compositor_counts(0, huge) == WINDOW_COORD_MAX || compositor_counts(0, huge) == -WINDOW_COORD_MAX);
+
+        // The kit moves what the stream turns: 100 turns of 24 at 100 percent are 800 px, and at 200 percent 1600 px.
+        precise_setup(&p, 100000, 50000);
+        for (int k = 0; k < 100; k++)
+                precise_turn(&p, 100000 + k * 16000, -(int)COMPOSITOR_STREAM_V);
+        ok = (long)p.s.at - (50000l << 8) == 800 * UI_SCROLL_SCALE;
+        precise_setup(&p, 100000, 50000);
+        p.ui.scale = 200;
+        for (int k = 0; k < 100; k++)
+        {
+                struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, -(int)COMPOSITOR_STREAM_V, 0};
+
+                ui_kit.now = 9000000000ll + (100000 + k * 16000) * 1000ll, ui_kit.test_clock = ui_kit.now;
+                ui_wheel_turn(&p.ui, &p.s, &turn);
+        }
+        ok &= (long)p.s.at - (50000l << 8) == 1600 * UI_SCROLL_SCALE;
+        check("stream notch: a stream of 100 notches moves the region 800 px at 100 percent and 1600 px at 200 percent (the output scale)", ok);
 }
 
 static fn check_kit_precise_stream(void)
@@ -161411,6 +161450,7 @@ b32 main()
         check_pad_scroll();
         check_wheel_stream();
         check_kit_precise_stream();
+        check_stream_notch();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

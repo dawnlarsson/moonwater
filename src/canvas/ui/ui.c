@@ -6354,6 +6354,7 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
 #define UI_PRECISE_MOST (1l << 24)     // the most one precise turn moves a region, in 256ths of a device pixel (65536 px)
+#define UI_PRECISE_NOTCH 40            // a precise turn's notch, in device pixels at 100 percent: 120ths of it are its share (a fixed px, not the row's)
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
 #define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
@@ -7012,10 +7013,10 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || s->unit > 0)
                 return ui_scroll_wheel(ui, s, event->a);
         {
-                // The turn is a row's share of its 120ths, in 256ths of a pixel. What a turn does not move whole (120ths of a 256th)
-                // is carried to the next, so a stream of single 120ths adds up exactly. Clamped to a span no region holds, so no
-                // value makes the cast wrap.
-                long total = (long)event->a * UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE + s->precise_rest, q = total / 120;
+                // The turn is its share of a notch's UI_PRECISE_NOTCH pixels, in 256ths. What a turn does not move whole (120ths of a
+                // 256th) is carried to the next, so a stream of single 120ths adds up exactly. Clamped to a span no region holds, so
+                // no value makes the cast wrap.
+                long total = (long)event->a * UI_PRECISE_NOTCH * ui->scale / 100 * UI_SCROLL_SCALE + s->precise_rest, q = total / 120;
 
                 s->precise_rest = total - q * 120;
                 q = q > UI_PRECISE_MOST ? UI_PRECISE_MOST : q < -UI_PRECISE_MOST ? -UI_PRECISE_MOST : q;
