@@ -223976,13 +223976,13 @@ static void dl_wide_rows(void)
         static unsigned int want[DL_W * DL_H], got[DL_W * DL_H];
         const font_face address_to faces[2] = {&dl_face, &dl_face};
         const unsigned int scales[4] = {100, 150, 200, 300};
-        const p32 codes[2] = {0x4e2d, 0xff21};
+        const p32 codes[3] = {0x4e2d, 0xff21, 0x1f600};
         const p32 grounds[2] = {0xf6f6f6u, 0x111113u}, inks[2] = {0x1d1d1fu, 0xdfe7efu};
         long bad = 0, cases = 0, recorded = 0;
 
         for (int k = 0; k < 4; k++)
                 for (int light = 0; light < 2; light++)
-                        for (int c = 0; c < 2; c++)
+                        for (int c = 0; c < 3; c++)
                         {
                                 p32 em = (13 * scales[k] / 100) << 6;
                                 font_metrics grid = font_metrics_at(faces[0], em);
@@ -224012,8 +224012,8 @@ static void dl_wide_rows(void)
                                                 break;
                                         }
                         }
-        check("draw list: a wide cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", recorded == cases && cases == 16);
-        check("draw list: a wide cell's replay is font_cell's two cells, bit for bit, at four scales, light and dark, CJK and fullwidth", bad == 0);
+        check("draw list: a wide cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", recorded == cases && cases == 24);
+        check("draw list: a wide cell's replay is font_cell's two cells, bit for bit, at four scales, light and dark, CJK, fullwidth and an emoji (no colour glyphs: an unknown glyph)", bad == 0);
 }
 
 // A cluster of one cell (a base and its combining marks): font_cluster_plan's coverage painted by font_plan_paint is what the recorder replays
