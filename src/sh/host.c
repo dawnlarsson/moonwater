@@ -5555,7 +5555,10 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
         if (count == 4 && string_equals(arguments[3], "report"))
         {
                 if (host_write_file((string_address)HOST_RECORD_DIR "/report", request, 7, 0644, false) < 0)
-                        return host_usage();
+                {
+                        host_say(log, "the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
+                        return 0;
+                }
                 for (positive wait = 0; wait < 30; wait++)
                 {
                         if (host_read_state((string_address)HOST_RECORD_DIR "/report", report, 16) < 0)

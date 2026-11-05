@@ -51990,6 +51990,7 @@ FUZZ_VALID = {
     "COLOUR": ["112233", "1e1e1e", "ffffff"], "ZONE": ["UTC", "Europe/London", "+1", "se", "UTC+14"],
     "LAYOUT": ["us", "uk", "de", "sv", "nb"], "NAME": ["alpha", "space-wizard", "a1", "x"],
     "NEW": ["alpha", "space-wizard", "a1", "random"], "SSID": ["home", "Cafe Wifi", "net-1"],
+    "SECONDS": ["1", "3", "10"],
     "PASSWORD": ["hunter22x", "-", "correct horse"], "DISK": ["/dev/null", "sda", "nvme0n1"],
     "ID": ["0627:0001", "0627:0001/68284-kbd", "46f4:0001/STICK1", "1-1"], "PORT": ["1-1", "1-2", "1-3"],
     "EVENT": ["poweroff", "canvas"], "COMMAND": ["true", "echo hi", "false"],
@@ -52261,6 +52262,9 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
         if prefix[0] not in (b"airplane", b"canvas", b"keyboard", b"mouse", b"ntp", b"security", b"taskbar",
                              b"wired", b"dns", b"desktop"):
             continue
+        #   A recording is asked for, not kept: "canvas record SECONDS" has no setting to say back.
+        if prefix[:2] == [b"canvas", b"record"]:
+            continue
         for _ in range(3):
             values = fuzz_expand(tree[1][-1], rng, good_for(prefix[0].decode()))
             if values and not {b"default", b"auto", b"random", b"list", b"xkb", b"-", b"yes", b"forget"} & set(values):
@@ -52306,11 +52310,14 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
     #   bare: whatever one of them reads and shows is shown as it is, and none waits
     #   for what is not coming.
     escape = b"\x1b]0;pwn\x07\x9b31m\x7f\x1b[2J\x1b[31mred\n"
+    #   sensors reads only /sys and /proc, which no plant here touches: its answer is
+    #   the same after each, so it is asked once in the baseline above and not 850 times
+    #   more (each reading takes a quarter second of the processor).
     for path in files:
         for kind in (b"x", b"f", b"z", b"l", b"d"):
             chains.append([([b"@plant", path.encode(), kind, escape], "plant", False)] +
                           [([verb.encode()], "plant-probe", False) for verb in ["status"] + verb_names
-                           if verb not in ("sleep", "hibernate")])
+                           if verb not in ("sleep", "hibernate", "sensors")])
     #   A file of the state replaced by garbage, then the verbs that read it.
     for _ in range(count // 4 if files else 0):
         path = files[rng.randrange(len(files))]
