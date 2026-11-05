@@ -911,12 +911,73 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
 // their rectangles are one), then per cell with a glyph box, a translate of the box through the cell's tones, its coverage and tones copied into
 // the pool once per frame. x and y are the target's; ox and oy the picture's place of the target's top left. A background that is FONT_UNKNOWN
 // (font_blend), a frame that is out of room, or a cell that does not fit sets lost: the frame is then the processor's.
+// The glyph of a cell plan, recorded for the GPU (op 10): its coverage copied into the pool once per frame and its tones (ui_scene_copy), then
+// the translate of the box. False when the frame has no room for it (scene->lost is set). The caller checks the room for the op.
+static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background, b32 ox, b32 oy)
+{
+        static p8 rows[256 * 256];
+        unsigned long tones_at = 0, cover_at = 0;
+        unsigned int address_to op;
+        b32 w, h;
+
+        if (!plan->translate)
+                return true;
+        w = plan->to - plan->from, h = plan->below - plan->above;
+        if (w <= 0 || h <= 0 || (unsigned long)w * (unsigned long)h > sizeof(rows))
+        {
+                scene->lost = UI_LOST_CELL;
+                return false;
+        }
+        for (b32 r = 0; r < h; r++)
+                memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
+        if (!ui_scene_copy(scene, scene->tone_slots, (p64)(unsigned long)plan->tones, (p64)colour << 32 | (background & 0xffffff), plan->strength,
+                           plan->tones, 256 * sizeof(p32), &tones_at) ||
+            !ui_scene_copy(scene, scene->cover_slots, (p64)(unsigned long)plan->coverage, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
+                           (unsigned long)w * (unsigned long)h, &cover_at))
+        {
+                scene->lost = UI_LOST_POOL;
+                return false;
+        }
+        op = scene->ops + 8 * scene->count++;
+        op[0] = 10u | (unsigned int)w << 8, op[1] = (unsigned int)(ox + plan->from), op[2] = (unsigned int)(oy + plan->above);
+        op[3] = (unsigned int)(ox + plan->to), op[4] = (unsigned int)(oy + plan->below), op[5] = (unsigned int)tones_at, op[6] = 0;
+        op[7] = (unsigned int)cover_at;
+        ui_scene_touch(scene, ox + plan->from, oy + plan->above, ox + plan->to, oy + plan->below);
+        return true;
+}
+
+// A wide cell (one code point, two cells) of a code view, recorded for the GPU: the two cells' rectangle on the ground, then the glyph's translate.
+// The plan is font_cell's known-ground branch with two cells (font_cell_plan), the same one the processor draws (font_cell), so the two agree by
+// construction (the rig checks it at four scales, light and dark).
+static void ui_scene_wide(struct ui address_to ui, const font_face address_to const address_to faces, p32 code, const font_metrics address_to grid, p32 em,
+                          const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y, p32 colour, p32 background)
+{
+        struct ui_scene address_to scene = ui->scene;
+        font_cell_plan_t plan;
+
+        if (scene->count + 2 > scene->room)
+        {
+                scene->lost = UI_LOST_ROOM;
+                return;
+        }
+        font_cell_plan(ui->engine, faces, 2, code, 2, grid, em, 0, target, x, y, colour, background, &plan);
+        if (plan.unknown)
+        {
+                scene->lost = UI_LOST_GROUND;
+                return;
+        }
+        if (plan.empty)
+                return;
+        if (plan.left < plan.right && plan.top < plan.bottom)
+                ui_scene_record(scene, ox + plan.left, oy + plan.top, ox + plan.right, oy + plan.bottom, plan.ground, true);
+        ui_scene_translate(scene, &plan, colour, background, ox, oy);
+}
+
 static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, const p32 address_to codes,
                            p32 run, const font_metrics address_to grid, p32 em, const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y,
                            p32 colour, p32 background)
 {
         struct ui_scene address_to scene = ui->scene;
-        static p8 rows[256 * 256];
         int width = grid->cell_width, height = grid->cell_height;
         int left = x < 0 ? 0 : x, right = x + run * width > target->width ? target->width : x + run * width;
         int top = y < 0 ? 0 : y, bottom = y + height > target->height ? target->height : y + height;
@@ -931,10 +992,6 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
         for (p32 i = 0; i < run; i++)
         {
                 font_cell_plan_t plan;
-                unsigned long tones_at = 0, cover_at = 0;
-                unsigned int address_to op;
-                b32 w, h;
-
                 font_cell_plan(ui->engine, faces, count, codes[i], 1, grid, em, flags, target, x + (b32)i * width, y, colour, background, &plan);
                 if (plan.unknown || scene->count >= scene->room)
                 {
@@ -943,27 +1000,8 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 }
                 if (!plan.translate)
                         continue;
-                w = plan.to - plan.from, h = plan.below - plan.above;
-                if (w <= 0 || h <= 0 || (unsigned long)w * (unsigned long)h > sizeof(rows))
-                {
-                        scene->lost = UI_LOST_CELL;
+                if (!ui_scene_translate(scene, &plan, colour, background, ox, oy))
                         return;
-                }
-                for (b32 r = 0; r < h; r++)
-                        memory_copy(rows + (positive)r * w, plan.coverage + (positive)r * plan.stride, (positive)w);
-                if (!ui_scene_copy(scene, scene->tone_slots, (p64)(unsigned long)plan.tones, (p64)colour << 32 | (background & 0xffffff), plan.strength,
-                                   plan.tones, 256 * sizeof(p32), &tones_at) ||
-                    !ui_scene_copy(scene, scene->cover_slots, (p64)(unsigned long)plan.coverage, (p64)w << 40 | (p64)h << 20 | plan.stride, 0, rows,
-                                   (unsigned long)w * (unsigned long)h, &cover_at))
-                {
-                        scene->lost = UI_LOST_POOL;
-                        return;
-                }
-                op = scene->ops + 8 * scene->count++;
-                op[0] = 10u | (unsigned int)w << 8, op[1] = (unsigned int)(ox + plan.from), op[2] = (unsigned int)(oy + plan.above);
-                op[3] = (unsigned int)(ox + plan.to), op[4] = (unsigned int)(oy + plan.below), op[5] = (unsigned int)tones_at, op[6] = 0;
-                op[7] = (unsigned int)cover_at;
-                ui_scene_touch(scene, ox + plan.from, oy + plan.above, ox + plan.to, oy + plan.below);
         }
 }
 
@@ -14819,12 +14857,31 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                         }
                                         if (origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
                                         {
-                                                // A cell of marks, wide or emoji is font_draw on the ground: font_blend, not recorded (lost).
-                                                if (ui->scene)
-                                                        ui->scene->lost = UI_LOST_MARKS;
-                                                font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
-                                                          (b32)((b64)(origin + l->x[k] - t->left) * 65536), baseline - t->top, ink & 0xffffffu,
-                                                          FONT_UNKNOWN);
+                                                p32 wide;
+
+                                                // One code point two cells wide (CJK, a fullwidth form) is font_cell with two cells on the paper it sits on,
+                                                // the plan the recorder takes: the same cell, so the processor and the GPU agree. Marks and emoji (several
+                                                // code points) are still font_draw on the ground (font_blend), not recorded (lost).
+                                                if (doc_decode(l->shown + l->shown_at[k], size, &wide) == size && l->x[k + 1] - l->x[k] == 2 * t->cell)
+                                                {
+                                                        unsigned int paper = ui_text_paper(t, l->offset[k], ground);
+                                                        b32 cell_x = origin + l->x[k] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
+
+                                                        if (ui->scene)
+                                                                ui_scene_wide(ui, faces, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y,
+                                                                              ink & 0xffffffu, paper);
+                                                        else
+                                                                font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y,
+                                                                          ink & 0xffffffu, paper);
+                                                }
+                                                else
+                                                {
+                                                        if (ui->scene)
+                                                                ui->scene->lost = UI_LOST_MARKS;
+                                                        font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
+                                                                  (b32)((b64)(origin + l->x[k] - t->left) * 65536), baseline - t->top, ink & 0xffffffu,
+                                                                  FONT_UNKNOWN);
+                                                }
                                         }
                                         k++;
                                         run = 0;

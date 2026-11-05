@@ -223933,6 +223933,80 @@ static void dl_cell_plan_rows(void)
         check("font plan: translates were planned (the test has glyphs to translate)", translates > 300);
 }
 
+// A wide cell of a code view (ui.c's ui_scene_wide, the recorded plan) replayed (fills, and the translate op 10 through its tones and cover) is
+// font_cell's two-cell pixels: four scales, a light and a dark ground, a CJK and a fullwidth code point, the noise around the cells the same.
+static void dl_replay_translate(const struct ui_scene address_to scene, unsigned int address_to into)
+{
+        const unsigned char address_to base = scene->cover - scene->at;
+
+        for (unsigned int k = 0; k < scene->count; k++)
+        {
+                const unsigned int address_to op = scene->ops + 8 * k;
+
+                if ((op[0] & 255) != 10)
+                {
+                        for (int y = (int)op[2]; y < (int)op[4]; y++)
+                                for (int x = (int)op[1]; x < (int)op[3]; x++)
+                                        into[(unsigned long)y * DL_W + (unsigned long)x] = (op[0] & 255) == 0 ? op[5] : ui_over(op[5], into[(unsigned long)y * DL_W + (unsigned long)x]);
+                        continue;
+                }
+                {
+                        unsigned int w = op[0] >> 8;
+                        const unsigned int address_to tones = (const unsigned int address_to)(base + op[5]);
+                        const unsigned char address_to cover = base + op[7];
+
+                        for (int y = (int)op[2]; y < (int)op[4]; y++)
+                                for (int x = (int)op[1]; x < (int)op[3]; x++)
+                                        into[(unsigned long)y * DL_W + (unsigned long)x] = tones[cover[(unsigned long)(y - (int)op[2]) * w + (unsigned long)(x - (int)op[1])]];
+                }
+        }
+}
+
+static void dl_wide_rows(void)
+{
+        static unsigned int want[DL_W * DL_H], got[DL_W * DL_H];
+        const font_face address_to faces[2] = {&dl_face, &dl_face};
+        const unsigned int scales[4] = {100, 150, 200, 300};
+        const p32 codes[2] = {0x4e2d, 0xff21};
+        const p32 grounds[2] = {0xf6f6f6u, 0x111113u}, inks[2] = {0x1d1d1fu, 0xdfe7efu};
+        long bad = 0, cases = 0, recorded = 0;
+
+        for (int k = 0; k < 4; k++)
+                for (int light = 0; light < 2; light++)
+                        for (int c = 0; c < 2; c++)
+                        {
+                                p32 em = (13 * scales[k] / 100) << 6;
+                                font_metrics grid = font_metrics_at(faces[0], em);
+                                font_target ref = {want, DL_W, 3 * grid.cell_width + 8, grid.cell_height + 6};
+                                font_target probe = {dl_probe_pixels, DL_W, ref.width, ref.height};
+                                b32 x = 3, y = 2;
+                                struct ui probe_ui;
+
+                                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                        want[i] = got[i] = dlc_rand();
+                                font_cell(&dl_engine, faces, 2, codes[c], 2, &grid, em, 0, &ref, x, y, inks[light], grounds[light]);
+                                dl_probe_reset();
+                                dl_probe_ui(&probe_ui, 1);
+                                ui_scene_wide(&probe_ui, faces, codes[c], &grid, em, &probe, 0, 0, x, y, inks[light], grounds[light]);
+                                cases++;
+                                recorded += !dl_probe_scene.lost && dl_probe_scene.count > 0;
+                                if (dl_probe_scene.lost)
+                                {
+                                        bad++;
+                                        continue;
+                                }
+                                dl_replay_translate(&dl_probe_scene, got);
+                                for (positive i = 0; i < (positive)DL_W * DL_H; i++)
+                                        if (want[i] != got[i])
+                                        {
+                                                bad++;
+                                                break;
+                                        }
+                        }
+        check("draw list: a wide cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", recorded == cases && cases == 16);
+        check("draw list: a wide cell's replay is font_cell's two cells, bit for bit, at four scales, light and dark, CJK and fullwidth", bad == 0);
+}
+
 static void dl_probes(void)
 {
         static struct ui probe;
@@ -223948,6 +224022,7 @@ static void dl_probes(void)
         if (fonts)
                 font_start(&dl_engine, dl_atlas, 512, 512);
         dl_cell_plan_rows();
+        dl_wide_rows();
 
         // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted.
         dl_probe_reset();
