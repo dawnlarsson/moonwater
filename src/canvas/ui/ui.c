@@ -6097,7 +6097,8 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         springs home past an end. The units are the caller's (device pixels, with the view and the content in the same
         ones), the positions are Q30. Every constant is fitted to a Mac's trackpad scroll, recorded as the scroll view's
         offset with each event (memory note scroll-input-redo-2026-11-05; refit when the recording grows). A finger moves
-        the position one for one and holds it at the ends. A release's coast starts at BODY_CARRY of the lift's speed and
+        the position one for one, and past an end the rubber band draws it. A wheel's notch moves a target that the position
+        follows (BODY_NOTCH_TAU_NS). A release's coast starts at BODY_CARRY of the lift's speed and
         falls by e in BODY_TAU_NS. A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
         BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
         home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
@@ -6114,11 +6115,14 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
 #define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
 
+#define BODY_NOTCH_TAU_NS 40000000ll         // a wheel's notches move a target, and the position follows it: by e in this long (start 40 ms)
+
 #define BODY_IDLE 0     // nothing moves it
-#define BODY_TRACK 1    // a finger holds it: one for one, held at the ends
+#define BODY_TRACK 1    // a finger holds it: one for one, drawn as the rubber band past an end
 #define BODY_DRIVEN 2   // the OS's momentum deltas move it: the view's share of each, nothing held
 #define BODY_COAST 3    // a release's speed carries it, falling
 #define BODY_SPRING 4   // it is past an end and springs home
+#define BODY_NOTCH 5    // a wheel's notches have moved the target, and the position follows it
 
 struct ui_body
 {
@@ -6129,6 +6133,7 @@ struct ui_body
         b64 speed;           // the spring's speed, units a second
         int state;           // BODY_IDLE and the rest
         b64 at;              // when the body was last stepped, ns
+        b64 target;          // a notch's target, units (Q30): where the position is going while BODY_NOTCH
 };
 
 static b64 ui_body_far(const struct ui_body address_to b)
@@ -6199,13 +6204,7 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
 // a finger or a pad's motion moves the position by delta (units, Q30): one for one, held at the ends
 static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
 {
-        b64 far = ui_body_far(b);
-
         b->raw += delta;
-        if (b->raw < 0)
-                b->raw = 0;
-        if (far && b->raw > far)
-                b->raw = far;
         b->state = BODY_TRACK;
         b->vel = 0;
         b->at = at;
@@ -6218,6 +6217,42 @@ static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
         b->state = BODY_DRIVEN;
         b->vel = 0;
         b->at = at;
+}
+
+// a finger goes down on the body: it stops where it is drawn, inside the ends (a press during a spring takes the nearer end)
+static void ui_body_hold(struct ui_body address_to b, b64 at)
+{
+        b64 far = ui_body_far(b), now = ui_body_drawn(b);
+
+        b->raw = now < 0 ? 0 : far && now > far ? far : now;
+        b->vel = 0;
+        b->state = BODY_IDLE;
+        b->at = at;
+}
+
+// the wheel's notches move the target (units, Q30) by delta, and the position follows it: from where it is, unless it is already
+// following one
+static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
+{
+        if (b->state != BODY_NOTCH)
+                b->target = b->raw;
+        b->target += delta;
+        b->vel = 0;
+        b->state = BODY_NOTCH;
+        b->at = at;
+}
+
+// the body's extent: a view and a content, units (Q30), with the position left where it is
+static void ui_body_fit(struct ui_body address_to b, b64 view, b64 content)
+{
+        b->view = view > 0 ? view : UI_ONE;
+        b->content = content;
+}
+
+// whether the body is held, carried, springing or following a notch: the caller steps it a frame at a time while it is
+static b32 ui_body_going(const struct ui_body address_to b)
+{
+        return b->state == BODY_TRACK || b->state == BODY_COAST || b->state == BODY_SPRING || b->state == BODY_NOTCH;
 }
 
 // the body is no longer held or carried: a position outside an end springs home, one inside stops where it is
@@ -6253,7 +6288,8 @@ static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at)
         b->state = BODY_COAST;
 }
 
-// steps the body to a time (ns): a coast falls and carries it, a spring draws it home. Returns whether it still moves.
+// steps the body to a time (ns): a coast falls and carries it, a notch's position follows its target, a spring draws it home.
+// Returns whether it still moves.
 static b32 ui_body_step(struct ui_body address_to b, b64 at)
 {
         b64 left = at - b->at;
@@ -6273,6 +6309,15 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                         if (b->vel < BODY_STILL && b->vel > -BODY_STILL)
                                 ui_body_settle(b);
                 }
+                else if (b->state == BODY_NOTCH)
+                {
+                        b->raw = b->target - ui_qmul(b->target - b->raw, ui_body_decay(ui_qdiv(dt, ui_body_seconds(BODY_NOTCH_TAU_NS))));
+                        if (b->target - b->raw < BODY_REST && b->raw - b->target < BODY_REST)
+                        {
+                                b->raw = b->target;
+                                ui_body_settle(b);
+                        }
+                }
                 else if (b->state == BODY_SPRING)
                 {
                         b64 a = -(b64)(BODY_SPRING_OMEGA * BODY_SPRING_OMEGA) * (b->shown - b->rest) - 2 * (b64)BODY_SPRING_OMEGA * b->speed;
@@ -6289,7 +6334,7 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 else
                         break;
         }
-        return b->state == BODY_COAST || b->state == BODY_SPRING;
+        return ui_body_going(b);
 }
 
 /*
@@ -6663,40 +6708,6 @@ static b64 ui_scroll_stretched(const struct ui_scroll address_to s, int address_
                 return ui_scroll_pull(s, past > 0 ? past : 0);
         }
         return s->back.value[0];
-}
-
-// The overscroll a bounded region draws past its end, in 256ths of a device pixel, and the edge it is past (-1 top, 1 bottom, 0 none):
-// the rubber band's give of the pull (ui_scroll_give, the curve a pixel of the region is drawn on), so the drawn distance rises
-// with the pull and flattens as it grows, and a region that springs home draws the same curve of what the spring still holds. A
-// stretch drawn as a pixel offset (the terminal's grid) reads this; the lists keep their squash (ui_scroll_stretched).
-static b64 ui_scroll_past(const struct ui_scroll address_to s, int address_to edge)
-{
-        b64 most = ui_scroll_most256(s), past = 0;
-
-        *edge = 0;
-        if (!s->bounds)
-                return 0;
-        if (s->dragging)
-        {
-                if (s->flung)
-                        return 0;
-                if (s->at < 0)
-                        past = -s->at, *edge = -1;
-                else if (s->at > most)
-                        past = s->at - most, *edge = 1;
-                else
-                        return 0;
-        }
-        else
-        {
-                if (!s->back.live)
-                        return 0;
-                past = s->back.value[1] >> 22;
-                if (past <= 0)
-                        return 0;
-                *edge = s->edge;
-        }
-        return ui_scroll_give(s, past);
 }
 
 // The drawn position, in whole device pixels, from where it is.
@@ -7325,6 +7336,18 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 q = q > UI_PRECISE_MOST ? UI_PRECISE_MOST : q < -UI_PRECISE_MOST ? -UI_PRECISE_MOST : q;
                 return ui_scroll_precise(ui, s, (int)q, (event->flags & WINDOW_WHEEL_STREAM) != 0);
         }
+}
+
+// The wheel turns a body as it turns a region: a notch is a row at the scale (UI_ROW), a precise turn is its share of
+// UI_PRECISE_NOTCH in 120ths, and a notch down is further down the content. Answers whether the body was given a notch.
+static b32 ui_body_wheel(int scale, struct ui_body address_to b, const struct window_event address_to event, b64 at)
+{
+        b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_PRECISE_NOTCH : UI_ROW) * (b64)scale / 100;
+
+        if (event->b || !event->a || (event->flags & WINDOW_WHEEL_STOP))
+                return false;
+        ui_body_notch(b, -(b64)event->a * per * UI_ONE / 120, at);
+        return true;
 }
 
 /* ---- end of the kit's controls ---- */
