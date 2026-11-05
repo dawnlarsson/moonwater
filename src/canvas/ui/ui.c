@@ -5598,8 +5598,8 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
 /*
         The pointer and the scroll region. ui_event_context(event) is the one place an event's touch flag and time are taken
         (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set, ui_scroll_show and ui_scroll_reveal place
-        it, ui_scroll_pointer and ui_scroll_wheel take input, ui_scroll_draw paints the bar and the stretch. The rubber band, the
-        wheel's burst and the hand are the kit's (ui_wheel_*, ui_scroll_hand): an app forwards its input and keeps no stretch.
+        it, ui_scroll_pointer and ui_wheel_turn take input, ui_scroll_draw paints the bar. The rubber band, the wheel's notch and the
+        hand are the body's (ui_body_*, s->body): an app forwards its input and keeps no stretch.
 */
 
 // Whether a device point is in a control's box (a radio group: which row; tabs: which tab), -1 when not.
@@ -6190,9 +6190,12 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
         b->at = at;
 }
 
+static b32 ui_body_step(struct ui_body address_to b, b64 at);
+
 // a finger or a pad's motion moves the position by delta (units, Q30): one for one, held at the ends
 static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
 {
+        ui_body_step(b, at);
         b->raw += delta;
         b->state = BODY_TRACK;
         b->vel = 0;
@@ -6202,6 +6205,7 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
 // an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end
 static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
 {
+        ui_body_step(b, at);
         b->raw += ui_qmul(delta, BODY_VIEW_FACTOR);
         b->state = BODY_DRIVEN;
         b->vel = 0;
@@ -6211,7 +6215,10 @@ static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
 // a finger goes down on the body: it stops where it is drawn, inside the ends (a press during a spring takes the nearer end)
 static void ui_body_hold(struct ui_body address_to b, b64 at)
 {
-        b64 far = ui_body_far(b), now = ui_body_drawn(b);
+        b64 far, now;
+
+        ui_body_step(b, at);
+        far = ui_body_far(b), now = ui_body_drawn(b);
 
         b->raw = now < 0 ? 0 : far && now > far ? far : now;
         b->vel = 0;
@@ -6223,6 +6230,7 @@ static void ui_body_hold(struct ui_body address_to b, b64 at)
 // following one
 static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
 {
+        ui_body_step(b, at);
         if (b->state != BODY_NOTCH)
                 b->target = b->raw;
         b->target += delta;
@@ -6264,9 +6272,12 @@ static void ui_body_settle(struct ui_body address_to b)
 // a finger lets go at a speed (units a second, positive toward the far end): a speed under BODY_STILL throws nothing
 static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at)
 {
-        b64 far = ui_body_far(b);
-        b32 edge = b->raw <= 0 || (far && b->raw >= far);
+        b64 far;
+        b32 edge;
 
+        ui_body_step(b, at);
+        far = ui_body_far(b);
+        edge = (b->raw <= 0 && speed < 0) || (far && b->raw >= far && speed > 0); // a throw out of the content, past the end it is at
         b->at = at;
         if (speed < BODY_STILL && speed > -BODY_STILL)
         {
@@ -6341,42 +6352,32 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
 #define UI_SCROLL_WIDTH 10
 #define UI_SCROLL_BORDER 3
 #define UI_SCROLL_LEAST 24
+#define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel (the checks read a region's place in them)
+#define UI_PRECISE_NOTCH 40            // a precise turn's notch, in device pixels at 100 percent: 120ths of it are its share (a fixed px, not the row's)
+#define UI_HAND_GAP_NS 40000000l       // a trackpad's hand is let go this long after its last report, when no lift came
+#define UI_HAND_PAUSE_NS 40000000l     // a finger still this long before its lift throws nothing (Android's ASSUME_POINTER_STOPPED_TIME, 40 ms: the tracker
+                                       // clears when the last sample is older than that at ACTION_UP); a pad's lift is exact, so this is its rule
 
+/*
+        A scroll region: a track down its x and a thumb in it, and a position that is the body's (ui_body, s->body) drawn in whole
+        device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
+        of (ui_scroll_release), a wheel's notch is a target the body follows (ui_body_wheel), a jump is a body set, a reveal is a notch,
+        and the bar's thumb is the body's place, drawn where the body is, past an end too. The names of the region's callers are thin
+        wrappers over the body.
+*/
 struct ui_scroll
 {
         int x, y, height;            // the track: its left, its top and its height
-        int content, view, scroll;   // what scrolls, what shows of it, how far it is scrolled
+        int content, view, scroll;   // what scrolls, what shows of it, and where the body is drawn (whole device pixels)
         b32 hover, held;
         int grab;                    // where in the thumb the hand took it
-        int unit;                    // it scrolls in whole units of this (a menu's choices), or pixels (0)
-        int wheel, left;             // a wheel's turn under a unit, and a finger's move under one, kept for the next
-        // The glide: a wheel's turn, a throw or a reveal moves at, in 256ths of a device pixel, to aim as a critically
-        // damped spring turns, its speed (256ths a second) and its time constant (ns). A finger holds at past an end
-        // (dragging): what is drawn is the rubber band's share of that. back is the spring that takes a pull home.
-        b64 at, aim, speed, stamp, tau;
-        b32 gliding, dragging;
-        b32 flung;                   // the finger is moving fast: a pull past an end gives nothing while it does (a flick clamps)
-        struct ui_spring back;
-        struct ui_tween ink, grow; // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
-        int inset;                 // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
-        // A bounded region (a list, a page's card or column) takes a pull past an end as a rubber band: the position goes on past
-        // the end, and what is drawn is the body's band of it (ui_scroll_band), so the content moves and nothing is squashed. edge
-        // is the end the spring takes home (-1 top, 1 bottom). A region that fits does not move under a finger unless it is bounded.
-        // scale is the kit's, for logical pixels.
-        b32 bounds;
-        int edge, scale;
-        b64 notch;                 // when the region last took a notch of the wheel, ns (ui_wheel_rate)
-        b64 pulled_at;             // when the hand took the region, ns: a wheel's pull springs home at its apex (UI_NOTCH_APEX_NS)
-        b32 absorb;                // a wheel's burst has had its bump at an end: the notches that go on pushing there are taken and move nothing
-        b32 hand;                  // a notch past an end or a precise input has the region in hand (ui_scroll_hand)
-        b32 precise;               // the hand is a trackpad's: its release throws on its speed. A wheel's notches are no finger, and throw nothing
-        long precise_rest;         // 120ths of a 256th a precise turn has not moved whole, carried to the next turn (ui_wheel_turn)
-        b32 smooth;                // a stream's hand: its notches add to the target (to) and the position follows it each frame (ui_scroll_step)
-        b64 to;                    // the stream's target, in 256ths of a device pixel, where the position is going
-        b64 step_at;               // when the position last followed the target (0: the frame that starts the clock)
-        b64 gaps[4];               // the last four intervals between a stream's notches, ns, the newest first (the rate's and the decay's)
-        struct ui_drag stream_drag; // the stream's target at each of its notches: the fingers' motion, which is the throw's speed (not the lagged position)
-        struct ui_drag hand_drag;  // the hand's reports, fitted for the release's speed (ui_scroll_release)
+        struct ui_body body;         // the position (its extent is the region's: ui_scroll_extent)
+        struct ui_drag drag;         // a trackpad's hand: its reports, fitted for the release's speed (ui_scroll_release)
+        b64 notch;                   // when the trackpad's hand last reported, ns (the gap that lets it go)
+        b32 precise;                 // the body is a trackpad's hand: its release throws on its speed (a wheel's notches throw nothing)
+        struct ui_tween ink, grow;   // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
+        int inset;                   // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
+        int scale;                   // the kit's, for logical pixels
 };
 
 /*
@@ -6392,22 +6393,18 @@ static void ui_scroll_track(const struct ui address_to ui, const struct ui_scrol
         *height = bottom > *top ? bottom - *top : 0;
 }
 
-// The thumb's top and length (device pixels); false when everything shows and there is no bar. A held thumb is drawn at its
-// target, the pointer's or a wheel turn's glide aim, while a glide runs to it, and otherwise where the scroll is: a bar whose
-// aim was never set is not drawn at it, and nothing lags the hand.
+// The thumb's top and length (device pixels); false when everything shows and there is no bar. The thumb is where the body is drawn,
+// unclamped: a pull past an end takes it off its track, as the rubber band takes the content.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
-        int track, at, least = UI_SCROLL_LEAST * ui->scale / 100, rest = s->content - s->view, scroll;
+        int track, at, least = UI_SCROLL_LEAST * ui->scale / 100, rest = s->content - s->view;
 
         ui_scroll_track(ui, s, &at, &track);
         if (s->content <= s->view || s->view <= 0 || track <= 0)
                 return 0;
         *length = (int)((b64)track * s->view / s->content);
         *length = *length < least ? least : *length > track ? track : *length;
-        // The aim in 256ths, rounded as ui_scroll_show rounds it.
-        scroll = s->held && s->gliding ? (int)((s->aim + 128) >> 8) : s->scroll;
-        scroll = scroll < 0 ? 0 : scroll > rest ? rest : scroll;
-        *top = at + (int)((b64)(track - *length) * scroll / rest);
+        *top = at + (int)((b64)(track - *length) * s->scroll / rest);
         return 1;
 }
 
@@ -6426,10 +6423,10 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
         return !ui_tween_still(&s->ink) || !ui_tween_still(&s->grow);
 }
 
-// The region's position is moving: a glide, a hand on it, or a stretch springing home (ui_scroll_moving is the thumb's ink).
+// The region's position is moving: its body is held, carried, springing or following a notch.
 static b32 ui_scroll_going(const struct ui_scroll address_to s)
 {
-        return s->gliding || s->back.live || s->dragging;
+        return ui_body_going(&s->body);
 }
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
@@ -6491,14 +6488,43 @@ static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll
         return ui_hit(ui, ui_kit_touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, height);
 }
 
+static int ui_scroll_most(const struct ui_scroll address_to s)
+{
+        int most = s->content - s->view;
+
+        return most > 0 ? most : 0;
+}
+
+// The body's extent is the region's: its view and content, in Q30 device pixels (a content that does not reach past the view has no
+// far end). Every entry point sets it first, so a region's ints are the body's whatever wrote them.
+static void ui_scroll_extent(struct ui_scroll address_to s)
+{
+        ui_body_fit(&s->body, (b64)(s->view > 0 ? s->view : 0) << UI_Q, (b64)(s->content > 0 ? s->content : 0) << UI_Q);
+}
+
+// The drawn position, in whole device pixels, from the body.
+static void ui_scroll_show(struct ui_scroll address_to s)
+{
+        ui_scroll_extent(s);
+        s->scroll = (int)((ui_body_drawn(&s->body) + UI_ONE / 2) >> UI_Q);
+}
+
+// A finger or a thumb goes down on the region: the body stops where it is drawn, and no trackpad's hand is in it any more.
+static void ui_scroll_hold(struct ui_scroll address_to s)
+{
+        ui_scroll_extent(s);
+        ui_body_hold(&s->body, ui_kit_time());
+        s->precise = 0;
+        ui_scroll_show(s);
+}
+
 /*
         The pointer on a scrollbar: motion (a held thumb follows the hand; hover lights it), a press (on the thumb it is
         held, on the track it pages) and a release. A finger (touch) takes the bar within its reach (ui_scroll_reach) and
         the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was not its own
-        (a press off it, a motion with nothing held); a press on it that pages answers the new scroll.
+        (a press off it, a motion with nothing held); a press on it that pages answers the new scroll. A held thumb is the
+        body's track: a place past an end is drawn by the rubber band, and the thumb goes off its track with it.
 */
-static void ui_scroll_show(struct ui_scroll address_to s);
-
 static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
 {
         int top, length, at, track, rest = s->content - s->view;
@@ -6515,20 +6541,11 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                         return -1;
                 if (track - length <= 0)
                         return s->scroll;
-                // A bounded region's thumb dragged past an end pulls it from that edge, one for one with the hand, as a finger's
-                // pull does: the band draws how far, and it is held until the release (ui_page_bars lets it go).
-                if (s->bounds && (y - s->grab < at || y - s->grab > at + track - length))
-                {
-                        int thumb = y - s->grab;
-                        b64 pull = thumb > at ? thumb - (at + track - length) : thumb - at;
-
-                        s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
-                        s->at = thumb > at ? ((b64)rest + pull) * 256 : pull * 256; // 256ths of a device pixel
-                        ui_scroll_show(s);
-                        return s->scroll;
-                }
-                s->dragging = 0; // back within the track: the drag is the scroll's again
-                return (int)((b64)(y - s->grab - at) * rest / (track - length));
+                ui_scroll_extent(s);
+                ui_body_track(&s->body, (((b64)(y - s->grab - at) * rest / (track - length)) << UI_Q) - s->body.raw, ui_kit_time());
+                s->precise = 0;
+                ui_scroll_show(s);
+                return s->scroll;
         }
         if (type != WINDOW_EVENT_BUTTON)
                 return -1;
@@ -6545,6 +6562,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         {
                 s->held = 1;
                 s->grab = y - top;
+                ui_scroll_hold(s);
                 return s->scroll;
         }
         // A finger beside the bar but off its thumb is on the content it means to drag or press, not the track: only a pointer pages.
@@ -6554,540 +6572,30 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
 }
 
 /*
-        How a region scrolls, whatever moves it: it is held between its top and its end, in whole units where it has
-        them; a band of what scrolls is brought into view; the wheel turns it a row a notch (a unit, where it has
-        them), a finger moves it pixel for pixel; and the keys move a text a line, a view, or to an end. Each answers
-        whether it moved, which is what the app draws again.
+        The region's frame, drawn at the kit's time: the body steps to it and the position is drawn; a region that moves keeps the kit
+        busy and its band drawn again, as a moving control's rows are. A trackpad's hand whose reports stopped for UI_HAND_GAP_NS is let
+        go here (its release). True when it moves.
 */
-static int ui_scroll_most(const struct ui_scroll address_to s)
+static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted);
+
+static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll address_to s)
 {
-        int most = s->content - s->view;
+        b64 now = ui_kit_time();
+        b32 moving;
 
-        return most > 0 ? most : 0;
-}
-
-/*
-        The glide. A wheel's notch adds its velocity to the region's speed and its distance to the aim; a throw starts
-        from its speed and aims where that speed carries it (speed times the time constant), and a reveal aims at the
-        row with no speed. The position moves to the aim as a critically damped spring does, from its own speed: its
-        speed falls by e in the time constant, and it never passes the aim (the speed is held to the distance). A wheel
-        and a throw share the time constant, so they decay alike. Nothing reads a frame count: each frame moves the
-        region by the time since its last.
-*/
-#define UI_SCROLL_REVEAL_NS 100000000l // a reveal's glide: its speed falls by e in this long
-#define UI_SCROLL_TAU_NS 36000000l     // a wheel notch's and a throw's glide: its speed falls by e in this long (a notch settles in 158 ms at 1x)
-#define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
-#define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
-#define UI_PRECISE_MOST (1l << 24)     // the most one precise turn moves a region, in 256ths of a device pixel (65536 px)
-#define UI_PRECISE_NOTCH 40            // a precise turn's notch, in device pixels at 100 percent: 120ths of it are its share (a fixed px, not the row's)
-#define UI_STREAM_TAU_NS 40000000l     // a stream's position follows its target with this time constant at a notch every 33 ms or slower (ui_stream_tau)
-#define UI_STREAM_GAP_NS 33000000l     // the notch interval the time constant is for: at a faster stream it shortens in proportion
-#define UI_STREAM_TAU_MIN_NS 12000000l // and never shorter than this
-#define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
-#define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
-#define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
-#define UI_HAND_PAUSE_NS 40000000l   // a finger still this long before its lift throws nothing (Android's ASSUME_POINTER_STOPPED_TIME, 40 ms: the tracker
-                                     // clears when the last sample is older than that at ACTION_UP); a pad's lift is exact, so this is its rule
-#define UI_NOTCH_APEX_NS 120000000l  // a wheel's pull grows this long, then springs home though the notches go on (a Mac's trackpad sends them for a second)
-#define UI_NOTCH_BURST_NS 150000000l // notches closer than this are one burst: a burst bumps an end once, and what goes on pushing there is taken
-#define UI_RUBBER_CARRY 400          // the most a release carries past an end, in px a second: the spring's first frames run on from it
-#define UI_SCROLL_VIEW_PAST 1        // the hand may hold the overscroll up to a view past the end
-#define UI_SCROLL_GLIDE 1              // the glide is built (the checks ask for it)
-
-static b64 ui_scroll_most256(const struct ui_scroll address_to s)
-{
-        return (b64)ui_scroll_most(s) * UI_SCROLL_SCALE;
-}
-
-// An aim held inside the region, and to a whole unit where it has them, in 256ths.
-static b64 ui_scroll_fit(const struct ui_scroll address_to s, b64 aim)
-{
-        b64 most = ui_scroll_most256(s);
-        int px;
-
-        aim = aim < 0 ? 0 : aim > most ? most : aim;
-        if (s->unit > 0)
-        {
-                px = (int)(aim / UI_SCROLL_SCALE);
-                aim = (b64)(px - px % s->unit) * UI_SCROLL_SCALE;
-        }
-        return aim;
-}
-
-// The part of a pull past an end that is drawn: the rubber band's share, 11 x H / (11 x + 20 H) of the pull x (in
-// pixels) for a view of H, Apple's curve for a scroll view. In 256ths.
-static b64 ui_scroll_give(const struct ui_scroll address_to s, b64 past)
-{
-        // Clamped so the products stay in 64 bits: a pull past 65536 pixels, or a view past 65536, is as far as it goes.
-        b64 view = s->view > 0 ? s->view > 65536 ? 65536 : s->view : 0, x = past < 0 ? -past : past, den, give;
-
-        x = x > (1ll << 24) ? 1ll << 24 : x;
-        den = 11 * x + 5120 * view;
-        give = den > 0 ? 2816 * x * view / den : 0;
-
-        return past < 0 ? -give : give;
-}
-
-// A bounded region's position (256ths) drawn through the body's rubber band: inside the ends it is itself, and past one the
-// content moves by the band's share of the distance (ui_body_drawn, the curve the terminal's grid shifts by), so a pull of any
-// length is a shift of the same kind and never a squash.
-static b64 ui_scroll_band(const struct ui_scroll address_to s, b64 at)
-{
-        struct ui_body b = {0};
-
-        b.view = (b64)(s->view > 0 ? s->view : 1) << UI_Q;
-        b.content = (b64)(s->content > 0 ? s->content : 0) << UI_Q;
-        b.raw = at * (1ll << (UI_Q - 8));
-        b.state = BODY_TRACK;
-        return ui_body_drawn(&b) >> (UI_Q - 8);
-}
-
-static b64 ui_scroll_past_at(const struct ui_scroll address_to s);
-
-// Where the region is drawn, in 256ths: where it is, or past an end while a finger holds it there (a bounded region through the
-// band: a spring draws the overscroll it is taking home, and a flick clamps). A region that fits does not move at all.
-static b64 ui_scroll_shown(const struct ui_scroll address_to s)
-{
-        b64 most = ui_scroll_most256(s);
-
-        if (s->bounds)
-        {
-                if (!s->dragging)
-                        return s->back.live ? ui_scroll_band(s, ui_scroll_past_at(s)) : s->at;
-                if (s->flung)
-                        return ui_scroll_band(s, s->at < 0 ? 0 : s->at > most ? most : s->at);
-                return ui_scroll_band(s, s->at);
-        }
-        if (!s->dragging)
-                return s->at;
-        if (!most)
-                return 0;
-        if (s->at < 0)
-                return s->flung ? 0 : ui_scroll_give(s, s->at);
-        return s->at > most ? (s->flung ? most : most + ui_scroll_give(s, s->at - most)) : s->at;
-}
-
-// The drawn position, in whole device pixels, from where it is.
-static void ui_scroll_show(struct ui_scroll address_to s)
-{
-        s->scroll = (int)((ui_scroll_shown(s) + UI_SCROLL_SCALE / 2) >> 8);
-}
-
-// A region at rest starts from where it is drawn: a write to scroll is taken there. One that is moving keeps its place.
-static void ui_scroll_rest(struct ui_scroll address_to s)
-{
-        if (!s->gliding && !s->back.live && !s->dragging && (int)((s->at + UI_SCROLL_SCALE / 2) >> 8) != s->scroll)
-                s->at = (b64)s->scroll << 8;
-}
-
-// The speed may not beat the distance to the aim, or the glide would pass it.
-static void ui_scroll_limit(struct ui_scroll address_to s)
-{
-        b64 d = s->at - s->aim, lim = (d < 0 ? -d : d) * 1000000000ll / s->tau;
-
-        s->speed = s->speed > lim ? lim : s->speed < -lim ? -lim : s->speed;
-}
-
-static void ui_scroll_flush(struct ui_scroll address_to s);
-static void ui_scroll_hand(struct ui_scroll address_to s, b64 move);
-
-static void ui_scroll_glide_to(struct ui_scroll address_to s, b64 aim, b64 tau)
-{
-        ui_scroll_flush(s);
-        s->aim = ui_scroll_fit(s, aim);
-        s->tau = tau;
-        s->gliding = 1;
-        s->back.live = 0;
-        s->dragging = 0;
-        ui_scroll_limit(s);
-}
-
-// The jump: the position is put at scroll and whatever was moving stops. True when the drawn position or the motion changed.
-static b32 ui_scroll_set(struct ui_scroll address_to s, int scroll)
-{
-        int most = ui_scroll_most(s), before = s->scroll;
-        b32 moving = s->gliding || s->back.live || s->dragging;
-
-        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
-        if (s->unit > 0)
-                scroll -= scroll % s->unit;
-        s->scroll = scroll;
-        s->at = s->aim = (b64)scroll << 8;
-        s->gliding = s->dragging = s->back.live = 0;
-        s->hand = s->absorb = 0;
-        s->smooth = 0;
-        s->speed = s->stamp = 0;
-        return scroll != before || moving;
-}
-
-// The region's ends moved (its content or its view): a glide's aim is kept inside them, and at rest the position is.
-static void ui_scroll_clamp(struct ui_scroll address_to s)
-{
-        if (s->gliding)
-        {
-                s->aim = ui_scroll_fit(s, s->aim);
-                ui_scroll_limit(s);
-        }
-        else if (!s->back.live && !s->dragging)
-                ui_scroll_set(s, s->scroll);
-}
-
-// A key or a band brought into view: a glide to where it shows, from where the region is going. False when it shows already.
-static b32 ui_scroll_reveal(struct ui_scroll address_to s, int top, int height)
-{
-        int at = (int)((s->gliding ? s->aim : (b64)s->scroll << 8) / UI_SCROLL_SCALE), aim = at;
-        b64 target;
-
-        if (top < at)
-                aim = top;
-        else if (top + height > at + s->view)
-                aim = top + height - s->view + (s->unit > 0 ? s->unit - 1 : 0);
-        target = ui_scroll_fit(s, (b64)aim * UI_SCROLL_SCALE);
-        if (target == (s->gliding ? s->aim : (b64)s->scroll << 8))
-                return false;
-        ui_scroll_rest(s);
-        ui_scroll_glide_to(s, target, UI_SCROLL_REVEAL_NS);
-        return true;
-}
-
-// A finger's move of the region by pixels (whole units at a time where it has them): it follows the finger, and past an
-// end the content is pulled and the rubber band gives. True when what is drawn moved.
-static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
-{
-        int before = s->scroll;
-
-        ui_scroll_flush(s);
-
-        if (s->unit > 0)
-        {
-                long total = (long)s->left + pixels;
-                int steps = (int)(total / s->unit);
-
-                s->left = (int)(total - (long)steps * s->unit);
-                return !steps || ui_scroll_set(s, s->scroll + steps * s->unit);
-        }
-        if (!s->dragging)
-        {
-                ui_scroll_rest(s);
-                s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0;
-        }
-        s->at += (b64)pixels * UI_SCROLL_SCALE;
-        {
-                // A finger may hold the region past its ends by as much as a hand does (UI_SCROLL_VIEW_PAST views), and no more: a pull
-                // of any length is a band of one size, and springs home in one time.
-                b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
-
-                s->at = s->at < -lim ? -lim : s->at > most + lim ? most + lim : s->at;
-        }
+        ui_scroll_extent(s);
+        if (s->precise && s->body.state == BODY_TRACK && now > s->notch && now - s->notch > UI_HAND_GAP_NS)
+                ui_scroll_release(s, 0);
+        moving = ui_body_step(&s->body, now);
         ui_scroll_show(s);
-        return s->scroll != before || s->bounds; // a bounded region's pull moves what is drawn past its end, whatever the scroll does
-}
-
-static b64 ui_wheel_clock(void);
-static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll address_to s, int delta);
-
-// The overscroll a bounded region's spring holds, where its end is: past the edge, outward, in 256ths.
-static b64 ui_scroll_past_at(const struct ui_scroll address_to s)
-{
-        b64 most = ui_scroll_most256(s), past = s->back.value[1] >> 22, edge = s->edge < 0 ? 0 : most;
-
-        past = past < 0 ? 0 : past;
-        return s->edge < 0 ? edge - past : edge + past;
-}
-
-/*
-        A stream's hand (ui_scroll_stream): each notch adds its pixels to the target, and each frame the position moves toward it as an
-        exponential does, with a time constant of UI_STREAM_TAU_NS at a notch every UI_STREAM_GAP_NS, shorter as the notches come faster.
-        The distance is the notches' whole: the target is their sum, and the position reaches it. A flush puts the position at the target
-        at once (a stream's end, a finger, a jump), so nothing of a stream is left to come after it.
-*/
-static b64 ui_stream_tau(const struct ui_scroll address_to s)
-{
-        b64 tau = s->gaps[0] ? UI_STREAM_TAU_NS * (b64)s->gaps[0] / UI_STREAM_GAP_NS : UI_STREAM_TAU_NS;
-
-        return tau < UI_STREAM_TAU_MIN_NS ? UI_STREAM_TAU_MIN_NS : tau > UI_STREAM_TAU_NS ? UI_STREAM_TAU_NS : tau;
-}
-
-static void ui_scroll_flush(struct ui_scroll address_to s)
-{
-        if (s->smooth)
-                s->at = s->to;
-        s->smooth = 0;
-        s->step_at = 0;
-}
-
-// The stream's decay: the last two intervals came a quarter slower than the two before (the rate is falling, a Mac's momentum), so a
-// stream that ends this way throws nothing. An abrupt stop (the intervals as they were) throws as a finger's lift does.
-static b32 ui_scroll_decaying(const struct ui_scroll address_to s)
-{
-        b64 recent = s->gaps[0] + s->gaps[1], older = s->gaps[2] + s->gaps[3];
-
-        return older && recent * 4 > older * 5;
-}
-
-// The position follows the target over the frame's time (the glide's clock, now).
-static void ui_scroll_step(struct ui_scroll address_to s, b64 now)
-{
-        b64 dt, e, d = s->to - s->at, tau = ui_stream_tau(s);
-
-        if (!s->step_at || now <= s->step_at)
+        if (moving && s->height > 0)
         {
-                s->step_at = now;
-                return;
-        }
-        dt = now - s->step_at;
-        s->step_at = now;
-        e = ui_exp_neg(dt * UI_ONE / tau);
-        s->at = s->to - ui_qmul(d, e);
-        if (s->at - s->to < UI_SCROLL_REST && s->to - s->at < UI_SCROLL_REST)
-                s->at = s->to;
-}
-
-// A stream's notch of q (256ths, positive: the content moves down): the hand takes the region where it is, if it is not a stream's
-// already, and the notch adds to the target, held inside the region's ends as a hand's place is (UI_SCROLL_VIEW_PAST views past).
-static void ui_scroll_stream(struct ui_scroll address_to s, b64 move)
-{
-        b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
-
-        if (!s->smooth || !s->dragging || !s->hand)
-        {
-                ui_scroll_flush(s);
-                ui_scroll_hand(s, 0);
-                s->to = s->at;
-                s->smooth = 1;
-                s->step_at = 0;
-                ui_drag_start(&s->stream_drag, (int)(s->to >> 8));
-        }
-        s->to += move;
-        s->to = s->to < -lim ? -lim : s->to > most + lim ? most + lim : s->to;
-        ui_drag_follow(&s->stream_drag, (int)(s->to >> 8));
-}
-
-// A finger on the region: whatever was moving it stops where it is drawn, and the drag takes it from there. A band being sprung
-// home stops past its end by what the spring still holds, so nothing jumps.
-static void ui_scroll_stop(struct ui_scroll address_to s)
-{
-        ui_scroll_flush(s);
-        if (s->gliding || s->back.live)
-        {
-                s->at = s->aim = s->bounds && s->back.live ? ui_scroll_past_at(s) : ui_scroll_shown(s);
-                s->gliding = s->back.live = 0;
-                ui_spring_stop(&s->back);
-                s->speed = s->stamp = 0;
-        }
-        s->hand = s->absorb = 0;
-}
-
-// The finger let go: a pull springs back to the end it is past, carrying the release's speed outward, and a throw glides on from
-// where it is (speed in pixels a second, the region's way).
-static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long speed)
-{
-        b64 most = ui_scroll_most256(s), shown, over;
-        int from = 0;
-        b32 pulled;
-
-        if (!s->dragging)
-                return;
-        shown = ui_scroll_shown(s);
-        pulled = (s->at < 0 || s->at > most) && !s->flung; // a pull past an end (a flick clamps, and springs nothing)
-        s->dragging = 0;
-        s->stamp = 0;
-        if (s->at < 0 || s->at > most)
-        {
-                b64 edge = s->at < 0 ? 0 : most;
-                long carry = speed > UI_RUBBER_CARRY ? UI_RUBBER_CARRY : speed < -UI_RUBBER_CARRY ? -UI_RUBBER_CARRY : speed;
-
-                over = s->at < 0 ? -s->at : s->at - most;
-                from = s->at < 0 ? -1 : 1;
-                s->gliding = s->speed = 0;
-                if (s->bounds)
-                {
-                        // The overscroll is the distance past the end, in Q30 pixels, and the spring takes it home; its speed is the
-                        // release's, outward, so a fast release runs on a little before the spring turns it home.
-                        s->at = s->aim = edge, s->edge = from;
-                        if (pulled)
-                        {
-                                WINDOW_TRACE("kit release past an end: the stretch %b px springs home, carrying the speed %b px/s outward\n",
-                                             (bipolar)over, (bipolar)carry);
-                                ui_spring_go(&s->back, 0, over << 22);
-                                s->back.pace = UI_SCROLL_BACK_PACE;
-                                ui_spring_speed(&s->back, 1, (b64)(from > 0 ? carry : -carry) * UI_ONE);
-                        }
-                }
-                else if (!most)
-                        s->at = s->aim = 0; // a region that fits moved for nothing: nothing springs
-                else
-                {
-                        s->at = shown, s->aim = edge;
-                        // The kit's release spring takes the part past the end home: its amplitude is that part, in Q30 pixels.
-                        ui_spring_go(&s->back, 0, (shown - edge) << 22);
-                        s->back.pace = UI_SCROLL_BACK_PACE;
-                }
-                ui_scroll_show(s);
-                return;
-        }
-        if (thrown)
-        {
-                // A throw's speed falls by e in UI_FLING_TAU_NS whatever the region's length, the one rule for every flick (the
-                // distance is the speed times it); the glide stops at the region's ends (ui_scroll_fit) and never passes its aim.
-                speed = speed > ui_throw_most(s->scale) ? ui_throw_most(s->scale) : speed < -ui_throw_most(s->scale) ? -ui_throw_most(s->scale) : speed;
-                s->speed = (b64)speed * UI_SCROLL_SCALE;
-                ui_scroll_glide_to(s, s->at + s->speed * UI_FLING_TAU_NS / 1000000000ll, UI_FLING_TAU_NS);
-        }
-        ui_scroll_show(s);
-}
-
-// The hand let go (no report for UI_HAND_GAP_NS): its release is the fit over its last reports, from the last of them, and the
-// region goes on as a finger's release does. A trackpad's hand is a finger, and throws on that speed; a wheel's notches are not
-// (they are a distance each, not a place the finger is at), and a stretch they pulled springs home and a region inside its ends stops.
-static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
-{
-        positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0, now = ui_drag_now();
-        long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
-        b32 thrown;
-
-        // A stream's speed is its fingers' (the target's notches), not the position's, which is still catching up when the notches stop.
-        if (s->smooth && s->stream_drag.samples > 0)
-                speed = ui_drag_velocity(&s->stream_drag, s->stream_drag.when[s->stream_drag.samples - 1]);
-
-        // A finger that was still for UI_HAND_PAUSE_NS before it lifted throws nothing: the speed at its last report is the speed it
-        // had before it stopped (a stop carries the slope of its deceleration, which the gap release read as a throw).
-        b32 paused = lifted && last && now > last && now - last > UI_HAND_PAUSE_NS;
-
-        if (paused)
-                speed = 0;
-        // A stream's end (no lift): a decaying stream throws nothing (its momentum is the stream's own), and its remainder is flushed.
-        if (s->smooth && !lifted && ui_scroll_decaying(s))
-                speed = 0;
-        thrown = s->precise && ui_throws(speed, s->scale);
-        if (s->smooth)
-                ui_scroll_flush(s);
-        WINDOW_TRACE_START();
-        WINDOW_TRACE_PART("kit hand release (");
-        window_trace_word(lifted ? "lift" : "gap");
-        WINDOW_TRACE_PART("): speed %b px/s, ", (bipolar)speed);
-        window_trace_word(paused ? "paused before the lift: no speed" : "not paused");
-        WINDOW_TRACE_PART(", precise %b, throws %b", (bipolar)s->precise, (bipolar)thrown);
-        WINDOW_TRACE_END();
-        s->hand = 0;
-        ui_scroll_let_go(s, thrown, speed);
-        // A wheel's notches have no release of their own: the gap that ended the hand is not the end of the burst (a trackpad's momentum
-        // goes on for a second), so what goes on pushing at the end is taken (ui_scroll_wheel) and the stretch goes home once.
-        s->absorb = !s->precise && s->bounds && s->back.live;
-        if (s->absorb)
-                WINDOW_TRACE("kit wheel: the stretch springs home; the notches that go on pushing at its end are absorbed\n");
-}
-
-// The hand let go after the gap of UI_HAND_GAP_NS (no lift was told: a wheel, or a pad that did not say it lifted).
-static void ui_scroll_release(struct ui_scroll address_to s)
-{
-        ui_scroll_release_hand(s, 0);
-}
-
-// A precise gesture ended (WINDOW_WHEEL_STOP: the pad's fingers all lifted): a region in hand lets go now, with the pause rule.
-static b32 ui_scroll_end(struct ui_scroll address_to s)
-{
-        if (!s->hand)
-                return false;
-        ui_scroll_release_hand(s, 1);
-        return true;
-}
-
-/*
-        A thumb held past an end holds a stretch (ui_scroll_pointer): its release lets it go, as a finger's does, or it never springs
-        home. A region the hand has (a wheel's notch, a trackpad's motion) lets go on its own release, so the thumb's does not.
-        Answers whether it let go.
-*/
-static b32 ui_scroll_thumb_release(struct ui_scroll address_to s, int type, b32 down, b32 held)
-{
-        if (type != WINDOW_EVENT_BUTTON || down || !held || !s->dragging || s->hand)
-                return false;
-        ui_scroll_let_go(s, 0, 0);
-        return true;
-}
-
-/*
-        Where a region is drawn: its track down the x edge (its width is the kit's), from y, height long, below inset (a window's close
-        button), what it scrolls (content) and how much shows (view), bounded (a stretch past an end) at the scale. The unit is 0 (a
-        pixel), and the scroll stays as it is; the app puts it where it means it to be.
-*/
-static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int height, int inset, int content, int view, int scale)
-{
-        s->x = x, s->y = y, s->height = height, s->inset = inset;
-        s->content = content, s->view = view;
-        s->bounds = 1, s->scale = scale, s->unit = 0;
-}
-
-// The hand's move, in 256ths of a device pixel (positive: the content moves down the region). It takes the region from where it is
-// drawn: a glide or a spring is stopped there, and a region at rest starts from its place. Its reports are fitted for the release,
-// and the region may be held past its ends by UI_SCROLL_VIEW_PAST views (the rubber band draws how far, through ui_scroll_band).
-static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
-{
-        positive now = ui_drag_now();
-
-        // A stream's remainder is the stream's: a hand that moves the region at once takes it first (ui_scroll_flush).
-        ui_scroll_flush(s);
-        b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
-
-        if (!s->dragging || !s->hand)
-        {
-                // A band being sprung home is taken where it is (ui_scroll_stop put the position there): a pull that came while
-                // the last one was going home goes on from it, and does not start again from the end.
-                b32 sprung = s->bounds && s->back.live;
-
-                ui_scroll_stop(s);
-                if (!sprung)
-                        ui_scroll_rest(s);
-                s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
-                s->hand = 1;
-                s->pulled_at = now;
-                ui_drag_start(&s->hand_drag, (int)(s->at >> 8));
-        }
-        s->at += move;
-        s->at = s->at < -lim ? -lim : s->at > most + lim ? most + lim : s->at;
-        ui_scroll_show(s);
-        ui_drag_follow(&s->hand_drag, (int)(s->at >> 8));
-}
-
-// A precise input (256ths of a device pixel, positive: the content moves down): one for one, with no notch and no glide.
-static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll address_to s, int q, b32 stream)
-{
-        int before = s->scroll;
-        b64 now = ui_event_clock();
-
-        if (!q)
-                return false;
-        if (stream)
-        {
-                // The intervals between a stream's notches: a new stream (or none) starts them afresh, and the newest is first.
-                if (!s->smooth || !s->notch || now <= s->notch)
-                        s->gaps[0] = s->gaps[1] = s->gaps[2] = s->gaps[3] = 0;
-                else
-                        s->gaps[3] = s->gaps[2], s->gaps[2] = s->gaps[1], s->gaps[1] = s->gaps[0], s->gaps[0] = now - s->notch;
-                s->notch = now;
-                s->precise = 1;
-                s->absorb = 0;
-                ui_scroll_stream(s, -(b64)q);
-                return true;
-        }
-        s->notch = now;
-        s->precise = 1;
-        s->absorb = 0;
-        ui_scroll_hand(s, -(b64)q);
-        return s->scroll != before || s->bounds;
-}
-
-// Only the overscroll of a bounded region is drawn past its end: the rest is the glide's, and the same for every region.
-static void ui_scroll_busy(const struct ui address_to ui, struct ui_scroll address_to s)
-{
-        ui_kit.busy = 1;
-        if (s->height > 0)
-        {
-                // A row that overlaps the region paints up to a row past either end (a switch's knob at its foot), so the band
-                // is the region and a row each way: what a frame that moved it must draw again.
+                // A row that overlaps the region paints up to a row past either end (a switch's knob at its foot), so the band is the region
+                // and a row each way: what a frame that moved it must draw again.
                 int pad = ui_dev(ui, UI_ROW), top = s->y - pad, bottom = s->y + s->height + pad;
 
                 top = top < 0 ? 0 : top;
+                ui_kit.busy = 1;
                 if (ui_kit.damage_bottom <= ui_kit.damage_top)
                         ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
                 else
@@ -7096,207 +6604,121 @@ static void ui_scroll_busy(const struct ui address_to ui, struct ui_scroll addre
                         ui_kit.damage_bottom = bottom > ui_kit.damage_bottom ? bottom : ui_kit.damage_bottom;
                 }
         }
-}
-
-// The glide's frame, drawn at the kit's time: where the region is now, and the kit busy with it while it moves (its band
-// is marked to be drawn again, as a moving control's rows are). A pull springing home is the kit's spring. True when moving.
-static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll address_to s)
-{
-        b64 now = (b64)ui_kit.now, before = s->at, q, w, e, d, v, c, ct;
-
-        if (s->hand && s->dragging)
-        {
-                b64 wheel = ui_wheel_clock();
-
-                if (wheel > s->notch && wheel - s->notch > UI_HAND_GAP_NS)
-                        ui_scroll_release(s);
-                if (s->dragging)
-                {
-                        if (s->smooth)
-                                ui_scroll_step(s, now);
-                        ui_scroll_show(s);
-                        ui_scroll_busy(ui, s);
-                        return true;
-                }
-        }
-        if (s->dragging || !(s->gliding || s->back.live))
-                return false;
-        if (s->gliding)
-        {
-                // The first frame drawn starts the clock, and nothing moves in it, as a spring's first frame does.
-                if (!s->stamp)
-                        s->stamp = now;
-                else if (now > s->stamp)
-                {
-                        q = ui_ms(now - s->stamp) / 1000;
-                        w = UI_ONE * 1000000000ll / s->tau;
-                        e = ui_exp_neg(ui_qmul(w, q));
-                        d = s->at - s->aim;
-                        v = s->speed;
-                        c = v + ui_qmul(w, d);
-                        ct = ui_qmul(c, q);
-                        d = ui_qmul(d + ct, e);
-                        v = ui_qmul(v - ui_qmul(w, ct), e);
-                        if (d < UI_SCROLL_REST && d > -UI_SCROLL_REST)
-                                s->at = s->aim, s->speed = 0, s->gliding = 0, s->stamp = 0;
-                        else
-                                s->at = s->aim + d, s->speed = v, s->stamp = now;
-                }
-        }
-        if (s->back.live)
-        {
-                ui_spring_at(&s->back);
-                // A bounded region's spring holds its position at the end and draws the overscroll (ui_scroll_shown, the band).
-                if (!s->bounds)
-                        s->at = s->aim + (s->back.value[1] >> 22);
-        }
-        ui_scroll_show(s);
-        if (!s->gliding && !s->back.live && s->at == before)
-                return false;
-        ui_scroll_busy(ui, s);
-        return true;
-}
-
-// The wheel's clock: a test's, when it has one, else the monotonic clock the notches arrive on.
-static b64 ui_wheel_clock(void)
-{
-        return ui_kit_clock();
+        return moving;
 }
 
 /*
-        The wheel's acceleration, one curve for every region that takes the wheel: a notch after a pause of UI_WHEEL_SLOW_NS
-        moves one unit, a notch within UI_WHEEL_FAST_NS of the region's last moves UI_WHEEL_FAST (Q8) units, and between them
-        the rate is a straight line in the time since that last notch. A fast spin travels further than the same notches fired
-        slowly, and a single notch still moves one unit. ui_scroll_wheel caps the travel (UI_WHEEL_REACH) so a long spin does
-        not run away, and the glide settles on its aim (ui_scroll_limit), so it never overshoots.
+        The jump: the body is put at scroll (inside the region's ends) and whatever moved it stops. True when the drawn position or the
+        motion changed.
 */
-#define UI_WHEEL_SLOW_NS 180000000l
-#define UI_WHEEL_FAST_NS 45000000l
-#define UI_WHEEL_FAST 1024 // Q8: four units a notch at the fast end
-#define UI_WHEEL_REACH 12  // units a spin may carry the aim past where the region is drawn
-#define UI_WHEEL_RUN 60    // rows a second the glide of a spin may run at most
-
-static b64 ui_wheel_rate(const struct ui_scroll address_to s)
+static b32 ui_scroll_set(struct ui_scroll address_to s, int scroll)
 {
-        b64 now = ui_event_clock();
-        b64 gap = s->notch && now > s->notch ? now - s->notch : UI_WHEEL_SLOW_NS;
+        int most = ui_scroll_most(s), before = s->scroll;
+        b32 moving = ui_body_going(&s->body);
 
-        if (gap >= UI_WHEEL_SLOW_NS)
-                return 256;
-        if (gap <= UI_WHEEL_FAST_NS)
-                return UI_WHEEL_FAST;
-        return 256 + (UI_WHEEL_FAST - 256) * (UI_WHEEL_SLOW_NS - gap) / (UI_WHEEL_SLOW_NS - UI_WHEEL_FAST_NS);
+        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
+        ui_scroll_extent(s);
+        ui_body_set(&s->body, s->body.view, s->body.content, (b64)scroll << UI_Q, ui_kit_time());
+        s->precise = 0;
+        ui_scroll_show(s);
+        return scroll != before || moving;
 }
 
-// A turn of the wheel, in the 120ths of a notch the compositor sends: what is under a step is kept for the next turn.
-// A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim, at the
-// wheel's rate (ui_wheel_rate). With the wheel smooth off (ui_kit.wheel_off) a notch is one row at once: no glide, no rate.
-// A notch that carries the content itself past an end of a bounded region (from where it is drawn, by its own distance) takes the
-// region in hand (ui_scroll_hand), one for one, so the overscroll grows with the notches from the first pixel past the end and
-// springs home on the release; nothing runs to the end first. Where the content is still short of the end the notch is a glide's as
-// anywhere else, its aim held at the end (ui_scroll_fit): the aim of a spin runs up to twelve rows ahead of the content, and a hand
-// taken when the AIM passed the end stopped the glide where the hand found it (three notches from 500 took the content to 540,
-// two to 700) and read its release as a finger's (a fourth took it to the end).
-static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll address_to s, int delta)
+// The region's ends moved (its content or its view): at rest its position is kept inside them; one that is moving keeps its motion.
+static void ui_scroll_clamp(struct ui_scroll address_to s)
 {
-        long total = (long)s->wheel + (long)delta * (s->unit > 0 ? 1 : UI_ROW * ui->scale / 100);
-        int steps = (int)(total / 120);
-        b64 base, aim, now, rate, reach, lim, pos, most, last, unit = s->unit > 0 ? s->unit : 1;
+        if (!ui_body_going(&s->body))
+                ui_scroll_set(s, s->scroll);
+}
 
-        s->wheel = (int)(total - (long)steps * 120);
-        if (!steps)
-                return false;
-        now = ui_event_clock();
-        rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s);
-        last = s->notch;
-        s->notch = now;
-        most = ui_scroll_most256(s);
-        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
-        if (s->bounds && most && !ui_kit.wheel_off)
-        {
-                // The hand moves one notch's distance at the wheel's unit, with no acceleration: a notch past an end is a pull, not a spin.
-                b64 move = -(b64)steps * unit * UI_SCROLL_SCALE;
-                b32 held = s->hand && s->dragging && (s->at < 0 || s->at > most), past = held || pos + move < 0 || pos + move > most;
+// A bar of a body: it is that body's place, drawn where the body is (past an end too), as the terminal's scrollback bar is.
+static void ui_scroll_follow(struct ui_scroll address_to s, const struct ui_body address_to b)
+{
+        s->body = *b;
+        ui_scroll_show(s);
+}
 
-                // A burst bumps an end once. Its pull grows for UI_NOTCH_APEX_NS and the stretch goes home from its apex, whatever is still
-                // coming (a Mac's trackpad, through the machine's tablet, sends a notch to every report of its finger and of the momentum
-                // after it: a second of them held the pull at its largest and then fought the spring home in pieces); the notches that
-                // push at the end after that, and within UI_NOTCH_BURST_NS of each other, are taken. A notch back, or a pause, ends it.
-                if (s->absorb && (!past || now - last >= UI_NOTCH_BURST_NS))
-                        s->absorb = 0;
-                if (s->absorb)
-                        return false;
-                if (held && !s->precise && now - s->pulled_at >= UI_NOTCH_APEX_NS)
-                {
-                        s->hand = 0;
-                        ui_scroll_let_go(s, 0, 0);
-                        s->absorb = s->back.live;
-                        return true;
-                }
-                if (past)
-                {
-                        s->precise = 0;
-                        ui_scroll_hand(s, move);
-                        ui_scroll_show(s);
-                        return true;
-                }
-                if (s->hand)
-                {
-                        // The notches took the content back inside its ends: the hand lets go of it where it is, as a stop and not a throw,
-                        // and this notch is the glide's.
-                        s->hand = 0;
-                        ui_scroll_let_go(s, 0, 0);
-                        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
-                }
-        }
-        base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
-        aim = base - (b64)steps * unit * UI_SCROLL_SCALE * rate / 256;
-        // The travel is capped where the region is drawn: a spin's aim is at most UI_WHEEL_REACH units past it.
-        reach = (b64)UI_WHEEL_REACH * (s->unit > 0 ? s->unit : UI_ROW * ui->scale / 100) * UI_SCROLL_SCALE;
-        aim = aim < pos - reach ? pos - reach : aim > pos + reach ? pos + reach : aim;
-        aim = ui_scroll_fit(s, aim);
-        if (ui_kit.wheel_off)
-                return ui_scroll_set(s, (int)(aim >> 8));
-        if (aim == base)
+/*
+        A key or a band brought into view: a notch of the body to where it shows, from where the body is going (its target while it
+        follows a notch). False when it shows already.
+*/
+static b32 ui_scroll_reveal(struct ui_scroll address_to s, int top, int height)
+{
+        b64 here = s->body.state == BODY_NOTCH ? s->body.target : s->body.raw;
+        int at = (int)((here + UI_ONE / 2) >> UI_Q), aim = at, most = ui_scroll_most(s);
+
+        if (top < at)
+                aim = top;
+        else if (top + height > at + s->view)
+                aim = top + height - s->view;
+        aim = aim < 0 ? 0 : aim > most ? most : aim;
+        if (aim == at)
                 return false;
-        if (s->dragging)
-                s->dragging = 0, s->speed = 0;
-        ui_scroll_rest(s);
-        // The notch's own speed is its distance over the time constant, the throw's rule, so a notch and a throw decay alike; a spin
-        // is held to UI_WHEEL_RUN rows a second, so the glide does not run away however fast the notches come.
-        s->speed += (aim - base) * 1000000000ll / UI_SCROLL_TAU_NS;
-        lim = (b64)UI_WHEEL_RUN * (s->unit > 0 ? s->unit : UI_ROW * ui->scale / 100) * UI_SCROLL_SCALE;
-        s->speed = s->speed > lim ? lim : s->speed < -lim ? -lim : s->speed;
-        ui_scroll_glide_to(s, aim, UI_SCROLL_TAU_NS);
+        ui_scroll_extent(s);
+        ui_body_notch(&s->body, ((b64)aim << UI_Q) - here, ui_kit_time());
+        s->precise = 0;
         return true;
 }
 
-// The wheel turns a region by its vertical notches, the one rule for every list and page: a horizontal notch (event->b) turns nothing.
-// A precise input (WINDOW_WHEEL_PRECISE) is a trackpad's motion in 120ths of a notch, and the region takes it one for one: a notch
-// is a row (UI_ROW at the window's scale), so 120ths of one are that over 120, in 256ths of a device pixel. Where a region takes
-// whole units (a menu's choices) it is the notches' own.
-static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
+// A finger's move of the region by pixels: the body is tracked by them, one for one, and past an end the rubber band draws it. True:
+// the region's drawn place or its motion changed, which a bounded region's always does.
+static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
 {
-        if (event->b)
-                return false;
-        if (event->flags & WINDOW_WHEEL_STOP)
-                return ui_scroll_end(s);
-        if (!(event->flags & WINDOW_WHEEL_PRECISE) || s->unit > 0)
-                return ui_scroll_wheel(ui, s, event->a);
-        {
-                // The turn is its share of a notch's UI_PRECISE_NOTCH pixels, in 256ths. What a turn does not move whole (120ths of a
-                // 256th) is carried to the next, so a stream of single 120ths adds up exactly. Clamped to a span no region holds, so
-                // no value makes the cast wrap.
-                long total = (long)event->a * UI_PRECISE_NOTCH * ui->scale / 100 * UI_SCROLL_SCALE + s->precise_rest, q = total / 120;
-
-                s->precise_rest = total - q * 120;
-                q = q > UI_PRECISE_MOST ? UI_PRECISE_MOST : q < -UI_PRECISE_MOST ? -UI_PRECISE_MOST : q;
-                return ui_scroll_precise(ui, s, (int)q, (event->flags & WINDOW_WHEEL_STREAM) != 0);
-        }
+        ui_scroll_extent(s);
+        ui_body_track(&s->body, (b64)pixels << UI_Q, ui_kit_time());
+        s->precise = 0;
+        ui_scroll_show(s);
+        return true;
 }
 
-// The wheel turns a body as it turns a region: a notch is a row at the scale (UI_ROW), a precise turn is its share of
-// UI_PRECISE_NOTCH in 120ths, and a notch down is further down the content. Answers whether the body was given a notch.
+// The finger let go, or a trackpad's hand: the body's release carries a throw on its speed (pixels a second, toward the far end) and a
+// pull springs home from where it is drawn. A body that is not held lets go of nothing.
+static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long speed)
+{
+        if (s->body.state != BODY_TRACK)
+                return;
+        ui_scroll_extent(s);
+        ui_body_let_go(&s->body, thrown ? (b64)speed * UI_ONE : 0, ui_kit_time());
+        s->precise = 0;
+        ui_scroll_show(s);
+}
+
+// The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it when
+// the speed is a throw. A finger still for UI_HAND_PAUSE_NS before its lift throws nothing (a stop carries the slope of its
+// deceleration, which the fit reads as a throw).
+static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
+{
+        positive last = s->drag.samples > 0 ? s->drag.when[s->drag.samples - 1] : 0, now = ui_drag_now();
+        long speed = last ? ui_drag_velocity(&s->drag, last) : 0;
+        b32 paused = lifted && last && now > last && now - last > UI_HAND_PAUSE_NS;
+
+        if (paused)
+                speed = 0;
+        ui_scroll_let_go(s, s->precise && ui_throws(speed, s->scale), speed);
+}
+
+// The thumb released: a held thumb lets the body go, so a pull past an end springs home.
+static b32 ui_scroll_thumb_release(struct ui_scroll address_to s, int type, b32 down, b32 held)
+{
+        if (type != WINDOW_EVENT_BUTTON || down || !held || s->body.state != BODY_TRACK || s->precise)
+                return false;
+        ui_scroll_let_go(s, 0, 0);
+        return true;
+}
+
+/*
+        Where a region is drawn: its track down the x edge (its width is the kit's), from y, height long, below inset (a window's close
+        button), what it scrolls (content) and how much shows (view), at the scale. The scroll stays as it is; the app puts it where it
+        means it to be.
+*/
+static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int height, int inset, int content, int view, int scale)
+{
+        s->x = x, s->y = y, s->height = height, s->inset = inset;
+        s->content = content, s->view = view, s->scale = scale;
+}
+
+// The wheel's notch, in a body's units: a notch (UI_ROW, or its share of UI_PRECISE_NOTCH for a precise turn) at the scale, moved
+// toward the far end when the notch goes down. Answers whether the body was given a notch.
 static b32 ui_body_wheel(int scale, struct ui_body address_to b, const struct window_event address_to event, b64 at)
 {
         b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_PRECISE_NOTCH : UI_ROW) * (b64)scale / 100;
@@ -7304,6 +6726,62 @@ static b32 ui_body_wheel(int scale, struct ui_body address_to b, const struct wi
         if (event->b || !event->a || (event->flags & WINDOW_WHEEL_STOP))
                 return false;
         ui_body_notch(b, -(b64)event->a * per * UI_ONE / 120, at);
+        return true;
+}
+
+/*
+        The wheel turns a region by its vertical notches, the one rule for every list and page: a horizontal notch (event->b) turns
+        nothing. A notch moves the body's target and the position follows it (ui_body_wheel); with the wheel smooth off
+        (ui_kit.wheel_off) it is one row at once. A trackpad's motion (WINDOW_WHEEL_PRECISE) is one for one, the hand, whose release
+        (WINDOW_WHEEL_STOP) throws on its speed; a stream of it (WINDOW_WHEEL_STREAM) follows as a notch does. Answers whether it moved.
+*/
+static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
+{
+        b64 now = ui_kit_time(), q = -(b64)event->a * UI_PRECISE_NOTCH * ui->scale / 100 * UI_ONE / 120;
+
+        if (event->b)
+                return false;
+        if (event->flags & WINDOW_WHEEL_STOP)
+        {
+                if (!s->precise || s->body.state != BODY_TRACK)
+                        return false;
+                ui_scroll_release(s, 1);
+                return true;
+        }
+        if (!event->a)
+                return false;
+        ui_scroll_extent(s);
+        if (!(event->flags & WINDOW_WHEEL_PRECISE))
+        {
+                if (!ui_body_wheel(ui->scale, &s->body, event, now))
+                        return false;
+                if (ui_kit.wheel_off)
+                {
+                        // A notch moves the row at once: the target inside the ends, and the body at rest there.
+                        b64 far = ui_body_far(&s->body), aim = s->body.target < 0 ? 0 : far && s->body.target > far ? far : s->body.target;
+
+                        ui_body_set(&s->body, s->body.view, s->body.content, aim, now);
+                }
+                s->precise = 0;
+        }
+        else if (event->flags & WINDOW_WHEEL_STREAM)
+        {
+                ui_body_notch(&s->body, q, now);
+                s->precise = 0;
+        }
+        else
+        {
+                if (s->body.state != BODY_TRACK || !s->precise)
+                {
+                        ui_scroll_hold(s);
+                        s->precise = 1;
+                        ui_drag_start(&s->drag, (int)(s->body.raw >> UI_Q));
+                }
+                ui_body_track(&s->body, q, now);
+                ui_drag_follow(&s->drag, (int)(s->body.raw >> UI_Q));
+                s->notch = now;
+        }
+        ui_scroll_show(s);
         return true;
 }
 
@@ -7539,8 +7017,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         m->scroll.content = height - 2 * sizes.vpad;
         m->scroll.view = m->height - 2 * sizes.vpad;
         m->scroll.x = ui_mirror(m->width - ui_dev(ui, UI_SCROLL_WIDTH), ui_dev(ui, UI_SCROLL_WIDTH), 0, m->width), m->scroll.y = sizes.vpad, m->scroll.height = m->height - 2 * sizes.vpad;
-        m->scroll.unit = 0;
-        m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
+        ui_scroll_set(&m->scroll, ui_popmenu_offset(ui, m, m->top));
         m->scroll.held = m->scroll.hover = 0;
 }
 
@@ -7608,7 +7085,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
         struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
         int y = sizes.vpad;
 
-        m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
+        ui_scroll_set(&m->scroll, ui_popmenu_offset(ui, m, m->top));
         m->moving = 0;
         for (int at = m->top; at < m->count && y < m->height - sizes.vpad; at++)
         {
@@ -7714,7 +7191,7 @@ static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu addre
         scroll = ui_scroll_pointer(ui, &m->scroll, type, x, y, down);
         if (scroll < 0)
                 return false;
-        if (!m->scroll.dragging)
+        if (m->scroll.body.state != BODY_TRACK)
                 ui_scroll_set(&m->scroll, scroll);
         ui_popmenu_sync(ui, m);
         return true;
@@ -9626,7 +9103,7 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
                                : x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         l->scroll.y = y, l->scroll.height = h, l->scroll.view = h;
         l->scroll.content = l->content;
-        l->scroll.bounds = 1, l->scroll.scale = ui->scale;
+        l->scroll.scale = ui->scale;
         ui_scroll_clamp(&l->scroll);
 }
 
@@ -10190,7 +9667,7 @@ static fn ui_finger_down(struct ui_finger address_to f, int x, int y, int target
         ui_drag_stop(&f->drag);
         f->region = region;
         if (region)
-                region->left = 0, region->flung = 0, ui_scroll_stop(region);
+                ui_scroll_hold(region);
         ui_press_begin(&f->press, x, y, target, true);
 }
 
@@ -10351,8 +9828,8 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
                 p->column_scroll.x = width - p->column_scroll.x - ui_dev(ui, UI_SCROLL_WIDTH);
                 p->seam = p->column_on ? width - p->seam : 0;
         }
-        // The column scrolls as a list does: its ends take a pull as the rubber band, and a wheel turn at an end (ui_scroll_shown).
-        p->column_scroll.bounds = 1, p->column_scroll.scale = ui->scale;
+        // The column scrolls as a list does: its ends take a pull as the rubber band, and a wheel turn at an end (the body's band).
+        p->column_scroll.scale = ui->scale;
         p->column_scroll.y = p->top, p->column_scroll.height = p->bottom - p->top, p->column_scroll.view = p->bottom - p->top;
         p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
         ui_scroll_clamp(&p->column_scroll);
@@ -10439,8 +9916,8 @@ static fn ui_page_fit(const struct ui address_to ui, struct ui_page address_to p
                            : p->right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
         card->y = p->top, card->height = card->view = p->bottom - p->top;
         card->content = card_content;
-        // A card that scrolls takes a pull at its ends like a list (ui_scroll_shown), and at its top when it fits.
-        card->bounds = 1, card->scale = ui->scale;
+        // A card that scrolls takes a pull at its ends like a list (the body's band), and at its top when it fits.
+        card->scale = ui->scale;
         ui_scroll_clamp(card);
 }
 
@@ -10583,7 +10060,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                 {
                         taken = true;
                         // A thumb stretching its region past an end keeps the stretch; its release lets it go, as a finger's does.
-                        if (!bars[k]->dragging)
+                        if (bars[k]->body.state != BODY_TRACK)
                                 ui_scroll_set(bars[k], scroll);
                 }
                 // Only a thumb that was held lets go: a finger dragging the content has the region dragging too, and its own release throws it.

@@ -338,7 +338,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
-    //  The wheel's glide (ui_scroll_wheel, every region the wheel turns): on, a notch glides to its row over a short time and a
+    //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch glides to its row over a short time and a
     //  fast spin travels further; off, a notch moves a whole row at once.
     SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",

@@ -881,7 +881,7 @@ struct windows
                 them by the clock), accent 0xrrggbb, motion 0 full or 1 reduced. themed counts up each time any
                 of them changes, and every window is knocked, so a window takes a new theme without a restart.
                 wheel_off is 1 when `moonwater canvas wheel smooth off` keeps it: a notch of the wheel then moves a whole row
-                at once, with no glide (ui_scroll_wheel), and themed counts it too.
+                at once, with no glide (ui_wheel_turn), and themed counts it too.
                 caret_speed and caret_thick are the caret's blink and width, `canvas caret blink` and `canvas caret thickness`,
                 each as its place plus one: 0 is not kept, and the standard (normal, and 2 px) is what a window draws then.
         */

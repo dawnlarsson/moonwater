@@ -579,7 +579,7 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
         // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
         if (!ui_body_going(&terminal.body) && terminal_body_px() != (int)first * cell)
                 ui_body_set(&terminal.body, terminal.body.view, terminal.body.content, (b64)first * cell * UI_ONE, terminal.body.at);
-        ui_scroll_set(&terminal.bar, terminal_body_px());
+        ui_scroll_follow(&terminal.bar, &terminal.body);
 }
 
 // The kit's bar follows the view: placed where the view's first row is, in pixels, and the body with it (not moving any more).
@@ -591,7 +591,7 @@ static void terminal_bar_follow(void)
                 return;
         terminal_bar_place(first, shown, total);
         ui_body_set(&terminal.body, terminal.body.view, terminal.body.content, (b64)first * terminal.cell_h * UI_ONE, terminal.body.at);
-        ui_scroll_set(&terminal.bar, terminal_body_px());
+        ui_scroll_follow(&terminal.bar, &terminal.body);
 }
 
 // The grid's shift in device pixels, down positive: the body's place less the view's whole row, which is the overscroll past an end
@@ -636,7 +636,7 @@ static void terminal_bar_step(void)
 
         ui_kit.busy = 0;
         ui_body_step(&terminal.body, ui_kit_time());
-        ui_scroll_set(&terminal.bar, terminal_body_px());
+        ui_scroll_follow(&terminal.bar, &terminal.body);
         if (terminal_bar_out() || terminal.bar.scroll != before || terminal_grid_shift() != shift)
                 terminal.dirty = true;
 }

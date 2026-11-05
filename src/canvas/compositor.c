@@ -10703,7 +10703,7 @@ static unsigned int compositor_tab_target(b32 lit)
 
 static bool compositor_setting_kept(const char *path, const char *word, long *value);
 
-// The wheel's glide (ui_scroll_wheel), as the table keeps it: a change knocks every window, as a theme change does.
+// The wheel's glide (ui_wheel_turn), as the table keeps it: a change knocks every window, as a theme change does.
 static void compositor_wheel_publish(unsigned int off)
 {
         struct windows *table = compositor.table;
