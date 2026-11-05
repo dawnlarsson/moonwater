@@ -5902,9 +5902,10 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         glass, which sees them both.
 */
 #define COMPOSITOR_GLASS_LIFT 96        // how far toward mid grey a glass window lifts what is behind it, in 256ths: lighter over dark, darker over light
-#define COMPOSITOR_GLASS_PIVOT 0x808080u // the grey the lift is toward, so a dark backdrop comes up and a bright one comes down
+#define COMPOSITOR_GLASS_PIVOT 0x808080u // the grey the lift is toward, so a dark backdrop comes up and a bright one comes down (dark glass)
+#define COMPOSITOR_GLASS_PIVOT_LIGHT 0xf0f0f0u // light glass lifts toward a near white: it stays light over a light window or wallpaper (a menu over a light window was a mid grey)
 #define COMPOSITOR_GLASS_DARKEST 0x5c // dark glass: no colour of a pixel brighter
-#define COMPOSITOR_GLASS_LIGHTEST 0xb4 // light glass: none dimmer
+#define COMPOSITOR_GLASS_LIGHTEST 0xe0 // light glass: none dimmer (0xb4 was a mid grey over the dark desktop: a light theme's menus read too grey)
 #define COMPOSITOR_GLASS_UNSIDED 2u
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
@@ -5913,14 +5914,14 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 // toward mid grey, and the brightest capped (dark glass) or the dimmest raised (light glass).
 static void compositor_glass_tone_span(unsigned int *into, const unsigned int *from, positive count, unsigned int side)
 {
-        memory_tint_u32(into, from, count, COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
+        memory_tint_u32(into, from, count, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
                         side ? COMPOSITOR_GLASS_LIGHTEST : 0);
 }
 
 // One pixel stays in C, as compositor_vivid does: the library call is the loss at this length (see there).
 static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int side)
 {
-        unsigned int pixel = window_mix(boosted, COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT);
+        unsigned int pixel = window_mix(boosted, side ? COMPOSITOR_GLASS_PIVOT_LIGHT : COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT);
         unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
         unsigned int most = r > g ? r : g, least = r < g ? r : g;
 

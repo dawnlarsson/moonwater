@@ -5055,21 +5055,13 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         b32 bare = c->variant == UI_FIELD_BARE;
         int above = bare ? 0 : 24 + 6, tall = bare && c->h ? c->h : UI_FIELD_H;
         b32 fy = ui_dev(ui, c->y) + ui_dev(ui, above);
-        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), 0);
         int baseline;
 
         // The label above (a bare field has none).
         if (!bare && c->label)
                 ui_control_label(ui, c, 0, 0, UI_BODY_LARGE, ui_role(UI_ON_SURFACE));
-        // The face: a glass well (16, or 24 focused) as it was; otherwise the ground, none at rest and the accent's tint when focused.
-        ui_kit_colour_to(&c->fill, ui->glass ? ui_well(ui, UI_SURFACE_HIGH, c->focused ? 24 : 16)
-                                             : c->focused ? (ui_role(UI_ACCENT_BRIGHT) & 0xffffffu) | (unsigned int)UI_FIELD_TINT << 24
-                                                          : ui_role(UI_ACCENT_BRIGHT) & 0xffffffu,
-                         180, &ui_ease);
-        ui_kit_fill(ui, &face, ui_kit_colour(&c->fill), null);
-        // The row's hover layer over it, and the same press layer a list row takes.
-        ui_kit_layer_to(c, c->disabled);
-        ui_kit_layer_fill(ui, &face, ui_text_colour(ui, UI_ON_SURFACE), ui_kit_layer(c));
+        // No background of its own, for now: the field is the text, its selection and its caret over what is under it (the row's ground, a glass
+        // window's glass). Nothing is drawn for its face, its hover, its press or its focus.
         baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
         // What is in the well is the engine's: the text (dots when masked), its selection, its caret and its placeholder.
         // A field with no engine is one nothing can be typed in, and shows its placeholder and no caret.
