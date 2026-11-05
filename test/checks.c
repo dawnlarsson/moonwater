@@ -170111,6 +170111,9 @@ static void test_touch(void)
         wayland_stop();
 }
 
+/* A finger's notch: the kit's UI_NOTCH (theme.h, not included here), in pixels at 100 percent, written as the number the shim is handed. */
+#define WAYLAND_FINGER_NOTCH 40
+
 /*
         wl_pointer.axis_stop: a finger scroll ends with axis_stop on both axes, once; a wheel's scroll has none; a version 9
         pointer says each axis' direction, identical, and the finger source comes before the axis.
@@ -170135,10 +170138,12 @@ static void test_axis_stop(void)
         wlc_pump(c);
         wlc_forget(c);
 
-        wayland_pointer_axis(0, 0, 120, 1);
+        wayland_pointer_axis(0, 0, 120, WAYLAND_FINGER_NOTCH);
         wlc_pump(c);
         a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_axis_source, 0);
         WLCHECK(a >= 0 && c->ev[a].u[0] == WLN_wl_pointer_axis_source_finger, "a finger scroll says its source is the finger");
+        b = event_at(c, WLI_wl_pointer, WLE_wl_pointer_axis, 0);
+        WLCHECK(b >= 0 && (long)(int)c->ev[b].u[2] == WAYLAND_FINGER_NOTCH * 256, "a finger's notch is 40 pixels (the kit's UI_NOTCH) to the client, one for one with the kit's turn (a wheel's notch is 15 units)");
         WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_relative_direction) == 1,
                 "a version 9 pointer says the direction of the axis, identical");
         wlc_forget(c);
@@ -171720,7 +171725,7 @@ static void test_fuzz(long rounds)
                                 case 0: wayland_pointer_to(row, (long)(wl_random() % 200) - 50, (long)(wl_random() % 200) - 50); break;
                                 case 1: wayland_pointer_motion(row, (long)(wl_random() % 300), (long)(wl_random() % 300)); break;
                                 case 2: wayland_pointer_button(row, (long)(wl_random() % 0x400) - 8, (long)(wl_random() & 1)); break;
-                                case 3: wayland_pointer_axis(row, (long)(wl_random() & 1), (long)(wl_random() % 2000) - 1000, (long)(wl_random() & 1)); break;
+                                case 3: wayland_pointer_axis(row, (long)(wl_random() & 1), (long)(wl_random() % 2000) - 1000, (long)(wl_random() & 1) * WAYLAND_FINGER_NOTCH); break;
                                 case 4: wayland_keyboard_to(row); break;
                                 case 5: wayland_key(row, (long)(wl_random() % 0x500) - 16, (long)(wl_random() & 1)); break;
                                 case 6: fake.locks = (long)(wl_random() & 18); wayland_key(row, 58, (long)(wl_random() & 1)); break;
@@ -171880,7 +171885,7 @@ static void test_seat(void)
         e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_axis);
         WLCHECK(e && (long)(int)e->u[2] == 15 * 256, "a notch is 15 units");
         wlc_forget(c);
-        wayland_pointer_axis(0, 1, -60, 1);
+        wayland_pointer_axis(0, 1, -60, WAYLAND_FINGER_NOTCH);
         wlc_pump(c);
         e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_axis_source);
         WLCHECK(e && e->u[0] == WLN_wl_pointer_axis_source_finger && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_value120) == 0, "two fingers are a finger's smooth value");

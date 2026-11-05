@@ -922,6 +922,7 @@ static inline long wayland_max(long a, long b)
         shown at the size it drew.
 */
 #define WAYLAND_UNIT 120
+#define WAYLAND_NOTCH 15 // a wheel's notch, in the surface's units, as every toolkit takes it (wl_pointer.axis)
 #define WAYLAND_SCALE_LEAST 30   // 25 percent
 #define WAYLAND_SCALE_MOST 960   // 800 percent
 
@@ -3854,11 +3855,25 @@ static int wayland_touch_find(long id)
         return -1;
 }
 
-static void wayland_touch_frame_to(struct wayland_client *c, long slot)
+/*
+        One wl_touch event to each touch seat of a client, with its words (count of them, as the wire has them), and a frame
+        after each: the frame is what ends a touch event for the client.
+*/
+static void wayland_touch_send(struct wayland_client *c, long event, const unsigned long *words, long count)
 {
-        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_touch_frame);
+        long slots[WAYLAND_SEATS], seats = wayland_seats(c, WLI_wl_touch, slots);
 
-        wayland_end(&e);
+        for (long at = 0; at < seats; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, event);
+                struct wayland_event frame;
+
+                for (long word = 0; word < count; word++)
+                        wayland_word(&e, words[word]);
+                wayland_end(&e);
+                frame = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_touch_frame);
+                wayland_end(&frame);
+        }
 }
 
 /*
@@ -3881,16 +3896,15 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *root, *s;
-        long sx = 0, sy = 0, time, slots[WAYLAND_SEATS], count, point = -1;
-        unsigned long serial;
+        long sx = 0, sy = 0, time, slots[WAYLAND_SEATS], point = -1;
+        unsigned long serial, words[6];
 
         if (!wayland.host || id < 0 || wayland_touch_find(id) >= 0 || !(root = wayland_row_surface(row, &c)))
                 return;
         for (int at = 0; at < WAYLAND_TOUCHES && point < 0; at++)
                 if (!wayland.touch[at].live)
                         point = at;
-        count = wayland_seats(c, WLI_wl_touch, slots);
-        if (point < 0 || count == 0 || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
+        if (point < 0 || wayland_seats(c, WLI_wl_touch, slots) == 0 || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
@@ -3901,19 +3915,9 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
         wayland.touch[point].id = id;
         wayland.touch[point].x = x;
         wayland.touch[point].y = y;
-        for (long at = 0; at < count; at++)
-        {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_touch_down);
-
-                wayland_word(&e, serial);
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, s->id);
-                wayland_word(&e, (unsigned long)id);
-                wayland_word(&e, wayland_fixed(sx, s->scale120));
-                wayland_word(&e, wayland_fixed(sy, s->scale120));
-                wayland_end(&e);
-                wayland_touch_frame_to(c, slots[at]);
-        }
+        words[0] = serial, words[1] = (unsigned long)time, words[2] = s->id, words[3] = (unsigned long)id;
+        words[4] = wayland_fixed(sx, s->scale120), words[5] = wayland_fixed(sy, s->scale120);
+        wayland_touch_send(c, WLE_wl_touch_down, words, 6);
 }
 
 /* The row a finger is down on, or -1 when it is not down: the shell gives a finger's place in that row's picture. */
@@ -3929,7 +3933,8 @@ WAYLAND_API void wayland_touch_motion(long id, long x, long y)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *s;
-        long ox = 0, oy = 0, time, slots[WAYLAND_SEATS], count;
+        long ox = 0, oy = 0, time;
+        unsigned long words[4];
         int at = wayland_touch_find(id);
 
         if (!wayland.host || at < 0 || (wayland.touch[at].x == x && wayland.touch[at].y == y))
@@ -3944,26 +3949,17 @@ WAYLAND_API void wayland_touch_motion(long id, long x, long y)
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
                 wayland_sub_offset(c, s, &ox, &oy);
         time = wayland.host->now(wayland.host->context);
-        count = wayland_seats(c, WLI_wl_touch, slots);
-        for (long n = 0; n < count; n++)
-        {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_motion);
-
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, (unsigned long)id);
-                wayland_word(&e, wayland_fixed(x - ox, s->scale120));
-                wayland_word(&e, wayland_fixed(y - oy, s->scale120));
-                wayland_end(&e);
-                wayland_touch_frame_to(c, slots[n]);
-        }
+        words[0] = (unsigned long)time, words[1] = (unsigned long)id;
+        words[2] = wayland_fixed(x - ox, s->scale120), words[3] = wayland_fixed(y - oy, s->scale120);
+        wayland_touch_send(c, WLE_wl_touch_motion, words, 4);
 }
 
 /* A finger that was down is lifted. */
 WAYLAND_API void wayland_touch_up(long id)
 {
         struct wayland_client *c;
-        long time, slots[WAYLAND_SEATS], count;
-        unsigned long serial;
+        long time;
+        unsigned long serial, words[3];
         int at = wayland_touch_find(id);
 
         if (!wayland.host || at < 0)
@@ -3974,17 +3970,8 @@ WAYLAND_API void wayland_touch_up(long id)
                 return;
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
-        count = wayland_seats(c, WLI_wl_touch, slots);
-        for (long n = 0; n < count; n++)
-        {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_up);
-
-                wayland_word(&e, serial);
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, (unsigned long)id);
-                wayland_end(&e);
-                wayland_touch_frame_to(c, slots[n]);
-        }
+        words[0] = serial, words[1] = (unsigned long)time, words[2] = (unsigned long)id;
+        wayland_touch_send(c, WLE_wl_touch_up, words, 3);
 }
 
 /*
@@ -3996,7 +3983,6 @@ WAYLAND_API void wayland_touch_cancel(void)
         for (int at = 0; at < WAYLAND_TOUCHES; at++)
         {
                 struct wayland_client *c;
-                long slots[WAYLAND_SEATS], count;
 
                 if (!wayland.touch[at].live)
                         continue;
@@ -4004,16 +3990,8 @@ WAYLAND_API void wayland_touch_cancel(void)
                 for (int each = 0; each < WAYLAND_TOUCHES; each++)
                         if (wayland.touch[each].live && wayland.touch[each].client == wayland.touch[at].client)
                                 wayland.touch[each].live = 0;
-                if (!c)
-                        continue;
-                count = wayland_seats(c, WLI_wl_touch, slots);
-                for (long n = 0; n < count; n++)
-                {
-                        struct wayland_event e = wayland_begin(c, c->objects[slots[n]].id, WLE_wl_touch_cancel);
-
-                        wayland_end(&e);
-                        wayland_touch_frame_to(c, slots[n]);
-                }
+                if (c)
+                        wayland_touch_send(c, WLE_wl_touch_cancel, 0, 0);
         }
 }
 
@@ -4055,18 +4033,19 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
 }
 
 /*
-        The wheel or two fingers: v120 is in hundred-and-twentieths of a notch, a notch being 15 of the surface's units
-        as every toolkit takes it, and horizontal says which axis. A wheel reports what version eight has for it
-        (value120), what earlier ones had (discrete steps, the remainder kept for the next), and a finger's motion is a
-        smooth value of the same size from a finger.
+        The wheel or two fingers: v120 is in hundred-and-twentieths of a notch, and horizontal says which axis. A wheel (notch_px
+        0) reports what version eight has for it (value120), what earlier ones had (discrete steps, the remainder kept for the
+        next), a notch being WAYLAND_NOTCH of the surface's units. A finger's turn (notch_px, the window's UI_NOTCH) is a smooth
+        value of the same size from a finger: a notch of it is notch_px pixels of the surface, so the client moves as the
+        fingers do.
 */
-WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long precise)
+WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long notch_px)
 {
         struct wayland_client *c;
-        struct wayland_surface *s;
         long time, slots[WAYLAND_SEATS], count, axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
+        int precise = notch_px > 0;
 
-        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || !v120)
+        if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !v120)
                 return;
         if (precise)
                 c->finger_scroll = 1;
@@ -4116,11 +4095,10 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
                 e = wayland_begin(c, o->id, WLE_wl_pointer_axis);
                 wayland_word(&e, (unsigned long)time);
                 wayland_word(&e, (unsigned long)axis);
-                wayland_word(&e, (unsigned long)(v120 * 15 * 256 / 120));
+                wayland_word(&e, (unsigned long)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
                 wayland_end(&e);
                 wayland_pointer_frame(c, slots[at]);
         }
-        (void)s;
 }
 
 /*

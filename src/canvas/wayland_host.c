@@ -2509,8 +2509,10 @@ static void compositor_wl_drain(int row)
                         // The last finger of a pad lifted: the precise scroll is over (axis_stop on both axes).
                         wayland_pointer_axis_stop(row);
                 else
-                        // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward.
-                        wayland_pointer_axis(row, b != 0, b ? a : -a, (flags & WINDOW_WHEEL_PRECISE) != 0 && !(flags & WINDOW_WHEEL_STREAM));
+                        // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward. A stream's
+                        // notch is a wheel's (value120), a finger's turn is the window's notch in pixels (UI_NOTCH).
+                        wayland_pointer_axis(row, b != 0, b ? a : -a,
+                                             (flags & WINDOW_WHEEL_PRECISE) && !(flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 0);
         }
         __atomic_store_n(&table->event_tail[row], tail, __ATOMIC_RELEASE);
 }
