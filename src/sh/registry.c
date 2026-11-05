@@ -403,7 +403,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll momentum [on|off]",
-                      .help = "a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it [on]"),
+                      .help = "a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]"),
     SETTING_PLAIN_ROW(null, "Rubber band", SETTINGS_SWITCH, 0, ("canvas", "scroll", "rubber"), "rubber ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_RUBBER_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll rubber [on|off]",

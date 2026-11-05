@@ -2452,7 +2452,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 // throw's floor, at the scale, throws nothing.
                 long speed = ui_drag_velocity(&terminal.finger.drag, ui_drag_now());
 
-                ui_body_let_go(&terminal.body, ui_throws(speed, terminal_scale()) ? -(b64)speed * UI_ONE : 0, ui_kit_time());
+                ui_body_let_go(&terminal.body, ui_throws(speed, terminal_scale()) ? -(b64)speed * UI_ONE : 0, ui_kit_time(), terminal_scale());
                 terminal.dirty = true;
                 return true;
         }

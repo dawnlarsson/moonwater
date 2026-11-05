@@ -148112,7 +148112,7 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
     expect = top ? terminal_rubber_px(-terminal.body.raw) : -terminal_rubber_px(terminal.body.raw - far);
     *body_match = (top ? shift > 4 : shift < -4) && shift - expect >= -1 && shift - expect <= 1;
     // Let go at no speed: the body springs home, and each frame the grid is drawn until it is whole.
-    ui_body_let_go(&terminal.body, 0, (b64)clock);
+    ui_body_let_go(&terminal.body, 0, (b64)clock, 100);
     for (int k = 0; k < 120; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
@@ -150781,7 +150781,7 @@ static void check_kit_body(void)
         check("kit body: a finger moves the position one for one: touch T00's deltas end at the recorded 178 px", finger_ok);
 
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 4148ll << UI_Q, 0);
-        ui_body_let_go(&b, -4903ll << UI_Q, 0);
+        ui_body_let_go(&b, -4903ll << UI_Q, 0, 100);
         worst_coast = 0;
         coast_ok = 1;
         for (k = 0; k < 8; k++)
@@ -150800,8 +150800,22 @@ static void check_kit_body(void)
         string_format(log, "  kit body: touch T06's coast, worst error %p percent of the travel at 50 ms steps\n", (positive)worst_coast);
         check("kit body: a release's coast follows touch T06 within 35 percent of the travel at each 50 ms", coast_ok);
 
+        {
+                // Android's maximum fling velocity caps a release at 8000 dp a second: 20000 px a second coasts as 8000 px a second does.
+                struct ui_body capped, at_cap;
+
+                ui_body_set(&capped, 772ll << UI_Q, 30000ll << UI_Q, 10000ll << UI_Q, 0);
+                ui_body_let_go(&capped, -20000ll << UI_Q, 0, 100);
+                ui_body_set(&at_cap, 772ll << UI_Q, 30000ll << UI_Q, 10000ll << UI_Q, 0);
+                ui_body_let_go(&at_cap, -8000ll << UI_Q, 0, 100);
+                ui_body_step(&capped, 1000000000ll);
+                ui_body_step(&at_cap, 1000000000ll);
+                check("kit body: a release at 20000 px a second coasts no farther than one at 8000, the cap (Android's maximum fling velocity)",
+                      ui_body_drawn(&capped) == ui_body_drawn(&at_cap) && ui_body_drawn(&at_cap) < 10000ll << UI_Q);
+        }
+
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
-        ui_body_let_go(&b, -914ll << UI_Q, 0);
+        ui_body_let_go(&b, -914ll << UI_Q, 0, 100);
         worst_dip = 0;
         dip_low = 0;
         dip_ok = 1;
@@ -150835,7 +150849,7 @@ static void check_kit_body(void)
               ui_body_drawn(&b) == 100ll << UI_Q && b.state != BODY_DRIVEN);
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_track(&b, -300ll << UI_Q, 0);
-        ui_body_let_go(&b, 0, 0);
+        ui_body_let_go(&b, 0, 0, 100);
         ui_body_step(&b, 2000000000ll);
         check("kit body: momentum off, a finger 300 px past the top still springs home to 0", ui_body_drawn(&b) == 0 && !ui_body_going(&b));
         ui_kit.scroll_off = 0;
@@ -150850,7 +150864,7 @@ static void check_kit_body(void)
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_track(&b, -300ll << UI_Q, 0);
         drawn = ui_body_drawn(&b);
-        ui_body_let_go(&b, 0, 0);
+        ui_body_let_go(&b, 0, 0, 100);
         ui_body_step(&b, 2000000000ll);
         check("kit body: a finger 300 px past the top is drawn in the band (above the rest, nearer than 300) and springs to rest at 0",
               drawn < 0 && drawn > -(300ll << UI_Q) && ui_body_drawn(&b) == 0 && !ui_body_going(&b));

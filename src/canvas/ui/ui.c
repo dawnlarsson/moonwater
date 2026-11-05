@@ -6114,6 +6114,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_q), momentum off makes a release's coast 0
         and an OS momentum delta move nothing (ui_body_let_go, ui_body_driven: the body settles where it is, and a pull past an end still
         springs home), and the rubber band off holds the position inside the ends as it moves (ui_body_pin, ui_body_clamp).
+        A release's speed is capped at ui_throw_most(scale) (Android's 8000 dp a second), and floored at ui_throws, at the scale.
         The thumb's own drag and a reveal are not turned: they move the body to where the hand or the view puts it.
 */
 #define BODY_CARRY (UI_ONE * 7 / 10)         // the coast's first speed, of the lift's (fit 0.70; the free-coast rows hold to 35 percent of the travel)
@@ -6346,15 +6347,17 @@ static void ui_body_settle(struct ui_body address_to b)
                 b->state = BODY_IDLE;
 }
 
-// a finger lets go at a speed (units a second, positive toward the far end): a speed under BODY_STILL throws nothing
-static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at)
+// a finger lets go at a speed (units a second, positive toward the far end) on a screen at the scale: a speed under BODY_STILL throws
+// nothing, and one over the cap (ui_throw_most) is thrown at the cap
+static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at, int scale)
 {
-        b64 far;
+        b64 far, most = (b64)ui_throw_most(scale) * UI_ONE;
         b32 edge;
 
         ui_body_step(b, at);
         if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS)
                 speed = 0;
+        speed = speed > most ? most : speed < -most ? -most : speed;
         far = ui_body_far(b);
         edge = (b->raw <= 0 && speed < 0) || (far && b->raw >= far && speed > 0); // a throw out of the content, past the end it is at
         b->at = at;
@@ -6758,7 +6761,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         if (s->body.state != BODY_TRACK)
                 return;
         ui_scroll_extent(s);
-        ui_body_let_go(&s->body, thrown ? (b64)speed * UI_ONE : 0, ui_kit_time());
+        ui_body_let_go(&s->body, thrown ? (b64)speed * UI_ONE : 0, ui_kit_time(), s->scale);
         s->precise = 0;
         ui_scroll_show(s);
 }
