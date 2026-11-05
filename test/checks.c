@@ -135969,8 +135969,8 @@ static unsigned int glass_lift_luma(unsigned int pixel)
 
 /*
         A glass window's look over a flat wallpaper, a dark one and a light one, on each theme. The glass is lifted from
-        what is behind it (a dark glass lighter over the dark wallpaper and darker over the light one, by COMPOSITOR_GLASS_LIFT toward
-        mid grey; a light glass light over both, toward a near white), its ink stands out UI_READABLE from the composed pixel, and its corners and line are a normal window's:
+        what is behind it (lighter over the dark wallpaper, darker over the light one, by COMPOSITOR_GLASS_LIFT toward
+        mid grey), its ink stands out UI_READABLE from the composed pixel, and its corners and line are a normal window's:
         the corner pixel is the wallpaper's and the edge pixel is the window's line. A window that is not glass is the
         control: the same geometry, its own colour inside, and the same corners and line.
 */
@@ -136022,9 +136022,8 @@ static void check_glass_lift(void)
                                 scenes++;
                                 if (glassy)
                                 {
-                                        // Dark glass: lighter over the dark wallpaper, darker over the light one, a lift either way. Light glass (the light
-                                        // theme's) is light over both, never dimmer than COMPOSITOR_GLASS_LIGHTEST, a menu over a light window is no grey.
-                                        lifted += theme == UI_THEME_LIGHT ? glass_lift_luma(centre) >= 0xdcu : at == 0 ? lift >= 16 : -lift >= 16;
+                                        // Over the dark wallpaper the glass is lighter, over the light one darker: a lift either way.
+                                        lifted += at == 0 ? lift >= 16 : -lift >= 16;
                                         inked += ui_contrast(ink, centre) >= UI_READABLE && ui_contrast(quiet, centre) >= UI_READABLE;
                                         string_format(log, "  glass lift: theme %p, wallpaper %p: glass %p, lift %p%s, ink contrast %p hundredths\n",
                                                       (positive)theme, (positive)glass_lift_luma(wall), (positive)glass_lift_luma(centre),
@@ -150118,6 +150117,60 @@ static fn check_wheel_stream(void)
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
 }
 
+// A stream's end (no notch for UI_HAND_GAP_NS): the hand lets go and the region throws on the stream's speed, as a touch flick does. A
+// stream of 8 px notches at 8, 16 and 50 ms apart is 1000, 500 and 160 px a second; each one's coast is that times half a second
+// (UI_FLING_TAU_NS), so 500, 250 and 80 px at most, never hundreds of rows. The coast moves on from the last notch with no jump: the
+// first frame after the release moves less than the speed for its own time, and nothing goes back. A stream with a 50 ms gap is
+// released by the gap and taken again by the next notch: the region still moves on, and the total is the notches' plus the coast.
+static fn check_stream_fling(void)
+{
+        static const long gaps[] = {8000, 16000, 50000};
+        static const int expect_px[] = {500, 250, 80};
+
+        for (int g = 0; g < 3; g++)
+        {
+                struct precise_region p;
+                long us = 100000, next = 100000, last_us = 100000, rest_px = 0, first_jump = 0, last_notch_at = -1;
+                long long before_stop = 0, prev_frame;
+                int notches = 0, back = 0, released = 0, after = 0, first_ok = 1;
+
+                precise_setup(&p, 100000, 50000);
+                // Notches and frames on one clock: forty notches a gap apart from 100 ms, each frame 16.7 ms, the frames going on
+                // three seconds after the last notch, so the release, the coast and the gap's restart are all in it.
+                for (; us < 100000 + 40 * gaps[g] + 3000000; us += 16667)
+                {
+                        while (notches < 40 && next <= us)
+                        {
+                                precise_turn(&p, next, -(int)COMPOSITOR_STREAM_V); // 8 px, down the region
+                                last_us = next, last_notch_at = next, before_stop = p.s.scroll;
+                                next += gaps[g];
+                                notches++;
+                        }
+                        prev_frame = p.s.scroll;
+                        precise_frames(&p, us, us);
+                        if (p.s.scroll < prev_frame)
+                                back++;
+                        if (last_notch_at >= 0 && us > last_us)
+                        {
+                                if (released && !after)
+                                        first_jump = (long)(p.s.scroll - prev_frame), after = 1; // the frame after the release
+                                if (!released && !p.s.hand)
+                                        released = 1;
+                        }
+                }
+                rest_px = (long)(p.s.scroll - before_stop);
+                // The frame after the release moves no more than a frame's worth of the coast (a fall from its speed).
+                if (first_jump > 40 || first_jump < 0)
+                        first_ok = 0;
+                string_format(log, "  stream fling: notches %p ms apart: the coast after the last is %b px (at most %p px), the first frame %b px, %p frames back\n",
+                              (positive)(gaps[g] / 1000), (bipolar)rest_px, (positive)expect_px[g], (bipolar)first_jump, (positive)back);
+                // 50 ms apart is 160 px a second: under the throw's floor (300 dp/s), so no coast is thrown and the region rests there.
+                check("stream fling: a stream's end throws a coast of at most half a second's speed, and no more than that",
+                      rest_px >= 0 && rest_px <= expect_px[g] + 4 && (g == 2 || rest_px >= expect_px[g] / 3));
+                check("stream fling: the coast starts from the last notch with no jump, and the region does not go back on the way", first_ok && back == 0);
+        }
+}
+
 // The readout (moonwater debug, window_wheel_report): the turns in the last five seconds of an input, how many were a stream's, the
 // most in a second, and the gaps between them. A turn ten seconds old is none; a ring that wrapped counts its last 1024; a turn stamped
 // after now is none.
@@ -155788,9 +155841,10 @@ static fn check_glass_pieces(string_address regular)
 #define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
         check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
               GLASS_AT(2, launcher.height - 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, launcher.height - 2) == 0);
-        check("glass: the launcher's field has no background of its own, for now: the glass shows through at its top, its edges and its foot",
-              GLASS_AT(LAUNCHER_WIDTH / 2, 0) == 0 && GLASS_AT(0, 0) == 0 && GLASS_AT(LAUNCHER_WIDTH - 1, 0) == 0 &&
-                  GLASS_AT(LAUNCHER_WIDTH - 12, pad + UI_TARGET / 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 12, pad + UI_TARGET - 1) == 0);
+        check("glass: the launcher's field runs to the panel's top and both edges (it melts into the panel: no gap above it, none left of it)",
+              GLASS_AT(LAUNCHER_WIDTH / 2, 0) > 0 && GLASS_AT(0, 0) > 0 && GLASS_AT(LAUNCHER_WIDTH - 1, 0) > 0);
+        check("glass: the launcher's field is a lit well over the glass, not clear, to where the list begins", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0 &&
+              GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET - 1) > 0);
 #undef GLASS_AT
 
         // A menu: glass with no face and no outline, its hot choice lit and the others not.
@@ -161528,6 +161582,7 @@ b32 main()
         check_stream_notch();
         check_trackpad_speed();
         check_wheel_report();
+        check_stream_fling();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
