@@ -135969,8 +135969,8 @@ static unsigned int glass_lift_luma(unsigned int pixel)
 
 /*
         A glass window's look over a flat wallpaper, a dark one and a light one, on each theme. The glass is lifted from
-        what is behind it (lighter over the dark wallpaper, darker over the light one, by COMPOSITOR_GLASS_LIFT toward
-        mid grey), its ink stands out UI_READABLE from the composed pixel, and its corners and line are a normal window's:
+        what is behind it (a dark glass lighter over the dark wallpaper and darker over the light one, by COMPOSITOR_GLASS_LIFT toward
+        mid grey; a light glass light over both, toward a near white), its ink stands out UI_READABLE from the composed pixel, and its corners and line are a normal window's:
         the corner pixel is the wallpaper's and the edge pixel is the window's line. A window that is not glass is the
         control: the same geometry, its own colour inside, and the same corners and line.
 */
@@ -136022,8 +136022,9 @@ static void check_glass_lift(void)
                                 scenes++;
                                 if (glassy)
                                 {
-                                        // Over the dark wallpaper the glass is lighter, over the light one darker: a lift either way.
-                                        lifted += at == 0 ? lift >= 16 : -lift >= 16;
+                                        // Dark glass: lighter over the dark wallpaper, darker over the light one, a lift either way. Light glass (the light
+                                        // theme's) is light over both, never dimmer than COMPOSITOR_GLASS_LIGHTEST, a menu over a light window is no grey.
+                                        lifted += theme == UI_THEME_LIGHT ? glass_lift_luma(centre) >= 0xdcu : at == 0 ? lift >= 16 : -lift >= 16;
                                         inked += ui_contrast(ink, centre) >= UI_READABLE && ui_contrast(quiet, centre) >= UI_READABLE;
                                         string_format(log, "  glass lift: theme %p, wallpaper %p: glass %p, lift %p%s, ink contrast %p hundredths\n",
                                                       (positive)theme, (positive)glass_lift_luma(wall), (positive)glass_lift_luma(centre),
@@ -155897,10 +155898,9 @@ static fn check_glass_pieces(string_address regular)
 #define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
         check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
               GLASS_AT(2, launcher.height - 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, launcher.height - 2) == 0);
-        check("glass: the launcher's field runs to the panel's top and both edges (it melts into the panel: no gap above it, none left of it)",
-              GLASS_AT(LAUNCHER_WIDTH / 2, 0) > 0 && GLASS_AT(0, 0) > 0 && GLASS_AT(LAUNCHER_WIDTH - 1, 0) > 0);
-        check("glass: the launcher's field is a lit well over the glass, not clear, to where the list begins", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0 &&
-              GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET - 1) > 0);
+        check("glass: the launcher's field has no background of its own, for now: the glass shows through at its top, its edges and its foot",
+              GLASS_AT(LAUNCHER_WIDTH / 2, 0) == 0 && GLASS_AT(0, 0) == 0 && GLASS_AT(LAUNCHER_WIDTH - 1, 0) == 0 &&
+                  GLASS_AT(LAUNCHER_WIDTH - 12, pad + UI_TARGET / 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 12, pad + UI_TARGET - 1) == 0);
 #undef GLASS_AT
 
         // A menu: glass with no face and no outline, its hot choice lit and the others not.
