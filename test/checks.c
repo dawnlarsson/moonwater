@@ -150712,6 +150712,86 @@ static fn check_kit_wheel_burst(void)
 }
 
 /*
+        The scroll body (ui_body) against a Mac's trackpad scroll, recorded in the memory note scroll-input-redo-2026-11-05: the
+        scroll view's offset with each event. Rows: a finger moves it one for one (touch T00's deltas, 178 px); a release
+        coasts from the lift (touch T06: 4148 px, 4903 px a second) within 35 percent of the travel at each 50 ms; the coast
+        that starts at the top and springs home (touch T02: pushed 22 px past, back to rest 0.55 s after the lift) within 3 px
+        at each 50 ms; an OS momentum delta moves the view's share of it (0.22); the rubber band draws less past the end than
+        it reaches for. The recording is refitted when it grows: the constants live in ui.c, the series here.
+*/
+static void check_kit_body(void)
+{
+        static const long finger_00[] = { 1, 8, 25, 33, 30, 23, 20, 13, 10, 9, 6 };
+        static const long coast_06[] = { 4026, 3924, 3839, 3770, 3715, 3672, 3638, 3617 };
+        static const long dip_02[] = { -21, -21, -17, -12, -8, -5, -4, -2, -2, -1, 0, 0 };
+        struct ui_body b;
+        b64 now, drawn, reach_small, reach_big, far_small;
+        long worst_coast, worst_dip, dip_low;
+        b32 finger_ok, coast_ok, dip_ok, driven_ok, rubber_ok;
+        int k;
+
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
+        for (k = 0; k < 11; k++)
+                ui_body_track(&b, (b64)finger_00[k] << UI_Q, (b64)(k + 1) * 8000000ll);
+        drawn = ui_body_drawn(&b) >> UI_Q;
+        finger_ok = drawn == 178;
+        check("kit body: a finger moves the position one for one: touch T00's deltas end at the recorded 178 px", finger_ok);
+
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 4148ll << UI_Q, 0);
+        ui_body_let_go(&b, -4903ll << UI_Q, 0);
+        worst_coast = 0;
+        coast_ok = 1;
+        for (k = 0; k < 8; k++)
+        {
+                long at, err, travel;
+
+                now = (b64)(k + 1) * 50000000ll;
+                ui_body_step(&b, now);
+                at = (long)(ui_body_drawn(&b) >> UI_Q);
+                err = at > coast_06[k] ? at - coast_06[k] : coast_06[k] - at;
+                travel = 4148 - coast_06[k];
+                if (err * 100 > travel * 35)
+                        coast_ok = 0;
+                worst_coast = err * 100 / travel > worst_coast ? err * 100 / travel : worst_coast;
+        }
+        string_format(log, "  kit body: touch T06's coast, worst error %p percent of the travel at 50 ms steps\n", (positive)worst_coast);
+        check("kit body: a release's coast follows touch T06 within 35 percent of the travel at each 50 ms", coast_ok);
+
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
+        ui_body_let_go(&b, -914ll << UI_Q, 0);
+        worst_dip = 0;
+        dip_low = 0;
+        dip_ok = 1;
+        for (k = 0; k < 12; k++)
+        {
+                long at, err;
+
+                now = (b64)(k + 1) * 50000000ll;
+                ui_body_step(&b, now);
+                at = (long)(ui_body_drawn(&b) >> UI_Q);
+                err = at > dip_02[k] ? at - dip_02[k] : dip_02[k] - at;
+                if (err > 3)
+                        dip_ok = 0;
+                worst_dip = err > worst_dip ? err : worst_dip;
+                dip_low = at < dip_low ? at : dip_low;
+        }
+        string_format(log, "  kit body: touch T02's top dip: lowest %b px (recorded -22), worst error %p px\n", (bipolar)dip_low, (positive)worst_dip);
+        check("kit body: a coast into the top is pushed past it, drawn as the rubber band, and springs home within 3 px of the recorded dip", dip_ok && dip_low < -15);
+
+        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
+        ui_body_driven(&b, 1000ll << UI_Q, 0);
+        drawn = ui_body_drawn(&b) >> UI_Q;
+        driven_ok = drawn >= 319 && drawn <= 321;
+        check("kit body: an OS momentum delta of 1000 moves the view 220 (the 0.22 the view shows)", driven_ok);
+
+        reach_small = ui_body_rubber(&b, 50ll << UI_Q);
+        reach_big = ui_body_rubber(&b, 5000ll << UI_Q);
+        far_small = reach_big >> UI_Q;
+        rubber_ok = reach_small < reach_big && far_small < 772 && far_small > 0;
+        check("kit body: the rubber band draws more for a longer pull, and never more than the view", rubber_ok);
+}
+
+/*
         The kit's row of buttons (ui_buttons), which a window's foot is made of: the buttons at the right of a row, the first
         leftmost; an action that says what it does takes the kit's press again to confirm, from the keys and from the pointer, and a
         held key's repeats are no press; the keys are one focus along the row that Shift-Tab gives it and the ends and Up give back;
@@ -161831,6 +161911,7 @@ b32 main()
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
+        check_kit_body();
         check_terminal_wheel_curve();
         check_kit_turn();
         check_kit_tab_ripple();

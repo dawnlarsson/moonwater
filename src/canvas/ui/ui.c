@@ -6093,6 +6093,206 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 }
 
 /*
+        The scroll body: the one place a position moves under a finger, under a trackpad's momentum or under a wheel, and
+        springs home past an end. The units are the caller's (device pixels, with the view and the content in the same
+        ones), the positions are Q30. Every constant is fitted to a Mac's trackpad scroll, recorded as the scroll view's
+        offset with each event (memory note scroll-input-redo-2026-11-05; refit when the recording grows). A finger moves
+        the position one for one and holds it at the ends. A release's coast starts at BODY_CARRY of the lift's speed and
+        falls by e in BODY_TAU_NS. A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
+        BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
+        home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
+        BODY_VIEW_FACTOR of each, the share the view shows.
+*/
+#define BODY_CARRY (UI_ONE * 7 / 10)         // the coast's first speed, of the lift's (fit 0.70; the free-coast rows hold to 35 percent of the travel)
+#define BODY_TAU_NS 260000000ll              // a coast's speed falls by e in this long (fit 0.26 s; the OS's own momentum stream falls in 0.29 s)
+#define BODY_EDGE_CARRY (UI_ONE * 65 / 10)   // a coast that starts at an end or reaches one: the first speed is the lift's times this (fit 6.5)
+#define BODY_TAU_EDGE_NS 10000000ll          // and past an end its speed falls by e in this long: a brief push (fit 10 ms)
+#define BODY_RUBBER_C (UI_ONE * 36 / 100)    // the rubber band's stiffness c (fit 0.36 to the top dip, for a view of 772 px: it scales with the view)
+#define BODY_SPRING_OMEGA 11                 // the spring home is critically damped at this rate, per second (fit 11: 0.5 px rms on the dip)
+#define BODY_STILL (UI_ONE * 20)             // a coast under 20 units a second has stopped
+#define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
+#define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
+#define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
+
+#define BODY_IDLE 0     // nothing moves it
+#define BODY_TRACK 1    // a finger holds it: one for one, held at the ends
+#define BODY_DRIVEN 2   // the OS's momentum deltas move it: the view's share of each, nothing held
+#define BODY_COAST 3    // a release's speed carries it, falling
+#define BODY_SPRING 4   // it is past an end and springs home
+
+struct ui_body
+{
+        b64 view, content;   // the view's extent and the content's, units (Q30); a content that does not reach past the view has no far end
+        b64 raw;             // where the motion has carried the position: unbounded past an end, drawn as the rubber band there
+        b64 vel;             // the coast's speed, units a second
+        b64 shown, rest;     // the spring: the position drawn, and the position it takes it home to
+        b64 speed;           // the spring's speed, units a second
+        int state;           // BODY_IDLE and the rest
+        b64 at;              // when the body was last stepped, ns
+};
+
+static b64 ui_body_far(const struct ui_body address_to b)
+{
+        return b->content > b->view ? b->content - b->view : 0;
+}
+
+// a time in ns as Q30 seconds: a step (a millisecond) or a time constant (under a second) is far inside 64 bits
+static b64 ui_body_seconds(b64 ns)
+{
+        return ns * UI_ONE / 1000000000;
+}
+
+// e to the minus q, Q30, to the fourth power: a step is a few milliseconds over a time constant of ten
+static b64 ui_body_decay(b64 q)
+{
+        b64 q2 = ui_qmul(q, q), q3 = ui_qmul(q2, q), q4 = ui_qmul(q3, q);
+
+        return UI_ONE - q + q2 / 2 - q3 / 6 + q4 / 24;
+}
+
+// the drawn share of a distance x past an end, the rubber band: (1 - 1/(x c / d + 1)) d
+static b64 ui_body_rubber(const struct ui_body address_to b, b64 x)
+{
+        b64 r;
+
+        if (x <= 0)
+                return 0;
+        r = ui_qdiv(ui_qmul(x, BODY_RUBBER_C), b->view);
+        return ui_qmul(UI_ONE - ui_qdiv(UI_ONE, r + UI_ONE), b->view);
+}
+
+// where the body is drawn: its position, or the rubber band past an end, or the spring's position while it springs
+static b64 ui_body_drawn(const struct ui_body address_to b)
+{
+        b64 far = ui_body_far(b);
+
+        if (b->state == BODY_SPRING)
+                return b->shown;
+        if (b->raw < 0)
+                return -ui_body_rubber(b, -b->raw);
+        if (far && b->raw > far)
+                return far + ui_body_rubber(b, b->raw - far);
+        return b->raw;
+}
+
+static b32 ui_body_outside(const struct ui_body address_to b)
+{
+        b64 far = ui_body_far(b);
+
+        return b->raw < 0 || (far && b->raw > far);
+}
+
+// the body at rest at a position, stepped from a time
+static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 place, b64 at)
+{
+        b->view = view > 0 ? view : UI_ONE;
+        b->content = content;
+        b->raw = place;
+        b->vel = 0;
+        b->shown = place;
+        b->rest = 0;
+        b->speed = 0;
+        b->state = BODY_IDLE;
+        b->at = at;
+}
+
+// a finger or a pad's motion moves the position by delta (units, Q30): one for one, held at the ends
+static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
+{
+        b64 far = ui_body_far(b);
+
+        b->raw += delta;
+        if (b->raw < 0)
+                b->raw = 0;
+        if (far && b->raw > far)
+                b->raw = far;
+        b->state = BODY_TRACK;
+        b->vel = 0;
+        b->at = at;
+}
+
+// an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end
+static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
+{
+        b->raw += ui_qmul(delta, BODY_VIEW_FACTOR);
+        b->state = BODY_DRIVEN;
+        b->vel = 0;
+        b->at = at;
+}
+
+// the body is no longer held or carried: a position outside an end springs home, one inside stops where it is
+static void ui_body_settle(struct ui_body address_to b)
+{
+        b64 far = ui_body_far(b);
+
+        b->vel = 0;
+        if (ui_body_outside(b))
+        {
+                b->shown = ui_body_drawn(b);
+                b->rest = b->raw < 0 ? 0 : far;
+                b->speed = 0;
+                b->state = BODY_SPRING;
+        }
+        else
+                b->state = BODY_IDLE;
+}
+
+// a finger lets go at a speed (units a second, positive toward the far end): a speed under BODY_STILL throws nothing
+static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at)
+{
+        b64 far = ui_body_far(b);
+        b32 edge = b->raw <= 0 || (far && b->raw >= far);
+
+        b->at = at;
+        if (speed < BODY_STILL && speed > -BODY_STILL)
+        {
+                ui_body_settle(b);
+                return;
+        }
+        b->vel = ui_qmul(speed, edge ? BODY_EDGE_CARRY : BODY_CARRY);
+        b->state = BODY_COAST;
+}
+
+// steps the body to a time (ns): a coast falls and carries it, a spring draws it home. Returns whether it still moves.
+static b32 ui_body_step(struct ui_body address_to b, b64 at)
+{
+        b64 left = at - b->at;
+
+        b->at = at;
+        while (left > 0)
+        {
+                b64 ns = left > BODY_STEP_NS ? BODY_STEP_NS : left, dt = ui_body_seconds(ns);
+
+                left -= ns;
+                if (b->state == BODY_COAST)
+                {
+                        b64 tau = ui_body_outside(b) ? BODY_TAU_EDGE_NS : BODY_TAU_NS;
+
+                        b->raw += ui_qmul(b->vel, dt);
+                        b->vel = ui_qmul(b->vel, ui_body_decay(ui_qdiv(dt, ui_body_seconds(tau))));
+                        if (b->vel < BODY_STILL && b->vel > -BODY_STILL)
+                                ui_body_settle(b);
+                }
+                else if (b->state == BODY_SPRING)
+                {
+                        b64 a = -(b64)(BODY_SPRING_OMEGA * BODY_SPRING_OMEGA) * (b->shown - b->rest) - 2 * (b64)BODY_SPRING_OMEGA * b->speed;
+
+                        b->speed += ui_qmul(a, dt);
+                        b->shown += ui_qmul(b->speed, dt);
+                        if (b->shown - b->rest < BODY_REST && b->rest - b->shown < BODY_REST && b->speed < BODY_REST && b->speed > -BODY_REST)
+                        {
+                                b->shown = b->rest;
+                                b->raw = b->rest;
+                                b->state = BODY_IDLE;
+                        }
+                }
+                else
+                        break;
+        }
+        return b->state == BODY_COAST || b->state == BODY_SPRING;
+}
+
+/*
         The scrollbar, every scrolling region's (ui.css's ::-webkit-scrollbar): a
         track 10 wide at the region's right edge, a clear 3 round a pill thumb (4
         wide), the ink at .18 and .30 while hovered or held, shown whenever what
