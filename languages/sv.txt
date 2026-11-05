@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	Ljudkortet kunde inte öppnas (fel %1$d)
 settings_issue_audio_rate	d45e	Ljudkortet använde %2$d Hz, inte de %1$d Hz som begärdes
 settings_issue_gpu_cooling	63ed	Grafikkortet svalnar efter hängningar (%1$d i rad)
 settings_issue_gpu_family	6311	Den här GPU-familjen stöds inte (familj %1$d)
+settings_issue_gpu_fault	28ad	Grafikkortet fick fel vid läsning av sitt minne: %1$s
+settings_issue_gpu_hung	8da4	Grafikkortet hängde sig två gånger på en minut: processorn ritar skrivbordet till slutet av den här sessionen
 settings_issue_gpu_lists	1433	Listorna är av: grafikkortet sammanställer inte på riktigt
 settings_issue_gpu_lost	28ed	Appar tappade %1$d av %2$d bildrutor till processorn
 settings_issue_gpu_map	f52f	Kärnan vägrade mappa fönsterbilderna för grafikkortet (steg %1$d, fel %2$d)

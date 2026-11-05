@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	La tarjeta de sonido no se pudo abrir (error %1$d
 settings_issue_audio_rate	d45e	La tarjeta de sonido usó %2$d Hz, no los %1$d Hz pedidos
 settings_issue_gpu_cooling	63ed	La tarjeta se está enfriando tras bloqueos (%1$d seguidos)
 settings_issue_gpu_family	6311	Esta familia de GPU no es compatible (familia %1$d)
+settings_issue_gpu_fault	28ad	La tarjeta falló al leer su memoria: %1$s
+settings_issue_gpu_hung	8da4	La tarjeta se bloqueó dos veces en un minuto: el procesador dibuja el escritorio hasta el final de esta sesión
 settings_issue_gpu_lists	1433	Las listas están desactivadas: la tarjeta no compone de verdad
 settings_issue_gpu_lost	28ed	Las apps perdieron %1$d de %2$d fotogramas en favor del procesador
 settings_issue_gpu_map	f52f	El kernel rechazó mapear las imágenes de las ventanas para la tarjeta (paso %1$d, error %2$d)

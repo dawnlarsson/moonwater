@@ -837,8 +837,14 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va)
                 return 0;
-        return gpu_copy(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch,
-                        (unsigned int)w, (unsigned int)h);
+        if (gpu_copy(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, (unsigned int)w, (unsigned int)h))
+                return 1;
+        // A copy that hung is the card's hang as a present's is (compositor_gpu_job_failed): without it every damage copy would wait two seconds on the card.
+#ifdef MOONWATER_GPU_C
+        if (gpu_last_error == 62 || gpu_last_error == 5)
+                compositor_gpu_job_failed();
+#endif
+        return 0;
 }
 
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)

@@ -221819,7 +221819,7 @@ static b32 gpu_route_rows(void)
         }
         // Let go of the maps: their pins come off, and the row's count is back to nothing.
         while (gpu_map_count)
-                gpu_drop(0);
+                gpu_drop(0, GPU_GONE_RECOVER);
         check("gpu route: the pins are let go of when the maps are", gpu_pin_sum == 0);
         gpu_fake_userptr = 0, gpu_userptr_gone = 0, gpu_userptr_off = 0;
         gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
@@ -221890,6 +221890,7 @@ static void gpu_resume_rows(void)
 
 static void gpu_loss_rows(void)
 {
+        unsigned int recovered_before = gpu_recovered; // the restarts the earlier rows made (a hang's restart is one) are not this row's
         positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, d_at = base + 8192;
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0}, started;
@@ -221899,7 +221900,7 @@ static void gpu_loss_rows(void)
         gpu_fake_cancel = 1;
         check("gpu loss: a submit answered ECANCELED is a lost card, and the scene is not drawn", !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_lost);
         gpu_fake_cancel = 0;
-        check("gpu loss: the card starts again (gpu_recover) and counts it", gpu_recover() && gpu_recovered == 1 && !gpu_lost);
+        check("gpu loss: the card starts again (gpu_recover) and counts it", gpu_recover() && gpu_recovered == recovered_before + 1 && !gpu_lost);
         check("gpu loss: the card draws its self-test right after the recovery", gpu_test_hash() == GPU_TEST_HASH);
         check("gpu loss: the maps are let go with the card", gpu_map_count == 0 && gpu.imports == 0);
         // A node that is absent (every node: ENOENT) is no card, and the start says so at the node; once it is there, the card starts.
@@ -221911,9 +221912,134 @@ static void gpu_loss_rows(void)
         check("gpu loss: the node is there again, and the card starts", gpu_start(1 << 20) && gpu.fd >= 0);
 }
 
+/*
+        The card's map records, its fault and its hang, with no card: the table is set by hand (fake handles, the card's fd absent), so each row is the
+        compositor's own answer. A record handed an address that a written map would let go of is refused (9) and kept until the job has run; a
+        map let go of is named by why and how long ago; a fault's address is named by what it was in; the kernel's log lines are read as the fault is
+        read; an import is not unmapped while a job may read it (a rotated screen); a hang cools the card, and a second within a minute gives it up.
+*/
+static b32 gpu_text_has(const char *text, const char *word)
+{
+        return string_find((string_address)text, (string_address)word) != 0;
+}
+
+static void gpu_fault_rows(void)
+{
+        static struct windows board;
+        struct windows_issue want[WINDOWS_GPU_CODES];
+        unsigned int count;
+        positive value = 0;
+        int saved_card = compositor.card, saved_gpu = compositor_gpu;
+        unsigned int *saved_scanout = compositor.scanout;
+        unsigned long saved_bytes = compositor.scanout_bytes;
+
+        gpu.fd = -1, gpu.pending = 0, gpu_fake_busy = 0, gpu_tick = 100, gpu_map_count = 0, gpu.imports = 0, gpu_gone_at = 0;
+        gpu_map_next = GPU_VA_MAPS;
+
+        // 1. A written map over a read map whose address a record holds: refused (9), the read map kept; once the job has run it is let go of (overlap).
+        gpu_maps[0].from = 0x10000000ull, gpu_maps[0].to = 0x10004000ull, gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = 0x4000;
+        gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 0, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0, gpu_maps[0].offset = 0;
+        gpu_map_count = 1;
+        check("gpu hazard: a read map's address is handed to a record", gpu_va_bytes((const void *)0x10000100ull, 4) == GPU_VA_MAPS + 0x100 && gpu_maps[0].handed);
+        check("gpu hazard: a written map over a read map a record holds is refused (9), and the read map is kept",
+              !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) == 9 && gpu_map_count == 1 && gpu_maps[0].to == 0x10004000ull &&
+              gpu_maps[0].va == GPU_VA_MAPS);
+        gpu_handed_clear();
+        check("gpu hazard: once no record waits for a job, the same written map drops the read map (overlap), not the record's",
+              !gpu_map_written((const void *)0x10002000ull, 0x1000) && gpu_map_count == 0 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_OVERLAP &&
+              gpu_gone[(gpu_gone_at - 1) % GPU_GONE].va == GPU_VA_MAPS);
+
+        // 2. The fault's address is named: a map let go of (its reason and ticks), a held map (handle, span, use), a forgotten one, an import, none.
+        gpu_fault_say(GPU_VA_MAPS + 0x180);
+        check("gpu fault: an address in a map let go of is named by its reason and the ticks since",
+              gpu_text_has(gpu_fault, "map handle 7 dropped 0 ticks ago by overlap with a written map"));
+        gpu_maps[0].from = 0x20000000ull, gpu_maps[0].to = 0x20002000ull, gpu_maps[0].va = GPU_VA_MAPS + 0x100000ull, gpu_maps[0].bytes = 0x2000;
+        gpu_maps[0].handle = 9, gpu_maps[0].used = gpu_tick - 3, gpu_maps[0].written = 1, gpu_maps[0].dma = 1;
+        gpu_map_count = 1;
+        gpu_fault_say(GPU_VA_MAPS + 0x100010ull);
+        check("gpu fault: an address in a held map is named with its handle, route, access, span and use",
+              gpu_text_has(gpu_fault, "held map, handle 9, dma-buf, written, from 0x20000000 to 0x20002000, used 3 ticks ago"));
+        gpu_maps[0].from = gpu_maps[0].to = 0;
+        gpu_fault_say(GPU_VA_MAPS + 0x100010ull);
+        check("gpu fault: a map forgotten (its pages let go of) and still mapped is named as forgotten", gpu_text_has(gpu_fault, "forgotten, used 3 ticks ago"));
+        gpu_map_count = 0;
+        gpu.imports = 1, gpu.imported[0] = 5, gpu.imported_va[0] = 0x40000000ull, gpu.imported_bytes[0] = 8192, gpu.imported_dead[0] = 0;
+        gpu_fault_say(0x40000010ull);
+        check("gpu fault: an address in a held import is named with its handle", gpu_text_has(gpu_fault, "held import, handle 5, live"));
+        gpu.imports = 0;
+        gpu_fault_say(0x1234ull);
+        check("gpu fault: an address in no map the table made is named as none", gpu_text_has(gpu_fault, "in no map or import the table ever made"));
+
+        // 3. The kernel's log: a record's time, the address after its key (hexadecimal), the status words.
+        check("gpu fault: a kernel log record's time is its third field (microseconds)", gpu_kmsg_usec("6,1234,5000000,-;amdgpu: x") == 5000000);
+        check("gpu fault: the page fault's address is read after its key, in hexadecimal",
+              gpu_key_hex("amdgpu 0000:04:00.0: amdgpu:  in page starting at address 0x0000203fd75000 from client 0x1b", "in page starting at address 0x", &value) &&
+              value == 0x203fd75000ull);
+        check("gpu fault: a status word is read (zero included), and an absent key is not",
+              gpu_key_hex("PERMISSION_FAULTS: 0x3 MAPPING_ERROR: 0x0 RW: 0x0", "MAPPING_ERROR: 0x", &value) && value == 0 && !gpu_key_hex("nothing", "RW: 0x", &value));
+        gpu_job_began = clock_monotonic_nanoseconds(), gpu_fault[0] = 0, gpu_job_error = 62;
+        gpu_fault_note(true);
+        check("gpu fault: a hang with no page fault in the log since it was submitted says so, with its error",
+              gpu_text_has(gpu_fault, "the card's job ended with error 62: the kernel's log has no page fault since it was submitted"));
+
+        // 4. The scanout the card writes (headless): its address is a written map's, never a read map's (a write through a read map faults).
+        compositor.card = -1, compositor.scanout = (unsigned int *)0x10000000ull, compositor.scanout_bytes = 0x4000;
+        gpu_maps[0].from = 0x10000000ull, gpu_maps[0].to = 0x10004000ull, gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = 0x4000;
+        gpu_maps[0].written = 0, gpu_maps[0].handed = 0, gpu_maps[0].used = gpu_tick;
+        gpu_map_count = 1;
+        check("gpu hazard: the headless scanout under a read map has no card address (no write through the read map)", compositor_gpu_output() == 0);
+        gpu_map_count = 0;
+        compositor.card = saved_card, compositor.scanout = saved_scanout, compositor.scanout_bytes = saved_bytes;
+
+        // 5. A screen turned while the card is busy: the import of its buffer is not let go of (a job may still read it).
+        {
+                int screen[4] = {0, 0, 8, 8};
+
+                gpu.imports = 1, gpu.imported[0] = 5, gpu.imported_va[0] = 0x40000000ull, gpu.imported_bytes[0] = 8192, gpu.imported_dead[0] = 0;
+                compositor.card = 3, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.out = 0x50000000ull;
+                compositor_gpu_state.turn_va[0] = 0x40000000ull, compositor_gpu_state.turn_key[0] = 0;
+                compositor_turns[0].handle = 42;
+                gpu.pending = 77, gpu_fake_busy = 1;
+                check("gpu hazard: a turned screen does not let its import go while a job may still read it",
+                      !compositor_gpu_rotate(0, screen, 90, 0, 0, 8, 8) && gpu.imports == 1 && compositor_gpu_state.turn_va[0] == 0x40000000ull);
+                gpu.pending = 0, gpu_fake_busy = 0, gpu.imports = 0;
+                compositor_gpu_state.turn_va[0] = 0, compositor_gpu_state.turn_key[0] = 0, compositor_gpu_state.out = 0;
+                compositor.card = saved_card;
+        }
+
+        // 6. The circuit breaker: one hang cools the card (the processor draws) and marks it to start again with no maps; a second within a minute gives
+        // it up for the session, and the board says so.
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0;
+        compositor_gpu_state.hung_at = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_steps = 0;
+        gpu_last_error = 62;
+        compositor_gpu_job_failed();
+        check("hang: one hang cools the card for two seconds, and marks it to start again with no maps",
+              compositor_gpu_state.cool_until > clock_monotonic_nanoseconds() && compositor_gpu_state.restart_due && !compositor_gpu_state.dead &&
+              !compositor_gpu_state.hung_off);
+        check("hang: while it cools, a present is the processor's and the card is not tried", compositor_gpu_draw(0, 0) == COMPOSITOR_GPU_WHY_DEAD);
+        gpu_last_error = 62;
+        compositor_gpu_job_failed();
+        check("hang: a second hang within a minute gives the card up for the session", compositor_gpu_state.dead && compositor_gpu_state.hung_off &&
+              compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG && !compositor_gpu_state.restart_due);
+        check("hang: a present after it is the processor's for good", compositor_gpu_draw(0, 0) == COMPOSITOR_GPU_WHY_HANG);
+        memory_zero(&board, sizeof(board));
+        board.gpu_on = 1, board.gpu_state = WINDOWS_GPU_HUNG;
+        count = windows_gpu_wanted(&board, want, WINDOWS_GPU_CODES);
+        check("hang: the board says the card is off for the session", count && want[0].code == WINDOWS_ISSUE_GPU_HUNG);
+        memory_zero(&board, sizeof(board));
+        board.gpu_on = 1, board.gpu_state = WINDOWS_GPU_UP, board.gpu_faults = 1;
+        string_copy_bounded((string_address)board.gpu_fault, (string_address)"card faulted reading 0x203fd75000: a map let go of", sizeof(board.gpu_fault));
+        count = windows_gpu_wanted(&board, want, WINDOWS_GPU_CODES);
+        check("fault: the board carries the card's fault text", count && want[0].code == WINDOWS_ISSUE_GPU_FAULT && gpu_text_has(want[0].detail, "card faulted reading 0x203fd75000"));
+        compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
+        compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
+        compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        gpu_fault_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;
@@ -223365,52 +223491,42 @@ b32 main(void)
                         pic[0] = 0;
                         check("gpu pending: the new context runs a scene", gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && pic[0] == 0xff336699u);
                 }
-                // Three hangs end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings; the file /root/canvas.gpu is not
-                // there for this check, which reads as on): read again while on, it stays given up; turned on from off, the GPU composes again; a GPU that never
-                // started stays given up.
-                // A hang is the processor's present, and the next present tries the card again: the fake fence holds the job of the hanging present (its wait
-                // answers "still running", so gpu_run gives it up), and the job is cleared by the reset path gpu_idle takes for a wait that reports an error.
-                // Three hangs in a row cool the card down: the presents in the cool-down are the processor's, the card is tried again when it is over, and
-                // canvas gpu turned off and on ends a cool-down at once.
+                // A hang is the processor's present, and the card is given up for two seconds: the presents in them are the processor's, and when the cool-down
+                // is over the card is started again once with no maps (gpu_recover), and the next present draws. A second hang within a minute gives the card up
+                // for the session: the processor's presents from then on, and canvas gpu turned off and on does not bring it back (compositor_gpu_settings).
                 {
-                        int retried, cooling, after;
+                        unsigned int recovered = gpu_recovered;
+                        int cooling, drew;
 
-                        // one hang: the processor's present, then the card tried again at the next, and it draws
                         gpu_fake_busy = 1;
-                        check("gpu hang: a hang is the processor's present", !compositor_gpu_present(&f, 1) && compositor_gpu_state.failures == 1);
+                        check("gpu hang: a hang is the processor's present, and cools the card for two seconds to start again with no maps",
+                              !compositor_gpu_present(&f, 1) && compositor_gpu_state.cool_until > clock_monotonic_nanoseconds() && compositor_gpu_state.restart_due &&
+                              compositor_gpu_state.failures == 0 && !compositor_gpu_state.dead);
                         gpu_fake_busy = 0;
                         gpu.pending = 1ull << 40;
-                        gpu_idle(); // a new context: the card reset, and the hung job is over
-                        retried = compositor_gpu_present(&f, 1) == 1;
-                        check("gpu hang: the next present tries the card again, and draws", retried && compositor_gpu_state.failures == 0);
-                        // three in a row, none drawn between them: the third cools the card down
-                        for (int hang = 0; hang < 3; hang++)
-                        {
-                                gpu_fake_busy = 1;
-                                (void)compositor_gpu_present(&f, 1);
-                                gpu_fake_busy = 0;
-                                if (hang < 2)
-                                {
-                                        gpu.pending = 1ull << 40;
-                                        gpu_idle();
-                                }
-                        }
-                        cooling = compositor_gpu_state.cool_until != 0 && compositor_gpu_state.cool_steps == 1 && !compositor_gpu_present(&f, 1);
-                        check("gpu hang: three in a row cool the card down, and the present in it is the processor's", cooling);
+                        gpu_idle(); // the hung job is over (a new context: the card reset)
+                        cooling = !compositor_gpu_present(&f, 1);
+                        check("gpu hang: while it cools, the present is the processor's and the card is not started", cooling && gpu_recovered == recovered);
                         compositor_gpu_state.cool_until = 1; // the cool-down is over
                         for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
                                 ; // the last hung job is over (the wait is answered at once only once it is)
-                        after = compositor_gpu_present(&f, 1) == 1;
-                        check("gpu hang: the card is tried again when the cool-down is over, and draws", after);
-                        compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + 60000000000ull;
-                        check("gpu hang: a cool-down is refused while it lasts", compositor_gpu_present(&f, 1) == 0);
+                        drew = compositor_gpu_present(&f, 1) == 1;
+                        check("gpu hang: when the cool-down is over the card starts again once, with no maps, and draws", drew && gpu_recovered == recovered + 1 &&
+                              !compositor_gpu_state.restart_due);
+                        gpu_fake_busy = 1;
+                        check("gpu hang: a second hang within a minute gives the card up for the session", !compositor_gpu_present(&f, 1) && compositor_gpu_state.dead &&
+                              compositor_gpu_state.hung_off && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG);
+                        gpu_fake_busy = 0;
+                        gpu.pending = 1ull << 40;
+                        gpu_idle();
                         compositor_gpu = 0;
-                        compositor_gpu_settings();
-                        for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
-                                ;
-                        check("gpu hang: canvas gpu turned off and on ends the cool-down at once", compositor_gpu && compositor_gpu_state.cool_until == 0 &&
-                              compositor_gpu_state.cool_steps == 0 && compositor_gpu_present(&f, 1) == 1);
+                        compositor_gpu_settings(); // turned off and on again: the session's give-up stays
+                        check("gpu hang: turning canvas gpu off and on does not bring a card given up for the session back", compositor_gpu && compositor_gpu_state.dead &&
+                              !compositor_gpu_present(&f, 1));
+                        compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0, compositor_gpu_state.cool_until = 0;
+                        compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_steps = 0;
                 }
+
                 compositor_gpu = 1;
                 compositor_gpu_settings();
                 for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
@@ -223590,7 +223706,7 @@ b32 main(void)
                 memory_fill_u32((unsigned int address_to)pictures, (positive)WINS * SIDE * SIDE, 0xff3060a0u);
                 memory_fill_u32((unsigned int address_to)band, (positive)DW * 48, 0xff202020u);
                 while (gpu_map_count)
-                        gpu_drop(0);
+                        gpu_drop(0, GPU_GONE_RECOVER);
                 for (int k = 0; k < WINS; k++)
                 {
                         memory_zero(&desk[k], sizeof(desk[k]));
@@ -223616,7 +223732,7 @@ b32 main(void)
                         string_format(log, "  gpu desktop: %s, %p maps held, the scene's why %p\n", composed ? (string_address) "composed" : (string_address) "refused",
                                       (positive)gpu_map_count, (positive)compositor_gscene.why);
                 while (gpu_map_count)
-                        gpu_drop(0);
+                        gpu_drop(0, GPU_GONE_RECOVER);
         }
 
         // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
@@ -223636,7 +223752,7 @@ b32 main(void)
                 for (int way = 0; way < 5; way++)
                 {
                         while (gpu_map_count)
-                                gpu_drop(0);
+                                gpu_drop(0, GPU_GONE_RECOVER);
                         for (int k = 0; way && k < 10; k++)
                                 gpu_map((const void address_to)(windows + (long)k * (long)window_bytes), 4 * ((positive)WIDE * 1079 + 1920));
                         for (int t = 0; way == 2 && t < TABS; t++) // a tab's slice: from its left edge, every row of the band, its width
@@ -223688,7 +223804,7 @@ b32 main(void)
                               best[0] / 1000, middle[0] / 1000, best[1] / 1000, middle[1] / 1000, best[2] / 1000, middle[2] / 1000, best[3] / 1000, middle[3] / 1000,
                               best[4] / 1000, middle[4] / 1000);
                 while (gpu_map_count)
-                        gpu_drop(0);
+                        gpu_drop(0, GPU_GONE_RECOVER);
         }
         // The launcher at 150, 200 and 300 percent, in the 8K section's regions (its picture, its ops and its bins), after that section has run.
         {
@@ -223917,7 +224033,7 @@ b32 main(void)
                         }
                 }
                 while (gpu_map_count)
-                        gpu_drop(0);
+                        gpu_drop(0, GPU_GONE_RECOVER);
         }
         gpu_loss_rows();
         gpu_resume_rows();

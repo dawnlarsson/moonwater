@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	Nie udało się otworzyć karty dźwiękowej (bł
 settings_issue_audio_rate	d45e	Karta dźwiękowa użyła %2$d Hz, a nie żądanych %1$d Hz
 settings_issue_gpu_cooling	63ed	Karta chłodzi się po zawieszeniach (%1$d z rzędu)
 settings_issue_gpu_family	6311	Ta rodzina GPU nie jest obsługiwana (rodzina %1$d)
+settings_issue_gpu_fault	28ad	Karta wywołała błąd przy odczycie swojej pamięci: %1$s
+settings_issue_gpu_hung	8da4	Karta zawiesiła się dwa razy w ciągu minuty: procesor rysuje pulpit do końca tej sesji
 settings_issue_gpu_lists	1433	Listy są wyłączone: karta nie składa obrazu naprawdę
 settings_issue_gpu_lost	28ed	Aplikacje straciły %1$d z %2$d klatek na rzecz procesora
 settings_issue_gpu_map	f52f	Jądro odmówiło mapowania obrazów okien dla karty (krok %1$d, błąd %2$d)

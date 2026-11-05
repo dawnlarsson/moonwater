@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	Die Soundkarte konnte nicht geöffnet werden (Feh
 settings_issue_audio_rate	d45e	Die Soundkarte hat %2$d Hz verwendet, nicht die angeforderten %1$d Hz
 settings_issue_gpu_cooling	63ed	Die Grafikkarte kühlt nach Hängern ab (%1$d hintereinander)
 settings_issue_gpu_family	6311	Diese GPU-Familie wird nicht unterstützt (Familie %1$d)
+settings_issue_gpu_fault	28ad	Die Grafikkarte hat beim Lesen ihres Speichers einen Fehler gemeldet: %1$s
+settings_issue_gpu_hung	8da4	Die Grafikkarte hat sich innerhalb einer Minute zweimal aufgehängt: Der Prozessor zeichnet den Desktop bis zum Ende dieser Sitzung
 settings_issue_gpu_lists	1433	Listen sind aus: die Grafikkarte setzt nicht wirklich zusammen
 settings_issue_gpu_lost	28ed	Apps haben %1$d von %2$d Bildern an den Prozessor verloren
 settings_issue_gpu_map	f52f	Der Kernel hat das Abbilden der Fensterbilder für die Grafikkarte abgelehnt (Schritt %1$d, Fehler %2$d)

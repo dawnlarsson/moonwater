@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	The sound card could not be opened (error %1$d)
 settings_issue_audio_rate	d45e	The sound card took %2$d Hz, not the %1$d Hz asked for
 settings_issue_gpu_cooling	63ed	The card is cooling down after hangs (%1$d in a row)
 settings_issue_gpu_family	6311	This GPU family is not supported (family %1$d)
+settings_issue_gpu_fault	28ad	The card faulted reading its memory: %1$s
+settings_issue_gpu_hung	8da4	The card hung twice within a minute: the processor draws the desktop for the rest of this session
 settings_issue_gpu_lists	1433	Lists are off: the card is not composing in earnest
 settings_issue_gpu_lost	28ed	Apps lost %1$d of %2$d frames to the processor
 settings_issue_gpu_map	f52f	The kernel refused to map window pictures for the card (step %1$d, error %2$d)

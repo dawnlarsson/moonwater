@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	A placa de som não pôde ser aberta (erro %1$d)
 settings_issue_audio_rate	d45e	A placa de som usou %2$d Hz, e não os %1$d Hz pedidos
 settings_issue_gpu_cooling	63ed	A placa está esfriando depois de travamentos (%1$d seguidos)
 settings_issue_gpu_family	6311	Esta família de GPU não é suportada (família %1$d)
+settings_issue_gpu_fault	28ad	A placa falhou ao ler a sua memória: %1$s
+settings_issue_gpu_hung	8da4	A placa bloqueou-se duas vezes em um minuto: o processador desenha o ambiente de trabalho até ao fim desta sessão
 settings_issue_gpu_lists	1433	As listas estão desligadas: a placa não está compondo de fato
 settings_issue_gpu_lost	28ed	Os aplicativos perderam %1$d de %2$d quadros para o processador
 settings_issue_gpu_map	f52f	O kernel recusou mapear as imagens das janelas para a placa (passo %1$d, erro %2$d)

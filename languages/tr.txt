@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	Ses kartı açılamadı (hata %1$d)
 settings_issue_audio_rate	d45e	Ses kartı istenen %1$d Hz yerine %2$d Hz kullandı
 settings_issue_gpu_cooling	63ed	Kart, takılmalardan sonra soğuyor (art arda %1$d)
 settings_issue_gpu_family	6311	Bu GPU ailesi desteklenmiyor (aile %1$d)
+settings_issue_gpu_fault	28ad	Kart belleğini okurken hata verdi: %1$s
+settings_issue_gpu_hung	8da4	Kart bir dakika içinde iki kez takıldı: bu oturumun sonuna kadar masaüstünü işlemci çizer
 settings_issue_gpu_lists	1433	Listeler kapalı: kart gerçekten birleştirme yapmıyor
 settings_issue_gpu_lost	28ed	Uygulamalar %2$d kareden %1$d tanesini işlemciye kaptırdı
 settings_issue_gpu_map	f52f	Çekirdek, pencere görüntülerini kart için eşlemeyi reddetti (adım %1$d, hata %2$d)

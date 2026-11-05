@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	La carte son n'a pas pu être ouverte (erreur %1$
 settings_issue_audio_rate	d45e	La carte son a pris %2$d Hz, et non les %1$d Hz demandés
 settings_issue_gpu_cooling	63ed	La carte refroidit après des blocages (%1$d à la suite)
 settings_issue_gpu_family	6311	Cette famille de GPU n'est pas prise en charge (famille %1$d)
+settings_issue_gpu_fault	28ad	La carte a échoué en lisant sa mémoire : %1$s
+settings_issue_gpu_hung	8da4	La carte s'est bloquée deux fois en une minute : le processeur dessine le bureau jusqu'à la fin de cette session
 settings_issue_gpu_lists	1433	Les listes sont désactivées : la carte ne compose pas réellement
 settings_issue_gpu_lost	28ed	Des applications ont perdu %1$d images sur %2$d au profit du processeur
 settings_issue_gpu_map	f52f	Le noyau a refusé de mapper les images des fenêtres pour la carte (étape %1$d, erreur %2$d)

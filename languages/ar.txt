@@ -96,6 +96,8 @@ settings_issue_audio_open	d428	تعذّر فتح بطاقة الصوت (الخط
 settings_issue_audio_rate	d45e	استخدمت بطاقة الصوت %2$d هرتز، وليس %1$d هرتز المطلوبة
 settings_issue_gpu_cooling	63ed	البطاقة تبرد بعد التعليق (%1$d مرات متتالية)
 settings_issue_gpu_family	6311	هذه عائلة المعالجات الرسومية غير مدعومة (العائلة %1$d)
+settings_issue_gpu_fault	28ad	أخطأت البطاقة في قراءة ذاكرتها: %1$s
+settings_issue_gpu_hung	8da4	علقت البطاقة مرتين خلال دقيقة: تتولى المعالجات رسم سطح المكتب حتى نهاية هذه الجلسة
 settings_issue_gpu_lists	1433	القوائم مُعطّلة: البطاقة لا تركّب فعليًا
 settings_issue_gpu_lost	28ed	خسرت التطبيقات %1$d من %2$d إطارًا لصالح المعالج
 settings_issue_gpu_map	f52f	رفض النواة تعيين صور النوافذ للبطاقة (الخطوة %1$d، الخطأ %2$d)

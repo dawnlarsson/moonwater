@@ -22784,6 +22784,15 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 said[256] = 0;
                 host_say(log, "  gpu kernel said %s\n", (string_address)said);
         }
+        // The card's last fault: the first page fault the kernel's log had since the job that failed was submitted, and what its address was in (gpu.c).
+        if (table->gpu_fault[0])
+        {
+                char fault[161];
+
+                memory_copy(fault, (const char *)table->gpu_fault, 160);
+                fault[160] = 0;
+                host_say(log, "  gpu fault       %s (%p jobs found one)\n", (string_address)fault, (positive)table->gpu_faults);
+        }
         if (table->gpu_map_why)
                 host_say(log, "  gpu map         the last map of a picture for the card was refused: %s (error %p)\n",
                          (table->gpu_map_why & 255) == 1 ? (string_address) "all the maps are held" :
@@ -22793,6 +22802,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (table->gpu_map_why & 255) == 5 ? (string_address) "no dma-buf route for them (not the window table's pages)" :
                          (table->gpu_map_why & 255) == 6 ? (string_address) "udmabuf would not make the pages a dma-buf" :
                          (table->gpu_map_why & 255) == 7 ? (string_address) "the render node would not import the dma-buf" :
+                         (table->gpu_map_why & 255) == 9 ? (string_address) "it would let go of a map the card reads in this present (the picture is the processor's)" :
                                                            (string_address) "the card would not map the dma-buf",
                          (positive)(table->gpu_map_why >> 8));
         //      The metrics: the presents' time on the card and on the processor (the mean and the worst of the last 128 each, microseconds), the maps,

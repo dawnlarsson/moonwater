@@ -96,6 +96,8 @@ settings_issue_audio_open	d428	کارت صدا باز نشد (خطای %1$d)
 settings_issue_audio_rate	d45e	کارت صدا %2$d هرتز را گرفت، نه %1$d هرتز خواسته‌شده
 settings_issue_gpu_cooling	63ed	کارت بعد از قفل‌شدن‌ها خنک می‌شود (%1$d بار پشت سر هم)
 settings_issue_gpu_family	6311	این خانواده GPU پشتیبانی نمی‌شود (خانواده %1$d)
+settings_issue_gpu_fault	28ad	کارت هنگام خواندن حافظه‌اش خطا داد: %1$s
+settings_issue_gpu_hung	8da4	کارت در کمتر از یک دقیقه دو بار قفل کرد: پردازنده تا پایان این نشست میز کار را می‌کشد
 settings_issue_gpu_lists	1433	فهرست‌ها خاموش‌اند: کارت واقعاً ترکیب نمی‌کند
 settings_issue_gpu_lost	28ed	برنامه‌ها %1$d از %2$d فریم را به پردازنده واگذار کردند
 settings_issue_gpu_map	f52f	هسته از نگاشت تصویر پنجره‌ها برای کارت خودداری کرد (گام %1$d، خطای %2$d)

@@ -96,6 +96,8 @@ settings_issue_audio_open	d428	ساؤنڈ کارڈ نہیں کھل سکا (خر�
 settings_issue_audio_rate	d45e	ساؤنڈ کارڈ نے %2$d ہرٹز لیا، نہ کہ مانگے گئے %1$d ہرٹز
 settings_issue_gpu_cooling	63ed	کارڈ رکنے کے بعد ٹھنڈا ہو رہا ہے (%1$d مسلسل)
 settings_issue_gpu_family	6311	یہ GPU فیملی معاون نہیں (فیملی %1$d)
+settings_issue_gpu_fault	28ad	کارڈ اپنی میموری پڑھتے وقت خرابی کا شکار ہوا: %1$s
+settings_issue_gpu_hung	8da4	کارڈ ایک منٹ میں دو بار اٹک گیا: اس نشست کے ختم ہونے تک ڈیسک ٹاپ پروسیسر بناتا ہے
 settings_issue_gpu_lists	1433	فہرستیں بند ہیں: کارڈ اصل میں ترکیب نہیں کر رہا
 settings_issue_gpu_lost	28ed	ایپس نے %2$d میں سے %1$d فریم پروسیسر کو دے دیے
 settings_issue_gpu_map	f52f	کرنل نے کارڈ کے لیے ونڈو کی تصاویر میپ کرنے سے انکار کیا (قدم %1$d، خرابی %2$d)

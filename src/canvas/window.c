@@ -562,6 +562,8 @@ enum windows_issue_code
         WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
         WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
         WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix
+        WINDOWS_ISSUE_GPU_FAULT,     // the card faulted reading GPU memory: a the jobs that found a fault; the detail is the fault's text (what the address was in)
+        WINDOWS_ISSUE_GPU_HUNG,      // the card hung twice within a minute: the processor draws the desktop for the rest of the session (no numbers)
         // The kernel's own notices (the feeder below): a the records of the class seen, b the seconds since the last, the detail the last line.
         WINDOWS_ISSUE_KERNEL_GPU,       // amdgpu, drm and i915 (under canvas gpu)
         WINDOWS_ISSUE_KERNEL_USB,       // usb and xhci (under usb)
@@ -1029,6 +1031,7 @@ struct windows
         unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
         unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
         char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
+        unsigned int gpu_faults; char gpu_fault[160]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault): "" for none yet
         unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
         unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
         unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
@@ -1451,13 +1454,15 @@ static unsigned int windows_metric_rate(unsigned long long count, unsigned long 
 // The codes the GPU raises under its key, in the order the board shows them (windows_gpu_wanted says which hold now).
 static const unsigned int windows_gpu_codes[] = {
         WINDOWS_ISSUE_GPU_USERPTR, WINDOWS_ISSUE_GPU_MAP, WINDOWS_ISSUE_GPU_UNTRUSTED, WINDOWS_ISSUE_GPU_FAMILY, WINDOWS_ISSUE_GPU_COOLING,
-        WINDOWS_ISSUE_GPU_REFUSED, WINDOWS_ISSUE_GPU_LISTS, WINDOWS_ISSUE_GPU_LOST, WINDOWS_ISSUE_GPU_SCANOUT};
+        WINDOWS_ISSUE_GPU_REFUSED, WINDOWS_ISSUE_GPU_LISTS, WINDOWS_ISSUE_GPU_LOST, WINDOWS_ISSUE_GPU_SCANOUT,
+        WINDOWS_ISSUE_GPU_HUNG, WINDOWS_ISSUE_GPU_FAULT};
 #define WINDOWS_GPU_CODES (sizeof(windows_gpu_codes) / sizeof(windows_gpu_codes[0]))
 // The GPU states (the table's gpu_state, and what Settings' status line says): the card is up, untrusted, not there, or cooling down.
 #define WINDOWS_GPU_UP 0u
 #define WINDOWS_GPU_UNTRUSTED 1u
 #define WINDOWS_GPU_NO_CARD 2u
 #define WINDOWS_GPU_COOLING 3u
+#define WINDOWS_GPU_HUNG 4u // given up for the session after two hangs within a minute (compositor_gpu_job_failed)
 // What Settings says the GPU does: off (the setting), no supported GPU, in use, partly in use, not in use (windows_gpu_judge).
 #define WINDOWS_GPU_STATUS_OFF 0u
 #define WINDOWS_GPU_STATUS_NONE 1u
@@ -1498,9 +1503,10 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
         #define WANT(sev, cod, x, y, text) do { if (count < room) { struct windows_issue *w = &want[count++]; memory_zero(w, sizeof(*w)); \
                 w->severity = (sev), w->code = (cod), w->a = (x), w->b = (y); string_copy_bounded((string_address)w->detail, (string_address)(text), WINDOWS_ISSUE_DETAIL); } } while (0)
         step = table->gpu_map_why & 255u, error = table->gpu_map_why >> 8;
-        if (step && (windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)))
+        // A map refused for the card's own sake (9: a picture it reads in this present is held, the processor draws it) is not the kernel's refusal.
+        if (step && step != 9u && (windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)))
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_USERPTR, step, error, table->gpu_said);
-        else if (step)
+        else if (step && step != 9u)
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, step, error, table->gpu_said);
         if (table->gpu_state == WINDOWS_GPU_UNTRUSTED)
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
@@ -1508,6 +1514,10 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
                 WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, "");
         if (table->gpu_state == WINDOWS_GPU_COOLING)
                 WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, table->gpu_steps, 0, "");
+        if (table->gpu_state == WINDOWS_GPU_HUNG)
+                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_HUNG, 0, 0, "");
+        if (table->gpu_fault[0])
+                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
         for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why] > refused_top)
                         refused_top = table->gpu_refused[why], refused_why = why;

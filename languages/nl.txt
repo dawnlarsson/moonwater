@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	De geluidskaart kon niet worden geopend (fout %1$
 settings_issue_audio_rate	d45e	De geluidskaart gebruikte %2$d Hz, niet de gevraagde %1$d Hz
 settings_issue_gpu_cooling	63ed	De kaart koelt af na vastlopers (%1$d achter elkaar)
 settings_issue_gpu_family	6311	Deze GPU-familie wordt niet ondersteund (familie %1$d)
+settings_issue_gpu_fault	28ad	De kaart maakte een fout bij het lezen van haar geheugen: %1$s
+settings_issue_gpu_hung	8da4	De kaart hing zich binnen een minuut twee keer op: de processor tekent het bureaublad tot het eind van deze sessie
 settings_issue_gpu_lists	1433	Lijsten staan uit: de kaart stelt niet echt samen
 settings_issue_gpu_lost	28ed	Apps verloren %1$d van %2$d frames aan de processor
 settings_issue_gpu_map	f52f	De kernel weigerde de vensterbeelden voor de kaart te mappen (stap %1$d, fout %2$d)

@@ -95,6 +95,8 @@ settings_issue_audio_open	d428	Impossibile aprire la scheda audio (errore %1$d)
 settings_issue_audio_rate	d45e	La scheda audio ha usato %2$d Hz, non i %1$d Hz richiesti
 settings_issue_gpu_cooling	63ed	La scheda si sta raffreddando dopo dei blocchi (%1$d di fila)
 settings_issue_gpu_family	6311	Questa famiglia di GPU non è supportata (famiglia %1$d)
+settings_issue_gpu_fault	28ad	La scheda ha generato un errore leggendo la propria memoria: %1$s
+settings_issue_gpu_hung	8da4	La scheda si è bloccata due volte in un minuto: il processore disegna il desktop fino alla fine di questa sessione
 settings_issue_gpu_lists	1433	Le liste sono disattivate: la scheda non compone davvero
 settings_issue_gpu_lost	28ed	Le app hanno perso %1$d fotogrammi su %2$d a favore del processore
 settings_issue_gpu_map	f52f	Il kernel ha rifiutato di mappare le immagini delle finestre per la scheda (passo %1$d, errore %2$d)

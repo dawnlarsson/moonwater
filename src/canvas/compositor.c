@@ -5558,7 +5558,7 @@ static unsigned int *compositor_scratch(unsigned int **at, unsigned long *had, u
         bytes = bytes < *had * 2 ? *had * 2 : bytes;
         bytes = (bytes + 65535) & ~65535ul;
         if (*at)
-                compositor_call(syscall(munmap), (positive)*at, *had, 0, 0, 0, 0);
+                gpu_forget((const void *)(*at), (positive)(*had)), compositor_call(syscall(munmap), (positive)*at, *had, 0, 0, 0, 0);
         mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
         *at = null;
         *had = 0;
@@ -6026,7 +6026,7 @@ static void compositor_glass_drop(int row)
         int left = 0;
 
         if (compositor.backdrop[row])
-                compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+                gpu_forget((const void *)(compositor.backdrop[row]), (positive)(compositor.glass_cut[row])), compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
         for (int other = 0; other < WINDOWS; other++)
                 left |= other != row && compositor.glassy[other];
         if (!left && compositor.frost)
@@ -6071,7 +6071,7 @@ static int compositor_glass_room(int row)
         if (need > compositor.glass_cut[row])
         {
                 if (compositor.backdrop[row])
-                        compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+                        gpu_forget((const void *)(compositor.backdrop[row]), (positive)(compositor.glass_cut[row])), compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
                 mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
                 compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
                 compositor.glass_cut[row] = 0;
@@ -6756,9 +6756,9 @@ static int compositor_turning_software(void);
 static void compositor_apart_drop(void)
 {
         if (compositor.composing)
-                compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
+                gpu_forget((const void *)(compositor.composing), (positive)(compositor.composing_bytes)), compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
         if (compositor.mirror && compositor.mirror_bytes)
-                compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
+                gpu_forget((const void *)(compositor.mirror), (positive)(compositor.mirror_bytes)), compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
         compositor.composing = compositor.mirror = 0;
         compositor.composing_bytes = compositor.mirror_bytes = 0;
         compositor.changed = 0;
@@ -6805,7 +6805,7 @@ static int compositor_changed_ready(void)
 
                 if (mirror < 0 && mirror > -4096)
                 {
-                        compositor_call(syscall(munmap), (positive)composing, slices, 0, 0, 0, 0);
+                        gpu_forget((const void *)(composing), (positive)(slices)), compositor_call(syscall(munmap), (positive)composing, slices, 0, 0, 0, 0);
                         compositor.composing = 0;
                         return 0;
                 }
@@ -6964,7 +6964,7 @@ static int compositor_overlay_buffers(unsigned int rows)
                 {
                         unsigned int close[2] = {compositor.overlay_handle[which], 0};
 
-                        compositor_call(syscall(munmap), (positive)compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0, 0);
+                        gpu_forget((const void *)(compositor.overlay_pixels[which]), (positive)(compositor.overlay_bytes)), compositor_call(syscall(munmap), (positive)compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0, 0);
                         system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor.overlay_fb[which]);
                         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
                         compositor.overlay_fb[which] = 0;
@@ -7609,9 +7609,11 @@ static struct
 {
         int up, dead, force, told; // started; given up for good (no card, or untrusted); headless is to use it (-G); said once that it composes
         enum compositor_gpu_why dead_why; // why it is given up: no card, or untrusted
-        unsigned int failures;     // hangs in a row (three cool the card down)
+        unsigned int failures;     // refused jobs in a row that are not hangs (three cool the card down)
         b64 cool_until;            // the card is not tried again before this monotonic time (0: it is)
-        unsigned int cool_steps;   // how many cool-downs in a row: each one longer, up to sixty-four seconds
+        unsigned int cool_steps;   // how many cool-downs there were (a hang's, and a run of refusals')
+        b64 hung_at;               // when the last hang was (0: none): a second one within a minute gives the card up for the session (compositor_gpu_job_failed)
+        int hung_off;              // given up for the session after two hangs: the processor draws the desktop until the session ends
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer): the one drawn into now
         positive cache[2], cache_key[2]; // the card's imports of the two scanouts (compositor_plate_swap trades them), and the one to make next
         int cache_next;
@@ -7640,6 +7642,8 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_family = gpu.family, compositor.table->gpu_device = gpu.device, compositor.table->gpu_map_probe = gpu_map_probe;
         if (gpu_said[0] && memory_compare(compositor.table->gpu_said, gpu_said, sizeof(gpu_said)))
                 memory_copy(compositor.table->gpu_said, gpu_said, sizeof(gpu_said));
+        compositor.table->gpu_faults = gpu_faults;
+        memory_copy(compositor.table->gpu_fault, gpu_fault, sizeof(gpu_fault));
         compositor.table->gpu_req_first = gpu_req.first, compositor.table->gpu_req_error = gpu_req.error, compositor.table->gpu_req_mask = gpu_req.mask;
         compositor.table->gpu_req_mode = gpu_req.mode, compositor.table->gpu_req_owner = gpu_req.owner;
         compositor.table->gpu_req_route = gpu_req.route, compositor.table->gpu_req_route_error = gpu_req.route_error;
@@ -7764,6 +7768,47 @@ static void compositor_gpu_recover(void)
         compositor_gpu_requirements();
 }
 
+/*
+        A job of the card that failed (gpu_last_error says why, as this call's answer). A hang (62 ETIME: the ring did not finish it in two seconds; 5 the wait
+        itself failed) is the card's one lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
+        started again with a clean table of maps (gpu_recover lets every map go: a present no longer names the addresses the hang read). A second hang within
+        a minute gives the card up for the session, the processor draws until it ends, and the board says so. Any other refused job counts as it always did:
+        three in a row cool the card down, each cool-down longer.
+*/
+#define COMPOSITOR_GPU_HUNG_COOL 2000000000ull
+#define COMPOSITOR_GPU_HUNG_WINDOW 60000000000ull
+static void compositor_gpu_job_failed(void)
+{
+        b64 now = clock_monotonic_nanoseconds();
+
+        if (gpu_last_error != 62 && gpu_last_error != 5)
+        {
+                if (++compositor_gpu_state.failures >= 3)
+                {
+                        unsigned int steps = compositor_gpu_state.cool_steps < 5 ? compositor_gpu_state.cool_steps : 5;
+
+                        compositor_gpu_state.cool_until = now + (COMPOSITOR_GPU_HUNG_COOL << steps);
+                        compositor_gpu_state.cool_steps++, compositor_gpu_state.failures = 0;
+                }
+                return;
+        }
+        compositor_gpu_state.failures = 0;
+        if (compositor_gpu_state.hung_at && now - compositor_gpu_state.hung_at < COMPOSITOR_GPU_HUNG_WINDOW)
+        {
+                compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG, compositor_gpu_state.hung_off = 1;
+                compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 0;
+                string_format(log, "compositor: the GPU hung twice within a minute (%s): the processor draws the desktop for the rest of the session\n", gpu_fault);
+                log_flush();
+                return;
+        }
+        compositor_gpu_state.hung_at = now;
+        compositor_gpu_state.cool_until = now + COMPOSITOR_GPU_HUNG_COOL;
+        compositor_gpu_state.cool_steps++;
+        compositor_gpu_state.restart_due = 1; // started again when the cool-down is over, with no maps (gpu_recover)
+        string_format(log, "compositor: the GPU hung (%s): the processor draws for two seconds, then the card starts again with no maps\n", gpu_fault);
+        log_flush();
+}
+
 // The scanout's address for the GPU, made when the scanout is new.
 static positive compositor_gpu_output(void)
 {
@@ -7771,10 +7816,11 @@ static positive compositor_gpu_output(void)
 
         if (compositor.card < 0)
         {
-                positive at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
+                // The card writes the scanout: its address is a written map's (a read map of the same pages is registered read-only, and a write through it faults).
+                positive at = gpu_va_written(compositor.scanout, compositor.scanout_bytes);
 
                 if (!at && gpu_map_written(compositor.scanout, compositor.scanout_bytes))
-                        at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
+                        at = gpu_va_written(compositor.scanout, compositor.scanout_bytes);
                 compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
         }
         else
@@ -7786,7 +7832,7 @@ static positive compositor_gpu_output(void)
                 {
                         at = compositor_gpu_state.cache_next, compositor_gpu_state.cache_next ^= 1;
                         if (compositor_gpu_state.cache[at])
-                                gpu_unimport(compositor_gpu_state.cache[at]);
+                                gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
                         compositor_gpu_state.cache_key[at] = key;
                 }
@@ -7962,7 +8008,11 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         long mapped;
 
                         if (compositor_gpu_scaled_pool[used].memory)
+                        {
+                                // The card's maps of these pages are let go of first: an address the new pages take would otherwise be read as the old map's.
+                                gpu_forget(compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes);
                                 compositor_call(syscall(munmap), (positive)compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes, 0, 0, 0, 0);
+                        }
                         compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0;
                         mapped = compositor_call(syscall(mmap), 0, grown, 3, 0x22, (positive)-1, 0);
                         if (mapped < 0 && mapped > -4096)
@@ -7985,8 +8035,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 }
                 if (!gpu_scale(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, (unsigned int)f->width, (unsigned int)f->height))
                 {
-                        if (++compositor_gpu_state.failures >= 3)
-                                compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                        compositor_gpu_job_failed();
                         return COMPOSITOR_GPU_WHY_HANG;
                 }
                 if (*io == frames)
@@ -8061,15 +8110,9 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         {
                 if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
                         compositor_gpu_recover();
-                // A hang: this present is the processor's and the next tries the card again (gpu_idle makes a new context of a card that reset). Three in a
-                // row cool the card down for two seconds, then four, eight, sixteen, thirty-two and sixty-four, each time it hangs again after one.
-                if (++compositor_gpu_state.failures >= 3)
-                {
-                        unsigned int steps = compositor_gpu_state.cool_steps < 5 ? compositor_gpu_state.cool_steps : 5;
-
-                        compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + (2000000000ull << steps);
-                        compositor_gpu_state.cool_steps++, compositor_gpu_state.failures = 0;
-                }
+                // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
+                // a minute is the session's (compositor_gpu_job_failed).
+                compositor_gpu_job_failed();
                 return COMPOSITOR_GPU_WHY_HANG;
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
@@ -8153,7 +8196,11 @@ static void compositor_gpu_issues(void)
         if (!table)
                 return;
         table->gpu_on = (unsigned int)compositor_gpu, table->gpu_able = (unsigned int)compositor_gpu_able;
-        table->gpu_state = compositor_gpu_state.dead ? (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_UNTRUSTED ? WINDOWS_GPU_UNTRUSTED : WINDOWS_GPU_NO_CARD)
+        // The card's fault text (gpu.c's gpu_fault) is on the board in the present that found it, not only when the table is published.
+        table->gpu_faults = gpu_faults;
+        memory_copy(table->gpu_fault, gpu_fault, sizeof(gpu_fault));
+        table->gpu_state = compositor_gpu_state.dead ? (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_UNTRUSTED ? WINDOWS_GPU_UNTRUSTED
+                                                       : compositor_gpu_state.hung_off ? WINDOWS_GPU_HUNG : WINDOWS_GPU_NO_CARD)
                            : compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until ? WINDOWS_GPU_COOLING
                                                                                                                               : WINDOWS_GPU_UP;
         table->gpu_steps = compositor_gpu_state.cool_steps;
@@ -8227,6 +8274,8 @@ static void compositor_gpu_restart_check(void)
                 compositor_gpu_state.restart_due = 1;
         if (!compositor_gpu_state.restart_due || !compositor_gpu_state.up || compositor_gpu_state.dead)
                 return;
+        if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
+                return; // after a hang the card is started again when its cool-down is over (compositor_gpu_job_failed)
         compositor_gpu_state.restart_due = 0;
         compositor_gpu_recover();
 }
@@ -8431,8 +8480,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0, (unsigned int)y0,
                        (unsigned int)x1, (unsigned int)y1))
         {
-                if (++compositor_gpu_state.failures >= 3)
-                        compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                compositor_gpu_job_failed();
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         compositor_gpu_state.failures = 0;
@@ -8459,11 +8507,11 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         unsigned int *op;
         positive from, to;
 
-        if (!compositor_gpu_state.up || !compositor_gpu_state.out || compositor.card < 0)
+        if (!compositor_gpu_state.up || !compositor_gpu_state.out || compositor.card < 0 || !gpu_idle()) // a job given up on may read the import it lets go of
                 return 0;
         if (compositor_gpu_state.turn_key[at] != turn->handle || !compositor_gpu_state.turn_va[at])
         {
-                gpu_unimport(compositor_gpu_state.turn_va[at]);
+                gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT);
                 compositor_gpu_state.turn_va[at] = gpu_import(compositor.card, turn->handle, turn->bytes), compositor_gpu_state.turn_key[at] = turn->handle;
         }
         if (!compositor_gpu_state.turn_va[at] || (degrees != 90 && degrees != 180 && degrees != 270))
@@ -9510,16 +9558,16 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
         for (unsigned int at = 0; at < 2; at++)
                 if (compositor_gpu_state.cache[at] && compositor_gpu_state.cache_key[at] == handle)
                 {
-                        gpu_unimport(compositor_gpu_state.cache[at]);
+                        gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = compositor_gpu_state.cache_key[at] = 0;
                         if (compositor_gpu_state.out_key == handle)
                                 compositor_gpu_state.out = compositor_gpu_state.out_key = 0;
                 }
         for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
                 if (compositor_gpu_state.turn_key[at] == handle && compositor_gpu_state.turn_va[at])
-                        gpu_unimport(compositor_gpu_state.turn_va[at]), compositor_gpu_state.turn_va[at] = 0;
+                        gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT), compositor_gpu_state.turn_va[at] = 0;
 #endif
-        compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
+        gpu_forget((const void *)(pixels), (positive)(bytes)), compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
         system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
 }
@@ -14298,7 +14346,8 @@ static void compositor_gpu_settings(void)
         {
                 // Turned on from off: the hangs and their cool-downs are forgiven. A card that never started is looked for again (its prerequisites checked once
                 // more: a driver or a node that came late); a card that drew its self-test wrong stays given up.
-                if (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED)
+                // Given up for the session after two hangs (compositor_gpu_job_failed) stays so: the turn does not bring it back.
+                if (!compositor_gpu_state.hung_off && (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED))
                         compositor_gpu_state.dead = 0;
                 compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
         }
@@ -18882,7 +18931,7 @@ static void compositor_uevents_read(void)
 */
 static void compositor_hand_back(void)
 {
-        compositor_call(syscall(munmap), (positive)compositor.scanout, compositor.scanout_bytes, 0, 0, 0, 0);
+        gpu_forget((const void *)(compositor.scanout), (positive)(compositor.scanout_bytes)), compositor_call(syscall(munmap), (positive)compositor.scanout, compositor.scanout_bytes, 0, 0, 0, 0);
         system_close(compositor.card);
 }
 
@@ -19102,7 +19151,7 @@ static unsigned int *compositor_remap(unsigned int *was, unsigned long had, unsi
         long mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
 
         if (was)
-                compositor_call(syscall(munmap), (positive)was, had, 0, 0, 0, 0);
+                gpu_forget((const void *)(was), (positive)(had)), compositor_call(syscall(munmap), (positive)was, had, 0, 0, 0, 0);
         return mapped < 0 && mapped > -4096 ? 0 : (unsigned int *)mapped;
 }
 
@@ -19123,7 +19172,7 @@ static void compositor_band_room(void)
                 if (at >= bands)
                 {
                         if (*pixels)
-                                compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
+                                gpu_forget((const void *)(*pixels), (positive)(*had)), compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
                         *pixels = 0;
                         *had = 0;
                         continue;
@@ -19153,12 +19202,12 @@ static void compositor_band_room(void)
                         unsigned long *had = at ? &compositor.band_more_bytes[at] : &compositor.band_bytes;
 
                         if (*pixels)
-                                compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
+                                gpu_forget((const void *)(*pixels), (positive)(*had)), compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
                         *pixels = 0;
                         *had = 0;
                 }
                 if (compositor.glass)
-                        compositor_call(syscall(munmap), (positive)compositor.glass, compositor.glass_bytes, 0, 0, 0, 0);
+                        gpu_forget((const void *)(compositor.glass), (positive)(compositor.glass_bytes)), compositor_call(syscall(munmap), (positive)compositor.glass, compositor.glass_bytes, 0, 0, 0, 0);
                 compositor.glass = 0;
                 compositor.glass_bytes = 0;
                 taskbar_changed();

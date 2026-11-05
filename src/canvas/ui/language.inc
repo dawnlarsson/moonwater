@@ -102,6 +102,8 @@ LANGUAGE_ID(settings_issue_audio_open, "The sound card could not be opened (erro
 LANGUAGE_ID(settings_issue_audio_rate, "The sound card took %2$d Hz, not the %1$d Hz asked for")
 LANGUAGE_ID(settings_issue_gpu_cooling, "The card is cooling down after hangs (%1$d in a row)")
 LANGUAGE_ID(settings_issue_gpu_family, "This GPU family is not supported (family %1$d)")
+LANGUAGE_ID(settings_issue_gpu_fault, "The card faulted reading its memory: %1$s")
+LANGUAGE_ID(settings_issue_gpu_hung, "The card hung twice within a minute: the processor draws the desktop for the rest of this session")
 LANGUAGE_ID(settings_issue_gpu_lists, "Lists are off: the card is not composing in earnest")
 LANGUAGE_ID(settings_issue_gpu_lost, "Apps lost %1$d of %2$d frames to the processor")
 LANGUAGE_ID(settings_issue_gpu_map, "The kernel refused to map window pictures for the card (step %1$d, error %2$d)")
