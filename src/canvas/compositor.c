@@ -4222,6 +4222,10 @@ static struct
         // A window that fills its screen is made as high as the room above the keyboard instead: its height (osk_height) and its
         // edges (osk_edges) are kept, to be given back.
         unsigned char osk_setting, osk_typed, osk_shown;
+        // A screen turned (compositor_osk_turned): the keyboard is held away until the focus goes to another window, or a field of this
+        // one is focused again after it lost its focus (osk_turn_blur: the focused window's field count was none).
+        unsigned char osk_turned, osk_turn_blur;
+        int osk_turn_focus;
         int osk_pan[WINDOWS], osk_height[WINDOWS];
         unsigned int osk_edges[WINDOWS];
         // A Wayland client's text field (wayland_host.c): the content purpose of its field, and the bottom of its text cursor in the
@@ -14064,7 +14068,18 @@ static void compositor_osk_sync(void)
         int keyboard = compositor_osk_row(), focus = compositor.focus, want = 0;
         b32 touch = !compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE;
 
-        if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF)
+        // The hold of a turn ends when the focus goes elsewhere, or when a field of the focused window is focused again after one lost it.
+        if (compositor.osk_turned)
+        {
+                if (focus != compositor.osk_turn_focus)
+                        compositor.osk_turned = 0;
+                else if (focus >= 0 && !compositor.table->field[focus])
+                        compositor.osk_turn_blur = 1;
+                else if (focus >= 0 && compositor.osk_turn_blur)
+                        compositor.osk_turned = 0;
+        }
+        if (keyboard >= 0 && focus >= 0 && focus != keyboard && compositor.table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF &&
+            !compositor.osk_turned)
                 want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !compositor_osk_physical();
         for (unsigned int row = 0; row < WINDOWS; row++)
                 if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
@@ -14077,6 +14092,16 @@ static void compositor_osk_sync(void)
         }
         compositor.osk_shown = (unsigned char)(keyboard >= 0 && want);
         compositor_osk_publish();
+}
+
+// A screen turned (compositor_space_retake saw a screen's turn change): the keyboard is put away and held away until the hold ends
+// (compositor_osk_sync). Its own size and place follow the output it is on (osk.c, osk_tick), so nothing else is asked here.
+static void compositor_osk_turned(void)
+{
+        compositor.osk_turned = 1;
+        compositor.osk_turn_blur = 0;
+        compositor.osk_turn_focus = compositor.focus;
+        compositor_osk_sync();
 }
 
 // The Settings choice, keyboard onscreen: auto unless the file says off or on.
@@ -18587,18 +18612,41 @@ static void compositor_headless_scale(void)
 // The screens taken again (a screen came or went, the arrangement changed), and said in the log when they changed.
 static void compositor_space_retake(void)
 {
-        unsigned int layout = compositor.layout;
-        b32 status = 0;
+        unsigned int layout = compositor.layout, was_count = compositor.outputs;
+        struct
+        {
+                char name[WINDOWS_OUTPUT_NAME];
+                unsigned int degrees;
+        } was[WINDOWS_OUTPUTS];
+        b32 status = 0, turned = 0;
 
+        // Each screen's turn before the take, by its name: a screen that turns is one whose turn is another after it (the keyboard is put
+        // away for it, compositor_osk_turned).
+        for (unsigned int at = 0; at < was_count && at < WINDOWS_OUTPUTS; at++)
+        {
+                memory_copy(was[at].name, compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+                was[at].degrees = compositor.output[at].degrees;
+        }
         if (compositor.card >= 0)
                 status = compositor_space_take(0);
         else
                 compositor_headless_scale();
+        for (unsigned int at = 0; at < compositor.outputs && status >= 0; at++)
+                for (unsigned int each = 0; each < was_count && each < WINDOWS_OUTPUTS; each++)
+                        if (!memory_compare(was[each].name, compositor.output[at].name, WINDOWS_OUTPUT_NAME) &&
+                            was[each].degrees != compositor.output[at].degrees)
+                                turned = 1;
 
         if (status < 0)
                 compositor_say("the screens could not be taken again, error", status);
         else if (compositor.layout != layout)
                 compositor_screens_say();
+        if (turned)
+                compositor_osk_turned();
+        // The keyboard is sized for the output it is on, which may have changed: it is woken to look (osk_tick).
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                if (compositor.asks[row] & WINDOW_KEYBOARD)
+                        compositor.woken |= 1u << row;
 }
 
 /*
