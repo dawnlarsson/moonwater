@@ -5495,7 +5495,7 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
 /* ---- the pointer ---- */
 /*
         The pointer and the scroll region. ui_event_context(event) is the one place an event's touch flag and time are taken
-        (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set and ui_scroll_show place it,
+        (ui_kit_touch, ui_kit.now). ui_scroll_* is every scrolled region: ui_scroll_set places it,
         ui_body_reveal notches it to a span, ui_scroll_pointer and ui_wheel_turn take input, ui_scroll_draw paints the bar. The
         rubber band, the wheel's notch and the hand are the body's (ui_body_*, s->body): an app forwards its input and keeps no stretch.
 */
@@ -5992,7 +5992,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         BODY_VIEW_FACTOR of each, the share the view shows.
 
         The Scrolling group's switches are read here, from ui_kit.scroll_off (the table's, WINDOW_SCROLL_*): natural direction turns the
-        sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_turn), momentum off makes a release's coast 0
+        sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_track, ui_wheel_turn), momentum off makes a release's coast 0
         and an OS momentum delta move nothing (ui_body_let_go, ui_body_driven: the body settles where it is, and a pull past an end still
         springs home), and the rubber band off holds the position inside the ends as it moves (ui_body_pin, ui_body_clamp).
         A release's speed is capped at ui_throw_most(scale) (Android's 8000 dp a second), and floored at ui_throws, at the scale.
@@ -6162,12 +6162,6 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
         b->vel = 0;
         b->at = at;
         ui_body_note(b);
-}
-
-// a finger's drag by delta (units, Q30): the body's track, as it is; the natural direction is a wheel's and a pad's
-static void ui_body_finger(struct ui_body address_to b, b64 delta, b64 at)
-{
-        ui_body_track(b, delta, at);
 }
 
 // an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end; momentum off, nothing
@@ -6435,8 +6429,7 @@ static long ui_body_given(struct ui_body address_to b, b64 at)
         A scroll region: a track down its x and a thumb in it, and a position that is the body's (ui_body, s->body) drawn in whole
         device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
         of (ui_scroll_release), a wheel's notch is a target the body follows (ui_wheel_turn), a jump is a body set, a reveal is a notch,
-        and the bar's thumb is the body's place, drawn where the body is, past an end too. The names of the region's callers are thin
-        wrappers over the body.
+        and the bar's thumb is the body's place, drawn where the body is, past an end too.
 */
 struct ui_scroll
 {
@@ -6494,12 +6487,6 @@ static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll
 static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 {
         return !ui_tween_still(&s->ink) || !ui_tween_still(&s->grow);
-}
-
-// The region's position is moving: its body is held, carried, springing or following a notch.
-static b32 ui_scroll_going(const struct ui_scroll address_to s)
-{
-        return ui_body_going(&s->body);
 }
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
@@ -6575,20 +6562,13 @@ static void ui_scroll_extent(struct ui_scroll address_to s)
         ui_body_fit(&s->body, (b64)(s->view > 0 ? s->view : 0) << UI_Q, (b64)(s->content > 0 ? s->content : 0) << UI_Q);
 }
 
-// The drawn position, in whole device pixels, from the body.
-static void ui_scroll_show(struct ui_scroll address_to s)
-{
-        ui_scroll_extent(s);
-        s->scroll = ui_body_px(&s->body);
-}
-
 // A finger or a thumb goes down on the region: the body stops where it is drawn, and no trackpad's hand is in it any more.
 static void ui_scroll_hold(struct ui_scroll address_to s)
 {
         ui_scroll_extent(s);
         ui_body_hold(&s->body, ui_kit_time());
         s->precise = 0;
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
 }
 
 /*
@@ -6617,7 +6597,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 ui_scroll_extent(s);
                 ui_body_track(&s->body, (((b64)(y - s->grab - at) * rest / (track - length)) << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
-                ui_scroll_show(s);
+                s->scroll = ui_body_px(&s->body);
                 return s->scroll;
         }
         if (type != WINDOW_EVENT_BUTTON)
@@ -6660,7 +6640,7 @@ static b32 ui_scroll_frame(const struct ui address_to ui, struct ui_scroll addre
         if (s->precise && s->body.state == BODY_TRACK && now > s->notch && now - s->notch > UI_HAND_GAP_NS)
                 ui_scroll_release(s, 0);
         moving = ui_body_step(&s->body, now);
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
         if (moving && s->height > 0)
         {
                 // A row that overlaps the region paints up to a row past either end (a switch's knob at its foot), so the band is the region
@@ -6693,7 +6673,7 @@ static b32 ui_scroll_set(struct ui_scroll address_to s, int scroll)
         ui_scroll_extent(s);
         ui_body_set(&s->body, s->body.view, s->body.content, (b64)scroll << UI_Q, ui_kit_time());
         s->precise = 0;
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
         return scroll != before || moving;
 }
 
@@ -6709,9 +6689,9 @@ static void ui_scroll_clamp(struct ui_scroll address_to s)
 static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
 {
         ui_scroll_extent(s);
-        ui_body_finger(&s->body, (b64)pixels << UI_Q, ui_kit_time());
+        ui_body_track(&s->body, (b64)pixels << UI_Q, ui_kit_time());
         s->precise = 0;
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
         return true;
 }
 
@@ -6724,7 +6704,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, long speed)
         ui_scroll_extent(s);
         ui_body_let_go(&s->body, (b64)speed * UI_ONE, ui_kit_time(), s->scale);
         s->precise = 0;
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
 }
 
 // The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it. A
@@ -6736,17 +6716,6 @@ static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
         b32 paused = lifted && last && now > last && now - last > UI_HAND_GAP_NS;
 
         ui_scroll_let_go(s, s->precise && !paused ? speed : 0);
-}
-
-/*
-        Where a region is drawn: its track down the x edge (its width is the kit's), from y, height long, below inset (a window's close
-        button), what it scrolls (content) and how much shows (view), at the scale. The scroll stays as it is; the app puts it where it
-        means it to be.
-*/
-static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int height, int inset, int content, int view, int scale)
-{
-        s->x = x, s->y = y, s->height = height, s->inset = inset;
-        s->content = content, s->view = view, s->scale = scale;
 }
 
 /*
@@ -6800,7 +6769,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 ui_press_track(&s->hand, (int)(s->body.raw >> UI_Q));
                 s->notch = now;
         }
-        ui_scroll_show(s);
+        s->scroll = ui_body_px(&s->body);
         return true;
 }
 

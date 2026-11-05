@@ -148687,7 +148687,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         frames++;
                 }
                 final_scroll = region.scroll - first_scroll;
-                if (tf > last_arrive + (long)g->rest * 1000 + 400000 && (!again || second) && !ui_scroll_going(&region) && !scroll_dragging(&region) && !scroll_hand(&region) &&
+                if (tf > last_arrive + (long)g->rest * 1000 + 400000 && (!again || second) && !ui_body_going(&region.body) && !scroll_dragging(&region) && !scroll_hand(&region) &&
                     !scroll_back(&region))
                 {
                         if (++settled > 8)
@@ -149372,7 +149372,7 @@ static fn check_kit_wheel_flood(void)
         }
         // The flood's own first move, and the same flood again after a pause, which is held as far.
         scroll_run(&ui, &s, &now, 2000);
-        home = s.scroll == 800 && band_past(&s, &edge) == 0 && !ui_scroll_going(&s);
+        home = s.scroll == 800 && band_past(&s, &edge) == 0 && !ui_body_going(&s.body);
         for (int k = 0; k < 60; k++)
         {
                 now += 16000000ll, ui_kit.now = now;
@@ -149391,7 +149391,7 @@ static fn check_kit_wheel_flood(void)
                 sparse = sparse || band_past(&s, &edge) > 0;
         }
         scroll_run(&ui, &s, &now, 2000);
-        sparse = sparse && s.scroll == 800 && !ui_scroll_going(&s);
+        sparse = sparse && s.scroll == 800 && !ui_body_going(&s.body);
         // A notch back takes the target back by one row.
         ui_scroll_set(&s, 800);
         ui_wheel_turn(&ui, &s, &down);

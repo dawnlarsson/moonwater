@@ -677,7 +677,7 @@ struct windows_issue
 // trackpad's motion (WINDOW_WHEEL_PRECISE), and a Wayland client takes it as the wheel it is (value120), not as a pad's fingers.
 #define WINDOW_WHEEL_STREAM 16384u // shares the bit of WINDOW_PINCH_BEGIN: the event's type says which meaning a flag has
 // The scroll body's switches, as the table's scroll_off holds them (0 is the standard: natural direction, momentum and the rubber
-// band all on). FLIP: natural direction is off, so a wheel's notch and a drag move the content the other way (ui_wheel_turn, ui_body_finger).
+// band all on). FLIP: natural direction is off, so a wheel's notch and a drag move the content the other way (ui_wheel_turn, ui_body_track).
 // STOPS: momentum is off, so a release carries no coast (ui_body_let_go). STILL: the rubber band is off, so past an end the content
 // stops there (ui_body_pin, ui_body_drawn).
 #define WINDOW_SCROLL_FLIP 1u
