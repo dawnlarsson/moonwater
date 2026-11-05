@@ -136475,6 +136475,11 @@ static void check_ui_press(void)
         ui_press_begin(&press, 10, 10, 3, true);
         check("ui press: up where it went down it is a click, and taken back it is none",
               clicked == 3 && ui_press_end(&press, true) == -1 && !ui_pressed(&press, 3));
+        // The release is the click only on the target the press went down on, for a pointer's press as for a list's row and a menu's choice.
+        ui_press_begin(&press, 10, 10, 3, false);
+        check("ui press: a release off the target it went down on is no click", ui_press_release(&press, false, 4) == -1);
+        ui_press_begin(&press, 10, 10, 3, false);
+        check("ui press: a release on the target it went down on is the click", ui_press_release(&press, false, 3) == 3);
         check("ui press: a finger reaches a 20 pixel shape from 10 pixels off it, a pointer does not",
               ui_hit(&ui, true, 90, 95, 100, 100, 20, 20) && !ui_hit(&ui, false, 90, 95, 100, 100, 20, 20) &&
                   ui_hit(&ui, false, 105, 105, 100, 100, 20, 20) && !ui_hit(&ui, true, 85, 95, 100, 100, 20, 20));

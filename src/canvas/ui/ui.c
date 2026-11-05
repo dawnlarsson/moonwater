@@ -1230,6 +1230,7 @@ static int ui_px(const struct ui address_to ui, int logical)
             ui_press_begin(press, x, y, target, touch)  a button or a finger went down on target (-1 for nothing)
             ui_press_move(ui, press, x, y)              true once the press is a drag: target is pressed no more
             ui_press_end(press, cancelled)              what was clicked as the press comes up, or -1
+            ui_press_release(press, cancelled, at)      the same, and -1 unless the release is on at (a pointer's press)
             ui_pressed(press, target)                   whether target is shown pressed now
 
         How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
@@ -1270,6 +1271,15 @@ static int ui_press_end(struct ui_press address_to press, b32 cancelled)
         press->down = false;
         press->target = -1;
         return clicked;
+}
+
+// The release of a press where it is at (a list's row under the pointer, a page's target, a menu's choice): the target it went down on
+// when that is clicked there, else -1. The one click rule for a pointer's press.
+static int ui_press_release(struct ui_press address_to press, b32 cancelled, int at)
+{
+        int clicked = ui_press_end(press, cancelled);
+
+        return clicked >= 0 && clicked == at ? clicked : -1;
 }
 
 static b32 ui_pressed(const struct ui_press address_to press, int target)
@@ -6765,15 +6775,6 @@ static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
         ui_scroll_let_go(s, s->precise && ui_throws(speed, s->scale), speed);
 }
 
-// The thumb released: a held thumb lets the body go, so a pull past an end springs home.
-static b32 ui_scroll_thumb_release(struct ui_scroll address_to s, int type, b32 down, b32 held)
-{
-        if (type != WINDOW_EVENT_BUTTON || down || !held || s->body.state != BODY_TRACK || s->precise)
-                return false;
-        ui_scroll_let_go(s, 0, 0);
-        return true;
-}
-
 /*
         Where a region is drawn: its track down the x edge (its width is the kit's), from y, height long, below inset (a window's close
         button), what it scrolls (content) and how much shows (view), at the scale. The scroll stays as it is; the app puts it where it
@@ -7379,9 +7380,9 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, false))
                         return UI_MENU_NOTHING;
                 // The release chooses an item only where its press went down (the kit's press: a cancel, or no press, is none).
-                clicked = ui_press_end(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                clicked = ui_press_release(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0, at);
                 ui_ripple_exit(&m->ripple);
-                if (clicked < 0 || at != clicked || !ui_popmenu_choosable(m, at))
+                if (clicked < 0 || !ui_popmenu_choosable(m, at))
                         return UI_MENU_NOTHING;
                 return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
         }
@@ -9714,8 +9715,7 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 return -1;
         }
         ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
-        row = ui_press_end(&l->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
-        return row >= 0 && row == ui_list_hit(ui, l, x, y) ? row : -1;
+        return ui_press_release(&l->press, (event->flags & WINDOW_KEY_CANCEL) != 0, ui_list_hit(ui, l, x, y));
 }
 
 /* ---- a finger on a page ---- */
@@ -10136,8 +10136,10 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                         if (bars[k]->body.state != BODY_TRACK)
                                 ui_scroll_set(bars[k], scroll);
                 }
-                // Only a thumb that was held lets go: a finger dragging the content has the region dragging too, and its own release throws it.
-                ui_scroll_thumb_release(bars[k], type, down, held);
+                // The thumb released: a held thumb lets the body go, so a pull past an end springs home. Only a thumb that was held lets
+                // go: a finger dragging the content has the region dragging too, and its own release throws it.
+                if (type == WINDOW_EVENT_BUTTON && !down && held && bars[k]->body.state == BODY_TRACK && !bars[k]->precise)
+                        ui_scroll_let_go(bars[k], 0, 0);
                 if (scroll >= 0 || lit != bars[k]->hover)
                         ui_page_moved(ui, p, bars[k]);
         }
@@ -10391,40 +10393,6 @@ static fn ui_page_press_done(const struct ui address_to ui, struct ui_page addre
         ui_kit.pointer_x = x, ui_kit.pointer_y = y;
 }
 
-// A mouse's press began: its target shows pressed. False when it went down on nothing (the action is then done at once).
-static b32 ui_page_press_begin(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
-{
-        int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
-
-        if (target < 0)
-                return false;
-        ui_press_begin(&p->press, x, y, target, false);
-        ui_page_press_show(ui, p, l, target, x, y);
-        ui_page_changed(p);
-        return true;
-}
-
-// The mouse moved with its press held: a row is shown pressed while the pointer is on the row the press went down on.
-static fn ui_page_press_slide(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int x, int y)
-{
-        if (p->press.target < UI_PAGE_GROUP && ui_list_press_slide(ui, l, &p->press, ui_page_target(ui, p, l, x, y)))
-                ui_page_changed(p);
-}
-
-// A mouse's release with its press held: done where it went down, if the release is on that target too; one taken back
-// (WINDOW_KEY_CANCEL) is no click.
-static fn ui_page_press_up(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, void (*done)(void),
-                           b32 cancelled)
-{
-        int clicked = ui_press_end(&p->press, cancelled), x = ui_kit.pointer_x, y = ui_kit.pointer_y;
-
-        ui_list_let_go(ui, l);
-        ui_page_changed(p);
-        if (clicked < 0 || clicked != ui_page_target(ui, p, l, x, y))
-                return;
-        ui_page_press_done(ui, p, l, done, p->press.x, p->press.y, x, y);
-}
-
 // A finger's motion: its press becomes a drag past the slop, and the region it drags follows it.
 static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int x, int y)
 {
@@ -10483,8 +10451,9 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
                         ui_page_finger_move(ui, p, l, event->a, event->b);
                         return;
                 }
-                if (p->press.down)
-                        ui_page_press_slide(ui, p, l, event->a, event->b);
+                // The mouse moved with its press held: a row is shown pressed while the pointer is on the row the press went down on.
+                if (p->press.down && p->press.target < UI_PAGE_GROUP && ui_list_press_slide(ui, l, &p->press, ui_page_target(ui, p, l, event->a, event->b)))
+                        ui_page_changed(p);
                 // The rows and the column: what is under the pointer is lit (a card has no rows).
                 if (!p->card)
                 {
@@ -10502,8 +10471,17 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
                 ui_kit_ripples_exit(&p->column);
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false);
                 ui_page_changed(p);
+                // A mouse's release with its press held: done where it went down, if the release is on that target too; one taken back
+                // (WINDOW_KEY_CANCEL) is no click.
                 if (!(event->flags & WINDOW_KEY_TOUCH) && p->press.down)
-                        ui_page_press_up(ui, p, l, done, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                {
+                        int clicked = ui_press_release(&p->press, (event->flags & WINDOW_KEY_CANCEL) != 0, ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y));
+
+                        ui_list_let_go(ui, l);
+                        ui_page_changed(p);
+                        if (clicked >= 0)
+                                ui_page_press_done(ui, p, l, done, p->press.x, p->press.y, ui_kit.pointer_x, ui_kit.pointer_y);
+                }
         }
         if (event->flags & WINDOW_KEY_TOUCH)
         {
@@ -10512,9 +10490,18 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
         }
         if (event->flags & WINDOW_KEY_DOWN)
         {
+                // A mouse's press began: its target shows pressed. A press on nothing is done at once.
+                int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
+
                 ui_drag_stop(&p->finger.drag);
-                if (!ui_page_press_begin(ui, p, l))
+                if (target < 0)
+                {
                         done();
+                        return;
+                }
+                ui_press_begin(&p->press, x, y, target, false);
+                ui_page_press_show(ui, p, l, target, x, y);
+                ui_page_changed(p);
         }
 }
 
