@@ -837,13 +837,19 @@ static b32 settings_key_of(int row, char address_to key, positive room)
         return true;
 }
 
+// The row whose lines ARE its content: the kernel's notices list under their row all the time, with no chevron and no fold (nothing to open).
+static b32 settings_always_open(int row)
+{
+        return row >= 0 && row < SETTINGS_ANY && settings_rows[row].output == SETTINGS_OUT_NOTICES;
+}
+
 // The expander a row has (UI_ROW_EXPANDER_*), or none: a row whose key has an issue on the board, and the GPU row always (its status and its
 // metrics are under it). The row's own state is settings_open.
 static int settings_expander(int row)
 {
         char key[WINDOWS_ISSUE_KEY];
 
-        if (row < 0 || row >= SETTINGS_ANY || !settings_key_of(row, key, sizeof(key)))
+        if (settings_always_open(row) || row < 0 || row >= SETTINGS_ANY || !settings_key_of(row, key, sizeof(key)))
                 return 0;
         if (!windows_issues_worst(&settings_board, key, null) && !string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU))
                 return 0;
@@ -1018,7 +1024,8 @@ static int settings_sub_rows(int row, int count)
 
         // The lines show when the row is open, and while it shuts (they fold away on the spring): each issue's message and its detail, and the
         // GPU's status and metrics first.
-        if (!settings_key_of(row, key, sizeof(key)) || !(settings_expanded[row] || settings_fold_at[row]) || !settings_expander(row))
+        if (!settings_key_of(row, key, sizeof(key)) ||
+            (!settings_always_open(row) && (!(settings_expanded[row] || settings_fold_at[row]) || !settings_expander(row))))
                 return count;
         settings_sub_owner = row;
         section = settings_section_start(row);
@@ -1063,7 +1070,7 @@ static fn settings_sub_describe(int at, struct ui_row address_to row)
         row->sub = 1, row->section = sub->section, row->label = sub->text, row->value = sub->words;
         row->dim = sub->detail;
         // A line under its row is as tall as the row's fold: a share of a row while the row opens or shuts.
-        row->reveal = sub->owner >= 0 && sub->owner < (int)SETTINGS_ALL ? settings_fold_at[sub->owner] : UI_ONE;
+        row->reveal = sub->owner >= 0 && sub->owner < (int)SETTINGS_ALL && !settings_always_open(sub->owner) ? settings_fold_at[sub->owner] : UI_ONE;
 }
 
 // The board, read once a second while Settings is open (its due time is when it is read next): the GPU's sample, and when what the rows
