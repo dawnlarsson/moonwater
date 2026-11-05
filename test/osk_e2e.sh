@@ -49,7 +49,8 @@ session()
         export HOME="$work/home" PATH="$work/bin:/usr/bin:/bin" XDG_RUNTIME_DIR=/run
         cd "$work" || return 1
         mkfifo input.fifo
-        bin/compositor -H 800x600 "$work/after.img" -i "$work/input.fifo" > compositor.log 2>&1 &
+        # the output is 800 by 600 (landscape) unless OSK_SCREEN says another size (the portrait session: 600x800)
+        bin/compositor -H "${OSK_SCREEN:-800x600}" "$work/after.img" -i "$work/input.fifo" > compositor.log 2>&1 &
         cpid=$!
         sleep 2
         # a keyboard layout (the 6th argument) is the setting's file, which the compositor reads when it is written
@@ -177,6 +178,9 @@ unshare -rm sh "$self" session "$work/de" "$compositor" "$fonts" off real de > "
 unshare -rm sh "$self" session "$work/fr" "$compositor" "$fonts" off real fr > "$work/fr/session.out" 2>&1 < /dev/null
 # a window maximised with the keyboard shown is made as high as the room above the keyboard, and given its height back when hidden
 unshare -rm sh "$self" session "$work/maximised" "$compositor" "$fonts" off real "" maximised > "$work/maximised/session.out" 2>&1 < /dev/null
+# a portrait output (600 by 800): the keyboard is half of its height, and as wide as the output
+mkdir -p "$work/portrait"
+OSK_SCREEN=600x800 unshare -rm sh "$self" session "$work/portrait" "$compositor" "$fonts" auto > "$work/portrait/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
 mkdir -p "$work/boot"

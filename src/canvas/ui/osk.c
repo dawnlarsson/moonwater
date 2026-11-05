@@ -30,12 +30,16 @@
 #define MOONWATER_CANVAS_OSK
 
 #define OSK_WIDTH 640     // logical pixels: the keyboard's width, its keys and their gaps are the kit's
-#define OSK_ROW 52        // a key's height in logical pixels, over the kit's 48 target
+#define OSK_TOUCH 48      // a key's touch target, logical: the rows are never shorter
 #define OSK_GAP 6         // between keys, logical
 #define OSK_ROWS 4
 #define OSK_COLS 12       // the most keys a row has (spacers count)
 #define OSK_PAGES 3
-#define OSK_HEIGHT (2 * UI_PAD + OSK_ROWS * OSK_ROW + (OSK_ROWS - 1) * OSK_GAP)
+// The keyboard's height is a share of the output's, in device pixels: 40 percent when the output is wider than it is (landscape),
+// 50 percent when it is not (portrait), and never more than half the output. The rows are at least the touch target, when that fits.
+#define OSK_HEIGHT_LANDSCAPE 40
+#define OSK_HEIGHT_PORTRAIT 50
+#define OSK_HEIGHT_LEAST (2 * UI_PAD + OSK_ROWS * OSK_TOUCH + (OSK_ROWS - 1) * OSK_GAP) // logical
 #define OSK_HOLD_NS 500000000ull   // a held key repeats after this
 #define OSK_REPEAT_NS 60000000ull  // and then every this
 #define OSK_SHIFT_NS 400000000ull  // two taps of Shift this close make it hold (caps)
@@ -184,6 +188,7 @@ static struct
         struct ui_control keys[OSK_ROWS * OSK_COLS];
         char words[OSK_ROWS * OSK_COLS][4]; // the character a key makes, drawn: upper case under Shift
         int width, height, shown;
+        int screen_width, screen_height;    // the output the keyboard is sized for (osk_metrics); another one sizes it again (osk_tick)
         int left, top;                      // where the keyboard is placed, in the screen's pixels
         b32 dirty, focused;
         unsigned int ground;
@@ -451,6 +456,8 @@ static b32 osk_event(const struct window_event address_to event)
 
 static b32 osk_layout_take(void);
 static b32 osk_purpose_take(void);
+static b32 osk_screen_changed(void);
+static void osk_metrics(void);
 
 // The held key repeats while the keyboard is held down: a key's repeat is due at its time and the loop waits for it.
 static long osk_tick(long timeout, long address_to other)
@@ -466,6 +473,12 @@ static long osk_tick(long timeout, long address_to other)
         if (layout || purpose)
         {
                 osk_relayout();
+                return 0;
+        }
+        // The output changed (a turn, a screen plugged in or out): the keyboard is sized for it, and placed, again.
+        if (osk_screen_changed())
+        {
+                osk_metrics();
                 return 0;
         }
         if (osk.repeat < 0)
@@ -485,14 +498,41 @@ static void osk_moving(int top, int bottom, b32 all)
 
 static void osk_dock(b32 moved);
 
-// The keyboard's size and place for the scale it is drawn at: its pixels, the scratch rows its text is written through
-// (ui_scratch_fit), its keys laid out again, and its place asked of the compositor (osk_dock), which moves it when it is up.
+// The keyboard's height in device pixels for an output of this size: its share of the output's height, 40 percent when the output is
+// wider than it is and 50 percent when it is not, and never more than half of it. The rows are at least the touch target (48 logical
+// pixels), so a height too short for them is the least that gives them; a screen too short for that is still never over half.
+static int osk_height_of(const struct ui address_to ui, int screen_width, int screen_height)
+{
+        int percent = screen_width > screen_height ? OSK_HEIGHT_LANDSCAPE : OSK_HEIGHT_PORTRAIT;
+        int height = screen_height * percent / 100, most = screen_height / 2, least = ui_px(ui, OSK_HEIGHT_LEAST);
+
+        if (height < least && least <= most)
+                height = least;
+        return height > most ? most : height;
+}
+
+// The output the keyboard is on has another size than the one it was sized for (osk_metrics).
+static b32 osk_screen_changed(void)
+{
+        int x, y, width, height;
+
+        windows_output(osk.own.table, 0, &x, &y, &width, &height);
+        return width != osk.screen_width || height != osk.screen_height;
+}
+
+// The keyboard's size and place for the scale it is drawn at and the output it is on: its pixels (the width never wider than the output),
+// its height (osk_height_of), the scratch rows its text is written through (ui_scratch_fit), its keys laid out again, and its place asked
+// of the compositor (osk_dock), which moves it when it is up.
 static void osk_metrics(void)
 {
         b32 up = osk.shown >= 0;
+        int x, y;
 
+        windows_output(osk.own.table, 0, &x, &y, &osk.screen_width, &osk.screen_height);
         osk.width = ui_px(&osk.ui, OSK_WIDTH);
-        osk.height = ui_px(&osk.ui, OSK_HEIGHT);
+        if (osk.width > osk.screen_width)
+                osk.width = osk.screen_width;
+        osk.height = osk_height_of(&osk.ui, osk.screen_width, osk.screen_height);
         ui_scratch_fit(&osk.ui, (unsigned int)osk.width);
         osk_layout();
         osk_dock(up);
