@@ -83,7 +83,13 @@ session()
         sleep 3
         bin/moonwater debug > debug.shown.txt 2>&1
         cp after.img before.img
-        if [ "$4" = auto ] && [ "${5:-real}" = real ]; then
+        if [ "${7:-}" = accent ]; then
+                # the accents: a letter held for the kit's hold shows its accents, and a lift on one types it in place of the letter (the
+                # letter is taken back with a Backspace); a letter whose row is on the top row shows them over itself, and the others above
+                # it. A lift on the letter itself (s, held) types the letter and nothing more.
+                python3 "$here/osk_input.py" input.fifo keys.txt text:x longpick:e:0 longpick:a:0 hold:s:0.9 ctrl:s > accent.input.log 2>&1
+                sleep 2
+        elif [ "$4" = auto ] && [ "${5:-real}" = real ]; then
                 # the keyboard's keys, typed into the field: a held Back empties the first line, a capital (Shift), the numbers page,
                 # Enter, then Ctrl+S saves the file
                 python3 "$here/osk_input.py" input.fifo keys.txt "text:abcdef" hold:Back:2 "text:Osk
@@ -178,8 +184,10 @@ unshare -rm sh "$self" session "$work/de" "$compositor" "$fonts" off real de > "
 unshare -rm sh "$self" session "$work/fr" "$compositor" "$fonts" off real fr > "$work/fr/session.out" 2>&1 < /dev/null
 # a window maximised with the keyboard shown is made as high as the room above the keyboard, and given its height back when hidden
 unshare -rm sh "$self" session "$work/maximised" "$compositor" "$fonts" off real "" maximised > "$work/maximised/session.out" 2>&1 < /dev/null
+# the accents of a long press (the letters of the layout, held for the kit's hold; the session's own keys, not the typing above)
+mkdir -p "$work/accent" "$work/portrait"
+unshare -rm sh "$self" session "$work/accent" "$compositor" "$fonts" auto real "" accent > "$work/accent/session.out" 2>&1 < /dev/null
 # a portrait output (600 by 800): the keyboard is half of its height, and as wide as the output
-mkdir -p "$work/portrait"
 OSK_SCREEN=600x800 unshare -rm sh "$self" session "$work/portrait" "$compositor" "$fonts" auto > "$work/portrait/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
 unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
@@ -339,5 +347,30 @@ if [ -n "$h0" ] && [ "$h2" = "$h0" ]; then
         row ok "the maximised editor gets its height back when the keyboard is put away ($h2)"
 else
         row FAIL "the maximised editor gets its height back when the keyboard is put away" "height $h0, then $h2"
+fi
+
+# the height: 40 percent of a landscape output's height (240 of 600), raised to the least that gives 48-pixel rows (242), and the keys are
+# at least 48 pixels high; a portrait output (600 by 800) is 50 percent (400) and as wide as the output is (the keyboard is 640 otherwise)
+land_h=$(python3 -I "$here/osk_debug.py" place "$work/debug.shown.txt" Keyboard | awk '{ print $4 }')
+set -- $(python3 -I "$here/osk_debug.py" place "$work/portrait/debug.shown.txt" Keyboard)
+port_w=$3 port_h=$4
+short=$(awk '$7 < 48' "$work/keys.txt" 2> /dev/null | wc -l)
+if [ "$land_h" = 242 ] && [ "${short:-1}" -eq 0 ]; then
+        row ok "the keyboard is 40 percent of a landscape output's height, and at least the 48-pixel rows (242 of 600; the keys are all 48 or more)"
+else
+        row FAIL "the keyboard is 40 percent of a landscape output's height" "height ${land_h:-none}, keys under 48: ${short:-?}"
+fi
+if [ "$port_h" = 400 ] && [ "$port_w" = 600 ]; then
+        row ok "a portrait output (600 by 800): the keyboard is half its height (400) and as wide as the output (600)"
+else
+        row FAIL "a portrait output (600 by 800): the keyboard is half its height and as wide as the output" "placed ${port_w:-none} by ${port_h:-none}"
+fi
+
+# the accents: a letter held for the kit's hold shows its accents; a lift on one types it in place of the letter (the letter is taken back
+# with a Backspace), on the top row over the key and on the others above it; a lift on the letter itself types the letter and nothing more
+if [ "$(cat "$work/accent/note.txt" 2> /dev/null)" = "$(printf 'x\303\251\303\240s')" ]; then
+        row ok "a long press shows the accents: e and a took the accents (xéàs), and a lift on the held s typed s and nothing more"
+else
+        row FAIL "a long press shows the accents: xéàs" "note.txt: $(cat "$work/accent/note.txt" 2> /dev/null | od -c | head -2 | tr '\n' ' ')"
 fi
 exit "$failures"

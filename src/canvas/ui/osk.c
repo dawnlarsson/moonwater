@@ -15,6 +15,14 @@
         for every letter, one more tap lets go. Backspace and the arrows repeat while their key is held (after OSK_HOLD_NS, every
         OSK_REPEAT_NS). A key's feedback is the kit's: its ripple, its press and its hover.
 
+        A letter held for the kit's hold (UI_TOUCH_HOLD_NS) shows its accents (osk_accents, the Latin letters of the Settings languages) in a
+        row above the key, or over it on the top row. The letter is typed on the press, as any key's; lifting on an accent takes that
+        letter back with one Backspace and types the accent on the key's own code; lifting anywhere else sends nothing more.
+
+        The keyboard's height is a share of the output's (osk_height_of): 40 percent landscape, 50 percent portrait, never over half, and
+        its rows at least the touch target. The keyboard is sized again when the output changes (osk_tick), and the compositor puts it away
+        when a screen turns (compositor_osk_turned).
+
         Two fingers at once (a shift held with a letter) is not done: a window's events carry no finger, so the compositor does not tell
         a second press from a first. The keyboard takes presses one at a time.
 
@@ -29,20 +37,22 @@
 #ifndef MOONWATER_CANVAS_OSK
 #define MOONWATER_CANVAS_OSK
 
-#define OSK_WIDTH 640     // logical pixels: the keyboard's width, its keys and their gaps are the kit's
+#define OSK_WIDTH 640     // logical pixels: the keyboard's width, its keys and their gaps are the kit's (never wider than the output)
 #define OSK_TOUCH 48      // a key's touch target, logical: the rows are never shorter
 #define OSK_GAP 6         // between keys, logical
 #define OSK_ROWS 4
 #define OSK_COLS 12       // the most keys a row has (spacers count)
 #define OSK_PAGES 3
-// The keyboard's height is a share of the output's, in device pixels: 40 percent when the output is wider than it is (landscape),
-// 50 percent when it is not (portrait), and never more than half the output. The rows are at least the touch target, when that fits.
+// The keyboard's height is a share of the output's height, in device pixels: 40 percent when the output is wider than it is (landscape),
+// 50 percent when it is taller (portrait), and never more than half the output. The rows are at least the touch target, when that fits.
 #define OSK_HEIGHT_LANDSCAPE 40
 #define OSK_HEIGHT_PORTRAIT 50
 #define OSK_HEIGHT_LEAST (2 * UI_PAD + OSK_ROWS * OSK_TOUCH + (OSK_ROWS - 1) * OSK_GAP) // logical
 #define OSK_HOLD_NS 500000000ull   // a held key repeats after this
 #define OSK_REPEAT_NS 60000000ull  // and then every this
 #define OSK_SHIFT_NS 400000000ull  // two taps of Shift this close make it hold (caps)
+#define OSK_ALT_MOST 9             // the accents a letter has in the table below (its row is ten: the letter and nine)
+#define OSK_ALT_PATH_MOST 256      // the trace's name with ".alt" on it
 #define OSK_TRACE_LINE 96
 #define OSK_TRACE_MOST ((OSK_PAGES + 1) * OSK_ROWS * OSK_COLS * OSK_TRACE_LINE) // the pages, and the email page the trace writes after them
 
@@ -106,6 +116,40 @@ static const struct osk_layout
     {OSK_LAYOUT('f', 'r'), {"azertyuiop", "qsdfghjklm", "wxcvbn"}},
 };
 static const unsigned short osk_letter_start[3] = {16, 30, 44};
+
+// The accents a long press of a letter shows: each row is the lower-case letter and the characters it takes (code points), in the
+// order they are shown. They cover the Latin-script languages of the Settings list (Español, Français, Deutsch, Português, Italiano,
+// Nederlands, Polski, Türkçe, Svenska; English has none, and the Cyrillic, Greek, Arabic, Hebrew, Persian and Urdu keyboards are not
+// Latin letters). The layout does not change them. Capitals come from osk_upper (Shift on the key makes the capital of each).
+static const unsigned int osk_accents[][10] = {
+    {'a', 0xe0, 0xe1, 0xe2, 0xe4, 0xe3, 0xe5, 0xe6, 0x105},          // à á â ä ã å æ ą
+    {'c', 0xe7, 0x107, 0x10d},                                       // ç ć č
+    {'e', 0xe9, 0xe8, 0xea, 0xeb, 0x119},                            // é è ê ë ę
+    {'g', 0x11f},                                                    // ğ
+    {'i', 0xec, 0xed, 0xee, 0xef, 0x131},                            // ì í î ï ı
+    {'l', 0x142},                                                    // ł
+    {'n', 0xf1, 0x144},                                              // ñ ń
+    {'o', 0xf3, 0xf2, 0xf4, 0xf6, 0xf5, 0x153},                      // ó ò ô ö õ œ
+    {'s', 0xdf, 0x15b, 0x15f, 0x161},                                // ß ś ş š
+    {'u', 0xf9, 0xfa, 0xfb, 0xfc},                                   // ù ú û ü
+    {'y', 0xff},                                                     // ÿ
+    {'z', 0x17a, 0x17c, 0x17e},                                      // ź ż ž
+};
+
+// The capital of an accent in the table: Latin-1's small letters are 0x20 above their capitals (ÿ is Ÿ), the Latin Extended-A letters
+// in the table are the code after their capital, and ı is I. ß has no capital here and stays.
+static unsigned int osk_upper(unsigned int ch)
+{
+        if (ch == 0x131)
+                return 'I';
+        if (ch >= 0xe0 && ch <= 0xfe && ch != 0xf7)
+                return ch - 0x20;
+        if (ch == 0xff)
+                return 0x178;
+        if (ch >= 0x100 && ch <= 0x17f)
+                return ch - 1;
+        return ch;
+}
 
 // The pages: the letters (built for the layout, osk_letters_build), the numbers and the common symbols, the second symbols page. A row
 // of keys is the kit's buttons in a line, each as wide as its span of the row's halves says, and the row fills the keyboard's width.
@@ -201,6 +245,14 @@ static struct
         unsigned short held_code;           // what its release sends
         int repeat;                         // the key that repeats, or -1
         b64 next;                           // when the held key next repeats
+        int long_key;                       // the letter a press is on, until it is a long press (its index), or -1
+        b64 long_at;                        // when that press becomes a long one (the kit's hold)
+        unsigned int long_capital;          // the press typed a capital (Shift was on): its accents are capitals too
+        int alt_key;                        // the letter whose accents are shown (its index), or -1
+        int alt_count;                      // the accents shown, in alts (the row above the key, or over it on the top row)
+        unsigned int alt_chars[OSK_ALT_MOST];
+        struct ui_control alts[OSK_ALT_MOST];
+        char alt_words[OSK_ALT_MOST][5];    // the accent each control says (UTF-8, a NUL)
         const char *trace;                  // -t FILE
         char trace_text[OSK_TRACE_MOST];
 } osk;
@@ -285,6 +337,10 @@ static void osk_draw(unsigned int address_to pixels)
         for (int k = 0; k < OSK_ROWS * OSK_COLS; k++)
                 if (osk.keys[k].kind)
                         ui_control_draw(ui, &osk.keys[k]);
+        // The accents of a long press are drawn over the keys, after them.
+        if (osk.alt_key >= 0)
+                for (int at = 0; at < osk.alt_count; at++)
+                        ui_control_draw(ui, &osk.alts[at]);
 }
 
 static b32 osk_frame(void)
@@ -340,6 +396,15 @@ static void osk_shift_tap(void)
         osk.shift_at = now;
 }
 
+// The accents of a letter (its row of osk_accents), or null for a letter that has none.
+static const unsigned int *osk_accents_of(unsigned int letter)
+{
+        for (unsigned int at = 0; at < sizeof(osk_accents) / sizeof(osk_accents[0]); at++)
+                if (osk_accents[at][0] == letter)
+                        return osk_accents[at];
+        return null;
+}
+
 // A press on a key: what it does, and the repeat it starts when it repeats.
 static void osk_press(int index)
 {
@@ -347,11 +412,20 @@ static void osk_press(int index)
 
         osk.held = index;
         osk.repeat = -1;
+        osk.long_key = -1;
         switch (key->kind)
         {
         case OSK_CHAR:
                 osk.held_code = key->code;
                 osk_send(key->code, osk_character(key), true);
+                // A letter with accents: held for the kit's hold, its accents are shown (osk_tick). The capital the press typed decides
+                // their case, so it is read before the Shift latch lets go.
+                if (osk_accents_of(key->ch))
+                {
+                        osk.long_key = index;
+                        osk.long_at = ui_kit.now + UI_TOUCH_HOLD_NS;
+                        osk.long_capital = osk_character(key) != key->ch;
+                }
                 if (osk.shift == 1)
                 {
                         osk.shift = 0;
@@ -396,13 +470,142 @@ static void osk_press(int index)
         }
 }
 
-// The release of the key the press was on: its key goes up, and its repeat ends.
+// The release of the key the press was on: its key goes up, its repeat ends, and a long press is over (its accents are shut by the
+// caller, which has read the one lifted on first).
 static void osk_release(void)
 {
         if (osk.held >= 0)
                 osk_send(osk.held_code, 0, false);
         osk.held = -1;
         osk.repeat = -1;
+        osk.long_key = -1;
+}
+
+// The accents of a long press are shut: the row is not drawn, and nothing is hit under it.
+static void osk_alts_close(void)
+{
+        if (osk.alt_key < 0)
+                return;
+        osk.alt_key = -1;
+        osk.alt_count = 0;
+        osk.dirty = true;
+}
+
+// A letter's accent picked on the row: the letter the press typed is taken back with a Backspace, and the accent is sent on the
+// letter's own key (the same key, so the evdev code is the letter's and the character is the accent's).
+static void osk_accent(int letter, unsigned int ch)
+{
+        const struct osk_key address_to key = &osk_page_keys[osk.page][letter / OSK_COLS][letter % OSK_COLS];
+
+        osk_send(OSK_CODE_BACKSPACE, 0, true);
+        osk_send(OSK_CODE_BACKSPACE, 0, false);
+        osk_send(key->code, ch, true);
+        osk_send(key->code, 0, false);
+}
+
+// The accent under a point of the row, or -1.
+static int osk_alt_hit(int x, int y)
+{
+        for (int at = 0; at < osk.alt_count; at++)
+                if (ui_control_hit(&osk.ui, &osk.alts[at], x, y) >= 0)
+                        return at;
+        return -1;
+}
+
+static int osk_put_number(char address_to into, int n);
+
+// The trace's accents: "index x y w h word" a line each, in the file the trace's name with .alt on it, written when the row opens (the
+// e2e lane picks an accent by it).
+static void osk_alts_trace(void)
+{
+        char path[OSK_ALT_PATH_MOST], text[OSK_ALT_MOST * OSK_TRACE_LINE];
+        const char *suffix = ".alt";
+        int at = 0, length = 0;
+        bipolar handle;
+
+        if (!osk.trace)
+                return;
+        for (; osk.trace[at] && at < OSK_ALT_PATH_MOST - 5; at++)
+                path[at] = osk.trace[at];
+        for (int k = 0; suffix[k]; k++)
+                path[at++] = suffix[k];
+        path[at] = 0;
+        for (int k = 0; k < osk.alt_count; k++)
+        {
+                const struct ui_control address_to c = &osk.alts[k];
+                int values[5];
+
+                values[0] = k;
+                values[1] = osk.left + ui_dev(&osk.ui, c->x);
+                values[2] = osk.top + ui_dev(&osk.ui, c->y);
+                values[3] = ui_dev(&osk.ui, c->w);
+                values[4] = ui_dev(&osk.ui, c->h);
+                for (int v = 0; v < 5; v++)
+                {
+                        length += osk_put_number(text + length, values[v]);
+                        text[length++] = ' ';
+                }
+                for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
+                        text[length++] = c->label[w];
+                text[length++] = '\n';
+        }
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (handle >= 0)
+        {
+                system_write_once(handle, text, (positive)length);
+                system_close(handle);
+        }
+}
+
+// The accents of the letter held (its index): the row is laid out above the key, or over it on the top row, centred on it, kept on the
+// keyboard, and its accents are the letter's (capitals when the press typed one). A letter with none, or a press no longer held, is no row.
+static void osk_alts_open(void)
+{
+        struct ui address_to ui = &osk.ui;
+        int letter = osk.long_key, count = 0, gap = OSK_GAP, row = letter / OSK_COLS;
+        const struct osk_key address_to key;
+        const unsigned int address_to accents;
+        struct ui_control address_to k;
+        int width, x0, y, total, most, at;
+
+        osk.long_key = -1;
+        if (letter < 0 || osk.held != letter)
+                return;
+        key = &osk_page_keys[osk.page][row][letter % OSK_COLS];
+        accents = osk_accents_of(key->ch);
+        if (!accents)
+                return;
+        for (unsigned int n = 1; n < sizeof(osk_accents[0]) / sizeof(osk_accents[0][0]) && accents[n] && count < OSK_ALT_MOST; n++)
+                osk.alt_chars[count++] = osk.long_capital ? osk_upper(accents[n]) : accents[n];
+        k = &osk.keys[letter];
+        width = k->w, total = count * width + (count - 1) * gap;
+        most = osk.width * 100 / ui->scale;
+        x0 = k->x + k->w / 2 - total / 2;
+        if (x0 < UI_PAD)
+                x0 = UI_PAD;
+        if (x0 + total > most - UI_PAD)
+                x0 = most - UI_PAD - total;
+        y = row > 0 ? k->y - k->h - gap : k->y;
+        for (at = 0; at < count; at++)
+        {
+                struct ui_control address_to c = &osk.alts[at];
+                p8 bytes[4];
+                positive size;
+
+                memory_zero(c, sizeof(*c));
+                c->kind = UI_BUTTON;
+                c->variant = UI_BUTTON_KEY;
+                c->x = x0 + at * (width + gap), c->y = y, c->w = width, c->h = k->h;
+                size = memory_utf8_encode(bytes, sizeof(bytes), osk.alt_chars[at]);
+                for (positive b = 0; b < size && b < 4; b++)
+                        osk.alt_words[at][b] = (char)bytes[b];
+                osk.alt_words[at][size < 4 ? size : 4] = 0;
+                c->label = osk.alt_words[at];
+        }
+        osk.alt_key = letter;
+        osk.alt_count = count;
+        osk.dirty = true;
+        osk_alts_trace();
 }
 
 static void osk_repeat_key(void)
@@ -448,7 +651,16 @@ static b32 osk_event(const struct window_event address_to event)
                                 osk_press(index);
                 }
                 else
+                {
+                        // Lifted on an accent of the row: it is typed (osk_accent). Lifted anywhere else, nothing is sent but the key's up.
+                        int letter = osk.alt_key, at = letter >= 0 ? osk_alt_hit(ui_kit.pointer_x, ui_kit.pointer_y) : -1;
+                        unsigned int ch = at >= 0 ? osk.alt_chars[at] : 0;
+
                         osk_release();
+                        osk_alts_close();
+                        if (ch)
+                                osk_accent(letter, ch);
+                }
                 osk.dirty = true;
         }
         return true;
@@ -462,8 +674,8 @@ static void osk_metrics(void);
 // The held key repeats while the keyboard is held down: a key's repeat is due at its time and the loop waits for it.
 static long osk_tick(long timeout, long address_to other)
 {
-        b64 now = ui_kit.now, wait;
-        b32 layout, purpose;
+        b64 now = ui_kit.now, wait = 0;
+        b32 layout, purpose, waiting = false;
 
         (void)other;
         // The layout or the focus's content purpose changed (the compositor woke the keyboard for it): the letters are built again,
@@ -472,6 +684,8 @@ static long osk_tick(long timeout, long address_to other)
         purpose = osk_purpose_take();
         if (layout || purpose)
         {
+                osk.long_key = -1;
+                osk_alts_close();
                 osk_relayout();
                 return 0;
         }
@@ -481,11 +695,24 @@ static long osk_tick(long timeout, long address_to other)
                 osk_metrics();
                 return 0;
         }
-        if (osk.repeat < 0)
+        // A letter held for the kit's hold is a long press: its accents are shown (the picture is due). Until then the loop waits for it.
+        if (osk.long_key >= 0)
+        {
+                if (now >= osk.long_at)
+                        osk_alts_open();
+                else
+                        wait = osk.long_at - now, waiting = true;
+        }
+        if (osk.repeat >= 0)
+        {
+                if (now >= osk.next)
+                        osk_repeat_key();
+                if (!waiting || (osk.next > now ? osk.next - now : 0) < wait)
+                        wait = osk.next > now ? osk.next - now : 0;
+                waiting = true;
+        }
+        if (!waiting)
                 return timeout;
-        if (now >= osk.next)
-                osk_repeat_key();
-        wait = osk.next > now ? osk.next - now : 0;
         return timeout < 0 || (b64)timeout > wait ? (long)wait : timeout;
 }
 
@@ -534,6 +761,7 @@ static void osk_metrics(void)
                 osk.width = osk.screen_width;
         osk.height = osk_height_of(&osk.ui, osk.screen_width, osk.screen_height);
         ui_scratch_fit(&osk.ui, (unsigned int)osk.width);
+        osk_alts_close();
         osk_layout();
         osk_dock(up);
         osk.dirty = true;

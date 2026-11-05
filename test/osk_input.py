@@ -9,6 +9,8 @@
 #     cell:PAGE:ROW:COL  a press and a lift on the key at that place of the trace, whatever page is shown
 #     drag:X1:Y1:X2:Y2   a press at X1, Y1, the pointer moved to X2, Y2 with the button held, and the lift
 #     hold:LABEL:SECS    a press held for SECS, then the lift
+#     longpick:LABEL:N   a letter held for a second (the kit's hold), then lifted on its accent N (the keyboard's FILE.alt, read after
+#                        the hold: the accents of the row it opened)
 #     text:STRING        each character as a tap: a capital is Shift and the letter, a space is Space, a newline is Enter
 #     wait:SECS          nothing, for the screen to settle
 #     ctrl:s             Control held over the letter s (Ctrl+S), on the fifo's own keys
@@ -70,6 +72,17 @@ def load(path):
     return keys
 
 
+def load_accents(path):
+    # the accents the keyboard opened (osk -t writes them to FILE.alt): one line each, "index x y w h word"
+    accents = {}
+    for line in open(path):
+        fields = line.rstrip("\n").split(" ", 5)
+        if len(fields) == 6:
+            index, x, y, w, h = map(int, fields[:5])
+            accents[index] = (x, y, w, h)
+    return accents
+
+
 def main():
     fifo, trace = sys.argv[1], sys.argv[2]
     keys = load(trace)
@@ -125,6 +138,17 @@ def main():
         elif kind == "hold":
             label, _, seconds = rest.partition(":")
             tap(label, float(seconds))
+        elif kind == "longpick":
+            label, _, index = rest.partition(":")
+            x, y, w, h = keys[(page, label)]
+            pointer.move(x + w // 2, y + h // 2)
+            pointer.press()
+            time.sleep(0.9)
+            ax, ay, aw, ah = load_accents(trace + ".alt")[int(index)]
+            pointer.move(ax + aw // 2, ay + ah // 2)
+            time.sleep(0.1)
+            pointer.lift()
+            time.sleep(0.15)
         elif kind == "wait":
             time.sleep(float(rest))
         elif kind == "ctrl":
