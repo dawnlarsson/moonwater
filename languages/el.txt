@@ -255,6 +255,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Left edge	9ce5	Αριστερό άκρο
 =Machine	be0e	Μηχάνημα
 =Mixer	123a	Μίκτης
+=Momentum	cfef	Αδράνεια
 =Motion	7647	Κίνηση
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
@@ -264,6 +265,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Name	7306	Όνομα
 =Name servers (auto for the network)	695a	Διακομιστές ονομάτων (auto για το δίκτυο)
 =Names over TLS	075a	Ονόματα μέσω TLS
+=Natural direction	d977	Φυσική κατεύθυνση
 =Network	ad65	Δίκτυο
 =Network adapters	88ef	Προσαρμογείς δικτύου
 =New USB devices	c15c	Νέες συσκευές USB
@@ -281,9 +283,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Remembered devices	abbc	Συσκευές που θυμάται
 =Right edge	279a	Δεξιό άκρο
 =Rotation	777f	Περιστροφή
+=Rubber band	9c42	Ελαστικό εφέ
 =Scale of this screen	e4ca	Κλίμακα αυτής της οθόνης
 =Screen	c631	Οθόνη
 =Screen modes	85ad	Λειτουργίες οθόνης
+=Scroll speed	e7af	Ταχύτητα κύλισης
+=Scrolling	74ec	Κύλιση
 =Set the clock from the network	b2a3	Ρύθμιση ρολογιού από το δίκτυο
 =Settings	8728	Ρυθμίσεις
 =Shake the pointer to find it	f508	Κούνημα του δείκτη για να βρεθεί
@@ -309,7 +314,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Time	e404	Ώρα
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
-=Trackpad scroll speed	3bc1	Ταχύτητα κύλισης της επιφάνειας αφής
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά

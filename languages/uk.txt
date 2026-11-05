@@ -255,6 +255,7 @@ ui_field_full	fe02	більше не вміщається
 =Left edge	9ce5	Лівий край
 =Machine	be0e	Комп'ютер
 =Mixer	123a	Мікшер
+=Momentum	cfef	Інерція
 =Motion	7647	Рух
 =Mount kept disks	f0c8	Монтувати збережені диски
 =Mouse acceleration	c400	Прискорення миші
@@ -264,6 +265,7 @@ ui_field_full	fe02	більше не вміщається
 =Name	7306	Ім'я
 =Name servers (auto for the network)	695a	Сервери імен (auto для мережі)
 =Names over TLS	075a	Імена через TLS
+=Natural direction	d977	Природний напрямок
 =Network	ad65	Мережа
 =Network adapters	88ef	Мережеві адаптери
 =New USB devices	c15c	Нові USB-пристрої
@@ -281,9 +283,12 @@ ui_field_full	fe02	більше не вміщається
 =Remembered devices	abbc	Запам'ятовані пристрої
 =Right edge	279a	Правий край
 =Rotation	777f	Поворот
+=Rubber band	9c42	Ефект гумки
 =Scale of this screen	e4ca	Масштаб цього екрана
 =Screen	c631	Екран
 =Screen modes	85ad	Режими екрана
+=Scroll speed	e7af	Швидкість прокрутки
+=Scrolling	74ec	Прокрутка
 =Set the clock from the network	b2a3	Встановлювати годинник за мережею
 =Settings	8728	Налаштування
 =Shake the pointer to find it	f508	Потрусити вказівником, щоб знайти його
@@ -309,7 +314,6 @@ ui_field_full	fe02	більше не вміщається
 =Time	e404	Час
 =Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
 =Time zone	741a	Часовий пояс
-=Trackpad scroll speed	3bc1	Швидкість прокрутки тачпада
 =Turned by the screen	ea45	Повертає екран
 =Turned left	507c	Повернуто ліворуч
 =Turned right	7a49	Повернуто праворуч

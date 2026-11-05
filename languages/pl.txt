@@ -255,6 +255,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Left edge	9ce5	Lewa krawędź
 =Machine	be0e	Maszyna
 =Mixer	123a	Mikser
+=Momentum	cfef	Pęd
 =Motion	7647	Ruch
 =Mount kept disks	f0c8	Montuj zachowane dyski
 =Mouse acceleration	c400	Przyspieszenie myszy
@@ -264,6 +265,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Name	7306	Nazwa
 =Name servers (auto for the network)	695a	Serwery nazw (auto dla sieci)
 =Names over TLS	075a	Nazwy przez TLS
+=Natural direction	d977	Naturalny kierunek
 =Network	ad65	Sieć
 =Network adapters	88ef	Karty sieciowe
 =New USB devices	c15c	Nowe urządzenia USB
@@ -281,9 +283,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Remembered devices	abbc	Zapamiętane urządzenia
 =Right edge	279a	Prawa krawędź
 =Rotation	777f	Obrót
+=Rubber band	9c42	Efekt gumki
 =Scale of this screen	e4ca	Skala tego ekranu
 =Screen	c631	Ekran
 =Screen modes	85ad	Tryby ekranu
+=Scroll speed	e7af	Prędkość przewijania
+=Scrolling	74ec	Przewijanie
 =Set the clock from the network	b2a3	Ustawiaj zegar z sieci
 =Settings	8728	Ustawienia
 =Shake the pointer to find it	f508	Potrząśnij wskaźnikiem, aby go znaleźć
@@ -309,7 +314,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Time	e404	Czas
 =Time server (auto for the pool)	67e5	Serwer czasu (auto dla puli)
 =Time zone	741a	Strefa czasowa
-=Trackpad scroll speed	3bc1	Prędkość przewijania gładzika
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo

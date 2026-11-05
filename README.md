@@ -59,7 +59,7 @@ moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
 moonwater clipboard clear              empty both selections and the history (root)
 moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
-moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel
+moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
 moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them
 moonwater sensors                      the processor use, clocks, GPU load, heat, fans and power of this machine, read now
 moonwater name [NEW|random]            what this machine is called, like space-wizard
@@ -79,6 +79,9 @@ moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggb
 moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
 moonwater canvas wheel smooth [on|off]  a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]
 moonwater canvas trackpad speed [slow|normal|fast]  how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]
+moonwater canvas scroll natural [on|off]  the content moves with the fingers, as on a touch screen; off, a wheel notch and a drag move it the other way [on]
+moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it [on]
+moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]

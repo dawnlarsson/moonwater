@@ -10742,6 +10742,39 @@ static void compositor_text_publish(unsigned int percent)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// The scroll body's switches, as the table keeps them (scroll_off: WINDOW_SCROLL_FLIP, _STOPS and _STILL, 0 the standard) with the
+// trackpad's speed (scroll_speed). A change knocks every window, as a theme change does.
+static void compositor_scroll_publish(unsigned int off, unsigned int speed)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || (table->scroll_off == off && table->scroll_speed == speed))
+                return;
+        table->scroll_off = off;
+        table->scroll_speed = speed;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
+// The Scrolling group's four rows, read in one place: natural direction, momentum and the rubber band, each on when nothing is kept, and
+// the trackpad's speed (normal when nothing is kept, or what is kept is none of the words), which compositor_speed takes for the pads.
+static void compositor_scroll_read(void)
+{
+        char word[16];
+        long natural = 1, momentum = 1, rubber = 1;
+
+        compositor_word(SETTING_SCROLL_NATURAL_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_SCROLL_NATURAL_PATH, word, &natural);
+        compositor_word(SETTING_SCROLL_MOMENTUM_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_SCROLL_MOMENTUM_PATH, word, &momentum);
+        compositor_word(SETTING_SCROLL_RUBBER_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_SCROLL_RUBBER_PATH, word, &rubber);
+        compositor_word(SETTING_TRACKPAD_SPEED_PATH, word, sizeof(word));
+        compositor.trackpad_speed = string_equals((string_address)word, (string_address) "slow") ? 1
+                                    : string_equals((string_address)word, (string_address) "fast") ? 2 : 0;
+        compositor_scroll_publish((natural ? 0 : WINDOW_SCROLL_FLIP) | (momentum ? 0 : WINDOW_SCROLL_STOPS) | (rubber ? 0 : WINDOW_SCROLL_STILL),
+                                  compositor.trackpad_speed);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
@@ -10760,10 +10793,7 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
         compositor_wheel_publish(smooth != 0);
-        // The trackpad's speed: normal when nothing is kept, or what is kept is none of the words.
-        compositor_word(SETTING_TRACKPAD_SPEED_PATH, word, sizeof(word));
-        compositor.trackpad_speed = string_equals((string_address)word, (string_address) "slow") ? 1
-                                    : string_equals((string_address)word, (string_address) "fast") ? 2 : 0;
+        compositor_scroll_read();
         compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));

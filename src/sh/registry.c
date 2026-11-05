@@ -146,6 +146,9 @@
 #define SETTING_MOTION_PATH "/root/canvas.motion"
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
 #define SETTING_TRACKPAD_SPEED_PATH "/root/canvas.trackpad.speed"
+#define SETTING_SCROLL_NATURAL_PATH "/root/canvas.scroll.natural"
+#define SETTING_SCROLL_MOMENTUM_PATH "/root/canvas.scroll.momentum"
+#define SETTING_SCROLL_RUBBER_PATH "/root/canvas.scroll.rubber"
 #define SETTING_CARET_BLINK_PATH "/root/canvas.caret.blink"
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
 // The text's size, in percent of what every role's size says: ui.c's ui_em multiplies it in, and the portal says it as text-scaling-factor.
@@ -344,13 +347,6 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
-    //  A trackpad's scroll: a stream notch is 8 px at rest and grows with the notch rate, and a two-finger millimetre is 60, 100 or 160 percent of
-    //  the pad's own (compositor_stream_v, compositor_pad_pct).
-    SETTING_PLAIN_ROW(null, "Trackpad scroll speed", SETTINGS_CHOICE, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
-                      .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
-                      .usage = "canvas trackpad speed [slow|normal|fast]",
-                      .help = "how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
@@ -392,6 +388,26 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "the right edge is off, windows or volume, not %s\n",
                       .usage = "canvas touch right [off|windows|volume]",
                       .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]"),
+    //  The scrolling group: how a wheel, a trackpad and a drag move the content (ui.c's scroll body). Natural direction turns
+    //  the way a notch and a drag move it; speed scales a trackpad's notches and streams (compositor_pad_pct, the speed row
+    //  that was in Input); momentum is the coast a release carries; the rubber band stretches past an end and springs home.
+    SETTING_PLAIN_ROW("Scrolling", "Natural direction", SETTINGS_SWITCH, 0, ("canvas", "scroll", "natural"), "natural ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_NATURAL_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas scroll natural [on|off]",
+                      .help = "the content moves with the fingers, as on a touch screen; off, a wheel notch and a drag move it the other way [on]"),
+    SETTING_PLAIN_ROW(null, "Scroll speed", SETTINGS_CHOICE, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
+                      .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
+                      .usage = "canvas trackpad speed [slow|normal|fast]",
+                      .help = "how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]"),
+    SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas scroll momentum [on|off]",
+                      .help = "a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it [on]"),
+    SETTING_PLAIN_ROW(null, "Rubber band", SETTINGS_SWITCH, 0, ("canvas", "scroll", "rubber"), "rubber ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_RUBBER_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas scroll rubber [on|off]",
+                      .help = "past the top or the bottom the content stretches and springs back; off, it stops at the end [on]"),
     //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
     //  when a program (the mixer, the tray, a volume key) changes the volume, so a row here and a slider there are one value.
     //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume

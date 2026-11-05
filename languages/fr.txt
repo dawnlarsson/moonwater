@@ -255,6 +255,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Left edge	9ce5	Bord gauche
 =Machine	be0e	Machine
 =Mixer	123a	Mélangeur
+=Momentum	cfef	Inertie
 =Motion	7647	Animation
 =Mount kept disks	f0c8	Monter les disques conservés
 =Mouse acceleration	c400	Accélération de la souris
@@ -264,6 +265,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Name	7306	Nom
 =Name servers (auto for the network)	695a	Serveurs de noms (auto pour le réseau)
 =Names over TLS	075a	Noms par TLS
+=Natural direction	d977	Sens naturel
 =Network	ad65	Réseau
 =Network adapters	88ef	Adaptateurs réseau
 =New USB devices	c15c	Nouveaux périphériques USB
@@ -281,9 +283,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Remembered devices	abbc	Appareils mémorisés
 =Right edge	279a	Bord droit
 =Rotation	777f	Rotation
+=Rubber band	9c42	Effet élastique
 =Scale of this screen	e4ca	Échelle de cet écran
 =Screen	c631	Écran
 =Screen modes	85ad	Modes d'écran
+=Scroll speed	e7af	Vitesse de défilement
+=Scrolling	74ec	Défilement
 =Set the clock from the network	b2a3	Régler l'horloge depuis le réseau
 =Settings	8728	Paramètres
 =Shake the pointer to find it	f508	Secouer le pointeur pour le retrouver
@@ -309,7 +314,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Time	e404	Heure
 =Time server (auto for the pool)	67e5	Serveur de temps (auto pour le pool)
 =Time zone	741a	Fuseau horaire
-=Trackpad scroll speed	3bc1	Vitesse de défilement du pavé tactile
 =Turned by the screen	ea45	Pivoté par l'écran
 =Turned left	507c	Pivoté à gauche
 =Turned right	7a49	Pivoté à droite

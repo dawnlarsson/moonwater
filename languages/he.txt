@@ -256,6 +256,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Left edge	9ce5	קצה שמאלי
 =Machine	be0e	מחשב
 =Mixer	123a	מערבל
+=Momentum	cfef	תנע
 =Motion	7647	תנועה
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
 =Mouse acceleration	c400	האצת העכבר
@@ -265,6 +266,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Name	7306	שם
 =Name servers (auto for the network)	695a	שרתי שמות (auto עבור הרשת)
 =Names over TLS	075a	שמות דרך TLS
+=Natural direction	d977	כיוון טבעי
 =Network	ad65	רשת
 =Network adapters	88ef	מתאמי רשת
 =New USB devices	c15c	התקני USB חדשים
@@ -282,9 +284,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Remembered devices	abbc	התקנים שמורים
 =Right edge	279a	קצה ימני
 =Rotation	777f	סיבוב
+=Rubber band	9c42	אפקט גומייה
 =Scale of this screen	e4ca	קנה המידה של המסך הזה
 =Screen	c631	מסך
 =Screen modes	85ad	מצבי מסך
+=Scroll speed	e7af	מהירות גלילה
+=Scrolling	74ec	גלילה
 =Set the clock from the network	b2a3	קבע את השעון מהרשת
 =Settings	8728	הגדרות
 =Shake the pointer to find it	f508	נער את המצביע כדי למצוא אותו
@@ -310,7 +315,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Time	e404	זמן
 =Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
 =Time zone	741a	אזור זמן
-=Trackpad scroll speed	3bc1	מהירות גלילה של משטח המגע
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה

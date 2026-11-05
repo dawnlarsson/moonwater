@@ -674,6 +674,13 @@ struct windows_issue
 // A precise turn that is a wheel's stream (a notch to every report, within UI_HAND_GAP_NS of the last): the kit takes it as a
 // trackpad's motion (WINDOW_WHEEL_PRECISE), and a Wayland client takes it as the wheel it is (value120), not as a pad's fingers.
 #define WINDOW_WHEEL_STREAM 16384u // shares the bit of WINDOW_PINCH_BEGIN: the event's type says which meaning a flag has
+// The scroll body's switches, as the table's scroll_off holds them (0 is the standard: natural direction, momentum and the rubber
+// band all on). FLIP: natural direction is off, so a wheel's notch and a drag move the content the other way (ui_wheel_q, ui_body_finger).
+// STOPS: momentum is off, so a release carries no coast (ui_body_let_go). STILL: the rubber band is off, so past an end the content
+// stops there (ui_body_pin, ui_body_drawn).
+#define WINDOW_SCROLL_FLIP 1u
+#define WINDOW_SCROLL_STOPS 2u
+#define WINDOW_SCROLL_STILL 4u
 /*
         A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/touch.h).
         a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
@@ -887,6 +894,10 @@ struct windows
         */
         unsigned int theme, accent, motion, themed;
         unsigned int wheel_off;
+        // The compositor's: the scroll body's switches, `moonwater canvas scroll` and `canvas trackpad speed` as they are kept. scroll_off
+        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS and WINDOW_SCROLL_STILL (0 is the standard); scroll_speed is the trackpad's speed,
+        // 0 normal, 1 slow, 2 fast. A change counts themed up, as a theme's does.
+        unsigned int scroll_off, scroll_speed;
         unsigned int caret_speed, caret_thick;
         // The compositor's: the language the windows Canvas draws itself speak, `moonwater language` as /root/language keeps it,
         // packed by windows_language_code (0 for English, which "en" is too). A change counts themed up, as a theme's does.
@@ -914,6 +925,10 @@ struct windows
         // The program's, read by the compositor: how many of the window's text fields have the keys (ui.c's ui_field_focus moves
         // it with each field's focus; the program zeroes it when it starts). The on-screen keyboard shows while the focus's is not 0.
         unsigned int field[WINDOWS];
+        // The program's, for moonwater debug: the scroll body that moved last in the window (ui.c's ui_body_note), its state (ui.c's
+        // BODY_*), its position and the place it is drawn, in device pixels, and its speed in pixels a second.
+        unsigned int body_state[WINDOWS];
+        int body_raw[WINDOWS], body_drawn[WINDOWS], body_speed[WINDOWS];
         // The compositor's, for moonwater debug: the on-screen keyboard's setting (0 auto, 1 off, 2 on), whether it is shown, the
         // last input (0 the mouse, 1 a touch or a pen, 2 a key of a physical keyboard) and whether a physical keyboard is plugged in.
         // osk_start is the decision the desktop starts the keyboard by (`moonwater keyboard start`): 1 when the setting is on, or

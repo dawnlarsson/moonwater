@@ -255,6 +255,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Left edge	9ce5	Sol kenar
 =Machine	be0e	Makine
 =Mixer	123a	Karıştırıcı
+=Momentum	cfef	Atalet
 =Motion	7647	Hareket
 =Mount kept disks	f0c8	Saklanan diskleri bağla
 =Mouse acceleration	c400	Fare ivmesi
@@ -264,6 +265,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Name	7306	Ad
 =Name servers (auto for the network)	695a	Ad sunucuları (ağ için auto)
 =Names over TLS	075a	TLS üzerinden adlar
+=Natural direction	d977	Doğal yön
 =Network	ad65	Ağ
 =Network adapters	88ef	Ağ bağdaştırıcıları
 =New USB devices	c15c	Yeni USB aygıtları
@@ -281,9 +283,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Remembered devices	abbc	Hatırlanan aygıtlar
 =Right edge	279a	Sağ kenar
 =Rotation	777f	Döndürme
+=Rubber band	9c42	Lastik bant efekti
 =Scale of this screen	e4ca	Bu ekranın ölçeği
 =Screen	c631	Ekran
 =Screen modes	85ad	Ekran kipleri
+=Scroll speed	e7af	Kaydırma hızı
+=Scrolling	74ec	Kaydırma
 =Set the clock from the network	b2a3	Saati ağdan ayarla
 =Settings	8728	Ayarlar
 =Shake the pointer to find it	f508	İşaretçiyi bulmak için salla
@@ -309,7 +314,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Time	e404	Saat
 =Time server (auto for the pool)	67e5	Zaman sunucusu (havuz için auto)
 =Time zone	741a	Saat dilimi
-=Trackpad scroll speed	3bc1	Dokunmatik yüzey kaydırma hızı
 =Turned by the screen	ea45	Ekran tarafından döndürülür
 =Turned left	507c	Sola döndürülmüş
 =Turned right	7a49	Sağa döndürülmüş

@@ -255,6 +255,7 @@ ui_field_full	fe02	that is as much as it holds
 =Left edge	9ce5	Left edge
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
+=Momentum	cfef	Momentum
 =Motion	7647	Motion
 =Mount kept disks	f0c8	Mount kept disks
 =Mouse acceleration	c400	Mouse acceleration
@@ -264,6 +265,7 @@ ui_field_full	fe02	that is as much as it holds
 =Name	7306	Name
 =Name servers (auto for the network)	695a	Name servers (auto for the network)
 =Names over TLS	075a	Names over TLS
+=Natural direction	d977	Natural direction
 =Network	ad65	Network
 =Network adapters	88ef	Network adapters
 =New USB devices	c15c	New USB devices
@@ -281,9 +283,12 @@ ui_field_full	fe02	that is as much as it holds
 =Remembered devices	abbc	Remembered devices
 =Right edge	279a	Right edge
 =Rotation	777f	Rotation
+=Rubber band	9c42	Rubber band
 =Scale of this screen	e4ca	Scale of this screen
 =Screen	c631	Screen
 =Screen modes	85ad	Screen modes
+=Scroll speed	e7af	Scroll speed
+=Scrolling	74ec	Scrolling
 =Set the clock from the network	b2a3	Set the clock from the network
 =Settings	8728	Settings
 =Shake the pointer to find it	f508	Shake the pointer to find it
@@ -309,7 +314,6 @@ ui_field_full	fe02	that is as much as it holds
 =Time	e404	Time
 =Time server (auto for the pool)	67e5	Time server (auto for the pool)
 =Time zone	741a	Time zone
-=Trackpad scroll speed	3bc1	Trackpad scroll speed
 =Turned by the screen	ea45	Turned by the screen
 =Turned left	507c	Turned left
 =Turned right	7a49	Turned right

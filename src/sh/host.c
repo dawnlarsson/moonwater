@@ -22252,6 +22252,25 @@ static fn host_debug_inputs(const struct windows address_to table)
 }
 
 /*
+        A window's scroll body for moonwater debug: the body that moved last in it (ui.c's ui_body_publish, the table's body_* row),
+        its state in ui.c's BODY_* order, its position and where it is drawn in device pixels, its speed in pixels a second, and the
+        Scrolling switches the compositor keeps (natural direction, momentum, the rubber band and the trackpad's speed).
+*/
+static fn host_debug_body(const struct windows address_to table, unsigned int row)
+{
+        static const string_address states[] = {"idle", "track", "driven", "coast", "spring", "notch"};
+        unsigned int state = table->body_state[row] < 6 ? table->body_state[row] : 0, off = table->scroll_off;
+
+        host_say(log, "                  scroll body %s, at %b px, drawn at %b px, %b px a second; natural direction %s, momentum %s, "
+                      "rubber band %s, speed %s\n",
+                 states[state], (bipolar)table->body_raw[row], (bipolar)table->body_drawn[row], (bipolar)table->body_speed[row],
+                 off & WINDOW_SCROLL_FLIP ? (string_address) "off" : (string_address) "on",
+                 off & WINDOW_SCROLL_STOPS ? (string_address) "off" : (string_address) "on",
+                 off & WINDOW_SCROLL_STILL ? (string_address) "off" : (string_address) "on",
+                 table->scroll_speed == 1 ? (string_address) "slow" : table->scroll_speed == 2 ? (string_address) "fast" : (string_address) "normal");
+}
+
+/*
         The head of the compositor's window table, mapped to be read, or null
         when no compositor is running or the table cannot be had: taken from
         /dev/spark and else from its path, both root's. Nothing in it is
@@ -22691,6 +22710,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 host_say(log, "  window %p%s       %w at %b,%b, %px%p\n", (positive)row, row < 10 ? (string_address) " " : (string_address) "",
                          writer_terminal_name, title[0] ? (string_address)title : (string_address) "-", (bipolar)table->x[row],
                          (bipolar)table->y[row], (positive)table->width[row], (positive)table->height[row]);
+                host_debug_body(table, row);
         }
         host_say(log, "  pointer         %s\n", table->pointer_plane ? (string_address) "on a plane of its own"
                                                                     : (string_address) "drawn in software");
@@ -25049,7 +25069,7 @@ static const host_row host_rows[] = {
     {null, "clipboard clear", "empty both selections and the history (root)", 'b'},
     {null, "clipboard watch [primary]", "a line each time something is copied, the text escaped (root)", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
-    {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
+    {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel", 'b'},
     {null, "notices [clear]", "the errors and warnings of the kernel the desktop has (root): clear dismisses them", 'b'},
     {null, "sensors", "the processor use, clocks, GPU load, heat, fans and power of this machine, read now", 'b'},
     {null, "@airplane", null, 'r'},

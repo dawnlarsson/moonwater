@@ -255,6 +255,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Left edge	9ce5	Bordo sinistro
 =Machine	be0e	Macchina
 =Mixer	123a	Mixer
+=Momentum	cfef	Inerzia
 =Motion	7647	Movimento
 =Mount kept disks	f0c8	Monta i dischi conservati
 =Mouse acceleration	c400	Accelerazione del mouse
@@ -264,6 +265,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Name	7306	Nome
 =Name servers (auto for the network)	695a	Server dei nomi (auto per la rete)
 =Names over TLS	075a	Nomi tramite TLS
+=Natural direction	d977	Direzione naturale
 =Network	ad65	Rete
 =Network adapters	88ef	Adattatori di rete
 =New USB devices	c15c	Nuovi dispositivi USB
@@ -281,9 +283,12 @@ ui_field_full	fe02	non ce ne sta di più
 =Remembered devices	abbc	Dispositivi ricordati
 =Right edge	279a	Bordo destro
 =Rotation	777f	Rotazione
+=Rubber band	9c42	Effetto elastico
 =Scale of this screen	e4ca	Scala di questo schermo
 =Screen	c631	Schermo
 =Screen modes	85ad	Modalità dello schermo
+=Scroll speed	e7af	Velocità di scorrimento
+=Scrolling	74ec	Scorrimento
 =Set the clock from the network	b2a3	Imposta l'orologio dalla rete
 =Settings	8728	Impostazioni
 =Shake the pointer to find it	f508	Agita il puntatore per trovarlo
@@ -309,7 +314,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Time	e404	Ora
 =Time server (auto for the pool)	67e5	Server dell'ora (auto per il pool)
 =Time zone	741a	Fuso orario
-=Trackpad scroll speed	3bc1	Velocità di scorrimento del trackpad
 =Turned by the screen	ea45	Ruotato dallo schermo
 =Turned left	507c	Ruotato a sinistra
 =Turned right	7a49	Ruotato a destra

@@ -255,6 +255,7 @@ ui_field_full	fe02	больше не помещается
 =Left edge	9ce5	Левый край
 =Machine	be0e	Компьютер
 =Mixer	123a	Микшер
+=Momentum	cfef	Инерция
 =Motion	7647	Движение
 =Mount kept disks	f0c8	Монтировать сохранённые диски
 =Mouse acceleration	c400	Ускорение мыши
@@ -264,6 +265,7 @@ ui_field_full	fe02	больше не помещается
 =Name	7306	Имя
 =Name servers (auto for the network)	695a	Серверы имён (auto для сети)
 =Names over TLS	075a	Имена через TLS
+=Natural direction	d977	Естественное направление
 =Network	ad65	Сеть
 =Network adapters	88ef	Сетевые адаптеры
 =New USB devices	c15c	Новые USB-устройства
@@ -281,9 +283,12 @@ ui_field_full	fe02	больше не помещается
 =Remembered devices	abbc	Запомненные устройства
 =Right edge	279a	Правый край
 =Rotation	777f	Поворот
+=Rubber band	9c42	Эффект резинки
 =Scale of this screen	e4ca	Масштаб этого экрана
 =Screen	c631	Экран
 =Screen modes	85ad	Режимы экрана
+=Scroll speed	e7af	Скорость прокрутки
+=Scrolling	74ec	Прокрутка
 =Set the clock from the network	b2a3	Устанавливать часы по сети
 =Settings	8728	Настройки
 =Shake the pointer to find it	f508	Потрясти указатель, чтобы найти его
@@ -309,7 +314,6 @@ ui_field_full	fe02	больше не помещается
 =Time	e404	Время
 =Time server (auto for the pool)	67e5	Сервер времени (auto для пула)
 =Time zone	741a	Часовой пояс
-=Trackpad scroll speed	3bc1	Скорость прокрутки тачпада
 =Turned by the screen	ea45	Поворачивает экран
 =Turned left	507c	Повёрнут влево
 =Turned right	7a49	Повёрнут вправо

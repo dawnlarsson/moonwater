@@ -2414,7 +2414,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         if (ui_finger_dragged(&terminal.finger))
                         {
                                 moved_px = ui_drag_follow(&terminal.finger.drag, terminal_at_y());
-                                ui_body_track(&terminal.body, -(b64)moved_px * UI_ONE, ui_kit_time());
+                                ui_body_finger(&terminal.body, -(b64)moved_px * UI_ONE, ui_kit_time());
                         }
                         if (terminal_bar_out() | (terminal_grid_shift() != shift))
                                 *dirty = true;

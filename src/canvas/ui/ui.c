@@ -2371,6 +2371,7 @@ static struct ui_kit
         struct ui_tween turn;              // 0 to UI_ONE while the theme turns
         unsigned int mode, accent, motion; // UI_THEME_LIGHT or _DARK, 0xrrggbb, 0 full or 1 reduced
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
+        unsigned int scroll_off;           // the scroll body's switches (WINDOW_SCROLL_FLIP, _STOPS, _STILL; 0 the standard), as the table keeps them
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
         unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
@@ -2421,6 +2422,12 @@ static fn ui_kit_caret_take(const struct windows address_to table)
 {
         ui_kit.caret_speed = table->caret_speed ? table->caret_speed - 1 : UI_CARET_NORMAL;
         ui_kit.caret_thick = table->caret_thick ? table->caret_thick - 1 : UI_CARET_MID;
+}
+
+// The scroll body's switches, taken with the wheel's: a table nobody has set is the standard (every switch on).
+static fn ui_kit_scroll_take(const struct windows address_to table)
+{
+        ui_kit.scroll_off = table->scroll_off;
 }
 
 // The window reads from the right when the language taken says so, read from the language itself (so the apps' language listeners, which run
@@ -6092,6 +6099,12 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
         home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
         BODY_VIEW_FACTOR of each, the share the view shows.
+
+        The Scrolling group's switches are read here, from ui_kit.scroll_off (the table's, WINDOW_SCROLL_*): natural direction turns the
+        sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_q), momentum off makes a release's coast 0
+        (ui_body_let_go, so the body settles where it is and a pull past an end still springs home), and the rubber band off holds the
+        position inside the ends as it moves (ui_body_pin, ui_body_clamp), so nothing is drawn past an end and nothing springs.
+        The thumb's own drag and a reveal are not turned: they move the body to where the hand or the view puts it.
 */
 #define BODY_CARRY (UI_ONE * 7 / 10)         // the coast's first speed, of the lift's (fit 0.70; the free-coast rows hold to 35 percent of the travel)
 #define BODY_TAU_NS 260000000ll              // a coast's speed falls by e in this long (fit 0.26 s; the OS's own momentum stream falls in 0.29 s)
@@ -6130,6 +6143,14 @@ static b64 ui_body_far(const struct ui_body address_to b)
         return b->content > b->view ? b->content - b->view : 0;
 }
 
+// The body that moved last in this window, copied each time it is moved or stepped (ui_body_note): moonwater debug reads it from the
+// window's row of the table (ui_body_publish).
+static struct ui_body ui_body_last;
+static void ui_body_note(const struct ui_body address_to b)
+{
+        ui_body_last = *b;
+}
+
 // a time in ns as Q30 seconds: a step (a millisecond) or a time constant (under a second) is far inside 64 bits
 static b64 ui_body_seconds(b64 ns)
 {
@@ -6155,6 +6176,14 @@ static b64 ui_body_rubber(const struct ui_body address_to b, b64 x)
         return ui_qmul(UI_ONE - ui_qdiv(UI_ONE, r + UI_ONE), b->view);
 }
 
+// a position held inside the ends, for a body with the rubber band off: a body with no far end stops at the top
+static b64 ui_body_clamp(const struct ui_body address_to b, b64 x)
+{
+        b64 far = ui_body_far(b);
+
+        return x < 0 ? 0 : x > far ? far : x;
+}
+
 // where the body is drawn: its position, or the rubber band past an end, or the spring's position while it springs
 static b64 ui_body_drawn(const struct ui_body address_to b)
 {
@@ -6162,6 +6191,8 @@ static b64 ui_body_drawn(const struct ui_body address_to b)
 
         if (b->state == BODY_SPRING)
                 return b->shown;
+        if (ui_kit.scroll_off & WINDOW_SCROLL_STILL)
+                return ui_body_clamp(b, b->raw);
         if (b->raw < 0)
                 return -ui_body_rubber(b, -b->raw);
         if (far && b->raw > far)
@@ -6169,11 +6200,29 @@ static b64 ui_body_drawn(const struct ui_body address_to b)
         return b->raw;
 }
 
+// whether the position is past an end, where the rubber band draws it and a spring takes it home (never, with the rubber band off)
 static b32 ui_body_outside(const struct ui_body address_to b)
 {
         b64 far = ui_body_far(b);
 
-        return b->raw < 0 || (far && b->raw > far);
+        return !(ui_kit.scroll_off & WINDOW_SCROLL_STILL) && (b->raw < 0 || (far && b->raw > far));
+}
+
+// With the rubber band off the position is held inside the ends as it moves, so a reversal answers at once; whether it moved.
+static b32 ui_body_pin(struct ui_body address_to b)
+{
+        b64 held = ui_kit.scroll_off & WINDOW_SCROLL_STILL ? ui_body_clamp(b, b->raw) : b->raw;
+
+        if (held == b->raw)
+                return false;
+        b->raw = held;
+        return true;
+}
+
+// The natural direction: a wheel's notch and a finger's drag move the content the way the fingers do (on), or the other way (off).
+static b64 ui_body_sign(b64 q)
+{
+        return ui_kit.scroll_off & WINDOW_SCROLL_FLIP ? -q : q;
 }
 
 // the body at rest at a position, stepped from a time
@@ -6188,6 +6237,7 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
         b->speed = 0;
         b->state = BODY_IDLE;
         b->at = at;
+        ui_body_note(b);
 }
 
 static b32 ui_body_step(struct ui_body address_to b, b64 at);
@@ -6197,9 +6247,18 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
 {
         ui_body_step(b, at);
         b->raw += delta;
+        ui_body_pin(b);
         b->state = BODY_TRACK;
         b->vel = 0;
         b->at = at;
+        ui_body_note(b);
+}
+
+// a finger's drag by delta (units, Q30, as the content moves with the finger when natural direction is on): the body's track, turned
+// by the natural direction
+static void ui_body_finger(struct ui_body address_to b, b64 delta, b64 at)
+{
+        ui_body_track(b, ui_body_sign(delta), at);
 }
 
 // an OS momentum delta: the view's share of it moves the position, and nothing holds it, so it pushes past an end
@@ -6207,9 +6266,11 @@ static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
 {
         ui_body_step(b, at);
         b->raw += ui_qmul(delta, BODY_VIEW_FACTOR);
+        ui_body_pin(b);
         b->state = BODY_DRIVEN;
         b->vel = 0;
         b->at = at;
+        ui_body_note(b);
 }
 
 // a finger goes down on the body: it stops where it is drawn, inside the ends (a press during a spring takes the nearer end)
@@ -6224,6 +6285,7 @@ static void ui_body_hold(struct ui_body address_to b, b64 at)
         b->vel = 0;
         b->state = BODY_IDLE;
         b->at = at;
+        ui_body_note(b);
 }
 
 // the wheel's notches move the target (units, Q30) by delta, and the position follows it: from where it is, unless it is already
@@ -6234,9 +6296,12 @@ static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
         if (b->state != BODY_NOTCH)
                 b->target = b->raw;
         b->target += delta;
+        if (ui_kit.scroll_off & WINDOW_SCROLL_STILL)
+                b->target = ui_body_clamp(b, b->target);
         b->vel = 0;
         b->state = BODY_NOTCH;
         b->at = at;
+        ui_body_note(b);
 }
 
 // the body's extent: a view and a content, units (Q30), with the position left where it is
@@ -6276,16 +6341,20 @@ static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at)
         b32 edge;
 
         ui_body_step(b, at);
+        if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS)
+                speed = 0;
         far = ui_body_far(b);
         edge = (b->raw <= 0 && speed < 0) || (far && b->raw >= far && speed > 0); // a throw out of the content, past the end it is at
         b->at = at;
         if (speed < BODY_STILL && speed > -BODY_STILL)
         {
                 ui_body_settle(b);
+                ui_body_note(b);
                 return;
         }
         b->vel = ui_qmul(speed, edge ? BODY_EDGE_CARRY : BODY_CARRY);
         b->state = BODY_COAST;
+        ui_body_note(b);
 }
 
 // steps the body to a time (ns): a coast falls and carries it, a notch's position follows its target, a spring draws it home.
@@ -6305,6 +6374,8 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                         b64 tau = ui_body_outside(b) ? BODY_TAU_EDGE_NS : BODY_TAU_NS;
 
                         b->raw += ui_qmul(b->vel, dt);
+                        if (ui_body_pin(b))
+                                b->vel = 0;
                         b->vel = ui_qmul(b->vel, ui_body_decay(ui_qdiv(dt, ui_body_seconds(tau))));
                         if (b->vel < BODY_STILL && b->vel > -BODY_STILL)
                                 ui_body_settle(b);
@@ -6334,6 +6405,7 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 else
                         break;
         }
+        ui_body_note(b);
         return ui_body_going(b);
 }
 
@@ -6661,7 +6733,7 @@ static b32 ui_scroll_reveal(struct ui_scroll address_to s, int top, int height)
 static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
 {
         ui_scroll_extent(s);
-        ui_body_track(&s->body, (b64)pixels << UI_Q, ui_kit_time());
+        ui_body_finger(&s->body, (b64)pixels << UI_Q, ui_kit_time());
         s->precise = 0;
         ui_scroll_show(s);
         return true;
@@ -6719,7 +6791,7 @@ static b64 ui_wheel_q(int scale, const struct window_event address_to event)
 {
         b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_NOTCH : UI_ROW) * (b64)scale / 100;
 
-        return -(b64)event->a * per * UI_ONE / 120;
+        return ui_body_sign(-(b64)event->a * per * UI_ONE / 120);
 }
 
 /*
@@ -6771,6 +6843,21 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         }
         ui_scroll_show(s);
         return true;
+}
+
+/*
+        The window's row of the table takes the body that moved last (ui_body_last): its state, where it is and where it is drawn in
+        device pixels, and its speed in pixels a second (a coast's, or a spring's). moonwater debug reads them.
+*/
+static void ui_body_publish(struct windows address_to table, unsigned int row)
+{
+        const struct ui_body address_to b = &ui_body_last;
+        b64 speed = b->state == BODY_SPRING ? b->speed : b->state == BODY_COAST ? b->vel : 0;
+
+        table->body_state[row] = (unsigned int)b->state;
+        table->body_raw[row] = (int)(b->raw >> UI_Q);
+        table->body_drawn[row] = (int)((ui_body_drawn(b) + UI_ONE / 2) >> UI_Q);
+        table->body_speed[row] = (int)(speed >> UI_Q);
 }
 
 /* ---- end of the kit's controls ---- */
@@ -7391,7 +7478,7 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -11144,7 +11231,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -11237,7 +11324,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
                         // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
                         // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)
@@ -11276,6 +11363,8 @@ static int ui_app_run(struct ui_app address_to app)
                 if (!running)
                         break;
 
+                // The scroll body that moved last, for moonwater debug (its row of the table).
+                ui_body_publish(table, row);
                 /*
                         The kit's clock: a frame is drawn at its time, and while anything in it moves (a spring, a
                         transition, a ripple, the theme turning) the next is due a display period after it, the

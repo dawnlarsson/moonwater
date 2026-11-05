@@ -255,6 +255,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Left edge	9ce5	Linker Rand
 =Machine	be0e	Gerät
 =Mixer	123a	Mixer
+=Momentum	cfef	Schwung
 =Motion	7647	Bewegung
 =Mount kept disks	f0c8	Gespeicherte Datenträger einhängen
 =Mouse acceleration	c400	Mausbeschleunigung
@@ -264,6 +265,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Name	7306	Name
 =Name servers (auto for the network)	695a	Namensserver (auto für das Netzwerk)
 =Names over TLS	075a	Namen über TLS
+=Natural direction	d977	Natürliche Richtung
 =Network	ad65	Netzwerk
 =Network adapters	88ef	Netzwerkadapter
 =New USB devices	c15c	Neue USB-Geräte
@@ -281,9 +283,12 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Remembered devices	abbc	Gemerkte Geräte
 =Right edge	279a	Rechter Rand
 =Rotation	777f	Drehung
+=Rubber band	9c42	Gummiband-Effekt
 =Scale of this screen	e4ca	Skalierung dieses Bildschirms
 =Screen	c631	Bildschirm
 =Screen modes	85ad	Bildschirmmodi
+=Scroll speed	e7af	Scrollgeschwindigkeit
+=Scrolling	74ec	Scrollen
 =Set the clock from the network	b2a3	Uhr über das Netzwerk stellen
 =Settings	8728	Einstellungen
 =Shake the pointer to find it	f508	Mauszeiger schütteln, um ihn zu finden
@@ -309,7 +314,6 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Time	e404	Zeit
 =Time server (auto for the pool)	67e5	Zeitserver (auto für den Pool)
 =Time zone	741a	Zeitzone
-=Trackpad scroll speed	3bc1	Trackpad-Scrollgeschwindigkeit
 =Turned by the screen	ea45	Vom Bildschirm gedreht
 =Turned left	507c	Nach links gedreht
 =Turned right	7a49	Nach rechts gedreht

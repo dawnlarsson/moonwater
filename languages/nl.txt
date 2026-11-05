@@ -255,6 +255,7 @@ ui_field_full	fe02	meer past er niet in
 =Left edge	9ce5	Linkerrand
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
+=Momentum	cfef	Momentum
 =Motion	7647	Beweging
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
 =Mouse acceleration	c400	Muisversnelling
@@ -264,6 +265,7 @@ ui_field_full	fe02	meer past er niet in
 =Name	7306	Naam
 =Name servers (auto for the network)	695a	Naamservers (auto voor het netwerk)
 =Names over TLS	075a	Namen via TLS
+=Natural direction	d977	Natuurlijke richting
 =Network	ad65	Netwerk
 =Network adapters	88ef	Netwerkadapters
 =New USB devices	c15c	Nieuwe USB-apparaten
@@ -281,9 +283,12 @@ ui_field_full	fe02	meer past er niet in
 =Remembered devices	abbc	Onthouden apparaten
 =Right edge	279a	Rechterrand
 =Rotation	777f	Rotatie
+=Rubber band	9c42	Rubberbandeffect
 =Scale of this screen	e4ca	Schaal van dit scherm
 =Screen	c631	Scherm
 =Screen modes	85ad	Schermmodi
+=Scroll speed	e7af	Scrollsnelheid
+=Scrolling	74ec	Scrollen
 =Set the clock from the network	b2a3	Klok instellen via het netwerk
 =Settings	8728	Instellingen
 =Shake the pointer to find it	f508	Schud de aanwijzer om hem te vinden
@@ -309,7 +314,6 @@ ui_field_full	fe02	meer past er niet in
 =Time	e404	Tijd
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
-=Trackpad scroll speed	3bc1	Scrollsnelheid van het trackpad
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid

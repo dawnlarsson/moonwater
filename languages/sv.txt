@@ -255,6 +255,7 @@ ui_field_full	fe02	mer ryms inte
 =Left edge	9ce5	Vänster kant
 =Machine	be0e	Maskin
 =Mixer	123a	Mixer
+=Momentum	cfef	Rörelsemängd
 =Motion	7647	Rörelse
 =Mount kept disks	f0c8	Montera sparade diskar
 =Mouse acceleration	c400	Musacceleration
@@ -264,6 +265,7 @@ ui_field_full	fe02	mer ryms inte
 =Name	7306	Namn
 =Name servers (auto for the network)	695a	Namnservrar (auto för nätverket)
 =Names over TLS	075a	Namn över TLS
+=Natural direction	d977	Naturlig riktning
 =Network	ad65	Nätverk
 =Network adapters	88ef	Nätverksadaptrar
 =New USB devices	c15c	Nya USB-enheter
@@ -281,9 +283,12 @@ ui_field_full	fe02	mer ryms inte
 =Remembered devices	abbc	Ihågkomna enheter
 =Right edge	279a	Höger kant
 =Rotation	777f	Rotation
+=Rubber band	9c42	Gummibandseffekt
 =Scale of this screen	e4ca	Den här skärmens skala
 =Screen	c631	Skärm
 =Screen modes	85ad	Skärmlägen
+=Scroll speed	e7af	Rullningshastighet
+=Scrolling	74ec	Rullning
 =Set the clock from the network	b2a3	Ställ klockan från nätverket
 =Settings	8728	Inställningar
 =Shake the pointer to find it	f508	Skaka pekaren för att hitta den
@@ -309,7 +314,6 @@ ui_field_full	fe02	mer ryms inte
 =Time	e404	Tid
 =Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
 =Time zone	741a	Tidszon
-=Trackpad scroll speed	3bc1	Rullningshastighet för styrplattan
 =Turned by the screen	ea45	Vänds av skärmen
 =Turned left	507c	Vriden åt vänster
 =Turned right	7a49	Vriden åt höger

@@ -140544,7 +140544,7 @@ static int settings_groups_named(const char address_to name)
 
 /*
         Where the rows are listed. A row is in the group a person looks for it in, by what it does and not by the program that
-        applies it: the keyboard, the mouse, the pointer and touch are Input, how the desktop is drawn is Canvas, the clock and its
+        applies it: the keyboard, the mouse, the pointer and touch are Input, how a wheel, a trackpad and a drag move the content is Scrolling, how the desktop is drawn is Canvas, the clock and its
         zone are Time, and the screens are Display. The Canvas header went with the row it was on (the removed Scale) and left
         the desktop's colour, theme, caret, pointer, clipboard and windows listed under Machine, with the keyboard and the zone.
         Every row of the table is checked by its verb's family, the moved ones by name, and each is found in its group and by
@@ -140552,7 +140552,7 @@ static int settings_groups_named(const char address_to name)
 */
 static fn check_settings_groups(void)
 {
-        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Sound", "Taskbar", "Time",
+        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
                                                 "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot", "System"};
         static const struct
         {
@@ -140563,7 +140563,7 @@ static fn check_settings_groups(void)
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
-            {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
+            {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"usb"}, "USB"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
@@ -140575,9 +140575,10 @@ static fn check_settings_groups(void)
         } placed[] = {
             {"Keyboard", "Input"}, {"On-screen keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
-            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Trackpad scroll speed", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
+            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
+            {"Natural direction", "Scrolling"}, {"Scroll speed", "Scrolling"}, {"Momentum", "Scrolling"}, {"Rubber band", "Scrolling"},
             {"Time zone", "Time"},
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
@@ -140594,7 +140595,7 @@ static fn check_settings_groups(void)
         for (int at = 0; at < count && at < settings_groups(); at++)
                 order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
         order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
-        check("settings groups: Machine, Canvas, Display, Input, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
+        check("settings groups: Machine, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
 
         // Each row in the group of its verb's family: the groups are what the rows do.
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -140659,7 +140660,7 @@ static fn check_settings_groups(void)
                 found &= settings_pos(row) >= 0;
                 settings_filter_clear(), (void)0;
         }
-        check("settings groups: the rows moved out of Machine are named in the groups of what they do (Input, Canvas, Time, Display)", by_name);
+        check("settings groups: the rows moved out of Machine are named in the groups of what they do (Input, Scrolling, Canvas, Time, Display)", by_name);
         check("settings groups: each is listed when its group is chosen", listed);
         check("settings groups: and none of them is listed under Machine", apart);
         check("settings groups: and the filter finds each by the first word of its label, from the group chosen", found);
@@ -147192,6 +147193,50 @@ static fn check_kit_place(void)
                 check("kit scrollbar: a held thumb settles at the on-surface ink and 1.25 of its 4 px, the track 10, and the kit idle", settled);
                 check("kit scrollbar: mid-tween (120 ms) the held thumb's ink and width are between the unlit and held values", between);
                 check("kit scrollbar: released, the thumb goes back to its unlit ink and width, and the kit goes idle", back);
+        }
+
+        // The Scrolling switches, read by the body (ui.c's ui_kit.scroll_off): natural direction off turns a wheel's notch the other way
+        // (the aim goes up for a notch down with it on, and down with it off); momentum off makes a release's coast nothing, so the
+        // region stops where the fingers leave it; the rubber band off holds the position at the end, with no stretch and no spring.
+        {
+                struct ui_scroll sw = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                struct window_event down = {WINDOW_EVENT_WHEEL, 0, -120, 0};
+                b64 aim_on, aim_off;
+                b32 coasted = false, held_still = false, pinned = false, sprang = false;
+
+                ui_kit.now = 7000000000ll, ui_kit.busy = 0, ui_kit.scroll_off = 0;
+                ui_scroll_set(&sw, 300);
+                ui_wheel_turn(&ui, &sw, &down);
+                aim_on = scroll_aim(&sw);
+                ui_kit.scroll_off = WINDOW_SCROLL_FLIP;
+                ui_scroll_set(&sw, 300);
+                ui_wheel_turn(&ui, &sw, &down);
+                aim_off = scroll_aim(&sw);
+                check("kit scroll switches: natural direction on, a notch down moves the content toward its far end; off, the other way",
+                      aim_on > (b64)300 * 256 && aim_off < (b64)300 * 256);
+
+                ui_kit.scroll_off = 0;
+                ui_scroll_set(&sw, 300);
+                ui_scroll_drag(&sw, -150);
+                ui_scroll_let_go(&sw, 1, 3000);
+                coasted = ui_body_going(&sw.body) && sw.body.state == BODY_COAST;
+                ui_kit.scroll_off = WINDOW_SCROLL_STOPS;
+                ui_scroll_set(&sw, 300);
+                ui_scroll_drag(&sw, -150);
+                ui_scroll_let_go(&sw, 1, 3000);
+                held_still = !ui_body_going(&sw.body) && sw.scroll == 150;
+                check("kit scroll switches: momentum on, a release coasts; off, it stops where the fingers leave it (150) and does not move on",
+                      coasted && held_still);
+
+                ui_kit.scroll_off = WINDOW_SCROLL_STILL;
+                ui_scroll_set(&sw, 0);
+                ui_scroll_drag(&sw, -150);
+                pinned = sw.scroll == 0 && sw.body.raw == 0;
+                ui_scroll_let_go(&sw, 0, 0);
+                sprang = sw.body.state == BODY_SPRING || ui_body_going(&sw.body) || sw.scroll != 0;
+                check("kit scroll switches: rubber band off, a pull past the top stops at the top: no stretch, no spring back",
+                      pinned && !sprang);
+                ui_kit.scroll_off = 0;
         }
 
         // The glide: a wheel's notch aims one row on and the position reaches it over several frames, from below and never

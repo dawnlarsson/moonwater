@@ -256,6 +256,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Left edge	9ce5	لبه چپ
 =Machine	be0e	رایانه
 =Mixer	123a	میکسر
+=Momentum	cfef	تکانه
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
 =Mouse acceleration	c400	شتاب ماوس
@@ -265,6 +266,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Name	7306	نام
 =Name servers (auto for the network)	695a	سرورهای نام (auto برای شبکه)
 =Names over TLS	075a	نام‌ها از طریق TLS
+=Natural direction	d977	جهت طبیعی
 =Network	ad65	شبکه
 =Network adapters	88ef	آداپتورهای شبکه
 =New USB devices	c15c	دستگاه‌های USB جدید
@@ -282,9 +284,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
 =Right edge	279a	لبه راست
 =Rotation	777f	چرخش
+=Rubber band	9c42	اثر کشسانی
 =Scale of this screen	e4ca	مقیاس این نمایشگر
 =Screen	c631	نمایشگر
 =Screen modes	85ad	حالت‌های نمایشگر
+=Scroll speed	e7af	سرعت پیمایش
+=Scrolling	74ec	پیمایش
 =Set the clock from the network	b2a3	تنظیم ساعت از روی شبکه
 =Settings	8728	تنظیمات
 =Shake the pointer to find it	f508	تکان دادن نشانگر برای پیدا کردن آن
@@ -310,7 +315,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Time	e404	زمان
 =Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
 =Time zone	741a	منطقه زمانی
-=Trackpad scroll speed	3bc1	سرعت پیمایش صفحه‌لمسی
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست
