@@ -153,8 +153,7 @@ static struct
         unsigned int bar_first[2], bar_shown[2], bar_total[2], bar_drawn[2];
         // The kit's scroll bar: its track and thumb as the kit draws them, and its hover and grab as the kit keeps them. Its place is
         // the body's (ui_body): the wheel's notches, a finger's drag and throw, and the grid's stretch all move the body.
-        struct ui_scroll bar;
-        struct ui_body body;
+        struct ui_scroll bar;        // its body is the grid's place (bar.body)
 
         // Where the view sits in the ring: a line and how many of its rows are above.
         unsigned int view, view_skip;
@@ -563,7 +562,7 @@ static struct ui terminal_kit(unsigned int address_to whole)
 // bar's thumb is the same place clamped to the track (ui_scroll_set).
 static int terminal_body_px(void)
 {
-        return (int)((ui_body_drawn(&terminal.body) + UI_ONE / 2) >> UI_Q);
+        return (int)((ui_body_drawn(&terminal.bar.body) + UI_ONE / 2) >> UI_Q);
 }
 
 // The kit's scroll bar where the view is: its track down the window's right edge, flush with it, from below the close
@@ -575,11 +574,11 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
 
         ui_scroll_place(&terminal.bar, (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100, 0, (int)terminal.height,
                         UI_CLOSE_BOTTOM, (int)total * cell, (int)shown * cell, terminal_scale());
-        ui_body_fit(&terminal.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE);
+        ui_body_fit(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE);
         // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
-        if (!ui_body_going(&terminal.body) && terminal_body_px() != (int)first * cell)
-                ui_body_set(&terminal.body, terminal.body.view, terminal.body.content, (b64)first * cell * UI_ONE, terminal.body.at);
-        ui_scroll_follow(&terminal.bar, &terminal.body);
+        if (!ui_body_going(&terminal.bar.body) && terminal_body_px() != (int)first * cell)
+                ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, (b64)first * cell * UI_ONE, terminal.bar.body.at);
+        ui_scroll_show(&terminal.bar);
 }
 
 // The kit's bar follows the view: placed where the view's first row is, in pixels, and the body with it (not moving any more).
@@ -590,8 +589,8 @@ static void terminal_bar_follow(void)
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
                 return;
         terminal_bar_place(first, shown, total);
-        ui_body_set(&terminal.body, terminal.body.view, terminal.body.content, (b64)first * terminal.cell_h * UI_ONE, terminal.body.at);
-        ui_scroll_follow(&terminal.bar, &terminal.body);
+        ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, (b64)first * terminal.cell_h * UI_ONE, terminal.bar.body.at);
+        ui_scroll_show(&terminal.bar);
 }
 
 // The grid's shift in device pixels, down positive: the body's place less the view's whole row, which is the overscroll past an end
@@ -616,19 +615,18 @@ static b32 terminal_bar_out(void)
         return terminal_view_put((unsigned int)((at + cell / 2) / cell));
 }
 
-// A wheel's turn (a notch, or a trackpad's pixels) is a notch of the body: the grid glides to where the turns take it.
+// A wheel's turn is the kit's (ui_wheel_turn) on the bar, whose body is the grid's: a notch glides the grid to where the turns take
+// it, and a trackpad's hand moves it one for one, its release throwing on the speed.
 static void terminal_bar_turn(const struct window_event address_to event, b32 address_to dirty)
 {
         unsigned int first, shown, total;
+        struct ui kit = terminal_kit(null);
 
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
                 return;
         terminal_bar_place(first, shown, total);
-        if (!event->b && event->a && !(event->flags & WINDOW_WHEEL_STOP))
-        {
-                ui_body_notch(&terminal.body, ui_wheel_q(terminal_scale(), event), ui_kit_time());
+        if (ui_wheel_turn(&kit, &terminal.bar, event))
                 *dirty = true;
-        }
 }
 
 // The body's motion, a frame: a notch's glide, a finger's throw, a pull's spring, and the view and the bar with it. A change of the
@@ -638,8 +636,8 @@ static void terminal_bar_step(void)
         int shift = terminal_grid_shift(), before = terminal.bar.scroll;
 
         ui_kit.busy = 0;
-        ui_body_step(&terminal.body, ui_kit_time());
-        ui_scroll_follow(&terminal.bar, &terminal.body);
+        ui_body_step(&terminal.bar.body, ui_kit_time());
+        ui_scroll_show(&terminal.bar);
         if (terminal_bar_out() || terminal.bar.scroll != before || terminal_grid_shift() != shift)
                 terminal.dirty = true;
 }
@@ -2415,7 +2413,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         // The grid moves one for one with the finger, up for a finger that goes down (the tracker's reports are kept
                         // where the grid fits, for a drag that finds it scrolling later). Past an end the body's rubber band draws it.
                         if (ui_finger_dragged(&terminal.finger))
-                                ui_body_finger(&terminal.body, -(b64)moved_px * UI_ONE, ui_kit_time());
+                                ui_body_finger(&terminal.bar.body, -(b64)moved_px * UI_ONE, ui_kit_time());
                         if (terminal_bar_out() | (terminal_grid_shift() != shift))
                                 *dirty = true;
                         return true;
@@ -2436,7 +2434,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 // Whatever was moving the grid stops where it is drawn, and the press is where the finger is.
                 ui_finger_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, null);
                 if (!alternate)
-                        ui_body_hold(&terminal.body, ui_kit_time());
+                        ui_body_hold(&terminal.bar.body, ui_kit_time());
                 terminal.finger_left = 0;
                 return true;
         }
@@ -2452,7 +2450,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 // throw's floor, at the scale, throws nothing.
                 long speed = ui_drag_velocity(&terminal.finger.drag, ui_drag_now());
 
-                ui_body_let_go(&terminal.body, ui_throws(speed, terminal_scale()) ? -(b64)speed * UI_ONE : 0, ui_kit_time(), terminal_scale());
+                ui_body_let_go(&terminal.bar.body, ui_throws(speed, terminal_scale()) ? -(b64)speed * UI_ONE : 0, ui_kit_time(), terminal_scale());
                 terminal.dirty = true;
                 return true;
         }
@@ -3764,7 +3762,7 @@ static long terminal_tick(long timeout, long address_to other)
                 timeout = hold;
 
         // The body's motion of the scrollback (a wheel's glide, a finger's throw, a pull's spring) goes on a frame at a time.
-        if (ui_body_going(&terminal.body))
+        if (ui_body_going(&terminal.bar.body))
         {
                 terminal_bar_step();
                 timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;

@@ -16838,24 +16838,6 @@ static int compositor_picture_under(int x, int y)
         return COMPOSITOR_NONE;
 }
 
-// The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
-// the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
-// raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
-// sent to the window it last moved over scrolled that one, or nothing.
-static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags);
-
-// A notch's wheel: 120ths of a notch, taken as notches by the region (a glide).
-static void compositor_wheel(int v120, int horizontal)
-{
-        compositor_wheel_flags(v120, horizontal, 0);
-}
-
-// A trackpad's two fingers: the same 120ths, flagged precise, so the region moves one for one with them (WINDOW_WHEEL_PRECISE).
-static void compositor_wheel_precise(int v120, int horizontal)
-{
-        compositor_wheel_flags(v120, horizontal, WINDOW_WHEEL_PRECISE);
-}
-
 // Whether a wheel event of device at, read at now, is a stream's (UI_HAND_GAP_NS from the device's last one). The
 // device's last is kept either way, so a stream that began is one for each notch after it.
 static int compositor_wheel_stream(unsigned int at, positive now)
@@ -16941,7 +16923,13 @@ static long long compositor_stream_turn(unsigned int at, long long value120, lon
         return turn;
 }
 
-static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
+// The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
+// the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
+// raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
+// sent to the window it last moved over scrolled that one, or nothing.
+// Every turn of the wheel comes here, a mouse's, a stream's, a trackpad's or two fingers' on a touch screen: v120 in 120ths of a
+// notch (of UI_NOTCH with WINDOW_WHEEL_PRECISE), and the window's flags. The window converts it once (ui_wheel_turn).
+static void compositor_wheel(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab;
 
@@ -17085,9 +17073,9 @@ static void compositor_pad_apply(unsigned int at, positive now)
                 compositor.table->input_wheel_used[at]++;
                 compositor.table->input_wheel_last[at] = now;
                 if (y)
-                        compositor_wheel_precise(y, 0);
+                        compositor_wheel(y, 0, WINDOW_WHEEL_PRECISE);
                 if (x)
-                        compositor_wheel_precise(x, 1);
+                        compositor_wheel(x, 1, WINDOW_WHEEL_PRECISE);
         }
 }
 
@@ -17818,11 +17806,11 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         break;
                 case UI_TOUCH_WHEEL:
                         compositor.touching = 1;
-                        compositor_wheel_precise(e->v120, e->horizontal);
+                        compositor_wheel(e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
                         wheel = 1;
                         break;
                 case UI_TOUCH_TURN_END:
-                        compositor_wheel_flags(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                        compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
                         break;
                 case UI_TOUCH_HOLD:
                         // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
@@ -18369,16 +18357,16 @@ static void compositor_input_read(unsigned int at)
 
                                         compositor.table->input_wheel_used[at]++;
                                         long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
+                                        unsigned int flags = 0;
 
                                         if (stream)
                                         {
                                                 long long gain = compositor_stream_gain_at(at, now);
 
-                                                compositor_wheel_flags(compositor_counts(0, compositor_stream_turn(at, value120, gain, sideways)), sideways,
-                                                                       WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM);
+                                                value120 = compositor_stream_turn(at, value120, gain, sideways);
+                                                flags = WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM;
                                         }
-                                        else
-                                                compositor_wheel(compositor_counts(0, value120), sideways);
+                                        compositor_wheel(compositor_counts(0, value120), sideways, flags);
                                 }
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
@@ -18428,7 +18416,7 @@ static void compositor_input_read(unsigned int at)
 
                                 compositor_pad_key(&compositor.pad[at], event->code, event->value);
                                 if (down && !compositor.pad[at].touching && !compositor.pad[at].fingers)
-                                        compositor_wheel_flags(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                                        compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
                                  !compositor.touchpad[at] && !compositor.touchscreen[at])

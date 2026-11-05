@@ -123569,7 +123569,7 @@ static fn check_pointer(void)
                 check("pointer: a finger dragged five cells down the paper (the first is the slop's) takes the scrollback four lines back, and sends nothing",
                       quiet && !to_shell_length && first + 4 == before);
                 terminal_deliver(-1, &lift, &dirty);
-                check("pointer: let go moving, the view is thrown", ui_body_going(&terminal.body));
+                check("pointer: let go moving, the view is thrown", ui_body_going(&terminal.bar.body));
                 ui_drag_stop(&terminal.finger.drag);
                 terminal_view_live();
                 finger.b = y;
@@ -129005,21 +129005,21 @@ static void check_compositor_volume(void)
         // The wheel over the cell: five percent a notch, up raising it; elsewhere it is not the volume's.
         compositor.pointer_x = cx + cw / 2, compositor.pointer_y = cy + ch / 2;
         compositor_volume.hold_until = 0;
-        compositor_wheel(120, 0);
+        compositor_wheel(120, 0, 0);
         volume_file(compositor_volume_path[1], text, sizeof(text));
         check("volume: a notch up over the cell is five more", string_equals((string_address)text, (string_address) "85\n") && compositor_volume.percent == 85);
-        compositor_wheel(-120, 0);
-        compositor_wheel(-120, 0);
+        compositor_wheel(-120, 0, 0);
+        compositor_wheel(-120, 0, 0);
         check("volume: and a notch down five less", compositor_volume.percent == 75);
-        compositor_wheel(60, 0);
+        compositor_wheel(60, 0, 0);
         check("volume: half a notch is nothing yet", compositor_volume.percent == 75);
-        compositor_wheel(60, 0);
+        compositor_wheel(60, 0, 0);
         check("volume: and the other half is the notch", compositor_volume.percent == 80);
         compositor.pointer_x = 1280, compositor.pointer_y = 700;
-        compositor_wheel(120, 0);
+        compositor_wheel(120, 0, 0);
         check("volume: a notch elsewhere is not the volume's", compositor_volume.percent == 80);
         compositor.pointer_x = cx + cw / 2, compositor.pointer_y = cy + ch / 2;
-        compositor_wheel(120, 1);
+        compositor_wheel(120, 1, 0);
         check("volume: and nor is one turned sideways", compositor_volume.percent == 80);
 
         // The microphone: a cell in the tray, before the volume's, while a program records from one (not one that records what plays, nor a paused
@@ -148026,7 +148026,7 @@ static void terminal_stretch_rest(void)
 // The rubber band's drawn distance for a pull past an end, in device pixels, as the grid's shift draws it.
 static int terminal_rubber_px(b64 past)
 {
-    return (int)((ui_body_rubber(&terminal.body, past) + UI_ONE / 2) >> UI_Q);
+    return (int)((ui_body_rubber(&terminal.bar.body, past) + UI_ONE / 2) >> UI_Q);
 }
 
 static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b32 *settled, b32 *body_match)
@@ -148053,14 +148053,14 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
     for (int k = 0; k < 8; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
-        ui_body_track(&terminal.body, (b64)move * UI_ONE / UI_SCROLL_SCALE, (b64)clock);
+        ui_body_track(&terminal.bar.body, (b64)move * UI_ONE / UI_SCROLL_SCALE, (b64)clock);
     }
-    far = terminal.body.content > terminal.body.view ? terminal.body.content - terminal.body.view : 0;
+    far = terminal.bar.body.content > terminal.bar.body.view ? terminal.bar.body.content - terminal.bar.body.view : 0;
     shift = terminal_grid_shift();
-    expect = top ? terminal_rubber_px(-terminal.body.raw) : -terminal_rubber_px(terminal.body.raw - far);
+    expect = top ? terminal_rubber_px(-terminal.bar.body.raw) : -terminal_rubber_px(terminal.bar.body.raw - far);
     *body_match = (top ? shift > 4 : shift < -4) && shift - expect >= -1 && shift - expect <= 1;
     // Let go at no speed: the body springs home, and each frame the grid is drawn until it is whole.
-    ui_body_let_go(&terminal.body, 0, (b64)clock, 100);
+    ui_body_let_go(&terminal.bar.body, 0, (b64)clock, 100);
     for (int k = 0; k < 120; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
@@ -148116,7 +148116,7 @@ static void check_terminal_stretch_edges(void)
     for (int k = 0; k < 8; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
-        ui_body_track(&terminal.body, -12 * UI_ONE, (b64)clock);
+        ui_body_track(&terminal.bar.body, -12 * UI_ONE, (b64)clock);
     }
     shift_stretched = terminal_grid_shift();
 
@@ -148179,12 +148179,12 @@ static void check_terminal_stretch_cost(void)
     for (int k = 0; k < 8; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
-        ui_body_track(&terminal.body, -12 * UI_ONE, (b64)clock);
+        ui_body_track(&terminal.bar.body, -12 * UI_ONE, (b64)clock);
     }
     for (int k = 0; k < COST_FRAMES; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
-        ui_body_track(&terminal.body, 0, (b64)clock);
+        ui_body_track(&terminal.bar.body, 0, (b64)clock);
         term_bytes((const p8 address_to) (k & 1 ? "x" : "y"), 1);
         terminal.own.table->shown[0] = terminal.own.table->frame[0];
         t0 = clock_monotonic_nanoseconds();
@@ -148259,9 +148259,30 @@ static void check_terminal_wheel_curve(void)
         ui_kit.test_clock = 0;
         terminal_extent(&first, &shown, &total);
         check("terminal scrollback: six notches move the body six rows of the kit's, rising frame by frame, and it rests on them",
-              rising && terminal.body.raw == notches * row && !ui_body_going(&terminal.body));
+              rising && terminal.bar.body.raw == notches * row && !ui_body_going(&terminal.bar.body));
         check("terminal scrollback: the view is the bar's offset to the nearest row, the grid's only rounding of it",
               first == (unsigned int)((terminal.bar.scroll + (int)terminal.cell_h / 2) / (int)terminal.cell_h));
+        // The kit's one conversion on the grid too: a trackpad's precise turn is the hand (ui_wheel_turn, one for one, not a notch's
+        // glide), and its lift lets the hand go. The bar's body is the grid's, so the rows above and this one share it.
+        {
+                struct window_event pad = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -120, 0};
+                struct window_event lift = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
+                b64 per = (b64)UI_NOTCH * terminal_scale() / 100 * UI_ONE, before;
+                b32 pad_dirty = false;
+
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                before = terminal.bar.body.raw;
+                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                terminal_bar_turn(&pad, &pad_dirty);
+                check("terminal scrollback: a trackpad's precise turn holds the body, and moves it one for one (UI_NOTCH at the scale)",
+                      pad_dirty && terminal.bar.body.state == BODY_TRACK && terminal.bar.body.raw == before + per);
+                clock += 16666667ll, ui_kit.now += 16666667ll, ui_kit.test_clock = clock;
+                terminal_bar_turn(&lift, &pad_dirty);
+                check("terminal scrollback: the trackpad's lift lets the hand go (ui_scroll_release), so the body is no longer held",
+                      terminal.bar.body.state != BODY_TRACK);
+                ui_kit.test_clock = 0;
+        }
         terminal_view_live();
         terminal_bar_follow();
 }

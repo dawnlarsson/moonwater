@@ -6111,7 +6111,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         BODY_VIEW_FACTOR of each, the share the view shows.
 
         The Scrolling group's switches are read here, from ui_kit.scroll_off (the table's, WINDOW_SCROLL_*): natural direction turns the
-        sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_q), momentum off makes a release's coast 0
+        sign of a wheel's notch and of a finger's drag (ui_body_sign, ui_body_finger, ui_wheel_turn), momentum off makes a release's coast 0
         and an OS momentum delta move nothing (ui_body_let_go, ui_body_driven: the body settles where it is, and a pull past an end still
         springs home), and the rubber band off holds the position inside the ends as it moves (ui_body_pin, ui_body_clamp).
         A release's speed is capped at ui_throw_most(scale) (Android's 8000 dp a second), and floored at ui_throws, at the scale.
@@ -6734,13 +6734,6 @@ static void ui_scroll_clamp(struct ui_scroll address_to s)
                 ui_scroll_set(s, s->scroll);
 }
 
-// A bar of a body: it is that body's place, drawn where the body is (past an end too), as the terminal's scrollback bar is.
-static void ui_scroll_follow(struct ui_scroll address_to s, const struct ui_body address_to b)
-{
-        s->body = *b;
-        ui_scroll_show(s);
-}
-
 // A finger's move of the region by pixels: the body is tracked by them, one for one, and past an end the rubber band draws it. True:
 // the region's drawn place or its motion changed, which a bounded region's always does.
 static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
@@ -6789,25 +6782,19 @@ static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int hei
         s->content = content, s->view = view, s->scale = scale;
 }
 
-// A wheel's notch in a body's units (Q30), negated: a notch down moves the position toward the far end. A stepped notch is a row at the
-// scale; a precise turn, and so a stream's notch, is its share of UI_NOTCH (the 120ths of the one notch the compositor sends).
-static b64 ui_wheel_q(int scale, const struct window_event address_to event)
-{
-        b64 per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_NOTCH : UI_ROW) * (b64)scale / 100;
-
-        return ui_body_sign(-(b64)event->a * per * UI_ONE / 120);
-}
-
 /*
-        The wheel turns a region by its vertical notches, the one rule for every list and page: a horizontal notch (event->b) turns
-        nothing. A stepped notch is a row, and a stream's notch is UI_NOTCH (WINDOW_WHEEL_STREAM): each moves the body's target, which
-        the position follows (ui_body_notch). With the wheel smooth off (ui_kit.wheel_off) a stepped notch is one row at once. A
-        trackpad's motion (WINDOW_WHEEL_PRECISE) is one for one, the hand, whose release (WINDOW_WHEEL_STOP) throws on its speed.
-        Answers whether it moved.
+        The one conversion of a window's wheel event into a body's motion, for every region the wheel turns (lists, pages, the gallery,
+        the terminal's bar): the compositor, the touch recogniser and a Wayland client send the event and nothing converts it again.
+        A horizontal notch (event->b) turns nothing. A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
+        the notch's turn is its 120ths of a notch: a stepped notch is a row at the scale, a precise turn (WINDOW_WHEEL_PRECISE, a
+        trackpad's or a stream's) is its share of UI_NOTCH, and a notch moves the body's target, which the position follows
+        (ui_body_notch), while a precise turn is the hand, one for one (ui_body_track). The sign: a notch down moves the position toward
+        the far end, and natural direction turns it (ui_body_sign). With the wheel smooth off (ui_kit.wheel_off) a stepped notch is one
+        row at once. Answers whether it moved.
 */
 static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
 {
-        b64 now = ui_kit_time(), q = ui_wheel_q(ui->scale, event);
+        b64 now = ui_kit_time(), per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_NOTCH : UI_ROW) * (b64)ui->scale / 100, q;
 
         if (event->b)
                 return false;
@@ -6820,6 +6807,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         }
         if (!event->a)
                 return false;
+        q = ui_body_sign(-(b64)event->a * per * UI_ONE / 120);
         ui_scroll_extent(s);
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM))
         {
