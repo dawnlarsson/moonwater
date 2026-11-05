@@ -153485,7 +153485,6 @@ static void fold_scroll(void)
 
         if (at >= 0)
                 settings.list.scroll.scroll = settings.list.top[at];
-        settings.list.scroll.gliding = 0;
         ui_scroll_clamp(&settings.list.scroll);
 }
 
@@ -153714,14 +153713,15 @@ b32 main()
 
                         memory_zero(&scroll_ui, sizeof(scroll_ui));
                         scroll_ui.scale = 100;
+                        ui_body_set(&glide.body, 200ll << UI_Q, 1000ll << UI_Q, 0, 0);
                         ui_kit.now = 1000000000ll;
                         for (positive turn = 0; turn < count; turn++)
                         {
-                                ui_scroll_wheel(&scroll_ui, &glide, turn % 2 ? 120 : -120);
+                                // a notch of the body (40 px, the kit's notch) and its frames at rest: the body's own glide, no kit wrapper
+                                ui_body_notch(&glide.body, (b64)(turn % 2 ? 40 : -40) << UI_Q, ui_kit.now);
                                 ui_kit.now += 16666667;
-                                ui_scroll_glide(&scroll_ui, &glide);
-                                while (glide.gliding)
-                                        ui_kit.now += 16666667, ui_scroll_glide(&scroll_ui, &glide), frames++;
+                                while (ui_body_step(&glide.body, ui_kit.now))
+                                        ui_kit.now += 16666667, frames++;
                         }
                         string_format(log, "  kit bench scroll-step: %p turns, %p frames\n", count, frames);
                         return 0;
