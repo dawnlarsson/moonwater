@@ -560,13 +560,6 @@ static struct ui terminal_kit(unsigned int address_to whole)
         return kit;
 }
 
-// The body's place in whole device pixels, unclamped (a stretch past an end is outside the content): where the grid is drawn, and the
-// bar's thumb is the same place clamped to the track (ui_scroll_set).
-static int terminal_body_px(void)
-{
-        return (int)((ui_body_drawn(&terminal.bar.body) + UI_ONE / 2) >> UI_Q);
-}
-
 // The kit's scroll bar where the view is: its track down the window's right edge, flush with it, from below the close
 // button to the window's bottom; the view's rows over the scrollback's, and first, the rows above the view. Its hover
 // and grab stay as the kit keeps them, from one frame to the next.
@@ -578,7 +571,7 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
                         UI_CLOSE_BOTTOM, (int)total * cell, (int)shown * cell, terminal_scale());
         ui_body_fit(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE);
         // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
-        if (!ui_body_going(&terminal.bar.body) && terminal_body_px() != (int)first * cell)
+        if (!ui_body_going(&terminal.bar.body) && ui_body_px(&terminal.bar.body) != (int)first * cell)
                 ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, (b64)first * cell * UI_ONE, terminal.bar.body.at);
         ui_scroll_show(&terminal.bar);
 }
@@ -605,14 +598,14 @@ static int terminal_grid_shift(void)
 
         if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
                 return 0;
-        shift = (int)(first * terminal.cell_h) - terminal_body_px();
+        shift = (int)(first * terminal.cell_h) - ui_body_px(&terminal.bar.body);
         return shift > (int)terminal.height ? (int)terminal.height : shift < -(int)terminal.height ? -(int)terminal.height : shift;
 }
 
 // The view is where the body is, to the nearest row (a row is a cell's height): the grid's only rounding of the body's place.
 static b32 terminal_bar_out(void)
 {
-        int cell = (int)terminal.cell_h, at = terminal_body_px() < 0 ? 0 : terminal_body_px();
+        int cell = (int)terminal.cell_h, at = ui_body_px(&terminal.bar.body) < 0 ? 0 : ui_body_px(&terminal.bar.body);
 
         return terminal_view_put((unsigned int)((at + cell / 2) / cell));
 }

@@ -139794,7 +139794,7 @@ static fn settings_group_glide_check(void)
 /*
         The band's drawn share past an end, 256ths of a device pixel: how far a bounded region's content is drawn past the end it is
         pulled past (edge -1 the top, 1 the bottom), and 0 inside its ends. It is the drawn position's distance past the end, the
-        rubber band's (ui_scroll_shown), so a pull of the list moves its rows by this and nothing else.
+        rubber band's (scroll_shown), so a pull of the list moves its rows by this and nothing else.
 */
 static b64 band_past(const struct ui_scroll address_to s, int address_to edge)
 {

@@ -6097,12 +6097,24 @@ static b64 ui_body_drawn(const struct ui_body address_to b)
         return b->raw;
 }
 
-// whether the position is past an end, where the rubber band draws it and a spring takes it home (never, with the rubber band off)
-static b32 ui_body_outside(const struct ui_body address_to b)
+// the same place in whole device pixels, rounded: the scroll's, the grid's (terminal.c) and the table's
+static int ui_body_px(const struct ui_body address_to b)
+{
+        return (int)((ui_body_drawn(b) + UI_ONE / 2) >> UI_Q);
+}
+
+// how far a position is past an end: below the top, or beyond the far end when the content has one
+static b64 ui_body_past(const struct ui_body address_to b, b64 x)
 {
         b64 far = ui_body_far(b);
 
-        return !(ui_kit.scroll_off & WINDOW_SCROLL_STILL) && (b->raw < 0 || (far && b->raw > far));
+        return x < 0 ? -x : far && x > far ? x - far : 0;
+}
+
+// whether the position is past an end, where the rubber band draws it and a spring takes it home (never, with the rubber band off)
+static b32 ui_body_outside(const struct ui_body address_to b)
+{
+        return !(ui_kit.scroll_off & WINDOW_SCROLL_STILL) && ui_body_past(b, b->raw) > 0;
 }
 
 // With the rubber band off the position is held inside the ends as it moves, so a reversal answers at once; whether it moved.
@@ -6191,14 +6203,6 @@ static void ui_body_hold(struct ui_body address_to b, b64 at)
 static b64 ui_body_stretched(const struct ui_body address_to b, b64 d)
 {
         return d <= 0 ? 0 : d >= b->view ? b->view : ui_qdiv(ui_qmul(d, b->view), ui_qmul(BODY_RUBBER_C, b->view - d));
-}
-
-// how far a position is past an end: below the top, or beyond the far end when the content has one
-static b64 ui_body_past(const struct ui_body address_to b, b64 x)
-{
-        b64 far = ui_body_far(b);
-
-        return x < 0 ? -x : far && x > far ? x - far : 0;
 }
 
 // the wheel's notches move the target (units, Q30) by delta, and the position follows it: from where it is, unless it is already
@@ -6575,7 +6579,7 @@ static void ui_scroll_extent(struct ui_scroll address_to s)
 static void ui_scroll_show(struct ui_scroll address_to s)
 {
         ui_scroll_extent(s);
-        s->scroll = (int)((ui_body_drawn(&s->body) + UI_ONE / 2) >> UI_Q);
+        s->scroll = ui_body_px(&s->body);
 }
 
 // A finger or a thumb goes down on the region: the body stops where it is drawn, and no trackpad's hand is in it any more.
@@ -6811,7 +6815,7 @@ static void ui_body_publish(struct windows address_to table, unsigned int row)
 
         table->body_state[row] = (unsigned int)b->state;
         table->body_raw[row] = (int)(b->raw >> UI_Q);
-        table->body_drawn[row] = (int)((ui_body_drawn(b) + UI_ONE / 2) >> UI_Q);
+        table->body_drawn[row] = ui_body_px(b);
         table->body_speed[row] = (int)(speed >> UI_Q);
 }
 
