@@ -619,6 +619,10 @@ struct windows_issue
 #define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
 // The input devices the compositor reads, the room of the name it keeps of each, and what it found each to be.
 #define WINDOWS_INPUTS 32
+// The wheel turns the readout keeps for each input: the last WINDOW_WHEEL_RING that were used, on the device's clock, and whether each
+// was a stream's notch (window_wheel_note). `moonwater debug` reads the ones within WINDOW_WHEEL_SPAN_NS (window_wheel_report).
+#define WINDOW_WHEEL_RING 1024
+#define WINDOW_WHEEL_SPAN_NS 5000000000ull
 #define WINDOWS_INPUT_NAME 48
 #define WINDOWS_INPUT_KEYBOARD 1u    // taken as a keyboard: it has the letter A
 #define WINDOWS_INPUT_MOUSE 2u       // as a mouse: relative X and Y
@@ -864,6 +868,9 @@ struct windows
         unsigned int input_kinds[WINDOWS_INPUTS];
         unsigned int input_wheel_read[WINDOWS_INPUTS], input_wheel_used[WINDOWS_INPUTS], input_dropped[WINDOWS_INPUTS];
         unsigned long input_wheel_last[WINDOWS_INPUTS];
+        unsigned long long wheel_when[WINDOWS_INPUTS][WINDOW_WHEEL_RING]; // the used turns' times, a ring (wheel_turns is the count ever)
+        unsigned char wheel_stream_flag[WINDOWS_INPUTS][WINDOW_WHEEL_RING]; // 1 when that turn was a stream's notch
+        unsigned int wheel_turns[WINDOWS_INPUTS], wheel_streams[WINDOWS_INPUTS]; // the used turns ever, and how many were a stream's
         char input_name[WINDOWS_INPUTS][WINDOWS_INPUT_NAME];
         unsigned int wheel_sent, wheel_nowhere, wheel_full;
         int wheel_row, wheel_x, wheel_y;
@@ -1095,6 +1102,68 @@ struct windows
 
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.
+/*
+        A wheel turn the compositor used, from input at, on its device's clock, and whether it was a stream's notch (the
+        compositor's stream test, compositor_wheel_stream). The ring keeps the last WINDOW_WHEEL_RING.
+*/
+static void window_wheel_note(struct windows address_to table, unsigned int at, unsigned long long when, int stream)
+{
+        unsigned int slot = table->wheel_turns[at] % WINDOW_WHEEL_RING;
+
+        table->wheel_when[at][slot] = when;
+        table->wheel_stream_flag[at][slot] = stream != 0;
+        table->wheel_turns[at]++;
+        table->wheel_streams[at] += stream != 0;
+}
+
+struct window_wheel_report
+{
+        unsigned int notches, streams, peak, gaps; // within the span; the stream's among them; the most in any one second; the gaps between them
+        unsigned long long least, median;          // the shortest gap and the median one, in ns (0 with fewer than two)
+};
+
+/*
+        The readout for one input at now: the turns within WINDOW_WHEEL_SPAN_NS of now (a turn that is later than now is none),
+        how many were a stream's, the most in one second of the span and the gaps between consecutive ones in it. A ring that
+        has wrapped holds the last WINDOW_WHEEL_RING turns only, so a span with more than that is counted over those.
+*/
+static void window_wheel_report(const struct windows address_to table, unsigned int at, unsigned long long now, struct window_wheel_report address_to r)
+{
+        static unsigned long long kept[WINDOW_WHEEL_RING], gap[WINDOW_WHEEL_RING];
+        unsigned int turns = table->wheel_turns[at], first = turns > WINDOW_WHEEL_RING ? turns - WINDOW_WHEEL_RING : 0, n = 0, second[5] = {0, 0, 0, 0, 0};
+
+        memory_zero(r, sizeof(*r));
+        for (unsigned int k = first; k < turns; k++)
+        {
+                unsigned int slot = k % WINDOW_WHEEL_RING;
+                unsigned long long when = table->wheel_when[at][slot];
+
+                if (when > now || now - when >= WINDOW_WHEEL_SPAN_NS)
+                        continue;
+                kept[n++] = when;
+                r->notches++;
+                r->streams += table->wheel_stream_flag[at][slot] != 0;
+                second[(now - when) / 1000000000ull]++;
+        }
+        for (unsigned int k = 0; k < 5; k++)
+                r->peak = second[k] > r->peak ? second[k] : r->peak;
+        for (unsigned int k = 1; k < n; k++)
+                if (kept[k] >= kept[k - 1])
+                        gap[r->gaps++] = kept[k] - kept[k - 1];
+        // The gaps are sorted by insertion: a span's gaps are a few hundred at most.
+        for (unsigned int k = 1; k < r->gaps; k++)
+        {
+                unsigned long long v = gap[k];
+                unsigned int j = k;
+
+                while (j > 0 && gap[j - 1] > v)
+                        gap[j] = gap[j - 1], j--;
+                gap[j] = v;
+        }
+        if (r->gaps)
+                r->least = gap[0], r->median = gap[r->gaps / 2];
+}
+
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
 
 /*

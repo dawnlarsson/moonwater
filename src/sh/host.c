@@ -22206,6 +22206,22 @@ static fn host_debug_inputs(const struct windows address_to table)
                                  (positive)table->input_wheel_read[at], (positive)table->input_wheel_used[at], ago / 10, ago % 10);
                 else if (kinds & (WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_WHEEL_HI | WINDOWS_INPUT_HWHEEL | WINDOWS_INPUT_HWHEEL_HI))
                         host_say(log, "                  wheel: none read\n");
+                if (table->wheel_turns[at])
+                {
+                        // The last five seconds of the turns the compositor used: how many, how fast (the mean and the most in a second),
+                        // how many were a stream's notch, and the gaps between them (the shortest and the median), in tenths.
+                        struct window_wheel_report w;
+
+                        window_wheel_report(table, at, (unsigned long long)now, &w);
+                        if (!w.notches)
+                                host_say(log, "                  wheel, the last 5 s: none (%p turns in all)\n", (positive)table->wheel_turns[at]);
+                        else
+                                host_say(log, "                  wheel, the last 5 s: %p turns, %p.%p a second on the mean and %p in the most in one second; "
+                                         "%p a stream's notch (the rest are lone notches); gaps between them %p.%p ms shortest, %p.%p ms median\n",
+                                         (positive)w.notches, (positive)(w.notches * 2 / 10), (positive)(w.notches * 2 % 10), (positive)w.peak,
+                                         (positive)w.streams, (positive)(w.least / 1000000), (positive)(w.least / 100000 % 10),
+                                         (positive)(w.median / 1000000), (positive)(w.median / 100000 % 10));
+                }
                 if (table->input_dropped[at])
                         host_say(log, "                  the kernel dropped its events %p times, which were not read in time\n",
                                  (positive)table->input_dropped[at]);

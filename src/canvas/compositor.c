@@ -18266,6 +18266,9 @@ static void compositor_input_read(unsigned int at)
                                         // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
                                         int stream = compositor_wheel_stream(at, now);
 
+                                        if (compositor.table)
+                                                window_wheel_note(compositor.table, at, now, stream);
+
                                         compositor.table->input_wheel_used[at]++;
                                         long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
 

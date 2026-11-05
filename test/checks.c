@@ -150118,6 +150118,41 @@ static fn check_wheel_stream(void)
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
 }
 
+// The readout (moonwater debug, window_wheel_report): the turns in the last five seconds of an input, how many were a stream's, the
+// most in a second, and the gaps between them. A turn ten seconds old is none; a ring that wrapped counts its last 1024; a turn stamped
+// after now is none.
+static fn check_wheel_report(void)
+{
+        static struct windows report;
+        static const unsigned long long now = 20000000000ull;
+        struct window_wheel_report r;
+        int ok;
+
+        memory_zero(&report, sizeof(report));
+        for (int k = 0; k < 50; k++)
+                window_wheel_note(&report, 3, 1000000000ull + (unsigned long long)k * 1000000ull, 0); // nineteen seconds before now
+        for (int k = 0; k < 200; k++)
+                window_wheel_note(&report, 3, now - (unsigned long long)(199 - k) * 16000000ull, k >= 50); // the last 3.2 s, 16 ms apart
+        window_wheel_report(&report, 3, now, &r);
+        ok = r.notches == 200 && r.streams == 150 && r.gaps == 199 && r.least == 16000000ull && r.median == 16000000ull &&
+             r.peak >= 60 && r.peak <= 65;
+        check("wheel readout: the last five seconds of 200 turns 16 ms apart: 200 counted, 150 a stream's, gaps 16 ms, about 62 in a second, and the ten-second-old turns none",
+              ok);
+
+        memory_zero(&report, sizeof(report));
+        for (int k = 0; k < 1500; k++)
+                window_wheel_note(&report, 4, now - (unsigned long long)(1499 - k) * 4000000ull, 1);
+        window_wheel_report(&report, 4, now, &r);
+        check("wheel readout: a ring that wrapped counts its last 1024 turns, 4 ms apart (6 s of them, so the span holds more than the ring)",
+              r.notches == WINDOW_WHEEL_RING && r.streams == WINDOW_WHEEL_RING && r.gaps == WINDOW_WHEEL_RING - 1 && r.least == 4000000ull);
+
+        memory_zero(&report, sizeof(report));
+        for (int k = 0; k < 10; k++)
+                window_wheel_note(&report, 5, now + 1000000000ull + (unsigned long long)k * 1000000ull, 0);
+        window_wheel_report(&report, 5, now, &r);
+        check("wheel readout: turns stamped after now are none, and an input with none reads none", r.notches == 0 && r.gaps == 0 && r.least == 0 && r.median == 0);
+}
+
 // The trackpad's speed setting: a two-finger swipe of 40 mm is 480 of the wheel's 120ths at normal, 280 at slow (60 percent) and
 // 760 at fast (160 percent); a stream notch is 24, 12 or 42. Zero is normal, so a compositor that was never read is normal.
 static long pad_swipe_sum(void)
@@ -161492,6 +161527,7 @@ b32 main()
         check_kit_precise_stream();
         check_stream_notch();
         check_trackpad_speed();
+        check_wheel_report();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
