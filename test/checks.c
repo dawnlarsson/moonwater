@@ -159273,7 +159273,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 ui_popmenu_add(&t, "Paste", null, 0, 2);
                 ui_popmenu_add(&t, "Select all", null, 0, 3);
                 ui_popmenu_size(wui, &t, 0);
-                trow = ui_popmenu_row(wui, &t), tpad = UI_MENU_PAD * wui->scale / 100, tx = t.width / 2;
+                trow = ui_popmenu_row(wui, &t), tpad = 0, tx = t.width / 2;
                 ty1 = tpad + trow + trow / 2, ty2 = tpad + 2 * trow + trow / 2;
                 ui_popmenu_event(wui, &t, &touch_press, tx, ty1);
                 ui_popmenu_event(wui, &t, &touch_move, tx, ty2);
@@ -159292,6 +159292,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 memory_zero((void address_to)pixels, 600 * 900 * 4);
                 opaque.glass = 0;
                 ui_begin(&opaque, picture, 600, m.width, m.height);
+                m.hot = -1;
                 ui_popmenu_draw(&opaque, &m);
                 check("menu: drawn opaque, a menu has no face (a menu is glass)", picture[2 * 600 + m.height / 2] == 0);
         }
@@ -159313,7 +159314,7 @@ static fn menu_defaults_check(struct ui address_to wui)
         {
                 struct ui glass = *wui;
                 struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
-                int row, pad = UI_MENU_PAD * wui->scale / 100, top, mid;
+                int row, pad = 0, top, mid; // a menu has no room above its first item or below its last
                 unsigned int address_to picture2 = picture;
 
                 glass.glass = 1, glass.opaque = false;
@@ -159490,9 +159491,9 @@ static fn kit_composites_check(struct ui address_to wui)
         for (int at = 0; at < 8; at++)
                 ui_popmenu_add(&pad_m, "Item", null, 0, at + 1);
         ui_popmenu_size(wui, &pad_m, 96 * s);
-        bottom = pad_m.height - 3 * s;
+        bottom = pad_m.height + 2 * s;
         {
-                int row = ui_popmenu_row(wui, &pad_m), middle = UI_MENU_PAD * s + 2 * row + row / 2;
+                int row = ui_popmenu_row(wui, &pad_m), middle = 2 * row + row / 2;
                 struct window_event motion = {WINDOW_EVENT_MOTION, 0, 10 * s, middle};
 
                 pad_m.hot = -1;
@@ -159500,7 +159501,7 @@ static fn kit_composites_check(struct ui address_to wui)
                 check("menu: the row drawn under the pointer is its item", pad_m.hot == 2 && ui_popmenu_at(wui, &pad_m, middle) == 2);
                 motion.b = bottom;
                 ui_popmenu_event(wui, &pad_m, &motion, 10 * s, bottom);
-                check("menu: the padding under the last row drawn is no item", pad_m.hot == -1 && ui_popmenu_at(wui, &pad_m, bottom) == -1);
+                check("menu: below the menu's last row is no item (it has no padding to be one)", pad_m.hot == -1 && ui_popmenu_at(wui, &pad_m, bottom) == -1);
         }
 
         keyed.count = 3;

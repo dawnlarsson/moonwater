@@ -7127,14 +7127,14 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 
 struct ui_menu_sizes
 {
-        int row, pad, inset, least, margin, radius; // device pixels
+        int row, pad, inset, least, margin, radius, vpad; // device pixels; vpad is the room above the first item and below the last: none, the items meet the edges
 };
 
 // Every menu's size, from the one place its numbers are: the mouse's row, or a finger's (touch).
 static struct ui_menu_sizes ui_menu_sizes(const struct ui address_to ui, b32 touch)
 {
         struct ui_menu_sizes sizes = {ui_dev(ui, touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), ui_dev(ui, UI_MENU_PAD), ui_dev(ui, UI_MENU_INSET),
-                                      ui_dev(ui, UI_MENU_LEAST), ui_dev(ui, UI_MENU_MARGIN), ui_dev(ui, UI_MENU_RADIUS)};
+                                      ui_dev(ui, UI_MENU_LEAST), ui_dev(ui, UI_MENU_MARGIN), ui_dev(ui, UI_MENU_RADIUS), 0};
 
         return sizes;
 }
@@ -7219,7 +7219,7 @@ static positive ui_popmenu_shown(const char address_to label, p8 address_to into
 static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to m, int limit)
 {
         struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
-        int widest = 0, height = 2 * sizes.pad;
+        int widest = 0, height = 2 * sizes.vpad;
 
         for (int at = 0; at < m->count; at++)
         {
@@ -7240,10 +7240,10 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         m->width = widest + 2 * (sizes.inset + sizes.pad);
         m->width = m->width < sizes.least ? sizes.least : m->width;
         m->height = limit > 0 && height > limit ? limit : height;
-        m->rows_shown = (m->height - 2 * sizes.pad) / sizes.row;
-        m->scroll.content = height - 2 * sizes.pad;
-        m->scroll.view = m->height - 2 * sizes.pad;
-        m->scroll.x = ui_mirror(m->width - ui_dev(ui, UI_SCROLL_WIDTH), ui_dev(ui, UI_SCROLL_WIDTH), 0, m->width), m->scroll.y = sizes.pad, m->scroll.height = m->height - 2 * sizes.pad;
+        m->rows_shown = (m->height - 2 * sizes.vpad) / sizes.row;
+        m->scroll.content = height - 2 * sizes.vpad;
+        m->scroll.view = m->height - 2 * sizes.vpad;
+        m->scroll.x = ui_mirror(m->width - ui_dev(ui, UI_SCROLL_WIDTH), ui_dev(ui, UI_SCROLL_WIDTH), 0, m->width), m->scroll.y = sizes.vpad, m->scroll.height = m->height - 2 * sizes.vpad;
         m->scroll.unit = 0;
         m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
         m->scroll.held = m->scroll.hover = 0;
@@ -7253,14 +7253,16 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
 // stops there), so the padding under the last row drawn is no item.
 static int ui_popmenu_at(const struct ui address_to ui, const struct ui_popmenu address_to m, int y)
 {
-        int top = ui_menu_sizes(ui, m->touch).pad;
+        int top = ui_menu_sizes(ui, m->touch).vpad;
 
+        if (y < 0 || y >= m->height) // past the menu's own height, the last row's rest that the draw cut is no item
+                return -1;
         for (int at = m->top; at < m->count; at++)
         {
                 int tall = ui_popmenu_tall(ui, m, at);
 
                 if (y >= top && y < top + tall)
-                        return (m->items[at].flags & UI_MENU_SEPARATOR) || top >= m->height - ui_menu_sizes(ui, m->touch).pad ? -1 : at;
+                        return (m->items[at].flags & UI_MENU_SEPARATOR) || top >= m->height - ui_menu_sizes(ui, m->touch).vpad ? -1 : at;
                 top += tall;
         }
         return -1;
@@ -7309,11 +7311,11 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
 {
         UI_CALL();
         struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
-        int y = sizes.pad;
+        int y = sizes.vpad;
 
         m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
         m->moving = 0;
-        for (int at = m->top; at < m->count && y < m->height - sizes.pad; at++)
+        for (int at = m->top; at < m->count && y < m->height - sizes.vpad; at++)
         {
                 const struct ui_menu_item address_to item = &m->items[at];
                 unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE);
@@ -7519,7 +7521,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         m->hot = at;
                         if (ui_popmenu_choosable(m, at))
                         {
-                                int top = ui_menu_sizes(ui, m->touch).pad + ui_popmenu_offset(ui, m, at);
+                                int top = ui_menu_sizes(ui, m->touch).vpad + ui_popmenu_offset(ui, m, at);
 
                                 ui_ripple_go(&m->ripple, ui_qdiv(ui_q(x), ui_q(ui->scale) / 100), ui_qdiv(ui_q(y - top), ui_q(ui->scale) / 100),
                                              ui_qdiv(ui_q(m->width), ui_q(ui->scale) / 100), ui_qdiv(ui_q(ui_popmenu_row(ui, m)), ui_q(ui->scale) / 100), 0);
