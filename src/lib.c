@@ -14356,7 +14356,7 @@ __asm__(
     //       cache), the time of the C loop it replaced: VBMI 39-69%, the
     //       SSE2 body below 69-78%.
     //
-    ASM_FUNC(memory_blend_u32_rect)
+    ASM_FUNC(memory_blend_u32_rect_baseline)
     "mov 8(%rsp), %rax\n   push %rbx\n   push %r12\n   push %r13\n   xor %r11d, %r11d\n   test %r8, %r8\n   jz " ASM_LABEL(blend_x64_done) "\n"
     "test %r9, %r9\n   jz " ASM_LABEL(blend_x64_done) "\n   shl $2, %rsi\n   mov %rax, %r12\n"
     ASM_NARROW("cpu_has_avx512_vbmi", "" ASM_LABEL(blend_x64_narrow) "")
@@ -14403,6 +14403,59 @@ __asm__(
     "" ASM_LABEL(blend_x64_narrow_stop) ":\n   mov %r11, %rax\n   imul %r8, %rax\n   add %r10, %rax\n   jmp " ASM_LABEL(blend_x64_out) "\n"
     "" ASM_LABEL(blend_x64_done) ":\n   mov %r8, %rax\n   imul %r9, %rax\n"
     "" ASM_LABEL(blend_x64_out) ":\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_blend_u32_rect_baseline)
+
+    //
+    //       memory_blend_u32_rect: the baseline above, with two changes. The
+    //       ground is the low 24 bits of its word, as the contract says, in both
+    //       bodies (the baseline compares the whole word). And a chunk of
+    //       sixteen whose coverage bytes are all zero is passed over before its
+    //       lookups: nothing in it is written and nothing in it stops the run.
+    //       The rest is the baseline's code, its labels renamed.
+    //
+    ASM_FUNC(memory_blend_u32_rect)
+    "mov 8(%rsp), %rax\n   push %rbx\n   push %r12\n   push %r13\n   xor %r11d, %r11d\n   test %r8, %r8\n   jz " ASM_LABEL(bln2x_done) "\n"
+    "test %r9, %r9\n   jz " ASM_LABEL(bln2x_done) "\n   shl $2, %rsi\n   mov %rax, %r12\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", "" ASM_LABEL(bln2x_narrow) "")
+    "vmovdqu64 1024(%rax), %zmm16\n   vmovdqu64 1088(%rax), %zmm17\n   vmovdqu64 1152(%rax), %zmm18\n   vmovdqu64 1216(%rax), %zmm19\n"
+    "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
+    "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
+    "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
+    "vpbroadcastd 2048(%rax), %zmm12\n   mov $0xffffff, %r10d\n   vpbroadcastd %r10d, %zmm13\n   vpandd %zmm13, %zmm12, %zmm12\n   mov $0xffff, %r13d\n"
+    "" ASM_LABEL(bln2x_row) ":\n   xor %r10d, %r10d\n"
+    "" ASM_LABEL(bln2x_piece) ":\n   mov %r8, %rbx\n   sub %r10, %rbx\n   bzhi %ebx, %r13d, %ebx\n   cmp $16, %r8\n   jb 1f\n"
+    "lea 16(%r10), %rax\n   cmp %r8, %rax\n   ja 1f\n   mov $0xffff, %ebx\n"
+    "1:  kmovw %ebx, %k1\n   vmovdqu8 (%rdx,%r10), %xmm0{%k1}{z}\n"
+    "vptestmb %xmm0, %xmm0, %k3\n   kortestw %k3, %k3\n   jz " ASM_LABEL(bln2x_next) "\n"
+    TR32_X64_LOOKUP
+    "vmovdqu32 (%rdi,%r10,4), %zmm14{%k1}{z}\n   vpandd %zmm13, %zmm14, %zmm15\n   vpcmpeqd %zmm12, %zmm15, %k2\n"
+    "kandnw %k3, %k2, %k5\n   kortestw %k5, %k5\n   jnz " ASM_LABEL(bln2x_stop) "\n"
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k3}\n"
+    "" ASM_LABEL(bln2x_next) ":\n   add $16, %r10\n   cmp %r8, %r10\n   jb " ASM_LABEL(bln2x_piece) "\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   inc %r11\n   cmp %r9, %r11\n   jb " ASM_LABEL(bln2x_row) "\n"
+    "vzeroupper\n   jmp " ASM_LABEL(bln2x_done) "\n"
+    "" ASM_LABEL(bln2x_stop) ":\n   kmovw %k5, %eax\n   tzcnt %eax, %eax\n   bzhi %eax, %r13d, %ebx\n   kmovw %ebx, %k6\n   kandw %k3, %k6, %k6\n"
+    "vmovdqu32 %zmm8, (%rdi,%r10,4){%k6}\n   vzeroupper\n   imul %r8, %r11\n   add %r10, %r11\n   add %r11, %rax\n   jmp " ASM_LABEL(bln2x_out) "\n"
+    "" ASM_LABEL(bln2x_narrow) ":\n   mov 2048(%r12), %r13d\n   and $0xffffff, %r13d\n   movd %r13d, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0xffffff, %eax\n"
+    "movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n   pxor %xmm7, %xmm7\n"
+    "" ASM_LABEL(bln2x_narrow_row) ":\n   xor %r10d, %r10d\n"
+    "" ASM_LABEL(bln2x_narrow_four) ":\n   lea 4(%r10), %rax\n   cmp %r8, %rax\n   ja " ASM_LABEL(bln2x_narrow_one) "\n"
+    "movd (%rdx,%r10), %xmm0\n   movdqu (%rdi,%r10,4), %xmm1\n   punpcklbw %xmm7, %xmm0\n   punpcklwd %xmm7, %xmm0\n"
+    "movdqa %xmm1, %xmm2\n   pand %xmm6, %xmm2\n   pcmpeqd %xmm5, %xmm2\n   movdqa %xmm0, %xmm3\n   pcmpeqd %xmm7, %xmm3\n"
+    "por %xmm3, %xmm2\n   movmskps %xmm2, %eax\n   cmp $15, %eax\n   jne " ASM_LABEL(bln2x_narrow_one) "\n"
+    "mov (%rdx,%r10), %ebx\n   movzbl %bl, %eax\n   movd (%r12,%rax,4), %xmm4\n   movzbl %bh, %eax\n   movd (%r12,%rax,4), %xmm8\n"
+    "shr $16, %ebx\n   movzbl %bl, %eax\n   movd (%r12,%rax,4), %xmm9\n   movzbl %bh, %eax\n   movd (%r12,%rax,4), %xmm10\n"
+    "punpckldq %xmm8, %xmm4\n   punpckldq %xmm10, %xmm9\n   punpcklqdq %xmm9, %xmm4\n"
+    "movdqa %xmm3, %xmm11\n   pand %xmm1, %xmm11\n   pandn %xmm4, %xmm3\n   por %xmm11, %xmm3\n   movdqu %xmm3, (%rdi,%r10,4)\n"
+    "add $4, %r10\n   jmp " ASM_LABEL(bln2x_narrow_next) "\n"
+    "" ASM_LABEL(bln2x_narrow_one) ":\n   movzbl (%rdx,%r10), %ebx\n   test %ebx, %ebx\n   jz 2f\n   mov (%rdi,%r10,4), %eax\n   and $0xffffff, %eax\n"
+    "cmp %r13d, %eax\n   jne " ASM_LABEL(bln2x_narrow_stop) "\n   mov (%r12,%rbx,4), %eax\n   mov %eax, (%rdi,%r10,4)\n"
+    "2:  inc %r10\n"
+    "" ASM_LABEL(bln2x_narrow_next) ":\n   cmp %r8, %r10\n   jb " ASM_LABEL(bln2x_narrow_four) "\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   inc %r11\n   cmp %r9, %r11\n   jb " ASM_LABEL(bln2x_narrow_row) "\n   jmp " ASM_LABEL(bln2x_done) "\n"
+    "" ASM_LABEL(bln2x_narrow_stop) ":\n   mov %r11, %rax\n   imul %r8, %rax\n   add %r10, %rax\n   jmp " ASM_LABEL(bln2x_out) "\n"
+    "" ASM_LABEL(bln2x_done) ":\n   mov %r8, %rax\n   imul %r9, %rax\n"
+    "" ASM_LABEL(bln2x_out) ":\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
     //
@@ -25232,7 +25285,7 @@ __asm__(
     //       an M2 core, the x86_64 block's glyphs: 46-76% of the time of
     //       clang's loop and 45-75% of GCC's. The x86_64 block carries the
     //       contract.
-    ASM_FUNC(memory_blend_u32_rect)
+    ASM_FUNC(memory_blend_u32_rect_baseline)
     "cbz x4, 8f\n   cbz x5, 8f\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   mov x8, xzr\n   dup v30.4s, w7\n   movi v31.4s, #0xff, msl #16\n"
     "1:  mov x9, xzr\n"
     "2:  add x10, x9, #4\n   cmp x10, x4\n   b.hi 3f\n   ldr w10, [x2, x9]\n   add x16, x0, x9, lsl #2\n   ldr q1, [x16]\n"
@@ -25247,6 +25300,91 @@ __asm__(
     "4:  cmp x9, x4\n   b.lo 2b\n   add x0, x0, x1\n   add x2, x2, x3\n   add x8, x8, #1\n   cmp x8, x5\n   b.lo 1b\n"
     "8:  mul x0, x4, x5\n" ASM_RET
     "7:  madd x0, x8, x4, x9\n" ASM_RET
+    ASM_END(memory_blend_u32_rect_baseline)
+
+    //       memory_blend_u32_rect: the glyph blend in blocks of sixteen, eight
+    //       and four pixels, with no branch on a coverage byte inside a block.
+    //       A sixteen-pixel block whose coverage is all zero is skipped whole (a
+    //       branch on the eight and four is not worth it: the glyph rows mix ink
+    //       and air within them, so it mispredicts). Every block tests each lane
+    //       for a nonzero byte whose pixel is not the ground in the low 24 bits;
+    //       such a lane is a stop, and the block goes to the scalar tail from its
+    //       first pixel,
+    //       which writes the pixels before the stop and answers the stop. A block
+    //       with no stop gathers table[byte] for every lane (a zero byte gathers
+    //       table[0], which is then not used) and stores each pixel as the table
+    //       word where its byte is nonzero and the pixel itself where it is zero.
+    //       The ground is masked to its low 24 bits, as the contract says; the
+    //       baseline above compares the whole word. It uses x0-x17 and v0-v7,
+    //       v16-v31, and never v8-v15, which the caller keeps.
+    ASM_FUNC(memory_blend_u32_rect)
+    "cbz x4, " ASM_LABEL(bln_done) "\n   cbz x5, " ASM_LABEL(bln_done) "\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   and w7, w7, #0xffffff\n"
+    "dup v30.4s, w7\n   movi v31.4s, #0xff, msl #16\n   mov x8, xzr\n"
+    "" ASM_LABEL(bln_row) ":\n   mov x9, xzr\n"
+    "" ASM_LABEL(bln_16) ":\n   add x10, x9, #16\n   cmp x10, x4\n   b.hi " ASM_LABEL(bln_8) "\n"
+    "add x12, x2, x9\n   add x13, x0, x9, lsl #2\n   ldr q0, [x12]\n   umaxv b2, v0.16b\n   fmov w10, s2\n   cbz w10, " ASM_LABEL(bln_16_next) "\n"
+    "ldr x14, [x12]\n   ldr x15, [x12, #8]\n   cmtst v1.16b, v0.16b, v0.16b\n"
+    "sxtl v2.8h, v1.8b\n   sxtl2 v3.8h, v1.16b\n   sxtl v4.4s, v2.4h\n   sxtl2 v5.4s, v2.8h\n   sxtl v6.4s, v3.4h\n   sxtl2 v7.4s, v3.8h\n"
+    "ld1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x13]\n"
+    "and v20.16b, v16.16b, v31.16b\n   and v21.16b, v17.16b, v31.16b\n   and v22.16b, v18.16b, v31.16b\n   and v23.16b, v19.16b, v31.16b\n"
+    "cmeq v20.4s, v20.4s, v30.4s\n   cmeq v21.4s, v21.4s, v30.4s\n   cmeq v22.4s, v22.4s, v30.4s\n   cmeq v23.4s, v23.4s, v30.4s\n"
+    "bic v20.16b, v4.16b, v20.16b\n   bic v21.16b, v5.16b, v21.16b\n   bic v22.16b, v6.16b, v22.16b\n   bic v23.16b, v7.16b, v23.16b\n"
+    "orr v20.16b, v20.16b, v21.16b\n   orr v22.16b, v22.16b, v23.16b\n   orr v20.16b, v20.16b, v22.16b\n"
+    "umaxv s20, v20.4s\n   fmov w10, s20\n   cbnz w10, " ASM_LABEL(bln_tail) "\n"
+    "ubfx x17, x14, #0, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[0], w17\n"
+    "ubfx x17, x14, #8, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[1], w17\n"
+    "ubfx x17, x14, #16, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[2], w17\n"
+    "ubfx x17, x14, #24, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[3], w17\n"
+    "ubfx x17, x14, #32, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[0], w17\n"
+    "ubfx x17, x14, #40, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[1], w17\n"
+    "ubfx x17, x14, #48, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[2], w17\n"
+    "ubfx x17, x14, #56, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[3], w17\n"
+    "ubfx x17, x15, #0, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v26.s[0], w17\n"
+    "ubfx x17, x15, #8, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v26.s[1], w17\n"
+    "ubfx x17, x15, #16, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v26.s[2], w17\n"
+    "ubfx x17, x15, #24, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v26.s[3], w17\n"
+    "ubfx x17, x15, #32, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v27.s[0], w17\n"
+    "ubfx x17, x15, #40, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v27.s[1], w17\n"
+    "ubfx x17, x15, #48, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v27.s[2], w17\n"
+    "ubfx x17, x15, #56, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v27.s[3], w17\n"
+    "bit v16.16b, v24.16b, v4.16b\n   bit v17.16b, v25.16b, v5.16b\n   bit v18.16b, v26.16b, v6.16b\n   bit v19.16b, v27.16b, v7.16b\n"
+    "st1 {v16.4s, v17.4s, v18.4s, v19.4s}, [x13]\n"
+    "" ASM_LABEL(bln_16_next) ":\n   add x9, x9, #16\n   b " ASM_LABEL(bln_16) "\n"
+    "" ASM_LABEL(bln_8) ":\n   add x10, x9, #8\n   cmp x10, x4\n   b.hi " ASM_LABEL(bln_4) "\n"
+    "add x12, x2, x9\n   add x13, x0, x9, lsl #2\n   ldr d0, [x12]\n"
+    "ldr x14, [x12]\n   cmtst v1.16b, v0.16b, v0.16b\n   sxtl v2.8h, v1.8b\n   sxtl v4.4s, v2.4h\n   sxtl2 v5.4s, v2.8h\n"
+    "ld1 {v16.4s, v17.4s}, [x13]\n   and v20.16b, v16.16b, v31.16b\n   and v21.16b, v17.16b, v31.16b\n"
+    "cmeq v20.4s, v20.4s, v30.4s\n   cmeq v21.4s, v21.4s, v30.4s\n"
+    "bic v20.16b, v4.16b, v20.16b\n   bic v21.16b, v5.16b, v21.16b\n   orr v20.16b, v20.16b, v21.16b\n"
+    "umaxv s20, v20.4s\n   fmov w10, s20\n   cbnz w10, " ASM_LABEL(bln_tail) "\n"
+    "ubfx x17, x14, #0, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[0], w17\n"
+    "ubfx x17, x14, #8, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[1], w17\n"
+    "ubfx x17, x14, #16, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[2], w17\n"
+    "ubfx x17, x14, #24, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[3], w17\n"
+    "ubfx x17, x14, #32, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[0], w17\n"
+    "ubfx x17, x14, #40, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[1], w17\n"
+    "ubfx x17, x14, #48, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[2], w17\n"
+    "ubfx x17, x14, #56, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v25.s[3], w17\n"
+    "bit v16.16b, v24.16b, v4.16b\n   bit v17.16b, v25.16b, v5.16b\n   st1 {v16.4s, v17.4s}, [x13]\n"
+    "" ASM_LABEL(bln_8_next) ":\n   add x9, x9, #8\n"
+    "" ASM_LABEL(bln_4) ":\n   add x10, x9, #4\n   cmp x10, x4\n   b.hi " ASM_LABEL(bln_tail) "\n"
+    "add x12, x2, x9\n   add x13, x0, x9, lsl #2\n   ldr s0, [x12]\n"
+    "ldr w14, [x12]\n   cmtst v1.16b, v0.16b, v0.16b\n   sxtl v2.8h, v1.8b\n   sxtl v4.4s, v2.4h\n"
+    "ld1 {v16.4s}, [x13]\n   and v20.16b, v16.16b, v31.16b\n   cmeq v20.4s, v20.4s, v30.4s\n   bic v20.16b, v4.16b, v20.16b\n"
+    "umaxv s20, v20.4s\n   fmov w10, s20\n   cbnz w10, " ASM_LABEL(bln_tail) "\n"
+    "ubfx x17, x14, #0, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[0], w17\n"
+    "ubfx x17, x14, #8, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[1], w17\n"
+    "ubfx x17, x14, #16, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[2], w17\n"
+    "ubfx x17, x14, #24, #8\n   ldr w17, [x6, x17, lsl #2]\n   ins v24.s[3], w17\n"
+    "bit v16.16b, v24.16b, v4.16b\n   st1 {v16.4s}, [x13]\n   add x9, x9, #4\n"
+    "" ASM_LABEL(bln_tail) ":\n   cmp x9, x4\n   b.hs " ASM_LABEL(bln_row_end) "\n"
+    "ldrb w14, [x2, x9]\n   cbz w14, " ASM_LABEL(bln_tail_skip) "\n"
+    "ldr w15, [x0, x9, lsl #2]\n   and w15, w15, #0xffffff\n   cmp w15, w7\n   b.ne " ASM_LABEL(bln_stop) "\n"
+    "ldr w16, [x6, x14, lsl #2]\n   str w16, [x0, x9, lsl #2]\n"
+    "" ASM_LABEL(bln_tail_skip) ":\n   add x9, x9, #1\n   b " ASM_LABEL(bln_tail) "\n"
+    "" ASM_LABEL(bln_row_end) ":\n   add x0, x0, x1\n   add x2, x2, x3\n   add x8, x8, #1\n   cmp x8, x5\n   b.lo " ASM_LABEL(bln_row) "\n"
+    "" ASM_LABEL(bln_done) ":\n   mul x0, x4, x5\n" ASM_RET
+    "" ASM_LABEL(bln_stop) ":\n   madd x0, x8, x4, x9\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
     //       memory_over_tone_u32: x0 into, x1 count, w2 tone, the contract
