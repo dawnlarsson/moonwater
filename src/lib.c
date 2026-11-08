@@ -14542,11 +14542,15 @@ __asm__(
     ASM_NARROW("cpu_has_avx512", "5f")
     "vpbroadcastd %r8d, %zmm0\n   cmp $16, %rdx\n   ja 2f\n   mov $0xffff, %eax\n   bzhi %edx, %eax, %eax\n   kmovw %eax, %k1\n"
     "1:  vmovdqu32 %zmm0, (%rdi){%k1}\n   add %rsi, %rdi\n   dec %rcx\n   jnz 1b\n   vzeroupper\n" ASM_RET
-    "2:  mov %rdi, %rax\n   lea -256(%r9), %r10\n   cmp %r10, %rax\n   ja 22f\n"
-    "21: vmovdqu32 %zmm0, (%rax)\n   vmovdqu32 %zmm0, 64(%rax)\n   vmovdqu32 %zmm0, 128(%rax)\n   vmovdqu32 %zmm0, 192(%rax)\n"
+    //  Wide rows (17 words and up) store an aligned body: the row's first 64 bytes as one unaligned store, the 64-byte
+    //  aligned stores from the next aligned address, then the row's last 64 bytes as one more unaligned store. A row
+    //  that starts anywhere in a line splits one or two stores, not every one of them. The loop heads sit on 64-byte
+    //  boundaries, since a loop that straddles one moved a row's time by up to 2x on the 9950X with nothing else changed.
+    ".balign 64\n2:  lea 64(%rdi), %rax\n   and $-64, %rax\n   vmovdqu32 %zmm0, (%rdi)\n   lea -256(%r9), %r10\n   cmp %r10, %rax\n   ja 22f\n"
+    ".balign 64\n21: vmovdqu32 %zmm0, (%rax)\n   vmovdqu32 %zmm0, 64(%rax)\n   vmovdqu32 %zmm0, 128(%rax)\n   vmovdqu32 %zmm0, 192(%rax)\n"
     "   add $256, %rax\n   cmp %r10, %rax\n   jbe 21b\n"
     "22: lea -64(%r9), %r10\n   cmp %r10, %rax\n   jae 23f\n"
-    "24: vmovdqu32 %zmm0, (%rax)\n   add $64, %rax\n   cmp %r10, %rax\n   jb 24b\n"
+    ".balign 64\n24: vmovdqu32 %zmm0, (%rax)\n   add $64, %rax\n   cmp %r10, %rax\n   jb 24b\n"
     "23: vmovdqu32 %zmm0, -64(%r9)\n"
     "add %rsi, %rdi\n   add %rsi, %r9\n   dec %rcx\n   jnz 2b\n   vzeroupper\n" ASM_RET
     "5:  movd %r8d, %xmm0\n   pshufd $0, %xmm0, %xmm0\n   cmp $4, %rdx\n   jb 7f\n   cmp $208, %rdx\n   jae 10f\n"
