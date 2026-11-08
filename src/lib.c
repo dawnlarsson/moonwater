@@ -22394,14 +22394,24 @@ __asm__(
     // every byte and cpu_hash_probed in one pass. Clobbers x16 and the
     // flags and nothing else, so x17 may carry a caller's return address.
     //
+    // Darwin does not emulate it: an EL0 read of ID_AA64ISAR0_EL1 is a
+    // SIGILL there. Under MACOS or IOS the probe reads nothing, sets
+    // cpu_hash_probed and leaves every cpu_has_* at the zero .bss gave it, so
+    // each hash core takes its generic body. Linux is the else branch,
+    // unchanged.
+    //
 #ifndef KERNEL_MODE
     ASM_LOCAL_FUNC(cpu_hash_detect)
+#if defined(MACOS) || defined(IOS)
+    "stp x0, x1, [sp, #-16]!\n   mov w0, #1\n   adrp x16, " ASM_PAGE(cpu_hash_probed) "\n   strb w0, [x16, " ASM_LO12(cpu_hash_probed) "]\n   ldp x0, x1, [sp], #16\n" ASM_RET
+#else
     "stp x0, x1, [sp, #-48]!\n   stp x2, x3, [sp, #16]\n   stp x4, x5, [sp, #32]\n   mrs x16, id_aa64isar0_el1\n   ubfx x0, x16, #8, #4\n   ubfx x1, x16, #12, #4\n   ubfx x2, x16, #32, #4\n"
     "ubfx x3, x16, #36, #4\n   ubfx x4, x16, #16, #4\n   cmp x0, #0\n   ccmp x1, #0, #4, ne\n   cset w0, ne\n   cmp x1, #2\n   cset w1, eq\n"
     "cmp x2, #0\n   cset w2, ne\n   cmp x3, #0\n   cset w3, ne\n   cmp x4, #0\n   cset w4, ne\n   mov w5, #1\n   adrp x16, " ASM_PAGE(cpu_has_sha) "\n   strb w0, [x16, " ASM_LO12(cpu_has_sha) "]\n"
     "adrp x16, " ASM_PAGE(cpu_has_sha512) "\n   strb w1, [x16, " ASM_LO12(cpu_has_sha512) "]\n   adrp x16, " ASM_PAGE(cpu_has_sha3) "\n   strb w2, [x16, " ASM_LO12(cpu_has_sha3) "]\n"
     "adrp x16, " ASM_PAGE(cpu_has_sm3) "\n   strb w3, [x16, " ASM_LO12(cpu_has_sm3) "]\n   adrp x16, " ASM_PAGE(cpu_has_crc32) "\n   strb w4, [x16, " ASM_LO12(cpu_has_crc32) "]\n"
     "adrp x16, " ASM_PAGE(cpu_hash_probed) "\n   strb w5, [x16, " ASM_LO12(cpu_hash_probed) "]\n   ldp x4, x5, [sp, #32]\n   ldp x2, x3, [sp, #16]\n   ldp x0, x1, [sp], #48\n" ASM_RET
+#endif
     ASM_LOCAL_END(cpu_hash_detect)
 #endif
     //
