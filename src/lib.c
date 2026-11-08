@@ -54106,8 +54106,20 @@ __asm__(
     "test %eax, %eax\n   jnz " ASM_LABEL(buffered_write_x64_deferred) "\n   cmp %rdx, %r9\n   jae " ASM_LABEL(buffered_write_x64_direct_entry) "\n   jmp " ASM_LABEL(buffered_write_x64_buffer_entry) "\n"
     "" ASM_LABEL(buffered_write_x64_deferred) ":\n   cmp %rdx, %r9\n   ja " ASM_LABEL(buffered_write_x64_direct_entry) "\n"
     "" ASM_LABEL(buffered_write_x64_buffer_entry) ":  mov %rdx, %rax\n   sub %r9, %rax\n   mov (%rcx), %r10\n   cmp %rax, %r10\n   ja " ASM_LABEL(buffered_write_x64_flush_first) "\n"
-    "sub $24, %rsp\n   mov %rcx, 0(%rsp)\n   mov %r9, 8(%rsp)\n   lea (%rsi,%r10), %rdi\n   mov %r8, %rsi\n   mov %r9, %rdx\n   call memory_copy\n   mov 0(%rsp), %rcx\n   mov 8(%rsp), %r9\n"
+    // A short span is most of what text sends here, so up to sixteen bytes
+    // go in without a call or a frame: two overlapping loads and stores of
+    // eight (or of four), and for one to three bytes the first, the middle
+    // (len >> 1) and the last. Longer spans take the copy below.
+    "lea (%rsi,%r10), %rdi\n   cmp $16, %r9\n   jbe " ASM_LABEL(buffered_write_x64_small16) "\n"
+    "sub $24, %rsp\n   mov %rcx, 0(%rsp)\n   mov %r9, 8(%rsp)\n   mov %r8, %rsi\n   mov %r9, %rdx\n   call memory_copy\n   mov 0(%rsp), %rcx\n   mov 8(%rsp), %r9\n"
     "add %r9, (%rcx)\n   mov $1, %eax\n   add $24, %rsp\n" ASM_RET
+    "" ASM_LABEL(buffered_write_x64_small16) ":\n   cmp $8, %r9\n   jb " ASM_LABEL(buffered_write_x64_small4) "\n"
+    "mov (%r8), %rax\n   mov -8(%r8,%r9), %r11\n   mov %rax, (%rdi)\n   mov %r11, -8(%rdi,%r9)\n   jmp " ASM_LABEL(buffered_write_x64_small_done) "\n"
+    "" ASM_LABEL(buffered_write_x64_small4) ":\n   cmp $4, %r9\n   jb " ASM_LABEL(buffered_write_x64_small1) "\n"
+    "mov (%r8), %eax\n   mov -4(%r8,%r9), %r11d\n   mov %eax, (%rdi)\n   mov %r11d, -4(%rdi,%r9)\n   jmp " ASM_LABEL(buffered_write_x64_small_done) "\n"
+    "" ASM_LABEL(buffered_write_x64_small1) ":\n   movzbl (%r8), %eax\n   mov %r9, %rdx\n   shr $1, %rdx\n   movzbl (%r8,%rdx), %esi\n   movzbl -1(%r8,%r9), %r11d\n"
+    "mov %al, (%rdi)\n   mov %sil, (%rdi,%rdx)\n   mov %r11b, -1(%rdi,%r9)\n"
+    "" ASM_LABEL(buffered_write_x64_small_done) ":\n   add %r9, (%rcx)\n   mov $1, %eax\n" ASM_RET
     "" ASM_LABEL(buffered_write_x64_flush_first) ":\n   sub $40, %rsp\n   mov %rsi, 0(%rsp)\n   mov %rcx, 8(%rsp)\n   mov %r8, 16(%rsp)\n   mov %r9, 24(%rsp)\n   mov %rcx, %rdx\n   call buffered_flush\n"
     "test %eax, %eax\n   jz " ASM_LABEL(buffered_write_x64_leave_40) "\n   mov 0(%rsp), %rdi\n   mov 16(%rsp), %rsi\n   mov 24(%rsp), %rdx\n"
     "call memory_copy\n   mov 8(%rsp), %rcx\n   mov 24(%rsp), %r9\n   add %r9, (%rcx)\n   mov $1, %eax\n"
@@ -54205,9 +54217,20 @@ __asm__(
     ASM_LOCAL_FUNC(buffered_write_core)
     "cbnz w6, " ASM_LABEL(buffered_write_arm64_deferred) "\n   cmp x5, x2\n   b.hs " ASM_LABEL(buffered_write_arm64_direct_entry) "\n   b " ASM_LABEL(buffered_write_arm64_buffer_entry) "\n"
     "" ASM_LABEL(buffered_write_arm64_deferred) ":\n   cmp x5, x2\n   b.hi " ASM_LABEL(buffered_write_arm64_direct_entry) "\n"
-    "" ASM_LABEL(buffered_write_arm64_buffer_entry) ":  sub x6, x2, x5\n   ldr x7, [x3]\n   cmp x7, x6\n   b.hi " ASM_LABEL(buffered_write_arm64_flush_first) "\n   stp x3, x5, [sp, #-32]!\n   str x30, [sp, #16]\n"
-    "add x0, x1, x7\n   mov x1, x4\n   mov x2, x5\n   bl memory_copy\n   ldp x3, x5, [sp]\n   ldr x30, [sp, #16]\n   ldr x7, [x3]\n   add x7, x7, x5\n   str x7, [x3]\n"
+    "" ASM_LABEL(buffered_write_arm64_buffer_entry) ":  sub x6, x2, x5\n   ldr x7, [x3]\n   cmp x7, x6\n   b.hi " ASM_LABEL(buffered_write_arm64_flush_first) "\n"
+    // The short spans as x86 does them: up to sixteen bytes in two
+    // overlapping loads and stores of eight, four, or for one to three
+    // bytes the first, the middle (len >> 1) and the last. No call, no frame.
+    "add x0, x1, x7\n   cmp x5, #16\n   b.ls " ASM_LABEL(buffered_write_arm64_small16) "\n"
+    "stp x3, x5, [sp, #-32]!\n   str x30, [sp, #16]\n   mov x1, x4\n   mov x2, x5\n   bl memory_copy\n   ldp x3, x5, [sp]\n   ldr x30, [sp, #16]\n   ldr x7, [x3]\n   add x7, x7, x5\n   str x7, [x3]\n"
     "mov w0, #1\n   add sp, sp, #32\n" ASM_RET
+    "" ASM_LABEL(buffered_write_arm64_small16) ":  cmp x5, #8\n   b.lo " ASM_LABEL(buffered_write_arm64_small4) "\n"
+    "ldr x8, [x4]\n   add x9, x4, x5\n   ldur x9, [x9, #-8]\n   str x8, [x0]\n   add x10, x0, x5\n   stur x9, [x10, #-8]\n   b " ASM_LABEL(buffered_write_arm64_small_done) "\n"
+    "" ASM_LABEL(buffered_write_arm64_small4) ":  cmp x5, #4\n   b.lo " ASM_LABEL(buffered_write_arm64_small1) "\n"
+    "ldr w8, [x4]\n   add x9, x4, x5\n   ldur w9, [x9, #-4]\n   str w8, [x0]\n   add x10, x0, x5\n   stur w9, [x10, #-4]\n   b " ASM_LABEL(buffered_write_arm64_small_done) "\n"
+    "" ASM_LABEL(buffered_write_arm64_small1) ":  ldrb w8, [x4]\n   lsr x11, x5, #1\n   ldrb w9, [x4, x11]\n   sub x12, x5, #1\n   ldrb w10, [x4, x12]\n"
+    "strb w8, [x0]\n   strb w9, [x0, x11]\n   strb w10, [x0, x12]\n"
+    "" ASM_LABEL(buffered_write_arm64_small_done) ":  add x7, x7, x5\n   str x7, [x3]\n   mov w0, #1\n" ASM_RET
     "" ASM_LABEL(buffered_write_arm64_flush_first) ":  sub sp, sp, #48\n   stp x1, x3, [sp]\n   stp x4, x5, [sp, #16]\n   str x30, [sp, #32]\n   mov x2, x3\n   bl buffered_flush\n"
     "cbz w0, " ASM_LABEL(buffered_write_arm64_leave_48) "\n   ldp x0, x3, [sp]\n   ldp x1, x2, [sp, #16]\n   bl memory_copy\n   ldr x3, [sp, #8]\n   ldr x5, [sp, #24]\n"
     "ldr x7, [x3]\n   add x7, x7, x5\n   str x7, [x3]\n   mov w0, #1\n"
