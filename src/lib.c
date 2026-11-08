@@ -54537,8 +54537,10 @@ __asm__(
     "mov %rsi, %rdi\n   mov %rax, %rsi\n   call memory_copy\n   mov %rbx, %rax\n   pop %rbx\n" ASM_RET
     "2:  xor %eax, %eax\n" ASM_RET
     "3:  mov $-1, %rax\n" ASM_RET
-    "4:  mov %rdx, %r8\n   mov %rsi, %r9\n   mov (%rdi), %r10\n   mov %r10, %rdi\n   mov %rcx, %rsi\n   xor %edx, %edx\n   mov $8, %eax  # lseek\n   syscall\n   test %rax, %rax\n   js 5f\n"
-    "mov %r10, %rdi\n   mov %r9, %rsi\n   mov %r8, %rdx\n   xor %eax, %eax  # read\n   syscall\n"
+    // One crossing, not two: pread64 takes the offset as its fourth
+    // argument, so the descriptor is not seeked first. Its position is left
+    // where it was; file_read never promised to move it.
+    "4:  mov (%rdi), %rdi\n   mov %rcx, %r10\n   mov $17, %eax  # pread64\n   syscall\n"
     "5:\n" ASM_RET
     ASM_END(file_read)
 );
