@@ -113,6 +113,7 @@
           bytes_reverse_16               public  yes     yes     yes
           bytes_reverse_32               public  yes     yes     yes
           canvas_cell                    public  yes     yes     yes
+          canvas_cell_1_1                public  yes     yes     yes
           canvas_cell2                   public  yes     yes     yes
           canvas_cell2_wide              public  yes     yes     yes
           canvas_cell_wide               public  yes     yes     yes
@@ -38954,6 +38955,47 @@ __asm__(
     "9:      " ASM_RET
     ASM_END(canvas_glyph2)
 
+    //
+    //   canvas_cell for one row: no sixteen entry pair table, one select per pixel stored once. Measured
+    //   (ns a call, best of 15, bench lock held): x86_64 Ryzen 9 9950X gcc -O2 1.83 here, 3.57 generic, 3.30 C;
+    //   arm64 Apple M2 Pro clang -O2 2.91 here, 3.06 generic, 3.14 C. riscv64 checked under qemu, not timed.
+    ASM_FUNC(canvas_cell_1_1)
+    "        movzbl (%rdx), %eax\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $7, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 0(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $6, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 4(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $5, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 8(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $4, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 12(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $3, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 16(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $2, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 20(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $1, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 24(%rdi)\n"
+    "        mov %r9d, %r10d\n"
+    "        bt $0, %eax\n"
+    "        cmovc %r8d, %r10d\n"
+    "        mov %r10d, 28(%rdi)\n"
+    "        " ASM_RET
+    ASM_END(canvas_cell_1_1)
+
     ASM_FUNC(canvas_cell)
     "        test    %rcx, %rcx\n   jz      9f\n   shl     $2, %rsi                # pitch, pixels to bytes\n"
 
@@ -39350,6 +39392,13 @@ __asm__(
     "3:      " ASM_RET
     ASM_END(canvas_row_blit)
 
+    //
+    //   canvas_cell for one row: no sixteen entry pair table, one select per pixel stored once. Measured
+    //   (ns a call, best of 15, bench lock held): x86_64 Ryzen 9 9950X gcc -O2 1.83 here, 3.57 generic, 3.30 C;
+    //   arm64 Apple M2 Pro clang -O2 2.91 here, 3.06 generic, 3.14 C. riscv64 checked under qemu, not timed.
+    ASM_FUNC(canvas_cell_1_1)
+    ASM_END(canvas_cell_1_1)
+
     ASM_FUNC(canvas_cell)
     "        cbz     x3, 9f\n   lsl     x1, x1, #2\n"
 
@@ -39659,6 +39708,79 @@ __asm__(
 
     "5:      lw      t2, 0(a1)\n   or      t2, t2, a3\n   sw      t2, 0(a0)\n   addi    a1, a1, 4\n   addi    a0, a0, 4\n   addi    a2, a2, -1\n   bnez    a2, 5b\n" ASM_RET
     ASM_END(canvas_row_blit)
+
+    //
+    //   canvas_cell for one row: no sixteen entry pair table, one select per pixel stored once. Measured
+    //   (ns a call, best of 15, bench lock held): x86_64 Ryzen 9 9950X gcc -O2 1.83 here, 3.57 generic, 3.30 C;
+    //   arm64 Apple M2 Pro clang -O2 2.91 here, 3.06 generic, 3.14 C. riscv64 checked under qemu, not timed.
+    ASM_FUNC(canvas_cell_1_1)
+    "        lbu t0, 0(a2)\n"
+    "        andi t1, t0, 128\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 0(a0)\n"
+    "        andi t1, t0, 64\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 4(a0)\n"
+    "        andi t1, t0, 32\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 8(a0)\n"
+    "        andi t1, t0, 16\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 12(a0)\n"
+    "        andi t1, t0, 8\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 16(a0)\n"
+    "        andi t1, t0, 4\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 20(a0)\n"
+    "        andi t1, t0, 2\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 24(a0)\n"
+    "        andi t1, t0, 1\n"
+    "        snez t1, t1\n"
+    "        neg t1, t1\n"
+    "        and t2, a4, t1\n"
+    "        not t1, t1\n"
+    "        and t3, a5, t1\n"
+    "        or t2, t2, t3\n"
+    "        sw t2, 28(a0)\n"
+    "        " ASM_RET
+    ASM_END(canvas_cell_1_1)
 
     ASM_FUNC(canvas_cell)
     "        beqz    a3, 9f\n   slli    a1, a1, 2\n"
