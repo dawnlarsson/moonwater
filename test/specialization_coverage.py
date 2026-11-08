@@ -859,8 +859,15 @@ cover('folds_already', 'options', 'system_wait4_retry',
       'the options are a literal at every call site and are moved into a '
       'register for the trap either way')
 
+cover('specialized', 'bound', 'string_digits_max',
+      'A literal bound of four or five digits is a run the compiler unrolls, '
+      'with the bound test gone: the asm tests the bound before every byte and '
+      'is a call. Measured against the asm with its bound in a register: 0.32 '
+      'to 0.46 of its time on an M2 Pro and 0.63 to 0.91 on a 9950X. Widths '
+      '18 to 20 are not expanded: no consistent win on the 9950X',
+      expansion='digits_max_known', evidence='test/checks.c#CHECK_bounded')
 cover('folds_already', 'bound', '''
-string_digits_max string_digits_octal_max string_digits_octal_escape_max
+string_digits_octal_max string_digits_octal_escape_max
 string_digits_hexadecimal_max string_digits_hexadecimal_escape_max
 ''', 'the bound is a literal, but each of these is already the base-folded '
      'form of string_digits_base_max: the specialization this family has is '

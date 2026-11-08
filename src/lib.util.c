@@ -8460,6 +8460,44 @@ static inline INLINE positive span_table_first(string_address source,
                  ? append_max_known((destination), (source), (bound))         \
                  : string_append_max((destination), (source), (bound)))
 
+//      A run of decimal digits whose bound is a literal where it is called.
+//      string_digits_max is the assembly, which takes the bound in a register
+//      and tests it before every byte. With a literal bound the run unrolls and
+//      the test goes. The answer is the same at every bound: the value wraps,
+//      and used is written only when it was given.
+//
+//      Measured against the assembly with its bound in a register, the
+//      unrolled run wins at widths 4 and 5 on an M2 Pro (0.32 to 0.46 of the
+//      time) and a 9950X (0.63 to 0.91), in two runs each. At 18 to 20 the
+//      9950X ratio is 0.96 to 1.03 across runs, which is noise, and the code
+//      costs about 700 bytes a site, so those widths stay on the assembly.
+#define KNOWN_DIGITS_MAX 5
+
+static inline INLINE positive digits_max_known(string_address source,
+                                               positive bound,
+                                               positive address_to used)
+{
+        positive value = 0;
+        positive at = 0;
+
+        while (at < bound) {
+                unsigned digit = (unsigned)source[at] - 48u;
+
+                if (digit > 9)
+                        break;
+                value = value * 10 + digit;
+                at++;
+        }
+        if (used)
+                *used = at;
+        return value;
+}
+
+#define string_digits_max(source, bound, used)                                \
+        (LIBRARY_EXPAND(STRING, (bound), KNOWN_DIGITS_MAX)                    \
+                 ? digits_max_known((source), (bound), (used))                \
+                 : string_digits_max((source), (bound), (used)))
+
 //      There is deliberately no string_copy_max macro. See the verdict and the block's prose.
 
 //      compare-and-find

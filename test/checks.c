@@ -32748,6 +32748,54 @@ static fn folded_guard_edge(void)
         }
 }
 
+/*
+        string_digits_max with a literal bound: the expansion reads the same
+        digits the routine does, and writes the same count. A run of digits
+        that stops early, one that fills the bound and one that runs past it
+        are all in the walk, at every literal from nought to sixty four.
+*/
+static positive digits_expect_reference(const p8 address_to source,
+                                        positive bound, positive address_to used)
+{
+        positive value = 0, at = 0;
+
+        while (at < bound && source[at] >= '0' && source[at] <= '9') {
+                value = value * 10 + (source[at] - '0');
+                at++;
+        }
+        if (used)
+                *used = at;
+        return value;
+}
+
+static fn digits_expect_fill(p8 address_to text, positive length, positive run)
+{
+        for (positive i = 0; i < length; i++)
+                text[i] = i < run ? (p8)('1' + i % 9) : i == run ? (p8)' ' : (p8)'x';
+}
+
+#define DIGITS_CASE(K)                                                         \
+        do {                                                                   \
+                for (positive t = 0; t <= (K) + 1; t++) {                      \
+                        p8 text[(K) + 2];                                      \
+                        positive want_used = 0, used_routine = 0, used_expanded = 0; \
+                        positive want;                                         \
+                                                                               \
+                        digits_expect_fill(text, (K) + 2, t);                  \
+                        want = digits_expect_reference(text, (K), &want_used); \
+                        judge((string_address)"string_digits_max routine",     \
+                              (K), t, (string_digits_max)(text, (K), &used_routine), want); \
+                        judge((string_address)"string_digits_max routine count", \
+                              (K), t, used_routine, want_used);                \
+                        judge((string_address)"string_digits_max expanded",    \
+                              (K), t, string_digits_max(text, (K), &used_expanded), want); \
+                        judge((string_address)"string_digits_max expanded count", \
+                              (K), t, used_expanded, want_used);               \
+                        judge((string_address)"string_digits_max expanded, no count", \
+                              (K), t, string_digits_max(text, (K), 0), want);  \
+                }                                                              \
+        } while (0)
+
 b32 main(void)
 {
         fence_open();
@@ -32760,6 +32808,7 @@ b32 main(void)
         EVERY_BOUND(END_CASE);
         EVERY_BOUND(PTR_CASE);
         EVERY_BOUND(APPEND_CASE);
+        EVERY_BOUND(DIGITS_CASE);
         length_guard_edge();
         literal_guard_edge();
 
