@@ -369,7 +369,7 @@ seam_of_path()
         src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
         test/checks.c | test/run | test/differential.py) echo suite ;;
         test/codec_floor/*) echo compress ;;
-        test/assembly/* | test/insns) echo lib ;;
+        test/assembly/* | test/insns | test/insn_sizes | test/insn_sizes.c) echo lib ;;
         test/insn.c) echo lib net ;;
         test/function_audit.seal) echo - ;;
         test/*) echo engine ;;

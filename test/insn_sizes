@@ -1,0 +1,150 @@
+#!/bin/sh
+#
+#       Guest instructions per call for lib.c routines, size by size, under
+#       qemu-user. The routines are the rows of test/insn_sizes.c; each cell is
+#       built from this tree, so a candidate body is compared with the shipped
+#       one by running the wrapper in each tree.
+#
+#       This is an instruction count, not a time. Cycles are not measured
+#       here: a qemu tick is the emulator's work, and nothing in this table is
+#       an architectural floor. Compare counts between bodies, then time the
+#       winner on hardware.
+#
+#       Usage:
+#           sh test/insn_sizes --list
+#           sh test/insn_sizes [-a riscv64|arm64] [-b DST,SRC] ROW[,ROW...] [SIZE[,SIZE...]]
+#
+#       -a   riscv64 (default) or arm64 (aarch64-linux-gnu-gcc, qemu-aarch64)
+#       -c   the emulated CPU, passed to qemu as -cpu. The default for riscv64
+#            is rv64,v=false, so the vector paths that lib.c picks at run time
+#            (cpu_has_vector) are off and the count is the scalar body. Use
+#            rv64,v=true,vlen=128 (or 256, 512) for the vector bodies; the
+#            count of a vector body depends on VLEN, so state it with the
+#            numbers. arm64 defaults to max, which is qemu's own default.
+#       -b   destination and source byte offsets, 0 to 63, default 0,0
+#       ROW  a row name from test/insn_sizes.c, or a comma list
+#       SIZE a byte count, or a comma list; default 0 1 3 4 7 8 15 16 17 31
+#            32 33 63 64 65 127 128 129 255 256 257 512 1024 4096
+#
+#       Output: one line per row, size and alignment, with instructions per
+#       call (the difference of a 1001-round and a 1-round run, over 1000) and
+#       instructions per byte where the size is not zero. The row named
+#       "empty" is the driver's own loop and call cost; subtract it to get a
+#       routine's cost. Needs qemu-user with plugin support and the cross
+#       compiler; prints a skip line when either is missing.
+#
+#       Example, the shipped copy against a candidate tree:
+#           sh test/insn_sizes -b 0,8 memory_copy 0,16,64,4096
+#           sh /private/tmp/candidate/test/insn_sizes -b 0,8 memory_copy 0,16,64,4096
+#
+set -e
+
+arch=riscv64
+cpu=
+offsets=0,0
+rows=
+sizes=
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+while [ $# -gt 0 ]; do
+        case $1 in
+        --list)
+                sed -n 's/^ *X(\([a-z_0-9]*\),.*/\1/p' "$root/test/insn_sizes.c"
+                exit 0 ;;
+        -a) arch=$2; shift 2 ;;
+        -b) offsets=$2; shift 2 ;;
+        -c) cpu=$2; shift 2 ;;
+        -*) echo "insn_sizes: unknown option $1" >&2; exit 2 ;;
+        *)
+                if [ -z "$rows" ]; then rows=$1
+                elif [ -z "$sizes" ]; then sizes=$1
+                else echo "insn_sizes: unexpected $1" >&2; exit 2
+                fi
+                shift ;;
+        esac
+done
+
+[ -n "$sizes" ] || sizes=0,1,3,4,7,8,15,16,17,31,32,33,63,64,65,127,128,129,255,256,257,512,1024,4096
+
+if [ -z "$rows" ]; then
+        echo "usage: sh test/insn_sizes [-a riscv64|arm64] [-b DST,SRC] ROW[,ROW...] [SIZE[,SIZE...]]" >&2
+        echo "       sh test/insn_sizes --list" >&2
+        exit 2
+fi
+
+case $arch in
+riscv64)
+        cc=riscv64-linux-gnu-gcc
+        run=qemu-riscv64
+        isa='-march=rv64imafd_zicsr_zicntr -mabi=lp64d'
+        [ -n "$cpu" ] || cpu='rv64,v=false' ;;
+arm64)
+        cc=aarch64-linux-gnu-gcc
+        run=qemu-aarch64
+        isa=-mno-outline-atomics
+        [ -n "$cpu" ] || cpu=max ;;
+*)
+        echo "insn_sizes: no architecture $arch" >&2
+        exit 2 ;;
+esac
+
+if ! command -v "$cc" >/dev/null 2>&1 || ! command -v "$run" >/dev/null 2>&1; then
+        echo "$arch: no $cc or $run, skipped"
+        exit 0
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+if ! gcc -O2 -shared -fPIC $(pkg-config --cflags glib-2.0) \
+        -o "$work/insn.so" "$root/test/insn.c" 2>"$work/plugin.err"; then
+        echo "the plugin did not build:"
+        sed 's/^/    /' "$work/plugin.err" | head -10
+        exit 1
+fi
+
+cd "$root"
+
+$cc $isa -O2 -static -nostdlib -nostartfiles -fno-stack-protector -fno-builtin \
+        -T src/build/spark.ld -Wl,-e,_start -Wl,--build-id=none \
+        -Wl,--no-warn-rwx-segments \
+        -o "$work/driver" test/insn_sizes.c
+
+dst=${offsets%,*}
+src=${offsets#*,}
+
+# count ROW SIZE: instructions in one call, from a 1 round and a 1001 round
+# run; each run's count is the last line the plugin writes to stderr.
+count() {
+        for rounds in 1 1001; do
+                if ! $run -cpu "$cpu" -plugin "$work/insn.so" "$work/driver" "$1" "$2" "$rounds" \
+                        "$dst" "$src" 2>"$work/stderr" >/dev/null; then
+                        echo "insn_sizes: driver failed for row $1 size $2 ($rounds rounds)" >&2
+                        return 1
+                fi
+                last=$(tail -n 1 "$work/stderr")
+                case $last in
+                ''|*[!0-9]*)
+                        echo "insn_sizes: no instruction count for row $1 size $2" >&2
+                        return 1 ;;
+                esac
+                if [ "$rounds" = 1 ]; then near=$last; else far=$last; fi
+        done
+        echo $(( (far - near) / 1000 ))
+}
+
+echo "$arch instructions per call, qemu-user -cpu $cpu (cycles not measured), dst offset $dst src offset $src"
+printf '%-22s %8s %14s %12s\n' row size insns_per_call insns_per_byte
+
+for row in $(echo "$rows" | tr , ' '); do
+        for size in $(echo "$sizes" | tr , ' '); do
+                n=$(count "$row" "$size")
+                if [ "$size" -gt 0 ]; then
+                        per=$(awk -v n="$n" -v s="$size" 'BEGIN { printf "%.3f", n / s }')
+                else
+                        per=-
+                fi
+                printf '%-22s %8s %14s %12s\n' "$row" "$size" "$n" "$per"
+        done
+done
