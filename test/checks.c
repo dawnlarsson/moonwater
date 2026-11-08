@@ -207552,6 +207552,31 @@ BENCH_ONCE(path_run, (bool assembly, positive operation,
                 sink += length + output[0] + output[length ? length - 1 : 0];
         })
 
+/* path_join's generic against its zero-to-fourteen-byte size class, the same join at a short length. */
+BENCH_ONCE(path_class_run, (bool classed, string_address directory, string_address name,
+                            positive rounds), rounds, i,
+        {
+                positive length = classed
+                                      ? path_join_0_14(output, PATH_CAPACITY, directory, name)
+                                      : path_join(output, PATH_CAPACITY, directory, name);
+
+                sink += length + output[0] + output[length ? length - 1 : 0];
+        })
+
+static fn path_class_row(string_address label, string_address directory,
+                         string_address name, positive rounds)
+{
+        p64 generic = positive_max;
+        p64 classed = positive_max;
+
+        BENCH_BEST_PAIRED(generic, path_class_run(false, directory, name, rounds),
+                          classed, path_class_run(true, directory, name, rounds));
+
+        string_format(log, "  %s: generic %p  class %p  class/generic %p%%\n",
+                      label, (positive)generic, (positive)classed,
+                      (positive)(classed * 100 / (generic ? generic : 1)));
+}
+
 static fn path_row(string_address label, positive operation,
                    string_address directory, string_address name,
                    string_address path, positive rounds)
@@ -207591,6 +207616,10 @@ b32 main()
                  "/usr/local/share/moonwater/bin///", 1u << 16);
         path_row("head long", BENCH_HEAD, long_directory, long_name, long_path,
                  1u << 13);
+
+        path_class_row("join class, 1 byte", "", "A", 1u << 18);
+        path_class_row("join class, 7 bytes", "usr", "bin", 1u << 18);
+        path_class_row("join class, 14 bytes", "usr/lib", "xbins0", 1u << 18);
 
         log_flush();
         return 0;

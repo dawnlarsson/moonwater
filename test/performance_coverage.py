@@ -211,6 +211,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_paths', '''
 path_head_copy path_join path_tail_copy
 ''', 'paired former-C/assembly timing over short, nested, and long paths')
 
+cover('direct_benchmark', 'test/checks.c#BENCH_paths', 'path_join_0_14',
+      'paired generic/size-class timing of the join at one, seven and fourteen bytes')
+
 cover('direct_benchmark', 'test/checks.c#BENCH_reverse', '''
 memory_reverse
 ''', 'paired former-C/assembly timing over primitive and folded rev shapes')

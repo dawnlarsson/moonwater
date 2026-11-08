@@ -826,6 +826,11 @@ cover('folds_already', 'set', 'string_set_add',
 cover('folds_already', 'name', 'byte_class_index string_get_environment',
       'a literal name folds the length; the body is a length and a small '
       'compare chain either way')
+cover('nothing_to_fold', None, 'path_join_0_14',
+      'the size class of path_join for a joined length of zero to fourteen '
+      'bytes, named by a caller that promises the bound (SIZE_NAMING); the join '
+      'inputs are runtime strings, so no call site hands a literal length to '
+      'fold, and no caller uses the class yet')
 cover('folds_already', 'capacity', 'path_join path_tail_copy path_head_copy',
       'the capacity is a literal at every call site and bounds the writes, '
       'but the work is the scan for the last separator, which the capacity '

@@ -368,6 +368,7 @@
           path_basename                  public  yes     yes     yes
           path_head_copy                 public  yes     yes     yes
           path_join                      public  yes     yes     yes
+          path_join_0_14                 public  yes     yes     yes
           path_split_core                local   yes     yes     yes
           path_tail_copy                 public  yes     yes     yes
           pcm_pack24                     public  yes     yes     yes
@@ -18864,6 +18865,25 @@ __asm__(
     ASM_END(path_join)
 
     //
+    //       path_join_0_14 -- path_join for a joined length of zero to fourteen
+    //       bytes, the size class where the out-of-line call and the nested
+    //       length and copy calls of path_join cost more than the bytes. The
+    //       same contract as path_join, and the same answer for every input:
+    //       one flat pass over the directory, one over the name, no call. A
+    //       longer join is still correct here (the loops run to the capacity),
+    //       but the class is for callers that know the length is short.
+    //
+    ASM_FUNC(path_join_0_14)
+    "test %rsi, %rsi\n   jz 9f\n   lea -1(%rsi), %r8\n   xor %r9d, %r9d\n"
+    "1:  cmp %r8, %r9\n   jae 2f\n   movzbl (%rdx, %r9), %r10d\n   test %r10b, %r10b\n   jz 2f\n   mov %r10b, (%rdi, %r9)\n   inc %r9\n   jmp 1b\n"
+    "2:  test %r9, %r9\n   jz 4f\n   cmpb $47, -1(%rdi, %r9)\n   je 4f\n   lea 1(%r9), %r10\n   cmp %rsi, %r10\n   jae 4f\n   movb $47, (%rdi, %r9)\n   mov %r10, %r9\n"
+    "4:  sub %r9, %r8\n   lea (%rdi, %r9), %rax\n   xor %r10d, %r10d\n"
+    "5:  cmp %r8, %r10\n   jae 6f\n   movzbl (%rcx, %r10), %r11d\n   test %r11b, %r11b\n   jz 6f\n   mov %r11b, (%rax, %r10)\n   inc %r10\n   jmp 5b\n"
+    "6:  add %r10, %r9\n   movb $0, (%rdi, %r9)\n   mov %r9, %rax\n" ASM_RET
+    "9:  xor %eax, %eax\n" ASM_RET
+    ASM_END(path_join_0_14)
+
+    //
     //       shell_set_cursor -- the cursor positioning escape sequence.
     //
     //       The C handed the whole thing to string_format, which walked the
@@ -28095,6 +28115,23 @@ __asm__(
     "ldr x23, [sp, #48]\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #64\n" ASM_RET
     "8:  mov x0, #0\n" ASM_RET
     ASM_END(path_join)
+
+    //
+    //       path_join_0_14 -- path_join for a joined length of zero to fourteen
+    //       bytes: the same answer, from flat loops with no call. The generic
+    //       path makes four nested calls, which cost more than the bytes at
+    //       this size. A longer join is still correct; the class is for the
+    //       callers that know the length is short.
+    //
+    ASM_FUNC(path_join_0_14)
+    "cbz x1, 9f\n   sub x5, x1, #1\n   mov x4, #0\n"
+    "1:  cmp x4, x5\n   b.hs 2f\n   ldrb w6, [x2, x4]\n   cbz w6, 2f\n   strb w6, [x0, x4]\n   add x4, x4, #1\n   b 1b\n"
+    "2:  cbz x4, 4f\n   sub x7, x4, #1\n   ldrb w6, [x0, x7]\n   cmp w6, #47\n   b.eq 4f\n   add x7, x4, #1\n   cmp x7, x1\n   b.hs 4f\n   mov w6, #47\n   strb w6, [x0, x4]\n   mov x4, x7\n"
+    "4:  sub x5, x5, x4\n   mov x7, #0\n"
+    "5:  cmp x7, x5\n   b.hs 6f\n   ldrb w6, [x3, x7]\n   cbz w6, 6f\n   add x8, x4, x7\n   strb w6, [x0, x8]\n   add x7, x7, #1\n   b 5b\n"
+    "6:  add x8, x4, x7\n   strb wzr, [x0, x8]\n   mov x0, x8\n" ASM_RET
+    "9:  mov x0, #0\n" ASM_RET
+    ASM_END(path_join_0_14)
 
     //
     //       shell_set_cursor -- the cursor positioning escape sequence.
@@ -38152,6 +38189,16 @@ __asm__(
     "sub a0, a0, s0\n   ld ra, 40(sp)\n   ld s0, 32(sp)\n   ld s1, 24(sp)\n   ld s2, 16(sp)\n   ld s3, 8(sp)\n   ld s4, 0(sp)\n   addi sp, sp, 48\n" ASM_RET
     "8:  li a0, 0\n" ASM_RET
     ASM_END(path_join)
+
+    //
+    //       path_join_0_14 -- the size class of path_join for a joined length
+    //       of zero to fourteen bytes. No riscv64 body has been timed or run
+    //       under qemu yet, so the class is the generic path here: the same
+    //       answer, with no measured class of its own.
+    //
+    ASM_FUNC(path_join_0_14)
+    "j path_join\n"
+    ASM_END(path_join_0_14)
 
     //
     //       shell_set_cursor -- the cursor positioning escape sequence.
@@ -49894,6 +49941,10 @@ string_address string_cut(string_address string, b8 cut_symbol);
 READS_WRITES(1, 2)
 positive path_join(p8 address_to destination, positive capacity,
                    string_address directory, string_address name);
+// path_join for a joined length of zero to fourteen bytes: the same contract and answer; the
+// size class a caller with a known short length names directly.
+positive path_join_0_14(p8 address_to destination, positive capacity,
+                        string_address directory, string_address name);
 WRITES(1, 2)
 positive path_tail_copy(p8 address_to destination, positive capacity,
                         string_address path);
