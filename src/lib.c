@@ -43867,7 +43867,14 @@ __asm__(
     ASM_FUNC(f32_to_bf16)
     "cbz x2, 9f\n   adrp x9, " ASM_PAGE(cpu_has_bf16) "\n   ldrb w9, [x9, " ASM_LO12(cpu_has_bf16) "]\n   cmp w9, #1\n   b.eq 20f\n   b.hi 10f\n"
     //      The first call asks ID_AA64ISAR1_EL1, which Linux answers at EL0.
+    //      Darwin does not: an EL0 read of an ID register is a SIGILL there,
+    //      so under MACOS or IOS the probe answers "no BF16" (1) and the call
+    //      takes the integer lanes, the same as any core without the feature.
+#if defined(MACOS) || defined(IOS)
+    "mov w9, #1\n"
+#else
     "mrs x9, id_aa64isar1_el1\n   ubfx x9, x9, #44, #4\n   cmp x9, #0\n   cset w9, ne\n   add w9, w9, #1\n"
+#endif
     "adrp x10, " ASM_PAGE(cpu_has_bf16) "\n   strb w9, [x10, " ASM_LO12(cpu_has_bf16) "]\n   cmp w9, #1\n   b.eq 20f\n"
     "10: mrs x9, fpcr\n   mov w10, #0x9f03\n   movk w10, #0x3c0, lsl #16\n   tst x9, x10\n   b.ne 20f\n"
     "movz w10, #0x7f80, lsl #16\n   dup v28.4s, w10\n   movi v29.4s, #0x80, lsl #24\n   cmp x2, #16\n   b.lo 15f\n"
