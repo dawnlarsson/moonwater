@@ -37655,6 +37655,7 @@ static NO_STACK_PROTECTOR fn stack_guard_seed(void)
 static inline INLINE fn stack_guard_seed(void) {}
 #endif
 
+#ifndef STANDARD_NO_ENTRY
 b32 moonwater_program_main(void);
 
 NO_STACK_PROTECTOR b32 main(void)
@@ -37672,6 +37673,7 @@ NO_STACK_PROTECTOR b32 main(void)
 }
 
 #define main moonwater_program_main
+#endif
 
 #endif
 #endif // LIB_SKIP_UMBRELLA

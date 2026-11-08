@@ -7382,9 +7382,8 @@ gate_kit_frames()
 
 gate_inventory()
 {
-        mkdir -p "$work/gate-inventory/platform" &&
-                cp src/lib.c "$work/gate-inventory/lib.c" &&
-                cp src/platform/*.inc "$work/gate-inventory/platform/" || return 1
+        mkdir -p "$work/gate-inventory" &&
+                cp src/lib.c "$work/gate-inventory/lib.c" || return 1
         python3 test/assembly/inventory.py "$work/gate-inventory/lib.c" > /dev/null || return 1
         cmp src/lib.c "$work/gate-inventory/lib.c" ||
                 { echo "src/lib.c differs from its generator (python3 test/assembly/inventory.py src/lib.c)"; return 1; }
@@ -15461,9 +15460,8 @@ fi
 group compact
 
 if command -v python3 > /dev/null 2>&1; then
-        mkdir -p "$work/inventory-tree/platform"
+        mkdir -p "$work/inventory-tree"
         cp src/lib.c "$work/inventory-tree/lib.c"
-        cp src/platform/*.inc "$work/inventory-tree/platform/"
         python3 test/assembly/inventory.py "$work/inventory-tree/lib.c" \
                 > /dev/null 2>&1
 

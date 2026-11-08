@@ -31,7 +31,8 @@
 #ifndef SPARK_INCLUDED
 #define SPARK_INCLUDED
 
-#include "../platform/spark.inc"
+/* The SPARK_* handoff and spawn constants are src/lib.c's now, under LINUX.
+   build.c includes lib.util.c, and so lib.c, before this file. */
 
 // "SPRK", little endian
 #define SPARK_MAGIC 0x4b525053u
