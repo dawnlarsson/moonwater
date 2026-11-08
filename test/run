@@ -27706,7 +27706,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines routine compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -27902,6 +27902,8 @@ bench_about()
         find)    bench_line="find's walker floor, apart from matching and metadata" ;;
         boot-time) bench_line="how long the stack takes to reach a shell, from the guest clock" ;;
         engines) bench_line="two builds of the multicall binary against each other" ;;
+        routine) bench_section=BENCH_routine
+                 bench_line="one lib.c routine at a list of sizes, interleaved against the host's function and the C loop; sh test/run bench routine -- --list" ;;
         compression-floor) bench_section=BENCH_compression_floor
                            bench_line="codec kernels, scalar references and the copy traffic proxy" ;;
         cksum-crc) bench_section=BENCH_cksum_crc
@@ -29138,6 +29140,42 @@ bench_engines()
         python3 test/differential.py --harness engines "$@"
 }
 
+#
+#       One lib.c routine at a list of sizes, against the host's own function
+#       and the C loop the compiler makes of the same job. It is hosted: lib.c's
+#       object is linked beside the section, and the section takes the bench
+#       lock for each timed run itself. Its options are the driver's, read
+#       at the top of the BENCH_routine section in test/checks.c.
+#
+#           sh test/run bench routine -- --list
+#           sh test/run bench routine -- memory_copy --sizes 1,64,4096
+#
+bench_routine()
+{
+        if [ "$#" -eq 0 ]; then
+                echo "  routine      NOT RUN -- it times one routine, and needs to be told which:"
+                echo "               sh test/run bench routine -- --list"
+                echo "               sh test/run bench routine -- memory_copy --sizes 1,64,4096"
+                return 2
+        fi
+
+        case $(uname -s) in
+        Darwin | Linux) ;;
+        *) echo "  routine      NOT RUN -- the hosted build is for Darwin and Linux, not $(uname -s)"; return 2 ;;
+        esac
+
+        "${CC:-cc}" -O2 -c src/lib.c -o "$work/routine.lib.o" || return 1
+        #       lib.c defines its own _start, which the C library's start file also
+        #       defines on Linux; the library's is renamed where it is linked here.
+        if [ "$(uname -s)" = Linux ]; then
+                objcopy --redefine-sym _start=moonwater_start "$work/routine.lib.o" || return 1
+        fi
+        "${CC:-cc}" -O2 -fno-builtin -DBENCH_routine test/checks.c "$work/routine.lib.o" \
+                -o "$work/bench.routine" || return 1
+
+        "$work/bench.routine" "$@"
+}
+
 bench_one()
 {
         bench_this=$1
@@ -29151,6 +29189,7 @@ bench_one()
         find)      bench_find "$@" ;;
         boot-time) bench_boot_time "$@" ;;
         engines)   bench_engines "$@" ;;
+        routine)   bench_routine "$@" ;;
         compression)
                 if [ "$#" -eq 0 ]; then
                         need_shell || return 1
