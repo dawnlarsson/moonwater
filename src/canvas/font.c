@@ -9360,7 +9360,7 @@ static fn font_find(font_engine address_to e, const font_face address_to const a
         *glyph = *face ? code : 0;
 }
 
-static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
+static __attribute__((used)) b32 font_kern_reference(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
 {
         //      The way holds 16 bits of each glyph: a pair past that is looked up, not memo'd.
         if (left > 0xffff || right > 0xffff)
@@ -9388,6 +9388,251 @@ static b32 font_kern(font_engine address_to e, const font_face address_to face, 
         }
         return way->value ? font_fixed(face, way->value, size) : 0;
 }
+
+//      font_kern: the memo's hit path, in assembly, for arm64 and x86-64 (SysV, not Windows). A pair is a hit when
+//      its way is in the set the hash names: the face's id, the two glyphs, then the adjustment in font units, which
+//      font_fixed scales to 16.16 as the reference does (the same signed division, rounded as font_divide rounds, and
+//      the same clamp). Anything else -- no engine or face, a glyph past the way's 16 bits, a miss, a face with no
+//      units -- is a tail call to font_kern_reference with the arguments untouched, which alone decides it (a miss
+//      writes the way). Nothing is written on a hit, so the reference sees the memo as it was.
+//      The offsets are font_engine's kern_memo, font_face's units and id, and the way's layout, checked below.
+#if (defined(__aarch64__) || defined(__x86_64__)) && !defined(_WIN32)
+_Static_assert(__builtin_offsetof(font_engine, kern_memo) == 783736 && __builtin_offsetof(font_face, units) == 104 &&
+               __builtin_offsetof(font_face, id) == 108 && sizeof(font_kern_way) == 12 &&
+               __builtin_offsetof(font_kern_way, face) == 0 && __builtin_offsetof(font_kern_way, left) == 2 &&
+               __builtin_offsetof(font_kern_way, right) == 4 && __builtin_offsetof(font_kern_way, value) == 8 &&
+               FONT_KERN_SETS == 512 && FONT_WAYS == 4 && FONT_FIXED_MOST == 0x40000000,
+               "font_kern's assembly: the layouts it reads, and the set, way and clamp constants it hard-codes");
+#endif
+
+#if defined(__aarch64__) && !defined(_WIN32)
+b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size);
+// arm64 (AAPCS64): x0 e, x1 face, w2 left, w3 right, w4 size. Scratch x9-x15 only, and x4 after the hit is known.
+__asm__(".text\n"
+        ".globl " FONT_SYM(font_kern) "\n"
+        ".p2align 2\n"
+        FONT_SYM(font_kern) ":\n"
+        "cbz x0, 9f\n"
+        "cbz x1, 9f\n"
+        "lsr w10, w2, #16\n"                      // a glyph past the way's 16 bits is looked up, not memo'd
+        "cbnz w10, 9f\n"
+        "lsr w10, w3, #16\n"
+        "cbnz w10, 9f\n"
+        "ldr w15, [x1, #108]\n"                   // face->id, 32 bits: as the reference compares it
+        "mov w10, w2\n"                           // left, zero-extended
+        "lsl x10, x10, #16\n"
+        "mov w11, w3\n"                           // right, zero-extended
+        "orr x9, x10, x11\n"
+        "orr x9, x9, x15, lsl #32\n"              // id << 32 | left << 16 | right
+        "movz x10, #0x7c15\n"
+        "movk x10, #0x7f4a, lsl #16\n"
+        "movk x10, #0x79b9, lsl #32\n"
+        "movk x10, #0x9e37, lsl #48\n"
+        "mul x9, x9, x10\n"
+        "lsr x9, x9, #55\n"                       // the set, 0..511
+        "mov x10, #48\n"                          // FONT_WAYS * sizeof(font_kern_way)
+        "madd x12, x9, x10, x0\n"
+        "add x12, x12, #0xbf, lsl #12\n"
+        "add x12, x12, #0x578\n"                  // x12 = &e->kern_memo[set][0]
+        "ldrh w13, [x12]\n"                       // way 0
+        "cmp w13, w15\n"
+        "b.ne 10f\n"
+        "ldrh w13, [x12, #2]\n"
+        "cmp w13, w2\n"
+        "b.ne 10f\n"
+        "ldrh w13, [x12, #4]\n"
+        "cmp w13, w3\n"
+        "b.ne 10f\n"
+        "ldrsw x13, [x12, #8]\n"                  // the value, sign-extended
+        "b 5f\n"
+        "10:\n"
+        "ldrh w13, [x12, #12]\n"                  // way 1
+        "cmp w13, w15\n"
+        "b.ne 11f\n"
+        "ldrh w13, [x12, #14]\n"
+        "cmp w13, w2\n"
+        "b.ne 11f\n"
+        "ldrh w13, [x12, #16]\n"
+        "cmp w13, w3\n"
+        "b.ne 11f\n"
+        "ldrsw x13, [x12, #20]\n"
+        "b 5f\n"
+        "11:\n"
+        "ldrh w13, [x12, #24]\n"                  // way 2
+        "cmp w13, w15\n"
+        "b.ne 12f\n"
+        "ldrh w13, [x12, #26]\n"
+        "cmp w13, w2\n"
+        "b.ne 12f\n"
+        "ldrh w13, [x12, #28]\n"
+        "cmp w13, w3\n"
+        "b.ne 12f\n"
+        "ldrsw x13, [x12, #32]\n"
+        "b 5f\n"
+        "12:\n"
+        "ldrh w13, [x12, #36]\n"                  // way 3
+        "cmp w13, w15\n"
+        "b.ne 9f\n"
+        "ldrh w13, [x12, #38]\n"
+        "cmp w13, w2\n"
+        "b.ne 9f\n"
+        "ldrh w13, [x12, #40]\n"
+        "cmp w13, w3\n"
+        "b.ne 9f\n"
+        "ldrsw x13, [x12, #44]\n"
+        "5:\n"                                    // hit: x13 the value; zero is zero
+        "cbnz x13, 6f\n"
+        "mov w0, #0\n"
+        "ret\n"
+        "6:\n"
+        "ldr w11, [x1, #104]\n"                   // face->units; none: the reference divides, so it answers
+        "cbz x11, 9f\n"
+        "mov w4, w4\n"                            // size, zero-extended
+        "mul x13, x13, x4\n"
+        "lsl x13, x13, #10\n"                     // units * size * 1024
+        "lsr x12, x11, #1\n"                      // half = units / 2
+        "tbnz x13, #63, 7f\n"
+        "add x13, x13, x12\n"                     // (value + half) / units
+        "sdiv x13, x13, x11\n"
+        "b 8f\n"
+        "7:\n"
+        "sub x13, x12, x13\n"                     // -((half - value) / units)
+        "sdiv x13, x13, x11\n"
+        "neg x13, x13\n"
+        "8:\n"
+        "mov x12, #0x40000000\n"                  // clamped to FONT_FIXED_MOST, both ways
+        "neg x14, x12\n"                          // -FONT_FIXED_MOST
+        "cmp x13, x12\n"
+        "csel x13, x12, x13, gt\n"
+        "cmp x13, x14\n"
+        "csel x13, x14, x13, lt\n"
+        "mov w0, w13\n"
+        "ret\n"
+        "9:\n"
+        "b " FONT_SYM(font_kern_reference) "\n"
+        FONT_TYPE(font_kern)
+        FONT_SIZE(font_kern));
+#elif defined(__x86_64__) && !defined(_WIN32)
+b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size);
+// x86-64 (SysV): rdi e, rsi face, edx left, ecx right, r8d size. Scratch rax, r9, r10, r11 and rdx after the hit is
+// known, and r8 once the units are checked; nothing is saved, so a tail call gets every argument as it came.
+__asm__(".intel_syntax noprefix\n"
+        ".text\n"
+        ".globl " FONT_SYM(font_kern) "\n"
+        ".p2align 4\n"
+        FONT_SYM(font_kern) ":\n"
+        "test rdi, rdi\n"
+        "jz 9f\n"
+        "test rsi, rsi\n"
+        "jz 9f\n"
+        "cmp edx, 0xffff\n"                       // a glyph past the way's 16 bits is looked up, not memo'd
+        "ja 9f\n"
+        "cmp ecx, 0xffff\n"
+        "ja 9f\n"
+        "mov eax, edx\n"                          // left, zero-extended
+        "shl rax, 16\n"
+        "mov r10d, ecx\n"                         // right, zero-extended
+        "or rax, r10\n"
+        "mov r9d, dword ptr [rsi + 108]\n"        // face->id, 32 bits: as the reference compares it
+        "shl r9, 32\n"
+        "or rax, r9\n"                            // id << 32 | left << 16 | right
+        "movabs r9, 0x9e3779b97f4a7c15\n"
+        "imul rax, r9\n"
+        "shr rax, 55\n"                           // the set, 0..511
+        "lea rax, [rax + rax*2]\n"
+        "shl rax, 4\n"                            // set * 48
+        "lea r10, [rdi + rax + 783736]\n"         // r10 = &e->kern_memo[set][0]
+        "movzx r11d, word ptr [r10]\n"            // way 0
+        "cmp r11d, dword ptr [rsi + 108]\n"
+        "jne 10f\n"
+        "movzx r11d, word ptr [r10 + 2]\n"
+        "cmp r11d, edx\n"
+        "jne 10f\n"
+        "movzx r11d, word ptr [r10 + 4]\n"
+        "cmp r11d, ecx\n"
+        "jne 10f\n"
+        "movsxd rax, dword ptr [r10 + 8]\n"       // the value, sign-extended
+        "jmp 5f\n"
+        "10:\n"
+        "movzx r11d, word ptr [r10 + 12]\n"       // way 1
+        "cmp r11d, dword ptr [rsi + 108]\n"
+        "jne 11f\n"
+        "movzx r11d, word ptr [r10 + 14]\n"
+        "cmp r11d, edx\n"
+        "jne 11f\n"
+        "movzx r11d, word ptr [r10 + 16]\n"
+        "cmp r11d, ecx\n"
+        "jne 11f\n"
+        "movsxd rax, dword ptr [r10 + 20]\n"
+        "jmp 5f\n"
+        "11:\n"
+        "movzx r11d, word ptr [r10 + 24]\n"       // way 2
+        "cmp r11d, dword ptr [rsi + 108]\n"
+        "jne 12f\n"
+        "movzx r11d, word ptr [r10 + 26]\n"
+        "cmp r11d, edx\n"
+        "jne 12f\n"
+        "movzx r11d, word ptr [r10 + 28]\n"
+        "cmp r11d, ecx\n"
+        "jne 12f\n"
+        "movsxd rax, dword ptr [r10 + 32]\n"
+        "jmp 5f\n"
+        "12:\n"
+        "movzx r11d, word ptr [r10 + 36]\n"       // way 3
+        "cmp r11d, dword ptr [rsi + 108]\n"
+        "jne 9f\n"
+        "movzx r11d, word ptr [r10 + 38]\n"
+        "cmp r11d, edx\n"
+        "jne 9f\n"
+        "movzx r11d, word ptr [r10 + 40]\n"
+        "cmp r11d, ecx\n"
+        "jne 9f\n"
+        "movsxd rax, dword ptr [r10 + 44]\n"
+        "5:\n"                                    // hit: rax the value; zero is zero
+        "test rax, rax\n"
+        "jnz 6f\n"
+        "xor eax, eax\n"
+        "ret\n"
+        "6:\n"
+        "mov r11d, dword ptr [rsi + 104]\n"       // face->units; none: the reference divides, so it answers
+        "test r11, r11\n"
+        "jz 9f\n"
+        "mov r8d, r8d\n"                          // size, zero-extended
+        "imul rax, r8\n"
+        "shl rax, 10\n"                           // units * size * 1024
+        "mov r9, r11\n"
+        "shr r9, 1\n"                             // half = units / 2
+        "test rax, rax\n"
+        "js 7f\n"
+        "add rax, r9\n"                           // (value + half) / units
+        "cqo\n"
+        "idiv r11\n"
+        "jmp 8f\n"
+        "7:\n"
+        "sub r9, rax\n"                           // -((half - value) / units)
+        "mov rax, r9\n"
+        "cqo\n"
+        "idiv r11\n"
+        "neg rax\n"
+        "8:\n"
+        "mov r9, 0x40000000\n"                    // clamped to FONT_FIXED_MOST, both ways
+        "cmp rax, r9\n"
+        "cmovg rax, r9\n"
+        "mov r9, -0x40000000\n"
+        "cmp rax, r9\n"
+        "cmovl rax, r9\n"
+        "ret\n"
+        "9:\n"
+        "jmp " FONT_SYM(font_kern_reference) "\n"
+        FONT_TYPE(font_kern)
+        FONT_SIZE(font_kern)
+        ".att_syntax prefix\n");
+#else
+static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
+{
+        return font_kern_reference(e, face, left, right, size);
+}
+#endif
 
 //      The pen in eighths of a pixel, to the nearest, halves right.
 static inline b32 font_eighths(b64 pen)
