@@ -226321,9 +226321,32 @@ static void routine_usage(void)
 
 #define ROUTINE_SIZES_MAX 128
 
+/* lib.c's feature bytes are set by moonwater_cpu_detect, and the startup
+   assembly calls that before main in a program. A hosted build is started by
+   the C library instead, so nothing sets the bytes, every routine that asks
+   one takes its narrowest path, and a timing is of the wrong body. This
+   driver calls the detector first of all, before any timed or checked call,
+   and prints what it found so each run says what it measured. The asm labels
+   name the symbols the assembly uses, with no leading underscore on Mach-O. */
+extern void moonwater_cpu_detect(void);
+#if !defined(__APPLE__)
+extern unsigned char routine_cpu_aes __asm__("cpu_has_aes");
+extern unsigned char routine_cpu_pclmul __asm__("cpu_has_pclmul");
+#endif
+#if defined(__x86_64__)
+extern unsigned char routine_cpu_fma __asm__("cpu_has_fma");
+extern unsigned char routine_cpu_vaes __asm__("cpu_has_vaes");
+extern unsigned char routine_cpu_vpclmul __asm__("cpu_has_vpclmul");
+extern unsigned char routine_cpu_avx2 __asm__("cpu_has_avx2");
+extern unsigned char routine_cpu_avx512 __asm__("cpu_has_avx512");
+extern unsigned char routine_cpu_vbmi __asm__("cpu_has_avx512_vbmi");
+#endif
+
 static int routine_main(int argc, char **argv)
 {
         routine_size sizes[ROUTINE_SIZES_MAX];
+
+        moonwater_cpu_detect();
         int size_count = (int)(sizeof routine_default_sizes / sizeof routine_default_sizes[0]);
         routine_size off_d = 0, off_s = 0;
         int tries = 15, fuzz = 512, check_only = 0, list_only = 0, names = 0;
@@ -226450,6 +226473,13 @@ static int routine_main(int argc, char **argv)
         printf("arch %s, %s, %s; offset %lu,%lu, tries %d, target %.1f ms, tie %.1f%%\n", un.machine, un.sysname,
                un.nodename, off_d, off_s, tries, target_ms, tie);
         printf("compiler: %s\n", __VERSION__);
+#if defined(__x86_64__)
+        printf("cpu bytes: aes %d pclmul %d fma %d vaes %d vpclmul %d avx2 %d avx512 %d avx512_vbmi %d\n",
+               routine_cpu_aes, routine_cpu_pclmul, routine_cpu_fma, routine_cpu_vaes, routine_cpu_vpclmul,
+               routine_cpu_avx2, routine_cpu_avx512, routine_cpu_vbmi);
+#elif !defined(__APPLE__)
+        printf("cpu bytes: aes %d pclmul %d\n", routine_cpu_aes, routine_cpu_pclmul);
+#endif
 
         for (int i = 0; i < names; i++)
         {
