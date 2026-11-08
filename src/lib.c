@@ -54685,10 +54685,11 @@ __asm__(
     ASM_FUNC(file_write)
     "cmpq $0, (%rdi)\n   jge 1f\n   mov $-1, %rax\n" ASM_RET
     "1:  push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   mov %rdi, %rbx\n   mov %rsi, %r12\n   mov %rdx, %r13\n   mov %rcx, %r14\n"
-    "mov (%rbx), %rdi\n   mov %r14, %rsi\n   xor %edx, %edx\n"
-    "mov $" MOONWATER_NUMBER(syscall(lseek)) ", %eax\n   syscall\n"
-    "mov %rax, %r15\n   test %r15, %r15\n   js 2f\n   mov (%rbx), %rdi\n   mov %r12, %rsi\n   mov %r13, %rdx\n"
-    "mov $" MOONWATER_NUMBER(syscall(write)) ", %eax\n   syscall\n"
+    // One crossing, not two: pwrite64 takes the offset as its fourth
+    // argument, as pread64 does in file_read, and leaves the descriptor's
+    // position alone.
+    "mov (%rbx), %rdi\n   mov %r12, %rsi\n   mov %r13, %rdx\n   mov %r14, %r10\n"
+    "mov $18, %eax  # pwrite64\n   syscall\n"
     "mov %rax, %r15\n   test %r15, %r15\n   jle 2f\n   cmpb $0, 32(%rbx)\n   je 2f\n   mov 24(%rbx), %rax\n   test %rax, %rax\n   jz 3f\n   mov %r14, %rdx\n   add %r15, %rdx\n   jc 3f\n"
     "cmp 88(%rbx), %rdx\n   ja 3f\n   cmp 184(%rbx), %rdx\n   ja 3f\n   lea (%rax,%r14), %rdi\n   mov %r12, %rsi\n   mov %r15, %rdx\n   call memory_copy\n   jmp 2f\n"
     "3:  mov %rbx, %rdi\n   call file_unload\n   mov %rbx, %rdi\n   call file_get_status\n"
