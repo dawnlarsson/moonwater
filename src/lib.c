@@ -44992,6 +44992,10 @@ fn f32_pair_to_s16(p8 address_to dst, const f32 address_to left, const f32 addre
 // 31 repetitions, core pinned): one frame 1.79 against 2.04 and 1.84; two frames 1.93 against 2.77 and 2.37.
 WRITES(1) READS(2) READS(3)
 fn f32_pair_to_s16_1_2(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
+// class f32_pair_to_s16_3_3 (count 3): two overlapping two-frame steps, at frames 0 and 1, so no scalar frame runs. Measured on the Mac:
+// 1.84 ns a call against the generic 3.91 and clang's C 6.55. On the box: 2.18 against 3.36 and gcc's C 3.16 (31 repetitions).
+WRITES(1) READS(2) READS(3)
+fn f32_pair_to_s16_3_3(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
 WRITES(1) READS(2) READS(3)
 fn f32_pair_to_s32(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
 WRITES(1) READS(2) READS(3)
@@ -46070,6 +46074,69 @@ __asm__(
     ASM_RET
     ASM_END(f32_pair_to_s16_1_2)
 
+    ASM_FUNC(f32_pair_to_s16_3_3)
+    "mov $0x47000000, %eax\n"
+    "movd %eax, %xmm13\n"
+    "shufps $0, %xmm13, %xmm13\n"
+    "mov $0xc7000000, %eax\n"
+    "movd %eax, %xmm14\n"
+    "shufps $0, %xmm14, %xmm14\n"
+    "mov $0x46fffe00, %eax\n"
+    "movd %eax, %xmm15\n"
+    "shufps $0, %xmm15, %xmm15\n"
+    "movq (%rsi), %xmm0\n"
+    "movq (%rdx), %xmm1\n"
+    "movaps %xmm0, %xmm2\n"
+    "cmpordps %xmm0, %xmm2\n"
+    "mulps %xmm13, %xmm0\n"
+    "andps %xmm2, %xmm0\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm0, %xmm12\n"
+    "movaps %xmm14, %xmm0\n"
+    "maxps %xmm12, %xmm0\n"
+    "cvtps2dq %xmm0, %xmm0\n"
+    "movaps %xmm1, %xmm3\n"
+    "cmpordps %xmm1, %xmm3\n"
+    "mulps %xmm13, %xmm1\n"
+    "andps %xmm3, %xmm1\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm1, %xmm12\n"
+    "movaps %xmm14, %xmm1\n"
+    "maxps %xmm12, %xmm1\n"
+    "cvtps2dq %xmm1, %xmm1\n"
+    "packssdw %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n"
+    "psrldq $8, %xmm1\n"
+    "punpcklwd %xmm1, %xmm0\n"
+    "movq %xmm0, (%rdi)\n"
+    "movq 4(%rsi), %xmm0\n"
+    "movq 4(%rdx), %xmm1\n"
+    "movaps %xmm0, %xmm2\n"
+    "cmpordps %xmm0, %xmm2\n"
+    "mulps %xmm13, %xmm0\n"
+    "andps %xmm2, %xmm0\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm0, %xmm12\n"
+    "movaps %xmm14, %xmm0\n"
+    "maxps %xmm12, %xmm0\n"
+    "cvtps2dq %xmm0, %xmm0\n"
+    "movaps %xmm1, %xmm3\n"
+    "cmpordps %xmm1, %xmm3\n"
+    "mulps %xmm13, %xmm1\n"
+    "andps %xmm3, %xmm1\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm1, %xmm12\n"
+    "movaps %xmm14, %xmm1\n"
+    "maxps %xmm12, %xmm1\n"
+    "cvtps2dq %xmm1, %xmm1\n"
+    "packssdw %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n"
+    "psrldq $8, %xmm1\n"
+    "punpcklwd %xmm1, %xmm0\n"
+    "movq %xmm0, 4(%rdi)\n"
+    ASM_RET
+    ASM_END(f32_pair_to_s16_3_3)
+
     ASM_FUNC(f32_pair_to_s32)
     "test %rcx, %rcx\n   jz " ASM_LABEL(audio_encode_s32_none) "\n"
     ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(audio_encode_s32_sse2) "")
@@ -46598,6 +46665,17 @@ __asm__(
     ASM_RET
     ASM_END(f32_pair_to_s16_1_2)
 
+    ASM_FUNC(f32_pair_to_s16_3_3)
+    "movz w9, #0x4700, lsl #16\n   dup v28.2s, w9\n"
+    "ldr d0, [x1]\n   ldr d1, [x2]\n   ldur d2, [x1, #4]\n   ldur d3, [x2, #4]\n"
+    "fmul v0.2s, v0.2s, v28.2s\n   fmul v1.2s, v1.2s, v28.2s\n   fmul v2.2s, v2.2s, v28.2s\n   fmul v3.2s, v3.2s, v28.2s\n"
+    "fcvtns v0.2s, v0.2s\n   fcvtns v1.2s, v1.2s\n   fcvtns v2.2s, v2.2s\n   fcvtns v3.2s, v3.2s\n"
+    "sqxtn v4.4h, v0.4s\n   sqxtn v5.4h, v1.4s\n   sqxtn v6.4h, v2.4s\n   sqxtn v7.4h, v3.4s\n"
+    "zip1 v4.4h, v4.4h, v5.4h\n   zip1 v6.4h, v6.4h, v7.4h\n"
+    "str d4, [x0]\n   stur d6, [x0, #4]\n"
+    ASM_RET
+    ASM_END(f32_pair_to_s16_3_3)
+
     ASM_FUNC(f32_pair_to_s32)
     "cbz x3, 9f\n"
     "movz w9, #0x4f00, lsl #16\n   dup v28.4s, w9\n   lsr x4, x3, #3\n   cbz x4, 3f\n"
@@ -47046,6 +47124,10 @@ __asm__(
     ASM_FUNC(f32_pair_to_s16_1_2)
     "tail f32_pair_to_s16\n"
     ASM_END(f32_pair_to_s16_1_2)
+
+    ASM_FUNC(f32_pair_to_s16_3_3)
+    "tail f32_pair_to_s16\n"
+    ASM_END(f32_pair_to_s16_3_3)
 
     ASM_FUNC(f32_pair_to_s32)
     "beqz a3, 9f\n"

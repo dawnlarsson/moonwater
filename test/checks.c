@@ -226257,6 +226257,7 @@ static int routine_copy_sweep(void)
    The destination is 4 bytes a frame. The reference is the C the mixer made of it (audio_c_encode format 0), held out of line
    as the candidates are, so every candidate pays one call and the same wrapper depth. */
 extern void f32_pair_to_s16(unsigned char *dst, const float *left, const float *right, unsigned long count);
+extern void f32_pair_to_s16_3_3(unsigned char *dst, const float *left, const float *right, unsigned long count);
 extern void f32_pair_to_s16_1_2(unsigned char *dst, const float *left, const float *right, unsigned long count);
 
 static int routine_round16(float v)
@@ -226294,6 +226295,15 @@ ROUTINE_CALL f32_pair_to_s16_asm(routine_byte *d, const routine_byte *s, routine
         return 0;
 }
 
+ROUTINE_CALL f32_pair_to_s16_3_3_asm(routine_byte *d, const routine_byte *s, routine_size bytes)
+{
+        const float *left = (const float *)s;
+        routine_size n = bytes >> 3;
+
+        f32_pair_to_s16_3_3(d, left, left + n, n);
+        return 0;
+}
+
 ROUTINE_CALL f32_pair_to_s16_1_2_asm(routine_byte *d, const routine_byte *s, routine_size bytes)
 {
         const float *left = (const float *)s;
@@ -226324,6 +226334,8 @@ static const struct routine_row routine_rows[] = {
          {{"ours", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}},
         {"f32_pair_to_s16_1_2", "bytes8",
          {{"ours", f32_pair_to_s16_1_2_asm}, {"generic", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}, 8, 23},
+        {"f32_pair_to_s16_3_3", "bytes8",
+         {{"ours", f32_pair_to_s16_3_3_asm}, {"generic", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}, 24, 31},
 };
 
 static const routine_size routine_default_sizes[] = {
