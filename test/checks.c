@@ -193033,6 +193033,7 @@ typedef unsigned long u64;
 void *memory_fill(void *, int, u64);
 void memory_exchange_apart(void *, void *, u64);
 void *memory_frob(void *, u64);
+void *memory_frob_8_8(void *, u64);
 void *memory_copy_apart(void *, const void *, u64);
 void *memory_copy(void *, const void *, u64);
 char *string_copy(char *, const char *);
@@ -193234,6 +193235,22 @@ static void frob(void)
                         r_frob(want + 64 + off, size);
                         whole("memory_frob twice", size, off);
                 }
+
+        /* The size class at eight bytes, every offset: it must answer what the
+           generic answers. */
+        for (u64 off = 0; off < 32; off++) {
+                void *answer;
+
+                for (u64 i = 0; i < ROOM; i++)
+                        got[i] = want[i] = (u8)(i * 37 + 8 + off);
+
+                answer = memory_frob_8_8(got + 64 + off, 8);
+                r_frob(want + 64 + off, 8);
+                checks++;
+                if (answer != got + 64 + off)
+                        bad++;
+                whole("memory_frob_8_8", 8, off);
+        }
 }
 
 static u8 subject[ROOM], spare[ROOM], mirror[ROOM];
@@ -226100,6 +226117,13 @@ struct routine_row
         routine_size lo, hi;                   /* a size class: the bytes it covers, both ends in; 0, 0 is every size */
 };
 
+/* Whether a size belongs to the row: a size class's row is timed and checked
+   only inside its class, the generic row at every size. */
+static int routine_in(const struct routine_row *row, routine_size n)
+{
+        return row->hi == 0 || (n >= row->lo && n <= row->hi);
+}
+
 #define ROUTINE_CALL static __attribute__((noinline)) routine_size
 #define ROUTINE_GUARD 64
 #define ROUTINE_MAX (16UL << 20)
@@ -226153,6 +226177,33 @@ ROUTINE_CALL string_length_c(routine_byte *d, const routine_byte *s, routine_siz
         while (s[i])
                 i++;
         return i;
+}
+
+/* memory_frob and its size classes: XOR with 42 in place. The wrappers return
+   0 so the result compare cannot differ on arena addresses. */
+extern void *memory_frob(void *block, routine_size size);
+extern void *memory_frob_8_8(void *block, routine_size size);
+
+ROUTINE_CALL memory_frob_generic(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        (void)s;
+        memory_frob(d, n);
+        return 0;
+}
+
+ROUTINE_CALL memory_frob_8_8_ours(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        (void)s;
+        memory_frob_8_8(d, n);
+        return 0;
+}
+
+ROUTINE_CALL memory_frob_c(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        (void)s;
+        for (routine_size i = 0; i < n; i++)
+                d[i] ^= 42;
+        return 0;
 }
 
 ROUTINE_CALL harness_empty(routine_byte *d, const routine_byte *s, routine_size n)
@@ -226348,6 +226399,10 @@ static const struct routine_row routine_rows[] = {
          {{"ours", f32_pair_to_s16_1_2_asm}, {"generic", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}, 8, 23},
         {"f32_pair_to_s16_3_3", "bytes8",
          {{"ours", f32_pair_to_s16_3_3_asm}, {"generic", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}, 24, 31},
+        {"memory_frob", "frob",
+         {{"ours", memory_frob_generic}, {"c", memory_frob_c}, {0, 0}}},
+        {"memory_frob_8_8", "frob",
+         {{"ours", memory_frob_8_8_ours}, {"generic", memory_frob_generic}, {"c", memory_frob_c}, {0, 0}}, 8, 8},
 };
 
 static const routine_size routine_default_sizes[] = {
@@ -226590,7 +226645,7 @@ static int routine_check_row(const struct routine_row *row, const routine_size *
                 routine_size n = sizes[z];
                 int wide = full && n <= 512;
 
-                if (row->hi && (n < row->lo || n > row->hi))
+                if (!routine_in(row, n))
                         continue;
                 routine_size span = full ? (wide ? 64 : 8) : 1;
 
@@ -226878,6 +226933,9 @@ static int routine_main(int argc, char **argv)
                 {
                         routine_size n = sizes[z];
                         const char *word;
+
+                        if (!routine_in(row, n))
+                                continue;
                         double ref = 0;
                         const char *ref_name = "";
                         double floor_ns = 0;

@@ -54,6 +54,11 @@ cover('direct_benchmark', 'test/checks.c#BENCH_routine', '''
 string_copy_bounded string_copy_bounded_3_16
 ''', 'the routine driver row: the size class and the general routine against the C reference at sizes 0 to 16, '
      'every offset pair and a sweep over source lengths 0 to 40 and capacities 0 to 16')
+# The size classes of memory_frob are timed by the routine driver's rows (one row per
+# class, sizes inside the class only), against the generic and the C loop.
+cover('direct_benchmark', 'test/checks.c#BENCH_routine',
+      'memory_frob_8_8',
+      'routine driver rows: class against the generic and the C reference, per size')
 
 cover('direct_benchmark', 'test/checks.c#BENCH_floor', '''
 memory_compare memory_copy memory_copy_apart memory_count memory_fill

@@ -639,6 +639,11 @@ memory_hash_33 memory_sum_bytes memory_checksum_bsd16
 memory_to_lower_ascii memory_to_upper_ascii memory_reverse memory_frob
 ''', 'fixed short bodies were measured; native x86-64 is level or slower, and '
      'every production caller carries a runtime size')
+# Size classes of memory_frob: named entries a caller selects when it knows its class
+# (SIZE_NAMING). No production call site yet hands them a literal, so no expansion is
+# claimed; the driver rows in test/checks.c time them (performance_coverage.py).
+cover('folds_already', 'size', 'memory_frob_8_8',
+      'named size class of memory_frob at eight bytes: no reachable call site folds its size yet')
 cover('folds_already', 'size', '''
 hash_xxh64 hash_xxh64_add hash_crc32 hash_crc64 zstd_bits_open zstd_huffman_stream zstd_huffman_4x
 ''', 'production spans are compressed-block or hash lengths; short and long '

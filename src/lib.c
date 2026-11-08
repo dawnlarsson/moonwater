@@ -230,6 +230,7 @@
           memory_ascii_span              public  yes     yes     yes
           memory_average_ahead           public  yes     yes     yes
           memory_blend_u32_rect          public  yes     yes     yes
+          memory_blend_u32_rect_baseline public  yes     yes     --
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
           memory_compare                 public  yes     yes     yes
@@ -269,6 +270,7 @@
           memory_fold_lines__room_64     public  yes     yes     yes
           memory_free                    public  yes     yes     yes
           memory_frob                    public  yes     yes     yes
+          memory_frob_8_8                public  yes     yes     yes
           memory_from_hex_exact          public  yes     yes     yes
           memory_get64                   public  yes     yes     yes
           memory_give                    public  yes     yes     yes
@@ -546,6 +548,9 @@
           sha512_blocks_avx2 -- local to x86_64
           zstd_sequences_decode_bmi2 -- local to x86_64
           zstd_sequences_run_bmi2 -- local to x86_64
+
+        Not yet on every machine:
+          memory_blend_u32_rect_baseline -- missing on riscv64
 */
 
 /*
@@ -9174,6 +9179,15 @@ __asm__(
     "vzeroupper\n   jmp " ASM_LABEL(memory_frob_x64_narrow) "\n"
 #endif
     ASM_END(memory_frob)
+
+    // Size class of memory_frob at exactly eight bytes, reached by name when
+    // the caller knows it is eight. One qword, read and written once, no
+    // overlapping access: the overlapping pairs of the wider classes stall on
+    // store forwarding when a buffer is worked again at once, so they lost to
+    // the C loop on x86-64. The generic entry stays correct for every size.
+    ASM_FUNC(memory_frob_8_8)
+    "mov %rdi, %rax\n   movabs $0x2a2a2a2a2a2a2a2a, %r8\n   xor %r8, (%rdi)\n" ASM_RET
+    ASM_END(memory_frob_8_8)
 
     // Adding 63 maps 'A'..'Z' to the signed interval -128..-103. Nothing
     // else lands below -102, so one signed comparison makes the conversion
@@ -22185,6 +22199,11 @@ __asm__(
     "" ASM_LABEL(memory_frob_arm64_done) ":\n   mov x0, x2\n" ASM_RET
     ASM_END(memory_frob)
 
+    // arm64 size class of memory_frob at exactly eight bytes (see the x86_64 class).
+    ASM_FUNC(memory_frob_8_8)
+    "mov x3, #0x2a2a\n   movk x3, #0x2a2a, lsl #16\n   orr x3, x3, x3, lsl #32\n   ldr x4, [x0]\n   eor x4, x4, x3\n   str x4, [x0]\n" ASM_RET
+    ASM_END(memory_frob_8_8)
+
     // NEON uses the same wrapped signed interval as x86: add 63 or 31,
     // compare against -102, then apply the resulting 0x20 mask.
     // The 64-byte path stays in v16-v23: v8-v15 are AAPCS64 callee-saved
@@ -30312,6 +30331,12 @@ __asm__(
     "9:  mv a0, a2\n" ASM_RET
     ASM_END(memory_reverse)
 #undef RV_REVERSE_FOUR
+
+    // The size class of memory_frob at eight bytes on RV64 is the generic body,
+    // which takes its doubleword path at that size.
+    ASM_FUNC(memory_frob_8_8)
+    "j memory_frob\n"
+    ASM_END(memory_frob_8_8)
 
     // Baseline RV64 does not promise misaligned word access. Peel once, run
     // aligned doublewords, and finish bytewise at the exact exclusive end.
@@ -50377,6 +50402,8 @@ READS_WRITES(1, 2) address_any memory_reverse(address_any block, positive size);
 // XOR exactly size bytes with 42 and return block. A zero size does not read
 // or write block, so null is valid in that case.
 READS_WRITES(1, 2) address_any memory_frob(address_any block, positive size);
+// memory_frob for exactly eight bytes: the same in-place XOR with 42; a caller that knows its size is eight names it.
+READS_WRITES(1, 2) address_any memory_frob_8_8(address_any block, positive size);
 // Convert exactly size bytes in place. Bytes outside the ASCII letter range
 // are unchanged, including NUL and bytes with the high bit set.
 READS_WRITES(1, 2) address_any memory_to_lower_ascii(address_any block, positive size);
