@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
 
 describe()
 {
@@ -184,6 +184,7 @@ describe()
         standard) echo "the standard library, and that it still builds with no platform under it" ;;
         verify)   echo "the assembly in lib.c against the C it replaced, on three machines" ;;
         exact)    echo "every size that is known where the call is written, and both tiers" ;;
+        libdiff)  echo "the library's memory routines against sanitized C references: every size to 100000, every alignment pair, overlap placements, guard-page operands, seeded fuzz (the compiler under test builds src/lib.c)" ;;
         text_asm) echo "text.c's own assembly against its C, on three machines" ;;
         shell_asm) echo "the shell's own assembly against its C, on three machines" ;;
         known)    echo "the rest of what folds when the call site knows it" ;;
@@ -3581,6 +3582,50 @@ lane_exact()
 {
         target_lane exact_one
 }
+
+#       The library's memory routines against plain C references: the driver is
+#       the CHECK_libdiff section of test/checks.c. Every size from 0 to 256, the
+#       tiers to 100000, every alignment pair the contract allows, the overlap
+#       placements of the memmove family, and seeded fuzz. The references and the
+#       driver are sanitized (address and undefined behaviour); the library is
+#       src/lib.c built by the compiler under test, on this machine.
+#
+#           sh test/run libdiff
+#           LIBDIFF_FUZZ=200000 sh test/run libdiff
+#
+lane_libdiff()
+(
+        libdiff_work=$work/libdiff
+        mkdir -p "$libdiff_work" || exit 1
+        case $host_system in
+        Darwin) libdiff_gc=-Wl,-dead_strip ;;
+        *) libdiff_gc=-Wl,--gc-sections ;;
+        esac
+        #       STANDARD_NO_ENTRY leaves out lib.c's own _start, which the C runtime
+        #       of a hosted program already has (ELF links fail on the second one).
+        $compiler -O2 -w -DSTANDARD_NO_ENTRY -ffunction-sections -fdata-sections -c src/lib.c \
+                -o "$libdiff_work/lib.o" 2> "$libdiff_work/lib.err" || {
+                note "libdiff: src/lib.c did not build with $compiler"
+                sed 's/^/    /' "$libdiff_work/lib.err" | head -10
+                exit 1
+        }
+        $compiler -O1 -g -w -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+                -DCHECK_libdiff test/checks.c "$libdiff_work/lib.o" $libdiff_gc \
+                -o "$libdiff_work/libdiff" 2> "$libdiff_work/link.err" || {
+                note "libdiff: the driver did not build with $compiler"
+                sed 's/^/    /' "$libdiff_work/link.err" | head -10
+                exit 1
+        }
+        ASAN_OPTIONS=allow_user_segv_handler=1:detect_leaks=0 \
+                "$libdiff_work/libdiff" > "$libdiff_work/out" 2>&1
+        libdiff_status=$?
+        sed -n '/FAIL\|runtime error\|ERROR: AddressSanitizer/p' "$libdiff_work/out" | head -40
+        libdiff_line=$(sed -n 's/^\([0-9]*\) checks, \([0-9]*\) failures$/\1 \2/p' \
+                "$libdiff_work/out" | tail -1)
+        [ -n "$libdiff_line" ] || { note "libdiff printed no verdict"; exit 1; }
+        tally "libdiff-$(uname -m)" "$((${libdiff_line% *} - ${libdiff_line#* }))" "${libdiff_line% *}"
+        [ "$libdiff_status" = 0 ] && [ "${libdiff_line#* }" = 0 ]
+)
 
 #       The branching assembly the text tools keep in their own source, lifted
 #       by the extractor and proven on all three machines: a tool binary cannot
