@@ -31,8 +31,9 @@
 #ifndef SPARK_INCLUDED
 #define SPARK_INCLUDED
 
-/* The SPARK_* handoff and spawn constants are src/lib.c's now, under LINUX.
-   build.c includes lib.util.c, and so lib.c, before this file. */
+/* The SPARK_* handoff and spawn constants are src/lib.c's. Every file that
+   includes this one has lib.c already: build.c through lib.util.c, and the
+   kernel module through core.c. */
 
 // "SPRK", little endian
 #define SPARK_MAGIC 0x4b525053u
