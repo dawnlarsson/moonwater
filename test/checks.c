@@ -226097,6 +226097,7 @@ struct routine_row
         const char *name;
         const char *shape;
         struct routine_candidate candidate[6]; /* NULL name ends the list */
+        routine_size lo, hi;                   /* a size class: the bytes it covers, both ends in; 0, 0 is every size */
 };
 
 #define ROUTINE_CALL static __attribute__((noinline)) routine_size
@@ -226251,6 +226252,66 @@ static int routine_copy_sweep(void)
         return bad != 0;
 }
 
+/* f32_pair_to_s16 (lib.c): the sink's interleaved 16-bit stereo from two float planes. The driver's size is bytes, and a
+   frame is 8 of them (left and right, a float each), so the source it fills is exactly the two planes and frames = bytes / 8.
+   The destination is 4 bytes a frame. The reference is the C the mixer made of it (audio_c_encode format 0), held out of line
+   as the candidates are, so every candidate pays one call and the same wrapper depth. */
+extern void f32_pair_to_s16(unsigned char *dst, const float *left, const float *right, unsigned long count);
+extern void f32_pair_to_s16_1_2(unsigned char *dst, const float *left, const float *right, unsigned long count);
+
+static int routine_round16(float v)
+{
+        float r;
+        int bits;
+
+        if (v != v)
+                return 0;
+        v *= 32768.0f;
+        v = v > 32767.0f ? 32767.0f : v;
+        v = v < -32768.0f ? -32768.0f : v;
+        r = v + 12582912.0f;
+        __builtin_memcpy(&bits, &r, 4);
+        return (bits & 0x7fffff) - 0x400000;
+}
+
+static __attribute__((noinline)) void f32_pair_to_s16_cref(routine_byte *d, const float *left, const float *right, routine_size n)
+{
+        for (routine_size i = 0; i < n; i++)
+        {
+                short x0 = (short)routine_round16(left[i]), x1 = (short)routine_round16(right[i]);
+
+                __builtin_memcpy(d + i * 4, &x0, 2);
+                __builtin_memcpy(d + i * 4 + 2, &x1, 2);
+        }
+}
+
+ROUTINE_CALL f32_pair_to_s16_asm(routine_byte *d, const routine_byte *s, routine_size bytes)
+{
+        const float *left = (const float *)s;
+        routine_size n = bytes >> 3;
+
+        f32_pair_to_s16(d, left, left + n, n);
+        return 0;
+}
+
+ROUTINE_CALL f32_pair_to_s16_1_2_asm(routine_byte *d, const routine_byte *s, routine_size bytes)
+{
+        const float *left = (const float *)s;
+        routine_size n = bytes >> 3;
+
+        f32_pair_to_s16_1_2(d, left, left + n, n);
+        return 0;
+}
+
+ROUTINE_CALL f32_pair_to_s16_c(routine_byte *d, const routine_byte *s, routine_size bytes)
+{
+        const float *left = (const float *)s;
+        routine_size n = bytes >> 3;
+
+        f32_pair_to_s16_cref(d, left, left + n, n);
+        return 0;
+}
+
 /* One row per routine. The names are the lib.c symbols. */
 static const struct routine_row routine_rows[] = {
         {"memory_copy", "copy",
@@ -226259,6 +226320,10 @@ static const struct routine_row routine_rows[] = {
          {{"ours", string_length_ours}, {"libc", string_length_libc}, {"c", string_length_c}, {0, 0}}},
         {"string_copy_bounded_3_16", "copy",
          {{"ours", string_copy_bounded_class}, {"generic", string_copy_bounded_ours}, {"c", string_copy_bounded_c}, {0, 0}}},
+        {"f32_pair_to_s16", "bytes8",
+         {{"ours", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}},
+        {"f32_pair_to_s16_1_2", "bytes8",
+         {{"ours", f32_pair_to_s16_1_2_asm}, {"generic", f32_pair_to_s16_asm}, {"c", f32_pair_to_s16_c}, {0, 0}}, 8, 23},
 };
 
 static const routine_size routine_default_sizes[] = {
@@ -226500,6 +226565,9 @@ static int routine_check_row(const struct routine_row *row, const routine_size *
         {
                 routine_size n = sizes[z];
                 int wide = full && n <= 512;
+
+                if (row->hi && (n < row->lo || n > row->hi))
+                        continue;
                 routine_size span = full ? (wide ? 64 : 8) : 1;
 
                 for (int i = 0; row->candidate[i].name; i++)
@@ -226525,7 +226593,7 @@ static int routine_check_row(const struct routine_row *row, const routine_size *
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
-                n = (routine_size)(state % 70001);
+                n = row->hi ? row->lo + (routine_size)(state % (row->hi - row->lo + 1)) : (routine_size)(state % 70001);
                 od = (routine_size)((state >> 20) % 64);
                 os = (routine_size)((state >> 32) % 64);
                 for (int i = 0; row->candidate[i].name; i++)
