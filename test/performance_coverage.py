@@ -383,6 +383,13 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_copy_apart__room
       'paired timing against the memory_copy_apart its callers had, over the lines '
       'of src/lib.c into a buffer nothing reads and one read at once, and at fixed '
       '40 and 76 bytes, with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_transpose', 'memory_transpose_u32',
+      'paired timing against the tile loop windows_rotate_u32 had for a quarter turn, over full-width tiles of sixteen columns and '
+      'four to sixteen rows (the only shapes the caller sends), with SSE2 on x86_64, '
+      'NEON on arm64 and scalar on riscv64')
+cover('benchmark_context', 'test/checks.c#BENCH_transpose', 'memory_transpose_rect_core',
+      'the scalar rectangle memory_transpose_u32 leaves at its edges and takes whole on riscv64, timed inside every '
+      'BENCH_transpose row whose shape has an edge', {'memory_transpose_rect_core': 'memory_transpose_u32'})
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_u32',
       'paired timing against the row loop compositor_blit had, one memory_copy a row, over a window 1160 words wide '
       'with rows 2560 apart, a sliver of 40 words, a band of 300 and a row of 96, with AVX-512 and without, '

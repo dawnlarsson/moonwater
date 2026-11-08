@@ -2275,6 +2275,24 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
                         {
                                 unsigned int qe = q + WINDOWS_TURN_TILE < qb ? q + WINDOWS_TURN_TILE : qb;
 
+                                // A full-width tile (sixteen columns, at least four rows) is one call. The panel row r of the tile is the
+                                // picture's column q + r, and panel column c is the picture's row lh - 1 - p - c for a quarter turn one way,
+                                // or p + c for the other: memory_transpose_u32 with the picture's column step, and the row step that turns
+                                // the tile's rows the same way. Any other edge is the loop below: measured, the call wins only at sixteen
+                                // columns on both machines, and the edges of a picture stay with the loop.
+                                if (qe - q >= 4 && pe - p == WINDOWS_TURN_TILE)
+                                {
+                                        unsigned int *to = into + (unsigned long)q * into_pitch + p;
+
+                                        if (degrees == 90)
+                                                memory_transpose_u32(to, into_pitch, from + (unsigned long)(lh - 1 - p) * from_pitch + q,
+                                                                     -(long)from_pitch, 1, qe - q, pe - p);
+                                        else
+                                                memory_transpose_u32(to, into_pitch, from + (unsigned long)p * from_pitch + (lw - 1 - q),
+                                                                     (long)from_pitch, -1, qe - q, pe - p);
+                                        continue;
+                                }
+
                                 for (unsigned int row = q; row < qe; row++)
                                 {
                                         unsigned int *to = into + (unsigned long)row * into_pitch;

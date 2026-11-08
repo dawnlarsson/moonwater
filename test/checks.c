@@ -202908,6 +202908,90 @@ b32 main(void)
 }
 #endif /* BENCH_copy_rect */
 
+#ifdef BENCH_transpose
+/* memory_transpose_u32 against the tile loop windows_rotate_u32 had for a quarter turn: each tile of a panel is a
+   block of rows by columns, the picture's column read down its rows and written across the panel's, with a
+   picture 1024 words a row. The shapes are the full-width tiles the caller sends, sixteen columns and four to sixteen
+   rows; the edges of a picture stay on the loop. On x86_64 with SSE2, arm64 with NEON, and scalar on riscv64. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define STRIDE 1024
+#define ROWS 1024
+
+static unsigned int turn_into[STRIDE * ROWS];
+static unsigned int turn_from[STRIDE * ROWS];
+static volatile positive sink;
+
+/* the loop windows_rotate_u32 wrote: row r of the tile is the picture's column, read down the picture's rows */
+__attribute__((noinline, noclone)) static void turn_c_loop(unsigned int address_to into, const unsigned int address_to from,
+                                                           positive rows, positive cols)
+{
+        for (positive row = 0; row < rows; row++)
+        {
+                const unsigned int address_to source = from + row;
+                unsigned int address_to to = into + row * STRIDE;
+
+                for (positive px = 0; px < cols; px++, source -= STRIDE)
+                        to[px] = *source;
+        }
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive rows, positive cols, positive rounds)
+{
+        positive answers = 0;
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                unsigned int address_to into = turn_into + (round % 8) * (ROWS / 2) + (round % 8);
+                const unsigned int address_to from = turn_from + (ROWS - 1 - round % 8) * STRIDE + 3 + round % 8;
+
+                if (assembly)
+                        memory_transpose_u32(into, STRIDE, from, -(long)STRIDE, 1, rows, cols);
+                else
+                        turn_c_loop(into, from, rows, cols);
+                answers += into[cols - 1] + round;
+        }
+        sink = answers;
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{16, 16}, {12, 16}, {8, 16}, {4, 16}};
+        static const string_address names[] = {"a 16 by 16 tile", "a 12 by 16 tile", "an 8 by 16 tile",
+                                               "a 4 by 16 tile"};
+
+        for (positive at = 0; at < STRIDE * ROWS; at++)
+                turn_from[at] = (unsigned int)at * 2654435761u;
+        for (positive at = 0; at < sizeof(shapes) / sizeof(shapes[0]); at++)
+        {
+                positive ratios[TRIES];
+                positive rounds = 4000000 / (shapes[at][0] * shapes[at][1] / 16 + 64) + 1;
+
+                BENCH_PAIRED_RUNS(ratios, former, assembly, shapes[at][0], shapes[at][1], rounds);
+                string_format(log, "memory_transpose_u32 %s: paired median ASM/C %p.", names[at],
+#if X64
+                              (string_address) "sse2",
+#elif RISCV64
+                              (string_address) "scalar",
+#else
+                              (string_address) "neon",
+#endif
+                              ratios[TRIES / 2] / 100);
+                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                log("%\n", 2);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_transpose */
+
 #ifdef BENCH_runs
 /* memory_runs_u32 against the C loop it is written out as (runs_reference in the CHECK_font section): a picture read for its
    stretches of one colour, a chunk of 16 words at a time. The shapes are what the compositor reads once a picture has

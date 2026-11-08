@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        459 routines (435 public, 24 local), 449 of them on all three and 10 local to one.
+        462 routines (437 public, 25 local), 452 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -93,6 +93,7 @@
           buffered_write_deferred_equal  public  yes     yes     yes
           byte_class_holds               public  yes     yes     yes
           byte_class_index               public  yes     yes     yes
+          byte_class_index_5_5           public  yes     yes     yes
           byte_is_alnum                  public  yes     yes     yes
           byte_is_alpha                  public  yes     yes     yes
           byte_is_ascii                  public  yes     yes     yes
@@ -329,6 +330,8 @@
           memory_translate               public  yes     yes     yes
           memory_translate_planes_u32_rect public  yes     yes     yes
           memory_translate_u32_rect      public  yes     yes     yes
+          memory_transpose_rect_core     local   yes     yes     yes
+          memory_transpose_u32           public  yes     yes     yes
           memory_unique_lines__room_64   public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
@@ -15723,6 +15726,63 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_transpose_u32 -- rdi into, rsi into_pitch in words, rdx from, rcx from_column in words (signed), r8
+    //       from_row (+1 or -1), r9 rows, the eighth argument (8(%rsp)) cols: into[r * into_pitch + c] = from[c *
+    //       from_column + r * from_row] for every row r and column c. from is the element at column 0, row 0. A
+    //       quarter turn of a picture is this with from_row -1 or +1 and from_column the picture's pitch or its
+    //       negative: the panel column is the picture's row and the panel row is its column. The body takes four
+    //       rows and four columns a turn: each column is one 16-byte load of four rows (reversed lane by lane when
+    //       from_row is -1), four loads make a 4x4 block that unpckl/unpckh turn over in place, and four stores put
+    //       it down. Whatever is left over at the edges (fewer than four columns in a band, fewer than four rows)
+    //       is a scalar rectangle, memory_transpose_rect_core. Nothing past the rectangle is read or written.
+    //
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_transpose_u32)
+    "mov 8(%rsp), %r10\n   cmp $4, %r9\n   jb 50f\n   cmp $4, %r10\n   jb 50f\n"
+    "push %rbx\n   push %r12\n   push %r14\n   push %r15\n   shl $2, %rsi\n   shl $2, %rcx\n"
+    "mov %rcx, %r15\n   shl $2, %r15\n   mov %r8, %r11\n   shl $4, %r11\n   mov %rdx, %r12\n   cmp $0, %r8\n   jg 20f\n   sub $12, %r12\n"
+    "20: mov %r9, %r14\n"
+    "21: cmp $4, %r14\n   jb 40f\n   xor %r9d, %r9d\n   mov %r12, %rbx\n"
+    "22: lea 4(%r9), %rax\n   cmp %r10, %rax\n   ja 23f\n"
+    "movdqu (%rbx), %xmm0\n   lea (%rbx,%rcx), %rax\n   movdqu (%rax), %xmm1\n   lea (%rax,%rcx), %rax\n   movdqu (%rax), %xmm2\n"
+    "lea (%rax,%rcx), %rax\n   movdqu (%rax), %xmm3\n   cmp $0, %r8\n   jg 24f\n"
+    "pshufd $0x1b, %xmm0, %xmm0\n   pshufd $0x1b, %xmm1, %xmm1\n   pshufd $0x1b, %xmm2, %xmm2\n   pshufd $0x1b, %xmm3, %xmm3\n"
+    "24: movdqa %xmm0, %xmm4\n   punpckldq %xmm1, %xmm4\n   punpckhdq %xmm1, %xmm0\n   movdqa %xmm2, %xmm5\n   punpckldq %xmm3, %xmm5\n"
+    "punpckhdq %xmm3, %xmm2\n   movdqa %xmm4, %xmm1\n   punpcklqdq %xmm5, %xmm1\n   punpckhqdq %xmm5, %xmm4\n   movdqa %xmm0, %xmm3\n"
+    "punpcklqdq %xmm2, %xmm3\n   punpckhqdq %xmm2, %xmm0\n"
+    "lea (%rdi,%r9,4), %rax\n   movdqu %xmm1, (%rax)\n   add %rsi, %rax\n   movdqu %xmm4, (%rax)\n   add %rsi, %rax\n"
+    "movdqu %xmm3, (%rax)\n   add %rsi, %rax\n   movdqu %xmm0, (%rax)\n   add %r15, %rbx\n   add $4, %r9\n   jmp 22b\n"
+    "23: cmp %r10, %r9\n   je 30f\n"
+    "push %rdi\n   push %rsi\n   push %rcx\n   push %r8\n   push %r9\n   push %r10\n   push %r11\n"
+    "mov %r9, %rax\n   imul %rcx, %rax\n   add %r12, %rax\n   cmp $0, %r8\n   jg 25f\n   add $12, %rax\n"
+    "25: lea (%rdi,%r9,4), %rdi\n   mov %rax, %rdx\n   shl $2, %r8\n   sub %r9, %r10\n   mov $4, %r9\n"
+    "call memory_transpose_rect_core\n"
+    "pop %r11\n   pop %r10\n   pop %r9\n   pop %r8\n   pop %rcx\n   pop %rsi\n   pop %rdi\n"
+    "30: lea (%rdi,%rsi,4), %rdi\n   add %r11, %r12\n   sub $4, %r14\n   jmp 21b\n"
+    "40: test %r14, %r14\n   jz 45f\n"
+    "push %rdi\n   push %rsi\n   push %rcx\n   push %r8\n   push %r9\n   push %r10\n   push %r11\n"
+    "mov %r12, %rdx\n   cmp $0, %r8\n   jg 26f\n   add $12, %rdx\n"
+    "26: mov %r14, %r9\n   shl $2, %r8\n   call memory_transpose_rect_core\n"
+    "pop %r11\n   pop %r10\n   pop %r9\n   pop %r8\n   pop %rcx\n   pop %rsi\n   pop %rdi\n"
+    "45: pop %r15\n   pop %r14\n   pop %r12\n   pop %rbx\n" ASM_RET
+    "50: shl $2, %rsi\n   shl $2, %rcx\n   shl $2, %r8\n   jmp memory_transpose_rect_core\n"
+    ASM_END(memory_transpose_u32)
+
+    //
+    //       memory_transpose_rect_core -- the scalar rectangle memory_transpose_u32 leaves at its edges: rdi into,
+    //       rsi into_pitch in bytes, rdx from (the rectangle's first element), rcx from_column in bytes (signed), r8
+    //       from_row in bytes (+4 or -4), r9 rows, r10 columns. Clobbers rax, r11, r12, r13 and the arguments.
+    //
+    ASM_LOCAL_FUNC(memory_transpose_rect_core)
+    "push %rbx\n   push %r12\n   push %r13\n   mov %r10, %rbx\n   mov %rdx, %r11\n   test %r9, %r9\n   jz 9f\n   test %rbx, %rbx\n   jz 9f\n"
+    "1: mov %rdi, %rax\n   mov %r11, %r13\n   mov %rbx, %r10\n"
+    "2: movl (%r13), %r12d\n   movl %r12d, (%rax)\n   add %rcx, %r13\n   add $4, %rax\n   dec %r10\n   jnz 2b\n"
+    "add %rsi, %rdi\n   add %r8, %r11\n   dec %r9\n   jnz 1b\n"
+    "9: pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_LOCAL_END(memory_transpose_rect_core)
+#endif
+
+    //
     //       memory_copy_rect_stream_u32 -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words,
     //       r8 width in words, r9 height. memory_copy_rect_u32 for a source the processor does not cache and for
     //       rectangles that do not overlap: a GPU's buffer mapped write-combined, where every load is an uncached
@@ -25768,6 +25828,53 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_transpose_u32: the x86_64 block carries the contract and the reasoning. x0 into, x1 into_pitch in
+    //       words, x2 from, x3 from_column in words (signed), x4 from_row (+1 or -1), x5 rows, x6 columns. A 4x4 block
+    //       is four ldr q loads, a rev64 and ext to reverse the lanes when from_row is -1, trn1 and trn2 at .4s and then
+    //       at .2d, and four str q stores.
+    //
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_transpose_u32)
+    "cmp x5, #4\n   b.lo 50f\n   cmp x6, #4\n   b.lo 50f\n"
+    "stp x29, x30, [sp, #-96]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n"
+    "stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n"
+    "mov x19, x0\n   lsl x20, x1, #2\n   lsl x21, x3, #2\n   mov x22, x4\n   mov x23, x5\n   mov x24, x6\n   lsl x26, x22, #4\n"
+    "lsl x27, x21, #2\n   mov x25, x2\n   cmp x22, #0\n   b.gt 20f\n   sub x25, x25, #12\n"
+    "20: cmp x23, #4\n   b.lo 40f\n   mov x28, #0\n   mov x9, x25\n"
+    "21: add x10, x28, #4\n   cmp x10, x24\n   b.hi 22f\n"
+    "ldr q0, [x9]\n   add x11, x9, x21\n   ldr q1, [x11]\n   add x11, x11, x21\n   ldr q2, [x11]\n   add x11, x11, x21\n   ldr q3, [x11]\n"
+    "cmp x22, #0\n   b.gt 24f\n"
+    "rev64 v0.4s, v0.4s\n   ext v0.16b, v0.16b, v0.16b, #8\n   rev64 v1.4s, v1.4s\n   ext v1.16b, v1.16b, v1.16b, #8\n"
+    "rev64 v2.4s, v2.4s\n   ext v2.16b, v2.16b, v2.16b, #8\n   rev64 v3.4s, v3.4s\n   ext v3.16b, v3.16b, v3.16b, #8\n"
+    "24: trn1 v4.4s, v0.4s, v1.4s\n   trn2 v5.4s, v0.4s, v1.4s\n   trn1 v6.4s, v2.4s, v3.4s\n   trn2 v7.4s, v2.4s, v3.4s\n"
+    "trn1 v0.2d, v4.2d, v6.2d\n   trn2 v2.2d, v4.2d, v6.2d\n   trn1 v1.2d, v5.2d, v7.2d\n   trn2 v3.2d, v5.2d, v7.2d\n"
+    "add x12, x19, x28, lsl #2\n   str q0, [x12]\n   add x12, x12, x20\n   str q1, [x12]\n   add x12, x12, x20\n   str q2, [x12]\n"
+    "add x12, x12, x20\n   str q3, [x12]\n   add x9, x9, x27\n   add x28, x28, #4\n   b 21b\n"
+    "22: cmp x28, x24\n   b.eq 30f\n"
+    "add x0, x19, x28, lsl #2\n   mov x1, x20\n   madd x2, x28, x21, x25\n   cmp x22, #0\n   b.gt 26f\n   add x2, x2, #12\n"
+    "26: mov x3, x21\n   lsl x4, x22, #2\n   mov x5, #4\n   sub x6, x24, x28\n   bl memory_transpose_rect_core\n"
+    "30: add x19, x19, x20, lsl #2\n   add x25, x25, x26\n   sub x23, x23, #4\n   b 20b\n"
+    "40: cbz x23, 45f\n   mov x0, x19\n   mov x1, x20\n   mov x2, x25\n   cmp x22, #0\n   b.gt 28f\n   add x2, x2, #12\n"
+    "28: mov x3, x21\n   lsl x4, x22, #2\n   mov x5, x23\n   mov x6, x24\n   bl memory_transpose_rect_core\n"
+    "45: ldp x27, x28, [sp, #80]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #96\n" ASM_RET
+    "50: lsl x1, x1, #2\n   lsl x3, x3, #2\n   lsl x4, x4, #2\n   b memory_transpose_rect_core\n"
+    ASM_END(memory_transpose_u32)
+
+    //
+    //       memory_transpose_rect_core -- the scalar rectangle at the edges: x0 into, x1 into_pitch in bytes, x2 from,
+    //       x3 from_column in bytes (signed), x4 from_row in bytes (+4 or -4), x5 rows, x6 columns.
+    //
+    ASM_LOCAL_FUNC(memory_transpose_rect_core)
+    "cbz x5, 9f\n   cbz x6, 9f\n   mov x7, x2\n"
+    "1: mov x8, x0\n   mov x9, x7\n   mov x11, x6\n"
+    "2: ldr w12, [x9]\n   str w12, [x8]\n   add x9, x9, x3\n   add x8, x8, #4\n   subs x11, x11, #1\n   b.ne 2b\n"
+    "add x0, x0, x1\n   add x7, x7, x4\n   subs x5, x5, #1\n   b.ne 1b\n"
+    "9: " ASM_RET
+    ASM_LOCAL_END(memory_transpose_rect_core)
+#endif
+
+    //
     //       memory_copy_rect_stream_u32 -- x0 into, x1 into_stride in words, x2 from, x3 from_stride in words, x4 width
     //       in words, x5 height. The x86_64 block carries the contract: memory_copy_rect_u32 for a source the processor
     //       does not cache and for rectangles that do not overlap. Here it is that copy: no load of NEON's is wider or
@@ -35673,6 +35780,29 @@ __asm__(
     "addi sp, sp, 64\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_transpose_u32: the x86_64 block carries the contract. a0 into, a1 into_pitch in words, a2 from, a3
+    //       from_column in words (signed), a4 from_row (+1 or -1), a5 rows, a6 columns. RV64IMAFD has no vector here,
+    //       so this is the scalar rectangle: one lw and one sw a column, with no compressed instructions.
+    //
+#ifndef KERNEL_MODE
+    ASM_FUNC(memory_transpose_u32)
+    "slli a1, a1, 2\n   slli a3, a3, 2\n   slli a4, a4, 2\n   j memory_transpose_rect_core\n"
+    ASM_END(memory_transpose_u32)
+
+    //
+    //       memory_transpose_rect_core -- the rectangle, with the strides in bytes: a0 into, a1 into_pitch in bytes, a2 from,
+    //       a3 from_column in bytes (signed), a4 from_row in bytes (+4 or -4), a5 rows, a6 columns.
+    //
+    ASM_LOCAL_FUNC(memory_transpose_rect_core)
+    "beqz a5, 9f\n   beqz a6, 9f\n   mv t1, a0\n   mv t2, a2\n"
+    "1: mv t3, t1\n   mv t4, t2\n   mv t5, a6\n"
+    "2: lw t6, 0(t4)\n   sw t6, 0(t3)\n   add t4, t4, a3\n   addi t3, t3, 4\n   addi t5, t5, -1\n   bnez t5, 2b\n"
+    "add t1, t1, a1\n   add t2, t2, a4\n   addi a5, a5, -1\n   bnez a5, 1b\n"
+    "9: " ASM_RET
+    ASM_LOCAL_END(memory_transpose_rect_core)
+#endif
 
     //
     //       memory_copy_rect_stream_u32 -- a0 into, a1 into_stride in words, a2 from, a3 from_stride in words, a4 width
@@ -49595,6 +49725,12 @@ fn memory_copy_rect_stream_u32(p32 address_to into, positive into_stride, const 
 // the colour. A row of more than 15 keeps its first 15. Nothing of the picture is written and nothing of a row's 128
 // bytes past its last run, and a zero width or height touches nothing but zero-width rows' counts (a zero count).
 fn memory_runs_u32(p8 address_to rows, const p32 address_to from, positive from_stride, positive width, positive height);
+// The rectangle transposed: into[r * into_pitch + c] = from[c * from_column + r * from_row] for every row r of rows and
+// column c of cols, from the element at column 0, row 0. from_row is +1 or -1, from_column any signed step in words (a
+// quarter turn of a picture is this, with the picture's pitch or its negative for from_column). Nothing outside the
+// rectangle is read or written, and a zero rows or cols touches nothing.
+fn memory_transpose_u32(p32 address_to into, positive into_pitch, const p32 address_to from, long from_column, long from_row,
+                        positive rows, positive cols);
 // A picture from_width by from_height (from_stride words a row) drawn nearest neighbour into a width by height
 // rectangle, of which the visible_width by visible_height part at left, top is written: into points at its top left
 // word, into_stride words a row. A pixel is the picture's at the source position of its centre, which steps in 24-bit

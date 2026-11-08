@@ -428,6 +428,13 @@ cover('folds_already', 'length', 'fast_argmax_f32',
       'greedy decoding hands it the logits of one step, a vocabulary wide; the '
       'length is the model\'s and a literal would remove one compare from a '
       'scan of thousands')
+cover('nothing_to_fold', None, 'memory_transpose_rect_core',
+      'the edge rectangle memory_transpose_u32 hands to it in bytes, with the edges it computes at run time; no call '
+      'site names it')
+cover('folds_already', 'rows', 'memory_transpose_u32',
+      'windows_rotate_u32 hands it the rows and columns of each tile at run time: a picture of any size leaves its edge '
+      'tiles at whatever size the picture allows, so no reachable call site passes a literal for both, and the tile is '
+      'taken as the caller has it')
 cover('folds_already', 'width', 'memory_copy_rect_u32',
       'compositor_blit hands it the visible width of a span, which the damage sets at run time; no reachable call '
       'site passes a literal, and the height is the same kind of value')
