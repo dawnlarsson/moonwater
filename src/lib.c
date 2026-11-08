@@ -21920,22 +21920,44 @@ __asm__(
     // pair of q registers retires thirty two bytes per turn.  A kernel build
     // owns no vector state here and takes only the integer-register body,
     // where rev is baseline ARMv8 and every access stays inside the span.
+    // Under thirty two bytes the two ends are one overlapping pair of blocks (two, four, eight or sixteen bytes): the
+    // last block reversed goes to the front and the first block reversed to the back, both loaded before either is
+    // stored. The bytes the two blocks share are the same byte in both, so the overlap is harmless. Zero and one return
+    // untouched. Thirty two and over: the front moves in x7 and x0 keeps the block's address, so every exit returns
+    // x0 as it was. Userspace turns 32 bytes a turn in vectors, then one overlapping pair of 16-byte blocks takes what
+    // is left under 32; a kernel build takes 16-byte word pairs and owns no vector state.
     ASM_FUNC(memory_reverse)
-    "mov x3, x0\n   add x4, x0, x1\n"
+    "cmp x1, #2\n   b.lo " ASM_LABEL(memory_reverse_arm64_ret) "\n   add x4, x0, x1\n   cmp x1, #4\n   b.hs " ASM_LABEL(memory_reverse_arm64_mid4) "\n"
+    "ldrh w5, [x0]\n   ldrh w6, [x4, #-2]\n   rev16 w5, w5\n   rev16 w6, w6\n   strh w6, [x0]\n   strh w5, [x4, #-2]\n"
+    "" ASM_LABEL(memory_reverse_arm64_ret) ":\n" ASM_RET
+    "" ASM_LABEL(memory_reverse_arm64_mid4) ":\n   cmp x1, #8\n   b.hs " ASM_LABEL(memory_reverse_arm64_mid8) "\n"
+    "ldr w5, [x0]\n   ldr w6, [x4, #-4]\n   rev w5, w5\n   rev w6, w6\n   str w6, [x0]\n   str w5, [x4, #-4]\n" ASM_RET
+    "" ASM_LABEL(memory_reverse_arm64_mid8) ":\n   cmp x1, #16\n   b.hs " ASM_LABEL(memory_reverse_arm64_mid16) "\n"
+    "ldr x5, [x0]\n   ldr x6, [x4, #-8]\n   rev x5, x5\n   rev x6, x6\n   str x6, [x0]\n   str x5, [x4, #-8]\n" ASM_RET
+    "" ASM_LABEL(memory_reverse_arm64_mid16) ":\n"
+#ifndef KERNEL_MODE
+    "cmp x1, #32\n   b.hs " ASM_LABEL(memory_reverse_arm64_big) "\n"
+    "ldr q0, [x0]\n   ldr q1, [x4, #-16]\n   rev64 v0.16b, v0.16b\n   rev64 v1.16b, v1.16b\n   ext v0.16b, v0.16b, v0.16b, #8\n   ext v1.16b, v1.16b, v1.16b, #8\n"
+    "str q1, [x0]\n   str q0, [x4, #-16]\n" ASM_RET
+#else
+    "b " ASM_LABEL(memory_reverse_arm64_big) "\n"
+#endif
+    "" ASM_LABEL(memory_reverse_arm64_big) ":\n   mov x7, x0\n"
 #ifndef KERNEL_MODE
     "cmp x1, #32\n   b.lo 5f\n   .balign 16\n"
-    "1:  ldr q0, [x0]\n   sub x4, x4, #16\n   ldr q1, [x4]\n   rev64 v0.16b, v0.16b\n   rev64 v1.16b, v1.16b\n   ext v0.16b, v0.16b, v0.16b, #8\n   ext v1.16b, v1.16b, v1.16b, #8\n"
-    "str q1, [x0]\n   str q0, [x4]\n   add x0, x0, #16\n   sub x1, x1, #32\n   cmp x1, #32\n   b.hs 1b\n"
+    "1:  ldr q0, [x7]\n   sub x4, x4, #16\n   ldr q1, [x4]\n   rev64 v0.16b, v0.16b\n   rev64 v1.16b, v1.16b\n   ext v0.16b, v0.16b, v0.16b, #8\n   ext v1.16b, v1.16b, v1.16b, #8\n"
+    "str q1, [x7]\n   str q0, [x4]\n   add x7, x7, #16\n   sub x1, x1, #32\n   cmp x1, #32\n   b.hs 1b\n"
+    "cmp x1, #2\n   b.lo " ASM_LABEL(memory_reverse_arm64_ret) "\n   cmp x1, #16\n   b.lo 7f\n"
+    "ldr q0, [x7]\n   ldr q1, [x4, #-16]\n   rev64 v0.16b, v0.16b\n   rev64 v1.16b, v1.16b\n   ext v0.16b, v0.16b, v0.16b, #8\n   ext v1.16b, v1.16b, v1.16b, #8\n"
+    "str q1, [x7]\n   str q0, [x4, #-16]\n" ASM_RET
 #endif
-    "5:  cmp x1, #16\n   b.lo 2f\n   .balign 16\n"
-    "1:  ldr x5, [x0]\n   sub x4, x4, #8\n   ldr x6, [x4]\n   rev x5, x5\n   rev x6, x6\n   str x6, [x0]\n   str x5, [x4]\n   add x0, x0, #8\n   sub x1, x1, #16\n   cmp x1, #16\n"
+    "5:  cmp x1, #16\n   b.lo 6f\n   .balign 16\n"
+    "1:  ldr x5, [x7]\n   sub x4, x4, #8\n   ldr x6, [x4]\n   rev x5, x5\n   rev x6, x6\n   str x6, [x7]\n   str x5, [x4]\n   add x7, x7, #8\n   sub x1, x1, #16\n   cmp x1, #16\n"
     "b.hs 1b\n"
-    "2:  cmp x1, #8\n   b.ne 3f\n   ldr x5, [x0]\n   rev x5, x5\n   str x5, [x0]\n   b 9f\n"
-    "3:  cmp x1, #4\n   b.ne 4f\n   ldr w5, [x0]\n   rev w5, w5\n   str w5, [x0]\n   b 9f\n"
-    "4:  cmp x1, #2\n   b.ne 6f\n   ldrh w5, [x0]\n   rev16 w5, w5\n   strh w5, [x0]\n   b 9f\n"
-    "6:  cmp x1, #2\n   b.lo 9f\n"
-    "1:  ldrb w5, [x0]\n   sub x4, x4, #1\n   ldrb w6, [x4]\n   strb w6, [x0], #1\n   strb w5, [x4]\n   sub x1, x1, #2\n   cmp x1, #2\n   b.hs 1b\n"
-    "9:  mov x0, x3\n" ASM_RET
+    "6:  cbz x1, " ASM_LABEL(memory_reverse_arm64_ret) "\n"
+    "7:  cmp x1, #8\n   b.lo 13f\n   ldr x5, [x7]\n   ldr x6, [x4, #-8]\n   rev x5, x5\n   rev x6, x6\n   str x6, [x7]\n   str x5, [x4, #-8]\n" ASM_RET
+    "13: cmp x1, #4\n   b.lo 9f\n   ldr w5, [x7]\n   ldr w6, [x4, #-4]\n   rev w5, w5\n   rev w6, w6\n   str w6, [x7]\n   str w5, [x4, #-4]\n" ASM_RET
+    "9:  cmp x1, #2\n   b.lo " ASM_LABEL(memory_reverse_arm64_ret) "\n   ldrh w5, [x7]\n   ldrh w6, [x4, #-2]\n   rev16 w5, w5\n   rev16 w6, w6\n   strh w6, [x7]\n   strh w5, [x4, #-2]\n" ASM_RET
     ASM_END(memory_reverse)
 
     // Same exact in-place contract as x86_64. NEON is baseline in userspace;
