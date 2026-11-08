@@ -854,6 +854,11 @@ cover('unmeasured', None, 'file_initialize strncpy',
       'assembly entries retained by the source inventory; no focused timing claim')
 
 
+cover('correctness_only', 'test/checks.c#CHECK_codec',
+      'memory_digits_checked_16_40 memory_digits_whole_16_40',
+      'agreement with the generic over every span of the test text, both limits; '
+      'timed in the commit message and not yet a BENCH row')
+
 def validate():
     errors = []
     manifest.reconcile(ROWS, errors)

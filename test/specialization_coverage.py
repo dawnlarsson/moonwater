@@ -1068,6 +1068,13 @@ cover('worth_it', 'bound', 'strncpy',
       expansion='strncpy_known')
 
 
+cover('worth_it', 'length', 'memory_digits_checked_16_40 memory_digits_whole_16_40',
+      'size-class entries for spans of 16 to 40 bytes: they win over the inlined '
+      'generic in that class, and no call site in src/ folds to them yet, so the '
+      'callers keep the generic',
+      expansion={'memory_digits_checked_16_40': 'memory_digits_checked_16_40',
+                 'memory_digits_whole_16_40': 'memory_digits_whole_16_40'})
+
 def validate():
     errors = []
     inventory = manifest.reconcile(ROWS, errors)

@@ -39612,6 +39612,26 @@ static fn span_checks(void)
               !positive_append_digit(address_of value, 0, positive_max) &&
                   value == positive_max / 10 + 1);
 
+        {
+                /* the 16_40 variants against the generic: every span length of the text, both limits */
+                bool agree = true;
+
+                for (positive length = 0; length <= sizeof text - 1; length++)
+                        for (int lim = 0; lim < 2; lim++)
+                        {
+                                positive limit = lim ? 0xffffffffull : positive_max;
+                                positive mine = 7, theirs = 7;
+                                positive want = memory_digits_checked(text, length, limit, address_of theirs);
+                                positive got = memory_digits_checked_16_40(text, length, limit, address_of mine);
+                                bool whole_want = memory_digits_whole(text, length, limit, address_of theirs);
+                                bool whole = memory_digits_whole_16_40(text, length, limit, address_of mine);
+
+                                if (got != want || mine != theirs || whole != whole_want)
+                                        agree = false;
+                        }
+                check("16_40 variants agree with the generic on every span of the text, both limits",
+                      agree);
+        }
         value = 7;
         check("digits at the front, count and number",
               memory_digits_checked(text + 60, 6, positive_max, address_of value) == 3 &&
