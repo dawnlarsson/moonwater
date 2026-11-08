@@ -48892,6 +48892,20 @@ PURE string_address string_search(string_address haystack, string_address needle
 
         arm64 and riscv64 have the scalar body; x86_64 without AVX2 has the
         same scalar body as its fallback.
+
+        Size classes, unit entries. No inline routing is landed for the 0 to 2
+        entry class. The class was routed by a check in front of the call
+        (three loads and branches in the caller, then this body from three
+        entries up), and the check costs the 4-entry class more than it gains
+        below 3: on the M2 Pro, 4 entries 2.15 ns routed against 1.79 ns for
+        this body and 2.09 ns for the shipped loop inlined (the loop gains at
+        0 to 2 entries, 0.30 against 0.61 at 0 entries); on the 9950X with gcc,
+        4 entries 2.10 ns routed against 1.46 ns and 1.83 ns. Callers therefore
+        name pointer_vector_count and get this body at every size. The cells
+        that stay a loss to the inlined loop are 0 and 1 entries on arm64
+        (0.58 and 0.28 ns per call; 2 entries is a win, 1.23 against 1.53),
+        0 and 1 entries on x86-64 with gcc (0.2 ns), and 0 to 2 entries on
+        x86-64 with clang (up to 0.56 ns).
 */
 #if X64
 __asm__(
