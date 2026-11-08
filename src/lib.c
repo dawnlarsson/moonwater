@@ -24579,8 +24579,35 @@ __asm__(
     ASM_END(memory_span_byte)
 
     ASM_FUNC(memory_span_byte_reverse)
-    "mov x3, #0\n   and w1, w1, #255\n"
-    "" ASM_LABEL(memory_span_byte_reverse_arm64_one) ":\n   cbz x2, 1f\n   sub x2, x2, #1\n   ldrb w4, [x0, x2]\n   cmp w4, w1\n   b.ne 1f\n   add x3, x3, #1\n   b " ASM_LABEL(memory_span_byte_reverse_arm64_one) "\n"
+    "and w1, w1, #255\n"
+#ifndef KERNEL_MODE
+    "cmp x2, #2\n   b.hi " ASM_LABEL(memory_span_byte_reverse_arm64_gt2) "\n   cbz x2, " ASM_LABEL(memory_span_byte_reverse_arm64_zero) "\n   cmp x2, #2\n   b.eq " ASM_LABEL(memory_span_byte_reverse_arm64_n2) "\n"
+    "ldrb w4, [x0]\n   cmp w4, w1\n   cset x0, eq\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_n2) ":\n   orr w6, w1, w1, lsl #8\n   ldrh w5, [x0]\n   cmp w5, w6\n   cset x7, eq\n   ldrb w5, [x0, #1]\n   cmp w5, w1\n   cset x0, eq\n   add x0, x0, x7\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_zero) ":\n   mov x0, #0\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_gt2) ":\n   cmp x2, #3\n   b.eq " ASM_LABEL(memory_span_byte_reverse_arm64_n3) "\n   cmp x2, #4\n   b.lo " ASM_LABEL(memory_span_byte_reverse_arm64_tiny) "\n   b " ASM_LABEL(memory_span_byte_reverse_arm64_gt3) "\n"
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_n3) ":\n   orr w6, w1, w1, lsl #8\n   ldrh w5, [x0, #1]\n   cmp w5, w6\n   b.ne " ASM_LABEL(memory_span_byte_reverse_arm64_n3not) "\n"
+    "ldrb w5, [x0]\n   cmp w5, w1\n   cset x0, eq\n   add x0, x0, #2\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_n3not) ":\n   ldrb w5, [x0, #2]\n   cmp w5, w1\n   cset x0, eq\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_gt3) ":\n   cmp x2, #16\n   b.lo " ASM_LABEL(memory_span_byte_reverse_arm64_word) "\n   dup v2.16b, w1\n   sub x6, x2, #16\n"
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_16) ":  ldr q0, [x0, x6]\n   cmeq v0.16b, v0.16b, v2.16b\n   shrn v0.8b, v0.8h, #4\n   fmov x5, d0\n   mvn x5, x5\n"
+    "cbnz x5, " ASM_LABEL(memory_span_byte_reverse_arm64_found) "\n   cbz x6, " ASM_LABEL(memory_span_byte_reverse_arm64_all) "\n"
+    "subs x6, x6, #16\n   b.hs " ASM_LABEL(memory_span_byte_reverse_arm64_16) "\n   mov x6, #0\n   b " ASM_LABEL(memory_span_byte_reverse_arm64_16) "\n"
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_found) ":\n   clz x5, x5\n   sub x7, x2, #16\n   sub x7, x7, x6\n   add x0, x7, x5, lsr #2\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_all) ":\n   mov x0, x2\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_word) ":\n   cmp x2, #8\n   b.lo " ASM_LABEL(memory_span_byte_reverse_arm64_four) "\n"
+    "mov x8, #0x0101010101010101\n   mul x7, x1, x8\n   sub x6, x2, #8\n   ldr x5, [x0, x6]\n   eor x5, x5, x7\n   cbnz x5, " ASM_LABEL(memory_span_byte_reverse_arm64_wfound) "\n"
+    "ldr x5, [x0]\n   eor x5, x5, x7\n   cbnz x5, " ASM_LABEL(memory_span_byte_reverse_arm64_whead) "\n   mov x0, x2\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_wfound) ":\n   clz x5, x5\n   lsr x0, x5, #3\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_whead) ":\n   clz x5, x5\n   sub x7, x2, #8\n   add x0, x7, x5, lsr #3\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_four) ":\n"
+    "mov x8, #0x0101010101010101\n   mul x7, x1, x8\n   sub x6, x2, #4\n   ldr w5, [x0, x6]\n   eor w5, w5, w7\n   cbnz w5, " ASM_LABEL(memory_span_byte_reverse_arm64_ffound) "\n"
+    "ldr w5, [x0]\n   eor w5, w5, w7\n   cbnz w5, " ASM_LABEL(memory_span_byte_reverse_arm64_fhead) "\n   mov x0, x2\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_ffound) ":\n   clz w5, w5\n   lsr w0, w5, #3\n" ASM_RET
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_fhead) ":\n   clz w5, w5\n   sub x7, x2, #4\n   add x0, x7, x5, lsr #3\n" ASM_RET
+#endif
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_tiny) ":\n   mov x3, #0\n   cbz x2, 1f\n"
+    "" ASM_LABEL(memory_span_byte_reverse_arm64_one) ":\n   sub x2, x2, #1\n   ldrb w4, [x0, x2]\n   cmp w4, w1\n   b.ne 1f\n   add x3, x3, #1\n   cbnz x2, " ASM_LABEL(memory_span_byte_reverse_arm64_one) "\n"
     "1:  mov x0, x3\n" ASM_RET
     ASM_END(memory_span_byte_reverse)
 
