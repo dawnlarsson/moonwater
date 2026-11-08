@@ -44996,6 +44996,15 @@ fn f32_pair_to_s16_1_2(p8 address_to dst, const f32 address_to left, const f32 a
 // 1.84 ns a call against the generic 3.91 and clang's C 6.55. On the box: 2.18 against 3.36 and gcc's C 3.16 (31 repetitions).
 WRITES(1) READS(2) READS(3)
 fn f32_pair_to_s16_3_3(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
+// class f32_pair_to_s16_5_7 (counts 5 to 7): two overlapping four-frame steps, at frames 0 and count - 4, so no scalar frame runs. With
+// AVX2 both steps share one register (the low lane is frames 0 to 3, the high lane frames count - 4 to count - 1); without it the SSE2
+// two-step body runs.
+// Measured on the Mac: 5 frames 1.77 ns a call against the generic 2.07 and clang's C 10.23; 6 frames 1.80 against 2.35 and 12.18;
+// 7 frames 1.78 against 3.86 and 14.01. On the box, two runs of 31 repetitions: 5 frames 1.78 and 1.78 against the generic 2.57 and
+// 2.57 and gcc's C 5.14 and 5.14; 6 frames 2.17 and 2.17 against 2.57 and 2.57 and 5.55; 7 frames 2.17 and 2.17 against 2.57 and
+// 2.57 and 6.53.
+WRITES(1) READS(2) READS(3)
+fn f32_pair_to_s16_5_7(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
 WRITES(1) READS(2) READS(3)
 fn f32_pair_to_s32(p8 address_to dst, const f32 address_to left, const f32 address_to right, positive count);
 WRITES(1) READS(2) READS(3)
@@ -46074,6 +46083,106 @@ __asm__(
     ASM_RET
     ASM_END(f32_pair_to_s16_1_2)
 
+    ASM_FUNC(f32_pair_to_s16_5_7)
+    ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(audio_pair_s16_5_7_sse2) "")
+    "mov $0x47000000, %eax\n"
+    "vmovd %eax, %xmm13\n"
+    "vbroadcastss %xmm13, %ymm13\n"
+    "mov $0xc7000000, %eax\n"
+    "vmovd %eax, %xmm14\n"
+    "vbroadcastss %xmm14, %ymm14\n"
+    "mov $0x46fffe00, %eax\n"
+    "vmovd %eax, %xmm15\n"
+    "vbroadcastss %xmm15, %ymm15\n"
+    "lea -4(%rcx), %r8\n"
+    "vmovups (%rsi), %xmm0\n"
+    "vinsertf128 $1, (%rsi,%r8,4), %ymm0, %ymm0\n"
+    "vmovups (%rdx), %xmm1\n"
+    "vinsertf128 $1, (%rdx,%r8,4), %ymm1, %ymm1\n"
+    "vcmpordps %ymm0, %ymm0, %ymm2\n"
+    "vmulps %ymm13, %ymm0, %ymm0\n"
+    "vandps %ymm2, %ymm0, %ymm0\n"
+    "vminps %ymm0, %ymm15, %ymm0\n"
+    "vmaxps %ymm0, %ymm14, %ymm0\n"
+    "vcvtps2dq %ymm0, %ymm0\n"
+    "vcmpordps %ymm1, %ymm1, %ymm3\n"
+    "vmulps %ymm13, %ymm1, %ymm1\n"
+    "vandps %ymm3, %ymm1, %ymm1\n"
+    "vminps %ymm1, %ymm15, %ymm1\n"
+    "vmaxps %ymm1, %ymm14, %ymm1\n"
+    "vcvtps2dq %ymm1, %ymm1\n"
+    "vpackssdw %ymm0, %ymm0, %ymm0\n"
+    "vpackssdw %ymm1, %ymm1, %ymm1\n"
+    "vpunpcklwd %ymm1, %ymm0, %ymm0\n"
+    "vmovdqu %xmm0, (%rdi)\n"
+    "vextracti128 $1, %ymm0, %xmm0\n"
+    "vmovdqu %xmm0, (%rdi,%r8,4)\n"
+    "vzeroupper\n"
+    ASM_RET
+    ASM_LABEL(audio_pair_s16_5_7_sse2) ":\n"
+    "mov $0x47000000, %eax\n"
+    "movd %eax, %xmm13\n"
+    "shufps $0, %xmm13, %xmm13\n"
+    "mov $0xc7000000, %eax\n"
+    "movd %eax, %xmm14\n"
+    "shufps $0, %xmm14, %xmm14\n"
+    "mov $0x46fffe00, %eax\n"
+    "movd %eax, %xmm15\n"
+    "shufps $0, %xmm15, %xmm15\n"
+    "lea -4(%rcx), %r8\n"
+    "movups (%rsi), %xmm0\n"
+    "movups (%rdx), %xmm1\n"
+    "movaps %xmm0, %xmm2\n"
+    "cmpordps %xmm0, %xmm2\n"
+    "mulps %xmm13, %xmm0\n"
+    "andps %xmm2, %xmm0\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm0, %xmm12\n"
+    "movaps %xmm14, %xmm0\n"
+    "maxps %xmm12, %xmm0\n"
+    "cvtps2dq %xmm0, %xmm0\n"
+    "movaps %xmm1, %xmm3\n"
+    "cmpordps %xmm1, %xmm3\n"
+    "mulps %xmm13, %xmm1\n"
+    "andps %xmm3, %xmm1\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm1, %xmm12\n"
+    "movaps %xmm14, %xmm1\n"
+    "maxps %xmm12, %xmm1\n"
+    "cvtps2dq %xmm1, %xmm1\n"
+    "packssdw %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n"
+    "psrldq $8, %xmm1\n"
+    "punpcklwd %xmm1, %xmm0\n"
+    "movdqu %xmm0, (%rdi)\n"
+    "movups (%rsi,%r8,4), %xmm0\n"
+    "movups (%rdx,%r8,4), %xmm1\n"
+    "movaps %xmm0, %xmm2\n"
+    "cmpordps %xmm0, %xmm2\n"
+    "mulps %xmm13, %xmm0\n"
+    "andps %xmm2, %xmm0\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm0, %xmm12\n"
+    "movaps %xmm14, %xmm0\n"
+    "maxps %xmm12, %xmm0\n"
+    "cvtps2dq %xmm0, %xmm0\n"
+    "movaps %xmm1, %xmm3\n"
+    "cmpordps %xmm1, %xmm3\n"
+    "mulps %xmm13, %xmm1\n"
+    "andps %xmm3, %xmm1\n"
+    "movaps %xmm15, %xmm12\n"
+    "minps %xmm1, %xmm12\n"
+    "movaps %xmm14, %xmm1\n"
+    "maxps %xmm12, %xmm1\n"
+    "cvtps2dq %xmm1, %xmm1\n"
+    "packssdw %xmm1, %xmm0\n"
+    "movdqa %xmm0, %xmm1\n"
+    "psrldq $8, %xmm1\n"
+    "punpcklwd %xmm1, %xmm0\n"
+    "movdqu %xmm0, (%rdi,%r8,4)\n"
+    ASM_RET
+    ASM_END(f32_pair_to_s16_5_7)
+
     ASM_FUNC(f32_pair_to_s16_3_3)
     "mov $0x47000000, %eax\n"
     "movd %eax, %xmm13\n"
@@ -46665,6 +46774,17 @@ __asm__(
     ASM_RET
     ASM_END(f32_pair_to_s16_1_2)
 
+    ASM_FUNC(f32_pair_to_s16_5_7)
+    "movz w9, #0x4700, lsl #16\n   dup v28.4s, w9\n"
+    "sub x4, x3, #4\n   add x5, x1, x4, lsl #2\n   add x6, x2, x4, lsl #2\n   add x7, x0, x4, lsl #2\n"
+    "ld1 {v0.4s}, [x1]\n   ld1 {v1.4s}, [x2]\n   ld1 {v2.4s}, [x5]\n   ld1 {v3.4s}, [x6]\n"
+    "fmul v0.4s, v0.4s, v28.4s\n   fmul v1.4s, v1.4s, v28.4s\n   fmul v2.4s, v2.4s, v28.4s\n   fmul v3.4s, v3.4s, v28.4s\n"
+    "fcvtns v0.4s, v0.4s\n   fcvtns v1.4s, v1.4s\n   fcvtns v2.4s, v2.4s\n   fcvtns v3.4s, v3.4s\n"
+    "sqxtn v4.4h, v0.4s\n   sqxtn v5.4h, v1.4s\n   st2 {v4.4h, v5.4h}, [x0]\n"
+    "sqxtn v6.4h, v2.4s\n   sqxtn v7.4h, v3.4s\n   st2 {v6.4h, v7.4h}, [x7]\n"
+    ASM_RET
+    ASM_END(f32_pair_to_s16_5_7)
+
     ASM_FUNC(f32_pair_to_s16_3_3)
     "movz w9, #0x4700, lsl #16\n   dup v28.2s, w9\n"
     "ldr d0, [x1]\n   ldr d1, [x2]\n   ldur d2, [x1, #4]\n   ldur d3, [x2, #4]\n"
@@ -47124,6 +47244,10 @@ __asm__(
     ASM_FUNC(f32_pair_to_s16_1_2)
     "tail f32_pair_to_s16\n"
     ASM_END(f32_pair_to_s16_1_2)
+
+    ASM_FUNC(f32_pair_to_s16_5_7)
+    "tail f32_pair_to_s16\n"
+    ASM_END(f32_pair_to_s16_5_7)
 
     ASM_FUNC(f32_pair_to_s16_3_3)
     "tail f32_pair_to_s16\n"
