@@ -591,6 +591,10 @@ string_search_folded string_split_next string_token string_token_next
 ''', 'pointers into text the caller owns, and a capacity that no call site in '
      'this tree hands over at all, there being no call site')
 
+cover('nothing_to_fold', None, 'pointer_vector_count',
+      'a NULL-ended vector built at run time from argv, environ or a word list: '
+      'no call site hands over a count the compiler can know')
+
 cover('nothing_to_fold', None, '''
 lock_take lock_release lock_try thread_start thread_join thread_exit
 thread_wait thread_wake

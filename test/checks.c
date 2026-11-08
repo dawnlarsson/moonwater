@@ -198569,6 +198569,62 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_hex */
+
+#ifdef BENCH_pointer_vector_count
+/* NULL-ended pointer vectors (argv, environ, word lists): the former one-entry
+   C loop against the shared four-entry scan, paired, over the entry counts the
+   callers see. The former body is out of line here, as the shared one is. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define ROUNDS (1u << 16)
+
+static string_address pool[1100];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static positive former_count(
+    string_address address_to vector)
+{
+        positive count = 0;
+        while (vector[count])
+                count++;
+        return count;
+}
+
+static p64 run(bool assembly, positive entries, positive rounds)
+{
+        p64 start = get_cpu_time();
+        (void)entries;
+        for (positive at = 0; at < rounds; at++)
+                sink += assembly ? pointer_vector_count(pool) :
+                                   former_count(pool);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive sizes[] = {0, 1, 2, 4, 8, 16, 32, 64, 256, 1024};
+        static char text[64];
+        for (positive row = 0; row < sizeof(sizes) / sizeof(sizes[0]); row++)
+        {
+                positive entries = sizes[row];
+                positive ratios[TRIES];
+                for (positive at = 0; at < entries; at++)
+                        pool[at] = text + (at & 31);
+                pool[entries] = 0;
+                if (former_count(pool) != pointer_vector_count(pool))
+                        return 1;
+                BENCH_PAIRED_RUNS(ratios, former, assembly, entries, ROUNDS);
+                string_format(log, "pointer_vector_count %p entries: paired median ASM/C %p.%p%%\n",
+                              entries, ratios[TRIES / 2] / 100, ratios[TRIES / 2] % 100);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_pointer_vector_count */
 #ifdef BENCH_hex_decode
 /* Hexadecimal decode at digest lengths: the former C digit loop versus the
    shared memory_from_hex_exact body, over valid digits, which is what a check

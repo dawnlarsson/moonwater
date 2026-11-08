@@ -64,6 +64,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_bases', '''
 positive_into_base
 ''', 'paired scalar/assembly timing across bases and value widths')
 
+cover('direct_benchmark', 'test/checks.c#BENCH_pointer_vector_count',
+      'pointer_vector_count',
+      'paired former-C/assembly timing over NULL-ended vectors of 0 to 1024 entries')
+
 cover('direct_benchmark', 'test/checks.c#BENCH_hex', 'memory_into_hex',
       'paired former-C/assembly timing over byte tails, dump rows and large spans')
 

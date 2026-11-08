@@ -676,18 +676,6 @@ static inline INLINE p64 hex_digits_word(p64 value)
            __auto_type _difference_b = (b);                                  \
            _difference_a > _difference_b ? _difference_a - _difference_b : 0; })
 
-/* The count of a NULL-ended pointer vector: argv, environ, a word list. */
-static inline INLINE positive pointer_vector_count(
-    string_address address_to vector)
-{
-        positive count = 0;
-
-        while (vector[count])
-                count++;
-
-        return count;
-}
-
 /* Compile-time array shape, never a separately maintained count. */
 #define array_count(array) (sizeof(array) / sizeof((array)[0]))
 
