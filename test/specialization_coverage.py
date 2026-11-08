@@ -634,6 +634,9 @@ cover('folds_already', 'size', 'hash_crc32c',
 cover('nothing_to_fold', None, 'keccak_blocks sm3_blocks',
       'a pointer to the chaining state and a block run the caller owns; the '
       'rate is a run-time SHA-3 length and nothing shortens either body')
+cover('nothing_to_fold', None, 'sm3_blocks_1_1',
+      'the one-block entry of sm3_blocks: cksum passes a run-time block count '
+      'from its sponge, so no caller in the tree reaches this entry yet')
 cover('folds_already', 'size', 'hash_crc32_msb',
       "cksum's read blocks, build.c's path and the one to eight length bytes "
       'are all counted at run time; no call site hands a literal')

@@ -632,6 +632,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_cksum_digests', 'keccak_blocks sm
       "cksum's SHA-3 (136 and 72 byte blocks) and SM3 cores at every feature "
       'tier, a read block and a single block a call, against the C '
       'src/sh/checksum.c carried, copied into the section')
+cover('correctness_only', 'test/checks.c', 'sm3_blocks_1_1',
+      'one-block SM3 against the textbook rounds at every feature tier '
+      '(sm3_check_cores, blocks = 1); its timing is in no test row, only the '
+      'scratch harness the landing commit message quotes')
 cover('direct_benchmark', 'test/checks.c#BENCH_unicode_width', 'unicode_width',
       'both variants over mixed, Latin, box-drawing, wide, emoji and mark '
       'streams against the C term.c and text.c ran '

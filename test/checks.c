@@ -163317,15 +163317,22 @@ static positive sm3_check_cores(p8 address_to limit)
                 {
                         p8 address_to data = limit - 64 * blocks - short_by;
                         p8 before = data[-1];
-                        p32 want[9], got[9];
+                        p32 want[9], got[9], one[9];
 
                         for (positive at = 0; at < 64 * blocks; at++)
                                 data[at] = hash_check_byte();
                         for (positive i = 0; i < 9; i++)
                                 want[i] = got[i] = (p32)hash_check_byte() << 24 ^ (p32)hash_check_seed;
+                        for (positive i = 0; i < 9; i++)
+                                one[i] = got[i];
                         sm3_reference(want, data, blocks);
                         sm3_blocks(got, data, blocks);
                         wrong += memory_compare(want, got, sizeof want) != 0;
+                        if (blocks == 1)
+                        {
+                                sm3_blocks_1_1(one, data);
+                                wrong += memory_compare(want, one, sizeof want) != 0;
+                        }
                         wrong += data[-1] != before;
                 }
         return wrong;
