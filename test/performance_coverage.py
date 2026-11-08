@@ -216,6 +216,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_prefix_known', 'memory_common_pre
       'equal spans: native x86-64 plus ARM64/RV64 instruction-set runners')
 cover('direct_benchmark', 'test/checks.c#BENCH_compare_max', 'string_compare_max',
       'dynamic-bound first-mismatch semantic floor and equal/late traffic proxies')
+cover('direct_benchmark', 'test/checks.c#BENCH_bounded_classes', '''
+string_copy_max_3_15
+''', 'size-class variants of the bounded copy and compare, timed at one bound per class against the generic routine')
 cover('direct_benchmark', 'test/checks.c#BENCH_string_copy', 'string_copy',
       'caller-shaped sizes against copy-only traffic and exact scalar semantic proxies')
 cover('direct_benchmark', 'test/checks.c#BENCH_hash_33',

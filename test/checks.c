@@ -213863,6 +213863,85 @@ b32 main(void)
 }
 #endif /* BENCH_compare_max */
 
+#ifdef BENCH_bounded_classes
+/* The size-class variant string_copy_max_3_15 at bounds of three to fifteen against the generic routine at the same
+   bound. Unit: calls, reported per hundred. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define BOUNDED_CLASS_ROUNDS (1u << 22)
+#define BOUNDED_CLASS_TRIES 7
+
+typedef string_address (*bounded_class_copy)(string_address, string_address, positive);
+
+static char bounded_class_source[64] __attribute__((aligned(64)));
+static char bounded_class_dest[64] __attribute__((aligned(64)));
+static volatile bipolar bounded_class_sink;
+
+static bounded_class_copy volatile bounded_class_copy_generic = string_copy_max;
+static bounded_class_copy volatile bounded_class_copy_fifteen = string_copy_max_3_15;
+
+#define BOUNDED_CLASS_COPY(name, call, bound) \
+        static fn name(void) { \
+                for (positive i = 0; i < BOUNDED_CLASS_ROUNDS; i++) \
+                        bounded_class_sink += (bipolar)call(bounded_class_dest, bounded_class_source, bound)[0]; \
+        }
+
+BOUNDED_CLASS_COPY(bounded_copy_generic_three, bounded_class_copy_generic, 3)
+BOUNDED_CLASS_COPY(bounded_copy_fifteen_three, bounded_class_copy_fifteen, 3)
+BOUNDED_CLASS_COPY(bounded_copy_generic_eight, bounded_class_copy_generic, 8)
+BOUNDED_CLASS_COPY(bounded_copy_fifteen_eight, bounded_class_copy_fifteen, 8)
+BOUNDED_CLASS_COPY(bounded_copy_generic_fifteen, bounded_class_copy_generic, 15)
+BOUNDED_CLASS_COPY(bounded_copy_fifteen_fifteen, bounded_class_copy_fifteen, 15)
+
+static bench_work bounded_class_named(string_address name)
+{
+        BENCH_NAME(name, "copy-three-generic", bounded_copy_generic_three);
+        BENCH_NAME(name, "copy-three-3-15", bounded_copy_fifteen_three);
+        BENCH_NAME(name, "copy-eight-generic", bounded_copy_generic_eight);
+        BENCH_NAME(name, "copy-eight-3-15", bounded_copy_fifteen_eight);
+        BENCH_NAME(name, "copy-fifteen-generic", bounded_copy_generic_fifteen);
+        BENCH_NAME(name, "copy-fifteen-3-15", bounded_copy_fifteen_fifteen);
+        return null;
+}
+
+b32 main(void)
+{
+        for (positive i = 0; i < 63; i++)
+                bounded_class_source[i] = (p8)('a' + (i * 7) % 23);
+        bounded_class_source[63] = 0;
+        bounded_class_source[40] = 0;
+
+        if (program_argument_count() > 1)
+        {
+                bench_work work = bounded_class_named(program_argument(1));
+                if (is_null(work))
+                        return 2;
+                work();
+                return 0;
+        }
+
+        string_format(log, "string_copy_max size class three to fifteen, best of %p (%p calls)\n",
+                      (positive)BOUNDED_CLASS_TRIES, (positive)BOUNDED_CLASS_ROUNDS);
+        bench_report((string_address)"copy three bytes, generic", bounded_copy_generic_three, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        bench_report((string_address)"copy three bytes, 3-15", bounded_copy_fifteen_three, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        bench_report((string_address)"copy eight bytes, generic", bounded_copy_generic_eight, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        bench_report((string_address)"copy eight bytes, 3-15", bounded_copy_fifteen_eight, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        bench_report((string_address)"copy fifteen bytes, generic", bounded_copy_generic_fifteen, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        bench_report((string_address)"copy fifteen bytes, 3-15", bounded_copy_fifteen_fifteen, BOUNDED_CLASS_TRIES,
+                     BOUNDED_CLASS_ROUNDS, (string_address)"call");
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_bounded_classes */
+
 #ifdef BENCH_string_copy
 /* string_copy over caller-shaped sizes, against semantic and traffic proxies. */
 #include "../src/lib.util.c"

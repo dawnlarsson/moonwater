@@ -113,10 +113,10 @@
           bytes_reverse_16               public  yes     yes     yes
           bytes_reverse_32               public  yes     yes     yes
           canvas_cell                    public  yes     yes     yes
-          canvas_cell_1_1                public  yes     yes     yes
           canvas_cell2                   public  yes     yes     yes
           canvas_cell2_1_1               public  yes     yes     yes
           canvas_cell2_wide              public  yes     yes     yes
+          canvas_cell_1_1                public  yes     yes     yes
           canvas_cell_wide               public  yes     yes     yes
           canvas_cells                   public  yes     yes     yes
           canvas_cells_wide              public  yes     yes     yes
@@ -436,6 +436,7 @@
           string_copy_max                public  yes     yes     yes
           string_copy_max_end            public  yes     yes     yes
           string_copy_max_endptr         public  yes     yes     yes
+          string_copy_max_3_15         public  yes     yes     yes
           string_cut                     public  yes     yes     yes
           string_diagnostic              public  yes     yes     yes
           string_digits                  public  yes     yes     yes
@@ -18653,6 +18654,30 @@ __asm__(
     "4:  jmp memory_copy_apart\n"
     ASM_END(string_copy_max)
     //
+    //       string_copy_max_3_15, x86_64: the bounded copy for a bound of one
+    //       to sixteen bytes, the same answer as string_copy_max. One sixteen byte
+    //       load of the source when its page allows (offset at most 0xff0, else the
+    //       generic body). The first zero byte z comes from the mask, sixteen when
+    //       there is none. The copy is z+1 bytes when the terminator is inside the
+    //       bound (z < n), and n bytes otherwise; the stores are two overlapping
+    //       pieces sized by the count, read back from the source, so nothing is
+    //       written past the bound or the terminator.
+    //
+    ASM_FUNC(string_copy_max_3_15)
+#ifndef KERNEL_MODE
+    "mov %rdi, %rax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja " ASM_LABEL(copy_max_3_15_generic) "\n"
+    "movdqu (%rsi), %xmm0\n   pxor %xmm1, %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   or $0x10000, %ecx\n   bsf %ecx, %ecx\n"
+    "cmp %rdx, %rcx\n   jae " ASM_LABEL(copy_max_3_15_bound) "\n   inc %ecx\n   jmp " ASM_LABEL(copy_max_3_15_count) "\n"
+    "" ASM_LABEL(copy_max_3_15_bound) ":\n   mov %rdx, %rcx\n"
+    "" ASM_LABEL(copy_max_3_15_count) ":\n   cmp $8, %ecx\n   jae " ASM_LABEL(copy_max_3_15_8) "\n   cmp $4, %ecx\n   jae " ASM_LABEL(copy_max_3_15_4) "\n"
+    "cmp $2, %ecx\n   jae " ASM_LABEL(copy_max_3_15_2) "\n   movzbl (%rsi), %r8d\n   movb %r8b, (%rdi)\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_8) ":\n   mov (%rsi), %r8\n   mov -8(%rsi,%rcx), %r9\n   mov %r8, (%rdi)\n   mov %r9, -8(%rdi,%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_4) ":\n   movl (%rsi), %r8d\n   movl -4(%rsi,%rcx), %r9d\n   movl %r8d, (%rdi)\n   movl %r9d, -4(%rdi,%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_2) ":\n   movzwl (%rsi), %r8d\n   movzwl -2(%rsi,%rcx), %r9d\n   movw %r8w, (%rdi)\n   movw %r9w, -2(%rdi,%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_generic) ":\n   jmp string_copy_max\n"
+#endif
+    ASM_END(string_copy_max_3_15)
+    //
     //       string_copy_max_end -- the bounded copy, and where it ended.
     //
     //       Seventeen places take a bounded string and then want to know how
@@ -27903,6 +27928,36 @@ __asm__(
     "9:  mov x0, x3\n" ASM_RET
 #endif
     ASM_END(string_copy_max)
+    //
+    //       string_copy_max_3_15: the bounded copy for a bound of one to
+    //       sixteen bytes, the same answer as string_copy_max and no other.
+    //
+    //       One vector read of the source, when its sixteen bytes lie inside
+    //       the page (the page offset is at most 0xff0; past that the generic
+    //       body takes the call). The first zero lane z is found from the
+    //       nibble syndrome, sixteen when there is none. The copy is z+1 bytes
+    //       when the terminator falls inside the bound (z < n: the terminator
+    //       is copied), and n bytes otherwise, so no byte is written past the
+    //       bound and nothing is written past the terminator. The stores are
+    //       two overlapping pieces sized by the count, each read back from the
+    //       source window, so a count of one to sixteen is two or three
+    //       instructions in its class.
+    //
+    ASM_FUNC(string_copy_max_3_15)
+#ifndef KERNEL_MODE
+    "and x9, x1, #0xfff\n   cmp x9, #0xff0\n   b.hi " ASM_LABEL(copy_max_3_15_generic) "\n"
+    "ldr q0, [x1]\n   cmeq v1.16b, v0.16b, #0\n   shrn v1.8b, v1.8h, #4\n   fmov x3, d1\n"
+    "rbit x3, x3\n   clz x3, x3\n   lsr x3, x3, #2\n"
+    "cmp x3, x2\n   b.hs " ASM_LABEL(copy_max_3_15_bound) "\n   add x3, x3, #1\n   b " ASM_LABEL(copy_max_3_15_count) "\n"
+    "" ASM_LABEL(copy_max_3_15_bound) ":\n   mov x3, x2\n"
+    "" ASM_LABEL(copy_max_3_15_count) ":\n   cmp x3, #8\n   b.hs " ASM_LABEL(copy_max_3_15_8) "\n   cmp x3, #4\n   b.hs " ASM_LABEL(copy_max_3_15_4) "\n"
+    "cmp x3, #2\n   b.hs " ASM_LABEL(copy_max_3_15_2) "\n   ldrb w4, [x1]\n   strb w4, [x0]\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_8) ":\n   ldr x4, [x1]\n   add x6, x1, x3\n   ldur x5, [x6, #-8]\n   str x4, [x0]\n   add x7, x0, x3\n   stur x5, [x7, #-8]\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_4) ":\n   ldr w4, [x1]\n   add x6, x1, x3\n   ldur w5, [x6, #-4]\n   str w4, [x0]\n   add x7, x0, x3\n   stur w5, [x7, #-4]\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_2) ":\n   ldrh w4, [x1]\n   add x6, x1, x3\n   ldurh w5, [x6, #-2]\n   strh w4, [x0]\n   add x7, x0, x3\n   sturh w5, [x7, #-2]\n" ASM_RET
+    "" ASM_LABEL(copy_max_3_15_generic) ":\n   b string_copy_max\n"
+#endif
+    ASM_END(string_copy_max_3_15)
     //
     //       string_copy_max_end. The x86_64 block above says what it is for
     //       and why it is two passes.
@@ -37943,6 +37998,12 @@ __asm__(
     "4:  tail memory_copy_apart\n"
     "9:  mv a0, a3\n" ASM_RET
     ASM_END(string_copy_max)
+    //
+    //       RISC-V: the size-class variants are the generic bodies. Their
+    //       classes are not timed on this architecture (instruction counts only),
+    //       so they claim nothing here and resolve to the generic routine.
+    //
+    ASM_ALIAS(string_copy_max_3_15, string_copy_max)
     //
     //       string_copy_max_end. The x86_64 block above says what it is for.
     //
@@ -49478,6 +49539,11 @@ string_address string_copy(string_address destination, string_address source);
 string_address string_append(string_address destination, string_address source);
 WRITES(1, 3)
 string_address string_copy_max(string_address destination, string_address source, positive length);
+/*
+        string_copy_max_3_15 is the size-class variant of string_copy_max for a bound of three to fifteen bytes:
+        the same answer, faster in that class. Bounds one and two, and every bound above fifteen, keep the generic routine.
+*/
+string_address string_copy_max_3_15(string_address destination, string_address source, positive length);
 /*
         The same copy, terminated, with the end handed back.
 

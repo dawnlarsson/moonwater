@@ -599,6 +599,9 @@ string_search_folded string_split_next string_token string_token_next
      'this tree hands over at all, there being no call site')
 
 cover('nothing_to_fold', None, '''
+string_copy_max_3_15
+''', 'size-class entries: a caller names the class when its bound is known to fall in it; the class is the entry, nothing folds')
+cover('nothing_to_fold', None, '''
 lock_take lock_release lock_try thread_start thread_join thread_exit
 thread_wait thread_wake
 ''', 'a lock word, a thread handle, a futex word or an entry pointer the call '

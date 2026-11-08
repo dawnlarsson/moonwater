@@ -27751,7 +27751,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect transpose runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines routine compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect transpose runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max bounded-classes string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines routine compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -27928,6 +27928,8 @@ bench_about()
                  bench_line="the production reader over warm memfd reads" ;;
         compare-max) bench_section=BENCH_compare_max
                  bench_line="dynamic-bound string_compare_max against its two floors" ;;
+        bounded-classes) bench_section=BENCH_bounded_classes
+                 bench_line="string_copy_max and string_compare_max size-class variants against the generic routine" ;;
         string-copy) bench_section=BENCH_string_copy
                  bench_line="string_copy over caller-shaped sizes against its proxies" ;;
         stream-get) bench_section=BENCH_stream_get
