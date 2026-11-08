@@ -295,10 +295,7 @@ static int compositor_record_alloc(void)
 // Whether the rows of two frames are the same, and whether the whole frames are.
 static int compositor_record_row_same(const unsigned int *a, const unsigned int *b, unsigned int width)
 {
-        for (unsigned int x = 0; x < width; x++)
-                if (a[x] != b[x])
-                        return 0;
-        return 1;
+        return !memory_compare(a, b, (unsigned long)width * 4);
 }
 
 static int compositor_record_same(const unsigned int *a, const unsigned int *b, unsigned int width, unsigned int height)
