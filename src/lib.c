@@ -54314,10 +54314,19 @@ __asm__(
     ASM_FUNC(log)
     "cbnz x1, " ASM_LABEL(log_arm64_have_length) "\n   stp x19, x30, [sp, #-16]!\n   mov x19, x0\n   bl string_length\n   mov x1, x0\n   mov x0, x19\n   ldp x19, x30, [sp], #16\n"
     "" ASM_LABEL(log_arm64_have_length) ":\n   mov x5, x1\n   mov x4, x0\n   cbz x5, " ASM_LABEL(log_arm64_done_fast) "\n   cmp x5, #4096\n   b.hs " ASM_LABEL(log_arm64_slow) "\n   adrp x3, " ASM_PAGE(log_writer_buffer_length) "\n"
-    "add x3, x3, " ASM_LO12(log_writer_buffer_length) "\n   ldr x6, [x3]\n   mov x7, #4096\n   sub x7, x7, x5\n   cmp x6, x7\n   b.hi " ASM_LABEL(log_arm64_slow) "\n   sub sp, sp, #32\n"
+    "add x3, x3, " ASM_LO12(log_writer_buffer_length) "\n   ldr x6, [x3]\n   mov x7, #4096\n   sub x7, x7, x5\n   cmp x6, x7\n   b.hi " ASM_LABEL(log_arm64_slow) "\n"
+    // Up to sixteen bytes are stored in place, as buffered_write does them.
+    "adrp x0, " ASM_PAGE(log_writer_buffer) "\n   add x0, x0, " ASM_LO12(log_writer_buffer) "\n   add x0, x0, x6\n   cmp x5, #16\n   b.ls " ASM_LABEL(log_arm64_small16) "\n   sub sp, sp, #32\n"
     "stp x4, x3, [sp]\n   stp x5, x30, [sp, #16]\n   adrp x0, " ASM_PAGE(log_writer_buffer) "\n   add x0, x0, " ASM_LO12(log_writer_buffer) "\n   add x0, x0, x6\n   mov x1, x4\n   mov x2, x5\n   bl memory_copy\n"
     "ldr x3, [sp, #8]\n   ldr x5, [sp, #16]\n   ldr x30, [sp, #24]\n   ldr x6, [x3]\n   add x6, x6, x5\n   str x6, [x3]\n   add sp, sp, #32\n"
     "" ASM_LABEL(log_arm64_done_fast) ":\n" ASM_RET
+    "" ASM_LABEL(log_arm64_small16) ":  cmp x5, #8\n   b.lo " ASM_LABEL(log_arm64_small4) "\n"
+    "ldr x8, [x4]\n   add x9, x4, x5\n   ldur x9, [x9, #-8]\n   str x8, [x0]\n   add x10, x0, x5\n   stur x9, [x10, #-8]\n   b " ASM_LABEL(log_arm64_small_done) "\n"
+    "" ASM_LABEL(log_arm64_small4) ":  cmp x5, #4\n   b.lo " ASM_LABEL(log_arm64_small1) "\n"
+    "ldr w8, [x4]\n   add x9, x4, x5\n   ldur w9, [x9, #-4]\n   str w8, [x0]\n   add x10, x0, x5\n   stur w9, [x10, #-4]\n   b " ASM_LABEL(log_arm64_small_done) "\n"
+    "" ASM_LABEL(log_arm64_small1) ":  ldrb w8, [x4]\n   lsr x11, x5, #1\n   ldrb w9, [x4, x11]\n   sub x12, x5, #1\n   ldrb w10, [x4, x12]\n"
+    "strb w8, [x0]\n   strb w9, [x0, x11]\n   strb w10, [x0, x12]\n"
+    "" ASM_LABEL(log_arm64_small_done) ":  add x6, x6, x5\n   str x6, [x3]\n" ASM_RET
     "" ASM_LABEL(log_arm64_slow) ":  adrp x3, " ASM_PAGE(log_writer_buffer_length) "\n   add x3, x3, " ASM_LO12(log_writer_buffer_length) "\n   mov x2, #4096\n   adrp x1, " ASM_PAGE(log_writer_buffer) "\n"
     "add x1, x1, " ASM_LO12(log_writer_buffer) "\n   mov x0, #1\n   str x30, [sp, #-16]!\n   bl buffered_write\n   cbnz w0, " ASM_LABEL(log_arm64_done) "\n   adrp x1, " ASM_PAGE(log_writer_failed) "\n"
     "add x1, x1, " ASM_LO12(log_writer_failed) "\n   adrp x2, " ASM_PAGE(buffered_failure) "\n   add x2, x2, " ASM_LO12(buffered_failure) "\n   ldrb w2, [x2]\n   strb w2, [x1]\n"
