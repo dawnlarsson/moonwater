@@ -23123,8 +23123,8 @@ static bool clock_tz_parse_to(string_address text,
         clock_has_dst = false;
         clock_std_west = 0;
         clock_dst_west = 0;
-        string_copy_bounded(clock_std_name, "UTC", CLOCK_TZ_NAME);
-        string_copy_bounded(clock_dst_name, "UTC", CLOCK_TZ_NAME);
+        string_copy_bounded_3_16(clock_std_name, "UTC", CLOCK_TZ_NAME);
+        string_copy_bounded_3_16(clock_dst_name, "UTC", CLOCK_TZ_NAME);
         if (!s || !s[0])
                 return true;
         if (!clock_tz_name(address_of s, clock_std_name, CLOCK_TZ_NAME))
@@ -23132,7 +23132,7 @@ static bool clock_tz_parse_to(string_address text,
         if (!clock_tz_offset(address_of s, address_of clock_std_west,
                              CLOCK_TZ_OFFSET_HOURS))
                 return false;
-        string_copy_bounded(clock_dst_name, clock_std_name, CLOCK_TZ_NAME);
+        string_copy_bounded_3_16(clock_dst_name, clock_std_name, CLOCK_TZ_NAME);
         if (!s[0] || s[0] == ',')
         {
                 timezone = clock_std_west;
@@ -23143,7 +23143,7 @@ static bool clock_tz_parse_to(string_address text,
                 standing, as it does there, rather than no zone at all. */
         if (!clock_tz_name(address_of s, clock_dst_name, CLOCK_TZ_NAME))
         {
-                string_copy_bounded(clock_dst_name, clock_std_name,
+                string_copy_bounded_3_16(clock_dst_name, clock_std_name,
                                     CLOCK_TZ_NAME);
                 timezone = clock_std_west;
                 daylight = 0;
@@ -23505,8 +23505,8 @@ static fn clock_tz_reset(void)
         clock_dst_west = 0;
         timezone = 0;
         daylight = 0;
-        string_copy_bounded(clock_std_name, "UTC", CLOCK_TZ_NAME);
-        string_copy_bounded(clock_dst_name, "UTC", CLOCK_TZ_NAME);
+        string_copy_bounded_3_16(clock_std_name, "UTC", CLOCK_TZ_NAME);
+        string_copy_bounded_3_16(clock_dst_name, "UTC", CLOCK_TZ_NAME);
 }
 
 /*
@@ -23759,7 +23759,7 @@ positive clock_zone_tzif(string_address zone, p8 address_to into,
                 tzset();
                 return 0;
         }
-        string_copy_bounded(name, clock_std_name, sizeof(name));
+        string_copy_bounded_3_16(name, clock_std_name, sizeof(name));
         east = -clock_std_west;
         tzset();
 

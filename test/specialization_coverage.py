@@ -92,6 +92,9 @@ MEASURED = ('specialized', 'worth_it', 'placed', 'ranged')
 
 #       <routine>__max_<N> and <routine>__room_<N>, lib.c's call-site entries.
 RANGED_NAME = re.compile(r'^([a-z_][a-z_0-9]*?)__(max|room)_([0-9]+)$')
+#       <routine>_<lo>_<hi>, the size-class spelling (SIZE_NAMING): an inclusive range of
+#       the routine's unit, bytes unless its contract says otherwise.
+RANGED_SIZE_NAME = re.compile(r'^([a-z_][a-z_0-9]*?)_([0-9]+)_([0-9]+)$')
 
 
 def cover(category, parameter, names, note, expansion=None, evidence=None,
@@ -601,6 +604,13 @@ string_search_folded string_split_next string_token string_token_next
 cover('nothing_to_fold', None, '''
 string_copy_max_3_15
 ''', 'size-class entries: a caller names the class when its bound is known to fall in it; the class is the entry, nothing folds')
+cover('ranged', 'capacity', 'string_copy_bounded_3_16',
+      'Measured. strlcpy for capacities three to sixteen: the source length by an aligned sixteen byte '
+      'scan and the copy by overlapping stores of at most fifteen bytes; no call to string_length or '
+      'memory_copy_apart. Against the general routine and the C reference on both machines, sizes 0 to 16 '
+      '(test/checks.c BENCH_routine). Literal capacities of sixteen name it directly (CLOCK_TZ_NAME sites)',
+      evidence='test/checks.c#BENCH_routine')
+
 cover('nothing_to_fold', None, '''
 lock_take lock_release lock_try thread_start thread_join thread_exit
 thread_wait thread_wake
@@ -1074,6 +1084,9 @@ def validate():
     manifested_specialized = {
         row.routine for row in ROWS
         if row.category in ('specialized', 'placed', 'ranged')
+        #      A size-class entry is named by its range, not by a macro: callers reach it through
+        #      the macro of the general routine, which carries the row.
+        and not RANGED_SIZE_NAME.match(row.routine)
     }
     if macro_specialized != manifested_specialized:
         if macro_specialized - manifested_specialized:
@@ -1112,10 +1125,10 @@ def validate():
         #      A ranged entry is its routine's name, a promise and a number,
         #      over a routine the inventory has.
         if row.category == 'ranged':
-            spelled = RANGED_NAME.match(row.routine)
+            spelled = RANGED_NAME.match(row.routine) or RANGED_SIZE_NAME.match(row.routine)
             if not spelled:
-                errors.append('%s: a ranged row is not <routine>__max_<N> or '
-                              '<routine>__room_<N>' % row.routine)
+                errors.append('%s: a ranged row is not <routine>__max_<N>, <routine>__room_<N> or '
+                              '<routine>_<lo>_<hi>' % row.routine)
             #      An entry with no plain routine is its own body, for a
             #      contract every caller keeps; it is in the inventory itself.
             elif spelled.group(1) not in inventory and row.routine not in inventory:
@@ -1149,8 +1162,13 @@ def validate():
                               row.routine)
             continue
 
-        #      specialized, ranged and worth_it name the expansion they mean.
-        if not row.expansion:
+        #      specialized, ranged and worth_it name the expansion they mean. A size-class entry
+        #      has no macro to name: callers name it by its range, so its row names no expansion.
+        if row.category == 'ranged' and RANGED_SIZE_NAME.match(row.routine):
+            if row.expansion:
+                errors.append('%s: a size-class row names an expansion, which it does not have' %
+                              row.routine)
+        elif not row.expansion:
             errors.append('%s: %s row names no expansion' %
                           (row.routine, row.category))
         elif row.category in ('specialized', 'ranged') and \

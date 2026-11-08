@@ -226060,6 +226060,9 @@ static int routine_libc_open(void)
 /* The lib.c entry points this driver times. The object supplies them. */
 extern void memory_copy(routine_byte *into, const routine_byte *from, routine_size count);
 extern routine_size string_length(const routine_byte *source);
+extern routine_size string_copy_bounded(routine_byte *into, const routine_byte *from, routine_size capacity);
+extern routine_size string_copy_bounded_3_16(routine_byte *into, const routine_byte *from, routine_size capacity);
+extern void moonwater_cpu_detect(void);
 
 /* lib.c's logging and buffered writers reach these two, which on some
    targets (Mach-O arm64 among them) are not in the object. The routines timed
@@ -226158,12 +226161,104 @@ ROUTINE_CALL harness_empty(routine_byte *d, const routine_byte *s, routine_size 
         return n;
 }
 
+/* string_copy_bounded: n is the capacity. The source is the driver's string of
+   length n, so every timed call copies n - 1 bytes and terminates (the
+   truncating case). "c" is the naive strlcpy, which the compiler under test
+   builds; it is the trusted reference. */
+ROUTINE_CALL string_copy_bounded_class(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        return string_copy_bounded_3_16(d, s, n);
+}
+
+ROUTINE_CALL string_copy_bounded_ours(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        return string_copy_bounded(d, s, n);
+}
+
+ROUTINE_CALL string_copy_bounded_c(routine_byte *d, const routine_byte *s, routine_size n)
+{
+        routine_size len = 0;
+
+        while (s[len])
+                len++;
+        if (n)
+        {
+                routine_size k = len < n - 1 ? len : n - 1;
+
+                for (routine_size i = 0; i < k; i++)
+                        d[i] = s[i];
+                d[k] = 0;
+        }
+        return len;
+}
+
+/* The driver's own check fills every source to exactly its size, so it never
+   reaches a source shorter than the capacity. This sweep does: every source
+   length from 0 to 40 (short, equal and longer than the capacity), every
+   capacity from 0 to 20, and every destination and source offset pair from
+   0 to 63. Each run is compared with the C reference on the result, the bytes
+   of the destination through a guard past the capacity, and the source. */
+static int routine_copy_sweep(void)
+{
+        static routine_byte src0[256], src1[256], dst0[256], dst1[256];
+        int bad = 0;
+        long runs = 0;
+
+        for (routine_size od = 0; od < 64; od++)
+                for (routine_size os = 0; os < 64; os++)
+                        for (routine_size len = 0; len <= 40; len++)
+                                for (routine_size cap = 0; cap <= 16; cap++)
+                                {
+                                        routine_size want, got;
+
+                                        for (routine_size i = 0; i < 256; i++)
+                                        {
+                                                src0[i] = (routine_byte)(1 + (i * 37u + len) % 255u);
+                                                dst0[i] = (routine_byte)(i * 131u + 0x5a);
+                                                src1[i] = src0[i];
+                                                dst1[i] = dst0[i];
+                                        }
+                                        src0[os + len] = 0;
+                                        src1[os + len] = 0;
+                                        want = string_copy_bounded_c(dst0 + od, src0 + os, cap);
+                                        got = string_copy_bounded_3_16(dst1 + od, src1 + os, cap);
+                                        runs++;
+                                        if (want != got)
+                                        {
+                                                if (bad++ < 8)
+                                                        printf("SWEEP len=%lu cap=%lu off=%lu,%lu: result %lu, trusted %lu\n",
+                                                               len, cap, od, os, got, want);
+                                                continue;
+                                        }
+                                        for (routine_size i = 0; i < 256; i++)
+                                                if (dst0[i] != dst1[i])
+                                                {
+                                                        if (bad++ < 8)
+                                                                printf("SWEEP len=%lu cap=%lu off=%lu,%lu: destination byte %lu is %02x, trusted %02x\n",
+                                                                       len, cap, od, os, i, dst1[i], dst0[i]);
+                                                        break;
+                                                }
+                                        for (routine_size i = 0; i < 256; i++)
+                                                if (src0[i] != src1[i])
+                                                {
+                                                        if (bad++ < 8)
+                                                                printf("SWEEP len=%lu cap=%lu off=%lu,%lu: source byte %lu changed\n",
+                                                                       len, cap, od, os, i);
+                                                        break;
+                                                }
+                                }
+        printf("sweep string_copy_bounded_3_16 %ld runs, %d mismatched\n", runs, bad);
+        return bad != 0;
+}
+
 /* One row per routine. The names are the lib.c symbols. */
 static const struct routine_row routine_rows[] = {
         {"memory_copy", "copy",
          {{"ours", memory_copy_ours}, {"libc", memory_copy_libc}, {"c", memory_copy_c}, {0, 0}}},
         {"string_length", "scan",
          {{"ours", string_length_ours}, {"libc", string_length_libc}, {"c", string_length_c}, {0, 0}}},
+        {"string_copy_bounded_3_16", "copy",
+         {{"ours", string_copy_bounded_class}, {"generic", string_copy_bounded_ours}, {"c", string_copy_bounded_c}, {0, 0}}},
 };
 
 static const routine_size routine_default_sizes[] = {
@@ -226382,6 +226477,10 @@ static int routine_check_row(const struct routine_row *row, const routine_size *
                              int full, int fuzz, routine_size off_d, routine_size off_s)
 {
         const struct routine_candidate *trusted = 0;
+        int swept = 0;
+
+        if (full && !routine_same(row->name, "string_copy_bounded_3_16"))
+                swept = routine_copy_sweep();
         int bad = 0, runs = 0;
         static const routine_size eight[8] = {0, 1, 3, 7, 8, 15, 31, 63};
         unsigned long state = 88172645463325252ul;
@@ -226439,7 +226538,7 @@ static int routine_check_row(const struct routine_row *row, const routine_size *
         }
 
         printf("check %-14s %d runs, %d mismatched\n", row->name, runs, bad);
-        return bad != 0;
+        return bad != 0 || swept;
 }
 
 static const struct routine_row *routine_find(const char *name)
@@ -226515,6 +226614,9 @@ extern unsigned char routine_cpu_vbmi __asm__("cpu_has_avx512_vbmi");
 static int routine_main(int argc, char **argv)
 {
         routine_size sizes[ROUTINE_SIZES_MAX];
+
+        /* Before any timing: the generic routines pick their bodies from what this processor has. */
+        moonwater_cpu_detect();
 
         moonwater_cpu_detect();
         int size_count = (int)(sizeof routine_default_sizes / sizeof routine_default_sizes[0]);

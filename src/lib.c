@@ -432,6 +432,7 @@
           string_compare_max             public  yes     yes     yes
           string_copy                    public  yes     yes     yes
           string_copy_bounded            public  yes     yes     yes
+          string_copy_bounded_3_16       public  yes     yes     yes
           string_copy_end                public  yes     yes     yes
           string_copy_max                public  yes     yes     yes
           string_copy_max_end            public  yes     yes     yes
@@ -69054,6 +69055,10 @@ __asm__(
 
 positive string_copy_bounded(string_address destination, string_address source,
                              positive capacity);
+//      The size class of string_copy_bounded for capacities three to sixteen. Callers reach it
+//      through the literal routing in lib.util.c, or name it directly.
+positive string_copy_bounded_3_16(string_address destination, string_address source,
+                                  positive capacity);
 positive string_append_bounded(string_address destination,
                                string_address source, positive capacity);
 string_address string_split_next(string_address address_to holder,
@@ -69090,6 +69095,37 @@ __asm__(
     "pop %rdx\n   pop %rax\n   movb $0, (%rbx,%rdx)\n"
     "1:  pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_END(string_copy_bounded)
+
+    //
+    //   string_copy_bounded_3_16: strlcpy for a capacity of three to sixteen
+    //   bytes. The same answer as string_copy_bounded at every capacity -- the
+    //   source length, whether or not it fitted -- and the same bytes written:
+    //   the first capacity minus one of the source, then a terminator, and
+    //   nothing at all for a capacity of zero. The source is read a sixteen
+    //   byte aligned chunk at a time, so no load crosses a page or reads past
+    //   the chunk that holds the terminator; the bytes before the source in
+    //   the first chunk are shifted out of the mask. The copy is at most
+    //   fifteen bytes, which is one or two overlapping loads and stores on
+    //   each side of the middle, read only from the source's own bytes below
+    //   the length and written only below the capacity. SSE2 is the baseline,
+    //   so the body needs no feature byte.
+    //
+    ASM_FUNC(string_copy_bounded_3_16)
+    "mov %rsi, %r9\n   and $15, %r9\n   mov %rsi, %r11\n   and $-16, %r11\n   pxor %xmm1, %xmm1\n"
+    "movdqu (%r11), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r10d\n   mov %r9, %rcx\n   shr %cl, %r10d\n"
+    "test %r10d, %r10d\n   jnz 2f\n   mov $16, %r9\n   sub %rcx, %r9\n"
+    "1:  add $16, %r11\n   movdqu (%r11), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r10d\n   test %r10d, %r10d\n   jnz 3f\n"
+    "add $16, %r9\n   jmp 1b\n"
+    "2:  xor %r9d, %r9d\n"
+    "3:  bsf %r10d, %eax\n   add %r9, %rax\n"
+    "mov %rdx, %rcx\n   test %rdx, %rdx\n   jz 9f\n   dec %rcx\n   mov %rax, %r9\n   cmp %rcx, %r9\n   cmova %rcx, %r9\n"
+    "cmp $8, %r9\n   jb 4f\n   mov (%rsi), %rcx\n   mov %rcx, (%rdi)\n   mov -8(%rsi,%r9), %rcx\n   mov %rcx, -8(%rdi,%r9)\n   jmp 8f\n"
+    "4:  cmp $4, %r9\n   jb 5f\n   mov (%rsi), %ecx\n   mov %ecx, (%rdi)\n   mov -4(%rsi,%r9), %ecx\n   mov %ecx, -4(%rdi,%r9)\n   jmp 8f\n"
+    "5:  cmp $2, %r9\n   jb 6f\n   movzwl (%rsi), %ecx\n   mov %cx, (%rdi)\n   movzwl -2(%rsi,%r9), %ecx\n   mov %cx, -2(%rdi,%r9)\n   jmp 8f\n"
+    "6:  test %r9, %r9\n   jz 8f\n   movb (%rsi), %cl\n   movb %cl, (%rdi)\n"
+    "8:  movb $0, (%rdi,%r9)\n"
+    "9:  " ASM_RET
+    ASM_END(string_copy_bounded_3_16)
 
     //
     //   strlcat. The answer is the length it wanted, so a destination that
@@ -69176,6 +69212,25 @@ __asm__(
     "1:  mov x0, x22\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #48\n" ASM_RET
     ASM_END(string_copy_bounded)
 
+    //      string_copy_bounded_3_16; the x86_64 block above carries the reasoning. The
+    //      source is read in aligned sixteen byte chunks, a nibble per byte from a
+    //      compare and a narrowing shift, so the first chunk's bytes before the source
+    //      are shifted out and the terminator is found with rbit and clz.
+    ASM_FUNC(string_copy_bounded_3_16)
+    "mov x15, x0\n   and x3, x1, #15\n   bic x4, x1, #15\n   movi v1.16b, #0\n   ldr q0, [x4]\n   cmeq v0.16b, v0.16b, v1.16b\n   shrn v0.8b, v0.8h, #4\n   fmov x5, d0\n"
+    "lsl x6, x3, #2\n   lsr x5, x5, x6\n   mov x7, #0\n   cbnz x5, 2f\n   mov x7, #16\n   sub x7, x7, x3\n"
+    "1:  add x4, x4, #16\n   ldr q0, [x4]\n   cmeq v0.16b, v0.16b, v1.16b\n   shrn v0.8b, v0.8h, #4\n   fmov x5, d0\n   cbnz x5, 2f\n"
+    "add x7, x7, #16\n   b 1b\n"
+    "2:  rbit x5, x5\n   clz x5, x5\n   lsr x5, x5, #2\n   add x9, x7, x5\n"
+    "cbz x2, 9f\n   sub x11, x2, #1\n   cmp x9, x11\n   csel x12, x9, x11, lo\n"
+    "cmp x12, #8\n   b.lo 4f\n   ldr x13, [x1]\n   str x13, [x15]\n   add x14, x1, x12\n   ldr x13, [x14, #-8]\n   add x14, x15, x12\n   str x13, [x14, #-8]\n   b 8f\n"
+    "4:  cmp x12, #4\n   b.lo 5f\n   ldr w13, [x1]\n   str w13, [x15]\n   add x14, x1, x12\n   ldr w13, [x14, #-4]\n   add x14, x15, x12\n   str w13, [x14, #-4]\n   b 8f\n"
+    "5:  cmp x12, #2\n   b.lo 6f\n   ldrh w13, [x1]\n   strh w13, [x15]\n   add x14, x1, x12\n   ldrh w13, [x14, #-2]\n   add x14, x15, x12\n   strh w13, [x14, #-2]\n   b 8f\n"
+    "6:  cbz x12, 8f\n   ldrb w13, [x1]\n   strb w13, [x15]\n"
+    "8:  strb wzr, [x15, x12]\n"
+    "9:  mov x0, x9\n" ASM_RET
+    ASM_END(string_copy_bounded_3_16)
+
     ASM_FUNC(string_append_bounded)
     "stp x29, x30, [sp, #-48]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   mov x19, x0\n   mov x20, x1\n   mov x21, x2\n"
     "mov x0, x19\n   mov x1, x21\n   bl string_length_max\n   mov x22, x0\n   cmp x22, x21\n   b.ne 1f\n   mov x0, x20\n   bl string_length\n   add x0, x0, x21\n   b 2f\n"
@@ -69225,6 +69280,13 @@ __asm__(
     "2:  mv s2, a3\n   mv a0, s0\n   mv a1, s1\n   mv a2, s2\n   call memory_copy_apart\n   add a0, s0, s2\n   sb zero, 0(a0)\n"
     "1:  mv a0, s3\n   ld s3, 8(sp)\n   ld s2, 16(sp)\n   ld s1, 24(sp)\n   ld s0, 32(sp)\n   ld ra, 40(sp)\n   addi sp, sp, 48\n" ASM_RET
     ASM_END(string_copy_bounded)
+
+    //      string_copy_bounded_3_16: no class body on riscv64 yet. The entry exists so that every
+    //      architecture names it, and it is the generic routine: the class has no measured
+    //      advantage here (riscv64 is counted in instructions, not timed).
+    ASM_FUNC(string_copy_bounded_3_16)
+    "j string_copy_bounded\n"
+    ASM_END(string_copy_bounded_3_16)
 
     ASM_FUNC(string_append_bounded)
     "addi sp, sp, -48\n   sd ra, 40(sp)\n   sd s0, 32(sp)\n   sd s1, 24(sp)\n   sd s2, 16(sp)\n   sd s3, 8(sp)\n   mv s0, a0\n   mv s1, a1\n   mv s2, a2\n"

@@ -50,6 +50,11 @@ def cover(category, evidence, names, note, anchors=None):
 
 # Direct subjects: these names are passed to a timed runner or appear in a
 # dedicated floor row, rather than merely helping the harness print or count.
+cover('direct_benchmark', 'test/checks.c#BENCH_routine', '''
+string_copy_bounded string_copy_bounded_3_16
+''', 'the routine driver row: the size class and the general routine against the C reference at sizes 0 to 16, '
+     'every offset pair and a sweep over source lengths 0 to 40 and capacities 0 to 16')
+
 cover('direct_benchmark', 'test/checks.c#BENCH_floor', '''
 memory_compare memory_copy memory_copy_apart memory_count memory_fill
 memory_first_of string_compare string_first_of
@@ -108,7 +113,7 @@ cover('direct_benchmark', 'test/checks.c#BENCH_reserve', 'memory_reserve',
 # by nothing in the tree, so there is no workload here whose speed they could
 # change and no timing row is claimed for them.
 cover('correctness_only', 'test/checks.c#CHECK_declare', '''
-string_append_bounded string_copy_bounded string_duplicate string_duplicate_max
+string_append_bounded string_duplicate string_duplicate_max
 string_search_folded string_split_next string_token string_token_next
 ''', 'the standard names, compiled twice from two files sharing nothing and '
      'diffed against the host headers; no caller in this tree, so no timing')
