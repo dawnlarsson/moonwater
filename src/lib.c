@@ -19967,6 +19967,18 @@ ASM_FUNC(positive_to_string)
     "   .byte 2, 3, -1, 9, -1, -1, 7, 5, 0, -1, -1, 6, 10, 8, 4, 1\n"
     ".popsection\n"
     ASM_END(byte_class_index)
+    // byte_class_index_5_5: the same answer as byte_class_index for a five byte name, from the
+    // hash alone. The length test and its taken branch are gone, and the name's slot is the
+    // generic's; any other length tails to the generic. Ryzen 9950X, gcc -O2, best of 15, ns per
+    // call (generic / this / C inlined): 1.37 / 1.11 / 8.9; the arm64 body is below.
+    ASM_FUNC(byte_class_index_5_5)
+    "cmp $5, %rsi\n   jne 9f\n"
+    "mov (%rdi), %ecx\n   movzbl 4(%rdi), %edx\n   shl $32, %rdx\n   or %rcx, %rdx\n"
+    "imul $1228393873, %rdx, %rax\n   shr $14, %rax\n   and $15, %eax\n   lea " ASM_LABEL(byte_class_slots) "(%rip), %r8\n"
+    "cmp (%r8,%rax,8), %rdx\n   jne 8f\n   movsbl 128(%r8,%rax), %eax\n" ASM_RET
+    "8:  mov $-1, %eax\n" ASM_RET
+    "9:  jmp byte_class_index\n"
+    ASM_END(byte_class_index_5_5)
     // Whether one byte belongs to one of those classes, read from a table
     // rather than decided by a dispatch. Each byte has a sixteen bit word
     // whose bit n is set when the byte is in class n, so the answer is one
@@ -28384,6 +28396,24 @@ ASM_FUNC(positive_to_string)
     ".quad 0x6b6e616c62, 0x746e697270, 0x6870617267\n   .quad 0x6c72746e63, 0x74636e7570, 0x746967696478\n"
     ".popsection\n"
     ASM_END(byte_class_index)
+    // byte_class_index_5_5 on arm64: the five byte hash of the x86-64 body, so a five byte name
+    // is one multiply and one load and the linear search of the generic is not run. Apple M2 Pro,
+    // clang -O2, best of 15, ns per call (generic / this / C inlined): 4.27 / 1.40 / 15.4. Any
+    // other length tails to the generic.
+    ASM_FUNC(byte_class_index_5_5)
+    "cmp x1, #5\n   b.ne 9f\n"
+    "ldr w2, [x0]\n   ldrb w3, [x0, #4]\n   orr x2, x2, x3, lsl #32\n"
+    "movz x6, #0xcd91\n   movk x6, #0x4937, lsl #16\n   mul x3, x2, x6\n   lsr x3, x3, #14\n   and x3, x3, #15\n"
+    "adrp x4, " ASM_PAGE_LABEL(byte_class_slots5) "\n   add x4, x4, " ASM_LO12_LABEL(byte_class_slots5) "\n"
+    "ldr x5, [x4, x3, lsl #3]\n   cmp x2, x5\n   b.ne 8f\n   add x4, x4, #128\n   ldrsb w0, [x4, x3]\n" ASM_RET
+    "8:  mov w0, #-1\n" ASM_RET
+    "9:  b byte_class_index\n"
+    "" ASM_RODATA_PUSH "\n   .balign 8\n"
+    "" ASM_LABEL(byte_class_slots5) ":\n   .quad 0x6d756e6c61, 0x7265707075, 0, 0x6c72746e63, 0, 0, 0x746e697270, 0x6563617073\n"
+    "   .quad 0x6168706c61, 0, 0, 0x6b6e616c62, 0x74636e7570, 0x6870617267, 0x7265776f6c, 0x7469676964\n"
+    "   .byte 2, 3, -1, 9, -1, -1, 7, 5, 0, -1, -1, 6, 10, 8, 4, 1\n"
+    ".popsection\n"
+    ASM_END(byte_class_index_5_5)
     // Whether one byte belongs to one of those classes, from the same table
     // the x86-64 body reads: one halfword load per call, a shift by the class,
     // and no branch on the byte or the class. Measured natively on the Mac
@@ -38291,6 +38321,10 @@ ASM_FUNC(positive_to_string)
     ".quad 0x6b6e616c62, 0x746e697270, 0x6870617267\n   .quad 0x6c72746e63, 0x74636e7570, 0x746967696478\n"
     ".popsection\n"
     ASM_END(byte_class_index)
+    // byte_class_index_5_5 on riscv64: the generic, with no five byte body (instruction counts only).
+    ASM_FUNC(byte_class_index_5_5)
+    "tail byte_class_index\n"
+    ASM_END(byte_class_index_5_5)
     // Whether one byte belongs to one of those classes, from the same table
     // the other machines read: a halfword load, a shift by the class and a
     // mask. Counted under qemu-user, guest instructions per byte for every
