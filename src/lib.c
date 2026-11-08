@@ -14733,6 +14733,7 @@ __asm__(
     "vpermd %zmm5, %zmm4, %zmm7\n   vpaddd %zmm1, %zmm5, %zmm5\n   vpaddd %zmm7, %zmm1, %zmm1\n"
     ASM_FUNC(memory_sweep_coverage)
     "mov %ecx, %eax\n   test %rdx, %rdx\n   jz " ASM_LABEL(sweep_x64_done) "\n"
+    "cmp $16, %rdx\n   jb " ASM_LABEL(sweep_x64_narrow) "\n"
     ASM_NARROW("cpu_has_avx512", "" ASM_LABEL(sweep_x64_narrow) "")
     "vpbroadcastd %ecx, %zmm1\n   vpxord %zmm0, %zmm0, %zmm0\n   mov $0x200000, %r8d\n   vpbroadcastd %r8d, %zmm2\n"
     "mov $0x100000, %r8d\n   vpbroadcastd %r8d, %zmm3\n   mov $15, %r8d\n   vpbroadcastd %r8d, %zmm4\n"
@@ -24929,10 +24930,10 @@ __asm__(
     "ubfx w11, w3, #8, #8\n   mul w11, w11, w4\n   add w11, w11, #128\n"
     "and w12, w3, #255\n   mul w12, w12, w4\n   add w12, w12, #128\n"
     "mov w3, #256\n   sub w3, w3, w4\n   mov w4, w10\n   mov w7, w11\n   mov w8, w12\n"
-    "dup v16.4s, w3\n   dup v17.4s, w4\n   dup v18.4s, w7\n   dup v19.4s, w8\n   dup v20.4s, w5\n   dup v21.4s, w6\n"
-    "mov w10, #255\n   dup v23.4s, w10\n   sub w11, w10, w6\n   dup v22.4s, w11\n"
     "adrp x9, " ASM_PAGE_LABEL(tint_a64_reciprocal) "\n   add x9, x9, " ASM_LO12_LABEL(tint_a64_reciprocal) "\n"
     "cmp x2, #4\n   b.lo 2f\n"
+    "dup v16.4s, w3\n   dup v17.4s, w4\n   dup v18.4s, w7\n   dup v19.4s, w8\n   dup v20.4s, w5\n   dup v21.4s, w6\n"
+    "mov w10, #255\n   dup v23.4s, w10\n   sub w11, w10, w6\n   dup v22.4s, w11\n"
     "4:  ldr q0, [x1], #16\n"
     "ushr v1.4s, v0.4s, #16\n   and v1.16b, v1.16b, v23.16b\n"
     "ushr v2.4s, v0.4s, #8\n   and v2.16b, v2.16b, v23.16b\n"
