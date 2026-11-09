@@ -474,6 +474,10 @@ typedef struct
         bool has_user;
         bool has_group;
         bool has_time;
+        /* GNU.sparse.name, the member's real name when its path record
+           spells the GNUSparseFile copy; it wins whatever the record order. */
+        p8 sparse_name[TAR_PATH];
+        bool has_sparse_name;
 } tar_pax_state;
 
 static tar_pax_state tar_pax_global;
@@ -568,6 +572,7 @@ static fn tar_pax_clear(tar_pax_state address_to state)
         state->has_user = false;
         state->has_group = false;
         state->has_time = false;
+        state->has_sparse_name = false;
         state->uname[0] = end;
         state->gname[0] = end;
         state->path[0] = end;
@@ -774,9 +779,9 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         {
                                 if (value >= TAR_PATH)
                                         return false;
-                                memory_copy(state->path, equal + 1, value);
-                                state->path[value] = end;
-                                state->has_path = true;
+                                memory_copy(state->sparse_name, equal + 1, value);
+                                state->sparse_name[value] = end;
+                                state->has_sparse_name = true;
                         }
                         else if ((name_length == 8 && !memory_compare(name, "realsize", 8)) ||
                                  (name_length == 4 && !memory_compare(name, "size", 4)))
@@ -923,6 +928,11 @@ static bool tar_member_name(p8 address_to block, p8 address_to into,
         tar_pax_state address_to state =
             tar_pax_local.has_path ? address_of tar_pax_local
                                    : address_of tar_pax_global;
+        if (tar_pax_local.has_sparse_name)
+        {
+                string_copy_max_end(into, tar_pax_local.sparse_name, TAR_PATH - 1);
+                return into[0] != end;
+        }
         if (state->has_path)
         {
                 string_copy_max_end(into, state->path, TAR_PATH - 1);
