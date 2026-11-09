@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        462 routines (437 public, 25 local), 452 of them on all three and 10 local to one.
+        457 routines (433 public, 24 local), 447 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -370,7 +370,6 @@
           path_tail_copy                 public  yes     yes     yes
           pcm_pack24                     public  yes     yes     yes
           pcm_widen                      public  yes     yes     yes
-          pointer_vector_count           public  yes     yes     yes
           positive_digits                public  yes     yes     yes
           positive_digits_core           local   yes     yes     yes
           positive_divide_wide           public  yes     yes     yes
@@ -49528,111 +49527,6 @@ PURE string_address string_find(string_address string, string_address input);
 
 //      strstr exactly: an empty needle is the front of the haystack.
 PURE string_address string_search(string_address haystack, string_address needle);
-
-#ifndef KERNEL_MODE
-/*
-        positive pointer_vector_count(string_address *vector)
-
-        The entries of a NULL-terminated pointer vector before the NULL: argv,
-        environ, a word list. No attribute: the answer depends on memory the
-        caller may change between calls.
-
-        The scalar bodies read an entry only once every entry before it is
-        known to be set, so they never touch memory past the NULL, and they
-        test four entries to a step. The AVX2 body on x86_64 tests four
-        pointers at a time in 32-byte aligned blocks, with the entries before
-        the start masked out of the first block. Aligning down stays inside the
-        page the first entry is on, so a block may hold entries past the NULL
-        but cannot fault on them. Eight-byte aligned pointers are all a C
-        caller can give, so nothing here needs more than that.
-
-        arm64 and riscv64 have the scalar body; x86_64 without AVX2 has the
-        same scalar body as its fallback.
-
-        Size classes, unit entries. No inline routing is landed for the 0 to 2
-        entry class. The class was routed by a check in front of the call
-        (three loads and branches in the caller, then this body from three
-        entries up), and the check costs the 4-entry class more than it gains
-        below 3: on the M2 Pro, 4 entries 2.15 ns routed against 1.79 ns for
-        this body and 2.09 ns for the shipped loop inlined (the loop gains at
-        0 to 2 entries, 0.30 against 0.61 at 0 entries); on the 9950X with gcc,
-        4 entries 2.10 ns routed against 1.46 ns and 1.83 ns. Callers therefore
-        name pointer_vector_count and get this body at every size. The cells
-        that stay a loss to the inlined loop are 0 and 1 entries on arm64
-        (0.58 and 0.28 ns per call; 2 entries is a win, 1.23 against 1.53),
-        0 and 1 entries on x86-64 with gcc (0.2 ns), and 0 to 2 entries on
-        x86-64 with clang (up to 0.56 ns).
-*/
-#if X64
-__asm__(
-    ASM_SECTION
-    ASM_FUNC(pointer_vector_count)
-    "   cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(pvc_x64_scalar) "\n"
-    "   mov %rdi, %rax\n   and $-32, %rax\n"
-    "   mov %rdi, %rcx\n   and $31, %rcx\n   shr $3, %rcx\n"
-    "   mov %rcx, %rdx\n   neg %rdx\n"
-    "   vpxor %xmm0, %xmm0, %xmm0\n"
-    "" ASM_LABEL(pvc_x64_block) ":\n"
-    "   vpcmpeqq (%rax), %ymm0, %ymm1\n"
-    "   vmovmskpd %ymm1, %r8d\n"
-    "   mov $-1, %r9d\n   shl %cl, %r9d\n   and %r9d, %r8d\n   and $15, %r8d\n"
-    "   jnz " ASM_LABEL(pvc_x64_found) "\n"
-    "   xor %ecx, %ecx\n   add $32, %rax\n   add $4, %rdx\n"
-    "   jmp " ASM_LABEL(pvc_x64_block) "\n"
-    "" ASM_LABEL(pvc_x64_found) ":\n"
-    "   bsf %r8d, %r8d\n   lea (%rdx,%r8), %rax\n"
-    "   vzeroupper\n"
-    ASM_RET
-    "" ASM_LABEL(pvc_x64_scalar) ":\n"
-    "   xor %eax, %eax\n"
-    "" ASM_LABEL(pvc_x64_loop) ":\n"
-    "   cmpq $0, (%rdi,%rax,8)\n   je " ASM_LABEL(pvc_x64_at0) "\n"
-    "   cmpq $0, 8(%rdi,%rax,8)\n   je " ASM_LABEL(pvc_x64_at1) "\n"
-    "   cmpq $0, 16(%rdi,%rax,8)\n   je " ASM_LABEL(pvc_x64_at2) "\n"
-    "   cmpq $0, 24(%rdi,%rax,8)\n   je " ASM_LABEL(pvc_x64_at3) "\n"
-    "   add $4, %rax\n   jmp " ASM_LABEL(pvc_x64_loop) "\n"
-    "" ASM_LABEL(pvc_x64_at3) ":\n   inc %rax\n"
-    "" ASM_LABEL(pvc_x64_at2) ":\n   inc %rax\n"
-    "" ASM_LABEL(pvc_x64_at1) ":\n   inc %rax\n"
-    "" ASM_LABEL(pvc_x64_at0) ":\n"
-    ASM_RET
-    ASM_END(pointer_vector_count)
-);
-#elif ARM64
-__asm__(
-    ASM_SECTION
-    ASM_FUNC(pointer_vector_count)
-    "   mov x3, x0\n   mov x0, #0\n"
-    "1: ldr x2, [x3]\n   cbz x2, 5f\n"
-    "   ldr x2, [x3, #8]\n   cbz x2, 6f\n"
-    "   ldr x2, [x3, #16]\n   cbz x2, 7f\n"
-    "   ldr x2, [x3, #24]\n   cbz x2, 8f\n"
-    "   add x3, x3, #32\n   add x0, x0, #4\n   b 1b\n"
-    "6: add x0, x0, #1\n" ASM_RET
-    "7: add x0, x0, #2\n" ASM_RET
-    "8: add x0, x0, #3\n" ASM_RET
-    "5: " ASM_RET
-    ASM_END(pointer_vector_count)
-);
-#elif RISCV64
-__asm__(
-    ASM_SECTION
-    ASM_FUNC(pointer_vector_count)
-    "   mv t1, a0\n   li a0, 0\n"
-    "1: ld t2, 0(t1)\n   beqz t2, 5f\n"
-    "   ld t2, 8(t1)\n   beqz t2, 6f\n"
-    "   ld t2, 16(t1)\n   beqz t2, 7f\n"
-    "   ld t2, 24(t1)\n   beqz t2, 8f\n"
-    "   addi t1, t1, 32\n   addi a0, a0, 4\n   j 1b\n"
-    "6: addi a0, a0, 1\n" ASM_RET
-    "7: addi a0, a0, 2\n" ASM_RET
-    "8: addi a0, a0, 3\n" ASM_RET
-    "5: " ASM_RET
-    ASM_END(pointer_vector_count)
-);
-#endif
-positive pointer_vector_count(string_address address_to vector);
-#endif
 /*
         string_length, string_compare and string_first_of under names the kernel has no opinion about.
 
