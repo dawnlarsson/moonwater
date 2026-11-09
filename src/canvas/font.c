@@ -9072,7 +9072,7 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
 //      takes the plain mix, all of it at half lighter. Keyed on the ink's
 //      lightness alone, green 4ec94e on black took two thirds of the curve
 //      meant for dark text and read 1.23 to 1.41 at 8 to 11 px.
-static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 strength)
+static __attribute__((used)) fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
         font_ramp_set address_to set = e->ramp_now;
 
@@ -9126,7 +9126,7 @@ static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 st
 //      One pixel: back and fore mixed by a of 255, channel by channel, in
 //      linear light; light text moves, by e->plain of 64, to the mix of the
 //      sRGB bytes themselves.
-static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
+static __attribute__((used)) p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
 {
         p32 mixed = 0;
 
@@ -9168,7 +9168,7 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
         as four planes of bytes, which is the table memory_translate_u32_rect
         takes. The engine keeps 64 pairs.
 */
-static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
+static __attribute__((used)) const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
         strength = strength > 255 ? 255 : strength;
         p64 key = (p64)1 << 63 | (p64)strength << 48 | (p64)e->linear << 56 |
@@ -9204,7 +9204,7 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 //      where another glyph has already drawn there or the ground is unknown.
 //      On a known ground the library lays the tones and stops at a pixel
 //      that is not the ground; that one is mixed here and the rest resumed.
-static fn font_blend(font_engine address_to e, const font_target address_to target,
+static __attribute__((used)) fn font_blend(font_engine address_to e, const font_target address_to target,
                      b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background, p32 strength)
 {
         b32 x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
@@ -10269,10 +10269,10 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
         return placed;
 }
 
-b64 font_draw(font_engine address_to e, const font_face address_to const address_to faces,
-              p32 count, const p8 address_to text, positive length, p32 size, p32 flags,
-              const font_target address_to target, b32 x, b32 baseline, p32 colour,
-              p32 background)
+static __attribute__((used)) b64 font_draw_reference(font_engine address_to e, const font_face address_to const address_to faces,
+                                                     p32 count, const p8 address_to text, positive length, p32 size, p32 flags,
+                                                     const font_target address_to target, b32 x, b32 baseline, p32 colour,
+                                                     p32 background)
 {
         const font_face address_to extended[FONT_CHAIN];
         positive at = 0;
@@ -10332,6 +10332,1013 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
         }
         return pen;
 }
+
+//      font_draw: the fast path, in assembly, for arm64 and x86-64 (SysV, not Windows). The run it takes is printable
+//      ASCII (0x20 to 0x7e) of at most 128 bytes, in one face (count 1, no fallbacks), not right to left, whose glyphs
+//      are in the glyph memo and whose coverage is in the cache's slots, the size and the cache within what the lookup
+//      takes without a reset. It lays the run as font_draw_reference does, in two passes: the pen, kerning, the phase
+//      and the slot of every glyph first, then every glyph blended onto the target in order. A byte outside that, a
+//      glyph the memo or the cache does not have, and a flag or a size this does not take are a tail call to
+//      font_draw_reference with the arguments untouched. Nothing is drawn, and no slot is made, before the run is
+//      known to be one the assembly takes; the memo's and the kerning's entries it fills are the reference's own.
+//      The C steps it calls are below (font_draw_prep, font_draw_kern), font_advance, and font_blend_glyph, once per glyph:
+//      the assembly makes the glyph's font_bitmap itself, the slot's box, with stores of the sizes it is read at.
+typedef struct
+{
+        p32 slot;               // the glyph's slot, 1-based, in the cache's list
+        b32 x, y;               // where its box lands on the target
+} font_draw_place;
+
+#if (defined(__aarch64__) || defined(__x86_64__)) && !defined(_WIN32)
+_Static_assert(offset_of(font_engine, fallbacks) == 997248 && offset_of(font_engine, glyph_memo) == 775544 &&
+               offset_of(font_engine, cached) == 637304 && offset_of(font_engine, index) == 629112 &&
+               offset_of(font_engine, slots) == 530808 && offset_of(font_engine, scratched) == 53 &&
+               offset_of(font_engine, slot_count) == 48 && offset_of(font_engine, generation) == 64 &&
+               offset_of(font_engine, atlas) == 24 && offset_of(font_engine, atlas_width) == 32 &&
+               offset_of(font_face, id) == 108 && sizeof(font_memo) == 16 &&
+               offset_of(font_memo, value) == 8 && sizeof(font_cache_way) == 24 &&
+               offset_of(font_cache_way, cell) == 8 && offset_of(font_cache_way, generation) == 16 &&
+               offset_of(font_cache_way, slot) == 20 && sizeof(font_slot) == 32 &&
+               offset_of(font_slot, x) == 16 && offset_of(font_slot, y) == 18 &&
+               offset_of(font_slot, width) == 20 && offset_of(font_slot, height) == 22 &&
+               offset_of(font_slot, left) == 24 && offset_of(font_slot, top) == 26 &&
+               sizeof(font_draw_place) == 12 && offset_of(font_draw_place, x) == 4 &&
+               offset_of(font_draw_place, y) == 8 && sizeof(font_bitmap) == 32 &&
+               offset_of(font_bitmap, stride) == 8 && offset_of(font_bitmap, left) == 16 &&
+               offset_of(font_bitmap, top) == 20 && offset_of(font_bitmap, width) == 24 &&
+               offset_of(font_bitmap, height) == 28 && offset_of(font_engine, ramp_now) == 2392 &&
+               offset_of(font_engine, ramp) == 2400 && sizeof(font_target) == 24 &&
+               offset_of(font_target, stride) == 8 && offset_of(font_target, width) == 16 &&
+               offset_of(font_target, height) == 20 && offset_of(font_ramp_set, ground) == 4 &&
+               offset_of(font_ramp_set, contrast) == 8,
+               "font_draw's assembly: the layouts it reads and writes");
+#endif
+
+//      The flags, style and strength a run is laid with, into out: out[0] the flags with the polarity, out[1] the style
+//      (with the 4 for whole stems), out[2] the strength.
+static __attribute__((used)) void font_draw_prep(const font_engine address_to e, p32 size, p32 flags, p32 colour, p32 background,
+                                                 p32 address_to out)
+{
+        flags = font_polarity(flags, colour, background);
+
+        p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
+
+        style |= style & 1 ? 4 : 0;
+        out[0] = flags;
+        out[1] = style;
+        out[2] = strength;
+}
+
+static __attribute__((used)) b32 font_draw_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right,
+                                                p32 size)
+{
+        return font_kern(e, face, left, right, size);
+}
+
+b64 font_draw(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p8 address_to text,
+              positive length, p32 size, p32 flags, const font_target address_to target, b32 x, b32 baseline, p32 colour,
+              p32 background);
+
+//      font_blend_glyph: font_blend, the C above, on a known ground, in assembly, with font_blend's own arguments and
+//      ABI (arm64: x0 e, x1 target, w2 x, w3 y, x4 the glyph by address, w5 colour, w6 background, w7 strength). It does
+//      the C's steps in the C's order: the clip; the tones and the ramp (font_tones, and font_ramp where the ramp is not
+//      the engine's current one); the kernel's row; and each stop of the row, the pixel mixed by font_mix, the rest of
+//      the row and the rows below taken by the kernel again. The row's state (r, c) is in registers, as the C's is. On
+//      a ground not known it tail-calls font_blend.
+#if defined(__aarch64__) && !defined(_WIN32)
+__asm__(".text\n"
+        ".p2align 2\n"
+        FONT_SYM(font_blend_glyph) ":\n"
+        "tst w6, #0xff000000\n"                    // FONT_UNKNOWN: not known, the C
+        "b.eq 97f\n"
+        "b " FONT_SYM(font_blend) "\n"
+        "97:\n"
+        "ldr w9, [x4, #24]\n"                      // the glyph's width and height, the target's width and height
+        "ldr w10, [x4, #28]\n"
+        "ldr w11, [x1, #16]\n"
+        "ldr w12, [x1, #20]\n"
+        "cmp w2, #0\n"                             // x0 (w13) = x < 0 ? -x : 0
+        "neg w13, w2\n"
+        "csel w13, w13, wzr, lt\n"
+        "cmp w3, #0\n"                             // y0 (w14)
+        "neg w14, w3\n"
+        "csel w14, w14, wzr, lt\n"
+        "add w15, w2, w9\n"                        // x1 (w15) = x + width > target width ? target width - x : width
+        "cmp w15, w11\n"
+        "sub w17, w11, w2\n"
+        "csel w15, w17, w9, gt\n"
+        "add w16, w3, w10\n"                       // y1 (w16)
+        "cmp w16, w12\n"
+        "sub w17, w12, w3\n"
+        "csel w16, w17, w10, gt\n"
+        "cmp w13, w15\n"
+        "b.ge 99f\n"                               // x0 >= x1 or y0 >= y1: nothing to draw
+        "cmp w14, w16\n"
+        "b.ge 99f\n"
+        "stp x29, x30, [sp, #-112]!\n"
+        "mov x29, sp\n"
+        "stp x19, x20, [sp, #16]\n"
+        "stp x21, x22, [sp, #32]\n"
+        "stp x23, x24, [sp, #48]\n"
+        "stp x25, x26, [sp, #64]\n"
+        "stp x27, x28, [sp, #80]\n"
+        "mov x19, x0\n"                            // e
+        "str w5, [sp, #96]\n"                      // colour, background, strength, as given
+        "str w6, [sp, #100]\n"
+        "str w7, [sp, #104]\n"
+        "sub w21, w15, w13\n"                      // width (x21) = x1 - x0, height (x22) = y1 - y0
+        "sub w22, w16, w14\n"
+        "ldr x9, [x4]\n"                           // coverage, glyph stride
+        "ldr x10, [x4, #8]\n"
+        "ldr x23, [x1, #8]\n"                      // stride (x23), pixels
+        "ldr x26, [x1]\n"
+        "add w17, w3, w14\n"                       // into (x26) = pixels + (y + y0) * stride + (x + x0), in pixels
+        "mov w17, w17\n"
+        "mul x17, x17, x23\n"
+        "add w2, w2, w13\n"
+        "add x17, x17, w2, uxtw\n"
+        "add x26, x26, x17, lsl #2\n"
+        "mov w14, w14\n"                           // from (x25) = coverage + y0 * glyph stride + x0
+        "mul x25, x14, x10\n"
+        "add x25, x25, w13, uxtw\n"
+        "add x25, x9, x25\n"
+        "mov x24, x10\n"                           // glyph stride (x24)
+        "mov x0, x19\n"                            // the tones: font_tones(e, colour, background, strength)
+        "ldr w1, [sp, #96]\n"
+        "ldr w2, [sp, #100]\n"
+        "ldr w3, [sp, #104]\n"
+        "bl " FONT_SYM(font_tones) "\n"
+        "mov x20, x0\n"                            // pixel (x20)
+        "ldr w3, [sp, #104]\n"                     // the ramp's strength: strength > 255 ? 255 : strength
+        "mov w4, #255\n"
+        "cmp w3, w4\n"
+        "csel w3, w4, w3, hi\n"
+        "ldr x9, [x19, #2392]\n"                   // font_ramp, unless the engine's ramp is this one already
+        "cbz x9, 20f\n"
+        "ldr w10, [sp, #96]\n"
+        "ldr w11, [x9]\n"
+        "cmp w11, w10\n"
+        "b.ne 20f\n"
+        "ldr w11, [x9, #4]\n"
+        "ldr w12, [sp, #100]\n"
+        "cmp w11, w12\n"
+        "b.ne 20f\n"
+        "ldr w11, [x9, #8]\n"
+        "cmp w11, w3\n"
+        "b.eq 21f\n"
+        "20:\n"
+        "mov x0, x19\n"
+        "ldr w1, [sp, #96]\n"
+        "ldr w2, [sp, #100]\n"
+        "bl " FONT_SYM(font_ramp) "\n"
+        "21:\n"
+        "mov x0, x26\n"                            // the first row: memory_blend_u32_rect(into, stride, from, glyph stride,
+        "mov x1, x23\n"                            // width, height, pixel): r (x27) = at / width, c (x28) = at % width
+        "mov x2, x25\n"
+        "mov x3, x24\n"
+        "mov x4, x21\n"
+        "mov x5, x22\n"
+        "mov x6, x20\n"
+        "bl " FONT_SYM(memory_blend_u32_rect) "\n"
+        "udiv x27, x0, x21\n"
+        "msub x28, x27, x21, x0\n"
+        "22:\n"                                    // while (r < height)
+        "cmp x27, x22\n"
+        "b.hs 98f\n"
+        "madd x9, x27, x23, x28\n"                 // here = into + r * stride + c (x10)
+        "add x10, x26, x9, lsl #2\n"
+        "madd x12, x27, x24, x28\n"                // fw = from[r * glyph stride + c]; a = e->ramp[fw] (w3)
+        "ldrb w12, [x25, x12]\n"
+        "ldr x14, [x19, #2400]\n"
+        "ldrb w3, [x14, x12]\n"
+        "mov x0, x19\n"                            // *here = font_mix(e, *here, colour & 0xffffff, a)
+        "ldr w1, [x10]\n"
+        "ldr w2, [sp, #96]\n"
+        "and w2, w2, #0xffffff\n"
+        "bl " FONT_SYM(font_mix) "\n"
+        "madd x9, x27, x23, x28\n"
+        "add x10, x26, x9, lsl #2\n"
+        "str w0, [x10]\n"
+        "add x28, x28, #1\n"                       // ++c < width: the rest of the row, from c, by the kernel
+        "cmp x28, x21\n"
+        "b.hs 23f\n"
+        "madd x11, x27, x23, x28\n"                // here + 1 = into + (r * stride + c) (c already counted)
+        "add x0, x26, x11, lsl #2\n"
+        "mov x1, x23\n"
+        "madd x9, x27, x24, x28\n"                 // from + r * glyph stride + c
+        "add x2, x25, x9\n"
+        "mov x3, x24\n"
+        "sub x4, x21, x28\n"                       // width - c, one row
+        "mov x5, #1\n"
+        "mov x6, x20\n"
+        "bl " FONT_SYM(memory_blend_u32_rect) "\n"
+        "sub x7, x21, x28\n"
+        "cmp x0, x7\n"
+        "b.hs 23f\n"                               // at >= width - c: the row is done
+        "add x28, x28, x0\n"                       // a stop at c + at: c += at, the row goes on
+        "b 22b\n"
+        "23:\n"                                    // ++r; the kernel over the rows below, from column 0
+        "add x27, x27, #1\n"
+        "cmp x27, x22\n"
+        "b.hs 98f\n"
+        "mul x9, x27, x23\n"
+        "add x0, x26, x9, lsl #2\n"                // into + r * stride
+        "mov x1, x23\n"
+        "mul x9, x27, x24\n"
+        "add x2, x25, x9\n"                        // from + r * glyph stride
+        "mov x3, x24\n"
+        "mov x4, x21\n"
+        "sub x5, x22, x27\n"                       // height - r
+        "mov x6, x20\n"
+        "bl " FONT_SYM(memory_blend_u32_rect) "\n"
+        "udiv x9, x0, x21\n"                       // r += at / width, c = at % width
+        "msub x28, x9, x21, x0\n"
+        "add x27, x27, x9\n"
+        "b 22b\n"
+        "98:\n"
+        "ldp x27, x28, [sp, #80]\n"
+        "ldp x25, x26, [sp, #64]\n"
+        "ldp x23, x24, [sp, #48]\n"
+        "ldp x21, x22, [sp, #32]\n"
+        "ldp x19, x20, [sp, #16]\n"
+        "ldp x29, x30, [sp], #112\n"
+        "99:\n"
+        "ret\n"
+        FONT_TYPE(font_blend_glyph)
+        FONT_SIZE(font_blend_glyph));
+#endif
+
+//      font_blend_glyph (x86-64): font_blend, the C above, on a known ground, in assembly, with font_blend's own ABI
+//      (SysV: rdi e, rsi target, edx x, ecx y, the glyph in memory at [rsp+8], r8d colour, r9d background, strength at
+//      [rsp+40]). The steps and their order are the arm64 one's: the clip, the tones and the ramp, the kernel's row, and
+//      each stop of the row. r (r12) and c (r13) are in registers, the stop's pixel in rbp; the kernel's table is the
+//      seventh argument, at [rsp]. On a ground not known it tail-jumps to font_blend.
+#if defined(__x86_64__) && !defined(_WIN32)
+__asm__(".intel_syntax noprefix\n"
+        ".text\n"
+        ".p2align 4\n"
+        FONT_SYM(font_blend_glyph) ":\n"
+        "test r9d, 0xff000000\n"                   // FONT_UNKNOWN: not known, the C
+        "jz 97f\n"
+        "jmp " FONT_SYM(font_blend) "\n"
+        "97:\n"
+        "push rbp\n"
+        "push rbx\n"
+        "push r12\n"
+        "push r13\n"
+        "push r14\n"
+        "push r15\n"
+        "sub rsp, 136\n"                           // the glyph is at [rsp+192], its strength at [rsp+224]
+        "mov rbx, rdi\n"                           // e
+        "mov dword ptr [rsp + 40], r8d\n"          // colour, background, strength, as given
+        "mov dword ptr [rsp + 44], r9d\n"
+        "mov eax, dword ptr [rsp + 224]\n"
+        "mov dword ptr [rsp + 48], eax\n"
+        "xor r10d, r10d\n"                         // x0 (r10d) = x < 0 ? -x : 0
+        "mov eax, edx\n"
+        "neg eax\n"
+        "cmp edx, 0\n"
+        "cmovl r10d, eax\n"
+        "xor r11d, r11d\n"                         // y0 (r11d) = y < 0 ? -y : 0
+        "mov eax, ecx\n"
+        "neg eax\n"
+        "cmp ecx, 0\n"
+        "cmovl r11d, eax\n"
+        "mov r8d, edx\n"                           // x1 (r8d) = x + width > target width ? target width - x : width
+        "add r8d, dword ptr [rsp + 216]\n"
+        "mov r9d, dword ptr [rsi + 16]\n"
+        "sub r9d, edx\n"
+        "mov eax, dword ptr [rsp + 216]\n"
+        "cmp r8d, dword ptr [rsi + 16]\n"
+        "cmovg eax, r9d\n"
+        "mov r8d, eax\n"
+        "mov r9d, ecx\n"                           // y1 (r9d) = y + height > target height ? target height - y : height
+        "add r9d, dword ptr [rsp + 220]\n"
+        "mov edi, dword ptr [rsi + 20]\n"
+        "sub edi, ecx\n"
+        "mov eax, dword ptr [rsp + 220]\n"
+        "cmp r9d, dword ptr [rsi + 20]\n"
+        "cmovg eax, edi\n"
+        "mov r9d, eax\n"
+        "cmp r10d, r8d\n"
+        "jge 98f\n"                                // x0 >= x1 or y0 >= y1: nothing to draw
+        "cmp r11d, r9d\n"
+        "jge 98f\n"
+        "sub r8d, r10d\n"                          // width (8), height (16): x1 - x0, y1 - y0
+        "sub r9d, r11d\n"
+        "mov eax, r8d\n"
+        "mov qword ptr [rsp + 8], rax\n"
+        "mov eax, r9d\n"
+        "mov qword ptr [rsp + 16], rax\n"
+        "mov rax, qword ptr [rsi + 8]\n"           // stride (24)
+        "mov qword ptr [rsp + 24], rax\n"
+        "mov edi, ecx\n"                           // into (r14) = pixels + (y + y0) * stride + (x + x0), in pixels
+        "add edi, r11d\n"
+        "imul rdi, rax\n"
+        "add edx, r10d\n"
+        "add rdi, rdx\n"
+        "mov r14, qword ptr [rsi]\n"
+        "lea r14, [r14 + rdi * 4]\n"
+        "mov rax, qword ptr [rsp + 192]\n"         // from (r15) = coverage + y0 * glyph stride + x0
+        "mov rcx, qword ptr [rsp + 200]\n"         // glyph stride (32)
+        "mov qword ptr [rsp + 32], rcx\n"
+        "mov edi, r11d\n"
+        "imul rdi, rcx\n"
+        "lea r15, [rax + rdi]\n"
+        "add r15, r10\n"
+        "mov rdi, rbx\n"                           // pixel = font_tones(e, colour, background, strength)
+        "mov esi, dword ptr [rsp + 40]\n"
+        "mov edx, dword ptr [rsp + 44]\n"
+        "mov ecx, dword ptr [rsp + 48]\n"
+        "call " FONT_SYM(font_tones) "\n"
+        "mov qword ptr [rsp], rax\n"
+        "mov ecx, dword ptr [rsp + 48]\n"          // the ramp's strength: strength > 255 ? 255 : strength
+        "cmp ecx, 255\n"
+        "jbe 19f\n"
+        "mov ecx, 255\n"
+        "19:\n"
+        "mov rax, qword ptr [rbx + 2392]\n"        // font_ramp, unless the engine's ramp is this one already
+        "test rax, rax\n"
+        "jz 20f\n"
+        "mov edx, dword ptr [rsp + 40]\n"
+        "cmp dword ptr [rax], edx\n"
+        "jne 20f\n"
+        "mov edx, dword ptr [rsp + 44]\n"
+        "cmp dword ptr [rax + 4], edx\n"
+        "jne 20f\n"
+        "cmp dword ptr [rax + 8], ecx\n"
+        "je 21f\n"
+        "20:\n"
+        "mov rdi, rbx\n"
+        "mov esi, dword ptr [rsp + 40]\n"
+        "mov edx, dword ptr [rsp + 44]\n"
+        "call " FONT_SYM(font_ramp) "\n"
+        "21:\n"
+        "mov rdi, r14\n"                           // the first row: memory_blend_u32_rect(into, stride, from, glyph stride,
+        "mov rsi, qword ptr [rsp + 24]\n"          // width, height, pixel); at the first stop, r = at / width, c = at % width
+        "mov rdx, r15\n"
+        "mov rcx, qword ptr [rsp + 32]\n"
+        "mov r8, qword ptr [rsp + 8]\n"
+        "mov r9, qword ptr [rsp + 16]\n"
+        "call " FONT_SYM(memory_blend_u32_rect) "\n"
+        "mov rcx, qword ptr [rsp + 8]\n"
+        "xor edx, edx\n"
+        "div rcx\n"
+        "mov r12, rax\n"
+        "mov r13, rdx\n"
+        "22:\n"                                    // while (r < height)
+        "cmp r12, qword ptr [rsp + 16]\n"
+        "jae 98f\n"
+        "mov rax, r12\n"                           // here (rbp) = into + r * stride + c
+        "imul rax, qword ptr [rsp + 24]\n"
+        "add rax, r13\n"
+        "lea rbp, [r14 + rax * 4]\n"
+        "mov rax, r12\n"                           // fw = from[r * glyph stride + c]; a = e->ramp[fw] (ecx)
+        "imul rax, qword ptr [rsp + 32]\n"
+        "add rax, r13\n"
+        "movzx eax, byte ptr [r15 + rax]\n"
+        "mov rcx, qword ptr [rbx + 2400]\n"
+        "movzx ecx, byte ptr [rcx + rax]\n"
+        "mov rdi, rbx\n"                           // *here = font_mix(e, *here, colour & 0xffffff, a)
+        "mov esi, dword ptr [rbp]\n"
+        "mov edx, dword ptr [rsp + 40]\n"
+        "and edx, 0xffffff\n"
+        "call " FONT_SYM(font_mix) "\n"
+        "mov dword ptr [rbp], eax\n"
+        "inc r13\n"                                // ++c < width: the rest of the row, from c, by the kernel
+        "cmp r13, qword ptr [rsp + 8]\n"
+        "jae 23f\n"
+        "lea rdi, [rbp + 4]\n"                     // here + 1
+        "mov rsi, qword ptr [rsp + 24]\n"
+        "mov rax, r12\n"
+        "imul rax, qword ptr [rsp + 32]\n"
+        "add rax, r13\n"
+        "lea rdx, [r15 + rax]\n"                   // from + r * glyph stride + c
+        "mov rcx, qword ptr [rsp + 32]\n"
+        "mov r8, qword ptr [rsp + 8]\n"
+        "sub r8, r13\n"                            // width - c, one row
+        "mov r9d, 1\n"
+        "call " FONT_SYM(memory_blend_u32_rect) "\n"
+        "mov rcx, qword ptr [rsp + 8]\n"
+        "sub rcx, r13\n"
+        "cmp rax, rcx\n"
+        "jae 23f\n"                                // at >= width - c: the row is done
+        "add r13, rax\n"                           // a stop at c + at: c += at, the row goes on
+        "jmp 22b\n"
+        "23:\n"                                    // ++r; the kernel over the rows below, from column 0
+        "inc r12\n"
+        "cmp r12, qword ptr [rsp + 16]\n"
+        "jae 98f\n"
+        "mov rdi, r12\n"
+        "imul rdi, qword ptr [rsp + 24]\n"
+        "lea rdi, [r14 + rdi * 4]\n"               // into + r * stride
+        "mov rsi, qword ptr [rsp + 24]\n"
+        "mov rdx, r12\n"
+        "imul rdx, qword ptr [rsp + 32]\n"
+        "add rdx, r15\n"                           // from + r * glyph stride
+        "mov rcx, qword ptr [rsp + 32]\n"
+        "mov r8, qword ptr [rsp + 8]\n"
+        "mov r9, qword ptr [rsp + 16]\n"
+        "sub r9, r12\n"                            // height - r
+        "call " FONT_SYM(memory_blend_u32_rect) "\n"
+        "mov rcx, qword ptr [rsp + 8]\n"           // r += at / width, c = at % width
+        "xor edx, edx\n"
+        "div rcx\n"
+        "add r12, rax\n"
+        "mov r13, rdx\n"
+        "jmp 22b\n"
+        "98:\n"
+        "add rsp, 136\n"
+        "pop r15\n"
+        "pop r14\n"
+        "pop r13\n"
+        "pop r12\n"
+        "pop rbx\n"
+        "pop rbp\n"
+        "ret\n"
+        FONT_TYPE(font_blend_glyph)
+        FONT_SIZE(font_blend_glyph)
+        ".att_syntax prefix\n");
+#endif
+
+#if defined(__aarch64__) && !defined(_WIN32)
+//      arm64 (AAPCS64): x0 e, x1 faces, w2 count, x3 text, x4 length, w5 size, w6 flags, x7 target, then on the stack
+//      x, baseline, colour, background. Apple's arm64 packs those four at their own sizes; AAPCS64 gives each 8 bytes.
+//      Frame, from sp (2272 bytes): out[0..2] from font_draw_prep (flags, style, strength), size, colour, background, target,
+//      x, baseline, text, length; the arguments x0-x7 kept at 80 (for the tail call); the places from 144 (16 bytes each,
+//      at most 128 of them); x29, x30 and x19-x25 saved at 2192 and up.
+//      x19 e, x20 the byte's index, x21 the pen, x22 the last glyph, x23 this glyph, x24 the face, x25 the eighth's whole pixels.
+#if defined(__APPLE__)
+#define FONT_DRAW_BASE "2276"
+#define FONT_DRAW_COLOUR "2280"
+#define FONT_DRAW_BG "2284"
+#else
+#define FONT_DRAW_BASE "2280"
+#define FONT_DRAW_COLOUR "2288"
+#define FONT_DRAW_BG "2296"
+#endif
+__asm__(".text\n"
+        ".globl " FONT_SYM(font_draw) "\n"
+        ".p2align 2\n"
+        FONT_SYM(font_draw) ":\n"
+        "sub sp, sp, #2272\n"
+        "add x16, sp, #2192\n"
+        "stp x29, x30, [x16]\n"
+        "stp x19, x20, [x16, #16]\n"
+        "stp x21, x22, [x16, #32]\n"
+        "stp x23, x24, [x16, #48]\n"
+        "str x25, [x16, #64]\n"
+        "add x29, sp, #2192\n"
+        "stp x0, x1, [sp, #80]\n"
+        "stp x2, x3, [sp, #96]\n"
+        "stp x4, x5, [sp, #112]\n"
+        "stp x6, x7, [sp, #128]\n"
+        "cmp w2, #1\n"                             // count 1
+        "b.ne 9f\n"
+        "cbz x4, 9f\n"                             // 1 to 128 bytes
+        "cmp x4, #128\n"
+        "b.hi 9f\n"
+        "cmp w5, #0x100, lsl #12\n"                // size < FONT_SIZE_LIMIT
+        "b.hs 9f\n"
+        "mov x19, x0\n"
+        "movz x10, #0x3780\n"                      // e->fallbacks == 0
+        "movk x10, #0xf, lsl #16\n"
+        "ldr w9, [x19, x10]\n"
+        "cbnz w9, 9f\n"
+        "ldrb w9, [x19, #53]\n"                    // !e->scratched
+        "cbnz w9, 9f\n"
+        "ldr w9, [x19, #48]\n"                     // e->slot_count < FONT_SLOTS * 3 / 4
+        "cmp w9, #3072\n"
+        "b.hs 9f\n"
+        "tst w6, #64\n"                            // not FONT_RTL
+        "b.ne 9f\n"
+        "ldr x24, [x1]\n"                          // faces[0]
+        "str w5, [sp, #12]\n"
+        "str x3, [sp, #40]\n"
+        "str x4, [sp, #48]\n"
+        "str x7, [sp, #24]\n"
+        "ldr w9, [sp, #2272]\n"                    // x
+        "str w9, [sp, #32]\n"
+        "ldr w9, [sp, #" FONT_DRAW_BASE "]\n"
+        "str w9, [sp, #36]\n"
+        "ldr w9, [sp, #" FONT_DRAW_COLOUR "]\n"
+        "str w9, [sp, #16]\n"
+        "ldr w9, [sp, #" FONT_DRAW_BG "]\n"
+        "str w9, [sp, #20]\n"
+        "mov x0, x19\n"
+        "ldr w1, [sp, #12]\n"
+        "mov w2, w6\n"
+        "ldr w3, [sp, #16]\n"
+        "ldr w4, [sp, #20]\n"
+        "mov x5, sp\n"
+        "bl " FONT_SYM(font_draw_prep) "\n"
+        "mov x20, #0\n"
+        "mov x21, #0\n"
+        "mov x22, #0\n"
+        "1:\n"                                     // pass one: the byte at x20
+        "ldr x9, [sp, #48]\n"
+        "cmp x20, x9\n"
+        "b.hs 10f\n"
+        "ldr x9, [sp, #40]\n"
+        "ldrb w10, [x9, x20]\n"
+        "sub w11, w10, #0x20\n"                    // 0x20 to 0x7e
+        "cmp w11, #0x5e\n"
+        "b.hi 9f\n"
+        "ldr w11, [x24, #108]\n"                   // key = 1 << 63 | id << 32 | code
+        "movz x12, #0x8000, lsl #48\n"
+        "orr x12, x12, x11, lsl #32\n"
+        "orr x12, x12, x10\n"
+        "movz x13, #0x7c15\n"
+        "movk x13, #0x7f4a, lsl #16\n"
+        "movk x13, #0x79b9, lsl #32\n"
+        "movk x13, #0x9e37, lsl #48\n"
+        "mul x14, x12, x13\n"
+        "lsr x14, x14, #40\n"                      // font_recall
+        "and x14, x14, #511\n"
+        "movz x15, #0xd578\n"
+        "movk x15, #0xb, lsl #16\n"
+        "add x15, x19, x15\n"
+        "add x15, x15, x14, lsl #4\n"
+        "ldr x16, [x15]\n"                         // memo->key == key, value nonzero
+        "cmp x16, x12\n"
+        "b.ne 9f\n"
+        "ldr w23, [x15, #8]\n"
+        "cbz w23, 9f\n"
+        "cbz x20, 2f\n"                            // kerning: not the first, not FONT_UNKERNED
+        "ldr w9, [sp, #0]\n"
+        "tst w9, #4\n"
+        "b.ne 2f\n"
+        "mov x0, x19\n"
+        "mov x1, x24\n"
+        "mov w2, w22\n"
+        "mov w3, w23\n"
+        "ldr w4, [sp, #12]\n"
+        "bl " FONT_SYM(font_draw_kern) "\n"
+        "sxtw x0, w0\n"
+        "add x21, x21, x0\n"
+        "2:\n"
+        "ldrsw x9, [sp, #32]\n"                    // eighth = (pen + x) * 8 + 0x8000 >> 16, b32
+        "add x9, x9, x21\n"
+        "lsl x9, x9, #3\n"
+        "add x9, x9, #8, lsl #12\n"
+        "asr x9, x9, #16\n"
+        "asr w25, w9, #3\n"                        // whole pixels: eighth >> 3
+        "and w11, w9, #7\n"                        // phase
+        "ldr w12, [x24, #108]\n"                   // cache key, font_cached's
+        "lsl x12, x12, #47\n"
+        "movz x13, #0x8000, lsl #48\n"
+        "orr x12, x12, x13\n"
+        "ubfiz x13, x23, #31, #16\n"
+        "orr x12, x12, x13\n"
+        "ldr w13, [sp, #12]\n"
+        "ubfiz x13, x13, #9, #22\n"
+        "orr x12, x12, x13\n"
+        "ubfiz x13, x11, #6, #3\n"
+        "orr x12, x12, x13\n"
+        "ldr w13, [sp, #4]\n"
+        "ubfiz x14, x13, #3, #3\n"
+        "orr x12, x12, x14\n"
+        "ubfx x14, x13, #3, #2\n"
+        "orr x12, x12, x14\n"
+        "movz x13, #0x7c15\n"                      // way: ((key ^ 0) * golden) >> 56
+        "movk x13, #0x7f4a, lsl #16\n"
+        "movk x13, #0x79b9, lsl #32\n"
+        "movk x13, #0x9e37, lsl #48\n"
+        "mul x14, x12, x13\n"
+        "lsr x14, x14, #56\n"
+        "add x14, x14, x14, lsl #1\n"              // * 24
+        "movz x15, #0xb978\n"
+        "movk x15, #0x9, lsl #16\n"
+        "add x15, x19, x15\n"
+        "add x15, x15, x14, lsl #3\n"
+        "ldr x13, [x15]\n"                         // way hit: key, cell 0, generation
+        "cmp x13, x12\n"
+        "b.ne 3f\n"
+        "ldr x13, [x15, #8]\n"
+        "cbnz x13, 3f\n"
+        "ldr w13, [x15, #16]\n"
+        "ldr w14, [x19, #64]\n"
+        "cmp w13, w14\n"
+        "b.ne 3f\n"
+        "ldrh w13, [x15, #20]\n"
+        "b 6f\n"
+        "3:\n"                                     // the index's chain from the home
+        "movz x13, #0x7c15\n"
+        "movk x13, #0x7f4a, lsl #16\n"
+        "movk x13, #0x79b9, lsl #32\n"
+        "movk x13, #0x9e37, lsl #48\n"
+        "mul x14, x12, x13\n"
+        "lsr x14, x14, #52\n"
+        "and x14, x14, #4095\n"
+        "movz x16, #0x9978\n"
+        "movk x16, #0x9, lsl #16\n"
+        "add x16, x19, x16\n"
+        "4:\n"
+        "ldrh w13, [x16, x14, lsl #1]\n"           // index[home], 1-based; 0 is a miss: the reference's
+        "cbz w13, 9f\n"
+        "sub x9, x13, #1\n"
+        "lsl x9, x9, #5\n"
+        "movz x10, #0x1978\n"
+        "movk x10, #0x8, lsl #16\n"
+        "add x9, x9, x10\n"
+        "add x9, x19, x9\n"
+        "ldr x10, [x9]\n"
+        "cmp x10, x12\n"
+        "b.ne 5f\n"
+        "ldr x10, [x9, #8]\n"
+        "cbnz x10, 5f\n"
+        "str x12, [x15]\n"                         // found: the way is written as the reference writes it
+        "str xzr, [x15, #8]\n"
+        "ldr w10, [x19, #64]\n"
+        "str w10, [x15, #16]\n"
+        "strh w13, [x15, #20]\n"
+        "b 6f\n"
+        "5:\n"
+        "add x14, x14, #1\n"
+        "and x14, x14, #4095\n"
+        "b 4b\n"
+        "6:\n"                                     // the slot's left and top, the place of the glyph
+        "sub x9, x13, #1\n"
+        "lsl x9, x9, #5\n"
+        "movz x10, #0x1978\n"
+        "movk x10, #0x8, lsl #16\n"
+        "add x9, x9, x10\n"
+        "add x9, x19, x9\n"
+        "ldrsh w10, [x9, #24]\n"
+        "ldrsh w11, [x9, #26]\n"
+        "add w10, w25, w10\n"
+        "ldr w14, [sp, #36]\n"
+        "sub w11, w14, w11\n"
+        "add x9, sp, #144\n"
+        "add x9, x9, x20, lsl #4\n"
+        "str w13, [x9]\n"
+        "str w10, [x9, #4]\n"
+        "str w11, [x9, #8]\n"
+        "mov x0, x24\n"                            // the advance
+        "mov w1, w23\n"
+        "ldr w2, [sp, #12]\n"
+        "bl " FONT_SYM(font_advance) "\n"
+        "sxtw x0, w0\n"
+        "add x21, x21, x0\n"
+        "mov x22, x23\n"
+        "add x20, x20, #1\n"
+        "b 1b\n"
+        "10:\n"                                    // pass two: each place blended in order, font_blend_glyph called with the glyph
+        "mov x20, #0\n"                            // (its font_bitmap, as font_slot_box makes it) at sp+80, the arguments
+        "7:\n"                                     // kept there for the tail call, which pass two never takes
+        "ldr x9, [sp, #48]\n"
+        "cmp x20, x9\n"
+        "b.hs 8f\n"
+        "add x2, sp, #144\n"
+        "add x2, x2, x20, lsl #4\n"                // x2 the place
+        "ldr w9, [x2]\n"
+        "sub x9, x9, #1\n"
+        "lsl x9, x9, #5\n"
+        "movz x10, #0x1978\n"
+        "movk x10, #0x8, lsl #16\n"                // 530808: the slots
+        "add x9, x9, x10\n"
+        "add x9, x19, x9\n"                        // &e->slots[slot - 1]
+        "ldrh w10, [x9, #16]\n"                    // slot->x
+        "ldrh w11, [x9, #18]\n"                    // slot->y
+        "ldrh w12, [x9, #20]\n"                    // slot->width
+        "ldrh w13, [x9, #22]\n"                    // slot->height
+        "ldrsh w14, [x9, #24]\n"                   // slot->left
+        "ldrsh w15, [x9, #26]\n"                   // slot->top
+        "ldr x16, [x19, #24]\n"                    // e->atlas
+        "ldr w17, [x19, #32]\n"                    // e->atlas_width
+        "madd x0, x11, x17, x16\n"                 // atlas + y * atlas_width + x: font_slot_box's coverage
+        "add x0, x0, x10\n"
+        "cbnz w12, 11f\n"                          // no width, no coverage
+        "mov x0, xzr\n"
+        "11:\n"
+        "mov x1, #1\n"                             // stride: 1 for the slot at 0xffff, else the atlas's width
+        "movz w11, #0xffff\n"
+        "cmp w10, w11\n"
+        "csel x1, x1, x17, eq\n"
+        "stp x0, x1, [sp, #80]\n"
+        "stp w14, w15, [sp, #96]\n"                // left, top
+        "stp w12, w13, [sp, #104]\n"               // width, height
+        "mov x0, x19\n"
+        "ldr x1, [sp, #24]\n"                      // target
+        "ldr w3, [x2, #8]\n"                       // place y
+        "ldr w2, [x2, #4]\n"                       // place x
+        "add x4, sp, #80\n"                        // the glyph, by reference (AAPCS64, Apple's arm64 too)
+        "ldr w5, [sp, #16]\n"                      // colour
+        "ldr w6, [sp, #20]\n"                      // background
+        "ldr w7, [sp, #8]\n"                       // strength
+        "bl " FONT_SYM(font_blend_glyph) "\n"
+        "add x20, x20, #1\n"
+        "b 7b\n"
+        "8:\n"
+        "mov x0, x21\n"
+        "add x16, sp, #2192\n"
+        "ldp x29, x30, [x16]\n"
+        "ldp x19, x20, [x16, #16]\n"
+        "ldp x21, x22, [x16, #32]\n"
+        "ldp x23, x24, [x16, #48]\n"
+        "ldr x25, [x16, #64]\n"
+        "add sp, sp, #2272\n"
+        "ret\n"
+        "9:\n"                                     // not the fast path: the reference, with the arguments as they were
+        "ldp x0, x1, [sp, #80]\n"
+        "ldp x2, x3, [sp, #96]\n"
+        "ldp x4, x5, [sp, #112]\n"
+        "ldp x6, x7, [sp, #128]\n"
+        "add x16, sp, #2192\n"
+        "ldp x29, x30, [x16]\n"
+        "ldp x19, x20, [x16, #16]\n"
+        "ldp x21, x22, [x16, #32]\n"
+        "ldp x23, x24, [x16, #48]\n"
+        "ldr x25, [x16, #64]\n"
+        "add sp, sp, #2272\n"
+        "b " FONT_SYM(font_draw_reference) "\n"
+        FONT_TYPE(font_draw)
+        FONT_SIZE(font_draw));
+#elif defined(__x86_64__) && !defined(_WIN32)
+//      x86-64 (SysV): rdi e, rsi faces, edx count, rcx text, r8 length, r9d size; then the stack from [rsp+8]: flags,
+//      target, x, baseline, colour, background. Frame, from rsp (after six pushes and 2184 bytes): out[0..2] from
+//      font_draw_prep (flags, style, strength), size, colour, background, target, x, baseline, text, length; the register
+//      arguments kept at 72 (for the tail call); the places from 128 (16 bytes each).
+//      rbx e, r12 the byte's index, r13 the pen, r14 the last glyph, r15 this glyph, rbp the face.
+__asm__(".intel_syntax noprefix\n"
+        ".text\n"
+        ".globl " FONT_SYM(font_draw) "\n"
+        ".p2align 4\n"
+        FONT_SYM(font_draw) ":\n"
+        "push rbp\n"
+        "push rbx\n"
+        "push r12\n"
+        "push r13\n"
+        "push r14\n"
+        "push r15\n"
+        "sub rsp, 2184\n"
+        "mov qword ptr [rsp + 72], rdi\n"
+        "mov qword ptr [rsp + 80], rsi\n"
+        "mov qword ptr [rsp + 88], rdx\n"
+        "mov qword ptr [rsp + 96], rcx\n"
+        "mov qword ptr [rsp + 104], r8\n"
+        "mov qword ptr [rsp + 112], r9\n"
+        "cmp edx, 1\n"                             // count 1
+        "jne 9f\n"
+        "test r8, r8\n"                            // 1 to 128 bytes
+        "jz 9f\n"
+        "cmp r8, 128\n"
+        "ja 9f\n"
+        "cmp r9d, 0x100000\n"                      // size < FONT_SIZE_LIMIT
+        "jae 9f\n"
+        "mov eax, dword ptr [rdi + 997248]\n"      // e->fallbacks == 0
+        "test eax, eax\n"
+        "jnz 9f\n"
+        "cmp byte ptr [rdi + 53], 0\n"             // !e->scratched
+        "jne 9f\n"
+        "cmp dword ptr [rdi + 48], 3072\n"         // e->slot_count < FONT_SLOTS * 3 / 4
+        "jae 9f\n"
+        "test dword ptr [rsp + 2240], 64\n"        // not FONT_RTL
+        "jnz 9f\n"
+        "mov rbx, rdi\n"
+        "mov rbp, qword ptr [rsi]\n"               // faces[0]
+        "mov qword ptr [rsp + 40], rcx\n"
+        "mov qword ptr [rsp + 48], r8\n"
+        "mov dword ptr [rsp + 12], r9d\n"
+        "mov rax, qword ptr [rsp + 2248]\n"
+        "mov qword ptr [rsp + 24], rax\n"
+        "mov eax, dword ptr [rsp + 2256]\n"
+        "mov dword ptr [rsp + 32], eax\n"
+        "mov eax, dword ptr [rsp + 2264]\n"
+        "mov dword ptr [rsp + 36], eax\n"
+        "mov eax, dword ptr [rsp + 2272]\n"
+        "mov dword ptr [rsp + 16], eax\n"
+        "mov eax, dword ptr [rsp + 2280]\n"
+        "mov dword ptr [rsp + 20], eax\n"
+        "mov rdi, rbx\n"
+        "mov esi, dword ptr [rsp + 12]\n"
+        "mov edx, dword ptr [rsp + 2240]\n"
+        "mov ecx, dword ptr [rsp + 16]\n"
+        "mov r8d, dword ptr [rsp + 20]\n"
+        "mov r9, rsp\n"
+        "call " FONT_SYM(font_draw_prep) "\n"
+        "xor r12d, r12d\n"
+        "xor r13d, r13d\n"
+        "xor r14d, r14d\n"
+        "1:\n"                                     // pass one: the byte at r12
+        "cmp r12, qword ptr [rsp + 48]\n"
+        "jae 10f\n"
+        "mov rax, qword ptr [rsp + 40]\n"
+        "movzx ecx, byte ptr [rax + r12]\n"
+        "lea edx, [rcx - 0x20]\n"                  // 0x20 to 0x7e
+        "cmp edx, 0x5e\n"
+        "ja 9f\n"
+        "mov eax, dword ptr [rbp + 108]\n"         // key = 1 << 63 | id << 32 | code
+        "shl rax, 32\n"
+        "movabs rdx, 0x8000000000000000\n"
+        "or rax, rdx\n"
+        "or rax, rcx\n"
+        "mov r10, rax\n"
+        "movabs rdx, 0x9e3779b97f4a7c15\n"
+        "imul rax, rdx\n"
+        "shr rax, 40\n"                            // font_recall
+        "and eax, 511\n"
+        "shl rax, 4\n"
+        "lea rdx, [rbx + rax + 775544]\n"
+        "cmp qword ptr [rdx], r10\n"               // memo->key == key, value nonzero
+        "jne 9f\n"
+        "mov r15d, dword ptr [rdx + 8]\n"
+        "test r15d, r15d\n"
+        "jz 9f\n"
+        "test r12, r12\n"                          // kerning: not the first, not FONT_UNKERNED
+        "jz 2f\n"
+        "test dword ptr [rsp], 4\n"
+        "jnz 2f\n"
+        "mov rdi, rbx\n"
+        "mov rsi, rbp\n"
+        "mov edx, r14d\n"
+        "mov ecx, r15d\n"
+        "mov r8d, dword ptr [rsp + 12]\n"
+        "call " FONT_SYM(font_draw_kern) "\n"
+        "movsxd rax, eax\n"
+        "add r13, rax\n"
+        "2:\n"
+        "movsxd rax, dword ptr [rsp + 32]\n"       // eighth = (pen + x) * 8 + 0x8000 >> 16, b32
+        "add rax, r13\n"
+        "lea rax, [rax * 8 + 32768]\n"
+        "sar rax, 16\n"
+        "mov r9d, eax\n"
+        "sar r9d, 3\n"                             // whole pixels: eighth >> 3
+        "and eax, 7\n"                             // phase
+        "mov edx, dword ptr [rbp + 108]\n"         // cache key, font_cached's
+        "shl rdx, 47\n"
+        "movabs r10, 0x8000000000000000\n"
+        "or rdx, r10\n"
+        "mov r10d, r15d\n"
+        "and r10d, 0xffff\n"
+        "shl r10, 31\n"
+        "or rdx, r10\n"
+        "mov r10d, dword ptr [rsp + 12]\n"
+        "and r10d, 0x3fffff\n"
+        "shl r10, 9\n"
+        "or rdx, r10\n"
+        "mov r10d, eax\n"
+        "shl r10, 6\n"
+        "or rdx, r10\n"
+        "mov r10d, dword ptr [rsp + 4]\n"
+        "mov r11d, r10d\n"
+        "and r11d, 7\n"
+        "shl r11, 3\n"
+        "or rdx, r11\n"
+        "shr r10d, 3\n"
+        "and r10d, 3\n"
+        "or rdx, r10\n"
+        "mov r11, rdx\n"                           // way: ((key ^ 0) * golden) >> 56, 24 bytes each
+        "movabs r10, 0x9e3779b97f4a7c15\n"
+        "imul r11, r10\n"
+        "shr r11, 56\n"
+        "lea r11, [r11 + r11 * 2]\n"
+        "lea r11, [rbx + r11 * 8 + 637304]\n"
+        "cmp qword ptr [r11], rdx\n"               // way hit: key, cell 0, generation
+        "jne 3f\n"
+        "cmp qword ptr [r11 + 8], 0\n"
+        "jne 3f\n"
+        "mov r10d, dword ptr [rbx + 64]\n"
+        "cmp dword ptr [r11 + 16], r10d\n"
+        "jne 3f\n"
+        "movzx r8d, word ptr [r11 + 20]\n"
+        "jmp 6f\n"
+        "3:\n"                                     // the index's chain from the home
+        "mov rax, rdx\n"
+        "movabs r10, 0x9e3779b97f4a7c15\n"
+        "imul rax, r10\n"
+        "shr rax, 52\n"
+        "and eax, 4095\n"
+        "4:\n"
+        "movzx r8d, word ptr [rbx + rax * 2 + 629112]\n"   // index[home], 1-based; 0 is a miss: the reference's
+        "test r8d, r8d\n"
+        "jz 9f\n"
+        "lea r10, [r8 - 1]\n"
+        "shl r10, 5\n"
+        "lea r10, [rbx + r10 + 530808]\n"
+        "cmp qword ptr [r10], rdx\n"
+        "jne 5f\n"
+        "cmp qword ptr [r10 + 8], 0\n"
+        "jne 5f\n"
+        "mov qword ptr [r11], rdx\n"               // found: the way is written as the reference writes it
+        "mov qword ptr [r11 + 8], 0\n"
+        "mov r10d, dword ptr [rbx + 64]\n"
+        "mov dword ptr [r11 + 16], r10d\n"
+        "mov word ptr [r11 + 20], r8w\n"
+        "jmp 6f\n"
+        "5:\n"
+        "add rax, 1\n"
+        "and rax, 4095\n"
+        "jmp 4b\n"
+        "6:\n"                                     // the slot's left and top, the place of the glyph
+        "lea r10, [r8 - 1]\n"
+        "shl r10, 5\n"
+        "lea r10, [rbx + r10 + 530808]\n"
+        "movsx edi, word ptr [r10 + 24]\n"
+        "movsx esi, word ptr [r10 + 26]\n"
+        "add edi, r9d\n"
+        "mov eax, dword ptr [rsp + 36]\n"
+        "sub eax, esi\n"
+        "mov rcx, r12\n"
+        "shl rcx, 4\n"
+        "mov dword ptr [rsp + rcx + 128], r8d\n"
+        "mov dword ptr [rsp + rcx + 132], edi\n"
+        "mov dword ptr [rsp + rcx + 136], eax\n"
+        "mov rdi, rbp\n"                           // the advance
+        "mov esi, r15d\n"
+        "mov edx, dword ptr [rsp + 12]\n"
+        "call " FONT_SYM(font_advance) "\n"
+        "movsxd rax, eax\n"
+        "add r13, rax\n"
+        "mov r14, r15\n"
+        "inc r12\n"
+        "jmp 1b\n"
+        "10:\n"                                    // pass two: each place blended in order, font_blend_glyph called with its glyph
+        "xor r12d, r12d\n"                         // (font_bitmap, as font_slot_box makes it) and strength on the stack
+        "7:\n"
+        "cmp r12, qword ptr [rsp + 48]\n"
+        "jae 8f\n"
+        "mov rdx, r12\n"
+        "shl rdx, 4\n"
+        "lea rdx, [rsp + rdx + 128]\n"             // rdx the place, its address kept for the arguments
+        "sub rsp, 48\n"                            // the outgoing arguments: the glyph at 0, strength at 32 (the frame's
+        "mov eax, dword ptr [rdx]\n"               // offsets from here are 48 more)
+        "sub eax, 1\n"                             // slot, 1-based
+        "shl rax, 5\n"
+        "lea r10, [rbx + rax + 530808]\n"          // &e->slots[slot - 1]
+        "movzx r8d, word ptr [r10 + 16]\n"         // slot->x
+        "movzx r9d, word ptr [r10 + 18]\n"         // slot->y
+        "movzx r11d, word ptr [r10 + 20]\n"        // slot->width
+        "movzx eax, word ptr [r10 + 22]\n"         // slot->height
+        "mov dword ptr [rsp + 28], eax\n"
+        "mov dword ptr [rsp + 24], r11d\n"         // width
+        "movsx eax, word ptr [r10 + 24]\n"         // slot->left
+        "mov dword ptr [rsp + 16], eax\n"
+        "movsx eax, word ptr [r10 + 26]\n"         // slot->top
+        "mov dword ptr [rsp + 20], eax\n"
+        "xor eax, eax\n"                           // coverage: null with no width, else atlas + y * atlas_width + x
+        "test r11d, r11d\n"
+        "jz 11f\n"
+        "mov eax, dword ptr [rbx + 32]\n"          // e->atlas_width
+        "imul r9, rax\n"
+        "add r9, qword ptr [rbx + 24]\n"           // e->atlas
+        "add r9, r8\n"
+        "mov rax, r9\n"
+        "11:\n"
+        "mov qword ptr [rsp], rax\n"               // coverage
+        "mov ecx, dword ptr [rbx + 32]\n"          // stride: 1 for the slot at 0xffff, else the atlas's width
+        "mov r10d, 1\n"
+        "cmp r8d, 0xffff\n"
+        "cmove rcx, r10\n"
+        "mov qword ptr [rsp + 8], rcx\n"           // stride
+        "mov rdi, rbx\n"
+        "mov rsi, qword ptr [rsp + 72]\n"          // target
+        "mov ecx, dword ptr [rdx + 8]\n"           // place y (before rdx, the place, becomes place x)
+        "mov edx, dword ptr [rdx + 4]\n"           // place x
+        "mov r8d, dword ptr [rsp + 64]\n"          // colour
+        "mov r9d, dword ptr [rsp + 68]\n"          // background
+        "mov eax, dword ptr [rsp + 56]\n"          // strength
+        "mov dword ptr [rsp + 32], eax\n"
+        "call " FONT_SYM(font_blend_glyph) "\n"
+        "add rsp, 48\n"
+        "inc r12\n"
+        "jmp 7b\n"
+        "8:\n"
+        "mov rax, r13\n"
+        "add rsp, 2184\n"
+        "pop r15\n"
+        "pop r14\n"
+        "pop r13\n"
+        "pop r12\n"
+        "pop rbx\n"
+        "pop rbp\n"
+        "ret\n"
+        "9:\n"                                     // not the fast path: the reference, with the arguments as they were
+        "mov rdi, qword ptr [rsp + 72]\n"
+        "mov rsi, qword ptr [rsp + 80]\n"
+        "mov rdx, qword ptr [rsp + 88]\n"
+        "mov rcx, qword ptr [rsp + 96]\n"
+        "mov r8, qword ptr [rsp + 104]\n"
+        "mov r9, qword ptr [rsp + 112]\n"
+        "add rsp, 2184\n"
+        "pop r15\n"
+        "pop r14\n"
+        "pop r13\n"
+        "pop r12\n"
+        "pop rbx\n"
+        "pop rbp\n"
+        "jmp " FONT_SYM(font_draw_reference) "\n"
+        FONT_TYPE(font_draw)
+        FONT_SIZE(font_draw)
+        ".att_syntax prefix\n");
+#else
+b64 font_draw(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p8 address_to text,
+              positive length, p32 size, p32 flags, const font_target address_to target, b32 x, b32 baseline, p32 colour,
+              p32 background)
+{
+        return font_draw_reference(e, faces, count, text, length, size, flags, target, x, baseline, colour, background);
+}
+#endif
 
 /*
         font_draw's loop, each glyph laid turned. It is a loop of its own and
