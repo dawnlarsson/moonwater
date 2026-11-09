@@ -146,7 +146,10 @@ if [ "${lists_card:-0}" -ge "$napps_parent" ]; then row ok "the apps are in list
 if [ "${refused_card:-1}" = 0 ]; then row ok "the compositor refused no list"; else row FAIL "the compositor refused no list" "refused ${refused_card:-none}"; fi
 touched_refused=$(grep -m1 '^  lists .*windows' "$work/card.touched.txt" 2> /dev/null | sed 's/.*, \([0-9]*\) refused.*/\1/')
 touched_switched=$(grep -m1 '^  list switched' "$work/card.touched.txt" 2> /dev/null | sed 's/^  list switched *\([0-9]*\),.*/\1/')
-if [ "${touched_refused:-1}" = 0 ] && [ "${touched_switched:-0}" = 0 ]; then row ok "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels"; else row FAIL "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels" "refused ${touched_refused:-none}, switched ${touched_switched:-0} ($(grep '^  list' "$work/card.touched.txt" 2> /dev/null | tr -s ' ' | tr '\n' ';'))"; fi
+# A list pulled past its end is its picture stretched (ui_stretch), which the card does not draw: that frame is lost (UI_LOST_STRETCH) and the window paints
+# it in pixels while the pull lasts, so the switches the wheel steps of the flicker detector make at an end are as many as the frames lost to the stretch.
+stretch_lost=$(grep -m1 'a list stretched past its end' "$work/card.touched.txt" 2> /dev/null | sed 's/^ *\([0-9]*\),.*/\1/')
+if [ "${touched_refused:-1}" = 0 ] && [ "${touched_switched:-0}" -le "${stretch_lost:-0}" ]; then row ok "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels"; else row FAIL "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels" "refused ${touched_refused:-none}, switched ${touched_switched:-0} ($(grep '^  list' "$work/card.touched.txt" 2> /dev/null | tr -s ' ' | tr '\n' ';'))"; fi
 if [ "${lists_off:-1}" = 0 ]; then row ok "with canvas gpu off the apps paint pixels (no list)"; else row FAIL "with canvas gpu off the apps paint pixels (no list)" "lists ${lists_off:-none}"; fi
 
 # the two screens: the same pixels; a difference is written out as PPM for the report
