@@ -122384,8 +122384,8 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
 #endif
 #ifdef CHECK_gpu_kit
-static int gpu_fake_busy; // the check's fake fence: while it is set, every job waited for is answered as still running (nothing on the card is held)
-#define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_io(3u, 9, 32, wait))
+static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fake_busy is set, every job waited for is answered as still running (nothing on the card is held); gpu_fake_idle answers done
+#define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
 // The fake card's prerequisites: gpu_fake_step names the step that fails, with gpu_fake_error for its error (gpu.c's gpu_req_step).
 static int gpu_fake_step = -1;
 static unsigned int gpu_fake_error;
@@ -224017,6 +224017,50 @@ static void gpu_fault_rows(void)
         compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 
+// A job the wait gave up on (a hang: gpu_run_job leaves gpu.pending set) may still run on the card. The restart after the cool-down waits for the card to
+// be idle (compositor_gpu_restart_check): its maps are not unmapped under it. Each step's answer is the fake fence's (gpu_fake_busy, gpu_fake_idle).
+static void gpu_flight_rows(void)
+{
+        int saved_card = compositor.card, saved_gpu = compositor_gpu;
+        // The card's and the compositor's state as the rows before found them: a recovery starts the card again, and a present after it would lay the card's
+        // buffer out anew (the rows after this one see the state the rows before left, not this one's).
+        unsigned char kept_gpu[sizeof(gpu)], kept_req[sizeof(gpu_req)], kept_state[sizeof(compositor_gpu_state)];
+        positive kept_bytes = gpu_bytes, kept_next = gpu_map_next;
+        unsigned int kept_tick = gpu_tick, kept_at = gpu_gone_at, kept_recovered = gpu_recovered;
+        b32 kept_lost = gpu_lost, kept_off = gpu_userptr_off, kept_gone = gpu_userptr_gone;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_req, &gpu_req, sizeof(gpu_req)), memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state));
+        gpu.fd = -1, gpu.pending = 0, gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_tick = 100, gpu_map_count = 0, gpu.imports = 0, gpu_gone_at = 0;
+        gpu_map_next = GPU_VA_MAPS;
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 1;
+        compositor_gpu_state.hung_at = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.failures = 0;
+
+        // 1. A map of a job still running after a hang (pending 77, busy): the cool-down is over and the restart is due, and it waits.
+        gpu_maps[0].from = 0x10000000ull, gpu_maps[0].to = 0x10004000ull, gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = 0x4000;
+        gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 0, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0, gpu_maps[0].offset = 0;
+        gpu_map_count = 1;
+        gpu.pending = 77, gpu_fake_busy = 1;
+        compositor_gpu_restart_check();
+        check("flight: a restart due after a hang waits while the job it gave up on may still run (the map kept, the restart still due)",
+              gpu_map_count == 1 && gpu_maps[0].va == GPU_VA_MAPS && gpu.pending == 77 && compositor_gpu_state.restart_due && !compositor_gpu_state.dead &&
+              gpu_gone_at == 0);
+
+        // 2. The job has ended (idle: the fence answers done), and the restart goes ahead: the recovery lets go of the map, and the card is given up for
+        // the lack of a node (every node is absent here).
+        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_absent = 8;
+        compositor_gpu_restart_check();
+        check("flight: once the card is idle the restart goes ahead: the map is let go of by the recovery, the job's pending clears, and the card is given up",
+              gpu_map_count == 0 && gpu_gone_at >= 1 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_RECOVER && gpu.pending == 0 &&
+              !compositor_gpu_state.restart_due && compositor_gpu_state.dead);
+        gpu_fake_absent = 0, compositor_gpu_state.dead = 0, compositor_gpu_state.up = 1;
+
+        gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_fake_absent = 0, gpu_map_count = 0;
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&gpu_req, kept_req, sizeof(gpu_req)), memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));
+        gpu_bytes = kept_bytes, gpu_map_next = kept_next, gpu_tick = kept_tick, gpu_gone_at = kept_at, gpu_recovered = kept_recovered;
+        gpu_lost = kept_lost, gpu_userptr_off = kept_off, gpu_userptr_gone = kept_gone;
+        compositor_gpu = saved_gpu, compositor.card = saved_card;
+}
+
 // A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
 // it composed nothing and used up its period. No flip in flight, or one past the deadline (a screen that is off never answers), is no wait.
 static void flip_wait_rows(void)
@@ -224039,6 +224083,7 @@ b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         gpu_fault_rows();
+        gpu_flight_rows();
         flip_wait_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
