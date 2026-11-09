@@ -24630,8 +24630,12 @@ def awk_caps(farm):
     refused = (
         'BEGIN { printf "%-*d|\\n", 67108866, 1 }',
         'BEGIN { printf "%.67108867d|\\n", 1 }',
+        'BEGIN { NF = 2097153; print NF }',
+        'BEGIN { $2097153 = "x"; print NF }',
     )
     accepted = (
+        ('BEGIN { NF = 2097152; print NF }', "2097152\n"),
+        ('BEGIN { $2097152 = "x"; print NF }', "2097152\n"),
         ('BEGIN { printf "%5d|%-3s|%05.1f\\n", 42, "ab", 2.25 }', "   42|ab |002.2\n"),
     )
     passed, notes = 0, []

@@ -315,9 +315,11 @@ static decimal awk_power(decimal base, decimal exponent)
    past the maximum is a room no allocation would give. */
 #define AWK_PLACES_SLACK 400
 #define AWK_PLACES_MAX ((positive)1 << 26)
-/* The bytes a printf conversion may pad or zero-fill to: past this one is
-   refused, the way the places are, and no memory is taken for it. */
+/* The bytes a printf conversion may pad or zero-fill to, and the fields awk may
+   be made to hold by an assignment: past these an assignment is refused, the
+   way the places are, and no memory is taken for it. */
 #define AWK_PAD_MAX ((positive)1 << 26)
+#define AWK_FIELDS_MAX ((positive)1 << 21)
 
 static positive awk_write_decimal(decimal value, b32 precision, p8 address_to out,
                                   positive room, p8 conversion, bool alternate)
@@ -1752,6 +1754,8 @@ static fn awk_fields_materialize()
 
 static fn awk_field_grow(b32 want)
 {
+        if ((positive)want > AWK_FIELDS_MAX)
+                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
         awk_fields_reserve((positive)want + 1);
 
         for (b32 i = awk_nf + 1; i <= want; i++)
@@ -1787,6 +1791,8 @@ static fn awk_nf_written(b32 want)
 {
         if (want < 0)
                 awk_die(null, "NF set to a negative value");
+        if ((positive)want > AWK_FIELDS_MAX)
+                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
 
         awk_fields_reserve((positive)want + 1);
 

@@ -107,6 +107,42 @@ must be refused with status 2 and `out of memory`, and `printf "%5d|..."` must
 still print what it printed. Before the fix the two refused cases exit 0 with
 67 MB out; after it they exit 2.
 
+### MW-2026-167: an NF or field assignment made awk hold as many fields as the number said
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | Unbounded resource use from input (CWE-400): an assignment to NF or to a field past the end grew the field table to the index given, with no bound |
+| Attacker | a program's input: a field number taken from a record (`$$1 = "x"`), or the number assigned to NF; or whoever writes the program text |
+| Reachable | src/sh/awk.c, `awk_nf_written` and `awk_field_grow`, reached from every assignment to NF or to a field beyond NF |
+| Exposure window | from 4615b6f2f (2026-08-28, the commit that first carried the field assignments) to the fix |
+| Fixed by | the commit with the subject "awk: an assignment to NF or to a field past 2^21 fields is refused" |
+
+**What happened.** `awk_nf_written(want)` and `awk_field_grow(want)` reserved
+`want + 1` field slots of 32 bytes each and then wrote each slot. `want` is
+the index as awk reads it, clamped to the 32-bit range, so `NF = 2147483647`
+asked for 64 GB of slots, and the loops that follow (`for (b32 i = want + 1;
+...)`) add one to a 32-bit value that is already the largest. Measured on the
+unfixed binary under a 4 GB address-space limit: `BEGIN { NF = 100000000 }`
+took 3.2 GB of slots and succeeded in 4 seconds, and `BEGIN { $100000000 = "x" }`
+did the same; gawk fails both at that limit. Without the limit the same
+assignment has no bound but the machine's memory.
+
+**Fix.** An assignment that makes more than `AWK_FIELDS_MAX` fields (2^21, 64
+MiB of slots) is refused, `out of memory`, status 2, before anything is
+reserved. Splitting a record is not affected: a record's own fields are bounded
+by its length, and they are counted by the splitter, not by these two functions.
+
+**Regression check.** `awk_caps` in `test/differential.py`: `NF = 2097153`,
+`$2097153 = "x"` must be refused with status 2 and `out of memory`;
+`NF = 2097152` and `$2097152 = "x"` must print 2097152. Before the fix the
+refused cases print the number and exit 0 (measured on the unfixed binary:
+`NF = 2097153` printed 2097153 and exited 0); after the fix they exit 2.
+
+**Still open.** Nothing in this entry changes gawk's answer for field numbers
+between 2^21 and 2^31, which gawk writes. That is a deliberate bound, and the
+number can be raised with `AWK_FIELDS_MAX` if a program needs more.
+
 ### MW-2026-165: a touch's handles drew past the terminal's window picture (out-of-bounds write in the terminal)
 
 | | |
