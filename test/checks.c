@@ -162704,6 +162704,9 @@ static void record_rows(void)
         unsigned int *saved_scanout = compositor.scanout;
         int saved_width = compositor.width, saved_height = compositor.height;
         unsigned long saved_pitch = compositor.scanout_pitch;
+        const char path[] = COMPOSITOR_RECORD_DIR "/frame-4294967-check.ppm";
+        unsigned char st[256] = {0};
+        unsigned short mode = 0;
 
         compositor_record_free();
         compositor_record_refused_size = 0;
@@ -162718,6 +162721,18 @@ static void record_rows(void)
         compositor_record_capture(2);
         check("record: a frame of a screen that changed size is copied into a block made for that size",
               compositor_record_width == 128 && compositor_record_height == 64 && compositor_record_taken == 1 && compositor_record_shots[0].pixels[0] == 0x22222222u);
+
+        // A frame file is the screen's pixels, so it is the owner's alone. The directory is /run/moonwater/record, which only a privileged run makes:
+        // where it can be written the mode is checked, and where it cannot it is said so.
+        compositor_record_write_ppm(large, 2, 2, 4294967u, "check");
+        if (system_stat_at(AT_FDCWD, (string_address)path, 0, 0x7ffu, st) != 0)
+                string_format(log, "  record: %s is not writable here: the frame file's mode is not checked\n", (string_address)COMPOSITOR_RECORD_DIR);
+        else
+        {
+                memory_copy(&mode, st + 28, 2);
+                check("record: a frame file is 0600, the screen's pixels are the owner's alone", (mode & 0777) == 0600);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0);
+        }
 
         compositor_record_free();
         compositor.scanout = saved_scanout, compositor.width = saved_width, compositor.height = saved_height, compositor.scanout_pitch = saved_pitch;

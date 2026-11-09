@@ -386,7 +386,9 @@ static void compositor_record_write_ppm(const unsigned int *pixels, unsigned int
         at = compositor_record_cat(path, at, sizeof(path), "-");
         at = compositor_record_cat(path, at, sizeof(path), cls);
         at = compositor_record_cat(path, at, sizeof(path), ".ppm");
-        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+        // A frame is the screen's own pixels, what was on it when a password or a document was: the owner alone reads it (0600). The directory is 0755 so
+        // that the names of the records can be listed; the report and the state are 0644 and say only counts.
+        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (handle < 0)
                 return;
         at = compositor_record_cat(head, 0, sizeof(head), "P6\n");

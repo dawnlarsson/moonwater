@@ -41,6 +41,26 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-170: a present record's screen frames were written world-readable (0644) into a directory any account can list
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | Permissions on a file created (CWE-732), and information in a file a user may read (CWE-200): screen contents |
+| Attacker | any local account, while a recording runs: `moonwater canvas record SECONDS` (root's request) writes up to eight frames of each class, of the whole screen |
+| Moonwater exposure window | from `75657e50e` (2026-11-04 21:57:44 +01:00, the frames of a recording and their writer) to the fixing commit (2026-11-09) |
+| Fixed by | this entry's commit, the one whose subject begins "canvas: the present record's frames are the owner's alone" (`src/canvas/record.h` `compositor_record_write_ppm`) |
+
+**What it was.** `compositor_record_write_ppm` created each frame of a recording, `frame-SEQ-CLASS.ppm` (and the `tear-before` and `tear-after` neighbours), with mode 0644 under `/run/moonwater/record`. The frame is the scanout's pixels at the present: whatever was on the screen, a password typed in a window or a document. The directory is made 0755 by the compositor (root), so any local account could list it and read the frames.
+
+**Reachability.** A recording is asked for by root only (`host_canvas_record` in `src/sh/host.c` writes the request as root). The frames are written while it runs, for as long as the recording lasts, and they are not removed afterwards.
+
+**The fix.** The frame files are created 0600. The report and the state stay 0644: they say only counts, and `moonwater canvas record report` reads the report as the person who asks.
+
+**Tests that fail without it.** `CHECK_terminal` `record: a frame file is 0600, the screen's pixels are the owner's alone` (in `record_rows`): it is checked where `/run/moonwater/record` can be written. The lane's user cannot write there, so the row says so and is not counted; run in a private mount namespace (`unshare -rm`, with a tmpfs over `/run`) the row fails on the old `record.h` (`FAIL record: a frame file is 0600`) and passes on the new one.
+
+**Still open.** The directory stays 0755, so the names of the frames (the sequence and the class) are listed by any account. The frames already written by an earlier compositor keep their mode, since an existing file keeps its mode when it is truncated.
+
 ### MW-2026-169: a present record's frame copy ran past its block when the screen changed size during a recording (out-of-bounds write in the root compositor)
 
 | | |
