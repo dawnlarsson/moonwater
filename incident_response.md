@@ -41,6 +41,39 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-182: the build tool's argument vectors were written past their 512 entries (a compile ran through sudo)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 (memory safety: stack out-of-bounds write in the build tool; a flag list cut short is refused, not dropped) |
+| Class | Memory safety: out-of-bounds write (CWE-787) on a stack array of 512 pointers; silent truncation of an argument list (CWE-754) |
+| Attacker | local: whoever sets the build's environment or profile words (`SPARK_CPPFLAGS`, a profile's `program_flags`, the kernel profiles and `make_flags` on the command line). No network path. |
+| Moonwater exposure window | from `a05c6d00b` (2026-09-09 16:03:20 +02:00, the spark packer: the link's eight words written after a split that may fill the vector) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/build/build.c`) |
+| Tests that fail without it | `HarnessBuildTools.test_spark_words_past_the_argument_vector_are_refused_before_compiling` in `test/differential.py` (harness `build_tools`): 505 words in `SPARK_CPPFLAGS` print no refusal and the spark compile starts |
+
+**What it was.** `build_add_split` appends a list of words to a 512-entry vector and stops at `room - 1`, so a list of
+500 or more words leaves the vector at 511 entries. Five callers then wrote more words, and a null, after it with no room
+check: the spark link (eight words and the null, after `SPARK_CPPFLAGS`), the freestanding link (the entry word and
+the null), the install command, the kernel's `make` flags (the `KCFLAGS` word and the null), and the boot command (the
+emulator's device words). Those writes went past `words[511]`. Observed on the box with `BUILD_TRACE=1 ./build spark
+programs/utilities out` and `SPARK_CPPFLAGS` of 505 words: the compile was started through `/usr/sbin/sudo`, with its
+argument list cut at 512 entries; with 300 words the same command runs unprivileged with all 341 words. The launcher
+takes the sudo path only when the command's `privileged` flag is set, and this command's flag is not set anywhere on
+that path, so the write past the array must have changed a neighbouring field (not confirmed with a debugger). The list
+the compiler got was then not the one the caller built.
+
+**The fix.** Each caller that appends words after a split keeps the room those words need (`BUILD_ARGUMENT_ROOM - 8`
+for the spark link, `- 1` for each freestanding split, `- 2` for the install and `make` lists, `- 32` and `- 28` for the
+two boot splits, `- 2` for the arch-profile list), and `build_add_split` refuses a list it cannot place completely with
+`build failed: too many words for one command` instead of cutting it short. The kernel profile list refuses more than
+511 profiles the same way.
+
+**Still open.** `build_words_of` stops silently when a list is longer than its 8 KiB text store (`BUILD_WORD_ROOM`),
+so a `SPARK_CPPFLAGS` past 8 KiB still drops its tail without a message. The argument parser for `build_local` still
+takes at most 511 profile names from the command line without a message. Whether the sudo spawn came from a corrupted
+field of the command record (as the stack layout suggests) was not confirmed by a debugger.
+
 ### MW-2026-171: stat padded a directive's width to a gigabyte from a format of fifteen bytes
 
 | | |

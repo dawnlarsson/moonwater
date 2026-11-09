@@ -2859,15 +2859,22 @@ static bool build_append(b32 handle, string_address path, positive room, positiv
 }
 
 //      Appending split words onto an argument vector under construction.
+//      Words fill the vector only up to `room`, which the caller sets with
+//      room to spare for what it writes after them and for the null that
+//      ends the vector. A word that does not fit is refused, and not dropped:
+//      the command would otherwise run without a flag its caller named.
 static positive build_add_split(string_address address_to words, positive count,
                                 positive room, string_address text)
 {
         string_address pieces[BUILD_ARGUMENT_ROOM];
         positive found = build_split(text, (string_address address_to)pieces,
                                      BUILD_ARGUMENT_ROOM);
+        positive at = 0;
 
-        for (positive at = 0; at < found && count + 1 < room; at++)
+        for (; at < found && count + 1 < room; at++)
                 words[count++] = pieces[at];
+        if (at < found)
+                build_die("too many words for one command");
 
         return count;
 }
@@ -3137,15 +3144,27 @@ static b32 build_spark(string_address source, string_address output,
                                              BUILD_ARGUMENT_ROOM);
                 bool keep_lines = mode && word_is(mode, "coverage");
 
-                for (positive at = 0; at < found && count + 1 < BUILD_ARGUMENT_ROOM;
-                     at++)
-                        if (!word_is(pieces[at], "-flto") &&
-                            !(keep_lines && (word_is(pieces[at], "-s") ||
-                                             word_is(pieces[at], "-Wl,--strip-all") ||
-                                             word_is(pieces[at], "-Wl,--strip-debug") ||
-                                             word_is(pieces[at], "-Wl,-x") ||
-                                             word_is(pieces[at], "-Wl,-s"))))
-                                words[count++] = pieces[at];
+                //      Sixteen slots stay free: the hook and debug words that
+                //      follow, the configuration's, and the link's own tail
+                //      (the split below keeps its room too). A list that does
+                //      not fit is refused, not cut short.
+                if (found == BUILD_ARGUMENT_ROOM)
+                        return string_report(log_error, 1,
+                                             "spark: too many program_flags words\n");
+                for (positive at = 0; at < found; at++)
+                {
+                        if (word_is(pieces[at], "-flto") ||
+                            (keep_lines && (word_is(pieces[at], "-s") ||
+                                            word_is(pieces[at], "-Wl,--strip-all") ||
+                                            word_is(pieces[at], "-Wl,--strip-debug") ||
+                                            word_is(pieces[at], "-Wl,-x") ||
+                                            word_is(pieces[at], "-Wl,-s"))))
+                                continue;
+                        if (count + 16 >= BUILD_ARGUMENT_ROOM)
+                                return string_report(log_error, 1,
+                                                     "spark: too many program_flags words\n");
+                        words[count++] = pieces[at];
+                }
         }
 
         if (mode && word_is(mode, "debug"))
@@ -3174,8 +3193,10 @@ static b32 build_spark(string_address source, string_address output,
                 if (kernels && *kernels && count + 1 < BUILD_ARGUMENT_ROOM)
                         words[count++] = kernels;
         }
+        //      The eight words below and the null that ends the vector have
+        //      to fit: the split keeps that room.
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 8,
                                 string_get_environment(environ,
                                                        "SPARK_CPPFLAGS"));
 
@@ -3398,14 +3419,16 @@ static b32 build_freestanding_link(string_address source, string_address output,
         words[count++] = source;
         words[count++] = "-o";
         words[count++] = output;
+        //      The entry word below and the null that ends the vector have
+        //      to fit: each split keeps one slot for them.
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 1,
                                 build_setting_get("freestanding_flags"));
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 1,
                                 build_whole_program_flags(compiler));
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 1,
                                 build_setting_get("freestanding_flags_tail"));
         words[count++] = build_join("-Wl,-e,", build_setting_get("entry"), null);
         words[count] = null;
@@ -3982,7 +4005,7 @@ static bool build_install(string_address what)
         }
 
         count = build_add_split((string_address address_to)words, 0,
-                                BUILD_ARGUMENT_ROOM, command);
+                                BUILD_ARGUMENT_ROOM - 2, command);
         words[count++] = what;
         words[count] = null;
 
@@ -5771,8 +5794,10 @@ static b32 build_local(string_address address_to profiles, positive count,
         build_label("", "KERNEL CONFIGURATION");
 
         {
+                //      The arch profile below and the null that ends the list
+                //      have to fit after these.
                 chosen_count = build_add_split((string_address address_to)chosen,
-                                               chosen_count, BUILD_ARGUMENT_ROOM,
+                                               chosen_count, BUILD_ARGUMENT_ROOM - 2,
                                                build_setting_get("profiles_always"));
 
                 //      Null when an arch/ profile is on the line, which is
@@ -5800,7 +5825,11 @@ static b32 build_local(string_address address_to profiles, positive count,
                 }
                 else
                         for (positive at = 0; at < count; at++)
+                        {
+                                if (chosen_count + 1 >= BUILD_ARGUMENT_ROOM)
+                                        return build_die("too many profiles");
                                 chosen[chosen_count++] = profiles[at];
+                        }
 
                 chosen[chosen_count] = null;
         }
@@ -5992,8 +6021,9 @@ static b32 build_local(string_address address_to profiles, positive count,
 
                 words[at++] = "make";
                 words[at++] = build_join("-j", cores, null);
+                //      The KCFLAGS word and the null below have to fit after.
                 at = build_add_split((string_address address_to)words, at,
-                                     BUILD_ARGUMENT_ROOM, make_flags);
+                                     BUILD_ARGUMENT_ROOM - 2, make_flags);
 
                 words[at++] = build_join("KCFLAGS=", kernel_cflags, null);
                 words[at] = null;
@@ -6941,9 +6971,11 @@ static b32 build_boot(string_address image, bool console, string_address arch,
         build_say(build_join("Booting ", image, " (", arch, ")", null));
         build_size(image);
 
+        //      The room kept after each split: at most four words before the
+        //      second split, and at most 28 (the null included) after it.
         words[count++] = emulator;
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 32,
                                 build_boot_setting("emulator_flags", arch));
         if (ram)
         {
@@ -6953,7 +6985,7 @@ static b32 build_boot(string_address image, bool console, string_address arch,
         words[count++] = "-kernel";
         words[count++] = image;
         count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM,
+                                BUILD_ARGUMENT_ROOM - 28,
                                 build_boot_setting("emulator_devices", arch));
 
         //      Hardware acceleration where this QEMU has it and the guest is

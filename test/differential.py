@@ -32499,6 +32499,31 @@ out.write_text("#!/usr/bin/env python3\\n"
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "compiled").exists())
 
+    def test_spark_words_past_the_argument_vector_are_refused_before_compiling(self):
+        """SPARK_CPPFLAGS of 505 words filled the argument vector to 511, and the
+        link's eight words and its null were then written past its 512 entries:
+        the compiler was started through sudo with its arguments cut at 512.
+        Words that do not fit are refused, and nothing is compiled."""
+        if platform.system() != "Linux":
+            self.skipTest("the freestanding C build tool requires Linux")
+        (self.work / "program.c").touch()
+        # The tool runs from a root holding the repository's build.sh, kernel/
+        # and src/ by link, and an artifacts/.config that names the arch.
+        root = self.work / "root"
+        root.mkdir()
+        for name in ("build.sh", "kernel", "src"):
+            (root / name).symlink_to(HARNESS_ROOT / name)
+        (root / "artifacts").mkdir()
+        (root / "artifacts" / ".config").write_text("#> arch x86_64\n")
+        self.env["SPARK_CPPFLAGS"] = " ".join("-DW%d" % n for n in range(505))
+        result = subprocess.run([build_tool(HARNESS_ROOT), "spark",
+                                 str(self.work / "program"), str(self.work / "out")],
+                                cwd=root, env=self.env, capture_output=True,
+                                text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("too many words", result.stderr + result.stdout)
+        self.assertFalse((self.work / "compiled").exists())
+
     def test_run_uses_local_output_and_preserves_status(self):
         source = self.work / "source.c"
         source.touch()
