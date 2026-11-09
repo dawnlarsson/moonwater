@@ -19548,9 +19548,11 @@ static fn terminal_ul_byte(terminal_state address_to state, p8 character)
                 terminal_ul_column(state, state->ul_column + 1, true);
                 return;
         }
-        // A byte past ASCII is one column, as col takes it: dropping it lost
-        // the text of every non-ASCII line under a UTF-8 locale.
-        if (!byte_is_printable(character) && character < 0x80)
+        // Under a UTF-8 locale a byte past ASCII is a character of the line,
+        // one column as col takes it, and dropping it lost the text of every
+        // non-ASCII line. The C locale still filters them.
+        if (!byte_is_printable(character) &&
+            !(character >= 0x80 && text_locale_utf8()))
                 return;
 
         if (state->ul_column >= TEXT_LINE_MAX)
@@ -19822,8 +19824,10 @@ static fn terminal_scan(byte_span address_to blob,
                                 continue;
                         }
 
-                        // A byte past ASCII is one column, as col takes it.
-                        if (!byte_is_printable(character) && character < 0x80)
+                        // Under a UTF-8 locale a byte past ASCII is one column,
+                        // as in ul; the C locale still filters it.
+                        if (!byte_is_printable(character) &&
+                            !(character >= 0x80 && text_locale_utf8()))
                                 continue;
 
                         state->crt_print_newline = true;
