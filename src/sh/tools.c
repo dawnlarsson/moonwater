@@ -18661,8 +18661,11 @@ static bool ul_renice_long_value(string_address word, string_address name,
 {
         positive length = string_length(name);
 
+        /* string_compare_max stops at the word's terminator: a bare "--" is
+           the empty word after the dashes, and memory_compare would read
+           the name's length past it. */
         if (!string_is(word, '-') || !string_is(word + 1, '-') ||
-            memory_compare(word + 2, name, length))
+            string_compare_max(word + 2, name, length))
                 return false;
 
         if (string_is(word + 2 + length, '='))
