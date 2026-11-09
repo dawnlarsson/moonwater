@@ -14571,6 +14571,7 @@ static bool pr_digits_run;
         needs a look, so a run goes out (or into the store) in one piece.
 */
 static p8 pr_plain[256];
+static bool pr_plain_words;
 
 static fn pr_plain_build()
 {
@@ -14580,6 +14581,9 @@ static fn pr_plain_build()
         // back rather than written, which pr_plain_put does for a run.
         pr_plain[' '] = pr_tabify ? 2 : 1;
         pr_plain[pr_input_tab_char] = 0;
+        // The eight-byte test below is the table's answer only while the
+        // input tab character is not one of the bytes it covers.
+        pr_plain_words = !(pr_input_tab_char >= 0x20 && pr_input_tab_char < 0x7f);
 }
 
 static fn pr_print_white_space();
@@ -14618,9 +14622,37 @@ static fn pr_plain_put(p8 address_to at, positive run)
         }
 }
 
+/*
+        Eight bytes at once: true when every byte of the word is 0x20 to
+        0x7e, which is what pr_plain holds as plain, with the input tab
+        character outside that range (pr_plain_words). A byte with its high
+        bit set fails the first test. Each byte is then tested for >= 0x20 by
+        adding 0x60 to its low seven bits, which cannot carry out of the
+        byte, and for <= 0x7e by adding 1: the high bit of the sum is the
+        answer for each byte at once.
+*/
+typedef p64 pr_word_u __attribute__((aligned(1), may_alias));
+
+static inline INLINE bool pr_plain_word(p64 word)
+{
+        const p64 high = 0x8080808080808080ull;
+
+        if (word & high)
+                return false;
+
+        p64 at_least = word + 0x6060606060606060ull;
+        p64 past = word + 0x0101010101010101ull;
+
+        return (at_least & ~past & high) == high;
+}
+
 static inline INLINE positive pr_plain_run(p8 address_to at, positive left)
 {
         positive run = 0;
+
+        if (pr_plain_words)
+                while (left - run >= 8 && pr_plain_word(*(const pr_word_u *)(at + run)))
+                        run += 8;
 
         while (run < left && pr_plain[at[run]])
                 run++;
