@@ -182179,6 +182179,26 @@ static void au_test_formats(void)
         }
 }
 
+/* The stereo card's bytes for a run, from the library's routine over the whole run in one call: the encoder's own chunks are not used. */
+static void au_pair_reference(long format, unsigned char *dst, const float *left, const float *right, unsigned long frames)
+{
+        static unsigned int lanes[2 * 1300];
+
+        if (format == AUDIO_FORMAT_S16LE)
+                f32_pair_to_s16(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_S32LE)
+                f32_pair_to_s32(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_S24_32LE)
+                f32_pair_to_s24_32(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_F32LE)
+                f32_pair_to_f32(dst, left, right, frames);
+        else
+        {
+                f32_pair_to_s24_32((unsigned char *)lanes, left, right, frames);
+                pcm_pack24(dst, lanes, 2 * frames);
+        }
+}
+
 static void au_test_encode(void)
 {
         static unsigned char out[AUDIO_BLOCK * 8 * 4];
@@ -182304,6 +182324,44 @@ static void au_test_encode(void)
 
                 memcpy(&one, out + i * 4, 4);
                 AUCHECK(one == (left[i] + right[i]) * 0.5f, "a mono card gets the mean, frame %ld", i);
+        }
+        {
+                //      Every card shape of every format, past one block: a card of N channels is the stereo card's frame at the front
+                //      and silence after it; a mono card is the mean's stereo frame, its first sample. The stereo card is the library's.
+                static float enc_l[1300], enc_r[1300], enc_mid[1300];
+                static unsigned char enc_out[1300 * 8 * 8], enc_ref[1300 * 8 * 8];
+                static const long enc_formats[] = {AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S24LE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S32LE, AUDIO_FORMAT_F32LE};
+                static const long enc_counts[] = {513, 1300};
+
+                for (long i = 0; i < 1300; i++)
+                {
+                        enc_l[i] = (float)((i * 7919) % 2001 - 1000) / 900.0f;
+                        enc_r[i] = -enc_l[i] * 0.7f + (float)(i % 11) * 1e-3f;
+                        enc_mid[i] = (enc_l[i] + enc_r[i]) * 0.5f;
+                }
+                for (unsigned f = 0; f < sizeof enc_formats / sizeof enc_formats[0]; f++)
+                        for (long ch = 1; ch <= 8; ch++)
+                                for (unsigned n = 0; n < sizeof enc_counts / sizeof enc_counts[0]; n++)
+                                {
+                                        long frames = enc_counts[n], bytes = audio_format_bytes(enc_formats[f]), wrote, bad = 0;
+                                        const float *a = ch == 1 ? enc_mid : enc_l, *b = ch == 1 ? enc_mid : enc_r;
+
+                                        wrote = audio_encode(enc_formats[f], enc_out, frames, ch, enc_l, enc_r);
+                                        au_pair_reference(enc_formats[f], enc_ref, a, b, (unsigned long)frames);
+                                        for (long i = 0; i < frames; i++)
+                                                for (long c = 0; c < ch; c++)
+                                                {
+                                                        const unsigned char *got = enc_out + (i * ch + c) * bytes;
+                                                        const unsigned char *want = enc_ref + (i * 2 + c) * bytes;
+
+                                                        if (c >= 2)
+                                                                for (long k = 0; k < bytes; k++)
+                                                                        bad |= got[k] != 0;
+                                                        else
+                                                                bad |= memcmp(got, want, (size_t)bytes) != 0;
+                                                }
+                                        AUCHECK(wrote == frames * ch * bytes && !bad, "format %ld, %ld channels, %ld frames: the card's bytes", enc_formats[f], ch, frames);
+                                }
         }
 }
 

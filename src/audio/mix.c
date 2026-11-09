@@ -237,7 +237,6 @@ AUDIO_API void audio_init(void)
         integer decoder's scale gives the sample's own; a byte-swapped float is a float, held to [-16, 16] with a NaN made zero).
 */
 #define AUDIO_WIDE 4096 // lanes a pass holds
-#define AUDIO_PACK 1024 // frames a pass of the 24-bit encoder holds
 
 AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, long channels, float *const *dst)
 {
@@ -288,137 +287,134 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
         }
 }
 
-// A float in [-1, 1] as a rounded integer of the given scale, ties to even, clipped into the integer's range.
-static inline int audio_round16(float v)
+/*
+        The library's stereo encoder for one run of frames (at most AUDIO_BLOCK): the pair of the card's format, two channels
+        interleaved into dst. The rounding, the clip and the NaN rule are the library's, the same for every card.
+*/
+static void audio_pair_encode(long format, unsigned char *dst, const float *left, const float *right, unsigned long frames)
 {
-        float r;
-        union { float f; int i; } bits;
+        if (format == AUDIO_FORMAT_S16LE)
+                f32_pair_to_s16(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_S32LE)
+                f32_pair_to_s32(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_S24_32LE)
+                f32_pair_to_s24_32(dst, left, right, frames);
+        else if (format == AUDIO_FORMAT_F32LE)
+                f32_pair_to_f32(dst, left, right, frames);
+        else
+        {
+                // 24 bits in three bytes: the pair as 24-in-32 lanes, packed to three bytes by the library
+                static unsigned int lanes[2 * AUDIO_BLOCK];
 
-        if (v != v)
-                return 0;
-        v *= 32768.0f;
-        v = v > 32767.0f ? 32767.0f : v;
-        v = v < -32768.0f ? -32768.0f : v;
-        r = v + 12582912.0f; // 1.5 * 2^23: the sum's low bits are the rounded integer
-        bits.f = r;
-        return (bits.i & 0x7fffff) - 0x400000;
+                f32_pair_to_s24_32((unsigned char *)lanes, left, right, frames);
+                pcm_pack24(dst, lanes, 2 * frames);
+        }
 }
 
-static inline int audio_round_wide(float v, double scale, double high)
+/*
+        F32LE in a card of other than two channels is the card's own rule: a sample clipped to [-1, 1], a NaN's bits kept. The
+        library's float pair (the stereo card's) quiets a NaN, so the two rules are kept apart, each as it was. Written as
+        floats, so the compiler vectorises it.
+*/
+static void audio_f32_pair_clip(float *dst, const float *left, const float *right, unsigned long frames)
 {
-        double d = (double)v * scale, r;
+        for (unsigned long i = 0; i < frames; i++)
+        {
+                float a = left[i], b = right[i];
 
-        if (v != v)
-                return 0;
-        d = d > high ? high : d;
-        d = d < -high - 1.0 ? -high - 1.0 : d;
-        r = d + 6755399441055744.0; // 1.5 * 2^52
-        union { double d; long long i; } bits;
+                dst[2 * i] = a > 1.0f ? 1.0f : a < -1.0f ? -1.0f : a;
+                dst[2 * i + 1] = b > 1.0f ? 1.0f : b < -1.0f ? -1.0f : b;
+        }
+}
 
-        bits.d = r;
-        return (int)(bits.i & 0xffffffffll);
+/*
+        The frames of a card of other than two channels: each frame is the pair's frame (two samples of the format) and silence
+        after it. The width is a constant in each copy (2, 3 or 4 bytes), so the copies are fixed-size.
+*/
+static inline __attribute__((always_inline)) void audio_spread(unsigned char *out, const unsigned char *pair, long frames, long card, long width, long copy)
+{
+        for (long i = 0; i < frames; i++)
+        {
+                unsigned char *q = out + i * card;
+                const unsigned char *p = pair + i * width;
+
+                for (long k = 0; k < copy; k++)
+                        q[k] = p[k];
+        }
+}
+
+/*
+        The frames of a card of other than two channels: the pair's frame (two samples of the format, width bytes) and silence
+        after it; a mono card is the first sample alone. Each copy has its trip count as a constant, one per format width.
+*/
+static void audio_spread_run(unsigned char *out, const unsigned char *pair, long frames, long channels, long bytes)
+{
+        long card = channels * bytes;
+
+        if (channels > 1)
+                memory_fill(out, 0, (unsigned long)(frames * card));
+        if (bytes == 2)
+        {
+                if (channels == 1)
+                        audio_spread(out, pair, frames, card, 4, 2);
+                else
+                        audio_spread(out, pair, frames, card, 4, 4);
+        }
+        else if (bytes == 3)
+        {
+                if (channels == 1)
+                        audio_spread(out, pair, frames, card, 6, 3);
+                else
+                        audio_spread(out, pair, frames, card, 6, 6);
+        }
+        else
+        {
+                if (channels == 1)
+                        audio_spread(out, pair, frames, card, 8, 4);
+                else
+                        audio_spread(out, pair, frames, card, 8, 8);
+        }
 }
 
 /*
         The bus into a card's bytes: format is one of S16LE, S24LE, S24_32LE, S32LE, F32LE. The pair goes to the first two
         channels of the card, a mono card gets the mean, and a channel past the second is silence. Answers the bytes written.
+        A block at a time: the library writes the pair (the mean twice, for mono), and a card of other than two channels gets
+        that pair at the front of each frame and silence after it.
 */
 AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long channels, const float *left, const float *right)
 {
         long bytes = audio_format_bytes(format);
+        static float mean[AUDIO_BLOCK];
+        static union { float f[2 * AUDIO_BLOCK]; unsigned char b[2 * AUDIO_BLOCK * 4]; } pair;
 
         // Only the card's formats are made: any other would be written four bytes a sample and answered as its own width.
         if (frames < 1 || channels < 1 || !(format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S24LE || format == AUDIO_FORMAT_S24_32LE ||
                                              format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
                 return 0;
-        // A card of two channels, which is what is asked for whenever it can be, in the formats it is asked in: the library's.
-        if (channels == 2 && frames > 0 && (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_S24_32LE || format == AUDIO_FORMAT_F32LE))
+        for (long done = 0; done < frames;)
         {
-                if (format == AUDIO_FORMAT_S16LE)
-                        f32_pair_to_s16(dst, left, right, (unsigned long)frames);
-                else if (format == AUDIO_FORMAT_S32LE)
-                        f32_pair_to_s32(dst, left, right, (unsigned long)frames);
-                else if (format == AUDIO_FORMAT_S24_32LE)
-                        f32_pair_to_s24_32(dst, left, right, (unsigned long)frames);
+                long take = frames - done < AUDIO_BLOCK ? frames - done : AUDIO_BLOCK;
+                const float *l = left + done, *r = right + done;
+                unsigned char *out = dst + done * channels * bytes;
+
+                if (channels == 1)
+                {
+                        for (long i = 0; i < take; i++)
+                                mean[i] = (l[i] + r[i]) * 0.5f;
+                        l = r = mean;
+                }
+                if (channels == 2)
+                        audio_pair_encode(format, out, l, r, (unsigned long)take);
                 else
-                        f32_pair_to_f32(dst, left, right, (unsigned long)frames);
-                return frames * 2 * bytes;
-        }
-        // The 24-bit form in three bytes: the library's 24-in-32 pairs, packed to three bytes by its next routine, a pass of 1024
-        // frames at a time.
-        if (channels == 2 && format == AUDIO_FORMAT_S24LE)
-        {
-                static unsigned int lanes[2 * AUDIO_PACK];
-
-                for (long done = 0; done < frames;)
                 {
-                        long take = frames - done < AUDIO_PACK ? frames - done : AUDIO_PACK;
-
-                        f32_pair_to_s24_32((unsigned char *)lanes, left + done, right + done, (unsigned long)take);
-                        pcm_pack24(dst + done * 6, lanes, (unsigned long)(2 * take));
-                        done += take;
+                        if (format == AUDIO_FORMAT_F32LE)
+                                audio_f32_pair_clip(pair.f, l, r, (unsigned long)take);
+                        else
+                                audio_pair_encode(format, pair.b, l, r, (unsigned long)take);
+                        audio_spread_run(out, pair.b, take, channels, bytes);
                 }
-                return frames * 2 * bytes;
-        }
-        for (long i = 0; i < frames; i++)
-        {
-                for (long c = 0; c < channels; c++)
-                {
-                        float v = channels == 1 ? (left[i] + right[i]) * 0.5f : c == 0 ? left[i] : c == 1 ? right[i] : 0.0f;
-                        unsigned char *q = dst + (i * channels + c) * bytes;
-
-                        switch (format)
-                        {
-                        case AUDIO_FORMAT_S16LE:
-                        {
-                                unsigned short x = (unsigned short)(short)audio_round16(v);
-
-                                q[0] = (unsigned char)x;
-                                q[1] = (unsigned char)(x >> 8);
-                                break;
-                        }
-                        case AUDIO_FORMAT_S32LE:
-                        {
-                                unsigned int x = (unsigned int)audio_round_wide(v, 2147483648.0, 2147483647.0);
-
-                                q[0] = (unsigned char)x;
-                                q[1] = (unsigned char)(x >> 8);
-                                q[2] = (unsigned char)(x >> 16);
-                                q[3] = (unsigned char)(x >> 24);
-                                break;
-                        }
-                        case AUDIO_FORMAT_S24_32LE:
-                        {
-                                unsigned int x = (unsigned int)audio_round_wide(v, 8388608.0, 8388607.0);
-
-                                q[0] = (unsigned char)x;
-                                q[1] = (unsigned char)(x >> 8);
-                                q[2] = (unsigned char)(x >> 16);
-                                q[3] = (unsigned char)(x >> 24);
-                                break;
-                        }
-                        case AUDIO_FORMAT_S24LE:
-                        {
-                                int x = audio_round_wide(v, 8388608.0, 8388607.0);
-
-                                q[0] = (unsigned char)x;
-                                q[1] = (unsigned char)(x >> 8);
-                                q[2] = (unsigned char)(x >> 16);
-                                break;
-                        }
-                        default: // F32LE
-                        {
-                                union { float f; unsigned int i; } x;
-
-                                x.f = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
-                                q[0] = (unsigned char)x.i;
-                                q[1] = (unsigned char)(x.i >> 8);
-                                q[2] = (unsigned char)(x.i >> 16);
-                                q[3] = (unsigned char)(x.i >> 24);
-                                break;
-                        }
-                        }
-                }
+                done += take;
         }
         return frames * channels * bytes;
 }
