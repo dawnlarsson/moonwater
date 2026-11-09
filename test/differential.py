@@ -26478,7 +26478,10 @@ TEXT_UTILITIES = (
                    {"argv": ("-G",), "stdin": "text_ptx_specials", "fixture": "text"},
                    ("--nosuchflag",), ("-Q",), ("-f", "-i", "ptx_ignore"), ("-i", "ptx_ignore", "-o", "ptx_only"),
                                    ("-A", "-R"), ("-r", "-R", "ptx_refs"), ("-f", "-W", "[a-z][a-z]*"), ("-g", "5", "-w", "50"),
-                                   ("-F", "++", "-w", "32"), ("-A", "ptx_src", "ptx_refs"))),
+                                   ("-F", "++", "-w", "32"), ("-A", "ptx_src", "ptx_refs"),
+                                   #   A width under the gap and a context that begins with a blank
+                                   #   (a -S match then a space): the before field has no padding.
+                                   ("-w", "4", "-S", "[.?]", "ptx_src"), ("-A", "-w", "4", "-S", "[.?]", "ptx_src"))),
     Utility("rev",
             options=(Option("-0"), Option("--zero")),
             operands=((), ("a.txt",), ("a.txt", "nonl"), ("missing",), ("dir",), ("-",), ("binary",), ("wide",),

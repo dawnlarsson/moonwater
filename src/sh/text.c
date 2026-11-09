@@ -17270,16 +17270,14 @@ static positive ptx_skip_something(ptx_file address_to file, positive at,
         return at;
 }
 
-static positive ptx_field_padding(positive field, bipolar used)
+// GNU prints half - gap - used spaces, and none unless that is above nought.
+// The field stays signed: half under gap is subtracted from as it is, so a
+// negative used (a before field that begins after its end) is not added on.
+static positive ptx_field_padding(bipolar field, bipolar used)
 {
-        if (used < 0)
-        {
-                positive extra = (positive)(-used);
-                return extra <= positive_max - field ? field + extra
-                                                     : positive_max;
-        }
+        bipolar room = field - used;
 
-        return (positive)used < field ? field - (positive)used : 0;
+        return room > 0 ? (positive)room : 0;
 }
 
 static fn ptx_put_span(ptx_file address_to file, ptx_span span)
@@ -17642,9 +17640,7 @@ static fn ptx_output_one(ptx_occurrence address_to occurrence)
                                (tail_truncated
                                     ? (bipolar)ptx_truncation_length
                                     : 0);
-                positive field = ptx_half_width > ptx_gap
-                                     ? ptx_half_width - ptx_gap
-                                     : 0;
+                bipolar field = (bipolar)ptx_half_width - (bipolar)ptx_gap;
                 writer_fill_bulk(text_put, ptx_field_padding(field, used), ' ');
         }
         else
@@ -17653,9 +17649,7 @@ static fn ptx_output_one(ptx_occurrence address_to occurrence)
                                (before_truncated
                                     ? (bipolar)ptx_truncation_length
                                     : 0);
-                positive field = ptx_half_width > ptx_gap
-                                     ? ptx_half_width - ptx_gap
-                                     : 0;
+                bipolar field = (bipolar)ptx_half_width - (bipolar)ptx_gap;
                 writer_fill_bulk(text_put, ptx_field_padding(field, used), ' ');
         }
 
