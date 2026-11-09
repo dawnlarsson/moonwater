@@ -22893,6 +22893,24 @@ def shell_lang_lastpipe_one_line(rng):
             "shopt -s lastpipe 2>/dev/null; echo y | { sh -c 'kill -9 $$'; echo after; }; echo st=$?\n")
 
 
+def shell_lex_conditional_word(rng):
+    """[[ is a conditional only where a command begins. In an argument it is
+    an ordinary word: the line does not wait for a ]] and the bytes after it
+    are words, not a conditional that a second line has to close."""
+    body = rng.choice((
+        "echo [[ x ]]",
+        "echo a [[ b",
+        "echo x; echo [[ ]]",
+        "echo \\; [[ x ]]",
+        "echo \"if\" [[ x ]]",
+        "echo [[ x ]] && echo nope; echo after",
+        "echo x && [[ -n y ]] && echo yes",
+        "if [[ -n y ]]; then echo then; fi",
+    ))
+    return ("conditional-word-boundary", shell_ALL,
+            body + "\nprintf 'after:%s\\n' \"$?\"\n")
+
+
 SHELL_FAMILIES = (
     shell_delivered(shell_lex_quotes),
     shell_delivered(shell_lex_substitution),
@@ -22904,6 +22922,7 @@ SHELL_FAMILIES = (
     shell_lex_stray_terminator,
     shell_lex_function_metadata,
     shell_delivered(shell_lex_nested_syntax),
+    shell_lex_conditional_word,
     shell_exec_special_prefix,
     shell_exec_command_exception,
     shell_exec_disabled_special,

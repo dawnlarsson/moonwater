@@ -149,6 +149,8 @@ _Static_assert(offset_of(lex_frame, line) == 24, "line");
 KEEP __attribute__((externally_visible)) lex_frame lex_context;
 
 static KEEP positive lex_at HOT_STATE;
+// The first byte of the line being lexed, which the walk back from a [[ stops at.
+static string_address lex_line_start;
 
 #define lex_tokens lex_context.tokens
 #define lex_token_room lex_context.token_room
@@ -586,6 +588,107 @@ static KEEP string_address lex_arithmetic_end(string_address start)
         return null;
 }
 
+/*
+        Whether the byte at this position is escaped: an odd number of
+        backslashes stand in front of it on this line.
+*/
+static bool lex_escaped_at(string_address at)
+{
+        positive run = 0;
+
+        while (at > lex_line_start && string_is(at - 1, '\\'))
+        {
+                at--;
+                run++;
+        }
+        return run & 1;
+}
+
+/*
+        Whether the byte at this position is a blank that really separates
+        words: a space or tab with no backslash in front of it.
+*/
+static bool lex_separator_blank_at(string_address at)
+{
+        return (string_is(at, ' ') || string_is(at, '\t')) &&
+               !lex_escaped_at(at);
+}
+
+/*
+        Whether the word that begins at this position is one of the reserved
+        words after which a command starts. Bash recognises them only as the
+        whole of an unquoted word, and the words below are the ones that can
+        come in front of a command.
+*/
+static bool lex_command_word(string_address word, positive length)
+{
+        static const string_address words[] = {
+            "if", "then", "else", "elif", "do", "while", "until", "!", "time", "{"};
+
+        for (positive at = 0; at < sizeof(words) / sizeof(words[0]); at++)
+                if (length == string_length(words[at]) &&
+                    !memory_compare(word, (address_any)words[at], length))
+                        return true;
+        return false;
+}
+
+/*
+        Whether a byte ends a word, unless a backslash makes it part of one.
+*/
+static bool lex_word_break_at(string_address at)
+{
+        p8 value = string_get(at);
+
+        if (lex_escaped_at(at))
+                return false;
+        return lex_is_space(value) || value == ';' || value == '&' ||
+               value == '|' || value == '(' || value == ')' || value == '<' ||
+               value == '>';
+}
+
+/*
+        Whether a [[ at this position begins a command. Bash reads [[ as the
+        conditional only where a command may begin: at the start of the line,
+        after a newline, ; & | ( ) or one of the reserved words in
+        lex_command_word that is itself at a command start. Anywhere else,
+        echo [[ x ]] and echo a [[ b are two ordinary words, and the lexer must
+        neither look for a ]] nor ask for a second line because of one. The
+        walk back goes no further than the line being lexed, and a redirection
+        in front of the word means it is an argument, not a command.
+*/
+static bool lex_command_head_at(string_address start)
+{
+        string_address at = start;
+
+        while (true)
+        {
+                string_address word;
+                p8 value;
+
+                while (at > lex_line_start && lex_separator_blank_at(at - 1))
+                        at--;
+                if (at == lex_line_start)
+                        return true;
+
+                value = string_get(at - 1);
+                if (!lex_escaped_at(at - 1))
+                {
+                        if (value == '\n' || value == ';' || value == '&' ||
+                            value == '|' || value == '(' || value == ')')
+                                return true;
+                        if (value == '<' || value == '>')
+                                return false;
+                }
+
+                word = at;
+                while (word > lex_line_start && !lex_word_break_at(word - 1))
+                        word--;
+                if (word == at || !lex_command_word(word, (positive)(at - word)))
+                        return false;
+                at = word;
+        }
+}
+
 // A Bash [[...]] condition is one command-language token. Its own &&, ||,
 // parentheses, < and > belong to the conditional grammar, while the same
 // bytes after the closing ]] belong to the shell grammar again.
@@ -595,6 +698,9 @@ static KEEP string_address lex_conditional_end(string_address start)
 
         //      dash has no [[: it is a word, and a command that is not found.
         if (shell_dash_compat)
+                return null;
+        //      Only where a command begins; anywhere else it is a word.
+        if (!lex_command_head_at(start))
                 return null;
         //      Whether a word may begin here: after a blank, or in bash
         //      after one of the condition's own operators, so that
@@ -1275,6 +1381,7 @@ HOT b32 lex_unfinished(string_address line)
         string_address step = line;
 
         lex_scan_failed = 0;
+        lex_line_start = line;
         // A # is a comment only where a word could have started, which is the
         // same rule lex_line uses -- echo a#b is one word and not half of one.
         bool fresh = true;
@@ -1293,7 +1400,8 @@ HOT b32 lex_unfinished(string_address line)
                 positive run;
 
                 if (fresh && c == '[' && string_is(step + 1, '[') &&
-                    !shell_dash_compat && lex_is_space(string_get(step + 2)))
+                    !shell_dash_compat && lex_is_space(string_get(step + 2)) &&
+                    lex_command_head_at(step))
                 {
                         string_address stop = lex_conditional_end(step);
 
@@ -1900,6 +2008,7 @@ b32 lex_line_floor(string_address line, b32 comments);
 HOT b32 lex_line(string_address line)
 {
         lex_scan_failed = 0;
+        lex_line_start = line;
         lex_prepare();
         return lex_line_floor(line, lex_comments_on());
 }
