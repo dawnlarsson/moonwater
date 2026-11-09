@@ -1031,7 +1031,7 @@ struct windows
         unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
         unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
         char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
-        unsigned int gpu_faults; char gpu_fault[160]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault): "" for none yet
+        unsigned int gpu_faults; char gpu_fault[320]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault, GPU_FAULT_BYTES): "" for none yet
         unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
         unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
         unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known

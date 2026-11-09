@@ -22787,10 +22787,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
         // The card's last fault: the first page fault the kernel's log had since the job that failed was submitted, and what its address was in (gpu.c).
         if (table->gpu_fault[0])
         {
-                char fault[161];
+                char fault[sizeof(table->gpu_fault) + 1];
 
-                memory_copy(fault, (const char *)table->gpu_fault, 160);
-                fault[160] = 0;
+                memory_copy(fault, (const char *)table->gpu_fault, sizeof(table->gpu_fault));
+                fault[sizeof(table->gpu_fault)] = 0;
                 host_say(log, "  gpu fault       %s (%p jobs found one)\n", (string_address)fault, (positive)table->gpu_faults);
         }
         if (table->gpu_map_why)

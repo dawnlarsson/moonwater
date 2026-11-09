@@ -122404,6 +122404,18 @@ static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 static p64 gpu_seen_bos[1 + 8 + 256];
 static unsigned int gpu_seen_count;
 #define GPU_SUBMIT_SEEN(list, count) do { gpu_seen_count = (count); memory_copy(gpu_seen_bos, (list), (positive)(count) * sizeof(p64)); } while (0)
+// The fake kernel's answer to AMDGPU_INFO_GPUVM_FAULT (gpu.c's gpu_fault_query): gpu_fake_vm 0 the real call, 1 the fault below, -1 a refusal (EINVAL: a kernel without the query).
+static int gpu_fake_vm;
+static positive gpu_fake_vm_addr;
+static unsigned int gpu_fake_vm_status, gpu_fake_vm_hub;
+#define GPU_FAULT_FAKE(error, fault)                                                                                                                                   \
+        do                                                                                                                                                             \
+        {                                                                                                                                                              \
+                if (gpu_fake_vm > 0)                                                                                                                                   \
+                        (error) = 0, (fault)->addr = gpu_fake_vm_addr, (fault)->status = gpu_fake_vm_status, (fault)->hub = gpu_fake_vm_hub;                           \
+                else if (gpu_fake_vm < 0)                                                                                                                              \
+                        (error) = 22;                                                                                                                                  \
+        } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -224266,6 +224278,7 @@ static void gpu_bo_rows(void)
         check("gpu bo: a map looked up, then a trim, then the job, is in the bo list", gpu_seen_has(7));
         check("gpu bo: every map a record was given before the job is in its list", held);
         check("gpu bo: a map no record was given and not used in this tick is not in the list", !gpu_seen_has(8));
+        check("gpu bo: a job marks the maps its list named with its serial, and no other", gpu_maps[0].listed == gpu_submit_serial && gpu_maps[1].listed != gpu_submit_serial);
 
         // 2. The job has run: the records are over, and the map is let go of. The job a tick later names neither map.
         check("gpu bo: once the job has run the map's mark is let go of", !gpu_maps[0].handed);
@@ -224299,6 +224312,182 @@ static void gpu_bo_rows(void)
 
         gpu_map_count = 0, gpu_gone_at = 0, gpu_seen_count = 0, gpu_fake_cancel = 0, gpu_lost = 0, gpu_last_error = 0, gpu_fault[0] = 0;
         gpu.at = kept_at, gpu.fd = kept_fd;
+}
+
+/*
+        The card's fault by the kernel's query (AMDGPU_INFO_GPUVM_FAULT, answered by the fake: gpu_fake_vm) and the kernel's log lines, with no card: the line gpu_fault says
+        names the map or import that owns the address and whether the failed job's bo list (the serial of the last submit) had the map; the query's status word and hub, and
+        the log's client, are kept (gpu_fault_last) and said; a kernel without the query leaves the log's text as it was.
+*/
+static b32 gpu_text_is(const char *text, const char *want)
+{
+        return string_equals((string_address)text, (string_address)want);
+}
+
+// A hang noted (gpu_fault_note) with the fake kernel's fault: at, the status word and the hub.
+static void gpu_vm_note(positive at, unsigned int status, unsigned int hub)
+{
+        gpu_fake_vm = 1, gpu_fake_vm_addr = at, gpu_fake_vm_status = status, gpu_fake_vm_hub = hub;
+        gpu_job_began = clock_monotonic_nanoseconds(), gpu_job_error = 62, gpu_fault[0] = 0;
+        gpu_fault_note(true);
+        gpu_fake_vm = 0;
+}
+
+// The first fault in a log, line by line (gpu_fault_line), in the kernel's own words; the client's line is client.
+static void gpu_vm_log(struct gpu_fault_scan *scan, const char *client)
+{
+        memory_zero(scan, sizeof(*scan));
+        gpu_fault_line("amdgpu 0000:04:00.0: amdgpu:  in page starting at address 0x0000002000000180 from client 0x1b (UTCL2)", scan);
+        gpu_fault_line("GCVM_L2_PROTECTION_FAULT_STATUS:0x00701031", scan);
+        gpu_fault_line(client, scan);
+        gpu_fault_line("\t MORE_FAULTS: 0x1", scan);
+        gpu_fault_line("\t PERMISSION_FAULTS: 0x3", scan);
+        gpu_fault_line("\t MAPPING_ERROR: 0x0", scan);
+        gpu_fault_line("\t RW: 0x0", scan);
+}
+
+static void gpu_vmfault_rows(void)
+{
+        struct gpu_fault_scan scan;
+        const unsigned int failed = 5, kept_epoch = gpu_epoch; // the failed job is the fifth submit
+        const positive in_named = GPU_VA_MAPS + 0x180, in_unnamed = GPU_VA_MAPS + 0x10040, in_gone = GPU_VA_MAPS + 0x20010, in_unlisted = GPU_VA_MAPS + 0x30010;
+
+        gpu.fd = -1, gpu.pending = 0, gpu_fake_busy = 0, gpu_tick = 100, gpu_map_count = 0, gpu.imports = 0, gpu_gone_at = 0, gpu_map_next = GPU_VA_MAPS;
+        gpu_submit_serial = failed;
+        gpu_bo_map(0, 7, 0x10000000ull, 100), gpu_maps[0].listed = failed; // in the failed job's list
+        gpu_bo_map(1, 8, 0x20000000ull, 100), gpu_maps[1].listed = failed - 1; // in the one before only
+        gpu_bo_map(2, 9, 0x30000000ull, 100), gpu_maps[2].listed = failed; // dropped after the failed job named it
+        gpu_bo_map(3, 10, 0x40000000ull, 100), gpu_maps[3].listed = failed - 2; // dropped without the failed job naming it
+        gpu_map_count = 4;
+        gpu_drop(3, GPU_GONE_EVICT);
+        gpu_drop(2, GPU_GONE_TRIM);
+        memory_zero(&gpu_fault_last, sizeof(gpu_fault_last));
+
+        // 1. A map the failed job's list named: the map, that its list had it, and the query's status word and hub.
+        gpu_vm_note(in_named, 0x00701031u, 0);
+        check("gpu vm fault: an address in a map the job's list named is said with the map, the list, the status word and the hub",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000000180: held map, handle 7, userptr, read, from 0x10000000 to 0x10004000, used 0 ticks ago, listed in the job's bo list; "
+                                     "status 0x701031, hub 0 (graphics)"));
+        check("gpu vm fault: the query's address, status word and hub are kept, and it is not a repeat",
+              gpu_fault_last.have_query && gpu_fault_last.query_at == in_named && gpu_fault_last.query_status == 0x701031u && gpu_fault_last.query_hub == 0 && !gpu_fault_last.again &&
+              !gpu_fault_last.have_at);
+
+        // 2. A map the list did not name.
+        gpu_vm_note(in_unnamed, 0x00701031u, 0);
+        check("gpu vm fault: an address in a map the job's list did not name says the list missed it",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000010040: held map, handle 8, userptr, read, from 0x20000000 to 0x20004000, used 0 ticks ago, missing from the job's bo list; "
+                                     "status 0x701031, hub 0 (graphics)"));
+
+        // 3. A map that was dropped: the owner from the ring of the maps let go of, why and when, and whether the failed job's list had named it.
+        gpu_vm_note(in_gone, 0x00701031u, 2);
+        check("gpu vm fault: an address in a map dropped after the job named it says so, with the reason, and the media hub",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000020010: map handle 9 dropped 0 ticks ago by the 120-tick trim, listed in the job's bo list; status 0x701031, hub 2 (media)"));
+        gpu_vm_note(in_unlisted, 0x00701031u, 1);
+        check("gpu vm fault: an address in a map dropped without the job's list naming it says the list missed it",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000030010: map handle 10 dropped 0 ticks ago to make room (every map held), missing from the job's bo list; "
+                                     "status 0x701031, hub 1 (media)"));
+
+        // 4. A map the compositor forgot but the table keeps (a job given up on may run): the list's words come with it.
+        gpu_bo_map(2, 11, 0x50000000ull, 100), gpu_maps[2].listed = failed, gpu_map_count = 3;
+        gpu_forget((const void *)0x50000000ull, 0x1000);
+        gpu_vm_note(GPU_VA_MAPS + 0x20000, 0x00701031u, 0);
+        check("gpu vm fault: an address in a forgotten map says it was forgotten, and that the list had it",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000020000: held map, handle 11, userptr, read, from 0x0 to 0x0, forgotten, used 0 ticks ago, listed in the job's bo list; "
+                                     "status 0x701031, hub 0 (graphics)"));
+        gpu_map_count = 2;
+
+        // 5. A kernel without the query (the fake answers EINVAL), and a kernel that keeps no fault (it answers zeros): the log's text as it was.
+        memory_zero(&gpu_fault_last, sizeof(gpu_fault_last));
+        gpu_fake_vm = -1, gpu_job_began = clock_monotonic_nanoseconds(), gpu_job_error = 62, gpu_fault[0] = 0;
+        gpu_fault_note(true);
+        gpu_fake_vm = 0;
+        check("gpu vm fault: a kernel without the query leaves the line the job's error alone, with no fault in the log",
+              gpu_text_is(gpu_fault, "the card's job ended with error 62: the kernel's log has no page fault since it was submitted") && !gpu_fault_last.have_query);
+        gpu_vm_note(0, 0, 0);
+        check("gpu vm fault: a kernel that keeps no fault (zeros) leaves it too", gpu_text_is(gpu_fault, "the card's job ended with error 62: the kernel's log has no page fault since it was submitted") &&
+                                                                                    !gpu_fault_last.have_query);
+        gpu_vm_log(&scan, "\t Faulty UTCL2 client ID: TCP (0x8)");
+        gpu_fault_text(&scan);
+        check("gpu vm fault: with the log's address and no query the line is the log's, with the list's words and the client",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000000180: held map, handle 7, userptr, read, from 0x10000000 to 0x10004000, used 0 ticks ago, listed in the job's bo list; client TCP "
+                                     "(MAPPING_ERROR 0, PERMISSION_FAULTS 3, RW 0)"));
+
+        // 6. The log's client, in the words the kernel prints (the number after the name is not part of it).
+        check("gpu vm fault: the client TCP is read from its line", gpu_text_is(scan.client, "TCP") && scan.have_at && scan.at == in_named);
+        gpu_vm_log(&scan, "\t Faulty UTCL2 client ID: SQC (data) (0x9)");
+        check("gpu vm fault: a client with a word in brackets keeps it (SQC (data))", gpu_text_is(scan.client, "SQC (data)"));
+        gpu_vm_log(&scan, "\t Faulty UTCL2 client ID: CPC (0x5)");
+        check("gpu vm fault: the client CPC is read from its line", gpu_text_is(scan.client, "CPC"));
+        gpu_vm_log(&scan, "\t Faulty UTCL2 client ID: Reserved");
+        check("gpu vm fault: a client with no number after it is read whole", gpu_text_is(scan.client, "Reserved"));
+        gpu_vm_log(&scan, "\t not a client line");
+        check("gpu vm fault: no client line, no client", scan.client[0] == 0 && scan.have_mapping && scan.have_permission && scan.have_rw);
+
+        // 7. The log's address and the query's together: the log's is the job's (bounded by its time), the query's status word and hub are said beside it.
+        gpu_vm_log(&scan, "\t Faulty UTCL2 client ID: TCP (0x8)");
+        scan.have_query = 1, scan.query_at = in_unnamed, scan.query_status = 0x00701031u, scan.query_hub = 0;
+        gpu_fault_text(&scan);
+        check("gpu vm fault: the log's address names the owner when the query has another, and the query's words follow",
+              gpu_text_is(gpu_fault, "card faulted reading 0x2000000180: held map, handle 7, userptr, read, from 0x10000000 to 0x10004000, used 0 ticks ago, listed in the job's bo list; "
+                                     "status 0x701031, hub 0 (graphics); client TCP (MAPPING_ERROR 0, PERMISSION_FAULTS 3, RW 0)"));
+
+        // 8. A fault of the address space that was survived is read again by a later job that failed for another reason: the second read says it is the same.
+        memory_zero(&gpu_fault_last, sizeof(gpu_fault_last));
+        gpu_vm_note(in_named, 0x00701031u, 0);
+        check("gpu vm fault: the first read of a fault is not a repeat", !gpu_fault_last.again && !gpu_text_has(gpu_fault, "the same fault"));
+        gpu_vm_note(in_named, 0x00701031u, 0);
+        check("gpu vm fault: the same address and status word read again says it is the same fault",
+              gpu_fault_last.again && gpu_text_has(gpu_fault, "status 0x701031, hub 0 (graphics); the same fault as the last one read"));
+        gpu_epoch++; // the card started again: a new descriptor, a new address space, which keeps no fault of the old one's
+        gpu_vm_note(in_named, 0x00701031u, 0);
+        check("gpu vm fault: the same address and status word in a card started again is not a repeat", !gpu_fault_last.again && !gpu_text_has(gpu_fault, "the same fault"));
+        gpu_vm_note(in_named, 0x00701032u, 0);
+        check("gpu vm fault: another status word at the address is another fault", !gpu_fault_last.again && !gpu_text_has(gpu_fault, "the same fault"));
+        gpu_vm_note(in_unnamed, 0x00701032u, 0);
+        check("gpu vm fault: another address is another fault", !gpu_fault_last.again && gpu_text_has(gpu_fault, "held map, handle 8"));
+
+        // 9. The whole chain by the fake submit: a map looked up, a trim, the job named it and was refused; the line says its list had the map (and not the other).
+        gpu_map_count = 2;
+        {
+                static unsigned int scratch[1024];
+                __typeof__(gpu.at) kept_at = gpu.at;
+                const void *first = (const void *)0x10000100ull;
+
+                gpu.at = scratch;
+                gpu_bo_map(0, 7, 0x10000000ull, 100), gpu_bo_map(1, 8, 0x20000000ull, 100);
+                gpu_va_bytes(first, 4);
+                gpu_trim();
+                gpu_fake_vm = 1, gpu_fake_vm_addr = GPU_VA_MAPS + 0x180, gpu_fake_vm_status = 0x00701031u, gpu_fake_vm_hub = 0, gpu_fault_next = 0;
+                gpu_bo_run();
+                check("gpu vm fault: a refused job names the map looked up before a trim, and its line says the list had it", gpu_text_has(gpu_fault, "held map, handle 7") &&
+                                                                                                                              gpu_text_has(gpu_fault, "listed in the job's bo list"));
+                gpu_fake_vm_addr = GPU_VA_MAPS + 0x10040, gpu_fault_next = 0;
+                gpu_bo_run();
+                check("gpu vm fault: the job after it, which no record gave the other map to, says the list missed that map", gpu_text_has(gpu_fault, "held map, handle 8") &&
+                                                                                                                              gpu_text_has(gpu_fault, "missing from the job's bo list"));
+                gpu_fake_vm = 0, gpu.at = kept_at;
+        }
+
+        gpu_map_count = 0, gpu_gone_at = 0, gpu_fault_next = 0, gpu_fault[0] = 0, gpu_job_error = 0, gpu_submit_serial = 0, gpu_fake_vm = 0, gpu_last_error = 0, gpu_lost = 0;
+        gpu_epoch = kept_epoch;
+        memory_zero(&gpu_fault_last, sizeof(gpu_fault_last));
+}
+
+// The kernel in this run answers the query on the card that is up (the box's has it; one without answers EINVAL): the encoding of the call is the kernel's.
+static void gpu_vmfault_live_row(void)
+{
+        struct gpu_fault_scan scan;
+        unsigned int e;
+
+        if (gpu.fd < 0 || gpu.broken)
+        {
+                check("gpu vm fault: no card here, so the kernel is not asked", true);
+                return;
+        }
+        memory_zero(&scan, sizeof(scan));
+        e = gpu_fault_query(&scan);
+        check("gpu vm fault: the kernel answers the query on the card (0) or refuses it as unknown (22), nothing else", e == 0 || e == 22);
+        string_format(log, "  gpu vm fault: the kernel's answer to the query on the card: error %p, a fault kept: %p\n", (positive)e, (positive)scan.have_query);
 }
 
 // A job the wait gave up on (a hang: gpu_run_job leaves gpu.pending set) may still run on the card. Its maps are not unmapped, and its import is not unmapped, under
@@ -224384,6 +224573,7 @@ b32 main(void)
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         gpu_fault_rows();
         gpu_bo_rows();
+        gpu_vmfault_rows();
         gpu_flight_rows();
         flip_wait_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
@@ -226459,6 +226649,7 @@ b32 main(void)
         gpu_lent_rows();
         gpu_held_rows();
         gpu_resume_rows();
+        gpu_vmfault_live_row();
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */

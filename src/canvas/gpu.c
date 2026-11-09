@@ -816,9 +816,9 @@ static b32 gpu_start(positive bytes)
 #define GPU_MAPS 256
 // dma: made by the dma-buf route (offset: its place in the table's memfd); bytes: the span of its GPU address (from and to are 0 for a map forgotten);
 // handed: its address was given to a record that no job has run yet (gpu_run clears it, the trim does not): the next job names the map whatever the tick (gpu_map_named),
-// and a written map is not put over it in the tick it was given (gpu_map_as).
-static struct { positive from, to, va, bytes; unsigned int handle, used; b32 written; b32 dma; b32 handed; positive offset; } gpu_maps[GPU_MAPS];
-static unsigned int gpu_map_count, gpu_tick;
+// and a written map is not put over it in the tick it was given (gpu_map_as); listed: the serial (gpu_submit_serial) of the last submit whose bo list named it, 0 for none.
+static struct { positive from, to, va, bytes; unsigned int handle, used; b32 written; b32 dma; b32 handed; unsigned int listed; positive offset; } gpu_maps[GPU_MAPS];
+static unsigned int gpu_map_count, gpu_tick, gpu_submit_serial; // the submits made, counted from 1: a fault says whether a map was in the bo list of the last
 
 // The maps and imports let go of, the last GPU_GONE: a fault's address is named by what it was in, and by why it was let go of and how many ticks ago
 // (gpu_fault_say). Each reason is one way a map or an import leaves the table.
@@ -839,19 +839,23 @@ static const string_address gpu_gone_words[GPU_GONE_WHY_COUNT] = {
     "never", "by the 120-tick trim", "with its pages let go of", "by overlap with a written map", "to make room (every map held)",
     "as its pages were gone (msync)", "by the card's restart", "as a released import", "as an unimported buffer"};
 #define GPU_GONE 16
-static struct { positive va, bytes, from, to; unsigned int handle, why, tick; b32 written, dma, import; } gpu_gone[GPU_GONE];
+static struct { positive va, bytes, from, to; unsigned int handle, why, tick, listed; b32 written, dma, import; } gpu_gone[GPU_GONE];
 static unsigned int gpu_gone_at; // the ring's next slot is gpu_gone_at % GPU_GONE (the ones before it are the last)
-static void gpu_gone_put(positive va, positive bytes, positive from, positive to, unsigned int handle, enum gpu_gone_why why, b32 written, b32 dma, b32 import)
+static void gpu_gone_put(positive va, positive bytes, positive from, positive to, unsigned int handle, enum gpu_gone_why why, b32 written, b32 dma, b32 import,
+                         unsigned int listed)
 {
         unsigned int at = gpu_gone_at++ % GPU_GONE;
 
         gpu_gone[at].va = va, gpu_gone[at].bytes = bytes, gpu_gone[at].from = from, gpu_gone[at].to = to, gpu_gone[at].handle = handle;
         gpu_gone[at].why = (unsigned int)why, gpu_gone[at].tick = gpu_tick, gpu_gone[at].written = written, gpu_gone[at].dma = dma, gpu_gone[at].import = import;
+        gpu_gone[at].listed = listed;
 }
 
-// The card's fault: a job that failed (ETIME, EIO or a refused submit) read the kernel's log for the first page fault since it was submitted, and gpu_fault
-// says what that address was in (gpu_fault_note). "" until a job fails; gpu_faults counts the jobs that read the log.
-static char gpu_fault[160];
+// The card's fault: a job that failed (ETIME, EIO or a refused submit) read the kernel's log for the first page fault since it was submitted and asked the kernel for the
+// last fault of the card's address space (gpu_fault_read), and gpu_fault says what that address was in and whether the job's bo list had it (gpu_fault_note). "" until a
+// job fails; gpu_faults counts the jobs that read the log. The board's table holds the same bytes (window.c's gpu_fault).
+#define GPU_FAULT_BYTES 320
+static char gpu_fault[GPU_FAULT_BYTES];
 static unsigned int gpu_faults, gpu_job_error;
 static positive gpu_job_began, gpu_fault_next; // when the job being run was submitted, and when a refused submit may read the log again (monotonic ns)
 
@@ -914,7 +918,8 @@ static b32 gpu_recover(void)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
         {
-                gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, GPU_GONE_RECOVER, gpu_maps[i].written, gpu_maps[i].dma, 0);
+                gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, GPU_GONE_RECOVER, gpu_maps[i].written, gpu_maps[i].dma, 0,
+                             gpu_maps[i].listed);
                 if (gpu_maps[i].dma && gpu_shared.pin)
                         gpu_shared.pin(gpu_maps[i].offset, 0);
         }
@@ -928,7 +933,7 @@ static void gpu_drop(unsigned int i, enum gpu_gone_why why)
 {
         p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].bytes}, close[1] = {gpu_maps[i].handle};
 
-        gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, why, gpu_maps[i].written, gpu_maps[i].dma, 0);
+        gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, why, gpu_maps[i].written, gpu_maps[i].dma, 0, gpu_maps[i].listed);
         gpu_io(1u, 8, 64, va);
         system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
         if (gpu_maps[i].dma && gpu_shared.pin)
@@ -1029,7 +1034,7 @@ static b32 gpu_map_dmabuf(positive from, positive to, positive at, b32 written)
                 return gpu_raw(gpu.fd, GPU_GEM_CLOSE, close), gpu_map_why = 8 | e << 8, false;
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
         gpu_maps[gpu_map_count].handle = (unsigned int)close[0], gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].bytes = to - from;
-        gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - base;
+        gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - base;
         gpu_map_count++, gpu_maps_dma++;
         if (gpu_shared.pin)
                 gpu_shared.pin(from - base, 1);
@@ -1077,7 +1082,7 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
                                 return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it
                         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
                         gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
-                        gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handed = 0;
+                        gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0;
                         gpu_map_count++, gpu_maps_user++;
                         gpu_map_next = at + (to - from);
                         return true;
@@ -1233,7 +1238,7 @@ static void gpu_forget(const void *addr, positive bytes)
                 if (from < gpu_maps[i].to && gpu_maps[i].from < to)
                 {
                         gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, GPU_GONE_FORGET, gpu_maps[i].written,
-                                     gpu_maps[i].dma, 0);
+                                     gpu_maps[i].dma, 0, gpu_maps[i].listed);
                         gpu_maps[i].from = gpu_maps[i].to = 0;
                 }
 }
@@ -1252,7 +1257,7 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                 {
                         p64 va[8] = {gpu.imported[i], 2, at, 0, gpu.imported_bytes[i]}, close[1] = {gpu.imported[i]};
 
-                        gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1);
+                        gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1, 0);
                         gpu_io(1u, 8, 64, va);
                         system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
@@ -1303,8 +1308,15 @@ static b32 gpu_idle(void)
         return true;
 }
 
-// The fault's address, said as what it was in (gpu_fault_say): a map held (its handle, userptr or dma-buf, read or written, its span from and to, and its
-// use), an import held, a map or an import let go of in the last sixteen (why, and how many ticks ago), or none the table ever made.
+// Whether the bo list of the last submit had a map (its listed is that submit's serial), in the words of the line.
+static const char *gpu_listed_words(unsigned int listed)
+{
+        return listed && listed == gpu_submit_serial ? ", listed in the job's bo list" : ", missing from the job's bo list";
+}
+
+// The fault's address, said as what it was in (gpu_fault_say): a map held (its handle, userptr or dma-buf, read or written, its span from and to, its use, and whether
+// the last submit's bo list had it), an import held (every submit names all), a map or an import let go of in the last sixteen (why, how many ticks ago, and for a map
+// whether that list had it), or none the table ever made.
 static void gpu_fault_say(positive at)
 {
         const unsigned int room = sizeof(gpu_fault);
@@ -1322,7 +1334,8 @@ static void gpu_fault_say(positive at)
                         n = gpu_text_put(gpu_fault, n, room, " to 0x"), n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].to, 16);
                         n = gpu_text_put(gpu_fault, n, room, gpu_maps[i].from || gpu_maps[i].to ? ", used " : ", forgotten, used ");
                         n = gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_maps[i].used, 10);
-                        gpu_text_put(gpu_fault, n, room, " ticks ago");
+                        n = gpu_text_put(gpu_fault, n, room, " ticks ago");
+                        gpu_text_put(gpu_fault, n, room, gpu_listed_words(gpu_maps[i].listed));
                         return;
                 }
         for (unsigned int i = 0; i < gpu.imports; i++)
@@ -1343,7 +1356,8 @@ static void gpu_fault_say(positive at)
                         n = gpu_text_put(gpu_fault, n, room, " handle "), n = gpu_text_num(gpu_fault, n, room, gpu_gone[slot].handle, 10);
                         n = gpu_text_put(gpu_fault, n, room, " dropped "), n = gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_gone[slot].tick, 10);
                         n = gpu_text_put(gpu_fault, n, room, " ticks ago ");
-                        gpu_text_put(gpu_fault, n, room, gpu_gone_words[gpu_gone[slot].why]);
+                        n = gpu_text_put(gpu_fault, n, room, gpu_gone_words[gpu_gone[slot].why]);
+                        gpu_text_put(gpu_fault, n, room, gpu_gone[slot].import ? "" : gpu_listed_words(gpu_gone[slot].listed));
                         return;
                 }
         }
@@ -1388,22 +1402,87 @@ static b32 gpu_key_hex(const char *text, const char *key, positive *value)
         return digits > 0;
 }
 
-// What the kernel's log says of the card since a time (monotonic ns, as its records' times are): the first page fault's address, and the status words of that
-// fault (MAPPING_ERROR, PERMISSION_FAULTS, RW) when the log has them after it. Read from the oldest record, as gpu_say_kernel reads it (/dev/kmsg, no wait).
+// The words after a key in a log line, up to the end of the line and less the number the kernel puts after a name ("TCP (0x8)" is TCP, "SQC (data) (0x9)" is
+// SQC (data)): into, "" when the key is not there.
+static void gpu_key_words(const char *text, const char *key, char *into, unsigned int size)
+{
+        const char *at = (const char *)string_find((string_address)text, (string_address)key);
+        unsigned int n = 0;
+
+        into[0] = 0;
+        if (!at)
+                return;
+        for (at += string_length((string_address)key); *at && *at != '\n' && n + 1 < size; at++)
+                into[n++] = *at;
+        into[n] = 0;
+        at = (const char *)string_find((string_address)into, (string_address) " (0x");
+        if (at)
+                into[(unsigned int)(at - into)] = 0;
+}
+
+// What the card says of its last page fault: from the kernel's log since a time (monotonic ns, as its records' times are), the first fault's address, the status words
+// of that fault (MAPPING_ERROR, PERMISSION_FAULTS, RW) and the client of the fault register ("Faulty UTCL2 client ID": TCP, SQC, CPC ...) when the log has them after it;
+// from the kernel's query (AMDGPU_INFO_GPUVM_FAULT), the page's address, the fault register's status word and the hub that saw it. again: the query's answer is the one the
+// last read had, in the same descriptor's address space (a fault that was survived, not this job's); epoch: the card's descriptor count at the read (gpu_epoch).
 struct gpu_fault_scan
 {
-        positive at, mapping, permission, rw;
-        b32 have_at, have_mapping, have_permission, have_rw;
+        positive at, mapping, permission, rw, query_at;
+        unsigned int query_status, query_hub, epoch;
+        b32 have_at, have_mapping, have_permission, have_rw, have_query, again;
+        char client[24];
 };
+static struct gpu_fault_scan gpu_fault_last; // the last fault read (gpu_fault_note)
+
+// One line of the kernel's log: the first page fault's address, then the words after it.
+static void gpu_fault_line(const char *text, struct gpu_fault_scan *out)
+{
+        if (!out->have_at)
+        {
+                out->have_at = gpu_key_hex(text, "in page starting at address 0x", &out->at);
+                return;
+        }
+        if (!out->have_mapping)
+                out->have_mapping = gpu_key_hex(text, "MAPPING_ERROR: 0x", &out->mapping);
+        if (!out->have_permission)
+                out->have_permission = gpu_key_hex(text, "PERMISSION_FAULTS: 0x", &out->permission);
+        if (!out->have_rw)
+                out->have_rw = gpu_key_hex(text, "RW: 0x", &out->rw);
+        if (!out->client[0])
+                gpu_key_words(text, "Faulty UTCL2 client ID: ", out->client, sizeof(out->client));
+}
+
+// AMDGPU_INFO_GPUVM_FAULT (query 0x23, the driver's version 3.55 and later): the last page fault of this descriptor's address space, struct drm_amdgpu_info_gpuvm_fault
+// (the page's address, the fault register's status word, the hub: 0 the graphics hub, 1 and 2 the media hubs, the hub's index above the first byte). 0 when the kernel
+// answered, with have_query set unless no fault is kept (the kernel answers zeros then); else its errno (EINVAL on a kernel without the query).
+struct gpu_vm_fault
+{
+        positive addr;
+        unsigned int status, hub;
+};
+#ifndef GPU_FAULT_FAKE
+#define GPU_FAULT_FAKE(error, fault)
+#endif
+static unsigned int gpu_fault_query(struct gpu_fault_scan *out)
+{
+        struct gpu_vm_fault fault = {0, 0, 0};
+        p64 ask[4] = {(p64)&fault, sizeof(fault) | 0x23ull << 32};
+        unsigned int e = gpu.fd >= 0 ? gpu_call(1u, 5, 32, ask) : 9; // EBADF
+
+        GPU_FAULT_FAKE(e, &fault);
+        if (e == 0 && (fault.addr || fault.status))
+                out->have_query = true, out->query_at = fault.addr, out->query_status = fault.status, out->query_hub = fault.hub;
+        return e;
+}
+
+// What the card says of its last fault since a time (monotonic ns): the kernel's log read from the oldest record, as gpu_say_kernel reads it (/dev/kmsg, no wait), and the
+// kernel's query. A kernel without the query, or one that keeps no fault, leaves the log's words alone.
 static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
 {
         static char record[8192];
         long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
 
         memory_zero(out, sizeof(*out));
-        if (handle < 0)
-                return;
-        for (unsigned int records = 0; records < 8192; records++)
+        for (unsigned int records = 0; handle >= 0 && records < 8192; records++)
         {
                 bipolar got = system_read_once(handle, record, sizeof(record) - 1);
                 char *text;
@@ -1414,51 +1493,68 @@ static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
                 text = (char *)string_find((string_address)record, (string_address) ";");
                 if (!text || gpu_kmsg_usec(record) * 1000 < since)
                         continue;
-                text++;
-                if (!out->have_at)
-                        out->have_at = gpu_key_hex(text, "in page starting at address 0x", &out->at);
-                else
-                {
-                        if (!out->have_mapping)
-                                out->have_mapping = gpu_key_hex(text, "MAPPING_ERROR: 0x", &out->mapping);
-                        if (!out->have_permission)
-                                out->have_permission = gpu_key_hex(text, "PERMISSION_FAULTS: 0x", &out->permission);
-                        if (!out->have_rw)
-                                out->have_rw = gpu_key_hex(text, "RW: 0x", &out->rw);
-                }
+                gpu_fault_line(text + 1, out);
         }
-        system_close(handle);
+        if (handle >= 0)
+                system_close(handle);
+        gpu_fault_query(out);
 }
 
-// A job that failed (ETIME or EIO, or a submit refused) says what the kernel's log says since it was submitted: the card's fault text (gpu_fault). A refused
-// submit reads the log at most once in two seconds; a hang always reads it (it costs the two seconds already).
-static void gpu_fault_note(b32 hang)
+// The line of a fault read (gpu_fault): where it was (gpu_fault_say), then the query's status word and hub, the client, and the log's status words. A fault the log does not
+// have is the query's address; neither is the job's error alone.
+static void gpu_fault_text(const struct gpu_fault_scan *s)
 {
-        positive now = clock_monotonic_nanoseconds();
-        struct gpu_fault_scan s;
-        unsigned int n;
         const unsigned int room = sizeof(gpu_fault);
+        unsigned int n;
 
-        if (!hang && now < gpu_fault_next)
-                return;
-        gpu_fault_next = now + 2000000000ull, gpu_faults++;
-        gpu_fault_read(gpu_job_began, &s);
-        if (!s.have_at)
+        if (!s->have_at && !s->have_query)
         {
                 n = gpu_text_put(gpu_fault, 0, room, "the card's job ended with error ");
                 n = gpu_text_num(gpu_fault, n, room, gpu_job_error, 10);
                 gpu_text_put(gpu_fault, n, room, ": the kernel's log has no page fault since it was submitted");
                 return;
         }
-        gpu_fault_say(s.at);
+        gpu_fault_say(s->have_at ? s->at : s->query_at);
         n = (unsigned int)string_length((string_address)gpu_fault);
+        if (s->have_query)
+        {
+                n = gpu_text_put(gpu_fault, n, room, "; status 0x"), n = gpu_text_num(gpu_fault, n, room, s->query_status, 16);
+                n = gpu_text_put(gpu_fault, n, room, ", hub "), n = gpu_text_num(gpu_fault, n, room, s->query_hub, 10);
+                n = gpu_text_put(gpu_fault, n, room, (s->query_hub & 255) == 0 ? " (graphics)" : (s->query_hub & 255) <= 2 ? " (media)" : "");
+        }
+        if (s->client[0])
+                n = gpu_text_put(gpu_fault, n, room, "; client "), n = gpu_text_put(gpu_fault, n, room, s->client);
+        if (s->again)
+                n = gpu_text_put(gpu_fault, n, room, "; the same fault as the last one read");
+        if (!s->have_at)
+                return;
         n = gpu_text_put(gpu_fault, n, room, " (MAPPING_ERROR ");
-        n = s.have_mapping ? gpu_text_num(gpu_fault, n, room, s.mapping, 10) : gpu_text_put(gpu_fault, n, room, "?");
+        n = s->have_mapping ? gpu_text_num(gpu_fault, n, room, s->mapping, 10) : gpu_text_put(gpu_fault, n, room, "?");
         n = gpu_text_put(gpu_fault, n, room, ", PERMISSION_FAULTS ");
-        n = s.have_permission ? gpu_text_num(gpu_fault, n, room, s.permission, 10) : gpu_text_put(gpu_fault, n, room, "?");
+        n = s->have_permission ? gpu_text_num(gpu_fault, n, room, s->permission, 10) : gpu_text_put(gpu_fault, n, room, "?");
         n = gpu_text_put(gpu_fault, n, room, ", RW ");
-        n = s.have_rw ? gpu_text_num(gpu_fault, n, room, s.rw, 10) : gpu_text_put(gpu_fault, n, room, "?");
+        n = s->have_rw ? gpu_text_num(gpu_fault, n, room, s->rw, 10) : gpu_text_put(gpu_fault, n, room, "?");
         gpu_text_put(gpu_fault, n, room, ")");
+}
+
+// A job that failed (ETIME or EIO, or a submit refused) says what the card says of its fault since it was submitted (gpu_fault_read): the card's fault text (gpu_fault),
+// and the fault is kept (gpu_fault_last). A refused submit reads at most once in two seconds; a hang always reads (it costs the two seconds already).
+static void gpu_fault_note(b32 hang)
+{
+        positive now = clock_monotonic_nanoseconds();
+        struct gpu_fault_scan s;
+
+        if (!hang && now < gpu_fault_next)
+                return;
+        gpu_fault_next = now + 2000000000ull, gpu_faults++;
+        gpu_fault_read(gpu_job_began, &s);
+        // The query keeps the last fault of the address space, which a later job that failed for another reason would read again: the log alone is bounded by the job's
+        // time, so an address only the query has, the same as the last read's in the same descriptor's address space (a card started again has a new one), is said so.
+        s.epoch = gpu_epoch;
+        s.again = !s.have_at && s.have_query && gpu_fault_last.have_query && s.epoch == gpu_fault_last.epoch && s.query_at == gpu_fault_last.query_at &&
+                  s.query_status == gpu_fault_last.query_status;
+        memory_copy(&gpu_fault_last, &s, sizeof(s));
+        gpu_fault_text(&s);
 }
 
 // No record waits for a job any more (the maps' addresses are no longer handed out to one): the marks of the lookups are cleared.
@@ -1511,6 +1607,8 @@ static b32 gpu_run_job(void)
                 return false;
         gpu_job_began = clock_monotonic_nanoseconds();
         memory_copy(gpu.at, ib, sizeof(ib));
+        if (!++gpu_submit_serial) // (counted from 1: 0 is a map no submit has named)
+                gpu_submit_serial++;
         for (;;)
         {
                 named = 0;
@@ -1521,7 +1619,7 @@ static b32 gpu_run_job(void)
                 // compositor let go of that no record of this job holds is not named: a glass scratch grown in the tick that used it made every job of the tick fail.
                 for (unsigned int i = 0; i < gpu_map_count; i++)
                         if (gpu_map_named(i))
-                                bos[named++] = gpu_maps[i].handle;
+                                bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 GPU_SUBMIT_SEEN(bos, named);
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none

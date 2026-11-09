@@ -7700,6 +7700,7 @@ static struct
 } compositor_gpu_counts;
 
 // The counts as the table says them (moonwater canvas reads the table, not the processor's memory).
+typedef char compositor_gpu_fault_fits[sizeof(gpu_fault) == sizeof(((struct windows *)0)->gpu_fault) ? 1 : -1]; // the table holds the bytes gpu.c writes
 static void compositor_gpu_publish(void)
 {
         if (!compositor.table)
