@@ -8691,10 +8691,27 @@ static bipolar file_created_open_at(bipolar directory, string_address name,
 
         bipolar handle = system_open_at(directory, name, flags);
         file_facts facts;
-        bipolar same = handle < 0 ? handle : system_path_same_opened_at(
-            handle, directory, name);
-        bipolar looked = same < 0 ? same : file_look_code(
+        bipolar looked = handle < 0 ? handle : file_look_code(
             handle, (string_address)"", AT_EMPTY_PATH, address_of facts);
+
+        /* The name must still be the inode the handle is. The handle is asked
+           once, above, with everything the checks below need; the identity
+           check that used to ask it again is one statx of the name. */
+        if (looked >= 0)
+        {
+                system_path_identity named;
+
+                looked = system_path_identity_at(
+                    directory, name,
+                    SYSTEM_PATH_AT_SYMLINK_NOFOLLOW | SYSTEM_PATH_AT_NO_AUTOMOUNT,
+                    SYSTEM_PATH_STATX_IDENTITY, address_of named);
+                if (looked >= 0 &&
+                    (named.inode != facts.inode ||
+                     named.device_major != facts.device_major ||
+                     named.device_minor != facts.device_minor ||
+                     (named.mode & 0170000) != (facts.mode & MODE_FORMAT)))
+                        looked = -11;
+        }
 
         if (looked >= 0 &&
             ((facts.mask & STATX_BASIC) != STATX_BASIC ||
