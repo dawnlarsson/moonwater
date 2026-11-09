@@ -13819,7 +13819,19 @@ static bool diff_index(diff_side address_to side)
                 while (hits)
                 {
                         side->at[which++] = begin;
+#if KNOWN_SCAN_WORDS
                         begin = from + (known_lowest_byte(hits) >> 3) + 1;
+#else
+                        {
+                                //      No count-trailing-zeros on this machine. The marks are
+                                //      high bits only, so the lowest marked byte is the first
+                                //      whose high bit is set.
+                                positive lane = 0;
+                                while (!((hits >> (lane * 8 + 7)) & 1))
+                                        lane++;
+                                begin = from + lane + 1;
+                        }
+#endif
                         hits &= hits - 1;
                 }
                 from += 8;
