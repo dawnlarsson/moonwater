@@ -222949,10 +222949,29 @@ static void gpu_fault_rows(void)
         compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 
+// A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
+// it composed nothing and used up its period. No flip in flight, or one past the deadline (a screen that is off never answers), is no wait.
+static void flip_wait_rows(void)
+{
+        positive period = compositor.period, issued = compositor.flip_issued;
+        int pending = compositor.flip_pending;
+
+        compositor.period = 16666666ull, compositor.flip_issued = 1000000000ull, compositor.flip_pending = 1;
+        check("flip: a flip in flight is waited for, to a deadline of four periods", compositor_flip_wait(1000000000ull + 16666666ull) == 1000000000ull + 4 * 16666666ull);
+        check("flip: the wait holds until its deadline", compositor_flip_wait(1000000000ull + 4 * 16666666ull - 1) == 1000000000ull + 4 * 16666666ull);
+        check("flip: past the deadline it is no wait (an event that never comes)", compositor_flip_wait(1000000000ull + 4 * 16666666ull) == 0);
+        compositor.flip_pending = 0;
+        check("flip: no flip in flight, no wait", compositor_flip_wait(1000000000ull + 1) == 0);
+        compositor.period = 0, compositor.flip_pending = 1;
+        check("flip: before a screen has said its period the frame is a 60th of a second", compositor_flip_wait(1000000000ull + 1) == 1000000000ull + 4 * 16666667ull);
+        compositor.period = period, compositor.flip_issued = issued, compositor.flip_pending = pending;
+}
+
 b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         gpu_fault_rows();
+        flip_wait_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;

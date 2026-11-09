@@ -4020,6 +4020,7 @@ static struct
         */
         int table_memfd, table_giver, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
         positive flip_when;  // the last flip-complete event's time (its vblank, on the monotonic clock), and its sequence
+        positive flip_issued; // when the flip in flight was asked of the card (the monotonic clock)
         unsigned int flip_seq;
         int flip_stamped;    // whether flip_when came with the event (a card that stamps its vblanks)
         /*
@@ -6472,6 +6473,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 return 0;
         compositor_flip_refused = 0;
         compositor.flip_pending = 1;
+        compositor.flip_issued = clock_monotonic_nanoseconds();
         compositor.flip_row = row;
         compositor.flip_buffer = which;
         compositor.on_screen = fb;
@@ -6508,6 +6510,21 @@ static void compositor_flip_done(void)
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
 #endif
+}
+
+/*
+        A flip the card has not completed is waited for, not tried against. A present that finds one pending composes nothing (it cannot flip a second) and has
+        used up its period (compositor.presented is its start), so the frame it was to draw came a period later. The loop's timer and the card's vblank are two clocks,
+        and each time the timer fell in the stretch before a vblank that the compose and the flip take, the flip landed on the vblank after it and the next present
+        found it pending: a steady animation had a frame a vblank late every few dozen frames. The card's event wakes the loop and the present is made then; the wait
+        is for COMPOSITOR_FLIP_PERIODS periods at the most, for an event that never comes (a screen that is off). The deadline, or 0 when nothing is waited for.
+*/
+#define COMPOSITOR_FLIP_PERIODS 4
+static positive compositor_flip_wait(positive now)
+{
+        positive period = compositor.period ? compositor.period : 16666667ull, last = compositor.flip_issued + COMPOSITOR_FLIP_PERIODS * period;
+
+        return compositor.flip_pending && now < last ? last : 0;
 }
 
 // The card's events, read when its descriptor is readable: a flip's completion is the one asked for.
@@ -7194,6 +7211,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
                 return 0;
         compositor.flip_pending = 1;
+        compositor.flip_issued = clock_monotonic_nanoseconds();
         compositor.flip_row = row;
         compositor.flip_buffer = which;
         compositor.on_screen = fb;
@@ -19567,12 +19585,13 @@ static b32 compositor_main()
 #endif
                 if (compositor.damages)
                 {
-                        positive frame;
+                        positive frame, waiting;
 
                         now = clock_monotonic_nanoseconds();
-                        frame = now - compositor.presented < compositor.period
-                                    ? compositor.presented + compositor.period
-                                    : now;
+                        waiting = compositor_flip_wait(now);
+                        frame = waiting                                                 ? waiting // the flip's event wakes the loop
+                                : now - compositor.presented < compositor.period ? compositor.presented + compositor.period
+                                                                                 : now;
                         until = !until || frame < until ? frame : until;
                 }
 #ifdef MOONWATER_GPU_C
@@ -19676,7 +19695,7 @@ static b32 compositor_main()
                 {
                         positive stamp = clock_monotonic_nanoseconds();
 
-                        if (stamp - compositor.presented >= compositor.period)
+                        if (stamp - compositor.presented >= compositor.period && !compositor_flip_wait(stamp))
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
