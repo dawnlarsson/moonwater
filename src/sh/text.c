@@ -13186,9 +13186,17 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                 {
                                                         bool explicit;
 
-                                                        have = text_tab_next(
-                                                            column, address_of stop,
-                                                            address_of explicit);
+                                                        //      Evenly spaced stops with none named are
+                                                        //      the arithmetic text_tab_next answers
+                                                        //      with, so the answer is made here.
+                                                        if (!text_tab_stop_count && text_tab_repeat &&
+                                                            column < positive_max - text_tab_repeat)
+                                                                stop = column - column % text_tab_repeat +
+                                                                       text_tab_repeat;
+                                                        else
+                                                                have = text_tab_next(
+                                                                    column, address_of stop,
+                                                                    address_of explicit);
                                                         stop_from = have ? column : 1;
                                                         stop_at = have ? stop : 0;
                                                 }
