@@ -12509,7 +12509,7 @@ static bool text_tab_parse(string_address list)
                         }
 
                         if (!positive_append_digit(address_of value, (positive)(c - '0'),
-                                                   positive_max))
+                                                   (positive)bipolar_max))
                         {
                                 positive length = 0;
                                 p8 number[64];
