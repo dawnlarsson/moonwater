@@ -105048,6 +105048,38 @@ b32 main(void)
                                   (wait_status_code(raw) == 0 ||
                                    wait_status_code(raw) == 77));
         }
+
+        /* test used one call of its own stack per ( and per !, so a word
+           list of a few hundred thousand of them ended the shell with a
+           segmentation fault. The depth is cut and the expression refused
+           with status 2. The child takes the crash, not this process. */
+        {
+                static string_address deep[300003];
+                bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+                positive raw = 0;
+
+                check("test: deep nesting child starts", child >= 0);
+                if (!child)
+                {
+                        positive at;
+
+                        deep[0] = (string_address)"[";
+                        for (at = 1; at <= 300000; at++)
+                                deep[at] = (string_address)"!";
+                        deep[300001] = (string_address)"x";
+                        deep[300002] = (string_address)"]";
+                        shell_argv = deep;
+                        shell_argc = 300003;
+                        shell_test(capture);
+                        system_call_1(syscall(exit_group),
+                                      shell_status == 2 ? 0 : 1);
+                }
+                if (child > 0)
+                        check("test refuses a nesting too deep for the stack with status 2",
+                              system_wait4_retry((b32)child, address_of raw,
+                                                 0, null) == child &&
+                                  wait_status_code(raw) == 0);
+        }
         return test_report(null);
 }
 #endif /* CHECK_audit_builtin_regressions */

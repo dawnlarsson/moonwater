@@ -12086,6 +12086,14 @@ static positive test_at;
 static positive test_stop;
 static bool test_bad;
 
+/* Each ( and each ! is a call down the parser, and the words come from the
+   command line or from an expansion, so their number is nobody's to bound:
+   a few hundred thousand of them used up the stack and the shell died. The
+   depth is cut here instead, and an expression that deep is refused as any
+   other malformed one is. */
+#define TEST_NESTING_MAX 4096
+static positive test_nesting;
+
 bool test_facts(string_address path, file_facts address_to out, bool follow)
 {
         return system_stat_at(AT_FDCWD, path,
@@ -12819,8 +12827,16 @@ bool test_primary()
         {
                 bool value;
 
+                if (test_nesting >= TEST_NESTING_MAX)
+                {
+                        test_bad = true;
+                        return false;
+                }
+
                 test_at++;
+                test_nesting++;
                 value = test_expression();
+                test_nesting--;
 
                 if (test_at < test_stop && word_is(shell_argv[test_at], ")"))
                         test_at++;
@@ -12871,8 +12887,19 @@ bool test_negation()
 {
         if (test_at + 1 < test_stop && word_is(shell_argv[test_at], "!"))
         {
+                bool value;
+
+                if (test_nesting >= TEST_NESTING_MAX)
+                {
+                        test_bad = true;
+                        return false;
+                }
+
                 test_at++;
-                return !test_negation();
+                test_nesting++;
+                value = !test_negation();
+                test_nesting--;
+                return value;
         }
 
         return test_primary();
@@ -13049,6 +13076,7 @@ HOT fn shell_test(writer write)
         test_stop = argc;
         test_bad = false;
         test_said = false;
+        test_nesting = 0;
 
         //      Both references say why they would not read the words, and
         //      a script that only looks at the status still cares that the
