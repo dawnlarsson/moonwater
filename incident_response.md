@@ -41,6 +41,48 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-184: the monitor wrote an interface's name and the hostname to the terminal with their control bytes
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 (hardening: a control byte in either name is drawn as `?`, one for one, so the cell keeps its width) |
+| Class | CWE-150 (an escape sequence from a name the kernel or a peer chose is not neutralised before the terminal), under CWE-20 (the name's bytes are not checked where they are drawn) |
+| Attacker | whoever sets a network interface's name in the network namespace the monitor reads (it needs CAP_NET_ADMIN there), or whoever sets the hostname, which is root or a client that takes a name from a DHCP lease and writes it; no other input. The monitor reads the hostname from the kernel (`uname`), not from a file a user can write |
+| Moonwater exposure window | from `ffbd8a95a` (2026-09-13, the commit that has these two writes in `src/sh/monitor.c`) to the fixing commit, about two months |
+| Fixed by | the commit that adds this entry (`src/sh/monitor.c`, `monitor_shown`, used by `monitor_header` and `monitor_networks`) |
+| Tests that fail without it | `CHECK_sensors`, four rows in `sensors_names` (`test/checks.c`): `an interface's escape bytes are not written`, `and an interface's control bytes are question marks`, `a hostname's escape bytes are not written`, `and a hostname's control bytes are question marks` |
+
+**What it was.** `monitor_networks` drew each interface's name with `string_to_field_bulk` and `monitor_header` drew the
+hostname with `writer_field_bulk`, both straight from the snapshot's bytes. A name that carried ESC, BEL or a C0 control
+reached the terminal as it was: an operating-system command (OSC 52 sets the clipboard, OSC 0 the window title) or a cursor
+move, written by a monitor that runs on a screen a person reads. The process list already spells its names through
+`terminal_safe_field` (tools.c), and the differential asserts that it does (`monitor renders command names through the same
+boundary`); the two cells this entry names were the ones left out.
+
+**How it was reproduced.** `sh test/run sensors` on the box, with the four rows above and the monitor as it was before the
+fix. Each row builds a snapshot whose interface is named `ESC ] 0 ; X BEL` (`\x1b]0;X\x07`) or passes that as the hostname,
+then reads the terminal text the monitor writes:
+
+```
+sensors-x86_64 1216 of 1220
+sensors-arm64  1216 of 1220
+sensors-riscv64 1216 of 1220
+               3648 of 3660
+  FAIL an interface's escape bytes are not written: ...
+  FAIL a hostname's escape bytes are not written: ...
+```
+
+Four rows on each of the three architectures, twelve of 3660. After the fix the same run is `3660 of 3660`.
+
+**The fix.** `monitor_shown` copies a name into a terminated buffer and draws each byte below a space and DEL as `?`. A
+name with only printable bytes is unchanged, so no good input moves, and the cell keeps its width (a spelled `\xNN` would
+widen it and push the row's columns out of line).
+
+**Still open.** The other escapers in the tree spell a control byte as `\xNN` (`writer_terminal_name`, `radio_display`, and
+`terminal_safe_field` for process names). The monitor's two cells use `?` because they are fixed-width; a reviewer who wants
+the spelled form in the monitor can change `monitor_shown` to `writer_hex_escaped` with the cell's width taken from the
+spelled length.
+
 ### MW-2026-183: the logger's clock-sync check gave adjtimex a 104-byte buffer on 32-bit builds (stack out-of-bounds write)
 
 | | |

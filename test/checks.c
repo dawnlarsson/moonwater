@@ -113299,6 +113299,58 @@ static fn sensors_moments(void)
         sensors_remove(root);
 }
 
+/*
+        Names drawn from the kernel and from a remote peer, an interface's and
+        the hostname, show their control bytes as question marks, so a name
+        cannot carry an escape sequence to the terminal (one that rewrites the
+        title or sets the clipboard).
+*/
+static bool sensors_has(p8 address_to bytes, positive length, string_address text)
+{
+        positive wanted = string_length(text);
+
+        for (positive at = 0; at + wanted <= length; at++)
+        {
+                positive same = 0;
+
+                while (same < wanted && bytes[at + same] == (p8)text[same])
+                        same++;
+                if (same == wanted)
+                        return true;
+        }
+        return false;
+}
+
+static fn sensors_names(void)
+{
+        static system_snapshot old;
+        static system_snapshot sample;
+        static struct snapshot_network networks[1];
+
+        memory_fill(address_of old, 0, sizeof(old));
+        memory_fill(address_of sample, 0, sizeof(sample));
+        memory_fill(networks, 0, sizeof(networks));
+        memory_copy_apart(networks[0].name, "\x1b]0;X\x07", 6);
+        networks[0].received = 5000;
+        sample.header.network_count = 1;
+        sample.networks = networks;
+
+        text_out_used = 0;
+        monitor_networks(address_of old, address_of sample, 1, 120, SYSTEM_NANOSECONDS);
+        sensors_expect("an interface's escape bytes are not written",
+              !sensors_has(text_out_buffer, text_out_used, "\x1b]0;X"));
+        sensors_expect("and an interface's control bytes are question marks",
+              sensors_has(text_out_buffer, text_out_used, "?]0;X?"));
+
+        text_out_used = 0;
+        monitor_header(address_of sample, "\x1b]0;X\x07", 1, 120);
+        sensors_expect("a hostname's escape bytes are not written",
+              !sensors_has(text_out_buffer, text_out_used, "\x1b]0;X"));
+        sensors_expect("and a hostname's control bytes are question marks",
+              sensors_has(text_out_buffer, text_out_used, "?]0;X?"));
+        text_out_used = 0;
+}
+
 b32 main(void)
 {
         p8 digits[24];
@@ -113309,6 +113361,7 @@ b32 main(void)
         model_append(sensors_base, "/t");
         sensors_grammar();
         sensors_moments();
+        sensors_names();
         {
                 p8 top[96];
 

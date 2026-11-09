@@ -815,6 +815,24 @@ static bool monitor_hardware_row(monitor_hardware address_to hardware,
         return !first;
 }
 
+/*
+        A name the kernel or a remote peer chose, as it is drawn: a control
+        byte (below a space, and DEL) is shown as a question mark, one for one,
+        so the cell keeps its width and no escape sequence reaches the
+        terminal. The copy is terminated, so it can be written as a string.
+*/
+static fn monitor_shown(p8 address_to into, string_address name,
+                        positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = (p8)name[at];
+
+                into[at] = byte < ' ' || byte == 0x7f ? (p8)'?' : byte;
+        }
+        into[length] = end;
+}
+
 static fn monitor_header(system_snapshot address_to sample,
                          string_address host, positive count,
                          positive columns)
@@ -824,10 +842,13 @@ static fn monitor_header(system_snapshot address_to sample,
         positive hours = seconds / 3600 % 24;
         positive minutes = seconds / 60 % 60;
         time_t now = (time_t)sample->header.realtime_seconds;
+        p8 shown[15];
+        positive shown_length = string_length_max(host, 14);
         tm broken;
 
+        monitor_shown(shown, host, shown_length);
         text_put_string("\033[1m ");
-        writer_field_bulk(text_put, host, string_length(host), 14, ' ', true);
+        writer_field_bulk(text_put, shown, shown_length, 14, ' ', true);
         text_put_string("\033[0m ");
 
         if (columns >= 72)
@@ -1057,9 +1078,13 @@ static fn monitor_networks(system_snapshot address_to old,
                     positive_into_human_nearest_string(down_text, down, false);
                 positive up_length =
                     positive_into_human_nearest_string(up_text, up, false);
+                p8 name_text[17];
+                positive name_length = string_length_max(network->name, 16);
+
+                monitor_shown(name_text, network->name, name_length);
                 monitor_row_left = columns > 1 ? columns - 1 : 1;
                 monitor_row_write(" ", 1);
-                string_to_field_bulk(monitor_row_write, network->name, 10, ' ',
+                string_to_field_bulk(monitor_row_write, name_text, 10, ' ',
                                 true);
                 monitor_row_write(" down ", 6);
                 down_text[down_length++] = '/';
