@@ -168684,7 +168684,7 @@ static void check_compositor_pointer(void) {
        at its scale squared; the hotspot is the corner of the arrow and the middle of the others, and
        what is drawn stays inside the damage. */
     {
-        static const int white[CP_SHAPES]={55,25,25,25,25},black[CP_SHAPES]={46,40,40,48,48};
+        static const int white[CP_SHAPES]={55,25,25,25,25,19,21,45,73,53,73},black[CP_SHAPES]={46,40,40,48,48,44,48,64,49,64,72};
         static u32 plane[64*64];
         for(unsigned shape=0;shape<CP_SHAPES;shape++)
             for(int scale=1;scale<=3;scale++) {
