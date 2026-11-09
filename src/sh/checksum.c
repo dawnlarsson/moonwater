@@ -343,6 +343,11 @@ static fn checksum_sponge_blocks(checksum_sponge address_to s,
 
 static fn checksum_sponge_block(checksum_sponge address_to s, const p8 address_to data)
 {
+        if (s->sm3)
+        {
+                sm3_blocks_1_1(s->words, data);
+                return;
+        }
         checksum_sponge_blocks(s, data, 1);
 }
 
