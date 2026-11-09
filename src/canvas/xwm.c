@@ -171,8 +171,7 @@ static int compositor_xwm_queue(const unsigned char *bytes, long count)
                 x->broken = 1;
                 return -1;
         }
-        for (long at = 0; at < count; at++)
-                x->out[x->out_len + at] = bytes[at];
+        memory_copy(x->out + x->out_len, bytes, (positive)count);
         x->out_len += count;
         x->seq = (x->seq + 1) & 0xffffu;
         return 0;
@@ -495,8 +494,7 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 }
                 if ((p->what == COMPOSITOR_XWM_PROP_NET_NAME && length) || (p->what == COMPOSITOR_XWM_PROP_NAME && !(w->state & COMPOSITOR_XWM_NET_TITLE)))
                 {
-                        for (unsigned int at = 0; at <= length; at++)
-                                w->title[at] = text[at];
+                        memory_copy(w->title, text, (positive)length + 1);
                         w->dirty = 1;
                 }
                 compositor_xwm_title_done(w);
@@ -923,16 +921,17 @@ static void compositor_xwm_consume(long n)
 {
         struct compositor_xwm *x = &compositor_xwm;
 
-        for (long at = n; at < x->in_len; at++)
-                x->in[at - n] = x->in[at];
+        memory_copy(x->in, x->in + n, (positive)(x->in_len - n));
         x->in_len -= n;
 }
 
 /* Every whole message in the input, in order: the setup reply first, then the messages. A message the codec refuses drops the
-   connection, so nothing a server sends is read past its bounds. */
+   connection, so nothing a server sends is read past its bounds. The messages answered are taken off the input once, at the end
+   (a burst of them is one move of the input, not one move of the rest of it for each message). */
 static void compositor_xwm_messages(void)
 {
         struct compositor_xwm *x = &compositor_xwm;
+        long at = 0;
 
         while (x->fd >= 0 && !x->broken)
         {
@@ -942,20 +941,20 @@ static void compositor_xwm_messages(void)
                 {
                         struct xwm_setup setup;
 
-                        size = xwm_setup_size(x->in, (unsigned long)x->in_len);
+                        size = xwm_setup_size(x->in + at, (unsigned long)(x->in_len - at));
                         if (size == XWM_ERR_SHORT)
-                                return;
+                                break;
                         if (size < 0)
                         {
                                 compositor_xwm_drop("the setup reply is too long");
                                 return;
                         }
-                        if (x->in_len < size)
-                                return;
-                        if (xwm_parse_setup(x->in, (unsigned long)size, &setup) != XWM_OK || setup.status != XWM_SETUP_SUCCESS)
+                        if (x->in_len - at < size)
+                                break;
+                        if (xwm_parse_setup(x->in + at, (unsigned long)size, &setup) != XWM_OK || setup.status != XWM_SETUP_SUCCESS)
                         {
                                 string_format(log, (string_address)"xwm: the setup reply has status %p and %p bytes, and the codec says %p\n",
-                                              (positive)x->in[0], (positive)size, (positive)xwm_parse_setup(x->in, (unsigned long)size, &setup));
+                                              (positive)x->in[at], (positive)size, (positive)xwm_parse_setup(x->in + at, (unsigned long)size, &setup));
                                 log_flush();
                                 compositor_xwm_drop("the setup was refused or is malformed");
                                 return;
@@ -964,29 +963,30 @@ static void compositor_xwm_messages(void)
                         x->resource_base = setup.resource_base;
                         x->resource_mask = setup.resource_mask;
                         x->ready = 1;
-                        compositor_xwm_consume(size);
+                        at += size;
                         compositor_xwm_start_session();
                         continue;
                 }
-                type = xwm_message_type(x->in, (unsigned long)x->in_len);
+                type = xwm_message_type(x->in + at, (unsigned long)(x->in_len - at));
                 if (type == XWM_ERR_SHORT)
-                        return;
-                size = xwm_server_message_size(x->in, (unsigned long)x->in_len);
+                        break;
+                size = xwm_server_message_size(x->in + at, (unsigned long)(x->in_len - at));
                 if (size < 0)
                 {
                         compositor_xwm_drop("a reply is longer than the window manager takes");
                         return;
                 }
-                if (x->in_len < size)
-                        return;
+                if (x->in_len - at < size)
+                        break;
                 // A server that sends faster than the queue to it drains is taken a pass at a time: the rest waits in the input.
                 if (x->out_len > COMPOSITOR_XWM_OUT - COMPOSITOR_XWM_ROOM)
-                        return;
-                compositor_xwm_message(x->in, size, type);
+                        break;
+                compositor_xwm_message(x->in + at, size, type);
                 if (x->fd < 0)
                         return;
-                compositor_xwm_consume(size);
+                at += size;
         }
+        compositor_xwm_consume(at);
 }
 
 /* ---- the connection ---- */
@@ -1069,8 +1069,10 @@ static void compositor_xwm_accept(void)
         x->focus_row = -2;
         n = xwm_enc_setup_request(setup, sizeof setup);
         if (n > 0)
-                for (long at = 0; at < n; at++)
-                        x->out[x->out_len++] = setup[at];
+        {
+                memory_copy(x->out, setup, (positive)n);
+                x->out_len = n;
+        }
         compositor_xwm_log("xwm: the window manager of Xwayland is connected\n");
         log_flush();
 }
@@ -1092,8 +1094,7 @@ static void compositor_xwm_flush(void)
                 compositor_xwm_drop("the write failed");
                 return;
         }
-        for (long at = got; at < x->out_len; at++)
-                x->out[at - got] = x->out[at];
+        memory_copy(x->out, x->out + got, (positive)(x->out_len - got));
         x->out_len -= got;
 }
 
