@@ -8926,6 +8926,9 @@ static void compositor_present_frames(void)
         // The frame goes into the buffer the screen is not showing, which is then shown (compositor_plate_swap): when the screens are one and no window
         // is on a plane. Its stale is composed with this present's damage, the damage is what the one shown does not have.
         int flip_own = 0;
+        // This present's own damage, its box, taken before the stale of the buffer composed into is added to it: the other buffer
+        // misses this and nothing else (see the join below).
+        int scene[4] = {0, 0, 0, 0}, scene_any = 0;
 
         if (!turning && compositor_output_count() < 2 && compositor.plane_row < 0)
         {
@@ -8937,6 +8940,8 @@ static void compositor_present_frames(void)
                                 return;
                         compositor_plate_swap();
                         flip_own = 1;
+                        for (unsigned int at = 0; at < compositor.damages; at++)
+                                compositor_stale_join(scene, &scene_any, compositor.damage[at]);
                         if (compositor_front_stale_any)
                                 compositor_damage(compositor_front_stale[0], compositor_front_stale[1], compositor_front_stale[2] - compositor_front_stale[0],
                                                   compositor_front_stale[3] - compositor_front_stale[1]);
@@ -9020,16 +9025,24 @@ static void compositor_present_frames(void)
         compositor.mirror_stale = 0;
         compositor_runs_learn(frames, rows, windows);
 
-        // The buffer composed into is whole now; the one the screen does not show misses this present's damage (every rectangle of it, the stale too).
+        // The buffer composed into is whole now; the one the screen does not show misses this present's own damage, not the stale composed
+        // into the buffer above: the shown one was composed at the last present and has that already. Joined in as well, each buffer's stale
+        // took in the other's on every present and grew to the whole screen.
         if (compositor_spare.fb)
         {
-                for (unsigned int at = 0; at < compositor.damages; at++)
+                if (flip_own)
                 {
-                        const int *d = compositor.damage[at];
-                        int r[4] = {d[0], d[1], d[2], d[3]};
-
-                        compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, r);
+                        if (scene_any)
+                                compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, scene);
                 }
+                else
+                        for (unsigned int at = 0; at < compositor.damages; at++)
+                        {
+                                const int *d = compositor.damage[at];
+                                int r[4] = {d[0], d[1], d[2], d[3]};
+
+                                compositor_stale_join(compositor_spare.stale, &compositor_spare.stale_any, r);
+                        }
         }
         compositor_front_stale_any = 0;
         // No clips at all would tell the card everything changed.
