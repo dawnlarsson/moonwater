@@ -315,6 +315,9 @@ static decimal awk_power(decimal base, decimal exponent)
    past the maximum is a room no allocation would give. */
 #define AWK_PLACES_SLACK 400
 #define AWK_PLACES_MAX ((positive)1 << 26)
+/* The bytes a printf conversion may pad or zero-fill to: past this one is
+   refused, the way the places are, and no memory is taken for it. */
+#define AWK_PAD_MAX ((positive)1 << 26)
 
 static positive awk_write_decimal(decimal value, b32 precision, p8 address_to out,
                                   positive room, p8 conversion, bool alternate)
@@ -3132,6 +3135,12 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 positive total = awk_size_add(awk_size_add(prefixed, zeros),
                                               shown == (positive)-1 ? body : shown);
                 positive padding = width > total ? width - total : 0;
+
+                // A width or an integer's precision is written out as bytes,
+                // so one past what a conversion may write is refused as the
+                // places are, instead of building gigabytes of padding.
+                if (padding > AWK_PAD_MAX || zeros > AWK_PAD_MAX)
+                        awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
 
                 if (padding && !left && !zero)
                         awk_builder_fill(address_of build, ' ', padding);

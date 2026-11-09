@@ -74,6 +74,39 @@ guard removed): without the fix 4139 checks, 1 failure (this row); with it, 4139
 **Still open.** Nothing known. The table's word is still written by any window program; the kit no longer makes a path of a
 word that is not a code, which is the only use of it.
 
+### MW-2026-166: a printf width or integer precision made awk write as many bytes as the number said
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | Unbounded resource use from input (CWE-400): the padding a conversion wrote had no bound, so the output was as large as the width or precision the format or the input gave |
+| Attacker | a program's input: a record used as a printf format (`printf $0`), or a width or precision taken from a field or argument; or whoever writes the program text |
+| Reachable | src/sh/awk.c, `awk_sprintf`, where the padding and the zero fill of a conversion are written |
+| Exposure window | from 4615b6f2f (2026-08-28, the commit that first carried the printf conversions) to the fix |
+| Fixed by | the commit with the subject "awk: a printf width or integer precision past 64 MiB is refused" |
+
+**What happened.** `awk_sprintf` computed the padding of a conversion as the
+width less the length of the text, and the zero fill of an integer as its
+precision less its digits, and wrote both with `awk_builder_fill`. Nothing
+bounded either number. `BEGIN { printf "%-*d|\n", 300000000, 1 }` wrote 300
+MB of output (the unfixed binary, 2026-11-09, `printf ... | wc -c` gave
+300000002), and a precision of 67108867 wrote 67 MB of zeros. The reference
+gawk writes the same bytes, so the output is not the defect; the defect is that
+one format string or one record chooses how much memory and output the process
+gives.
+
+**Fix.** A conversion whose padding or zero fill is more than `AWK_PAD_MAX`
+(2^26 bytes, 64 MiB, the same bound the places of a `%f` already have) is
+refused before any byte is written: `out of memory`, status 2. Every width or
+precision that writes at most 64 MiB is written as before. The bound is ours:
+gawk has none.
+
+**Regression check.** `awk_caps` in `test/differential.py` (the awk lane,
+`AWK_CHECKS`): `printf "%-*d|\n", 67108866, 1` and `printf "%.67108867d|\n", 1`
+must be refused with status 2 and `out of memory`, and `printf "%5d|..."` must
+still print what it printed. Before the fix the two refused cases exit 0 with
+67 MB out; after it they exit 2.
+
 ### MW-2026-165: a touch's handles drew past the terminal's window picture (out-of-bounds write in the terminal)
 
 | | |

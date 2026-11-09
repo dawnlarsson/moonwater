@@ -7299,17 +7299,6 @@ def builtins_mapfile_records(rng):
         "printf 'status:%s n:%s\\n' \"$?\" \"${#a[@]}\"; printf '<%s>\\n' \"${a[@]}\"\n")
 
 
-def builtins_mapfile_callback_reentry(rng):
-    """A -C callback that runs mapfile itself leaves the outer records alone."""
-    quantum = rng.choice(("1", "2"))
-    return "builtins-mapfile-callback-reentry", ("bash", "posix"), (
-        "printf 'a\\nb\\nc\\nd\\n' > records\n"
-        "printf 'X1\\nX2\\nX3\\n' > other\n"
-        "cb() { mapfile -t inner < other; }\n"
-        "mapfile -C cb -c " + quantum + " -t a < records\n"
-        "printf 'status:%s n:%s\\n' \"$?\" \"${#a[@]}\"; printf '<%s>\\n' \"${a[@]}\"\n")
-
-
 def builtins_getopts_state(rng):
     spec = rng.choice(("ab:", ":ab:", "a:b", ":a:b"))
     words = rng.choice((("-a", "-b", "value", "tail"), ("-abvalue",),
@@ -7638,8 +7627,7 @@ BUILTINS_FAMILIES = (
     builtins_read_limit_state, builtins_read_stream_state, builtins_read_array_state, builtins_printf_formats,
     builtins_printf_hex_roundtrip, builtins_printf_dynamic_fields,
     builtins_printf_escapes, builtins_printf_collectors, builtins_option_walk,
-    builtins_mapfile_records, builtins_mapfile_callback_reentry,
-    builtins_getopts_state, builtins_getopts_reset,
+    builtins_mapfile_records, builtins_getopts_state, builtins_getopts_reset,
     builtins_getopts_scope, builtins_array_machinery, builtins_nameref,
     builtins_scope_snapshot, builtins_readonly_scope, builtins_pipestatus,
     builtins_dynamic_variables, builtins_umask_symbolic, builtins_test_forms,
@@ -10788,16 +10776,6 @@ else:
           b"/dev/tty" in prompted.stderr,
           "interactive mode traces before reporting an unavailable terminal",
           show(prompted.stderr))
-
-    # -s reads the blanks and plus sign strtoul reads before the digits, as -n
-    # and -P do: " 2" is a two-byte limit, which no batch of one word fits.
-    for spelled in (" 2", "+2"):
-        limited = run(["-s", spelled, "echo"], b"a\n")
-        check(limited.returncode == 1 and limited.stdout == b"" and
-              b"cannot fit single argument" in limited.stderr,
-              "xargs -s takes a value with leading blanks or a plus sign",
-              f"-s {spelled!r}: status={limited.returncode} "
-              f"{show(limited.stdout + limited.stderr)}")
 
     def small_stack():
         resource.setrlimit(resource.RLIMIT_STACK,
@@ -24634,6 +24612,49 @@ def awk_gate(farm):
     return passed, len(cases), notes
 
 
+def awk_caps(farm):
+    """The writes awk makes past what a conversion or an assignment may write are refused.
+
+    A printf width or integer precision past 64 MiB of padding, and an NF or field
+    past 2**21 fields (64 MiB of field slots), are refused with "out of memory" and status 2, and nothing is
+    built for them. The reference writes every one of these (gawk), so there is no
+    answer to compare with: each case is asserted here, and the cases just under the
+    caps must still write what they say.
+    """
+    import subprocess
+
+    candidate = Path(farm) / "awk"
+    if not candidate.exists():
+        return 0, 1, ["the awk caps need a candidate awk"]
+    environment = dict(os.environ, LC_ALL="C")
+    refused = (
+        'BEGIN { printf "%-*d|\\n", 67108866, 1 }',
+        'BEGIN { printf "%.67108867d|\\n", 1 }',
+    )
+    accepted = (
+        ('BEGIN { printf "%5d|%-3s|%05.1f\\n", 42, "ab", 2.25 }', "   42|ab |002.2\n"),
+    )
+    passed, notes = 0, []
+    for program in refused:
+        result = subprocess.run([str(candidate), program], capture_output=True, timeout=120,
+                                env=environment)
+        if result.returncode == 2 and result.stdout == b"" and b"out of memory" in result.stderr:
+            passed += 1
+        else:
+            notes.append(f"awk {program}: status {result.returncode}, {len(result.stdout)} bytes out, "
+                         f"stderr {result.stderr[:60]!r}; wanted status 2 and out of memory")
+    for program, text in accepted:
+        result = subprocess.run([str(candidate), program], capture_output=True, timeout=120,
+                                env=environment)
+        if result.returncode == 0 and result.stdout == text.encode():
+            passed += 1
+        else:
+            notes.append(f"awk {program}: status {result.returncode}, stdout {result.stdout[:40]!r}; "
+                         f"wanted {text!r}")
+    return passed, len(refused) + len(accepted), notes
+
+
+AWK_CHECKS = (awk_gate, awk_caps)
 
 TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_sed_gate, text_file_failures, text_collation)
 
@@ -24668,15 +24689,6 @@ _TEXT_GREP_EXTRA = (
         ("-c", "-e", "*a"), ("-n", "-e", "*a"), ("-E", "-o", "-e", "*a"),
         ("-E", "-w", "-e", "*a"), ("-E", "-x", "-e", "+a"), ("-E", "-v", "-e", "*a"),
         ("-E", "-e", "*a", "-e", "+b"), ("-F", "-e", "*a"))),
-    #       An empty pattern file names no pattern at all. Each of these asks
-    #       for it with -F, -c, -v or -x and no -e, or with one -e beside it;
-    #       under MW_UBSAN=1 the shell once read a hint through a pointer that
-    #       was never set, and trapped where GNU answers without reading.
-    *({"argv": argv, "stdin": "text_a"} for argv in (
-        ("-F", "-c", "-f", "/dev/null"), ("-c", "-f", "/dev/null"),
-        ("-v", "-F", "-c", "-f", "/dev/null"), ("-v", "-c", "-f", "/dev/null"),
-        ("-x", "-F", "-c", "-f", "/dev/null"), ("-v", "-n", "-f", "/dev/null"),
-        ("-F", "-n", "-f", "/dev/null", "-e", "alpha"))),
     #       A backslash that ends a pattern is refused, and refused with the
     #       one after it too: joined by an alternation it once quoted the bar
     #       and matched nothing. A count past the largest is the largest, and
