@@ -175800,6 +175800,31 @@ static void test_fractional_damage(void)
         wayland_stop();
 }
 
+/*
+        The client counts its live subsurfaces (the child scans are passed over at none): a subsurface counts from the
+        request that gives it its role, and stops counting when its surface goes, whatever its object did before.
+*/
+static void test_subsurface_count(void)
+{
+        struct tree t;
+        struct wlc *c;
+        struct wayland_client *shim;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        tree_open(&t, 1);
+        c = t.s.c;
+        shim = wayland.client[c->slot];
+        WLCHECK(shim->subsurfaces == 1, "a subsurface is counted (%ld)", shim->subsurfaces);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+        WLCHECK(shim->subsurfaces == 1, "and still while its object is gone, its surface having its role (%ld)", shim->subsurfaces);
+        wlc_send(c, t.child, WLQ_wl_surface_destroy);
+        WLCHECK(shim->subsurfaces == 0, "and not once its surface is gone (%ld)", shim->subsurfaces);
+        wlc_end(c);
+        leak_check("subsurface count");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -175834,6 +175859,7 @@ int main(int argc, char **argv)
         test_seat();
         test_subsurfaces();
         test_holds();
+        test_subsurface_count();
         test_tree_cost();
         test_geometry();
         test_cursor();

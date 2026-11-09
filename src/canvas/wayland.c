@@ -538,6 +538,7 @@ struct wayland_client
         long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
         long budget_at, budget_used; // the window of time the client's copies are counted in (its start, ms), and its pixels so far
         long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
+        long subsurfaces;            // live surfaces whose role is a subsurface's, exact (counted where the role is given, and where the surface goes): none, and no child scan is made
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
@@ -1572,6 +1573,8 @@ static void wayland_unhold(struct wayland_client *c, struct wayland_surface *s)
 
 static int wayland_has_children(struct wayland_client *c, long parent)
 {
+        if (!c->subsurfaces)
+                return 0;
         for (long at = 0; at < WAYLAND_SURFACES; at++)
                 if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && c->surfaces[at].sub_parent == parent + 1)
                         return 1;
@@ -1969,6 +1972,8 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
 // The subsurfaces under a surface that are waiting for its commit, applied now, and theirs under them.
 static void wayland_sub_apply_children(struct wayland_client *c, long parent)
 {
+        if (!c->subsurfaces)
+                return;
         for (long at = 0; at < WAYLAND_SURFACES; at++)
         {
                 struct wayland_surface *s = &c->surfaces[at];
@@ -2077,6 +2082,8 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
                 c->waiting--;
                 s->readies = 0;
         }
+        if (s->live && s->role == WAYLAND_ROLE_SUBSURFACE)
+                c->subsurfaces--;
         // The surface the pointer was over, or a window it was over, is nowhere now, and the next motion enters it again.
         if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot &&
             wayland.pointer_surface == wayland_surface_index(c, s))
@@ -2974,6 +2981,8 @@ static int wayland_subcompositor_request(struct wayland_client *c, struct waylan
                 if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
                     c->surfaces[at].sub_parent == wayland_surface_index(c, parent) + 1)
                         order = wayland_max(order, c->surfaces[at].sub_order);
+        if (s->role != WAYLAND_ROLE_SUBSURFACE)
+                c->subsurfaces++;
         s->role = WAYLAND_ROLE_SUBSURFACE;
         s->sub_parent = (unsigned short)(wayland_surface_index(c, parent) + 1);
         s->sub_id = c->objects[a[0].slot].id;
