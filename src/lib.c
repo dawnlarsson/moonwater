@@ -13941,8 +13941,9 @@ __asm__(
     //       starts wherever the caller points), and each colour of the
     //       picture then has the ground's times (255 - alpha) / 255, rounded
     //       to the nearest, added with saturation: pmullw on words and the
-    //       division as (t + (t >> 8)) >> 8 of t + 128, which is exact for
-    //       every product of two bytes. Four pixels a turn, eight with AVX2.
+    //       division as (t * 257) >> 16 of t = product + 128 (pmulhuw), which is (t + (t >> 8)) >> 8
+    //       and so exact for every product of two bytes. The 255 - alpha words come from vpshufb
+    //       with AVX2 and AVX-512. Four pixels a turn, eight with AVX2, sixteen with AVX-512.
     //
     ASM_FUNC(memory_glass_over_u32)
     "test %rcx, %rcx\n   jz 9f\n   xor %r9d, %r9d\n"
@@ -13963,35 +13964,45 @@ __asm__(
     "movdqa %xmm2, %xmm3\n   punpckldq %xmm2, %xmm2\n   punpckhdq %xmm3, %xmm3\n"
     "movdqa %xmm0, %xmm4\n   punpcklbw %xmm5, %xmm0\n   punpckhbw %xmm5, %xmm4\n"
     "pmullw %xmm2, %xmm0\n   pmullw %xmm3, %xmm4\n   paddw %xmm6, %xmm0\n   paddw %xmm6, %xmm4\n"
-    "movdqa %xmm0, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm0\n   psrlw $8, %xmm0\n"
-    "movdqa %xmm4, %xmm3\n   psrlw $8, %xmm3\n   paddw %xmm3, %xmm4\n   psrlw $8, %xmm4\n"
+    "pmulhuw " ASM_LABEL(glass_257) "(%rip), %xmm0\n   pmulhuw " ASM_LABEL(glass_257) "(%rip), %xmm4\n"
     "packuswb %xmm4, %xmm0\n   paddusb %xmm1, %xmm0\n" ASM_RET
     "5:  vpxor %ymm5, %ymm5, %ymm5\n   vpcmpeqw %ymm6, %ymm6, %ymm6\n   vpsrlw $15, %ymm6, %ymm6\n   vpsllw $7, %ymm6, %ymm6\n"
-    "vpcmpeqd %ymm7, %ymm7, %ymm7\n   vpsrld $24, %ymm7, %ymm7\n"
+    "vpcmpeqd %ymm7, %ymm7, %ymm7\n   vpsrld $24, %ymm7, %ymm7\n   vpcmpeqd %ymm13, %ymm13, %ymm13\n"
+    "vmovdqu " ASM_LABEL(glass_pick_lo) "(%rip), %ymm8\n   vmovdqu " ASM_LABEL(glass_pick_hi) "(%rip), %ymm9\n"
+    "vpcmpeqw %ymm10, %ymm10, %ymm10\n   vpsrlw $15, %ymm10, %ymm10\n   vpsllw $8, %ymm10, %ymm11\n   vpaddw %ymm11, %ymm10, %ymm10\n"
     "4:  cmp $8, %rcx\n   jb 6f\n   mov %r9, %r10\n   and $15, %r10\n"
     "vmovdqu (%rdx), %ymm0\n   vpaddusb (%r8,%r10,4), %ymm0, %ymm0\n   vpsubusb 256(%r8,%r10,4), %ymm0, %ymm0\n   vmovdqu (%rsi), %ymm1\n"
-    "vpsrld $24, %ymm1, %ymm2\n   vpxor %ymm7, %ymm2, %ymm2\n   vpslld $16, %ymm2, %ymm3\n   vpor %ymm3, %ymm2, %ymm2\n"
-    "vpunpckldq %ymm2, %ymm2, %ymm3\n   vpunpckhdq %ymm2, %ymm2, %ymm2\n"
+    "vpxor %ymm13, %ymm1, %ymm2\n   vpshufb %ymm9, %ymm2, %ymm3\n   vpshufb %ymm8, %ymm2, %ymm2\n"
     "vpunpcklbw %ymm5, %ymm0, %ymm4\n   vpunpckhbw %ymm5, %ymm0, %ymm0\n"
-    "vpmullw %ymm3, %ymm4, %ymm4\n   vpmullw %ymm2, %ymm0, %ymm0\n   vpaddw %ymm6, %ymm4, %ymm4\n   vpaddw %ymm6, %ymm0, %ymm0\n"
-    "vpsrlw $8, %ymm4, %ymm3\n   vpaddw %ymm3, %ymm4, %ymm4\n   vpsrlw $8, %ymm4, %ymm4\n"
-    "vpsrlw $8, %ymm0, %ymm3\n   vpaddw %ymm3, %ymm0, %ymm0\n   vpsrlw $8, %ymm0, %ymm0\n"
+    "vpmullw %ymm2, %ymm4, %ymm4\n   vpmullw %ymm3, %ymm0, %ymm0\n   vpaddw %ymm6, %ymm4, %ymm4\n   vpaddw %ymm6, %ymm0, %ymm0\n"
+    "vpmulhuw %ymm10, %ymm4, %ymm4\n   vpmulhuw %ymm10, %ymm0, %ymm0\n"
     "vpackuswb %ymm0, %ymm4, %ymm0\n   vpaddusb %ymm1, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
     "add $32, %rdi\n   add $32, %rsi\n   add $32, %rdx\n   add $8, %r9\n   sub $8, %rcx\n   jmp 4b\n"
     "6:  vzeroupper\n   jmp 2b\n"
     //  Sixteen pixels a turn with AVX-512: the AVX2 steps on zmm, the unpacks and the pack acting within each 128-bit
     //  lane, which holds four whole pixels, so the lanes never need crossing. r9 is a multiple of sixteen here, so the
     //  grain is read from its start. Fewer than sixteen left go to the AVX2 loop at 5, which sets its own constants.
+    //  The mask of each colour's word is the picture's alpha byte in the word's low byte, inverted (255 minus alpha) and
+    //  zero in the high byte: pick_lo puts px0's alpha in words 0 to 3 and px1's in 4 to 7 of each lane (the bytes the low
+    //  unpack takes), pick_hi px2's and px3's (the high unpack). The division by 255 is the one multiply: (t * 257) >> 16
+    //  of t = colour * (255 - alpha) + 128 is (t + (t >> 8)) >> 8 for every such t (the checks prove it).
+    "" ASM_RODATA_PUSH "\n   .balign 64\n"
+    "" ASM_LABEL(glass_pick_lo) ":\n   .byte 3,128,3,128,3,128,3,128,7,128,7,128,7,128,7,128, 3,128,3,128,3,128,3,128,7,128,7,128,7,128,7,128\n"
+    "   .byte 3,128,3,128,3,128,3,128,7,128,7,128,7,128,7,128, 3,128,3,128,3,128,3,128,7,128,7,128,7,128,7,128\n"
+    "" ASM_LABEL(glass_pick_hi) ":\n   .byte 11,128,11,128,11,128,11,128,15,128,15,128,15,128,15,128, 11,128,11,128,11,128,11,128,15,128,15,128,15,128,15,128\n"
+    "   .byte 11,128,11,128,11,128,11,128,15,128,15,128,15,128,15,128, 11,128,11,128,11,128,11,128,15,128,15,128,15,128,15,128\n"
+    "   .balign 16\n" "" ASM_LABEL(glass_257) ":\n   .short 257, 257, 257, 257, 257, 257, 257, 257\n"
+    ".popsection\n"
     "11: vpxord %zmm5, %zmm5, %zmm5\n   vpternlogd $0xff, %zmm6, %zmm6, %zmm6\n   vpsrlw $15, %zmm6, %zmm6\n   vpsllw $7, %zmm6, %zmm6\n"
-    "vpternlogd $0xff, %zmm7, %zmm7, %zmm7\n   vpsrld $24, %zmm7, %zmm7\n"
+    "vpternlogd $0xff, %zmm7, %zmm7, %zmm7\n   vpsrld $24, %zmm7, %zmm7\n   vpternlogd $0xff, %zmm13, %zmm13, %zmm13\n"
+    "vmovdqu64 " ASM_LABEL(glass_pick_lo) "(%rip), %zmm8\n   vmovdqu64 " ASM_LABEL(glass_pick_hi) "(%rip), %zmm9\n"
+    "vpternlogd $0xff, %zmm10, %zmm10, %zmm10\n   vpsrlw $15, %zmm10, %zmm10\n   vpsllw $8, %zmm10, %zmm11\n   vpaddw %zmm11, %zmm10, %zmm10\n"
     "12: cmp $16, %rcx\n   jb 5b\n"
     "vmovdqu64 (%rdx), %zmm0\n   vpaddusb (%r8), %zmm0, %zmm0\n   vpsubusb 256(%r8), %zmm0, %zmm0\n   vmovdqu64 (%rsi), %zmm1\n"
-    "vpsrld $24, %zmm1, %zmm2\n   vpxord %zmm7, %zmm2, %zmm2\n   vpslld $16, %zmm2, %zmm3\n   vpord %zmm3, %zmm2, %zmm2\n"
-    "vpunpckldq %zmm2, %zmm2, %zmm3\n   vpunpckhdq %zmm2, %zmm2, %zmm2\n"
+    "vpxord %zmm13, %zmm1, %zmm2\n   vpshufb %zmm9, %zmm2, %zmm3\n   vpshufb %zmm8, %zmm2, %zmm2\n"
     "vpunpcklbw %zmm5, %zmm0, %zmm4\n   vpunpckhbw %zmm5, %zmm0, %zmm0\n"
-    "vpmullw %zmm3, %zmm4, %zmm4\n   vpmullw %zmm2, %zmm0, %zmm0\n   vpaddw %zmm6, %zmm4, %zmm4\n   vpaddw %zmm6, %zmm0, %zmm0\n"
-    "vpsrlw $8, %zmm4, %zmm3\n   vpaddw %zmm3, %zmm4, %zmm4\n   vpsrlw $8, %zmm4, %zmm4\n"
-    "vpsrlw $8, %zmm0, %zmm3\n   vpaddw %zmm3, %zmm0, %zmm0\n   vpsrlw $8, %zmm0, %zmm0\n"
+    "vpmullw %zmm2, %zmm4, %zmm4\n   vpmullw %zmm3, %zmm0, %zmm0\n   vpaddw %zmm6, %zmm4, %zmm4\n   vpaddw %zmm6, %zmm0, %zmm0\n"
+    "vpmulhuw %zmm10, %zmm4, %zmm4\n   vpmulhuw %zmm10, %zmm0, %zmm0\n"
     "vpackuswb %zmm0, %zmm4, %zmm0\n   vpaddusb %zmm1, %zmm0, %zmm0\n   vmovdqu64 %zmm0, (%rdi)\n"
     "add $64, %rdi\n   add $64, %rsi\n   add $64, %rdx\n   add $16, %r9\n   sub $16, %rcx\n   jmp 12b\n"
     ASM_END(memory_glass_over_u32)
