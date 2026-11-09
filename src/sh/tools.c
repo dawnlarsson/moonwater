@@ -8664,6 +8664,12 @@ static fn tools_uuid_record_read(string_address text,
 
         record->variant = tools_uuid_variant(address_of record->uuid);
         record->type = (string_address)"";
+        /* The reference reads a version and a time only from the RFC 4122
+           variant (the 10 in the top bits of byte 8), so an NCS, Microsoft
+           or other uuid whose byte 6 looks like a version shows no TYPE and
+           no TIME. */
+        if ((record->uuid.bytes[8] & 0xc0) != 0x80)
+                return;
         if (tools_uuid_all(address_of record->uuid, 0) ||
             tools_uuid_all(address_of record->uuid, 0xff))
                 return;

@@ -15017,7 +15017,10 @@ MISC_UTILITIES = (
                       ("017f22e2-79b0-7cc3-98c4-dc0c0c07398f",), ("f81d4fae-7dec-11d0-a765-00a0c91e6bf6",),
                       ("F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6",), ("garbage",), ("",), ("f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "garbage",
                       "00000000-0000-0000-0000-000000000000"), ("f81d4fae7dec11d0a76500a0c91e6bf6",),
-                      ("{f81d4fae-7dec-11d0-a765-00a0c91e6bf6}",), ("c232ab00-9414-11ec-b3c8-9f6bdeced846",)),
+                      ("{f81d4fae-7dec-11d0-a765-00a0c91e6bf6}",), ("c232ab00-9414-11ec-b3c8-9f6bdeced846",),
+                      # Not RFC 4122: the reference shows no TYPE and no TIME for these, whatever byte 6 says.
+                      ("12345678-1234-1234-1234-123456789abc",), ("12345678-1234-1234-c234-123456789abc",),
+                      ("12345678-1234-1234-e234-123456789abc",), ("12345678-1234-3234-0234-123456789abc",)),
             # Raw output escapes every byte above 0x7f as well as controls, space and backslash: a
             # multibyte name is \xc3\xa9 there. The table writes a control or a tab as \x01 and \x09 but
             # a byte above 0x7f as it is, in every table tool, so no row here puts one in that mode.
