@@ -1214,9 +1214,9 @@ static __attribute__((unused)) b32 font_kerning_units_reference(const font_face 
 #define FONT_KERN_END ""
 #endif
 
-_Static_assert(__builtin_offsetof(font_face, size) == 8 && __builtin_offsetof(font_face, lookup_list) == 56 &&
-               __builtin_offsetof(font_face, kern) == 64 && __builtin_offsetof(font_face, lookups) == 112 &&
-               __builtin_offsetof(font_face, lookup_count) == 144,
+_Static_assert(offset_of(font_face, size) == 8 && offset_of(font_face, lookup_list) == 56 &&
+               offset_of(font_face, kern) == 64 && offset_of(font_face, lookups) == 112 &&
+               offset_of(font_face, lookup_count) == 144,
                "font_kerning_units: the assembly reads these fields at these offsets");
 #if defined(FONT_KERN_ARM64)
 b32 font_kerning_units(const font_face address_to face, p32 left, p32 right);
@@ -8716,18 +8716,18 @@ static __attribute__((used)) font_bitmap font_cached_find_reference(font_engine 
 #endif
 
 #if defined(__aarch64__) && !defined(_WIN32)
-_Static_assert(__builtin_offsetof(font_engine, index) == 629112 && __builtin_offsetof(font_engine, slots) == 530808 &&
-               __builtin_offsetof(font_engine, atlas) == 24 && __builtin_offsetof(font_engine, atlas_width) == 32 &&
-               __builtin_offsetof(font_engine, slot_count) == 48 && __builtin_offsetof(font_engine, scratched) == 53 &&
-               __builtin_offsetof(font_engine, generation) == 64 && sizeof(font_slot) == 32 &&
-               __builtin_offsetof(font_slot, x) == 16 && __builtin_offsetof(font_slot, y) == 18 &&
-               __builtin_offsetof(font_slot, width) == 20 && __builtin_offsetof(font_slot, height) == 22 &&
-               __builtin_offsetof(font_slot, left) == 24 && __builtin_offsetof(font_slot, top) == 26 &&
-               sizeof(font_cache_way) == 24 && __builtin_offsetof(font_cache_way, generation) == 16 &&
-               __builtin_offsetof(font_cache_way, slot) == 20 && sizeof(font_bitmap) == 32 &&
-               __builtin_offsetof(font_bitmap, stride) == 8 && __builtin_offsetof(font_bitmap, left) == 16 &&
-               __builtin_offsetof(font_bitmap, top) == 20 && __builtin_offsetof(font_bitmap, width) == 24 &&
-               __builtin_offsetof(font_bitmap, height) == 28,
+_Static_assert(offset_of(font_engine, index) == 629112 && offset_of(font_engine, slots) == 530808 &&
+               offset_of(font_engine, atlas) == 24 && offset_of(font_engine, atlas_width) == 32 &&
+               offset_of(font_engine, slot_count) == 48 && offset_of(font_engine, scratched) == 53 &&
+               offset_of(font_engine, generation) == 64 && sizeof(font_slot) == 32 &&
+               offset_of(font_slot, x) == 16 && offset_of(font_slot, y) == 18 &&
+               offset_of(font_slot, width) == 20 && offset_of(font_slot, height) == 22 &&
+               offset_of(font_slot, left) == 24 && offset_of(font_slot, top) == 26 &&
+               sizeof(font_cache_way) == 24 && offset_of(font_cache_way, generation) == 16 &&
+               offset_of(font_cache_way, slot) == 20 && sizeof(font_bitmap) == 32 &&
+               offset_of(font_bitmap, stride) == 8 && offset_of(font_bitmap, left) == 16 &&
+               offset_of(font_bitmap, top) == 20 && offset_of(font_bitmap, width) == 24 &&
+               offset_of(font_bitmap, height) == 28,
                "font_cached_find's assembly: the layouts it reads and writes");
 
 font_bitmap font_cached_find(font_engine address_to e, const font_face address_to face, p32 code, p32 size, p32 phase,
@@ -8808,18 +8808,18 @@ __asm__(".text\n"
         FONT_TYPE(font_cached_find)
         FONT_SIZE(font_cached_find));
 #elif defined(__x86_64__) && !defined(_WIN32)
-_Static_assert(__builtin_offsetof(font_engine, index) == 629112 && __builtin_offsetof(font_engine, slots) == 530808 &&
-               __builtin_offsetof(font_engine, atlas) == 24 && __builtin_offsetof(font_engine, atlas_width) == 32 &&
-               __builtin_offsetof(font_engine, slot_count) == 48 && __builtin_offsetof(font_engine, scratched) == 53 &&
-               __builtin_offsetof(font_engine, generation) == 64 && sizeof(font_slot) == 32 &&
-               __builtin_offsetof(font_slot, x) == 16 && __builtin_offsetof(font_slot, y) == 18 &&
-               __builtin_offsetof(font_slot, width) == 20 && __builtin_offsetof(font_slot, height) == 22 &&
-               __builtin_offsetof(font_slot, left) == 24 && __builtin_offsetof(font_slot, top) == 26 &&
-               sizeof(font_cache_way) == 24 && __builtin_offsetof(font_cache_way, generation) == 16 &&
-               __builtin_offsetof(font_cache_way, slot) == 20 && sizeof(font_bitmap) == 32 &&
-               __builtin_offsetof(font_bitmap, stride) == 8 && __builtin_offsetof(font_bitmap, left) == 16 &&
-               __builtin_offsetof(font_bitmap, top) == 20 && __builtin_offsetof(font_bitmap, width) == 24 &&
-               __builtin_offsetof(font_bitmap, height) == 28,
+_Static_assert(offset_of(font_engine, index) == 629112 && offset_of(font_engine, slots) == 530808 &&
+               offset_of(font_engine, atlas) == 24 && offset_of(font_engine, atlas_width) == 32 &&
+               offset_of(font_engine, slot_count) == 48 && offset_of(font_engine, scratched) == 53 &&
+               offset_of(font_engine, generation) == 64 && sizeof(font_slot) == 32 &&
+               offset_of(font_slot, x) == 16 && offset_of(font_slot, y) == 18 &&
+               offset_of(font_slot, width) == 20 && offset_of(font_slot, height) == 22 &&
+               offset_of(font_slot, left) == 24 && offset_of(font_slot, top) == 26 &&
+               sizeof(font_cache_way) == 24 && offset_of(font_cache_way, generation) == 16 &&
+               offset_of(font_cache_way, slot) == 20 && sizeof(font_bitmap) == 32 &&
+               offset_of(font_bitmap, stride) == 8 && offset_of(font_bitmap, left) == 16 &&
+               offset_of(font_bitmap, top) == 20 && offset_of(font_bitmap, width) == 24 &&
+               offset_of(font_bitmap, height) == 28,
                "font_cached_find's assembly: the layouts it reads and writes");
 
 font_bitmap font_cached_find(font_engine address_to e, const font_face address_to face, p32 code, p32 size, p32 phase,
@@ -9397,10 +9397,10 @@ static __attribute__((used)) b32 font_kern_reference(font_engine address_to e, c
 //      writes the way). Nothing is written on a hit, so the reference sees the memo as it was.
 //      The offsets are font_engine's kern_memo, font_face's units and id, and the way's layout, checked below.
 #if (defined(__aarch64__) || defined(__x86_64__)) && !defined(_WIN32)
-_Static_assert(__builtin_offsetof(font_engine, kern_memo) == 783736 && __builtin_offsetof(font_face, units) == 104 &&
-               __builtin_offsetof(font_face, id) == 108 && sizeof(font_kern_way) == 12 &&
-               __builtin_offsetof(font_kern_way, face) == 0 && __builtin_offsetof(font_kern_way, left) == 2 &&
-               __builtin_offsetof(font_kern_way, right) == 4 && __builtin_offsetof(font_kern_way, value) == 8 &&
+_Static_assert(offset_of(font_engine, kern_memo) == 783736 && offset_of(font_face, units) == 104 &&
+               offset_of(font_face, id) == 108 && sizeof(font_kern_way) == 12 &&
+               offset_of(font_kern_way, face) == 0 && offset_of(font_kern_way, left) == 2 &&
+               offset_of(font_kern_way, right) == 4 && offset_of(font_kern_way, value) == 8 &&
                FONT_KERN_SETS == 512 && FONT_WAYS == 4 && FONT_FIXED_MOST == 0x40000000,
                "font_kern's assembly: the layouts it reads, and the set, way and clamp constants it hard-codes");
 #endif
