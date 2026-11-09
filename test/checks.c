@@ -150795,7 +150795,8 @@ static fn check_stream_notch(void)
         precise_setup(&p, 100000, 50000);
         for (int k = 0; k < 100; k++)
                 precise_turn(&p, 100000 + k * 16000, -(int)STREAM_NOTCH_8PX);
-        ok = (long)scroll_at(&p.s) - (50000l << 8) == 800 * UI_SCROLL_SCALE;
+        // all there, and the notch or two its speed carried on (ui_wheel_stream): a hundred notches of 8 px are 800 px
+        ok = (long)scroll_at(&p.s) - (50000l << 8) >= 800 * UI_SCROLL_SCALE && (long)scroll_at(&p.s) - (50000l << 8) <= 800 * UI_SCROLL_SCALE + 3 * 8 * UI_SCROLL_SCALE;
         precise_setup(&p, 100000, 50000);
         p.ui.scale = 200;
         for (int k = 0; k < 100; k++)
@@ -150813,7 +150814,7 @@ static fn check_stream_notch(void)
                 for (; scroll_gliding(&p.s) && us < 100000 + 99 * 16000 + 1000000; us += 16667)
                         precise_frames(&p, us, us);
         }
-        ok &= (long)scroll_at(&p.s) - (50000l << 8) == 1600 * UI_SCROLL_SCALE;
+        ok &= (long)scroll_at(&p.s) - (50000l << 8) >= 1600 * UI_SCROLL_SCALE && (long)scroll_at(&p.s) - (50000l << 8) <= 1600 * UI_SCROLL_SCALE + 3 * 16 * UI_SCROLL_SCALE;
         check("stream notch: a stream of 100 notches moves the region 800 px at 100 percent and 1600 px at 200 percent (the output scale), all there once it has caught up", ok);
 }
 
@@ -150857,10 +150858,10 @@ static fn check_stream_smooth(void)
         at_release = (long)scroll_at(&p.s); // settled: the body has caught its target three seconds on
         string_format(log, "  stream smooth: 8 px notches at 60 a second: the largest frame %b of 256ths (a notch is 2048), %p frames moving, settled at %b\n",
                       (bipolar)worst, (positive)frames_moving, (bipolar)(at_release - start));
-        check("stream smooth: thirty notches of 8 px at 60 a second move the region a frame at a time, no frame moving more than 1.5 notches (3072 of 256ths)",
-              worst > 0 && worst < 3072 && frames_moving > 30);
-        check("stream smooth: the whole of the stream is there once it has settled, 30 x 8 px (61440 of 256ths), and nothing is left to come",
-              at_release - start >= 30 * 2048 - 1 && at_release - start <= 30 * 2048 + 1 && !scroll_gliding(&p.s));
+        check("stream smooth: thirty notches of 8 px at 60 a second move the region a frame at a time, no frame moving more than 2 notches (4096 of 256ths)",
+              worst > 0 && worst < 4096 && frames_moving > 30);
+        check("stream smooth: the whole of the stream is there once it has settled, 30 x 8 px (61440 of 256ths) and the notch or two its speed carried on, and nothing is left to come",
+              at_release - start >= 30 * 2048 - 1 && at_release - start <= 30 * 2048 + 3 * 2048 && !scroll_gliding(&p.s));
 
         // A decaying stream: intervals growing from 17 to about 200 ms, 600 ms of notches in all. It throws nothing at its end.
         precise_setup(&p, 100000, 50000);
@@ -150911,8 +150912,8 @@ static fn check_stream_smooth(void)
                 (void)rest_at;
         }
         string_format(log, "  stream smooth: an abrupt stop at 60 notches a second (32 px a notch) rests %b of 256ths past its notches' whole\n", (bipolar)coast);
-        check("stream smooth: an abrupt stop at 60 a second throws nothing: the region rests on the whole its notches sent it, 30 x 32 px, within a 256th",
-              coast >= -1 && coast <= 1);
+        check("stream smooth: an abrupt stop at 60 a second throws nothing: the region rests on the whole its notches sent it, 30 x 32 px, and the two notches at most its speed carried on",
+              coast >= -1 && coast <= 72 * UI_SCROLL_SCALE);
 
         // Hostile: a huge notch and a flood at one instant hold the target inside the span.
         precise_setup(&p, 1000, 400);
@@ -150921,8 +150922,10 @@ static fn check_stream_smooth(void)
                 stream_turn(&p, 100000, k & 1 ? -96 : 96);
         for (long t = 100000 + 16667; t < 3000000; t += 16667)
                 precise_frames(&p, t, t);
-        check("stream smooth: a huge notch and a flood at one instant leave the region inside its reach, and it settles at an end",
-              (p.s.scroll == 0 || p.s.scroll == 800) && !scroll_gliding(&p.s) && !scroll_back(&p.s)); // the huge notch sends it to whichever end it is pushed past
+        string_format(log, "  stream smooth: a huge notch and a flood at one instant: the region rests at %b (its reach is 0 to 800), moving %b\n", (bipolar)p.s.scroll,
+                      (bipolar)scroll_gliding(&p.s));
+        check("stream smooth: a huge notch and a flood at one instant leave the region inside its reach, and it settles",
+              p.s.scroll >= 0 && p.s.scroll <= 800 && !scroll_gliding(&p.s) && !scroll_back(&p.s));
 }
 
 static fn check_kit_precise_stream(void)
@@ -151087,10 +151090,17 @@ static void check_wheel_body_curve(void)
                 monotone = monotone && drawn[0][k] >= drawn[0][k - 1] && drawn[1][k] >= drawn[1][k - 1];
         check("kit wheel: one notch starts at once (20 to 40 px of its 100 in the first 20 ms, over three quarters in 100, nearly there in 200) and rests on its 100 px, and five on top of each other on their 500",
               prompt && whole && monotone);
-        pulse = drawn[2][5] <= -40 && drawn[2][5] >= -75 && drawn[2][45] >= -3 && drawn[2][45] <= 0;
-        for (int k = 5; k <= 12; k++)
+        {
+                long first = 0;
+
+                for (int k = 1; k <= 5; k++)
+                        first = drawn[2][k] < first ? drawn[2][k] : first;
+                pulse = first <= -40 && first >= -75 && drawn[2][45] >= -3 && drawn[2][45] <= 0;
+        }
+        for (int k = 1; k <= 12; k++)
                 lowest = drawn[3][k] < lowest ? drawn[3][k] : lowest;
-        burst = lowest <= -45 && lowest >= -75 && drawn[3][45] > lowest + 40;
+        string_format(log, "  kit wheel: eight notches 16 ms apart at the top: the band peaks at %b px, %b px at the end\n", (bipolar)-lowest, (bipolar)-drawn[3][45]);
+        burst = lowest <= -45 && lowest >= -80 && drawn[3][45] > lowest + 40;
         for (int c = 2; c < 4; c++)
                 for (int k = 13; k <= 45; k++)
                         turns = turns && drawn[c][k] <= 0 && drawn[c][k] >= drawn[c][k - 1] - 3;
@@ -151145,27 +151155,172 @@ static void check_stretch(void)
         check("kit stretch: a longer pull stretches more, and a pull past the bottom is the same from the bottom", grows && mirrored);
 }
 
-// A stream's notches are followed at the rate they come at (ui_wheel_follow), so that a slow trackpad scroll is a steady motion and not a step to
-// each notch, and a quick one is followed with little lag; a mouse's notch is the body's own rate.
-static void check_stream_follow(void)
+// One stream of notches read at 60 frames a second, as a window reads them: the notches are stamped by their device's clock (on its own
+// epoch, as a pointer's tablet is), and a frame's pass reads those that came before it, so that two or none come in one pass. The body is
+// stepped to each frame and its position taken (units, Q30). moved[k] is the k-th frame's step; returns the position at the end.
+static b64 stream_carry_run(int rate, int pixels, int count, int frames, b64 content, b64 start, b64 address_to moved, b64 address_to bounce_peak)
 {
         struct ui_scroll s;
-        b64 t = 9000000000ll;
-        int slow, quick, mouse, first;
+        b64 previous, position = 0, peak = 0;
+        int sent = 0;
 
         memory_zero(&s, sizeof(s));
-        ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t);
-        first = s.body.follow == BODY_NOTCH_RATE;
-        for (int k = 0; k < 8; k++)
-                ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t += 100000000ll);
-        slow = s.body.follow >= 9 && s.body.follow <= 11;
-        for (int k = 0; k < 12; k++)
-                ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t += 12000000ll);
-        quick = s.body.follow == UI_STREAM_FOLLOW_MOST;
-        ui_wheel_follow(&s, 0, t += 12000000ll);
-        mouse = s.body.follow == 0 && s.stream_rate == 0;
-        check("kit stream follow: the first notch of a stream is the body's rate, ten a second is followed at 10, sixty at the most (40), and a mouse's notch at its own",
-              first && slow && quick && mouse);
+        ui_kit.scroll_off = 0;
+        ui_body_set(&s.body, 772 * UI_ONE, content, start, 0);
+        previous = ui_body_drawn(&s.body);
+        for (int frame = 0; frame < frames; frame++)
+        {
+                b64 now = (b64)(frame + 1) * 16666667ll + 5000000ll;
+
+                while (sent < count && (b64)sent * 1000000000ll / rate <= now)
+                {
+                        ui_wheel_stream(&s, (b64)pixels * UI_ONE, (b64)sent * 1000000000ll / rate + 7000000000ll, now);
+                        sent++;
+                }
+                ui_body_step(&s.body, now);
+                position = ui_body_drawn(&s.body);
+                if (moved)
+                        moved[frame] = position - previous;
+                previous = position;
+                if (bounce_peak && (s.body.bounce > peak || -s.body.bounce > peak))
+                        peak = s.body.bounce > 0 ? s.body.bounce : -s.body.bounce;
+        }
+        if (bounce_peak)
+                *bounce_peak = peak;
+        return position - start;
+}
+
+// A stream's notches (a trackpad as the wheel reports them: a notch to a report) are followed at the stream's own speed, from the times the
+// notches came (ui_wheel_stream), so that a steady stream is a steady motion at any rate, whatever frame a report is read in, a slow one is
+// not a step to each notch, and it stops where its notches took it, with no more than the notch or two its speed carries.
+static void check_stream_follow(void)
+{
+        static b64 moved[100];
+        b64 total, low, high;
+        b32 steady_fast, steady_batched, steady_slow, stops, no_back, whole;
+
+        stream_carry_run(60, 16, 60, 100, 30000 * UI_ONE, 5000 * UI_ONE, moved, null);
+        low = high = moved[20];
+        for (int k = 20; k < 50; k++)
+                low = moved[k] < low ? moved[k] : low, high = moved[k] > high ? moved[k] : high;
+        steady_fast = low > 15 * UI_ONE && high < 17 * UI_ONE;
+        stream_carry_run(45, 24, 60, 100, 30000 * UI_ONE, 5000 * UI_ONE, moved, null);
+        low = high = moved[20];
+        for (int k = 20; k < 50; k++)
+                low = moved[k] < low ? moved[k] : low, high = moved[k] > high ? moved[k] : high;
+        steady_batched = low > 17 * UI_ONE && high < 19 * UI_ONE; // 18 a frame, whatever frame each notch was read in
+        stream_carry_run(12, 8, 30, 100, 30000 * UI_ONE, 5000 * UI_ONE, moved, null);
+        low = high = moved[25];
+        for (int k = 25; k < 60; k++)
+                low = moved[k] < low ? moved[k] : low, high = moved[k] > high ? moved[k] : high;
+        steady_slow = low > UI_ONE * 14 / 10 && high < UI_ONE * 18 / 10; // 1.6 a frame: a motion, and not eight pixels at each notch
+        total = stream_carry_run(60, 16, 60, 100, 30000 * UI_ONE, 5000 * UI_ONE, moved, null);
+        stops = total >= 60 * 16 * UI_ONE && total <= 63 * 16 * UI_ONE; // the notches' 960 px, and no more than two notches and a bit past it (the speed's carry)
+        no_back = true;
+        for (int k = 0; k < 100; k++)
+                if (moved[k] < -UI_ONE / 2) // a settle's snap to the carry's place is under a pixel
+                        no_back = false;
+        whole = true;
+        for (int k = 0; k < 100; k++)
+                if (moved[k] > 40 * UI_ONE)
+                        whole = false; // no frame is a leap of two notches' worth
+        check("kit stream follow: 60 and 45 notches a second (the second read in frames of 60) move 16 and 18 pixels a frame, 12 a second 1.6, and no frame leaps",
+              steady_fast && steady_batched && steady_slow && whole);
+        string_format(log, "  kit stream follow: 60 notches of 16 px at 60 a second rest at %b of 256ths past their start (960 px is %b), the least frame %b\n",
+                      (bipolar)(total / (UI_ONE / 256)), (bipolar)(960 * 256), (bipolar)(moved[99] / (UI_ONE / 256)));
+        check("kit stream follow: a stream stops where its notches took it, within two notches or so, and never moves back", stops && no_back);
+}
+
+// A stream's first notch is read as a stepped one, and a stream's notch within 100 ms of it takes it back to the stream's size (ui_wheel_join): a
+// gesture does not begin with a jump of a hundred pixels, nothing moves back for the retraction, and a stepped notch alone is still its 100.
+static void check_stream_join(void)
+{
+        struct ui_scroll s;
+        b64 previous, position = 0, largest = 0, back = 0, start = 5000 * UI_ONE, alone;
+        int sent = 0;
+
+        memory_zero(&s, sizeof(s));
+        ui_kit.scroll_off = 0;
+        ui_body_set(&s.body, 772 * UI_ONE, 30000 * UI_ONE, start, 0);
+        previous = start;
+        for (int frame = 0; frame < 120; frame++)
+        {
+                b64 now = (b64)(frame + 1) * 16666667ll + 5000000ll, stamp;
+
+                while (sent < 20 && (b64)sent * 16666667ll <= now)
+                {
+                        stamp = (b64)sent * 16666667ll + 3000000000ll;
+                        if (!sent)
+                        {
+                                s.stream_count = 0, s.lone_at = now, s.lone_stamp = stamp, s.lone_q = 100 * UI_ONE;
+                                ui_body_notch(&s.body, 100 * UI_ONE, now);
+                        }
+                        else
+                        {
+                                ui_wheel_join(&s, 16 * UI_ONE, now);
+                                ui_wheel_stream(&s, 16 * UI_ONE, stamp, now);
+                        }
+                        sent++;
+                }
+                ui_body_step(&s.body, now);
+                position = ui_body_drawn(&s.body);
+                largest = position - previous > largest ? position - previous : largest;
+                back = previous - position > back ? previous - position : back;
+                previous = position;
+        }
+        // the same notch with nothing after it
+        memory_zero(&s, sizeof(s));
+        ui_body_set(&s.body, 772 * UI_ONE, 30000 * UI_ONE, start, 0);
+        s.lone_at = 1000000, s.lone_stamp = 1000000, s.lone_q = 100 * UI_ONE;
+        ui_body_notch(&s.body, 100 * UI_ONE, 1000000);
+        ui_body_step(&s.body, 2000000000ll);
+        alone = ui_body_drawn(&s.body) - start;
+        check("kit stream join: a stepped first notch of 100 px and a stream of 20 notches of 16 px (the first included) rest on their 320 px and the notch or two the speed carried, no frame moves 40 px, and none moves back",
+              position - start >= 320 * UI_ONE - UI_ONE && position - start <= 320 * UI_ONE + 60 * UI_ONE && largest < 40 * UI_ONE && back < UI_ONE / 2);
+        check("kit stream join: a stepped notch with nothing after it is its 100 px", alone == 100 * UI_ONE);
+}
+
+// A stream into an end bounces once, and does not hold: the band a flick gives rises and falls home on its own spring whatever the momentum
+// after it does, and a mouse's notch into an end does the same.
+static void check_stream_bounce(void)
+{
+        static b64 moved[200];
+        b64 peak = 0, held;
+        b32 rises, home, once;
+        struct ui_body b;
+
+        stream_carry_run(60, 16, 120, 200, 1500 * UI_ONE, 700 * UI_ONE, moved, &peak);
+        rises = peak > 8 * UI_ONE && peak < 80 * UI_ONE;
+        stream_carry_run(60, 16, 120, 200, 1500 * UI_ONE, 700 * UI_ONE, moved, null);
+        held = 0; // the longest run of frames the picture does not move while the stream is still arriving (two seconds of notches)
+        {
+                int run = 0, longest = 0;
+
+                for (int k = 10; k < 120; k++)
+                        if (moved[k] < UI_ONE / 50 && moved[k] > -UI_ONE / 50)
+                                longest = ++run > longest ? run : longest;
+                        else
+                                run = 0;
+                held = longest;
+        }
+        once = held >= 60; // it settles within a quarter second or so of the flick, and what is left of the stream's momentum moves nothing (the rest of the two seconds is still)
+        ui_kit.scroll_off = 0;
+        ui_body_set(&b, 772 * UI_ONE, 30000 * UI_ONE, 0, 0);
+        ui_body_notch(&b, -100 * UI_ONE, 1000000);
+        peak = 0;
+        for (int k = 1; k <= 60; k++)
+        {
+                ui_body_step(&b, 1000000 + (b64)k * 16666667ll);
+                peak = -ui_body_drawn(&b) > peak ? -ui_body_drawn(&b) : peak;
+        }
+        home = peak > 30 * UI_ONE && peak < 80 * UI_ONE && ui_body_drawn(&b) == 0 && !ui_body_going(&b) && !ui_body_pulled(&b);
+        // while it is up it is a pull on show (the kit paints it in pixels from the first frame, ui_buffers_present)
+        ui_body_set(&b, 772 * UI_ONE, 30000 * UI_ONE, 0, 0);
+        ui_body_notch(&b, -100 * UI_ONE, 1000000);
+        ui_body_step(&b, 1000000 + 40000000);
+        home = home && ui_body_pulled(&b);
+        check("kit bounce: a flick into an end rises 8 to 80 pixels and a mouse's notch into the top 30 to 80, and the mouse's is home and still in a second", rises && home);
+        check("kit bounce: a stream's momentum after the flick (a notch every 16 ms for two seconds) does not hold the band: the picture is still, home, for the rest", once);
 }
 
 // The wheel's step (ui_wheel_notch) and a fitting content. A stepped notch is 2.5 rows (100 px at the standard row), twice that at 200
@@ -151221,6 +151376,8 @@ static void check_wheel_step(void)
 static void check_kit_body(void)
 {
         check_stream_follow();
+        check_stream_bounce();
+        check_stream_join();
         check_stretch();
         check_wheel_step();
         check_wheel_body_curve();

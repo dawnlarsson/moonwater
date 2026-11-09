@@ -6014,7 +6014,9 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         offset with each event (memory note scroll-input-redo-2026-11-05; refit when the recording grows). A finger moves
         the position one for one, and past an end the rubber band draws it. A wheel's notch moves a target that the position
         runs to at once and eases out (BODY_NOTCH_RATE: the first frame already shows a quarter of the way, and a notch on a notch just moves the
-        target on), and a notch into an end counts BODY_NOTCH_PULL times, so that it stretches the band. A release's coast starts at BODY_CARRY of the lift's speed and
+        target on), and a notch into an end gives the band a push (ui_body_bump): a bounce on top of the position that rises and falls home by
+        its own critically damped spring, and is never held. A stream's notches (a trackpad as the wheel reports it) are followed at their own
+        speed (ui_body_stream). A release's coast starts at BODY_CARRY of the lift's speed and
         falls by e in BODY_TAU_NS (a trackpad's hand; a finger's throw goes as far as Android's, ui_body_finger_tau). A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
         BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
         home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
@@ -6032,7 +6034,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define BODY_EDGE_CARRY (UI_ONE * 65 / 10)   // a coast that starts at an end or reaches one: the first speed is the lift's times this (fit 6.5)
 #define BODY_TAU_EDGE_NS 10000000ll          // and past an end its speed falls by e in this long: a brief push (fit 10 ms)
 #define BODY_RUBBER_C (UI_ONE * 36 / 100)    // the rubber band's stiffness c (fit 0.36 to the top dip, for a view of 772 px: it scales with the view)
-#define BODY_SPRING_OMEGA 20                 // the spring home is critically damped at this rate, per second: 90 percent home in 0.2 s, 98 in 0.3 (11, the Mac's fit, was 0.55 s: slow motion)
+#define BODY_SPRING_OMEGA 24                 // the spring home is critically damped at this rate, per second: 90 percent home in 0.17 s, 98 in 0.25 (11, the Mac's fit, was 0.55 s: slow motion)
 #define BODY_STILL (UI_ONE * 20)             // a coast under 20 units a second has stopped
 #define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
@@ -6041,8 +6043,15 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define UI_BODY_FRAME_NS 16000000l           // a body that moves is stepped again this long later: a frame
 
 #define BODY_NOTCH_RATE 18                   // a wheel's notches move a target, and the position runs to it at once and eases out: e to the minus this, per second, of the gap is left (a quarter of a notch in the first frame, 83 percent at 100 ms, all but 3 percent at 200)
-#define BODY_NOTCH_PULL 3                    // a notch's travel past an end counts this many times, so that a wheel at an end stretches the band as a pad's pull does
-#define BODY_NOTCH_PAST 4                    // the target goes no further past an end than this share of the view (one in this many): the band a wheel can pull
+#define BODY_BUMP_K 36                       // a notch into an end gives the band a push of this many times its pixels past the end, a second (100 px: 3600 a second, a bounce of 55 px)
+#define BODY_BUMP_CAP 10                     // the bounce is soft-capped at this share (one in) of the view: a push is worth less the nearer the band is to it, and nothing at it
+#define BODY_BURST_NS 150000000ll            // a stream's notches into an end that come within this of each other are one burst: the momentum of one flick, a bounce for the whole of it
+#define BODY_BURST_TAKE_NS 60000000ll        // and a burst is taken for this long, from its first notch at the end: what comes after it is the same flick's momentum and pushes nothing
+#define BODY_STREAM_RATE 25                  // a stream's position runs to where its notches carry it at this rate, a second: it corrects, and the stream's own speed moves it (BODY_DRIVE)
+#define BODY_DRIVE_LEAST_NS 12000000ll       // a stream's speed carries its position on past the last notch for a notch's interval (at least this)
+#define BODY_DRIVE_MOST_NS 90000000ll        // and at most this
+#define BODY_DRIVE_LATE_NS 12000000ll        // and a notch read late (a pass reads the reports that came before it) must not stop it, so this much more
+#define BODY_DRIVE_TAPER_NS 12000000ll       // and then falls away to nothing over this long
 
 #define BODY_IDLE 0     // nothing moves it
 #define BODY_TRACK 1    // a finger holds it: one for one, drawn as the rubber band past an end
@@ -6061,7 +6070,10 @@ struct ui_body
         int state;           // BODY_IDLE and the rest
         b64 at;              // when the body was last stepped, ns
         b64 target;          // a notch's target, units (Q30): where the position is going while BODY_NOTCH
-        b64 pushed;          // when the last notch moved the target, ns: past an end the band is held while notches keep coming
+        b64 bounce, bounce_v; // the band a notch into an end gives, on top of the position: its distance past the end and its speed (units, units a second), critically damped home
+        b64 burst_at, burst_last; // a stream's burst at an end: when its first notch came there and its last, ns (0: none)
+        b64 drive;           // a stream's speed, units a second (0: a mouse's notches): the target goes on at it from drive_at, for drive_for
+        b64 drive_at, drive_for; // when the stream's last notch came (ns, the kit's clock) and how long past it the target is carried on
         b64 sent;            // a free throw's position already given as whole pixels (ui_body_given)
         b64 tau;             // this coast's speed falls by e in this long, ns: a pad's (BODY_TAU_NS) or a finger's (ui_body_finger_tau)
         int follow;          // a notch's run to its target: e to the minus this a second (0: BODY_NOTCH_RATE). A stream's is the rate its notches come at
@@ -6119,20 +6131,28 @@ static b64 ui_body_drawn(const struct ui_body address_to b)
         b64 far = ui_body_far(b);
 
         if (b->state == BODY_SPRING)
-                return b->shown;
+                return b->shown + b->bounce;
         if (ui_kit.scroll_off & WINDOW_SCROLL_STILL)
                 return ui_body_clamp(b, b->raw);
         if (b->raw < 0)
-                return -ui_body_rubber(b, -b->raw);
+                return -ui_body_rubber(b, -b->raw) + b->bounce;
         if (far && b->raw > far)
-                return far + ui_body_rubber(b, b->raw - far);
-        return b->raw;
+                return far + ui_body_rubber(b, b->raw - far) + b->bounce;
+        return b->raw + b->bounce;
 }
 
 // the same place in whole device pixels, rounded: the scroll's, the grid's (terminal.c) and the table's
 static int ui_body_px(const struct ui_body address_to b)
 {
         return (int)((ui_body_drawn(b) + UI_ONE / 2) >> UI_Q);
+}
+
+// whether the body is drawn past an end (half a pixel or more): a pull, a spring home or a bounce is on show, and the picture is stretched
+static b32 ui_body_pulled(const struct ui_body address_to b)
+{
+        b64 at = ui_body_drawn(b), far = ui_body_far(b);
+
+        return at < -UI_ONE / 2 || at > far + UI_ONE / 2;
 }
 
 // how far a position is past an end: below the top, or beyond the far end when the content has one
@@ -6180,6 +6200,9 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
         b->speed = 0;
         b->tau = 0;
         b->follow = 0;
+        b->bounce = b->bounce_v = 0;
+        b->burst_at = b->burst_last = 0;
+        b->drive = 0;
         b->state = BODY_IDLE;
         b->at = at;
         ui_body_note(b);
@@ -6195,6 +6218,8 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
         ui_body_pin(b);
         b->state = BODY_TRACK;
         b->vel = 0;
+        b->bounce = b->bounce_v = 0;
+        b->drive = 0;
         b->at = at;
         ui_body_note(b);
 }
@@ -6223,48 +6248,113 @@ static void ui_body_hold(struct ui_body address_to b, b64 at)
 
         b->raw = now < 0 ? 0 : now > far ? far : now;
         b->vel = 0;
+        b->bounce = b->bounce_v = 0;
+        b->drive = 0;
         b->state = BODY_IDLE;
         b->at = at;
         ui_body_note(b);
 }
 
-// the drawn stretch d past an end as the position that draws it, the rubber band's inverse
-static b64 ui_body_stretched(const struct ui_body address_to b, b64 d)
+/*
+        A notch into an end gives the band a push: the pixels the notch carried it past the end, BODY_BUMP_K times a second (a
+        speed), added to the bounce, which is critically damped home (BODY_SPRING_OMEGA) and sits on the position, so a bounce is a rise
+        and a fall, and never a hold: what a person pulls a band for. A push is worth less the nearer the bounce is to its cap
+        (BODY_BUMP_CAP), the square of what is left. A stream's notches into an end (a trackpad's flick, and the momentum after it) are one
+        burst: pushes in the first BODY_BURST_TAKE_NS count, and what comes after it, while the notches keep coming within BODY_BURST_NS,
+        is the same flick and pushes nothing, so the band rises and falls once for a flick and not as long as its momentum lasts.
+*/
+static void ui_body_bump(struct ui_body address_to b, b64 out, b64 at, b32 stream)
 {
-        return d <= 0 ? 0 : d >= b->view ? b->view : ui_qdiv(ui_qmul(d, b->view), ui_qmul(BODY_RUBBER_C, b->view - d));
+        b64 cap = b->view / BODY_BUMP_CAP, same, room, fastest = cap * 66;
+
+        out = out > b->view ? b->view : out < -b->view ? -b->view : out; // a notch is no more than a view past an end
+
+        if (stream)
+        {
+                if (!b->burst_last || at - b->burst_last > BODY_BURST_NS)
+                        b->burst_at = at;
+                b->burst_last = at;
+                if (at - b->burst_at > BODY_BURST_TAKE_NS)
+                        return;
+        }
+        else
+                b->burst_at = b->burst_last = 0;
+        same = (out < 0) == (b->bounce < 0) ? (b->bounce < 0 ? -b->bounce : b->bounce) : 0;
+        room = cap <= 0 || same >= cap ? 0 : UI_ONE - ui_qdiv(same, cap);
+        b->bounce_v += ui_qmul(ui_qmul(out, (b64)BODY_BUMP_K * UI_ONE), ui_qmul(room, room));
+        b->bounce_v = b->bounce_v > fastest ? fastest : b->bounce_v < -fastest ? -fastest : b->bounce_v; // the speed that rises to the cap (the spring's peak is a 66th of its speed)
 }
 
-// the wheel's notches move the target (units, Q30) by delta, and the position runs to it: from where it is, unless it is already
-// running to one. A notch's travel out past an end counts BODY_NOTCH_PULL times, up to a BODY_NOTCH_PAST-th of the view past it.
-static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
+// A notch's delta moves the target (the position runs to it), held inside the ends: what it carries past an end is the band's push.
+static void ui_body_push(struct ui_body address_to b, b64 delta, b64 at, b32 stream)
 {
-        b64 old, out, most;
+        b64 far, from, want, held, before, after, out = 0;
 
         ui_body_step(b, at);
         if (b->state == BODY_SPRING)
         {
-                b64 into = b->shown - b->rest;
-
-                b->raw = b->rest + (into < 0 ? -ui_body_stretched(b, -into) : ui_body_stretched(b, into));
+                // a pull's spring home goes on as the bounce, on a position that is at its end
+                b->bounce += b->shown - b->rest;
+                b->bounce_v += b->speed;
+                b->raw = b->shown = b->rest;
+                b->speed = 0;
                 b->state = BODY_IDLE;
         }
         if (b->state != BODY_NOTCH)
                 b->target = b->raw, b->vel = 0;
-        old = b->target;
-        b->target += delta;
-        if (ui_kit.scroll_off & WINDOW_SCROLL_STILL)
-                b->target = ui_body_clamp(b, b->target);
-        else
-        {
-                out = ui_body_past(b, b->target) - ui_body_past(b, old);
-                if (out > 0)
-                        b->target += (b->target < 0 ? -out : out) * (BODY_NOTCH_PULL - 1);
-                most = b->view / BODY_NOTCH_PAST;
-                b->target = b->target < -most ? -most : b->target > ui_body_far(b) + most ? ui_body_far(b) + most : b->target;
-        }
+        far = ui_body_far(b);
+        from = b->target;
+        want = from + delta;
+        held = want < 0 ? 0 : want > far ? far : want;
+        before = from - (from < 0 ? 0 : from > far ? far : from);
+        after = want - held;
+        if (after > 0)
+                out = after - (before > 0 ? before : 0);
+        else if (after < 0)
+                out = after - (before < 0 ? before : 0);
+        if ((after > 0 && out < 0) || (after < 0 && out > 0))
+                out = 0;
+        b->target = held;
+        if (out && !(ui_kit.scroll_off & WINDOW_SCROLL_STILL))
+                ui_body_bump(b, out, at, stream);
         b->state = BODY_NOTCH;
-        b->pushed = b->at = at;
+        b->at = at;
         ui_body_note(b);
+}
+
+// the wheel's notches move the target (units, Q30) by delta, and the position runs to it: from where it is, unless it is already
+// running to one, and eases out
+static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
+{
+        ui_body_push(b, delta, at, false);
+        b->follow = 0;
+        b->drive = 0;
+}
+
+// A stream's notch (a trackpad as a wheel reports it): the target moves by delta as a notch's does, and the stream's own speed (units a
+// second) carries the position on from when the notch came (the kit's clock) for hold (ns), and then lets it go: the position runs to the
+// target and the carry together, so a steady stream is a steady motion and a notch's step is not seen. The target stays the notches' sum.
+static void ui_body_stream(struct ui_body address_to b, b64 delta, b64 drive, b64 hold, b64 when, b64 at)
+{
+        ui_body_push(b, delta, at, true);
+        b->follow = BODY_STREAM_RATE;
+        b->drive = drive;
+        b->drive_at = when;
+        b->drive_for = hold;
+}
+
+// A notch taken back: the target moves back by amount (signed, as the notch moved it), but not behind where the position is already
+// (nothing moves back for it)
+static void ui_body_retract(struct ui_body address_to b, b64 amount)
+{
+        b64 aim;
+
+        if (b->state != BODY_NOTCH || !amount)
+                return;
+        aim = b->target - amount;
+        if (amount > 0 ? aim < b->raw : aim > b->raw)
+                aim = b->raw;
+        b->target = aim;
 }
 
 /*
@@ -6297,7 +6387,7 @@ static void ui_body_fit(struct ui_body address_to b, b64 view, b64 content)
 // whether the body is held, carried, springing or following a notch: the caller steps it a frame at a time while it is
 static b32 ui_body_going(const struct ui_body address_to b)
 {
-        return b->state == BODY_TRACK || b->state == BODY_COAST || b->state == BODY_SPRING || b->state == BODY_NOTCH;
+        return b->state == BODY_TRACK || b->state == BODY_COAST || b->state == BODY_SPRING || b->state == BODY_NOTCH || b->bounce || b->bounce_v;
 }
 
 // the body is no longer held or carried: a position outside an end springs home, one inside stops where it is
@@ -6309,7 +6399,7 @@ static void ui_body_settle(struct ui_body address_to b)
         b->follow = 0;
         if (ui_body_outside(b))
         {
-                b->shown = ui_body_drawn(b);
+                b->shown = ui_body_drawn(b) - b->bounce; // the spring's own place: the bounce is drawn on top of it
                 b->rest = b->raw < 0 ? 0 : far;
                 b->speed = 0;
                 b->state = BODY_SPRING;
@@ -6416,23 +6506,47 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 }
                 else if (b->state == BODY_NOTCH)
                 {
-                        b64 gap = b->target - b->raw, slack;
-
-                        // The gap closes by e to the minus BODY_NOTCH_RATE a second: the first millisecond is the fastest, so a notch shows
-                        // at once, and a notch on a notch moves the target on and the position goes on running.
+                        b64 far = ui_body_far(b), aim = b->target, carry = 0, gap, lo = b->raw < 0 ? b->raw : 0, hi = b->raw > far ? b->raw : far;
                         b64 rate = b->follow > 0 ? b->follow : BODY_NOTCH_RATE;
+                        b32 over = false;
 
-                        b->raw += gap - ui_qmul(gap, ui_body_decay(dt * rate));
-                        b->vel = ui_qmul(b->target - b->raw, rate * UI_ONE);
-                        gap = b->raw - b->target;
-                        // Past an end the notch is a pulse: the band is let go of once it has come within a tenth of its stretch (6 pixels at the
-                        // least) of the target and the notches have paused (half the hand's gap), and springs home.
-                        slack = ui_body_past(b, b->target) / 10 > UI_ONE * 6 ? ui_body_past(b, b->target) / 10 : UI_ONE * 6;
-                        if (ui_body_outside(b) ? gap < slack && gap > -slack && at - b->pushed >= (b64)UI_HAND_GAP_NS / 2
-                                               : gap < BODY_REST && gap > -BODY_REST)
+                        // A stream's own speed carries the target on from its last notch for a notch's interval and a quarter, and the position
+                        // runs to it and is carried by it as well: a steady stream is a steady motion, and a notch only corrects it. The carry
+                        // is a guess at where the next notch will be, so the target does not take it: the next notch is the target's, and the
+                        // carry is the position's alone, until the stream stops and the position stays where the carry took it.
+                        if (b->drive)
                         {
-                                if (!ui_body_outside(b))
-                                        b->raw = b->target;
+                                b64 lead = (at - left) - b->drive_at, used, fade = UI_ONE, carried;
+
+                                lead = lead < 0 ? 0 : lead;
+                                over = lead >= b->drive_for + BODY_DRIVE_TAPER_NS;
+                                used = lead;
+                                // The speed holds for the interval and the pass's lateness, then falls away to nothing over BODY_DRIVE_TAPER_NS: a notch that
+                                // is read late (a pass reads reports that came before it) only slows the carry, and a stream that stops is not a stop at once.
+                                if (over)
+                                        used = b->drive_for + BODY_DRIVE_TAPER_NS / 2, fade = 0;
+                                else if (lead > b->drive_for)
+                                {
+                                        b64 past = lead - b->drive_for;
+
+                                        used = b->drive_for + past - past * past / (2 * BODY_DRIVE_TAPER_NS);
+                                        fade = UI_ONE - past * UI_ONE / BODY_DRIVE_TAPER_NS;
+                                }
+                                carried = b->target + ui_qmul(b->drive, ui_body_seconds(used));
+                                aim = carried < 0 ? 0 : carried > far ? far : carried;
+                                carry = aim != carried ? 0 : ui_qmul(ui_qmul(b->drive, dt), fade);
+                        }
+                        // The gap closes by e to the minus the rate a second: the first millisecond is the fastest, so a notch shows at once, and a
+                        // notch on a notch moves the target on and the position goes on running.
+                        gap = aim - b->raw;
+                        b->raw += gap - ui_qmul(gap, ui_body_decay(dt * rate)) + carry;
+                        b->raw = b->raw < lo ? lo : b->raw > hi ? hi : b->raw;
+                        gap = aim - b->raw;
+                        b->vel = ui_qmul(gap, rate * UI_ONE) + (carry ? b->drive : 0);
+                        if ((!b->drive || over) && gap < BODY_REST && gap > -BODY_REST)
+                        {
+                                b->raw = b->target = aim;
+                                b->drive = 0;
                                 ui_body_settle(b);
                         }
                 }
@@ -6449,8 +6563,18 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                                 b->state = BODY_IDLE;
                         }
                 }
-                else
+                else if (!b->bounce && !b->bounce_v)
                         break;
+                // The band a notch gave an end is its own critically damped spring, on top of whatever else moves the position.
+                if (b->bounce || b->bounce_v)
+                {
+                        b64 a = -(b64)(BODY_SPRING_OMEGA * BODY_SPRING_OMEGA) * b->bounce - 2 * (b64)BODY_SPRING_OMEGA * b->bounce_v;
+
+                        b->bounce_v += ui_qmul(a, dt);
+                        b->bounce += ui_qmul(b->bounce_v, dt);
+                        if (b->bounce < BODY_REST && -b->bounce < BODY_REST && b->bounce_v < BODY_REST && -b->bounce_v < BODY_REST)
+                                b->bounce = b->bounce_v = 0;
+                }
         }
         ui_body_note(b);
         return ui_body_going(b);
@@ -6495,6 +6619,11 @@ static long ui_body_given(struct ui_body address_to b, b64 at)
 #define UI_SCROLL_LEAST 24
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel (the checks read a region's place in them)
 
+#define UI_STREAM_TRACK 6                    // the notches of a stream the speed is measured over
+#define UI_STREAM_GESTURE_NS 150000000ll     // a stream's notch after a gap this long begins a gesture: nothing carries over
+#define UI_STREAM_SPAN_NS 40000000ll         // a stream's speed is measured over at least this long (and a pair of notches under 4 ms apart is one report's)
+#define UI_STREAM_JOIN_NS 100000000ll        // a stream's first notch after a stepped one, this soon, shows the stepped one was the stream's first (ui_wheel_join)
+
 /*
         A scroll region: a track down its x and a thumb in it, and a position that is the body's (ui_body, s->body) drawn in whole
         device pixels (s->scroll). A finger's drag is a body track, a trackpad's hand is a track that its release throws on the speed
@@ -6515,8 +6644,11 @@ struct ui_scroll
         int inset;                   // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
         int scale;                   // the kit's, for logical pixels
         int wheel;                   // device pixels one stepped notch of a wheel moves it; 0 for the kit's (UI_WHEEL_TENTHS tenths of a row)
-        b64 stream_at;               // when the last notch of a stream came (ns), and the rate they have been coming at, a second
-        int stream_rate;
+        b64 stream_when[UI_STREAM_TRACK];  // a stream's last notches: when each came (ns, the device's stamp, or the kit's clock when it has none) and what it moved (units, Q30)
+        b64 stream_moved[UI_STREAM_TRACK];
+        int stream_count;            // the notches of this stream's gesture (a longer gap than UI_STREAM_GESTURE_NS begins another)
+        b64 stream_skew;             // the least the kit's time has been after a notch's stamp in this gesture: the stamp's own clock, in the kit's
+        b64 lone_at, lone_stamp, lone_q; // the last stepped notch: when it was read (the kit's clock), its device's stamp, and what it moved (units, Q30); lone_at 0 for none
 };
 
 /*
@@ -6832,34 +6964,75 @@ static long ui_wheel_pixels(const struct ui address_to ui, const struct window_e
 }
 
 /*
-        How fast the body runs to a notch's target. A mouse's notch is BODY_NOTCH_RATE. A stream's notches (a trackpad reported as a notch to
-        every report) are tens to a hundred and more a second when the fingers are quick and a few when they are slow, and each is a fixed
-        distance: the body follows them at the rate they come at (smoothed over a few), so that a slow scroll is a steady motion where each
-        notch was a step, and a quick one is followed with little lag (UI_STREAM_FOLLOW_LEAST to _MOST a second).
+        The first notch of a stream is read as a stepped one (nothing said yet that a stream had begun): a row and a half, when the stream's
+        notches are 8 to 32 pixels. When a stream's notch follows it this soon (the compositor found them close together), the stepped notch
+        was the stream's first, and is taken back to the size of the stream's: the position does not jump a hundred pixels as a finger
+        starts, and does not move back for it (ui_body_retract). The stepped notch is then the stream's first in the speed's measure.
 */
-#define UI_STREAM_FOLLOW_LEAST 8
-#define UI_STREAM_FOLLOW_MOST 40
-static void ui_wheel_follow(struct ui_scroll address_to s, unsigned int flags, b64 now)
+static void ui_wheel_join(struct ui_scroll address_to s, b64 q, b64 now)
 {
-        b64 gap = now - s->stream_at;
+        b64 lone = s->lone_q;
 
-        if (!(flags & WINDOW_WHEEL_STREAM))
+        if (!s->lone_at || s->stream_count)
+                return;
+        if (now - s->lone_at > UI_STREAM_JOIN_NS || (lone < 0) != (q < 0) || (lone > 0 ? lone <= q : lone >= q))
         {
-                s->body.follow = 0, s->stream_rate = 0;
+                s->lone_at = 0;
                 return;
         }
-        if (s->stream_at && gap > 0 && gap < 4 * (b64)UI_HAND_GAP_NS)
-        {
-                int now_rate = (int)(1000000000ll / gap);
+        ui_body_retract(&s->body, lone - q);
+        s->stream_count = 1;
+        s->stream_when[0] = s->lone_stamp;
+        s->stream_moved[0] = q;
+        s->stream_skew = s->lone_at - s->lone_stamp;
+        s->lone_at = 0;
+}
 
-                s->stream_rate = s->stream_rate ? (s->stream_rate * 2 + now_rate) / 3 : now_rate;
+/*
+        A stream's notch (a trackpad reported as a notch to every report: tens to a hundred and more a second when the fingers are quick, a few
+        when they are slow, each a fixed distance) is the finger's motion, and is followed as it is: the speed of the last few notches (over
+        UI_STREAM_SPAN_NS at least, from the times the notches came) carries the position on past the last one for a notch's interval and a
+        pass's lateness, and then lets it fall away (ui_body_stream), so that a steady stream is a steady motion, at any rate and whatever
+        frame the reports are read in, and a notch only corrects it. A stream stops where its notches took the position and the notch or
+        two its speed carried it on. A notch's time is its device's stamp, in the kit's clock by the least delay seen in the gesture: a
+        batch of reports read in one pass keeps the times they came at.
+*/
+static void ui_wheel_stream(struct ui_scroll address_to s, b64 q, b64 stamp, b64 now)
+{
+        b64 late, skew, span = 0, moved = 0, drive = 0, hold = 0, when;
+        int n, back, newest;
+
+        stamp = stamp ? stamp : now;
+        late = now - stamp;
+        // a notch after a gap begins a gesture: its times are its own
+        if (s->stream_count && stamp - s->stream_when[(s->stream_count - 1) % UI_STREAM_TRACK] > UI_STREAM_GESTURE_NS)
+                s->stream_count = 0;
+        if (!s->stream_count || late < s->stream_skew)
+                s->stream_skew = late;
+        skew = s->stream_skew;
+        when = stamp + skew;
+        newest = s->stream_count;
+        s->stream_when[newest % UI_STREAM_TRACK] = stamp;
+        s->stream_moved[newest % UI_STREAM_TRACK] = q;
+        s->stream_count++;
+        n = s->stream_count < UI_STREAM_TRACK ? s->stream_count : UI_STREAM_TRACK;
+        for (back = 1; back < n; back++)
+        {
+                moved += s->stream_moved[(newest - back + 1) % UI_STREAM_TRACK];
+                span = stamp - s->stream_when[(newest - back) % UI_STREAM_TRACK];
+                if (span >= UI_STREAM_SPAN_NS)
+                        break;
         }
-        else
-                s->stream_rate = 0;
-        s->stream_at = now;
-        s->body.follow = !s->stream_rate ? BODY_NOTCH_RATE
-                         : s->stream_rate < UI_STREAM_FOLLOW_LEAST ? UI_STREAM_FOLLOW_LEAST
-                         : s->stream_rate > UI_STREAM_FOLLOW_MOST ? UI_STREAM_FOLLOW_MOST : s->stream_rate;
+        if (back < n || (n > 1 && span >= 4000000ll && back == n))
+        {
+                int used = back < n ? back : n - 1;
+
+                drive = ui_qdiv(moved, ui_body_seconds(span));
+                hold = span / used;
+                hold = hold < BODY_DRIVE_LEAST_NS ? BODY_DRIVE_LEAST_NS : hold > BODY_DRIVE_MOST_NS ? BODY_DRIVE_MOST_NS : hold;
+                hold += BODY_DRIVE_LATE_NS;
+        }
+        ui_body_stream(&s->body, q, drive, hold, when, now);
 }
 
 /*
@@ -6894,8 +7067,17 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 return false;
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM))
         {
-                ui_wheel_follow(s, event->flags, now);
-                ui_body_notch(&s->body, q, now);
+                if (event->flags & WINDOW_WHEEL_STREAM)
+                {
+                        ui_wheel_join(s, q, now);
+                        ui_wheel_stream(s, q, (b64)ui_kit.stamp, now);
+                }
+                else
+                {
+                        s->stream_count = 0;
+                        s->lone_at = now, s->lone_stamp = ui_kit.stamp ? (b64)ui_kit.stamp : now, s->lone_q = q;
+                        ui_body_notch(&s->body, q, now);
+                }
                 // A stepped notch with the wheel smooth off is one step at once: the target inside the ends, and the body at rest there.
                 if (!(event->flags & WINDOW_WHEEL_PRECISE) && ui_kit.wheel_off)
                 {
@@ -6928,7 +7110,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
 static void ui_body_publish(struct windows address_to table, unsigned int row)
 {
         const struct ui_body address_to b = &ui_body_last;
-        b64 speed = b->state == BODY_SPRING ? b->speed : b->state == BODY_COAST ? b->vel : 0;
+        b64 speed = b->state == BODY_SPRING ? b->speed : b->state == BODY_COAST || b->state == BODY_NOTCH ? b->vel : b->bounce_v;
 
         table->body_state[row] = (unsigned int)b->state;
         table->body_raw[row] = (int)(b->raw >> UI_Q);
@@ -6956,6 +7138,7 @@ static long ui_map(positive size)
 #define UI_STRETCH_K_Q4 56         // 3.5 in sixteenths: p is this much of the band's share of the view
 #define UI_STRETCH_MAX_Q4 11       // 0.7 in sixteenths (rounded): the most p goes to
 #define UI_STRETCH_VIEW 4096
+static b32 ui_stretch_now, ui_stretch_last;     // a frame stretched a picture (this one, the one before): the card does not draw it, so the frame after one is the processor's
 static unsigned int address_to ui_stretch_rows; // the region's picture as it was drawn, a copy the remap reads
 static positive ui_stretch_room;                // its room, pixels
 static int ui_stretch_map[UI_STRETCH_VIEW + 1]; // where each row of the picture is shown, 256ths of a row
@@ -6983,6 +7166,7 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
 
         if (!pull || view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
                 return false;
+        ui_stretch_now = true;
         if (ui->scene)
         {
                 ui->scene->lost = UI_LOST_STRETCH;
@@ -11144,7 +11328,9 @@ static b32 ui_list_frame_end(struct window_row address_to own, int width, int he
         {
                 table->list_lost[row][why]++;
                 ui_app_ui->scene = null;
-                ui_list_back_lost(ui_app_ui);
+                // A stretch is not a failure to wait out: the frames while it lasts are the processor's (ui_stretch_last), and the first without one is the card's.
+                if (why != UI_LOST_STRETCH)
+                        ui_list_back_lost(ui_app_ui);
                 return false;
         }
         ui_list_back_whole();
@@ -11175,8 +11361,11 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
 
         if (b->shown >= 0 && !windows_ready(own))
                 return false;
+        // A pull is on show in the body that moved last (an event gave it one: the frame is not yet drawn), or the frame before stretched: the processor's.
+        ui_stretch_last = ui_stretch_now || ui_body_pulled(&ui_body_last);
+        ui_stretch_now = false;
         // The whole picture recorded into the window's list (ui_list_wanted): the buffers the processor paints next lack all of it.
-        if (ui_list_wanted(own) && ui_list_frame_begin())
+        if (!ui_stretch_last && ui_list_wanted(own) && ui_list_frame_begin())
         {
                 paint(windows_buffer(table, row, (unsigned int)slot), 0, height);
                 if (ui_list_frame_end(own, width, height, before))
@@ -11531,7 +11720,13 @@ static int ui_app_run(struct ui_app address_to app)
                                 if (!app->frame())
                                         timeout = 50000000;
                                 else
-                                        ui_kit.drawn = (b64)now;
+                                {
+                                        // The frame's place on the grid of periods: the line it was due at, when it was drawn within half a period after
+                                        // it (a wake a little late does not move the grid), else where it was drawn (the grid begins again).
+                                        positive line = (positive)ui_kit.drawn + period;
+
+                                        ui_kit.drawn = (b64)(ui_kit.drawn && now >= line && now < line + period / 2 ? line : now);
+                                }
                                 if (ui_kit.busy)
                                 {
                                         *app->dirty = true;
@@ -11549,6 +11744,25 @@ static int ui_app_run(struct ui_app address_to app)
                 if (app->done && app->done())
                         break;
 
+                /*
+                        A frame that moves something is due a display period after the last one's start, not after its end: the wait the frame asks for
+                        (a period, from when the frame was drawn and sent) is taken to the next line of the grid of periods from the frame's start, so
+                        that a frame which takes a few milliseconds to draw is not a few milliseconds late each time, and the frames come at the
+                        display's rate, evenly, and not at its rate less what each one cost (a drift the eye sees as a motion that is not smooth).
+                */
+                if (timeout > 0 && ui_kit.drawn)
+                {
+                        positive period = table->period ? table->period : 16666667u, clock = ui_kit_clock(), since = clock - (positive)ui_kit.drawn;
+
+                        if (clock >= (positive)ui_kit.drawn && (positive)timeout >= period / 2 && (positive)timeout <= period + period / 4 && since < 4 * period)
+                        {
+                                positive due = (positive)ui_kit.drawn + (since / period + 1) * period;
+
+                                if (due - clock < 2000000u)
+                                        due += period;
+                                timeout = (long)(due - clock);
+                        }
+                }
                 ready = windows_wait_also(app->own, app->popup && app->popup->open ? app->popup->own.wake : -1, other, timeout);
                 if (ready < 0)
                         break;

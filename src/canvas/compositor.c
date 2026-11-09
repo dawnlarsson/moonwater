@@ -19302,7 +19302,7 @@ static void compositor_band_room(void)
 static b32 compositor_main()
 {
         b32 status;
-        int running = 1, extra = -1;
+        int running = 1, extra = -1, tablet = 0;
         string_address headless = null, file = null, font = null;
 
         claim_standard_descriptors();
@@ -19321,6 +19321,8 @@ static b32 compositor_main()
 
                 if (compositor_option(option, 't'))
                         taskbar_position_default(TASKBAR_TOP);
+                else if (compositor_option(option, 'T'))
+                        tablet = 1; // the -i device is a tablet, a virtual machine's pointer: its wheel can be a trackpad's stream
                 else if (at + 1 < program_argument_count() && compositor_option(option, 's'))
                         compositor.scale = (int)compositor_number(program_argument(++at), 0) * 100;
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))
@@ -19371,8 +19373,9 @@ static b32 compositor_main()
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
                 // The -i device is no keyboard the compositor took: the headless fifo is not a physical one. It is a mouse's wheel and buttons, which
-                // is what a driver writes to it, so its wheel is stepped as a mouse's is (compositor_wheel_streams).
-                compositor.input_kinds[compositor.input_count] = WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
+                // is what a driver writes to it, so its wheel is stepped as a mouse's is (compositor_wheel_streams); with -T it is a tablet's, and its
+                // wheel is a stream when its notches come close together.
+                compositor.input_kinds[compositor.input_count] = (tablet ? 0 : WINDOWS_INPUT_MOUSE) | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
                 compositor.inputs[compositor.input_count] = extra;
                 compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
         }
