@@ -168684,7 +168684,7 @@ static void check_compositor_pointer(void) {
        at its scale squared; the hotspot is the corner of the arrow and the middle of the others, and
        what is drawn stays inside the damage. */
     {
-        static const int white[CP_SHAPES]={55,25,25,25,25,19,21,45,73,53,73},black[CP_SHAPES]={46,40,40,48,48,44,48,64,49,64,72};
+        static const int white[CP_SHAPES]={55,25,25,25,25,19,21,45,59,53,73},black[CP_SHAPES]={46,40,40,48,48,44,48,64,52,64,72};
         static u32 plane[64*64];
         for(unsigned shape=0;shape<CP_SHAPES;shape++)
             for(int scale=1;scale<=3;scale++) {
@@ -168726,6 +168726,20 @@ static void check_compositor_pointer(void) {
               compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_RIGHT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
+        /* The click hand is told apart by its creases: an outline pixel with the inside on both sides of it, across
+           or along. The index, the three folded fingers and the thumb each set off by one, so at least four; the
+           lump it replaced had one. */
+        {
+            int creases=0;
+#define CP_LIT(rows,x,y) ((x)>=0&&(y)>=0&&(x)<CP_CURSOR_W&&(y)<CP_CURSOR_H&&((rows)[y]&((x)<8?0x80u>>(x):0x8000u>>((x)-8))))
+#define CP_INSIDE(x,y) (CP_LIT(compositor_cursor_fill[CP_HAND],x,y)&&!CP_LIT(compositor_cursor_edge[CP_HAND],x,y))
+            for(int y=0;y<CP_CURSOR_H;y++)for(int x=0;x<CP_CURSOR_W;x++)
+                creases+=CP_LIT(compositor_cursor_edge[CP_HAND],x,y)&&
+                         ((CP_INSIDE(x,y-1)&&CP_INSIDE(x,y+1))||(CP_INSIDE(x-1,y)&&CP_INSIDE(x+1,y)));
+#undef CP_LIT
+#undef CP_INSIDE
+            ck_ok(creases>=4);
+        }
     }
 }
 
