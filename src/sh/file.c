@@ -53345,7 +53345,14 @@ static b32 file_xargs()
 
         //      -s may ask for up to the POSIX limit, so a batch is held in a
         //      buffer that big; the default stays at the 128 KiB it was.
+        //      A stack limit of unlimited makes the POSIX limit a quarter of
+        //      2^64, and the batch buffers are the arena's: a batch it cannot
+        //      hold was refused with no message and status 1. The batch is
+        //      held to a sixteenth of the arena.
         positive batch = posix > XARGS_BATCH_BYTES ? posix : XARGS_BATCH_BYTES;
+
+        if (batch > UTILITY_ARENA_BYTES / 16)
+                batch = UTILITY_ARENA_BYTES / 16;
 
         //      findutils takes the environment out of the limit it calls
         //      POSIX's and out of what is left again for the command it will
