@@ -223840,6 +223840,58 @@ static void gpu_lent_rows(void)
         compositor.width = saved_width, compositor.most_w = saved_most;
 }
 
+/*
+        The card's hang and loss, held back: while the card cools after a hang, or a restart is due, or a submit said the card lost its state, a list is
+        not drawn on the card (the context and the maps are the old ones); and a restart due waits while the job given up on may still run (a new context
+        is not started on the queue that job is on). The card is up (gpu_loss_rows started it).
+*/
+static void gpu_held_rows(void)
+{
+        static unsigned int pixels[4 * 4];
+        static unsigned int list[16];
+        int damage[4] = {0, 0, 4, 4}, saved_gpu = compositor_gpu;
+        __typeof__(compositor_gpu_state) saved = compositor_gpu_state;
+        unsigned int recovered;
+
+        if (gpu.fd < 0 || gpu.broken)
+        {
+                check("gpu held: no card here, so nothing is held back", true);
+                return;
+        }
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.cool_until = 0;
+        compositor_gpu_state.restart_due = 0, gpu_lost = 0, gpu_fake_busy = 0, gpu.pending = 0;
+        compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + 1000000000ull;
+        compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
+        check("gpu held: a list is not drawn on the card while the card cools after a hang", compositor_list_why == COMPOSITOR_LIST_CARD);
+        compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 1;
+        compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
+        check("gpu held: nor while a restart is due (the context and the maps are the old ones)", compositor_list_why == COMPOSITOR_LIST_CARD);
+        compositor_gpu_state.restart_due = 0, gpu_lost = 1;
+        compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
+        check("gpu held: nor after a submit said the card lost its state", compositor_list_why == COMPOSITOR_LIST_CARD);
+        gpu_lost = 0;
+        compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
+        check("gpu held: with nothing held the list is looked at (an empty list is refused as not open)", compositor_list_why == COMPOSITOR_LIST_OPEN);
+
+        recovered = gpu_recovered;
+        gpu.pending = 1ull << 40, gpu_fake_busy = 1; // a job the wait says is still running
+        compositor_gpu_state.restart_due = 1, compositor_gpu_state.cool_until = 0;
+        compositor_gpu_restart_check();
+        check("gpu held: a restart due waits while the job given up on may still run", gpu_recovered == recovered && compositor_gpu_state.restart_due);
+        gpu_fake_busy = 0, gpu.pending = 0;
+        compositor_gpu_restart_check();
+        check("gpu held: once that job is over the restart happens, and the card is up", gpu_recovered == recovered + 1 && !compositor_gpu_state.restart_due &&
+              gpu.fd >= 0);
+        recovered = gpu_recovered;
+        gpu_lost = 1;
+        compositor_gpu_lost_check();
+        check("gpu held: a card that lost its state is started again before the next present draws on it", gpu_recovered == recovered + 1 && !gpu_lost &&
+              gpu.fd >= 0);
+
+        compositor_gpu_state = saved;
+        compositor_gpu = saved_gpu;
+        gpu_fake_busy = 0, gpu.pending = 0, gpu_lost = 0;
+}
 
 /*
         The card's map records, its fault and its hang, with no card: the table is set by hand (fake handles, the card's fd absent), so each row is the
@@ -226057,6 +226109,7 @@ b32 main(void)
         }
         gpu_loss_rows();
         gpu_lent_rows();
+        gpu_held_rows();
         gpu_resume_rows();
         return test_report(null);
 }

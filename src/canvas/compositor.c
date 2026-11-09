@@ -7833,6 +7833,21 @@ static void compositor_gpu_recover(void)
         compositor_gpu_requirements();
 }
 
+// A submit said the card lost its state (gpu_lost): started again before anything is drawn on it, so the present that found it draws on the processor
+// and the next one on the new card. Nothing else recovers the card on a present that refused before the scene (a picture, a scanout).
+static void compositor_gpu_lost_check(void)
+{
+        if (gpu_lost && !compositor_gpu_state.dead)
+                compositor_gpu_recover();
+}
+
+// The card is not to be given a job now: a hang's cool-down, a restart due (the card's context and maps are the old ones until it is started again), or a
+// submit that said the card lost its state. The processor draws those.
+static int compositor_gpu_held(void)
+{
+        return compositor_gpu_state.restart_due || gpu_lost || (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until);
+}
+
 /*
         A job of the card that failed (gpu_last_error says why, as this call's answer). A hang (62 ETIME: the ring did not finish it in two seconds; 5 the wait
         itself failed) is the card's one lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
@@ -8121,6 +8136,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
         compositor_gpu_restart_check(); // a machine that slept, or a gap between presents that is one, starts the card again before this present
+        compositor_gpu_lost_check();
         if (compositor_gpu_state.dead)
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
         if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
@@ -8341,6 +8357,8 @@ static void compositor_gpu_restart_check(void)
                 return;
         if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
                 return; // after a hang the card is started again when its cool-down is over (compositor_gpu_job_failed)
+        if (!gpu_idle())
+                return; // a job given up on may still be on the card: a new context is not started on its queue until it is over
         compositor_gpu_state.restart_due = 0;
         compositor_gpu_recover();
 }
@@ -8516,7 +8534,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
         if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
-        if (!compositor_gpu || compositor_gpu_state.dead || !compositor_gpu_up() || !gpu_idle())
+        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || !compositor_gpu_up() || !gpu_idle())
                 return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
         if (ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
