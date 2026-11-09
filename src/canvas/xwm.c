@@ -512,10 +512,11 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                                         w->state |= COMPOSITOR_XWM_POPUPTYPE;
                 w->state |= COMPOSITOR_XWM_PROPS_READ;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_PROTOCOLS && r.format == XWM_FORMAT_32)
+        else if (p->what == COMPOSITOR_XWM_PROP_PROTOCOLS)
         {
+                // A window with no WM_PROTOCOLS has none of the protocols (ICCCM 4.1.2.7): that is known as much as a list is.
                 w->protocols = 0;
-                for (unsigned long at = 0; at + 4 <= r.value_len; at += 4)
+                for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + at);
 
@@ -1230,17 +1231,18 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                         continue;
                 // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW (once), and is
                 // destroyed when it said it does not take it.
-                if ((compositor.state[w->row] & WINDOW_CLOSING) && !(w->state & COMPOSITOR_XWM_DELETE_SENT))
+                // A window that is asked to go is asked by WM_DELETE_WINDOW when its WM_PROTOCOLS lists it, and is destroyed when it
+                // does not (ICCCM 4.2.8.1). The WM_PROTOCOLS reply is waited for first: the close is asked of again until then.
+                if ((compositor.state[w->row] & WINDOW_CLOSING) && !(w->state & COMPOSITOR_XWM_DELETE_SENT) &&
+                    ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN)))
                 {
                         w->state |= COMPOSITOR_XWM_DELETE_SENT;
                         if (w->state & COMPOSITOR_XWM_POPUPISH)
                                 compositor_xwm_window_op(XWM_OP_UNMAP_WINDOW, w->id);
-                        else
-                        {
+                        else if (w->protocols & COMPOSITOR_XWM_PROTO_DELETE)
                                 compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_DELETE]);
-                                if ((w->state & COMPOSITOR_XWM_PROTO_KNOWN) && !(w->protocols & COMPOSITOR_XWM_PROTO_DELETE))
-                                        compositor_xwm_window_op(XWM_OP_DESTROY_WINDOW, w->id);
-                        }
+                        else
+                                compositor_xwm_window_op(XWM_OP_DESTROY_WINDOW, w->id);
                 }
                 if (!(w->state & COMPOSITOR_XWM_POPUPISH))
                         compositor_xwm_sync(w);
