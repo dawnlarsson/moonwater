@@ -19732,12 +19732,12 @@ static b32 compositor_main()
                         }
                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // Callbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
+                // Callbacks or feedbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
                 else if (compositor_wl.started && wayland_frame_wanted() &&
                          clock_monotonic_nanoseconds() - compositor.presented >= compositor.period)
                 {
                         compositor.presented = clock_monotonic_nanoseconds();
-                        compositor_wl_frame();
+                        compositor_wl_idle();
                 }
 #endif
 

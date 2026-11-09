@@ -2599,6 +2599,21 @@ static void compositor_wl_frame(void)
 }
 
 /*
+        A frame's time went by with nothing drawn (nothing on the screen changed): the callbacks that waited for a frame are answered as
+        for a drawn one, and the feedbacks a commit took are answered too, since the picture is the one on the screen. A flip still in
+        flight is not answered for: its feedbacks wait for the flip's completion, and the next frame's time answers them.
+*/
+static void compositor_wl_idle(void)
+{
+        if (!compositor_wl.started)
+                return;
+        wayland_frame();
+        if (!compositor.flip_pending)
+                wayland_presented_idle((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++);
+        compositor_wl_flush_all();
+}
+
+/*
         The fingers of a touch screen, as the windows' clients are told them (wl_touch): a finger that is down now and was not in
         the last report is a touch down on the window under it, one that was down and is down still moved (a motion, when it
         is somewhere else), and one that was down and is not is lifted. dropped: the device lost its events, so every finger

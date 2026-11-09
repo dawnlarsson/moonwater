@@ -538,6 +538,7 @@ struct wayland_client
         long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
         long budget_at, budget_used; // the window of time the client's copies are counted in (its start, ms), and its pixels so far
         long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
+        long presenting_surfaces;    // surfaces of the client holding presentation feedbacks for a frame (presentings above zero), exact: a client with none is passed over
         long subsurfaces;            // live surfaces whose role is a subsurface's, exact (counted where the role is given, and where the surface goes): none, and no child scan is made
         long out_length;
         unsigned char out[WAYLAND_OUT];
@@ -1468,7 +1469,11 @@ static void wayland_feedback_take(struct wayland_client *c, struct wayland_surfa
         for (long at = 0; at < s->feedbacks; at++)
         {
                 if (shown && s->presentings < WAYLAND_PRESENTATIONS)
+                {
+                        if (!s->presentings)
+                                c->presenting_surfaces++;
                         s->presenting[s->presentings++] = s->feedback[at];
+                }
                 else
                         wayland_feedback_discard(c, s->feedback[at]);
         }
@@ -2798,6 +2803,8 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                         wayland_feedback_discard(c, s->feedback[at]);
                 for (long at = 0; at < s->presentings; at++)
                         wayland_feedback_discard(c, s->presenting[at]);
+                if (s->presentings)
+                        c->presenting_surfaces--;
                 s->feedbacks = s->presentings = 0;
                 if (s->role_id)
                 {
@@ -7248,18 +7255,17 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                         wayland_object_delete(c, slot);
                 }
         }
+        if (s->presentings)
+                c->presenting_surfaces--;
         s->presentings = 0;
 }
 
 /*
-        A frame was drawn and flipped to the screen (wayland_presented's when, refresh and seq, as above): the feedbacks its
-        commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
-        a timer's frame with nothing new answers none.
+        The feedbacks of every window shown, answered with the frame at when. A drawn frame (drawn 1) also lets go of the buffer a
+        lent picture was replaced by, since the frame that shows the new picture is the one drawn; an idle frame does not.
 */
-WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
+static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn)
 {
-        if (!wayland.host)
-                return;
         for (long row = 0; row < WAYLAND_ROWS; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
@@ -7271,7 +7277,7 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
                 if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
                         continue;
                 // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
-                if (s->lent_gone)
+                if (drawn && s->lent_gone)
                 {
                         wayland_let_go(c, s->lent_gone - 1);
                         s->lent_gone = 0;
@@ -7283,7 +7289,51 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
         }
 }
 
-/* Whether any callback waits for a frame, so the compositor knows to come back for one. */
+/*
+        A frame was drawn and flipped to the screen (wayland_presented's when, refresh and seq, as above): the feedbacks its
+        commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
+        a timer's frame with nothing new answers none.
+*/
+WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
+{
+        if (!wayland.host)
+                return;
+        wayland_presented_rows(when, refresh, seq, flags, 1);
+}
+
+/*
+        A frame time went by and nothing was drawn: a commit whose content was the screen's (no damage, or damage of nothing) changes
+        nothing, so the picture is on the screen at this frame, and the feedbacks it took are answered. Without this a commit that
+        draws nothing waits for a frame that is never drawn, and a client that waits for its feedback (Chromium's video, which submits
+        its next frame when the last one is presented) stops.
+*/
+WAYLAND_API void wayland_presented_idle(unsigned long when, unsigned long refresh, unsigned long seq)
+{
+        if (!wayland.host)
+                return;
+        wayland_presented_rows(when, refresh, seq, 0, 0);
+}
+
+/* Whether a window that is shown has a feedback waiting for the next frame (wayland_presented_idle answers it). */
+static int wayland_presentings_wanted(struct wayland_client *c, long row)
+{
+        struct wayland_surface *root = &c->surfaces[wayland.row_surface[row]];
+        struct wayland_facts facts;
+
+        if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                return 0;
+        if (root->presentings)
+                return 1;
+        for (long at = 0; at < WAYLAND_SURFACES; at++)
+                if (c->surfaces[at].live && c->surfaces[at].presentings && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
+                    wayland_root_of(c, &c->surfaces[at]) == root)
+                        return 1;
+        return 0;
+}
+
+/*
+        Whether any callback waits for a frame, or a feedback for the next frame, so the compositor knows to come back for one.
+*/
 WAYLAND_API long wayland_frame_wanted(void)
 {
         // A commit held for a barrier is waited for a frame at a time: each frame drawn is the one that clears it.
@@ -7296,15 +7346,18 @@ WAYLAND_API long wayland_frame_wanted(void)
                 struct wayland_facts facts;
                 int waits;
 
-                if (!c || !c->waiting)
+                if (!c || (!c->waiting && !c->presenting_surfaces))
                         continue;
-                waits = c->surfaces[wayland.row_surface[row]].readies != 0;
-                for (long at = 0; !waits && at < WAYLAND_SURFACES; at++)
+                waits = c->waiting && c->surfaces[wayland.row_surface[row]].readies != 0;
+                for (long at = 0; c->waiting && !waits && at < WAYLAND_SURFACES; at++)
                         waits = c->surfaces[at].live && c->surfaces[at].readies && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
                                 wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
                 // A window put away is told of no frame (wayland_frame), so no frame is wanted for its callbacks: they are answered by the
                 // first frame drawn once it is shown, which the compositor draws for any window it shows.
                 if (waits && !(wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED)))
+                        return 1;
+                // A feedback waits for the frame an idle tick answers (wayland_presented_idle): a client that holds none costs nothing here.
+                if (c->presenting_surfaces && wayland_presentings_wanted(c, row))
                         return 1;
         }
         return 0;

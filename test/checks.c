@@ -171997,6 +171997,24 @@ static void test_presentation(void)
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1,
                 "the object is let go by its event: a later frame answers no one");
 
+        /* a commit that draws nothing (the screen already shows its picture): the feedback waits for a frame, the compositor is told one is
+           wanted, and the idle frame answers it with the time it is at */
+        wlc_forget(c);
+        feedback = wlc_id(c, WLI_wp_presentation_feedback, 1);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, feedback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(wayland_frame_wanted(), "a feedback that waits for a frame asks the compositor for one while its window is shown");
+        fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
+        WLCHECK(!wayland_frame_wanted(), "a window put away with a feedback waiting asks for no frame");
+        fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
+        wlc_forget(c);
+        wayland_presented_idle(7000000000ul, 16666667ul, 9);
+        wlc_pump(c);
+        a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[1] == 7 && c->ev[a].u[2] == 0 && c->ev[a].u[6] == 0 && !wayland_frame_wanted(),
+                "an idle frame presents the feedback at its time, with no flags, and nothing waits after it");
+
         /* more than the surface holds: the one it cannot hold is discarded at once */
         wlc_forget(c);
         for (int at = 0; at < WAYLAND_PRESENTATIONS + 1; at++)
