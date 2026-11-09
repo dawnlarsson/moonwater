@@ -33,7 +33,9 @@ static fn host_language_list(void)
         codes += 3;
         while (*codes)
         {
-                p8 path[sizeof(SETTING_LANGUAGE_DIRECTORY) + 8], head[HOST_LANGUAGE_HEAD], name[48], how[16], code[8];
+                /* The directory, then a code of up to seven bytes, ".txt" and its NUL: 7 + 4 + 1 = 12 bytes past the
+                   directory's characters, which is sizeof(directory) + 11 (the old + 8 overran by up to three bytes). */
+                p8 path[sizeof(SETTING_LANGUAGE_DIRECTORY) + 11], head[HOST_LANGUAGE_HEAD], name[48], how[16], code[8];
                 positive size = 0, at = sizeof(SETTING_LANGUAGE_DIRECTORY) - 1;
                 bipolar got;
 
