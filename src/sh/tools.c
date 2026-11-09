@@ -15757,6 +15757,7 @@ typedef struct
 
 static system_snapshot ps_snapshot;
 static positive ps_now;
+static positive ps_now_ns;
 static positive ps_own_tty;
 static positive ps_own_uid;
 static positive ps_wall;
@@ -15852,6 +15853,26 @@ static fn ps_bytes(address_any value, positive length)
 {
         if (!byte_store_append_span(&ps_field_buffer, value, length)) ps_failed = true;
 }
+
+/*
+        The lifetime and the CPU time that %CPU is taken from, both in
+        milliseconds. Whole seconds of each lost up to a second of the
+        denominator and all of a sub-second CPU time: a half second of CPU
+        in a two second life read as 0.0 where procps says 25.0.
+*/
+static positive ps_life_ms(struct snapshot_process address_to process)
+{
+        return ps_now_ns > process->start_ns
+                   ? (ps_now_ns - process->start_ns) / 1000000u
+                   : 0;
+}
+
+static positive ps_cpu_ms(struct snapshot_process address_to process)
+{
+        return system_saturating_add(process->user_ns, process->system_ns) /
+               1000000u;
+}
+
 #define ps_byte(value) do { p8 byte = (value); ps_bytes(&byte, 1); } while (0)
 #define ps_text(value) ps_bytes((value), string_length(value))
 #define ps_digits(value) positive_to_string(ps_bytes, (value))
@@ -15965,15 +15986,9 @@ static byte_span ps_draw(struct snapshot_process address_to process,
         case PS_FIELD_TTY: ps_put_tty((positive)process->tty); break;
         case PS_FIELD_CPU:
         {
-                positive began = process->start_ns / SYSTEM_NANOSECONDS;
-                positive lived = ps_now > began
-                                     ? ps_now - began
-                                     : 0;
+                positive lived = ps_life_ms(process);
 
-                ps_digits(lived ? system_saturating_add(process->user_ns,
-                                                        process->system_ns) /
-                                      SYSTEM_NANOSECONDS * 100 / lived
-                                : 0);
+                ps_digits(lived ? ps_cpu_ms(process) * 100 / lived : 0);
                 break;
         }
         case PS_FIELD_STIME:
@@ -16030,13 +16045,9 @@ static byte_span ps_draw(struct snapshot_process address_to process,
                 break;
         case PS_FIELD_PCPU:
         {
-                positive began = process->start_ns / SYSTEM_NANOSECONDS;
-                positive lived = difference_or_zero(ps_now, began);
-                positive tenths = lived
-                    ? system_saturating_add(process->user_ns,
-                                            process->system_ns) /
-                          SYSTEM_NANOSECONDS * 1000 / lived
-                    : 0;
+                positive lived = ps_life_ms(process);
+                /* Rounded to the tenth, as procps prints it. */
+                positive tenths = lived ? (ps_cpu_ms(process) * 2000 / lived + 1) / 2 : 0;
 
                 ps_digits(tenths / 10);
                 ps_byte('.');
@@ -16646,6 +16657,7 @@ static b32 tools_ps(void)
                 return text_done(string_diagnostic(&text_diagnostic, 1, "/proc", "cannot read"));
 
         ps_now = ps_snapshot.header.uptime_ns / SYSTEM_NANOSECONDS;
+        ps_now_ns = ps_snapshot.header.uptime_ns;
         ps_wall = ps_snapshot.header.realtime_seconds;
         ps_boot = (b64)ps_wall - (b64)ps_now;
         if ((wanted & ((positive)1 << PS_FIELD_STIME)) &&
