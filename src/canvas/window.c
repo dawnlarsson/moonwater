@@ -3052,6 +3052,19 @@ static struct window *window_grid_open(unsigned int columns, unsigned int rows,
         columns = columns < max_columns ? columns : max_columns;
         rows = rows < history ? rows : history;
 
+        /*
+                Line n is slot n modulo history, and head counts lines in 32 bits, so it wraps after four billion
+                of them. A history that does not divide 2^32 puts the lines either side of the wrap in slots that
+                are not next to each other: a screen that spans the wrap showed lines written long ago in place of
+                the newest, and the scrollback was overwritten early. A power of two divides 2^32, so the ring is
+                that size or the next one up.
+        */
+        if (history > 0x80000000u)
+                return 0;
+        for (unsigned long power = 1; power < history; power <<= 1)
+                ;
+        history = (unsigned int)power;
+
         cells = (unsigned long)history * max_columns;
         if (cells > 0xffffffffu / sizeof(struct window_cell))
                 return 0;

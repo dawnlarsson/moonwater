@@ -10256,6 +10256,20 @@ b32 main()
 
                         i++;
                 }
+                else if (string_compare(verb, (string_address) "grid") == 0)
+                {
+                        // A ring of the history asked for, with head set to the number given after it: head wraps at 2^32.
+                        window = window_grid_open(columns, rows, 80, number(argument));
+                        if (!window)
+                                log_direct(str("grid: no ring\n"));
+                        else
+                        {
+                                grid_take();
+                                full_reset();
+                                window->head = number(program_argument(i + 2));
+                        }
+                        i += 2;
+                }
                 else if (string_compare(verb, (string_address) "reads") == 0)
                         feed_reads = true;
                 else if (string_compare(verb, (string_address) "cut") == 0)
@@ -11815,6 +11829,13 @@ fi
 section resize
 
 group grid
+#       head wraps at 2^32 after four billion lines, and line n is slot n modulo the history. A history of 63 is rounded to 64, a
+#       power of two, so the screen that spans the wrap keeps n..v where it was written; unrounded, it showed the old lines o..s
+#       in the top rows.
+same 'history wraps at 2^32' '[n]|[o]|[p]|[q]|[r]|[s]|[t]|[u]|[v]|[]' \
+                                                 10 10 grid 63 4294967290 in 'a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\nk\r\nl\r\nm\r\nn\r\no\r\np\r\nq\r\nr\r\ns\r\nt\r\nu\r\nv\r\n' dump
+same 'power of two history' '[n]|[o]|[p]|[q]|[r]|[s]|[t]|[u]|[v]|[]' \
+                                                 10 10 grid 64 4294967290 in 'a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj\r\nk\r\nl\r\nm\r\nn\r\no\r\np\r\nq\r\nr\r\ns\r\nt\r\nu\r\nv\r\n' dump
 same 'wider'         '[hello]'                   10 3 in 'hello' resize '20x3' row 0
 same 'the cursor comes with it' '[c]|[d]|[e]|2,1' \
                                                  20 5 in 'a\r\nb\r\nc\r\nd\r\ne' resize '20x3' dump cursor
