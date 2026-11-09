@@ -5030,10 +5030,16 @@ static fn tar_read_members(tar_members address_to run)
                 }
 
                 type = block[156];
+
+                /*      The device numbers are read for a device only, as
+                        GNU reads them: junk in those bytes of a file or a
+                        fifo is not an invalid header, and does not end the
+                        archive there. */
                 if (!tar_field_value(block + 124, 12, address_of size) ||
                     !tar_field_value(block + 100, 8, address_of mode) ||
-                    !tar_field_value(block + 329, 8, address_of major) ||
-                    !tar_field_value(block + 337, 8, address_of minor))
+                    ((type == '3' || type == '4') &&
+                     (!tar_field_value(block + 329, 8, address_of major) ||
+                      !tar_field_value(block + 337, 8, address_of minor))))
                 {
                         tar_refuse("invalid header");
                         break;
