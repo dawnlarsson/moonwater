@@ -104091,6 +104091,11 @@ static fn reuse_regex(void)
         check("capture-bearing search succeeds",
               regex_compile("(a)", true, false, false, REGEX_POLICY_DEFAULT) &&
               regex_find(REGEX_LONGEST | REGEX_CAPTURES, "a", 1, 0) && regex_slots[2] == 0);
+        // A count of 2^64 + 1 wrapped to one in the reader; it is text now, as a count past 32767 is.
+        check("an interval count past 2^64 is not read as a small count",
+              regex_compile("a{18446744073709551617}", true, false, false, REGEX_POLICY_DEFAULT) &&
+              !regex_find(REGEX_LONGEST, "aaa", 3, 0) &&
+              regex_find(REGEX_LONGEST, "a{18446744073709551617}", 23, 0));
         check("literal shortcut clears captures removed by a zero count",
               regex_compile("(b){0}x", true, false, false, REGEX_POLICY_DEFAULT) &&
               regex_find(REGEX_LONGEST | REGEX_CAPTURES, "x", 1, 0) &&

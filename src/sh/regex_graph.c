@@ -1112,6 +1112,26 @@ static bool rx_interval_strict(rx_compiler *c, b32 *low, b32 *high)
         return true;
 }
 
+/*
+        The digits of a count, saturated. string_digits_max wraps at 2^64, so
+        a count of twenty digits read as a small one and was accepted as that.
+        This stops growing once it is past every limit a count is held to.
+*/
+static positive rx_count_digits(string_address text, positive length, positive *used)
+{
+        positive value = 0, at = 0;
+
+        while (at < length && text[at] >= '0' && text[at] <= '9')
+        {
+                if (value < 100000)
+                        value = value * 10 + (positive)(text[at] - '0');
+                at++;
+        }
+
+        *used = at;
+        return value;
+}
+
 static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
 {
         if (c->program.policy & REGEX_STRICT_INTERVALS)
@@ -1120,7 +1140,7 @@ static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
         positive at = c->at + (c->extended ? 1 : 2), used;
         if (at >= c->length)
                 return false;
-        positive first = string_digits_max(c->pattern + at, c->length - at, address_of used);
+        positive first = rx_count_digits(c->pattern + at, c->length - at, address_of used);
         if (!used && c->pattern[at] != ',')
                 return false;
         at += used;
@@ -1128,7 +1148,7 @@ static bool rx_interval(rx_compiler *c, b32 *low, b32 *high)
         if (at < c->length && c->pattern[at] == ',')
         {
                 at++;
-                second = string_digits_max(c->pattern + at, c->length - at, address_of used);
+                second = rx_count_digits(c->pattern + at, c->length - at, address_of used);
                 at += used;
                 if (!used)
                         second = positive_max;
