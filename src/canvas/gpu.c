@@ -28,6 +28,9 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #ifndef GPU_OPEN_FAKE
 #define GPU_OPEN_FAKE(fd)
 #endif
+#ifndef GPU_SUBMIT_SEEN
+#define GPU_SUBMIT_SEEN(list, count) // a check's copy of the buffers a submit names (gpu_run_job's bos)
+#endif
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -812,7 +815,8 @@ static b32 gpu_start(positive bytes)
 // present had, and a present with no room for a picture is the processor's). A map this tick does not use is not named by its job: no cost to hold it.
 #define GPU_MAPS 256
 // dma: made by the dma-buf route (offset: its place in the table's memfd); bytes: the span of its GPU address (from and to are 0 for a map forgotten);
-// handed: its address was given to a record that no job has run yet (gpu_run clears it), so no map of it may be let go of until then.
+// handed: its address was given to a record that no job has run yet (gpu_run clears it, the trim does not): the next job names the map whatever the tick (gpu_map_named),
+// and a written map is not put over it in the tick it was given (gpu_map_as).
 static struct { positive from, to, va, bytes; unsigned int handle, used; b32 written; b32 dma; b32 handed; positive offset; } gpu_maps[GPU_MAPS];
 static unsigned int gpu_map_count, gpu_tick;
 
@@ -1047,8 +1051,8 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         // (the job would read unmapped pages): the written map is refused (9) and the processor draws the picture; the others are dropped.
         if (written)
                 for (unsigned int i = 0; i < gpu_map_count; i++)
-                        if (from < gpu_maps[i].to && gpu_maps[i].from < to && gpu_maps[i].handed)
-                                return gpu_map_why = 9, false;
+                        if (from < gpu_maps[i].to && gpu_maps[i].from < to && gpu_maps[i].handed && gpu_maps[i].used == gpu_tick)
+                                return gpu_map_why = 9, false; // (the records of an earlier tick are not run again: no job need wait for them)
         for (unsigned int i = 0; written && i < gpu_map_count; i++)
                 if (from < gpu_maps[i].to && gpu_maps[i].from < to)
                         gpu_drop(i--, GPU_GONE_OVERLAP);
@@ -1120,8 +1124,9 @@ static b32 gpu_idle(void);
 static void gpu_unimport(positive at, enum gpu_gone_why why);
 static void gpu_release_import(positive at);
 
-// A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed, and the maps and imports let go of while
-// a job might still read them (gpu_forget, gpu_release_import) are dropped once the card is idle.
+// A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers freed, and the maps and imports let go of while a job might still read them
+// (gpu_forget, gpu_release_import) are dropped once the card is idle. The marks of the maps handed to records are not let go of here: a record given before the trim may be
+// run after it, and gpu_run lets the marks go once the job has.
 static void gpu_trim(void)
 {
         gpu_tick++;
@@ -1129,7 +1134,6 @@ static void gpu_trim(void)
         {
                 b32 forgotten = !gpu_maps[i].from && !gpu_maps[i].to;
 
-                gpu_maps[i].handed = 0; // a new tick: the records of the last one are not run again
                 if (gpu_tick - gpu_maps[i].used > 120 || (forgotten && gpu_idle()))
                         gpu_drop(i--, forgotten ? GPU_GONE_FORGET : GPU_GONE_TRIM);
         }
@@ -1457,11 +1461,24 @@ static void gpu_fault_note(b32 hang)
         gpu_text_put(gpu_fault, n, room, ")");
 }
 
-// No record waits for a job any more (the maps' addresses are no longer handed out to one): the flags of gpu_map_as are cleared.
+// No record waits for a job any more (the maps' addresses are no longer handed out to one): the marks of the lookups are cleared.
 static void gpu_handed_clear(void)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 gpu_maps[i].handed = 0;
+}
+
+// Whether the job's bo list (the submit's buffers) names the map at i. The invariant: every map a record of the job refers to is in the list. A record gets a map's address
+// from gpu_va_bytes or gpu_va_written only, which mark the map handed, and the mark stays until a job has run (gpu_run), so a map handed to a record is named in whatever tick
+// the job runs (a trim between the lookup and the run moves the tick on), and so is a map used in this tick that has its pages. The kernel looks at the pages of every map
+// named at every submission, so no other is named. The one exception is a map the compositor let go of (gpu_forget: its pages are unmapped, from and to are 0): the kernel
+// refuses a job that names a buffer whose pages are gone (EFAULT), and the trim keeps such a map while a job given up on may run, so it is named for a record of this tick
+// alone (that job is refused, as it should be: the record reads pages that are gone), not for the mark of an earlier one, whose record is not run again.
+static b32 gpu_map_named(unsigned int i)
+{
+        const b32 pages = gpu_maps[i].from || gpu_maps[i].to, now = gpu_maps[i].used == gpu_tick;
+
+        return pages ? gpu_maps[i].handed || now : gpu_maps[i].handed && now;
 }
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_run_job)
@@ -1499,14 +1516,14 @@ static b32 gpu_run_job(void)
                 named = 0;
                 for (unsigned int i = 0; i < gpu.imports; i++)
                         bos[named++] = gpu.imported[i];
-                // Of the maps, the ones this present used (its records' addresses are in them alone): the kernel looks at the pages of every map named at
-                // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job.
-                // A map the compositor let go of (gpu_forget: its pages are unmapped, from and to are 0) that no record of this job holds is not named: the kernel
-                // refuses a job that names a buffer whose pages are gone (EFAULT), and a glass scratch grown in the tick that used it made every job of the tick fail.
+                // Of the maps, the ones a record of this job was given and the ones this present used (gpu_map_named): the kernel looks at the pages of every map named at
+                // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job. A map the
+                // compositor let go of that no record of this job holds is not named: a glass scratch grown in the tick that used it made every job of the tick fail.
                 for (unsigned int i = 0; i < gpu_map_count; i++)
-                        if (gpu_maps[i].used == gpu_tick && (gpu_maps[i].from || gpu_maps[i].to || gpu_maps[i].handed))
+                        if (gpu_map_named(i))
                                 bos[named++] = gpu_maps[i].handle;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
+                GPU_SUBMIT_SEEN(bos, named);
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
                 gpu_last_error = 0;
                 GPU_SUBMIT_FAKE(gpu_last_error); // a check's fake submit answers an error before the call is made (and the call is then not made)

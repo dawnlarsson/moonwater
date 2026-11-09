@@ -122400,6 +122400,10 @@ static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 #define GPU_SUBMIT_FAKE(error) do { gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
+// The buffers the last submit named (gpu_run_job's bos, seen before the call is made or answered): the rows ask whether a map's handle is in the list.
+static p64 gpu_seen_bos[1 + 8 + 256];
+static unsigned int gpu_seen_count;
+#define GPU_SUBMIT_SEEN(list, count) do { gpu_seen_count = (count); memory_copy(gpu_seen_bos, (list), (positive)(count) * sizeof(p64)); } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -224202,6 +224206,101 @@ static void gpu_fault_rows(void)
         compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 
+/*
+        The buffers a submit names (gpu_run_job's bos). A record gets a map's address from gpu_va_bytes or gpu_va_written, which mark the map handed, and the mark holds until a
+        job has run (gpu_run): every map a record was given is in the list whatever the ticks between the lookup and the run (a trim moves the tick on). The submit is the
+        fake's (answered ECANCELED before the call is made, with no card), so the list is what the hook saw.
+*/
+static b32 gpu_seen_has(unsigned int handle)
+{
+        for (unsigned int i = 0; i < gpu_seen_count; i++)
+                if (gpu_seen_bos[i] == handle)
+                        return true;
+        return false;
+}
+
+// One job by the fake submit (gpu_run, which lets the marks go after it); true when every map handed to a record before it is in the list it named.
+static b32 gpu_bo_run(void)
+{
+        unsigned int owed[256], owing = 0;
+        b32 held = true;
+
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_maps[i].handed)
+                        owed[owing++] = gpu_maps[i].handle;
+        gpu_fake_cancel = 1, gpu_seen_count = 0;
+        gpu_run();
+        gpu_fake_cancel = 0, gpu_lost = 0;
+        for (unsigned int i = 0; i < owing; i++)
+                held &= gpu_seen_has(owed[i]);
+        return held;
+}
+
+// Map i of the table by hand: a handle, a span of 0x4000 bytes from from at an address of its own, last used in the tick used, held by no record.
+static void gpu_bo_map(unsigned int i, unsigned int handle, positive from, unsigned int used)
+{
+        memory_zero(&gpu_maps[i], sizeof(gpu_maps[i]));
+        gpu_maps[i].from = from, gpu_maps[i].to = from + 0x4000, gpu_maps[i].va = GPU_VA_MAPS + 0x10000ull * i, gpu_maps[i].bytes = 0x4000;
+        gpu_maps[i].handle = handle, gpu_maps[i].used = used;
+}
+
+static void gpu_bo_rows(void)
+{
+        static unsigned int scratch[1024]; // the job's packets and arguments are written at the card's buffer: a buffer of the row's, since there is no card
+        __typeof__(gpu.at) kept_at = gpu.at;
+        int kept_fd = gpu.fd;
+        const void *first = (const void *)0x10000100ull;
+        b32 held;
+
+        gpu.at = scratch, gpu.fd = -1, gpu.pending = 0, gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_tick = 100, gpu_map_count = 0, gpu.imports = 0, gpu_gone_at = 0;
+        gpu_map_next = GPU_VA_MAPS, gpu_last_error = 0;
+        gpu_bo_map(0, 7, 0x10000000ull, 100);
+        gpu_bo_map(1, 8, 0x20000000ull, 95);
+        gpu_map_count = 2;
+
+        // 1. A record is given the first map's address, the present is over (gpu_trim: the tick moves on, the marks of the tick are let go of by the old rule) and
+        // the job runs after it: the map is in the list.
+        check("gpu bo: a map's address is handed to a record", gpu_va_bytes(first, 4) == GPU_VA_MAPS + 0x100 && gpu_maps[0].handed);
+        gpu_trim();
+        held = gpu_bo_run();
+        check("gpu bo: a map looked up, then a trim, then the job, is in the bo list", gpu_seen_has(7));
+        check("gpu bo: every map a record was given before the job is in its list", held);
+        check("gpu bo: a map no record was given and not used in this tick is not in the list", !gpu_seen_has(8));
+
+        // 2. The job has run: the records are over, and the map is let go of. The job a tick later names neither map.
+        check("gpu bo: once the job has run the map's mark is let go of", !gpu_maps[0].handed);
+        gpu_trim();
+        gpu_bo_run();
+        check("gpu bo: a job a tick later names no map nobody was given in between", !gpu_seen_has(7) && !gpu_seen_has(8));
+
+        // 3. Looked up and run in one tick (no trim between): named, as before.
+        check("gpu bo: a map looked up in the tick of the job is handed again", gpu_va_bytes(first, 4) == GPU_VA_MAPS + 0x100 && gpu_maps[0].handed);
+        held = gpu_bo_run();
+        check("gpu bo: a map looked up and run in one tick is in the list", gpu_seen_has(7) && held && !gpu_seen_has(8));
+
+        // 4. A map the compositor forgot (its pages are gone; the trim keeps it while a job given up on may run). Given to a record in an earlier tick, it is not named (the
+        // kernel refuses a job that names pages that are gone, and the record of an earlier tick is not run again); given to one in this tick, it is (that job is refused).
+        gpu_maps[1].from = gpu_maps[1].to = 0, gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick - 1;
+        gpu_bo_run();
+        check("gpu bo: a forgotten map handed in an earlier tick is not in the list", !gpu_seen_has(8));
+        gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick;
+        held = gpu_bo_run();
+        check("gpu bo: a forgotten map handed in this tick is in the list (the kernel refuses that job)", gpu_seen_has(8) && held);
+
+        // 5. The mark does not hold off a written map in a tick after its lookup (the old rule's meaning): the processor would otherwise draw until a job ran, and none runs
+        // while it does.
+        gpu_bo_map(0, 7, 0x10000000ull, gpu_tick);
+        gpu_map_count = 1;
+        check("gpu bo: a map is handed to a record", gpu_va_bytes(first, 4) == GPU_VA_MAPS + 0x100 && gpu_maps[0].handed);
+        check("gpu bo: in the tick of the lookup a written map over it is refused (9)", !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) == 9 && gpu_map_count == 1);
+        gpu_trim();
+        check("gpu bo: a tick on, with no job run, a written map over it is not refused (9) and drops it",
+              !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) != 9 && gpu_map_count == 0);
+
+        gpu_map_count = 0, gpu_gone_at = 0, gpu_seen_count = 0, gpu_fake_cancel = 0, gpu_lost = 0, gpu_last_error = 0, gpu_fault[0] = 0;
+        gpu.at = kept_at, gpu.fd = kept_fd;
+}
+
 // A job the wait gave up on (a hang: gpu_run_job leaves gpu.pending set) may still run on the card. Its maps are not unmapped, and its import is not unmapped, under
 // it: the restart after the cool-down waits for the card to be idle (compositor_gpu_restart_check), and an import released meanwhile is unmapped by the trim
 // once the card is idle (gpu_unimport, gpu_trim). Each step's answer is the fake fence's (gpu_fake_busy, gpu_fake_idle).
@@ -224284,6 +224383,7 @@ b32 main(void)
 {
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         gpu_fault_rows();
+        gpu_bo_rows();
         gpu_flight_rows();
         flip_wait_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
