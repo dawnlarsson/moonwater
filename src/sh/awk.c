@@ -1188,17 +1188,23 @@ static regex_program awk_regex_cache[AWK_REGEX_CACHED];
 static awk_text address_to awk_regex_cache_key[AWK_REGEX_CACHED];
 static b32 awk_regex_cache_count;
 
-static awk_text address_to awk_regex_escapes(string_address pattern);
+static awk_text address_to awk_regex_escapes(string_address pattern, positive length);
 static DEAD_END fn awk_syntax(string_address reason);
 static bool awk_parsing;
 
-static fn awk_regex_build(regex_program address_to into, string_address pattern)
+/* The pattern is its length's bytes: a NUL in a dynamic regex is a byte the
+   regex matches, as gawk's does, and a C string would end the pattern there. */
+static fn awk_regex_build(regex_program address_to into, string_address pattern, positive length)
 {
-        awk_text address_to plain =
-            string_first_of(pattern, '\\') ? awk_regex_escapes(pattern) : null;
+        bool backslash = false;
 
-        if (!regex_compile(plain ? plain->text : pattern, true, false, true,
-                           text_regex_policy()))
+        for (positive i = 0; i < length && !backslash; i++)
+                backslash = pattern[i] == '\\';
+
+        awk_text address_to plain = backslash ? awk_regex_escapes(pattern, length) : null;
+
+        if (!regex_compile_bytes(plain ? plain->text : pattern, plain ? plain->length : length,
+                                 true, false, true, text_regex_policy()))
         {
                 // Written in the program, it is the program that is wrong.
                 if (awk_parsing)
@@ -1211,11 +1217,11 @@ static fn awk_regex_build(regex_program address_to into, string_address pattern)
         regex_keep(into);
 }
 
-static regex_program address_to awk_regex_keep(string_address pattern)
+static regex_program address_to awk_regex_keep(string_address pattern, positive length)
 {
         regex_program address_to into = (regex_program address_to)awk_take(sizeof(regex_program));
 
-        awk_regex_build(into, pattern);
+        awk_regex_build(into, pattern, length);
         return into;
 }
 
@@ -1241,7 +1247,7 @@ static regex_program address_to awk_regex_dynamic(awk_text address_to pattern)
         b32 which = awk_regex_cache_count++;
 
         awk_regex_cache_key[which] = awk_text_hold(pattern);
-        awk_regex_build(address_of awk_regex_cache[which], pattern->text);
+        awk_regex_build(address_of awk_regex_cache[which], pattern->text, pattern->length);
         return address_of awk_regex_cache[which];
 }
 
@@ -3426,9 +3432,8 @@ static bool awk_name_start(p8 character)
 */
 static b32 awk_escape(string_address source, positive address_to at, positive stop);
 
-static awk_text address_to awk_regex_escapes(string_address pattern)
+static awk_text address_to awk_regex_escapes(string_address pattern, positive length)
 {
-        positive length = string_length(pattern);
         awk_builder build;
 
         awk_builder_start(address_of build);
@@ -4227,7 +4232,7 @@ static awk_node address_to awk_primary()
         case T_ERE:
                 node = awk_node_new(N_REGEX);
                 node->text = awk_text_hold(awk_token_text);
-                node->program = awk_regex_keep(awk_token_text->text);
+                node->program = awk_regex_keep(awk_token_text->text, awk_token_text->length);
                 awk_next_token();
                 return node;
 

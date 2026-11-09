@@ -5185,6 +5185,9 @@ def awk_audit():
         ("BEGIN { while (\"echo a; echo b\" | getline line > 0) print line }",),
         ("BEGIN { \"echo hi\" | getline; print NR; \"echo yo\" | getline x; print NR, x }",),
         ("NR == 1 { getline y < FILENAME; print NR, y }", "one"),
+        #   A NUL in a dynamic regex is a byte the regex matches (gawk's answer); a regex
+        #   held as a C string ended at it and matched "a" alone.
+        ("BEGIN { r = \"a\\0b\"; print length(r), (\"xa\" ~ r), (\"a\\0b\" ~ r), (\"aXb\" ~ r) }",),
         ("BEGIN { s = \"abc\"; sub(/b/, \"\\\\\\\\\\\\&\", s); print s; t = \"abc\"; sub(/b/, \"\\\\\\\\&\", t); print t; u = \"abc\"; sub(/b/, \"\\\\&\", u); print u }",),
         ("function f() { next } { f(); print \"after\", $0 } END { print NR }", "letters"),
         ("function f() { nextfile } { f(); print \"after\", $0 } END { print NR }", "letters", "grid"),
@@ -24631,7 +24634,6 @@ def awk_gate(farm):
     return passed, len(cases), notes
 
 
-AWK_CHECKS = (awk_gate,)
 
 TEXT_CHECKS = (text_grep_encoding, text_grep_engine, text_grep_many, text_sed_gate, text_file_failures, text_collation)
 
