@@ -128,6 +128,7 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "gpu.c" // GPU rendering, on unless the build's header says SHELL_NO_GPU (CONFIG_MOONWATER_GPU=n); the build tool, which makes its kernels, is without it
 #else
 // Without the GPU a client's dma-buf is never imported (no card to read it), so no picture is one the card reads.
+static unsigned int gpu_epoch;
 static int gpu_ready(void)
 {
         return 0;

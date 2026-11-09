@@ -122375,7 +122375,14 @@ static fn bowl_session_prepare(string_address home, string_address runtime) { (v
 static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
 #include "../src/canvas/screen.c"
 #include "../src/canvas/font.c"
+#ifndef CHECK_gpu_kit // the GPU rows hold a client's dma-buf lent to a row, which is the shim's (gpu_lent_rows)
 #define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
+#else
+// The shim's signal macros (shell.c's, which these lanes do not include): the gpu rows install no handler, so none is caught here.
+#define SIGNAL_RESTART 0x10000000
+#define SIGNAL_CATCH_RESTORER 0
+#define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
+#endif
 #ifdef CHECK_gpu_kit
 static int gpu_fake_busy; // the check's fake fence: while it is set, every job waited for is answered as still running (nothing on the card is held)
 #define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_io(3u, 9, 32, wait))
@@ -223775,6 +223782,65 @@ static void gpu_loss_rows(void)
         check("gpu loss: the node is there again, and the card starts", gpu_start(1 << 20) && gpu.fd >= 0);
 }
 
+// A card's import held by the card now (an address the card's descriptor maps, not let go of).
+static b32 gpu_held_import(positive at)
+{
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                if (gpu.imported_va[i] == at && !gpu.imported_dead[i])
+                        return true;
+        return false;
+}
+
+static unsigned int gpu_lent_pixels[64 * 64];
+
+/*
+        A client's dma-buf lent to a row (compositor_wl_lend) keeps the card's address of its import, and a card started again (gpu_recover: a hang's
+        restart, a resume, a context the card lost) has a descriptor and an address space of its own: an address kept from before it is none of its maps,
+        and a job that names it faults. Real card only; the state is looked at (no job runs that names an address the card does not hold).
+*/
+static void gpu_lent_rows(void)
+{
+        struct wayland_picture picture;
+        p64 make[4] = {sizeof(gpu_lent_pixels), 4096, 2, 1}, drop[1];
+        unsigned int prime[3] = {0, 2 | 0x80000, 0};
+        int saved_width = compositor.width, saved_most = compositor.most_w, dmabuf;
+        const int row = 5;
+
+        if (gpu.fd < 0 || gpu.broken)
+        {
+                check("gpu lent: no card here, so no picture is lent to one", true);
+                return;
+        }
+        if (gpu_call(3u, 0, 32, make) != 0)
+        {
+                check("gpu lent: a buffer for a dma-buf is made on the card", false);
+                return;
+        }
+        prime[0] = drop[0] = (unsigned int)make[0];
+        if (system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642du, prime) != 0) // DRM_IOCTL_PRIME_HANDLE_TO_FD: the dma-buf holds the buffer
+        {
+                check("gpu lent: the buffer is a dma-buf", false);
+                gpu_raw(gpu.fd, GPU_GEM_CLOSE, drop);
+                return;
+        }
+        dmabuf = (int)prime[2];
+        gpu_raw(gpu.fd, GPU_GEM_CLOSE, drop);
+        compositor.width = 64, compositor.most_w = 0;
+        memory_zero(&picture, sizeof(picture));
+        picture.pixels = (const unsigned char *)gpu_lent_pixels, picture.stride = 256, picture.width = 64, picture.height = 64;
+        picture.full = 1, picture.last = 1, picture.sync_fd = dmabuf, picture.map = picture.pixels, picture.map_bytes = sizeof(gpu_lent_pixels);
+        check("gpu lent: a client's dma-buf is lent to a row, its card address held by the card",
+              compositor_wl_lend(row, &picture, 32, 32) && compositor_lent_va(row) != 0 && gpu_held_import(compositor_lent_va(row)));
+        check("gpu lent: the card started again", gpu_recover());
+        check("gpu lent: the started card keeps no address of the lent picture (its import went with the old descriptor)", compositor_lent_va(row) == 0);
+        check("gpu lent: the picture lent again is imported into the started card, at an address that card holds",
+              compositor_wl_lend(row, &picture, 32, 32) && compositor_lent_va(row) != 0 && gpu_held_import(compositor_lent_va(row)));
+        compositor_wl_unlend(row);
+        system_close(dmabuf);
+        compositor.width = saved_width, compositor.most_w = saved_most;
+}
+
+
 /*
         The card's map records, its fault and its hang, with no card: the table is set by hand (fake handles, the card's fd absent), so each row is the
         compositor's own answer. A record handed an address that a written map would let go of is refused (9) and kept until the job has run; a
@@ -225990,6 +226056,7 @@ b32 main(void)
                         gpu_drop(0, GPU_GONE_RECOVER);
         }
         gpu_loss_rows();
+        gpu_lent_rows();
         gpu_resume_rows();
         return test_report(null);
 }

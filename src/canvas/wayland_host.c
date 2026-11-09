@@ -109,6 +109,7 @@ static struct
                 positive va, import;
                 const unsigned char *map;
                 long fd;
+                unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
         } lent[WINDOWS];
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
         // when the buffer changes or the row closes.
@@ -116,8 +117,18 @@ static struct
         {
                 const unsigned char *map;
                 positive va;
+                unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
         } source[WINDOWS];
 } compositor_wl = {.listen = -1, .wake = -1, .lent = {{0}}};
+
+/*
+        A card address of a client's dma-buf (its import's), kept with the card's epoch the import was made in: 0 once the card has been let go of since
+        (gpu_recover: the import went with the old descriptor, and the address may be another map's by now), so that the picture is imported again.
+*/
+static positive compositor_wl_live(positive va, unsigned int epoch)
+{
+        return va && epoch == gpu_epoch ? va : 0;
+}
 
 /* ---- the keymap a client reads ---- */
 
@@ -578,7 +589,11 @@ static void compositor_wl_row_close(void *context, int row)
         if (row >= 0 && row < WINDOWS)
                 compositor_wl.laying[row].open = 0, compositor_wl_unlend(row);
         if (row >= 0 && row < WINDOWS && compositor_wl.source[row].va)
-                gpu_release_import(compositor_wl.source[row].va), compositor_wl.source[row].va = 0, compositor_wl.source[row].map = 0;
+        {
+                if (compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
+                        gpu_release_import(compositor_wl.source[row].va);
+                compositor_wl.source[row].va = 0, compositor_wl.source[row].map = 0;
+        }
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
@@ -651,7 +666,7 @@ static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
 // The card's address of a lent picture's first pixel, for a dma-buf (0 for a pool, which the card maps by its pages).
 static positive compositor_lent_va(int row)
 {
-        return compositor_lent(row) ? compositor_wl.lent[row].va : 0;
+        return compositor_lent(row) ? compositor_wl_live(compositor_wl.lent[row].va, compositor_wl.lent[row].epoch) : 0;
 }
 
 // The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's.
@@ -659,7 +674,7 @@ static void compositor_wl_unlend(int row)
 {
         if (!compositor_lent(row))
                 return;
-        if (compositor_wl.lent[row].import)
+        if (compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
                 gpu_release_import(compositor_wl.lent[row].import);
         memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
 }
@@ -737,7 +752,8 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         unsigned long stride = (unsigned long)picture->stride;
         const unsigned char *at;
         positive va = 0, import = 0;
-        int same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd;
+        int same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
+                   (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
 
         // Only a picture the client says is all changed is the buffer's: a partial damage is a change over what the window showed, which a
         // client that reuses its buffers (Xwayland's root) does not keep whole in the buffer (the copy lays the damage over the window).
@@ -770,7 +786,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                         return 0;
                 va = import + (positive)(at - picture->map);
         }
-        if (compositor_lent(row) && !same && compositor_wl.lent[row].import)
+        if (compositor_lent(row) && !same && compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
                 gpu_release_import(compositor_wl.lent[row].import);
         compositor_wl.lent[row].pixels = (const unsigned int *)at;
         compositor_wl.lent[row].pitch = stride / 4;
@@ -778,6 +794,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         compositor_wl.lent[row].height = height;
         compositor_wl.lent[row].va = va;
         compositor_wl.lent[row].import = import;
+        compositor_wl.lent[row].epoch = gpu_epoch;
         compositor_wl.lent[row].map = picture->map;
         compositor_wl.lent[row].fd = picture->sync_fd;
         return 1;
@@ -821,11 +838,12 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         }
         else
         {
-                if (compositor_wl.source[row].map != picture->map)
+                if (compositor_wl.source[row].map != picture->map || !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
                 {
-                        if (compositor_wl.source[row].va)
+                        if (compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
                                 gpu_release_import(compositor_wl.source[row].va);
                         compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                        compositor_wl.source[row].epoch = gpu_epoch;
                         compositor_wl.source[row].map = compositor_wl.source[row].va ? picture->map : 0;
                         if (!compositor_wl.source[row].va)
                                 return 0;

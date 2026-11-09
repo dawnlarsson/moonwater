@@ -19,6 +19,8 @@ static b32 gpu_userptr_off, gpu_userptr_gone; // off: /run/moonwater/gpu-nouserp
 static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
 static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
 static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
+static unsigned int gpu_epoch; // the card's descriptor count: it goes up each time the card is let go of (gpu_stop), and with it every import and map. An address kept
+                               // from an earlier epoch is none of the card's (wayland_host.c's lent and source addresses check it)
 static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover starts the card again with them)
 #ifndef GPU_SUBMIT_FAKE
 #define GPU_SUBMIT_FAKE(error)
@@ -629,6 +631,7 @@ static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         gpu.fd = -1, gpu.at = 0, gpu.size = 0, gpu.ctx = 0, gpu.handle = 0, gpu.imports = 0, gpu.pending = 0;
+        gpu_epoch++;
 }
 
 // The first card that is one the kernels are for, with bytes of pixels behind the page of commands, and one context. Every prerequisite is a step (gpu_req):
