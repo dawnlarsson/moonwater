@@ -125912,9 +125912,10 @@ static void check_taskbar_tray(void)
 {
     static const char *const good[] = {SETTING_TASKBAR_TRAY_STANDARD, "{time.24h.hour}:{time.24h.min}", "{{x}} {host}",
                                        "{date.weekday} {date.day} {date.monthname}  {cpu.load}  {mem.used}%  {temp}C", "no names at all",
-                                       "\xe6\x97\xa5\xe6\x9c\xac {battery.percent}", "", null};
+                                       "\xe6\x97\xa5\xe6\x9c\xac {battery.percent}", "\xed\x9f\xbf \xf4\x8f\xbf\xbf", "", null};
     static const char *const bad[] = {"{nope}", "{battery", "}", "a}b", "{}", "{ battery}", "tab\there", "\xff", "\xe6\x97",
-                                      "{time.24h.hour}{", null};
+                                      "{time.24h.hour}{", "\xe0\x80\x80", "\xe0\x90\x80", "\xed\xa0\x80", "\xf0\x80\x80\x80",
+                                      "\xf4\x90\x80\x80", null};
     char long_format[SETTING_TRAY_MOST + 8];
     struct taskbar_view view;
     int x, y, w, h, bx, by, bw, bh, cx, cy, cw, ch;

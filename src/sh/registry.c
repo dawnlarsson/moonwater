@@ -823,9 +823,18 @@ static bool setting_tray_valid(const char *text, positive *bad)
                         goto wrong;
                 if (follow)
                 {
-                        for (positive more = 1; more <= follow; more++)
-                                if (((unsigned char)text[at + more] & 0xc0) != 0x80)
-                                        goto wrong;
+                        /*
+                                The whole sequence, judged as memory_utf8_span
+                                judges it: an overlong form (E0 needs A0 or more
+                                after it, F0 needs 90), a surrogate (ED needs 9F or
+                                less) and anything past U+10FFFF (F4 needs 8F or
+                                less) are not sequences, however well the bytes
+                                after the lead continue. A sequence the end of the
+                                text cuts off is not one either.
+                        */
+                        if (at + follow >= length ||
+                            memory_utf8_valid_span((address_any)(text + at), follow + 1).x != follow + 1)
+                                goto wrong;
                         at += follow + 1;
                         continue;
                 }
