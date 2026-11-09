@@ -53497,8 +53497,14 @@ static b32 file_xargs()
                         still means something once it has saturated.
                 */
                 positive made = positive_max;
+                string_address digits = written + string_span(written, string_set_space);
 
-                string_digits_checked_exact(written, 10, address_of made);
+                //      The blanks and plus sign xargs_count_value takes before
+                //      the digits are taken here too, or " 2" reads as too wide.
+                if (string_is(digits, '+'))
+                        digits++;
+
+                string_digits_checked_exact(digits, 10, address_of made);
                 if (!made)
                         made = 1;
                 if (made > posix)

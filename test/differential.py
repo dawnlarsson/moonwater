@@ -10774,6 +10774,16 @@ else:
           "interactive mode traces before reporting an unavailable terminal",
           show(prompted.stderr))
 
+    # -s reads the blanks and plus sign strtoul reads before the digits, as -n
+    # and -P do: " 2" is a two-byte limit, which no batch of one word fits.
+    for spelled in (" 2", "+2"):
+        limited = run(["-s", spelled, "echo"], b"a\n")
+        check(limited.returncode == 1 and limited.stdout == b"" and
+              b"cannot fit single argument" in limited.stderr,
+              "xargs -s takes a value with leading blanks or a plus sign",
+              f"-s {spelled!r}: status={limited.returncode} "
+              f"{show(limited.stdout + limited.stderr)}")
+
     def small_stack():
         resource.setrlimit(resource.RLIMIT_STACK,
                            (512 * 1024, 512 * 1024))
