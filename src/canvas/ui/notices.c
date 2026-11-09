@@ -88,6 +88,8 @@ static void notices_board(void)
 static void notices_size(unsigned int width, unsigned int height)
 {
         notices.width = (int)width, notices.height = (int)height;
+        // The labels are drawn through the kit's scratch line, which only ui_scratch_fit maps: a popup that maps none draws no text.
+        ui_scratch_fit(&notices.ui, width);
         notices.dirty = true;
 }
 

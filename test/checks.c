@@ -128868,6 +128868,39 @@ static void check_notices_dot(void)
                   notices.menu.items[2].flags == UI_MENU_SEPARATOR && notices.menu.items[3].id == NOTICES_ID_OPEN &&
                   notices.menu.items[4].id == NOTICES_ID_DISMISS);
 
+        /*
+                The popup's labels are drawn through its own kit's scratch line, which only ui_scratch_fit maps, and each app maps its
+                own at its size (the size hook, notices_size). The rows above were drawn through the terminal's kit, which has one; a
+                popup whose size hook left its kit unmapped drew its rows with no text, an empty window. Here the popup's kit is the
+                terminal's with the scratch taken away, sized as notices_open sizes it, and its picture must have ink in it beyond the
+                rule the menu draws.
+        */
+        {
+            static unsigned int picture[GLASS_SIDE * GLASS_SIDE];
+            int ink = 0, hover = 0;
+
+            notices.ui = terminal.ui;
+            notices.ui.scratch = null, notices.ui.scratch_width = 0, notices.ui.scratch_scale = 0;
+            notices.ui.glass = 1, notices.ui.opaque = 0, notices.ui.scale = 100;
+            ui_popmenu_size(&notices.ui, &notices.menu, NOTICES_SHOT_H);
+            notices_size((unsigned int)notices.menu.width, (unsigned int)notices.menu.height);
+            check("notices: the popup's kit has a scratch line at least as wide as the popup once it is sized",
+                  notices.ui.scratch != null && notices.ui.scratch_width >= notices.width);
+            notices_draw(picture);
+            for (int y = 0; y < notices.height; y++)
+                for (int x = 0; x < notices.width; x++)
+                    ink += (picture[y * GLASS_SIDE + x] >> 24) != 0;
+            check("notices: the popup draws its labels, not an empty window (the picture has ink beyond the rule)", ink > 4 * notices.width);
+            // The hot item (a hover) is drawn over its row and its label stays: the same labels, the highlight under them.
+            notices.menu.hot = 0;
+            notices_draw(picture);
+            for (int y = 0; y < notices.height; y++)
+                for (int x = 0; x < notices.width; x++)
+                    hover += (picture[y * GLASS_SIDE + x] >> 24) != 0;
+            check("notices: a hovered item keeps its label drawn", hover >= ink);
+            notices.menu.hot = -1;
+        }
+
         notices_dismiss();
         view = compositor_taskbar_view();
         check("notices: Dismiss all takes the kernel notices off the board, and the look after it takes the dot away",
