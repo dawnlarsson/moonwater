@@ -41,6 +41,24 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-183: the logger's clock-sync check gave adjtimex a 104-byte buffer on 32-bit builds (stack out-of-bounds write)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | Memory safety: stack out-of-bounds write (CWE-787) in `logger`, in a 32-bit build only |
+| Attacker | a local account that runs `logger` with the RFC 5424 format (`-n`, or `-4`) on a 32-bit Linux build; the kernel writes the struct past the array |
+| Moonwater exposure window | from `f763f40fa` (2026-09-09 08:53:48 +0200, `logger` reports the kernel's clock sync state) to the fixing commit (2026-11-09). No 32-bit build is shipped, so no shipped image had it |
+| Fixed by | this entry's commit (`src/sh/tools.c`, `logger_clock_synced`) |
+
+**What it was.** `logger_clock_synced` declared `positive words[26]` for the buffer adjtimex fills. On a 32-bit build `positive` is 32 bits, so the array was 104 bytes. A 32-bit kernel's `struct timex` is 128 bytes (208 on 64-bit, measured on the box), and adjtimex writes all of it even for a read-only call (modes 0). The write ran 24 bytes past the array on the stack.
+
+**The fix.** The array is sized in bytes: 208, which is 26 words on 64-bit (unchanged) and 52 words on 32-bit. The word indices (maxerror 3, status 5, time 9 and 10) name the same kernel fields in both widths.
+
+**Tests that fail without it.** No lane can run a 32-bit shell (the box has no 32-bit libc). The check is a compile-time size: `char buffer_holds_timex[(sizeof(positive[LOGGER_TIMEX_WORDS]) >= 128) ? 1 : -1]` with `positive` as a 32-bit unsigned int. Before the fix clang refuses it ("declared as an array with a negative size"); after, it compiles. The 128-byte figure is the 32-bit uapi layout worked out by hand, not measured.
+
+**Still open.** Whether a 32-bit Linux build becomes a target; none has been built or run.
+
 ### MW-2026-182: the build tool's argument vectors were written past their 512 entries (a compile ran through sudo)
 
 | | |
