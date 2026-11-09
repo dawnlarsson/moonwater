@@ -39438,22 +39438,30 @@ static bool cp_words_read(string_address option, string_address value,
                           const file_word address_to words, positive count,
                           bool address_to context, p8 address_to last)
 {
-        p8 one[64];
+        p8 small[64];
 
         if (!value)
                 return true;
 
         for (positive at = 0; value[at];)
         {
-                positive length = 0;
+                positive start = at;
 
                 while (value[at] && value[at] != ',')
-                {
-                        if (length + 1 < sizeof(one))
-                                one[length++] = value[at];
                         at++;
-                }
 
+                //      The word is copied whole, so that the message quotes
+                //      all of it: a word past the small buffer -- no option
+                //      takes one that long -- is copied to memory of its own.
+                positive length = at - start;
+                p8 address_to one = small;
+
+                if (length >= sizeof(small))
+                {
+                        one = memory_take(length + 1);
+                        refuse_if(!one, false, "cp: memory exhausted\n");
+                }
+                memory_copy_apart(one, value + start, length);
                 one[length] = end;
 
                 if (value[at] == ',')
