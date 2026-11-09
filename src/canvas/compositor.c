@@ -2830,7 +2830,11 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
         bitmap and nothing else. Each word is a row of sixteen pixels, the
         first eight in its low byte, as the kernel desktop's are. The hotspot
         is the pixel the pointer is: the corner of the arrow and the centre of
-        the resize shapes.
+        the resize shapes. The hand is a classic cursor font's, not drawn here:
+        its glyph 60 (hand2) is the edge and its mask, glyph 61, less the edge
+        is the fill, the cell holding them as the font does, so the hotspot is
+        the glyph's origin, one row down. The font's own notice says its glyphs
+        are unencumbered.
 */
 #define CP_CURSOR_W 16
 #define CP_CURSOR_H 20
@@ -2866,8 +2870,8 @@ static const unsigned short compositor_cursor_edge[CP_SHAPES][CP_CURSOR_H] = {
      0x8002, 0x8002, 0x8002, 0x8003, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0x8003, 0xc006, 0x600c, 0x3018, 0xd836, 0xcc66, 0x0440, 0xcc66, 0xd836,
      0x3018, 0x600c, 0xc006, 0x8003, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
-    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xc007, 0x4004, 0x4004,
-     0x7c04, 0x0204, 0x3e04, 0x021c, 0x1f24, 0x0124, 0x0f1c, 0x0804, 0xf003, 0x0000},
+    {0x0000, 0x807f, 0x4080, 0x207e, 0x1010, 0x100e, 0x1010, 0x280e, 0x4410, 0x820c,
+     0x0403, 0x4802, 0x1001, 0xa000, 0x4000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0xf83f, 0x0820, 0x1830, 0x3018, 0x600c, 0xc006, 0x8002, 0x8002, 0x8002, 0xc006,
      0x600c, 0x3018, 0x1830, 0x0820, 0xf83f, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0xe00f, 0x3018, 0x1830, 0x8c63, 0xc441, 0xe448, 0x644c, 0x244e, 0x0447,
@@ -2891,15 +2895,17 @@ static const unsigned short compositor_cursor_fill[CP_SHAPES][CP_CURSOR_H] = {
      0x0001, 0x0001, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0x0000, 0x0001, 0x8003, 0xc007, 0x2009, 0x3019, 0xf83f, 0x3019, 0x2009,
      0xc007, 0x8003, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
-    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x8003, 0x8003,
-     0x8003, 0xfc03, 0xc003, 0xfc03, 0xe01b, 0xfe1b, 0xf003, 0xf003, 0x0000, 0x0000},
+    {0x807f, 0x4080, 0xa07f, 0xd081, 0xe86f, 0xe811, 0xe82f, 0xd411, 0xba2f, 0x7d13,
+     0xfa0c, 0xb405, 0xe802, 0x5001, 0xa000, 0x4000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0xf01f, 0xe00f, 0xc007, 0x8003, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001,
      0x8003, 0xc007, 0xe00f, 0xf01f, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
     {0x0000, 0x0000, 0xc007, 0xe00f, 0x701c, 0x383e, 0x1837, 0x9833, 0xd831, 0xf838,
      0x701c, 0xe00f, 0xc007, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000}
 };
 
-static const signed char compositor_cursor_hot[CP_SHAPES] = {0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7};
+// The pixel of its cell each shape is the pointer at: across, then down.
+static const signed char compositor_cursor_hot[CP_SHAPES][2] = {{0, 0}, {7, 7}, {7, 7}, {7, 7}, {7, 7}, {7, 7},
+                                                                {7, 7}, {7, 7}, {0, 1}, {7, 7}, {7, 7}};
 
 // The edges of a window a hand has hold of, and the shape that says so.
 #define CP_EDGE_LEFT 1u
@@ -2920,10 +2926,10 @@ static const unsigned char compositor_cursor_by_edges[16] = {
 // The cell of a shape at a scale with the pointer at x, y: its top left.
 static void compositor_cursor_cell(int *left, int *top, int x, int y, unsigned int shape, int scale)
 {
-        int hot = compositor_cursor_hot[shape < CP_SHAPES ? shape : 0] * scale;
+        const signed char *hot = compositor_cursor_hot[shape < CP_SHAPES ? shape : 0];
 
-        *left = x - hot;
-        *top = y - hot;
+        *left = x - hot[0] * scale;
+        *top = y - hot[1] * scale;
 }
 
 // The largest whole scale of a shape the plane holds.
@@ -10306,7 +10312,7 @@ static int compositor_cursor_paint(unsigned int shape, int fitted)
         {
                 struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
 
-                compositor_cursor_draw(&t, compositor_cursor_hot[shape] * fitted, compositor_cursor_hot[shape] * fitted,
+                compositor_cursor_draw(&t, compositor_cursor_hot[shape][0] * fitted, compositor_cursor_hot[shape][1] * fitted,
                                        shape, fitted, compositor_cursor_ink(0, 0xff000000u),
                                        compositor_cursor_ink(1, 0xff000000u));
         }
