@@ -400,7 +400,7 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
                       .usage = "canvas trackpad speed [slow|normal|fast]",
-                      .help = "how far a trackpad scroll moves the content: 8 px a stream notch at normal, more as the notches come faster; slow and fast scale it [normal]"),
+                      .help = "how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]"),
     SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll momentum [on|off]",

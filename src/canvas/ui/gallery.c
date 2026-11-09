@@ -165,10 +165,13 @@ static fn gallery_place(struct ui address_to ui, int width, int height);
 // The page drawn into the rows of the band: the paper, then every control, the scroll taken off their places.
 static fn gallery_draw(struct ui address_to ui)
 {
-        int right = 0, row_y = -1, scroll;
+        int right = 0, row_y = -1, scroll, drawn, rest;
 
         ui_scroll_frame(ui, &gallery.scroll);
-        scroll = gallery.scroll.scroll * 100 / ui->scale;
+        // The page is drawn at rest, inside its ends, and a pull past one is the picture stretched (ui_stretch)
+        drawn = gallery.scroll.scroll;
+        rest = drawn < 0 ? 0 : drawn > ui_scroll_most(&gallery.scroll) ? ui_scroll_most(&gallery.scroll) : drawn;
+        scroll = rest * 100 / ui->scale;
         ui->top = 0;
         ui->bottom = ui->height;
         ui_fill(ui, 0, 0, ui->width, ui->height, ui_role_surface());
@@ -201,6 +204,8 @@ static fn gallery_draw(struct ui address_to ui)
                         right = c->x + c->w, row_y = c->y;
         }
         gallery_place(ui, ui->width, ui->height);
+        if (drawn != rest)
+                ui_stretch(ui, 0, 0, ui->width, ui->height, drawn - rest);
         ui_scroll_draw(ui, &gallery.scroll);
         // A finger's selection in either field: its handles and actions bar, over the page.
         ui_text_overlay(ui, &gallery.field[0]);

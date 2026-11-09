@@ -2263,6 +2263,7 @@ static struct ui_kit
         unsigned int mode, accent, motion; // UI_THEME_LIGHT or _DARK, 0xrrggbb, 0 full or 1 reduced
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
         unsigned int scroll_off;           // the scroll body's switches (WINDOW_SCROLL_FLIP, _STOPS, _STILL; 0 the standard), as the table keeps them
+        unsigned int scroll_speed;         // the Scroll speed row, as the table keeps it: 0 normal, 1 slow, 2 fast (ui_wheel_percent)
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
         unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
@@ -2319,6 +2320,7 @@ static fn ui_kit_caret_take(const struct windows address_to table)
 static fn ui_kit_scroll_take(const struct windows address_to table)
 {
         ui_kit.scroll_off = table->scroll_off;
+        ui_kit.scroll_speed = table->scroll_speed;
 }
 
 // The window reads from the right when the language taken says so, read from the language itself (so the apps' language listeners, which run
@@ -6004,7 +6006,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define BODY_EDGE_CARRY (UI_ONE * 65 / 10)   // a coast that starts at an end or reaches one: the first speed is the lift's times this (fit 6.5)
 #define BODY_TAU_EDGE_NS 10000000ll          // and past an end its speed falls by e in this long: a brief push (fit 10 ms)
 #define BODY_RUBBER_C (UI_ONE * 36 / 100)    // the rubber band's stiffness c (fit 0.36 to the top dip, for a view of 772 px: it scales with the view)
-#define BODY_SPRING_OMEGA 11                 // the spring home is critically damped at this rate, per second (fit 11: 0.5 px rms on the dip)
+#define BODY_SPRING_OMEGA 20                 // the spring home is critically damped at this rate, per second: 90 percent home in 0.2 s, 98 in 0.3 (11, the Mac's fit, was 0.55 s: slow motion)
 #define BODY_STILL (UI_ONE * 20)             // a coast under 20 units a second has stopped
 #define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
@@ -6036,6 +6038,7 @@ struct ui_body
         b64 pushed;          // when the last notch moved the target, ns: past an end the band is held while notches keep coming
         b64 sent;            // a free throw's position already given as whole pixels (ui_body_given)
         b64 tau;             // this coast's speed falls by e in this long, ns: a pad's (BODY_TAU_NS) or a finger's (ui_body_finger_tau)
+        int follow;          // a notch's run to its target: e to the minus this a second (0: BODY_NOTCH_RATE). A stream's is the rate its notches come at
 };
 
 static b64 ui_body_far(const struct ui_body address_to b)
@@ -6150,6 +6153,7 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
         b->rest = 0;
         b->speed = 0;
         b->tau = 0;
+        b->follow = 0;
         b->state = BODY_IDLE;
         b->at = at;
         ui_body_note(b);
@@ -6276,6 +6280,7 @@ static void ui_body_settle(struct ui_body address_to b)
         b64 far = ui_body_far(b);
 
         b->vel = 0;
+        b->follow = 0;
         if (ui_body_outside(b))
         {
                 b->shown = ui_body_drawn(b);
@@ -6389,8 +6394,10 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
 
                         // The gap closes by e to the minus BODY_NOTCH_RATE a second: the first millisecond is the fastest, so a notch shows
                         // at once, and a notch on a notch moves the target on and the position goes on running.
-                        b->raw += gap - ui_qmul(gap, ui_body_decay(dt * BODY_NOTCH_RATE));
-                        b->vel = ui_qmul(b->target - b->raw, (b64)BODY_NOTCH_RATE * UI_ONE);
+                        b64 rate = b->follow > 0 ? b->follow : BODY_NOTCH_RATE;
+
+                        b->raw += gap - ui_qmul(gap, ui_body_decay(dt * rate));
+                        b->vel = ui_qmul(b->target - b->raw, rate * UI_ONE);
                         gap = b->raw - b->target;
                         // Past an end the notch is a pulse: the band is let go of once it has come within a tenth of its stretch (6 pixels at the
                         // least) of the target and the notches have paused (half the hand's gap), and springs home.
@@ -6482,6 +6489,8 @@ struct ui_scroll
         int inset;                   // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
         int scale;                   // the kit's, for logical pixels
         int wheel;                   // device pixels one stepped notch of a wheel moves it; 0 for the kit's (UI_WHEEL_TENTHS tenths of a row)
+        b64 stream_at;               // when the last notch of a stream came (ns), and the rate they have been coming at, a second
+        int stream_rate;
 };
 
 /*
@@ -6763,11 +6772,18 @@ static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
         two fingers, a stream) is UI_NOTCH, the pad's own path, and is not changed by it.
 */
 #define UI_WHEEL_TENTHS 25
+
+// The Scroll speed row (slow, normal, fast) as the percent of a stepped notch it moves; a precise turn's is the compositor's (compositor_pad_pct)
+static b64 ui_wheel_percent(void)
+{
+        return ui_kit.scroll_speed == 1 ? 60 : ui_kit.scroll_speed == 2 ? 160 : 100;
+}
+
 static b64 ui_wheel_notch(const struct ui address_to ui, const struct ui_scroll address_to s, unsigned int flags)
 {
         if (flags & WINDOW_WHEEL_PRECISE)
                 return (b64)UI_NOTCH * ui->scale / 100;
-        return s->wheel > 0 ? (b64)s->wheel : (b64)UI_ROW * UI_WHEEL_TENTHS / 10 * ui->scale / 100;
+        return (s->wheel > 0 ? (b64)s->wheel : (b64)UI_ROW * UI_WHEEL_TENTHS / 10 * ui->scale / 100) * ui_wheel_percent() / 100;
 }
 
 /*
@@ -6778,7 +6794,7 @@ static b64 ui_wheel_notch(const struct ui address_to ui, const struct ui_scroll 
 */
 static long ui_wheel_pixels(const struct ui address_to ui, const struct window_event address_to event, long step, int address_to rest)
 {
-        b64 per = event->flags & WINDOW_WHEEL_PRECISE ? (b64)UI_NOTCH * ui->scale / 100 : step, delta = -(b64)event->a * per, total;
+        b64 per = event->flags & WINDOW_WHEEL_PRECISE ? (b64)UI_NOTCH * ui->scale / 100 : step * ui_wheel_percent() / 100, delta = -(b64)event->a * per, total;
         long pixels;
 
         if (ui_kit.scroll_off & WINDOW_SCROLL_FLIP)
@@ -6787,6 +6803,37 @@ static long ui_wheel_pixels(const struct ui address_to ui, const struct window_e
         pixels = (long)(total / 120);
         *rest = (int)(total - (b64)pixels * 120);
         return pixels;
+}
+
+/*
+        How fast the body runs to a notch's target. A mouse's notch is BODY_NOTCH_RATE. A stream's notches (a trackpad reported as a notch to
+        every report) are tens to a hundred and more a second when the fingers are quick and a few when they are slow, and each is a fixed
+        distance: the body follows them at the rate they come at (smoothed over a few), so that a slow scroll is a steady motion where each
+        notch was a step, and a quick one is followed with little lag (UI_STREAM_FOLLOW_LEAST to _MOST a second).
+*/
+#define UI_STREAM_FOLLOW_LEAST 8
+#define UI_STREAM_FOLLOW_MOST 40
+static void ui_wheel_follow(struct ui_scroll address_to s, unsigned int flags, b64 now)
+{
+        b64 gap = now - s->stream_at;
+
+        if (!(flags & WINDOW_WHEEL_STREAM))
+        {
+                s->body.follow = 0, s->stream_rate = 0;
+                return;
+        }
+        if (s->stream_at && gap > 0 && gap < 4 * (b64)UI_HAND_GAP_NS)
+        {
+                int now_rate = (int)(1000000000ll / gap);
+
+                s->stream_rate = s->stream_rate ? (s->stream_rate * 2 + now_rate) / 3 : now_rate;
+        }
+        else
+                s->stream_rate = 0;
+        s->stream_at = now;
+        s->body.follow = !s->stream_rate ? BODY_NOTCH_RATE
+                         : s->stream_rate < UI_STREAM_FOLLOW_LEAST ? UI_STREAM_FOLLOW_LEAST
+                         : s->stream_rate > UI_STREAM_FOLLOW_MOST ? UI_STREAM_FOLLOW_MOST : s->stream_rate;
 }
 
 /*
@@ -6821,6 +6868,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 return false;
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM))
         {
+                ui_wheel_follow(s, event->flags, now);
                 ui_body_notch(&s->body, q, now);
                 // A stepped notch with the wheel smooth off is one step at once: the target inside the ends, and the body at rest there.
                 if (!(event->flags & WINDOW_WHEEL_PRECISE) && ui_kit.wheel_off)
@@ -6868,6 +6916,105 @@ static void ui_body_publish(struct windows address_to table, unsigned int row)
 static long ui_map(positive size)
 {
         return compositor_call(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
+}
+
+/*
+        The overscroll stretch, Android 12's: a region pulled past an end is its picture drawn stretched from the end it is pulled at, which stays
+        where it is, the content not shifted. The region draws its rows at rest (clamped to its ends) and ui_stretch then remaps the picture:
+        a row at distance u (a share of the view) from the pinned end is shown at u + p (u - u^2 + u^3/3), so the content is p times larger at the
+        end and falls back to its own size at the far side, rows past the view going out of it, and every row is the two rows of the picture it
+        falls between, blended (vertical only). p is UI_STRETCH_K times the band's share of the view (the rubber band's drawn distance, ui_body_drawn),
+        and goes to UI_STRETCH_MAX as it grows: the content at the end is at most 1.7 times its size. The card does not draw this (the recorded
+        frame is lost, UI_LOST_STRETCH, and the program paints the picture), and a list taller than UI_STRETCH_VIEW pixels shifts as it did.
+*/
+#define UI_STRETCH_K_Q4 56         // 3.5 in sixteenths: p is this much of the band's share of the view
+#define UI_STRETCH_MAX_Q4 11       // 0.7 in sixteenths (rounded): the most p goes to
+#define UI_STRETCH_VIEW 4096
+static unsigned int address_to ui_stretch_rows; // the region's picture as it was drawn, a copy the remap reads
+static positive ui_stretch_room;                // its room, pixels
+static int ui_stretch_map[UI_STRETCH_VIEW + 1]; // where each row of the picture is shown, 256ths of a row
+
+// two pixels (premultiplied ARGB) blended by f in 256ths, a and b held two channels to a lane
+static inline unsigned int ui_stretch_blend(unsigned int a, unsigned int b, unsigned int f)
+{
+        unsigned int green = ((((a >> 8) & 0x00ff00ffu) * (256 - f) + ((b >> 8) & 0x00ff00ffu) * f) >> 8) & 0x00ff00ffu;
+        unsigned int blue = (((a & 0x00ff00ffu) * (256 - f) + (b & 0x00ff00ffu) * f) >> 8) & 0x00ff00ffu;
+
+        return green << 8 | blue;
+}
+
+// A region's picture, x by y and width by height in device pixels, stretched from the end it was pulled past: pull is the band's pixels, negative
+// past the top and positive past the bottom. True when it was.
+static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull);
+
+static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull)
+{
+        int x0 = x < 0 ? 0 : x, x1 = x + width > ui->width ? ui->width : x + width;
+        int y0 = y < 0 ? 0 : y, y1 = y + height > ui->height ? ui->height : y + height;
+        int view = y1 - y0, wide = x1 - x0, band = pull < 0 ? -pull : pull, at = 0;
+        b64 raw, grow;
+        positive need;
+
+        if (!pull || view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
+                return false;
+        if (ui->scene)
+        {
+                ui->scene->lost = UI_LOST_STRETCH;
+                return false;
+        }
+        band = band > view / 2 ? view / 2 : band;
+        raw = (b64)band * UI_STRETCH_K_Q4 * UI_ONE / 16 / view;
+        grow = ui_qdiv(ui_qmul(raw, (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16), raw + (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16);
+        need = (positive)wide * (positive)view;
+        if (need > ui_stretch_room)
+        {
+                positive room = (need * 4 + 0xfffff) & ~(positive)0xfffff;
+                long mapped = ui_map(room);
+
+                if (mapped < 0 && mapped > -4096)
+                        return false;
+                if (ui_stretch_rows)
+                        compositor_call(syscall(munmap), (positive)ui_stretch_rows, ui_stretch_room * 4, 0, 0, 0, 0);
+                ui_stretch_rows = (unsigned int address_to)mapped;
+                ui_stretch_room = room / 4;
+        }
+        // Where the picture's row i is shown (the distance from the pinned end, 256ths of a row): u + grow (u - u^2 + u^3/3), of the view
+        for (int i = 0; i <= view; i++)
+        {
+                b64 u = (b64)i * UI_ONE / view, u2 = ui_qmul(u, u), u3 = ui_qmul(u2, u), shown = u + ui_qmul(grow, u - u2 + u3 / 3);
+
+                ui_stretch_map[i] = (int)((shown * view) >> (UI_Q - 8));
+        }
+        memory_copy_rect_u32(ui_stretch_rows, (unsigned long)wide, ui->pixels + (unsigned long)y0 * ui->pitch + (unsigned long)x0, ui->pitch,
+                             (unsigned long)wide, (unsigned long)view);
+        for (int d = 0; d < view; d++)
+        {
+                int target = d * 256, from, row, next, line = pull < 0 ? d : view - 1 - d;
+                unsigned int f;
+                const unsigned int address_to a, address_to b;
+                unsigned int address_to to;
+
+                while (at < view - 1 && ui_stretch_map[at + 1] <= target)
+                        at++;
+                from = at * 256 + (ui_stretch_map[at + 1] > ui_stretch_map[at] ? (target - ui_stretch_map[at]) * 256 / (ui_stretch_map[at + 1] - ui_stretch_map[at]) : 0);
+                from = from > (view - 1) * 256 ? (view - 1) * 256 : from < 0 ? 0 : from;
+                // the distance from the pinned end is the row from the top at the top, and from the bottom at the bottom
+                if (pull > 0)
+                        from = (view - 1) * 256 - from;
+                row = from >> 8, f = (unsigned int)from & 255;
+                next = row + 1 < view ? row + 1 : row;
+                a = ui_stretch_rows + (unsigned long)row * (unsigned long)wide;
+                b = ui_stretch_rows + (unsigned long)next * (unsigned long)wide;
+                if (!ui_in_band(ui, y0 + line))
+                        continue;
+                to = ui->pixels + (unsigned long)(y0 + line) * ui->pitch + (unsigned long)x0;
+                if (!f || row == next)
+                        memory_copy_rect_u32(to, ui->pitch, a, (unsigned long)wide, (unsigned long)wide, 1);
+                else
+                        for (int k = 0; k < wide; k++)
+                                to[k] = ui_stretch_blend(a[k], b[k], f);
+        }
+        return true;
 }
 
 // A font engine and its atlas, atlas pixels a side, as one mapping. The default, 512, is 256 KiB of the image's address space
@@ -9580,7 +9727,15 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         UI_CALL();
         int row_height = ui_dev(ui, UI_ROW);
 
+        int drawn, rest;
+
         ui_scroll_frame(ui, &l->scroll);
+        // The rows are drawn at rest, inside the list's ends, and a pull past an end is the picture stretched (ui_stretch), as Android 12's is.
+        drawn = l->scroll.scroll;
+        rest = drawn < 0 ? 0 : drawn > ui_scroll_most(&l->scroll) ? ui_scroll_most(&l->scroll) : drawn;
+        if (l->h > UI_STRETCH_VIEW)
+                rest = drawn;
+        l->scroll.scroll = rest;
         ui->top = l->y;
         ui->bottom = l->y + l->h;
         if (!l->count && l->empty)
@@ -9609,6 +9764,10 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui->top = band_top, ui->bottom = band_bottom;
                 }
         }
+        l->scroll.scroll = drawn;
+        // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
+        if (drawn != rest)
+                ui_stretch(ui, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h, drawn - rest);
         ui_scroll_draw(ui, &l->scroll);
 }
 
@@ -10019,7 +10178,7 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
-        int chosen = p->chosen;
+        int chosen = p->chosen, drawn, rest;
 
         if (!p->column_on)
                 return;
@@ -10032,7 +10191,10 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->at = chosen;
         }
         c->x = ui_rtl() ? p->width * 100 / ui->scale - UI_PAD - p->column_w * 100 / ui->scale : UI_PAD;
-        c->y = (p->top - p->column_scroll.scroll) * 100 / ui->scale;
+        // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_stretch)
+        drawn = p->column_scroll.scroll;
+        rest = drawn < 0 ? 0 : drawn > ui_scroll_most(&p->column_scroll) ? ui_scroll_most(&p->column_scroll) : drawn;
+        c->y = (p->top - rest) * 100 / ui->scale;
         c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
         // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
@@ -10047,6 +10209,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
         ui_control_draw(ui, c);
+        if (drawn != rest)
+                ui_stretch(ui, ui_rtl() ? p->seam : 0, p->top, ui_rtl() ? p->width - p->seam : p->seam, p->bottom - p->top, drawn - rest);
 }
 
 // The column's bar, drawn last of the page (after the body's rows): its track lies across the seam, so the body's rows (their hover,

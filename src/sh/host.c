@@ -22895,6 +22895,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                  why == UI_LOST_TERM_GRID ? (string_address) "terminal: a fill outside the grid and the picture" :
                                                  why == UI_LOST_TERM_FONT ? (string_address) "terminal: a font draw outside the grid" :
                                                  why == UI_LOST_TERM_WIDE ? (string_address) "terminal: a wide character" :
+                                                 why == UI_LOST_STRETCH ? (string_address) "a list stretched past its end (painted in pixels)" :
                                                                             (string_address) "the glass (taskbar)");
                 }
         }

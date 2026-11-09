@@ -51,6 +51,7 @@ enum ui_list_lost
         UI_LOST_TERM_FONT, // the terminal: a font draw outside the grid
         UI_LOST_TERM_WIDE, // the terminal: a wide character
         UI_LOST_GLASS,     // the taskbar's glass (never a window: the band is the compositor's)
+        UI_LOST_STRETCH,   // a list pulled past its end is stretched in the picture (ui_stretch), which the card does not do
         UI_LOST_COUNT
 };
 

@@ -3630,6 +3630,8 @@ struct compositor_pad
         int per_mm_x, per_mm_y; // its units to a millimetre
         int left_x, left_y;     // what a move or a turn left under a whole count or 120th, times the units to a millimetre
         unsigned int clicked;   // the button the pad's press went down as
+        unsigned long long gain_at; // when its last two-finger report was read (ns), for the speed of the hand
+        int gain_left_x, gain_left_y; // what the speed's gain left under a whole 120th, in 256ths
         // A multitouch pad's fingers (ABS_MT_SLOT, TRACKING_ID and POSITION_X and Y, compositor_pad_slot): a pinch is the span of
         // two of them (compositor_pad_pinch), and is read from these, not from the primary finger the wheel reads.
         int slot;                           // the slot the next events are about
@@ -16938,8 +16940,8 @@ static int compositor_wheel_streams(unsigned int at, positive now)
 
 /*
         A stream's gain: the pixels a stream notch moves at 100 percent, in 256ths, as a function of the notches' rate in centi-notches a
-        second (compositor_stream_rate). Eight pixels up to 10 a second, then a gentle power curve, 3 x (rate - 10) / 50 to the 1.5, so
-        a notch is four times as far at 60 a second (32 px). Continuous, rising, and held at the top past 60; a rate of nothing is the base.
+        second (compositor_stream_rate). Eight pixels up to 10 a second, then a gentle power curve, 3 x (rate - 10) / 35 to the 1.5, so
+        a notch is four times as far at 45 a second (32 px). Continuous, rising, and held at the top past 45; a rate of nothing is the base.
 */
 static long long compositor_stream_gain(unsigned long long rate)
 {
@@ -16948,7 +16950,7 @@ static long long compositor_stream_gain(unsigned long long rate)
 
         if (!x)
                 return COMPOSITOR_GAIN_BASE;
-        xq = (unsigned long long)x * 65536 / 5000;
+        xq = (unsigned long long)x * 65536 / 3500;
         xq = xq > 65536 ? 65536 : xq;
         f = xq * ui_touch_isqrt(xq * 65536) / 65536; // x to the 1.5 in 65536ths
         return COMPOSITOR_GAIN_BASE + COMPOSITOR_GAIN_BASE * 3 * (long long)f / 65536;
@@ -17134,6 +17136,41 @@ static int compositor_pad_pinch(struct compositor_pad *pad)
         return 1;
 }
 
+/*
+        A hand's speed on the pad is its gain, as a person's scroll on any trackpad is: a slow hand goes one for one (precise), and a quick one
+        goes further, up to COMPOSITOR_PAD_GAIN_TOP 256ths of that at COMPOSITOR_PAD_GAIN_FAST millimetres a second and above, rising in a
+        line from COMPOSITOR_PAD_GAIN_SLOW. A report's turn (120ths of a notch, 12 a millimetre) over the time since the pad's last report is
+        the speed; the first report of a hand, and one after a pause, have none and are not gained. What the gain leaves under a whole 120th is
+        carried to the next report.
+*/
+#define COMPOSITOR_PAD_GAIN_SLOW 40
+#define COMPOSITOR_PAD_GAIN_FAST 240
+#define COMPOSITOR_PAD_GAIN_TOP 614
+#define COMPOSITOR_PAD_GAIN_PAUSE_NS 100000000ull
+static void compositor_pad_gain(struct compositor_pad *pad, positive now, int *x, int *y)
+{
+        unsigned long long since = pad->gain_at, gap = now - since;
+        long long turn = (*x < 0 ? -(long long)*x : *x) > (*y < 0 ? -(long long)*y : *y) ? (*x < 0 ? -(long long)*x : *x) : (*y < 0 ? -(long long)*y : *y);
+        long long speed, gain;
+
+        pad->gain_at = now;
+        if (!since || now <= since || gap > COMPOSITOR_PAD_GAIN_PAUSE_NS)
+        {
+                pad->gain_left_x = pad->gain_left_y = 0;
+                return;
+        }
+        speed = turn * 1000000000ll / (long long)gap / COMPOSITOR_PAD_WHEEL; // millimetres a second
+        gain = speed <= COMPOSITOR_PAD_GAIN_SLOW ? 256
+               : speed >= COMPOSITOR_PAD_GAIN_FAST ? COMPOSITOR_PAD_GAIN_TOP
+               : 256 + (speed - COMPOSITOR_PAD_GAIN_SLOW) * (COMPOSITOR_PAD_GAIN_TOP - 256) / (COMPOSITOR_PAD_GAIN_FAST - COMPOSITOR_PAD_GAIN_SLOW);
+        {
+                long long gx = (long long)*x * gain + pad->gain_left_x, gy = (long long)*y * gain + pad->gain_left_y;
+
+                *x = (int)(gx / 256), *y = (int)(gy / 256);
+                pad->gain_left_x = (int)(gx - (long long)*x * 256), pad->gain_left_y = (int)(gy - (long long)*y * 256);
+        }
+}
+
 static void compositor_pad_apply(unsigned int at, positive now)
 {
         int x, y, kind = compositor_pad_report(&compositor.pad[at], &x, &y);
@@ -17149,6 +17186,7 @@ static void compositor_pad_apply(unsigned int at, positive now)
                 compositor.table->input_wheel_read[at]++;
                 compositor.table->input_wheel_used[at]++;
                 compositor.table->input_wheel_last[at] = now;
+                compositor_pad_gain(&compositor.pad[at], now, &x, &y);
                 if (y)
                         compositor_wheel(y, 0, WINDOW_WHEEL_PRECISE);
                 if (x)

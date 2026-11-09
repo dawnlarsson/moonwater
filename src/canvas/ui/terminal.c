@@ -3242,6 +3242,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 //      ROWS is unsigned, so its negation is not: the bounds are signed here.
                 steps = steps > (int)ROWS * 120 ? (int)ROWS * 120 : steps < -(int)ROWS * 120 ? -(int)ROWS * 120 : steps;
+                // Natural direction turns the wheel a program is given (its arrows, its buttons) as it turns every region's
+                if (ui_kit.scroll_off & WINDOW_SCROLL_FLIP)
+                        steps = -steps;
 
                 // A program that asked for the pointer is owed the wheel as buttons 64 and 65, one a notch:
                 // a wheel that reports in fifteenths of a notch is the same notches as one that reports whole.

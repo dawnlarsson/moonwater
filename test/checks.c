@@ -150366,6 +150366,45 @@ static fn check_pad_scroll(void)
               (total >= 40959 && total <= 40961) || (total <= -40959 && total >= -40961));
 }
 
+// A hand's speed on the pad is its gain (compositor_pad_gain): the first report of a hand and one after a pause are one for one; a slow hand
+// (under 40 mm a second) is one for one; a quick one (240 mm a second and over) goes 2.4 times as far; between, in a line; the remainder under
+// a 120th is carried, so a hundred reports add up to the gain of their sum.
+static fn check_pad_gain(void)
+{
+        struct compositor_pad pad;
+        positive t = 5000000000ull;
+        int x, y, first, slow, quick, middle, paused;
+        long total = 0;
+
+        memory_zero(&pad, sizeof(pad));
+        x = 0, y = 100;
+        compositor_pad_gain(&pad, t, &x, &y);
+        first = y == 100;
+        x = 0, y = 4;
+        compositor_pad_gain(&pad, t += 16000000ull, &x, &y);   // 4 of 12 a millimetre in 16 ms: 21 mm a second
+        slow = y == 4;
+        x = 0, y = 60;
+        compositor_pad_gain(&pad, t += 16000000ull, &x, &y);   // 5 mm in 16 ms: 312 mm a second
+        quick = y == 143 || y == 144;
+        x = 0, y = 29;
+        compositor_pad_gain(&pad, t += 16000000ull, &x, &y);   // 2.4 mm in 16 ms: 151 mm a second, 1.0 + 0.55 of the way up the line
+        middle = y >= 45 && y <= 58;
+        x = 0, y = 50;
+        compositor_pad_gain(&pad, t += 500000000ull, &x, &y);  // half a second after: a hand begun again
+        paused = y == 50;
+        memory_zero(&pad, sizeof(pad));
+        for (int k = 0; k < 100; k++)
+        {
+                x = 0, y = 30;                                  // 2.5 mm in 16 ms: 156 mm a second, whatever the report
+                compositor_pad_gain(&pad, 5000000000ull + (positive)k * 16000000ull, &x, &y);
+                total += y;
+        }
+        check("pad gain: the first report of a hand, a slow hand and a hand after a pause are one for one; a quick one goes 2.4 times as far, a middling one between",
+              first && slow && quick && middle && paused);
+        check("pad gain: a hundred reports of 30 120ths at 156 mm a second add up to their gain, 1.81 times, the first report's 30 as it was (the remainders carried)",
+              total >= 5300 && total <= 5500);
+}
+
 static fn check_wheel_stream(void)
 {
         int ok = 1, two = 0;
@@ -150584,7 +150623,7 @@ static fn check_stream_fling(void)
         }
 }
 
-// The rate-adaptive gain (compositor_stream_gain): 8 px at 10 notches a second and below, 32 px at 60 and above, rising in between on a
+// The rate-adaptive gain (compositor_stream_gain): 8 px at 10 notches a second and below, 32 px at 45 and above, rising in between on a
 // curve with no step; a device's notches at 10, 30, 60 and 100 a second move px a second that follow the curve; and no rate, however
 // odd (none, the same instant, a clock backward, a huge notch), leaves the gain between the base and the top.
 static fn check_stream_gain(void)
@@ -150607,7 +150646,7 @@ static fn check_stream_gain(void)
         held &= compositor_stream_gain(6000) == top && compositor_stream_gain(10000) == top && compositor_stream_gain(1000) == COMPOSITOR_GAIN_BASE;
         check("stream gain: the curve rises with the rate, never falls, and has no step (at most 3 of 256ths a hundredth of a notch a second)",
               mono && worst <= 3);
-        check("stream gain: 8 px at 10 a second and below, 32 px at 60 and above and held there, and between them between the two",
+        check("stream gain: 8 px at 10 a second and below, 32 px at 45 and above and held there, and between them between the two",
               held && bounded);
 
         memory_zero(&compositor, sizeof(compositor));
@@ -150632,8 +150671,8 @@ static fn check_stream_gain(void)
         }
         string_format(log, "  stream gain: px a second at 10, 30, 60 and 100 notches a second: %p, %p, %p, %p (the curve's gain there times the rate)\n",
                       (positive)rate_px[0], (positive)rate_px[1], (positive)rate_px[2], (positive)rate_px[3]);
-        check("stream gain: a stream at 10, 30, 60 and 100 notches a second moves about 80, 420, 1900 and 3100 px a second, rising with the rate",
-              rate_px[0] > 72 && rate_px[0] < 88 && rate_px[1] > 400 && rate_px[1] < 440 && rate_px[2] > 1850 && rate_px[2] < 1990 &&
+        check("stream gain: a stream at 10, 30, 60 and 100 notches a second moves about 80, 550, 1900 and 3200 px a second, rising with the rate",
+              rate_px[0] > 72 && rate_px[0] < 88 && rate_px[1] > 520 && rate_px[1] < 580 && rate_px[2] > 1850 && rate_px[2] < 1990 &&
               rate_px[3] > 3000 && rate_px[3] < 3250 && rate_px[0] < rate_px[1] && rate_px[1] < rate_px[2] && rate_px[2] < rate_px[3]);
 
         // Hostile: the same instant (no span), a clock that went back, and a notch of a trillion.
@@ -151059,6 +151098,76 @@ static void check_wheel_body_curve(void)
               pulse && burst && turns);
 }
 
+// The overscroll stretch (ui_stretch): a picture pulled past its top is stretched from the top, which stays; the content is larger at the
+// pinned end and its own size at the far side; the pull is the band's pixels and the stretch grows with it and goes no further than 1.7 times;
+// past the bottom it is the same from the bottom; no pull is no change; a recorded frame is lost and left as it is.
+static void check_stretch(void)
+{
+        static unsigned int picture[64 * 200], before[64 * 200];
+        struct ui ui = terminal.ui;
+        struct ui_scene scene;
+        b32 pinned, larger, far_side, monotone = true, mirrored, grows, untouched, lost;
+        int at_20, at_20_big, from_bottom;
+
+        ui.pixels = picture, ui.pitch = 64, ui.width = 64, ui.height = 200, ui.scene = null;
+        ui.band_top = ui.band_bottom = 0;
+        for (int row = 0; row < 200; row++)
+                for (int column = 0; column < 64; column++)
+                        picture[row * 64 + column] = 0xff000000u | (unsigned int)row << 16 | (unsigned int)row << 8 | (unsigned int)row;
+        memory_copy(before, picture, sizeof(picture));
+        untouched = !ui_stretch(&ui, 0, 0, 64, 200, 0) && !memory_compare(before, picture, sizeof(picture));
+        ui_stretch(&ui, 0, 0, 64, 200, -30);
+        for (int row = 1; row < 200; row++)
+                monotone = monotone && (picture[row * 64] & 255) >= (picture[(row - 1) * 64] & 255);
+        pinned = (picture[0] & 255) == 0;
+        at_20 = (int)(picture[20 * 64] & 255);
+        larger = at_20 < 18;                                  // twenty rows down shows what lay less than eighteen down: enlarged at the pinned end
+        far_side = (int)(picture[199 * 64] & 255) > 170 && (int)(picture[199 * 64] & 255) < 200; // and the last row shows what lay near it
+        for (int row = 0; row < 200; row++)
+                for (int column = 0; column < 64; column++)
+                        picture[row * 64 + column] = 0xff000000u | (unsigned int)row << 16 | (unsigned int)row << 8 | (unsigned int)row;
+        ui_stretch(&ui, 0, 0, 64, 200, -90);
+        at_20_big = (int)(picture[20 * 64] & 255);
+        grows = at_20_big < at_20;                            // a longer pull is a larger stretch
+        for (int row = 0; row < 200; row++)
+                for (int column = 0; column < 64; column++)
+                        picture[row * 64 + column] = 0xff000000u | (unsigned int)row << 16 | (unsigned int)row << 8 | (unsigned int)row;
+        ui_stretch(&ui, 0, 0, 64, 200, 30);
+        from_bottom = (int)(picture[179 * 64] & 255);
+        mirrored = (picture[199 * 64] & 255) == 199 && from_bottom > 181 && (picture[0] & 255) > 0 && (picture[0] & 255) < 30;
+        memory_copy(picture, before, sizeof(picture));
+        memory_zero(&scene, sizeof(scene));
+        ui.scene = &scene;
+        ui_stretch(&ui, 0, 0, 64, 200, -30);
+        lost = scene.lost == UI_LOST_STRETCH && !memory_compare(before, picture, sizeof(picture));
+        check("kit stretch: no pull is no change, and a recorded frame is left as it is and lost to the stretch", untouched && lost);
+        check("kit stretch: a pull past the top keeps the top row, shows the content larger at the top and its own size at the far side, in order", pinned && larger && far_side && monotone);
+        check("kit stretch: a longer pull stretches more, and a pull past the bottom is the same from the bottom", grows && mirrored);
+}
+
+// A stream's notches are followed at the rate they come at (ui_wheel_follow), so that a slow trackpad scroll is a steady motion and not a step to
+// each notch, and a quick one is followed with little lag; a mouse's notch is the body's own rate.
+static void check_stream_follow(void)
+{
+        struct ui_scroll s;
+        b64 t = 9000000000ll;
+        int slow, quick, mouse, first;
+
+        memory_zero(&s, sizeof(s));
+        ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t);
+        first = s.body.follow == BODY_NOTCH_RATE;
+        for (int k = 0; k < 8; k++)
+                ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t += 100000000ll);
+        slow = s.body.follow >= 9 && s.body.follow <= 11;
+        for (int k = 0; k < 12; k++)
+                ui_wheel_follow(&s, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, t += 12000000ll);
+        quick = s.body.follow == UI_STREAM_FOLLOW_MOST;
+        ui_wheel_follow(&s, 0, t += 12000000ll);
+        mouse = s.body.follow == 0 && s.stream_rate == 0;
+        check("kit stream follow: the first notch of a stream is the body's rate, ten a second is followed at 10, sixty at the most (40), and a mouse's notch at its own",
+              first && slow && quick && mouse);
+}
+
 // The wheel's step (ui_wheel_notch) and a fitting content. A stepped notch is 2.5 rows (100 px at the standard row), twice that at 200
 // percent, a region's own unit (the terminal's three lines) when it has one, and a precise turn is UI_NOTCH whatever the region says. A content
 // that fits its view has no far end: a wheel notch moves nothing, a finger cannot drag it toward the far side or leave it there, and a pull
@@ -151111,11 +151220,13 @@ static void check_wheel_step(void)
 
 static void check_kit_body(void)
 {
+        check_stream_follow();
+        check_stretch();
         check_wheel_step();
         check_wheel_body_curve();
         static const long finger_00[] = { 1, 8, 25, 33, 30, 23, 20, 13, 10, 9, 6 };
         static const long coast_06[] = { 4026, 3924, 3839, 3770, 3715, 3672, 3638, 3617 };
-        static const long dip_02[] = { -21, -21, -17, -12, -8, -5, -4, -2, -2, -1, 0, 0 };
+        static const long dip_02[] = { -24, -19, -11, -6, -3, -2, -1, -1, -1, -1, -1, 0 }; // T02's dip (the recording's was -21 -21 -17 -12 -8 -5 -4 -2 -2 -1 0 0 at the Mac's spring, 11 a second), at the spring that is 20
         struct ui_body b;
         b64 now, drawn, reach_small, reach_big, far_small;
         long worst_coast, worst_dip, dip_low;
@@ -151181,8 +151292,8 @@ static void check_kit_body(void)
                 worst_dip = err > worst_dip ? err : worst_dip;
                 dip_low = at < dip_low ? at : dip_low;
         }
-        string_format(log, "  kit body: touch T02's top dip: lowest %b px (recorded -22), worst error %p px\n", (bipolar)dip_low, (positive)worst_dip);
-        check("kit body: a coast into the top is pushed past it, drawn as the rubber band, and springs home within 3 px of the recorded dip", dip_ok && dip_low < -15);
+        string_format(log, "  kit body: touch T02's top dip: lowest %b px (the Mac's was -22), worst error %p px\n", (bipolar)dip_low, (positive)worst_dip);
+        check("kit body: a coast into the top is pushed past it, drawn as the rubber band, and springs home within 3 px of the dip at the spring (20 a second, home within 0.25 s)", dip_ok && dip_low < -15);
 
         ui_kit.scroll_off = 0;
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
@@ -162370,6 +162481,7 @@ b32 main()
         check_kit_axis_swipe();
         check_pad_pinch();
         check_pad_scroll();
+        check_pad_gain();
         check_wheel_stream();
         check_wheel_mouse();
         check_scroll_bits();
