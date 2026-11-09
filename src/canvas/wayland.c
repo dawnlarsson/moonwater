@@ -6276,13 +6276,19 @@ static long wayland_inhibitors_now(void)
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
+                long seen = 0;
 
                 if (!c || c->dead || !c->inhibitors)
                         continue;
-                for (long at = 0; at < WAYLAND_OBJECTS; at++)
-                        if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && c->objects[at].id &&
-                            wayland_surface_shown(c, wayland_surface_of(c, at)))
-                                count++;
+                // c->inhibitors counts the zwp_idle_inhibitor_v1 objects the client holds (wayland_object_free takes one back when it
+                // goes), so the scan ends at the last of them: a turn of the loop asks this on every pass while a video plays.
+                for (long at = 0; at < WAYLAND_OBJECTS && seen < c->inhibitors; at++)
+                        if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && c->objects[at].id)
+                        {
+                                seen++;
+                                if (wayland_surface_shown(c, wayland_surface_of(c, at)))
+                                        count++;
+                        }
         }
         return count;
 }
