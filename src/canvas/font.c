@@ -9168,7 +9168,7 @@ static __attribute__((used)) p32 font_mix(const font_engine address_to e, p32 ba
         as four planes of bytes, which is the table memory_translate_u32_rect
         takes. The engine keeps 64 pairs.
 */
-static __attribute__((used)) const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
+static __attribute__((used)) const p32 address_to font_tones_reference(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
         strength = strength > 255 ? 255 : strength;
         p64 key = (p64)1 << 63 | (p64)strength << 48 | (p64)e->linear << 56 |
@@ -9198,6 +9198,144 @@ static __attribute__((used)) const p32 address_to font_tones(font_engine address
         pair->key = key;
         return pair->pixel;
 }
+
+//      font_tones: the hit path, in assembly, for arm64 and x86-64 (SysV, not Windows). The key is the reference's, built
+//      as it builds it: the strength clamped to 255, the linear flag at bit 56, the colour's and the ground's 24 bits, and
+//      bit 63. The set is the hash's top four bits, and its ways are the pairings 4 * 2064 bytes apart from the pairs. A
+//      way with the key answers with its pixel table, 8 bytes into the pairing, the reference's own pointer. Nothing is
+//      written on a hit, so the round-robin turns stay as they were. Anything else -- a miss, which makes a way -- is a
+//      tail call to font_tones_reference with the arguments untouched, and it alone fills the way. Bit 63 is always set,
+//      so a way never filled (its key 0) cannot match. The offsets are font_engine's and font_pairing's, checked below.
+#if (defined(__aarch64__) || defined(__x86_64__)) && !defined(_WIN32)
+_Static_assert(offset_of(font_engine, linear) == 20 && offset_of(font_engine, pairs) == 643448 &&
+               sizeof(font_pairing) == 2064 && offset_of(font_pairing, key) == 0 &&
+               offset_of(font_pairing, pixel) == 8 && FONT_PAIRS == 64 && FONT_WAYS == 4 &&
+               FONT_PAIRS / FONT_WAYS == 16 && sizeof(font_pairing) * FONT_WAYS == 8256 && sizeof(bool) == 1,
+               "font_tones' assembly: the layouts it reads, and the 16 sets of 4 ways it probes");
+#endif
+
+#if defined(__aarch64__) && !defined(_WIN32)
+const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength);
+// arm64 (AAPCS64): x0 e, w1 colour, w2 background, w3 strength; the arguments are left as they came for the tail call.
+// Scratch x12-x16 only; a leaf with no stack.
+__asm__(".text\n"
+        ".globl " FONT_SYM(font_tones) "\n"
+        ".p2align 2\n"
+        FONT_SYM(font_tones) ":\n"
+        "mov w12, #255\n"
+        "cmp w3, #255\n"
+        "csel w12, w3, w12, ls\n"                 // strength = min(strength, 255)
+        "and w13, w1, #0xffffff\n"                // colour & 0xffffff << 24
+        "lsl x13, x13, #24\n"
+        "and w14, w2, #0xffffff\n"                // background & 0xffffff
+        "orr x13, x13, x14\n"
+        "lsl x14, x12, #48\n"                     // strength << 48
+        "orr x13, x13, x14\n"
+        "ldrb w14, [x0, #20]\n"                   // e->linear, a bool, << 56
+        "lsl x14, x14, #56\n"
+        "orr x13, x13, x14\n"
+        "orr x13, x13, #0x8000000000000000\n"     // the key's bit 63: x13 = key
+        "movz x15, #0x7c15\n"                     // set = key * 0x9e3779b97f4a7c15 >> 60
+        "movk x15, #0x7f4a, lsl #16\n"
+        "movk x15, #0x79b9, lsl #32\n"
+        "movk x15, #0x9e37, lsl #48\n"
+        "mul x15, x13, x15\n"
+        "lsr x15, x15, #60\n"
+        "movz x16, #8256\n"                       // 4 ways of 2064 bytes
+        "mul x15, x15, x16\n"
+        "add x15, x0, x15\n"
+        "add x15, x15, #0x9d, lsl #12\n"          // x15 = &e->pairs[set * FONT_WAYS], pairs at 643448
+        "add x15, x15, #0x178\n"
+        "ldr x16, [x15]\n"                        // way 0
+        "cmp x16, x13\n"
+        "b.eq 10f\n"
+        "ldr x16, [x15, #2064]\n"                 // way 1
+        "cmp x16, x13\n"
+        "b.eq 11f\n"
+        "ldr x16, [x15, #4128]\n"                 // way 2
+        "cmp x16, x13\n"
+        "b.eq 12f\n"
+        "ldr x16, [x15, #6192]\n"                 // way 3
+        "cmp x16, x13\n"
+        "b.eq 13f\n"
+        "b " FONT_SYM(font_tones_reference) "\n"  // a miss: the reference makes the way
+        "10:\n"
+        "add x0, x15, #8\n"                       // way 0's pixel table
+        "ret\n"
+        "11:\n"
+        "add x0, x15, #2072\n"
+        "ret\n"
+        "12:\n"
+        "movz x16, #4136\n"
+        "add x0, x15, x16\n"
+        "ret\n"
+        "13:\n"
+        "movz x16, #6200\n"
+        "add x0, x15, x16\n"
+        "ret\n"
+        FONT_TYPE(font_tones)
+        FONT_SIZE(font_tones));
+#elif defined(__x86_64__) && !defined(_WIN32)
+const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength);
+// x86-64 (SysV): rdi e, esi colour, edx background, ecx strength. The arguments are left as they came for the tail call;
+// rax and r8-r11 are scratch, and there is no stack to restore.
+__asm__(".intel_syntax noprefix\n"
+        ".text\n"
+        ".globl " FONT_SYM(font_tones) "\n"
+        ".p2align 4\n"
+        FONT_SYM(font_tones) ":\n"
+        "mov r8d, ecx\n"
+        "mov r9d, 255\n"
+        "cmp r8d, 255\n"
+        "cmova r8d, r9d\n"                        // strength = min(strength, 255)
+        "mov r10d, esi\n"
+        "and r10d, 0xffffff\n"                    // colour & 0xffffff << 24
+        "shl r10, 24\n"
+        "mov r11d, edx\n"
+        "and r11d, 0xffffff\n"                    // background & 0xffffff
+        "or r10, r11\n"
+        "shl r8, 48\n"                            // strength << 48
+        "or r10, r8\n"
+        "movzx eax, byte ptr [rdi + 20]\n"        // e->linear, a bool, << 56
+        "shl rax, 56\n"
+        "or r10, rax\n"
+        "bts r10, 63\n"                           // r10 = key
+        "mov r11, r10\n"                          // set = key * 0x9e3779b97f4a7c15 >> 60
+        "movabs rax, 0x9e3779b97f4a7c15\n"
+        "imul r11, rax\n"
+        "shr r11, 60\n"
+        "imul r11, r11, 8256\n"                   // 4 ways of 2064 bytes
+        "lea r11, [rdi + r11 + 643448]\n"         // r11 = &e->pairs[set * FONT_WAYS]
+        "cmp qword ptr [r11], r10\n"
+        "je 10f\n"
+        "cmp qword ptr [r11 + 2064], r10\n"
+        "je 11f\n"
+        "cmp qword ptr [r11 + 4128], r10\n"
+        "je 12f\n"
+        "cmp qword ptr [r11 + 6192], r10\n"
+        "je 13f\n"
+        "jmp " FONT_SYM(font_tones_reference) "\n"   // a miss: the reference makes the way
+        "10:\n"
+        "lea rax, [r11 + 8]\n"                    // way 0's pixel table
+        "ret\n"
+        "11:\n"
+        "lea rax, [r11 + 2072]\n"
+        "ret\n"
+        "12:\n"
+        "lea rax, [r11 + 4136]\n"
+        "ret\n"
+        "13:\n"
+        "lea rax, [r11 + 6200]\n"
+        "ret\n"
+        FONT_TYPE(font_tones)
+        FONT_SIZE(font_tones)
+        ".att_syntax prefix\n");
+#else
+static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32 background, p32 strength)
+{
+        return font_tones_reference(e, colour, background, strength);
+}
+#endif
 
 //      A glyph's coverage onto the target at x, y: through the pair's tones
 //      where the pixel under it is still the background, by the full mix
