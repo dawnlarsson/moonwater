@@ -31475,7 +31475,9 @@ static b32 text_grep_run()
 
         regex_boundary = whole_line ? REGEX_BOUNDARY_LINE :
                          whole_word ? REGEX_BOUNDARY_WORD : REGEX_BOUNDARY_NONE;
-        const rx_hints *literal = regex_current.hints;
+        // No expression was compiled when never is set, so regex_current has no
+        // hints to read: the empty string's hints stand in for them.
+        const rx_hints *literal = never ? address_of grep_no_literal : regex_current.hints;
         bool literal_proves = !many && (regex_current.flags & RX_LITERAL_PROVES) != 0;
 
         grep_literals.count = 0;

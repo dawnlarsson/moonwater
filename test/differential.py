@@ -24666,6 +24666,15 @@ _TEXT_GREP_EXTRA = (
         ("-c", "-e", "*a"), ("-n", "-e", "*a"), ("-E", "-o", "-e", "*a"),
         ("-E", "-w", "-e", "*a"), ("-E", "-x", "-e", "+a"), ("-E", "-v", "-e", "*a"),
         ("-E", "-e", "*a", "-e", "+b"), ("-F", "-e", "*a"))),
+    #       An empty pattern file names no pattern at all. Each of these asks
+    #       for it with -F, -c, -v or -x and no -e, or with one -e beside it;
+    #       under MW_UBSAN=1 the shell once read a hint through a pointer that
+    #       was never set, and trapped where GNU answers without reading.
+    *({"argv": argv, "stdin": "text_a"} for argv in (
+        ("-F", "-c", "-f", "/dev/null"), ("-c", "-f", "/dev/null"),
+        ("-v", "-F", "-c", "-f", "/dev/null"), ("-v", "-c", "-f", "/dev/null"),
+        ("-x", "-F", "-c", "-f", "/dev/null"), ("-v", "-n", "-f", "/dev/null"),
+        ("-F", "-n", "-f", "/dev/null", "-e", "alpha"))),
     #       A backslash that ends a pattern is refused, and refused with the
     #       one after it too: joined by an alternation it once quoted the bar
     #       and matched nothing. A count past the largest is the largest, and
