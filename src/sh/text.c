@@ -23814,8 +23814,8 @@ static bool tr_case_classes(bool complement)
         if (complement || !tr_two.has_class)
                 return true;
 
-        positive upper = tr_class_size(byte_class_index("upper", 5));
-        positive lower = tr_class_size(byte_class_index("lower", 5));
+        positive upper = tr_class_size(byte_class_index_5_5("upper", 5));
+        positive lower = tr_class_size(byte_class_index_5_5("lower", 5));
         b32 c1 = 0;
         b32 c2 = 0;
         bool new_one = true;

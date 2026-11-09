@@ -53855,6 +53855,8 @@ enum
 
 // Which of the twelve, or -1 for a name that is none of them.
 PURE b32 byte_class_index(string_address name, positive length);
+// byte_class_index for a name of five bytes (the same answer; any other length goes to the generic).
+PURE b32 byte_class_index_5_5(string_address name, positive length);
 CONST bool byte_class_holds(b32 which, p8 value);
 fn string_set_add(b8 address_to set, string_address members);
 
