@@ -10803,24 +10803,40 @@ static void compositor_scroll_publish(unsigned int off, unsigned int speed)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// Whether a Scrolling switch is on for the word its file holds (the row's standard when it holds none, or none of its words). A switch row's
+// value is the place of its word in "on off" (registry.c: setting_words_of), so on is 0 and off is 1, as every other reader of a switch has it
+// (touch, predict touch, shake, acceleration). This was read as if on were 1: momentum and the rubber band, whose standard is on, were off in a
+// desktop that had never set them (and, set on, off), and a release threw nothing and an end stopped dead.
+static bool compositor_switch_on(const char *path, const char *word)
+{
+        long value = 0;
+
+        compositor_setting_kept(path, word, &value);
+        return value == 0;
+}
+
+// The table's scroll_off (WINDOW_SCROLL_FLIP, _STOPS and _STILL) for the words of natural direction, momentum and the rubber band: nothing set
+// is 0 bits, the standard (natural direction off: the OS's sign; momentum and the rubber band on).
+static unsigned int compositor_scroll_bits(const char *natural, const char *momentum, const char *rubber)
+{
+        return (compositor_switch_on(SETTING_SCROLL_NATURAL_PATH, natural) ? WINDOW_SCROLL_FLIP : 0) |
+               (compositor_switch_on(SETTING_SCROLL_MOMENTUM_PATH, momentum) ? 0 : WINDOW_SCROLL_STOPS) |
+               (compositor_switch_on(SETTING_SCROLL_RUBBER_PATH, rubber) ? 0 : WINDOW_SCROLL_STILL);
+}
+
 // The Scrolling group's four rows, read in one place: natural direction (off when nothing is kept), momentum and the rubber band (on), and
 // the trackpad's speed (normal when nothing is kept, or what is kept is none of the words), which compositor_speed takes for the pads.
 static void compositor_scroll_read(void)
 {
-        char word[16];
-        long natural = 0, momentum = 1, rubber = 1;
+        char natural[16], momentum[16], rubber[16], word[16];
 
-        compositor_word(SETTING_SCROLL_NATURAL_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_SCROLL_NATURAL_PATH, word, &natural);
-        compositor_word(SETTING_SCROLL_MOMENTUM_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_SCROLL_MOMENTUM_PATH, word, &momentum);
-        compositor_word(SETTING_SCROLL_RUBBER_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_SCROLL_RUBBER_PATH, word, &rubber);
+        compositor_word(SETTING_SCROLL_NATURAL_PATH, natural, sizeof(natural));
+        compositor_word(SETTING_SCROLL_MOMENTUM_PATH, momentum, sizeof(momentum));
+        compositor_word(SETTING_SCROLL_RUBBER_PATH, rubber, sizeof(rubber));
         compositor_word(SETTING_TRACKPAD_SPEED_PATH, word, sizeof(word));
         compositor.trackpad_speed = string_equals((string_address)word, (string_address) "slow") ? 1
                                     : string_equals((string_address)word, (string_address) "fast") ? 2 : 0;
-        compositor_scroll_publish((natural ? 0 : WINDOW_SCROLL_FLIP) | (momentum ? 0 : WINDOW_SCROLL_STOPS) | (rubber ? 0 : WINDOW_SCROLL_STILL),
-                                  compositor.trackpad_speed);
+        compositor_scroll_publish(compositor_scroll_bits(natural, momentum, rubber), compositor.trackpad_speed);
 }
 
 static void compositor_theme_read(void)
@@ -16911,6 +16927,15 @@ static int compositor_wheel_stream(unsigned int at, positive now)
         return stream;
 }
 
+// Whether a wheel event of device at, read at now, is a stream's. A mouse proper (relative, with buttons: WINDOWS_INPUT_MOUSE) never is, however
+// fast its wheel is spun: its detents are notches, each the same distance, and a spin of them must not move less than a lone one does (it did:
+// notches under 60 ms apart were taken for a trackpad, and moved 8 to 32 px against a lone notch's row). Only a tablet (a virtual machine's
+// pointer, which a Mac's trackpad rides) can be a stream.
+static int compositor_wheel_streams(unsigned int at, positive now)
+{
+        return (compositor.input_kinds[at] & WINDOWS_INPUT_MOUSE) ? 0 : compositor_wheel_stream(at, now);
+}
+
 /*
         A stream's gain: the pixels a stream notch moves at 100 percent, in 256ths, as a function of the notches' rate in centi-notches a
         second (compositor_stream_rate). Eight pixels up to 10 a second, then a gentle power curve, 3 x (rate - 10) / 50 to the 1.5, so
@@ -18401,7 +18426,7 @@ static void compositor_input_read(unsigned int at)
                                 if (fine || !(compositor.hires[at] >> sideways & 1))
                                 {
                                         // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
-                                        int stream = compositor_wheel_stream(at, now);
+                                        int stream = compositor_wheel_streams(at, now);
 
                                         if (compositor.table)
                                                 window_wheel_note(compositor.table, at, now, stream);
@@ -19304,8 +19329,9 @@ static b32 compositor_main()
         compositor_inputs_open();
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
-                // The -i device is no keyboard the compositor took (its kinds stay none): the headless fifo is not a physical one.
-                compositor.input_kinds[compositor.input_count] = 0;
+                // The -i device is no keyboard the compositor took: the headless fifo is not a physical one. It is a mouse's wheel and buttons, which
+                // is what a driver writes to it, so its wheel is stepped as a mouse's is (compositor_wheel_streams).
+                compositor.input_kinds[compositor.input_count] = WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
                 compositor.inputs[compositor.input_count] = extra;
                 compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
         }

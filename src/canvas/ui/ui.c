@@ -5985,7 +5985,8 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         ones), the positions are Q30. Every constant is fitted to a Mac's trackpad scroll, recorded as the scroll view's
         offset with each event (memory note scroll-input-redo-2026-11-05; refit when the recording grows). A finger moves
         the position one for one, and past an end the rubber band draws it. A wheel's notch moves a target that the position
-        follows critically damped (BODY_NOTCH_OMEGA), and a notch into an end counts BODY_NOTCH_PULL times, so that it stretches the band. A release's coast starts at BODY_CARRY of the lift's speed and
+        runs to at once and eases out (BODY_NOTCH_RATE: the first frame already shows a quarter of the way, and a notch on a notch just moves the
+        target on), and a notch into an end counts BODY_NOTCH_PULL times, so that it stretches the band. A release's coast starts at BODY_CARRY of the lift's speed and
         falls by e in BODY_TAU_NS. A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
         BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
         home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
@@ -6011,8 +6012,9 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
 #define BODY_FREE_AT ((b64)1 << 50)          // a free throw starts 2^20 pixels along, and its far end is as far again (ui_body_free)
 #define UI_BODY_FRAME_NS 16000000l           // a body that moves is stepped again this long later: a frame
 
-#define BODY_NOTCH_OMEGA 22                  // a wheel's notches move a target, and the position follows it critically damped at this rate, per second: it eases in from rest, and a notch on a notch keeps its speed
-#define BODY_NOTCH_PULL 2                    // a notch's travel past an end counts this many times, so that a wheel at an end stretches the band as a pad's pull does
+#define BODY_NOTCH_RATE 18                   // a wheel's notches move a target, and the position runs to it at once and eases out: e to the minus this, per second, of the gap is left (a quarter of a notch in the first frame, 83 percent at 100 ms, all but 3 percent at 200)
+#define BODY_NOTCH_PULL 3                    // a notch's travel past an end counts this many times, so that a wheel at an end stretches the band as a pad's pull does
+#define BODY_NOTCH_PAST 4                    // the target goes no further past an end than this share of the view (one in this many): the band a wheel can pull
 
 #define BODY_IDLE 0     // nothing moves it
 #define BODY_TRACK 1    // a finger holds it: one for one, drawn as the rubber band past an end
@@ -6117,10 +6119,11 @@ static b32 ui_body_outside(const struct ui_body address_to b)
         return !(ui_kit.scroll_off & WINDOW_SCROLL_STILL) && ui_body_past(b, b->raw) > 0;
 }
 
-// With the rubber band off the position is held inside the ends as it moves, so a reversal answers at once; whether it moved.
+// With the rubber band off the position is held inside the ends as it moves, so a reversal answers at once; whether it moved. A content
+// that fits has no far end to pull toward (it can be pulled down from its top, and no further up than its top): it is held there always.
 static b32 ui_body_pin(struct ui_body address_to b)
 {
-        b64 held = ui_kit.scroll_off & WINDOW_SCROLL_STILL ? ui_body_clamp(b, b->raw) : b->raw;
+        b64 held = ui_kit.scroll_off & WINDOW_SCROLL_STILL ? ui_body_clamp(b, b->raw) : !ui_body_far(b) && b->raw > 0 ? 0 : b->raw;
 
         if (held == b->raw)
                 return false;
@@ -6186,7 +6189,7 @@ static void ui_body_hold(struct ui_body address_to b, b64 at)
         ui_body_step(b, at);
         far = ui_body_far(b), now = ui_body_drawn(b);
 
-        b->raw = now < 0 ? 0 : far && now > far ? far : now;
+        b->raw = now < 0 ? 0 : now > far ? far : now;
         b->vel = 0;
         b->state = BODY_IDLE;
         b->at = at;
@@ -6199,8 +6202,8 @@ static b64 ui_body_stretched(const struct ui_body address_to b, b64 d)
         return d <= 0 ? 0 : d >= b->view ? b->view : ui_qdiv(ui_qmul(d, b->view), ui_qmul(BODY_RUBBER_C, b->view - d));
 }
 
-// the wheel's notches move the target (units, Q30) by delta, and the position follows it: from where it is, unless it is already
-// following one, and with the speed it has. A notch's travel out past an end counts BODY_NOTCH_PULL times, up to a sixth of the view past it.
+// the wheel's notches move the target (units, Q30) by delta, and the position runs to it: from where it is, unless it is already
+// running to one. A notch's travel out past an end counts BODY_NOTCH_PULL times, up to a BODY_NOTCH_PAST-th of the view past it.
 static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
 {
         b64 old, out, most;
@@ -6224,7 +6227,7 @@ static void ui_body_notch(struct ui_body address_to b, b64 delta, b64 at)
                 out = ui_body_past(b, b->target) - ui_body_past(b, old);
                 if (out > 0)
                         b->target += (b->target < 0 ? -out : out) * (BODY_NOTCH_PULL - 1);
-                most = b->view / 6;
+                most = b->view / BODY_NOTCH_PAST;
                 b->target = b->target < -most ? -most : b->target > ui_body_far(b) + most ? ui_body_far(b) + most : b->target;
         }
         b->state = BODY_NOTCH;
@@ -6352,14 +6355,18 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 }
                 else if (b->state == BODY_NOTCH)
                 {
-                        b64 gap = b->raw - b->target;
+                        b64 gap = b->target - b->raw, slack;
 
-                        b->vel += ui_qmul(-(b64)(BODY_NOTCH_OMEGA * BODY_NOTCH_OMEGA) * gap - 2 * (b64)BODY_NOTCH_OMEGA * b->vel, dt);
-                        b->raw += ui_qmul(b->vel, dt);
+                        // The gap closes by e to the minus BODY_NOTCH_RATE a second: the first millisecond is the fastest, so a notch shows
+                        // at once, and a notch on a notch moves the target on and the position goes on running.
+                        b->raw += gap - ui_qmul(gap, ui_body_decay(dt * BODY_NOTCH_RATE));
+                        b->vel = ui_qmul(b->target - b->raw, (b64)BODY_NOTCH_RATE * UI_ONE);
                         gap = b->raw - b->target;
-                        // Past an end the notch is a pulse: the band is let go of within a few pixels of its stretch once the notches have paused (half the hand's gap), and springs home.
-                        if (ui_body_outside(b) ? gap < UI_ONE * 6 && gap > -UI_ONE * 6 && at - b->pushed >= (b64)UI_HAND_GAP_NS / 2
-                                               : gap < BODY_REST && gap > -BODY_REST && b->vel < BODY_STILL && b->vel > -BODY_STILL)
+                        // Past an end the notch is a pulse: the band is let go of once it has come within a tenth of its stretch (6 pixels at the
+                        // least) of the target and the notches have paused (half the hand's gap), and springs home.
+                        slack = ui_body_past(b, b->target) / 10 > UI_ONE * 6 ? ui_body_past(b, b->target) / 10 : UI_ONE * 6;
+                        if (ui_body_outside(b) ? gap < slack && gap > -slack && at - b->pushed >= (b64)UI_HAND_GAP_NS / 2
+                                               : gap < BODY_REST && gap > -BODY_REST)
                         {
                                 if (!ui_body_outside(b))
                                         b->raw = b->target;
@@ -6444,6 +6451,7 @@ struct ui_scroll
         struct ui_tween ink, grow;   // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
         int inset;                   // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
         int scale;                   // the kit's, for logical pixels
+        int wheel;                   // device pixels one stepped notch of a wheel moves it; 0 for the kit's (UI_WHEEL_TENTHS tenths of a row)
 };
 
 /*
@@ -6719,18 +6727,51 @@ static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
 }
 
 /*
+        The distance a notch of the wheel moves a region, in device pixels. A stepped notch (a mouse wheel's detent) is UI_WHEEL_TENTHS
+        tenths of a row, 100 dp at the standard row, where Chrome's is 100 px and Android's mouse wheel 64 dp: a notch a row (40) was the
+        weak wheel. A region with a unit of its own (the terminal's three lines) says it in s->wheel. A precise turn (a trackpad's
+        two fingers, a stream) is UI_NOTCH, the pad's own path, and is not changed by it.
+*/
+#define UI_WHEEL_TENTHS 25
+static b64 ui_wheel_notch(const struct ui address_to ui, const struct ui_scroll address_to s, unsigned int flags)
+{
+        if (flags & WINDOW_WHEEL_PRECISE)
+                return (b64)UI_NOTCH * ui->scale / 100;
+        return s->wheel > 0 ? (b64)s->wheel : (b64)UI_ROW * UI_WHEEL_TENTHS / 10 * ui->scale / 100;
+}
+
+/*
+        A wheel event as pixels toward the far end (down, right), for a view that moves by its own units rather than by a body (the text's
+        lines and columns): a stepped notch is step pixels, a precise turn its share of UI_NOTCH, and natural direction turns both
+        (ui_body_sign), as it turns every region's. The remainder under a whole pixel is kept in *rest, in 120ths of a pixel, so that a
+        trackpad's hundred small reports add up to the pixels they are, and none of them is rounded up to a unit of its own.
+*/
+static long ui_wheel_pixels(const struct ui address_to ui, const struct window_event address_to event, long step, int address_to rest)
+{
+        b64 per = event->flags & WINDOW_WHEEL_PRECISE ? (b64)UI_NOTCH * ui->scale / 100 : step, delta = -(b64)event->a * per, total;
+        long pixels;
+
+        if (ui_kit.scroll_off & WINDOW_SCROLL_FLIP)
+                delta = -delta;
+        total = *rest + delta;
+        pixels = (long)(total / 120);
+        *rest = (int)(total - (b64)pixels * 120);
+        return pixels;
+}
+
+/*
         The one conversion of a window's wheel event into a body's motion, for every region the wheel turns (lists, pages, the gallery,
         the terminal's bar): the compositor, the touch recogniser and a Wayland client send the event and nothing converts it again.
         A horizontal notch (event->b) turns nothing. A release (WINDOW_WHEEL_STOP) lets a trackpad's hand go on its speed. Otherwise
-        the notch's turn is its 120ths of a notch: a stepped notch is a row at the scale, a precise turn (WINDOW_WHEEL_PRECISE, a
+        the notch's turn is its 120ths of a notch: a stepped notch is ui_wheel_notch at the scale, a precise turn (WINDOW_WHEEL_PRECISE, a
         trackpad's or a stream's) is its share of UI_NOTCH, and a notch moves the body's target, which the position follows
         (ui_body_notch), while a precise turn is the hand, one for one (ui_body_track). The sign: a notch down moves the position toward
         the far end, and natural direction turns it (ui_body_sign). With the wheel smooth off (ui_kit.wheel_off) a stepped notch is one
-        row at once. Answers whether it moved.
+        step at once. Answers whether it moved.
 */
 static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
 {
-        b64 now = ui_kit_time(), per = (event->flags & WINDOW_WHEEL_PRECISE ? UI_NOTCH : UI_ROW) * (b64)ui->scale / 100, q;
+        b64 now = ui_kit_time(), per = ui_wheel_notch(ui, s, event->flags), q;
 
         if (event->b)
                 return false;
@@ -6745,10 +6786,13 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
                 return false;
         q = ui_body_sign(-(b64)event->a * per * UI_ONE / 120);
         ui_scroll_extent(s);
+        // A notch (a mouse's detent, a stream's) moves a region that scrolls: one whose content fits has nowhere to go, in either direction.
+        if ((!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM)) && !ui_body_far(&s->body))
+                return false;
         if (!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM))
         {
                 ui_body_notch(&s->body, q, now);
-                // A stepped notch with the wheel smooth off is one row at once: the target inside the ends, and the body at rest there.
+                // A stepped notch with the wheel smooth off is one step at once: the target inside the ends, and the body at rest there.
                 if (!(event->flags & WINDOW_WHEEL_PRECISE) && ui_kit.wheel_off)
                 {
                         b64 far = ui_body_far(&s->body), aim = s->body.target < 0 ? 0 : far && s->body.target > far ? far : s->body.target;
@@ -11587,6 +11631,9 @@ struct ui_select
         b32 boxed;                     // a drag by a box: its edge does not scroll it
         b32 dragging, holding, handles, bar, bar_want, bar_up;
         int drag_kind, drag_x, drag_y, finger, grab_dx, grab_dy, finger_left, clicks;
+        int wheel_rest, wheel_rest_x;  // a wheel's turn under a whole pixel, in 120ths, down and across (ui_wheel_pixels)
+        b32 wheel_on;                  // a trackpad's hand is in this view
+        long wheel_hand;               // a trackpad's hand in this view: the pixels it has moved the view, finger-wise (down positive), for its release's throw
         int bar_x, bar_y, bar_w, bar_h, bar_count, bar_down, over_top, over_bottom;
         int bar_at[UI_SELECT_BAR_ITEMS + 1];   // each item's left edge from bar_x, then the bar's right
         int bar_id[UI_SELECT_BAR_ITEMS];
@@ -13912,17 +13959,54 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 
         if (event->type == WINDOW_EVENT_WHEEL)
         {
+                long pixels;
+                b32 precise = (event->flags & WINDOW_WHEEL_PRECISE) != 0;
+
+                // A trackpad's lift: the hand lets go and the view is thrown on its speed, the way a finger's lift throws it (ui_select_finger_up).
+                if (event->flags & WINDOW_WHEEL_STOP)
+                {
+                        if (!s->wheel_on)
+                                return 0;
+                        s->wheel_on = false;
+                        ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale);
+                        return ui_body_going(&s->fling) ? UI_TEXT_MOVED : 0;
+                }
                 if (!well)
                         return 0;
                 if ((event->flags & WINDOW_KEY_CONTROL) && t->mode == UI_TEXT_CODE)
                         return ui_text_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
                 s->quiet_at = now + UI_SELECT_BAR_AFTER_NS;
+                // A turn is pixels (a notch three lines or columns, a precise turn its share of UI_NOTCH, natural direction applied), and the view
+                // moves by the lines they make: the rest under a line is kept for the next turn, and no turn is rounded up to a line of its own.
                 if (event->b)
-                        t->scroll_x = t->scroll_x - (b64)event->a * t->cell * 3 / 120 > 0 ? t->scroll_x - (b64)event->a * t->cell * 3 / 120 : 0;
+                {
+                        pixels = ui_wheel_pixels(ui, event, 3 * (long)t->cell, &s->wheel_rest_x);
+                        t->scroll_x = t->scroll_x + pixels > 0 ? t->scroll_x + pixels : 0;
+                }
                 else
                 {
-                        b64 lines = -(b64)event->a * 3 / 120, to = (b64)t->top_line + (lines ? lines : event->a < 0 ? 1 : -1);
+                        long lines, step = 3 * (long)(t->line_height > 0 ? t->line_height : 1);
+                        b64 to;
 
+                        // A new hand stops a throw in flight, and a precise turn is the hand: its reports are kept for the throw its lift makes.
+                        if (precise && !s->wheel_on)
+                        {
+                                ui_body_hold(&s->fling, ui_kit_time());
+                                ui_press_track_start(&s->grab, 0);
+                                s->wheel_hand = 0, s->wheel_on = true;
+                        }
+                        else if (!precise)
+                                ui_body_hold(&s->fling, ui_kit_time());
+                        pixels = ui_wheel_pixels(ui, event, step, &s->wheel_rest);
+                        if (precise)
+                        {
+                                s->wheel_hand -= pixels;
+                                ui_press_track(&s->grab, (int)s->wheel_hand);
+                        }
+                        s->finger_left += (int)pixels;
+                        lines = t->line_height > 0 ? s->finger_left / t->line_height : 0;
+                        s->finger_left -= (int)lines * t->line_height;
+                        to = (b64)t->top_line + lines;
                         t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
                 }
                 return UI_TEXT_MOVED;

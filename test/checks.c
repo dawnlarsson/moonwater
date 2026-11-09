@@ -134340,6 +134340,76 @@ static void check_throw_last_step(struct ui address_to wui)
 }
 
 /*
+        The wheel on a code view. A mouse's notch is three lines, the same at any rate and turned by natural direction; a trackpad's
+        hundred small reports are the pixels they are (4 px each at 100 percent: 400 px, the lines that make), and no report is a line of
+        its own; and the lift of a quick hand (WINDOW_WHEEL_STOP) throws the view on its speed, which the app's ticks then spend.
+*/
+static void check_code_wheel(struct ui address_to wui)
+{
+    static struct ui_text view;
+    struct window_event notch = {WINDOW_EVENT_WHEEL, 0, -120, 0};
+    struct window_event small = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -12, 0};
+    struct window_event quick = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -60, 0};
+    struct window_event lift = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
+    int x = SCROLL_CODE_LEFT + 40, y = SCROLL_CODE_TOP + SCROLL_CODE_HEIGHT / 2;
+    positive now = 4000000000ull;
+    long three, five, back, small_lines, first_three, pixels_lines, thrown_lines = 0;
+    b32 thrown, spent, redraw = false;
+
+    scroll_setup(0);
+    ui_kit.scroll_off = 0;
+    scroll_code(wui, &view, 10);
+    ui_text_event(wui, &view, &notch, x, y);
+    three = (long)view.top_line - 10;
+    for (int k = 0; k < 4; k++)
+        ui_text_event(wui, &view, &notch, x, y);
+    five = (long)view.top_line - 10;
+    ui_kit.scroll_off = WINDOW_SCROLL_FLIP;
+    for (int k = 0; k < 5; k++)
+        ui_text_event(wui, &view, &notch, x, y);
+    back = (long)view.top_line - 10;
+    ui_kit.scroll_off = 0;
+    check("code view wheel: a notch is three lines, five are fifteen, and natural direction takes them back", three == 3 && five == 15 && back == 0);
+    ui_text_close(&view);
+
+    scroll_setup(0);
+    scroll_code(wui, &view, 5);
+    ui_kit.now = now;
+    for (int k = 0; k < 3; k++)
+        ui_text_event(wui, &view, &small, x, y);
+    first_three = (long)view.top_line - 5;
+    for (int k = 3; k < 100; k++)
+        ui_text_event(wui, &view, &small, x, y);
+    small_lines = (long)view.top_line - 5;
+    pixels_lines = 400 / (long)view.line_height;
+    check("code view wheel: a hundred reports of 4 px are 400 px of lines, and the first three (12 px) are not three lines",
+          view.line_height > 12 && first_three == 0 && small_lines >= pixels_lines - 1 && small_lines <= pixels_lines);
+    ui_text_event(wui, &view, &lift, x, y);
+    ui_text_close(&view);
+
+    scroll_setup(0);
+    scroll_code(wui, &view, 2);
+    for (int k = 0; k < 12; k++)
+    {
+        ui_kit.now = now += 16000000ull;
+        ui_text_event(wui, &view, &quick, x, y);
+    }
+    ui_kit.now = now += 16000000ull;
+    ui_text_event(wui, &view, &lift, x, y);
+    thrown = ui_body_going(&view.sel.fling);
+    for (int step = 1; step <= 300 && ui_body_going(&view.sel.fling); step++)
+    {
+        p64 was = view.top_line;
+
+        ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &view, -1, &redraw));
+        thrown_lines += (long)view.top_line - (long)was;
+    }
+    spent = !ui_body_going(&view.sel.fling) && thrown_lines > 3;
+    check("code view wheel: the lift of a quick hand throws the view, and the app's ticks spend the throw", thrown && spent);
+    ui_text_close(&view);
+}
+
+/*
         The window's pointer is the kit's: the last motion's place (ui_event_context), kept through a press and a key, and the sends
         (ui_text_send, ui_field_send) take it, so a send is the explicit call at that place: the same answer and the same caret.
 */
@@ -147341,7 +147411,7 @@ static fn check_kit_place(void)
                 ui_kit.scroll_off = 0;
         }
 
-        // The notch: a wheel's notch aims one row on and the body follows it over several frames, from below and never past it;
+        // The notch: a wheel's notch aims one step on (ui_wheel_notch: 2.5 rows) and the body runs to it over several frames, from below and never past it;
         // a pull past an end is limited and springs back to that end when let go, at either end; a settled notch leaves the kit
         // idle; a keyboard reveal (ui_body_reveal) notches the body to the row it shows, from where it is, and a row in view is
         // not moved. Each is a frame at a time, as the kit's loop draws it.
@@ -147355,21 +147425,23 @@ static fn check_kit_place(void)
                 b64 notch_clock = 0;
                 int settle_ms = 0;
 
+                int step = (int)ui_wheel_notch(&ui, &glide, 0);
+
                 ui_kit.now = 6000000000ll, ui_kit.busy = 0;
                 ui_wheel_turn(&ui, &glide, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0});
-                aimed = scroll_aim(&glide) == (b64)UI_ROW * 256 && glide.scroll == 0;
+                aimed = scroll_aim(&glide) == (b64)step * 256 && glide.scroll == 0;
                 notch_clock = ui_kit.now + 16666667;
                 for (frame = 0; frame < 240 && scroll_gliding(&glide); frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_frame(&ui, &glide);
                         notch_monotone = notch_monotone && glide.scroll >= last;
-                        overshot = overshot || glide.scroll > UI_ROW;
-                        rising += glide.scroll > 0 && glide.scroll < UI_ROW;
+                        overshot = overshot || glide.scroll > step;
+                        rising += glide.scroll > 0 && glide.scroll < step;
                         fine = fine || (scroll_at(&glide) & 255) != 0;
                         last = glide.scroll;
                 }
-                reached = glide.scroll == UI_ROW && !scroll_gliding(&glide);
+                reached = glide.scroll == step && !scroll_gliding(&glide);
                 settle_ms = (int)((ui_kit.now - notch_clock) / 1000000);
                 steps = rising >= 3;
                 ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -147422,25 +147494,25 @@ static fn check_kit_place(void)
                 shown_again = ui_body_reveal(&glide.body, 400, UI_ROW, ui_kit.now);
                 revealed = revealed && reveal_steps && jumped && glide.scroll + glide.view >= 500 + UI_ROW;
 
-                        check("kit notch: a wheel notch aims one row on, and the body reaches it over several frames from below, never past it, in 256ths",
+                        check("kit notch: a wheel notch aims one step (2.5 rows) on, and the body reaches it over several frames from below, never past it, in 256ths",
                       aimed && steps && reached && notch_monotone && !overshot && idle && fine);
-                check("kit notch: a wheel notch settles in 250 to 450 ms, to half a device pixel from one row (the body's critically damped follow, 22 a second)",
+                check("kit notch: a wheel notch settles in 250 to 450 ms, to half a device pixel from its step (the body's run to the target, e to the minus 18 a second)",
                       settle_ms >= 250 && settle_ms <= 450);
                 check("kit body: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
                 check("kit reveal: a keyboard reveal notches the body to the row it shows, from where it is, and a row in view is not moved",
                       revealed && !shown_again);
         }
 
-        // The wheel (canvas wheel smooth, and the acceleration of a spin). With the wheel smooth a notch glides to its row over several
-        // frames and no frame jumps a row; with it off a notch is one row at once. A single slow notch is one row, the same notches
-        // fired fast travel further than fired slowly, the glide's speed is held to UI_WHEEL_RUN rows a second, and it settles on
+        // The wheel (canvas wheel smooth). With the wheel smooth a notch runs to its step (ui_wheel_notch, `row` here) over several
+        // frames and no frame jumps more than half of it; with it off a notch is one step at once. A single slow notch is one step, the
+        // same notches fired fast travel the same, the run's speed stays inside what five notches in 120 ms ask of it, and it settles on
         // its aim without passing it.
         {
                 struct ui_scroll smooth = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
                 struct ui_scroll slow = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
                 struct ui_scroll fast = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
                 struct wheel_run run;
-                int row = UI_ROW * ui.scale / 100, frames_between = 0, jump = 0, last = 0, frame, fast_travel = 0, slow_travel = 0;
+                int row = (int)ui_wheel_notch(&ui, &smooth, 0), frames_between = 0, jump = 0, last = 0, frame, fast_travel = 0, slow_travel = 0, first_frame = 0;
                 b32 glides = false, once = false, travel_ok = false, capped = false;
 
                 struct window_event notch = {WINDOW_EVENT_WHEEL, 0, -120, 0};
@@ -147453,10 +147525,12 @@ static fn check_kit_place(void)
                         ui_kit.now += 16666667, ui_kit.test_clock += 16666667, ui_kit.busy = 0;
                         ui_scroll_frame(&ui, &smooth);
                         frames_between += smooth.scroll > 0 && smooth.scroll < row;
+                        first_frame = frame == 0 ? smooth.scroll : first_frame;
                         jump = smooth.scroll - last > jump ? smooth.scroll - last : jump;
                         last = smooth.scroll;
                 }
                 glides = frames_between >= 3 && jump < row / 2 && smooth.scroll == row && !scroll_gliding(&smooth);
+                glides = glides && first_frame >= row / 5;
 
                 ui_kit.wheel_off = 1;
                 ui_scroll_set(&smooth, 0);
@@ -147469,12 +147543,12 @@ static fn check_kit_place(void)
                 run = wheel_spin(&ui, &fast, 5, 30000000ll);
                 fast_travel = run.scroll;
                 travel_ok = slow_travel == 5 * row && fast_travel == slow_travel;
-                capped = run.fastest <= (b64)60 * row * UI_SCROLL_SCALE && !run.passed && !scroll_gliding(&fast);
+                capped = run.fastest <= (b64)40 * row * UI_SCROLL_SCALE && !run.passed && !scroll_gliding(&fast);
                 ui_kit.test_clock = 0;
-                check("kit wheel: with the wheel smooth a notch glides to its row over several frames with no frame jumping a row, and off a notch is one row at once",
+                check("kit wheel: with the wheel smooth a notch runs to its step over several frames, a fifth of it already in the first, no frame jumping half of it, and off a notch is one step at once",
                       glides && once);
-                check("kit wheel: a single slow notch is one row, and the same notches fired fast travel the same: a notch is a row at any rate (the body does not accelerate; the compositor sets the rate)", travel_ok);
-                check("kit wheel: a fast spin's glide is held to 60 rows a second, and it settles on its aim without passing it", capped);
+                check("kit wheel: a single slow notch is one step, and the same notches fired fast travel the same: a notch is a step at any rate (the body does not accelerate; the compositor sets the rate)", travel_ok);
+                check("kit wheel: a fast spin's run is held to 40 steps a second (4000 px at the standard row), and it settles on its aim without passing it", capped);
         }
 
         // Every list: its scroll track runs the view's full height with the view's ends (its top at the view's top, its bottom at the
@@ -148023,7 +148097,8 @@ static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int
         t->monotone = t->inside = true;
         for (int frame = 0; frame < 400; frame++)
         {
-                struct window_event turn = {WINDOW_EVENT_WHEEL, 0, 0, 0};
+                // A report of the machine's trackpad is a stream notch (the compositor sends it precise): 120ths of UI_NOTCH
+                struct window_event turn = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM, 0, 0};
                 int moved;
 
                 if (frame >= ENDS_FINGER)
@@ -148323,14 +148398,14 @@ static void check_terminal_stretch(void)
 }
 
 /*
-    A burst of six notches on the terminal's bar: each is a row of the kit's (UI_ROW at the scale), the body follows the target they make
-    critically damped (BODY_NOTCH_OMEGA), and the view is the body's offset to the nearest row.
+    A burst of six notches on the terminal's bar: each is three lines (the bar's wheel), the body runs to the target they make
+    (BODY_NOTCH_RATE), and the view is the body's offset to the nearest row.
 */
 static void check_terminal_wheel_curve(void)
 {
         unsigned int first, shown, total;
         int notches = 6, last = 0;
-        b64 clock = 50000000000ll, row = (b64)UI_ROW * terminal_scale() / 100 * UI_ONE;
+        b64 clock = 50000000000ll, row;
         b32 dirty = false, rising = true;
         struct window_event notch = {WINDOW_EVENT_WHEEL, 0, -120, 0};
 
@@ -148340,6 +148415,7 @@ static void check_terminal_wheel_curve(void)
         terminal_view_set(0);
         terminal_extent(&first, &shown, &total);
         terminal_bar_place(first, shown, total);
+        row = (b64)3 * (b64)terminal.cell_h * UI_ONE;
         ui_kit.now = 9000000000ll, ui_kit.busy = 0;
         for (int k = 0; k < notches; k++)
         {
@@ -148355,7 +148431,7 @@ static void check_terminal_wheel_curve(void)
         }
         ui_kit.test_clock = 0;
         terminal_extent(&first, &shown, &total);
-        check("terminal scrollback: six notches move the body six rows of the kit's, rising frame by frame, and it rests on them",
+        check("terminal scrollback: six notches move the body eighteen lines (three a notch), rising frame by frame, and it rests on them",
               rising && terminal.bar.body.raw == notches * row && !ui_body_going(&terminal.bar.body));
         check("terminal scrollback: the view is the bar's offset to the nearest row, the grid's only rounding of it",
               first == (unsigned int)((terminal.bar.scroll + (int)terminal.cell_h / 2) / (int)terminal.cell_h));
@@ -149406,11 +149482,12 @@ static fn check_kit_wheel_flood(void)
         int edge = 0;
 
         ui.scale = 100;
-        row = UI_ROW * ui.scale / 100;
+        row = 0;
         memory_zero(&s, sizeof(s));
         s.x = 100, s.y = 10, s.height = 200, s.content = 1000, s.view = 200, s.scale = 100;
         ui_kit.now = now, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&s, 800);
+        row = (int)ui_wheel_notch(&ui, &s, 0);
         view_band = band_view_px(&s);
         // A second of notches, 16 ms apart, at the bottom end.
         for (int k = 0; k < 60; k++)
@@ -149461,7 +149538,7 @@ static fn check_kit_wheel_flood(void)
         }
         scroll_run(&ui, &s, &now, 2000);
         sparse = sparse && s.scroll == 800 && !ui_body_going(&s.body);
-        // A notch back takes the target back by one row.
+        // A notch back takes the target back by one step.
         ui_scroll_set(&s, 800);
         ui_wheel_turn(&ui, &s, &down);
         target_before = s.body.target;
@@ -149476,7 +149553,7 @@ static fn check_kit_wheel_flood(void)
         check("kit wheel flood: two seconds after the last notch nothing is stretched or going, and the list rests at its end", home);
         check("kit wheel flood: a second flood after a pause is held as far as the first, and it springs home the same way", again >= peak * 9 / 10 && again <= peak * 11 / 10 + 256);
         check("kit wheel flood: a notch every 100 ms at an end pulls it by the band, and it springs home at rest", sparse);
-        check("kit wheel flood: a notch back takes the target back by one row", back);
+        check("kit wheel flood: a notch back takes the target back by one step", back);
         check("kit wheel flood: once the notches stop the stretch falls within a third of a second of its apex: it is not held at its peak", fall);
         (void)target_before, (void)reach_px;
 }
@@ -150287,6 +150364,43 @@ static fn check_wheel_stream(void)
         check("wheel stream: each device keeps its own last, so a second device's first notch is stepped", two);
 }
 
+// The compositor's reading of the Scrolling switches (compositor_scroll_bits) from the words their files hold. A switch's value is its word's
+// place in "on off", so on is 0; it was read as if on were 1, which left momentum and the rubber band off in a desktop that had never set them
+// (a release threw nothing, an end stopped dead) and turned them off by setting them on.
+static fn check_scroll_bits(void)
+{
+        b32 standard, on, off, mixed, junk;
+
+        standard = compositor_scroll_bits("", "", "") == 0 && compositor_scroll_bits("default", "default", "default") == 0;
+        on = compositor_scroll_bits("on", "on", "on") == WINDOW_SCROLL_FLIP;
+        off = compositor_scroll_bits("off", "off", "off") == (WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL);
+        mixed = compositor_scroll_bits("on", "off", "") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS) &&
+                compositor_scroll_bits("", "", "off") == WINDOW_SCROLL_STILL && compositor_scroll_bits("", "off", "on") == WINDOW_SCROLL_STOPS;
+        junk = compositor_scroll_bits("sideways", "maybe", "2") == 0;
+        check("scroll switches: nothing set is the standard (natural direction off; momentum and the rubber band on), no bits", standard);
+        check("scroll switches: all three set on is natural direction alone (FLIP), and all three set off is no momentum and no rubber band", on && off);
+        check("scroll switches: each is read on its own, and a word that is none of the row's is the standard", mixed && junk);
+}
+
+// A mouse is never a stream: a wheel spun at 100 notches a second, and a lone notch after the spin (which a tablet would still take for the
+// stream's, for three seconds) are all stepped. A tablet's notches 16 ms apart are a stream, as they were.
+static fn check_wheel_mouse(void)
+{
+        int mouse_steps = 1, tablet_streams;
+        positive t = 5000000000ull;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.input_kinds[0] = WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
+        compositor.input_kinds[1] = WINDOWS_INPUT_TABLET | WINDOWS_INPUT_WHEEL;
+        for (int k = 0; k < 40; k++)
+                mouse_steps &= !compositor_wheel_streams(0, t + (positive)k * 10000000ull);
+        mouse_steps &= !compositor_wheel_streams(0, t + 40 * 10000000ull + 500000000ull);
+        compositor_wheel_streams(1, t);
+        tablet_streams = compositor_wheel_streams(1, t + 16000000) && compositor_wheel_streams(1, t + 32000000) && compositor_wheel_streams(1, t + 48000000);
+        check("wheel mouse: a mouse's wheel spun at 100 notches a second, and a notch half a second after, are all stepped, never a stream", mouse_steps);
+        check("wheel mouse: a tablet's notches 16 ms apart are still a stream", tablet_streams);
+}
+
 // The memory (COMPOSITOR_WHEEL_MEMORY_NS): a device that has streamed (three stream notches in a gesture) has its next gesture's first
 // notch as a stream notch, if it comes within three seconds of the last stream notch; past that, or on a device that never streamed,
 // it is a row step. Long gaps (a mouse's) never make a stream, so they never promote.
@@ -150582,7 +150696,7 @@ static fn check_stream_notch(void)
                 ui_kit.now = 9000000000ll + (100000 + k * 16000) * 1000ll, ui_kit.test_clock = ui_kit.now;
                 ui_wheel_turn(&p.ui, &p.s, &turn);
         }
-        // A stream's notches go to a target that the position follows (the body's notch, BODY_NOTCH_OMEGA): the whole is there once the
+        // A stream's notches go to a target that the position follows (the body's notch, BODY_NOTCH_RATE): the whole is there once the
         // position has caught the target, which it does in a few frames after the last notch.
         {
                 long us = 100000 + 99 * 16000;
@@ -150828,14 +150942,15 @@ static fn check_kit_notch_take(void)
         at each 50 ms; an OS momentum delta moves the view's share of it (0.22); the rubber band draws less past the end than
         it reaches for. The recording is refitted when it grows: the constants live in ui.c, the series here.
 */
-// The wheel on the body, as the picture a person sees: the drawn offset from where it began, every 20 ms for 600 ms, for one notch and a burst of
-// five in the middle of a long list, and for one notch and a burst of eight at its top, where a notch goes out past the end.
+// The wheel on the body, as the picture a person sees: the drawn offset from where it began, every 20 ms, for one notch (100 px, the wheel's
+// step at the standard row) and a burst of five in the middle of a long list, and for one notch and a burst of eight at its top, where a
+// notch goes out past the end.
 static void check_wheel_body_curve(void)
 {
         static const struct { long start; int notches; long gap_ms, delta; } cases[] = {
-            {5000, 1, 0, 40}, {5000, 5, 16, 40}, {0, 1, 0, -40}, {0, 8, 16, -40}};
-        long drawn[4][31];
-        b32 eased, whole, monotone = true, pulse, burst, turns = true;
+            {5000, 1, 0, 100}, {5000, 5, 16, 100}, {0, 1, 0, -100}, {0, 8, 16, -100}};
+        long drawn[4][46], lowest = 0;
+        b32 prompt, whole, monotone = true, pulse, burst, turns = true;
 
         for (int c = 0; c < 4; c++)
         {
@@ -150844,7 +150959,7 @@ static void check_wheel_body_curve(void)
 
                 ui_kit.scroll_off = 0;
                 ui_body_set(&w, 772ll << UI_Q, 30000ll << UI_Q, (b64)cases[c].start << UI_Q, 0);
-                for (int k = 0; k <= 30; k++)
+                for (int k = 0; k <= 45; k++)
                 {
                         b64 now = (b64)k * 20000000ll;
 
@@ -150857,23 +150972,76 @@ static void check_wheel_body_curve(void)
                         drawn[c][k] = (long)((ui_body_drawn(&w) >> UI_Q) - cases[c].start);
                 }
         }
-        eased = drawn[0][1] <= 5 && drawn[0][5] >= 18 && drawn[0][5] <= 30 && drawn[0][10] >= 35;
-        whole = drawn[0][30] == 40 && drawn[1][30] == 200;
-        for (int k = 1; k <= 30; k++)
+        prompt = drawn[0][1] >= 20 && drawn[0][1] <= 40 && drawn[0][5] >= 75 && drawn[0][5] <= 90 && drawn[0][10] >= 95;
+        whole = drawn[0][45] == 100 && drawn[1][45] == 500;
+        for (int k = 1; k <= 45; k++)
                 monotone = monotone && drawn[0][k] >= drawn[0][k - 1] && drawn[1][k] >= drawn[1][k - 1];
-        check("kit wheel: one notch eases in from rest (5 px or less in 20 ms, over half the way in 100 ms, nearly there in 200) and rests on its 40 px, and five on top of each other on their 200",
-              eased && whole && monotone);
-        pulse = drawn[2][9] <= -15 && drawn[2][9] >= -35 && drawn[2][30] >= -3 && drawn[2][30] <= 0;
-        burst = drawn[3][12] <= -30 && drawn[3][12] >= -60 && drawn[3][30] > drawn[3][12] + 25;
+        check("kit wheel: one notch starts at once (20 to 40 px of its 100 in the first 20 ms, over three quarters in 100, nearly there in 200) and rests on its 100 px, and five on top of each other on their 500",
+              prompt && whole && monotone);
+        pulse = drawn[2][5] <= -40 && drawn[2][5] >= -75 && drawn[2][45] >= -3 && drawn[2][45] <= 0;
+        for (int k = 5; k <= 12; k++)
+                lowest = drawn[3][k] < lowest ? drawn[3][k] : lowest;
+        burst = lowest <= -45 && lowest >= -75 && drawn[3][45] > lowest + 40;
         for (int c = 2; c < 4; c++)
-                for (int k = 13; k <= 30; k++)
-                        turns = turns && drawn[c][k] <= 0 && drawn[c][k] >= drawn[c][k - 1];
-        check("kit wheel: a notch up at the top stretches the band 15 to 35 px and springs home, and eight in 130 ms stretch it 30 to 60 and fall once",
+                for (int k = 13; k <= 45; k++)
+                        turns = turns && drawn[c][k] <= 0 && drawn[c][k] >= drawn[c][k - 1] - 3;
+        check("kit wheel: a notch up at the top stretches the band 40 to 75 px within 100 ms and springs home, and eight in 130 ms stretch it as far and fall once",
               pulse && burst && turns);
+}
+
+// The wheel's step (ui_wheel_notch) and a fitting content. A stepped notch is 2.5 rows (100 px at the standard row), twice that at 200
+// percent, a region's own unit (the terminal's three lines) when it has one, and a precise turn is UI_NOTCH whatever the region says. A content
+// that fits its view has no far end: a wheel notch moves nothing, a finger cannot drag it toward the far side or leave it there, and a pull
+// down from its top still gives and springs home.
+static void check_wheel_step(void)
+{
+        struct ui ui = terminal.ui;
+        struct ui_scroll fits, own;
+        b32 steps, units, still, top_pull;
+
+        ui.scale = 100;
+        memory_zero(&own, sizeof(own));
+        steps = ui_wheel_notch(&ui, &own, 0) == (b64)UI_ROW * 5 / 2 && ui_wheel_notch(&ui, &own, 0) >= 96;
+        ui.scale = 200;
+        steps = steps && ui_wheel_notch(&ui, &own, 0) == (b64)UI_ROW * 5 / 2 * 2;
+        own.wheel = 60;
+        units = ui_wheel_notch(&ui, &own, 0) == 60 && ui_wheel_notch(&ui, &own, WINDOW_WHEEL_PRECISE) == (b64)UI_NOTCH * 2;
+        ui.scale = 100;
+
+        memory_zero(&fits, sizeof(fits));
+        fits.x = 100, fits.y = 10, fits.height = 300, fits.content = 200, fits.view = 300, fits.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = ui_kit.now, ui_kit.scroll_off = 0;
+        ui_scroll_set(&fits, 0);
+        still = !ui_wheel_turn(&ui, &fits, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0}) && !ui_body_going(&fits.body) && fits.scroll == 0;
+        ui_scroll_hold(&fits);
+        ui_scroll_drag(&fits, 150);
+        still = still && fits.scroll == 0 && fits.body.raw == 0;
+        ui_scroll_let_go(&fits, 3000);
+        for (int frame = 0; frame < 60; frame++)
+        {
+                ui_kit.now += 16666667, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_scroll_frame(&ui, &fits);
+        }
+        still = still && fits.scroll == 0 && !ui_body_going(&fits.body);
+        ui_scroll_hold(&fits);
+        ui_scroll_drag(&fits, -150);
+        top_pull = fits.scroll < 0 && fits.scroll > -150;
+        ui_scroll_let_go(&fits, 0);
+        for (int frame = 0; frame < 120; frame++)
+        {
+                ui_kit.now += 16666667, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_scroll_frame(&ui, &fits);
+        }
+        top_pull = top_pull && fits.scroll == 0 && !ui_body_going(&fits.body);
+        ui_kit.test_clock = 0;
+        check("kit wheel step: a stepped notch is 2.5 rows (twice that at 200 percent), a region's own unit when it names one, and a precise turn is UI_NOTCH", steps && units);
+        check("kit fits: a content that fits does not move under a notch, cannot be dragged toward its far side or left there, and is pulled down from its top and springs home",
+              still && top_pull);
 }
 
 static void check_kit_body(void)
 {
+        check_wheel_step();
         check_wheel_body_curve();
         static const long finger_00[] = { 1, 8, 25, 33, 30, 23, 20, 13, 10, 9, 6 };
         static const long coast_06[] = { 4026, 3924, 3839, 3770, 3715, 3672, 3638, 3617 };
@@ -150980,16 +151148,16 @@ static void check_kit_body(void)
         check("kit body: a finger 300 px past the top is drawn in the band (above the rest, nearer than 300) and springs to rest at 0",
               drawn < 0 && drawn > -(300ll << UI_Q) && ui_body_drawn(&b) == 0 && !ui_body_going(&b));
 
-        // A notch moves the target by its delta and the position follows it critically damped at 22 a second: from rest, 22 percent of the way in 40 ms
-        // (it eases in), resting on the target exactly.
+        // A notch moves the target by its delta and the position runs to it, the gap closing by e to the minus 18 a second: from rest, 51 percent of
+        // the way in 40 ms (it starts at once and eases out), resting on the target exactly.
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_notch(&b, 48ll << UI_Q, 0);
         ui_body_notch(&b, 48ll << UI_Q, 0);
         ui_body_step(&b, 40000000ll);
         reach_small = ui_body_drawn(&b) >> UI_Q;
         ui_body_step(&b, 1000000000ll);
-        check("kit body: two notches of 48 move the position 21 (22 percent of 96, eased in) in 40 ms, and rest on 96 exactly",
-              reach_small >= 20 && reach_small <= 22 && ui_body_drawn(&b) == 96ll << UI_Q && !ui_body_going(&b));
+        check("kit body: two notches of 48 move the position 49 (51 percent of 96, running at once) in 40 ms, and rest on 96 exactly",
+              reach_small >= 48 && reach_small <= 50 && ui_body_drawn(&b) == 96ll << UI_Q && !ui_body_going(&b));
 }
 
 /*
@@ -152778,7 +152946,7 @@ static fn check_kit_states(void)
                       frames > 0 && !sl.sliding && sl.value > ui_q(60) && !sl.slide.landed);
         }
 
-        // Scroll: a second wheel notch during a glide carries on from where it is and aims two rows down.
+        // Scroll: a second wheel notch during a run carries on from where it is and aims two steps down.
         {
                 struct ui_scroll glide;
                 int frames;
@@ -152795,8 +152963,8 @@ static fn check_kit_states(void)
                 ui_wheel_turn(&ui, &glide, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0});
                 ui_kit.test_clock = 0;
                 frames = sweep_settle_scroll(&ui, &glide);
-                check("kit states: a second notch during a glide carries on to two rows and goes idle there",
-                      frames > 0 && !scroll_gliding(&glide) && glide.scroll == 2 * UI_ROW && scroll_at(&glide) == scroll_aim(&glide));
+                check("kit states: a second notch during a run carries on to two steps and goes idle there",
+                      frames > 0 && !scroll_gliding(&glide) && glide.scroll == 2 * (int)ui_wheel_notch(&ui, &glide, 0) && scroll_at(&glide) == scroll_aim(&glide));
         }
 
         // Tabs: a tap on the third tab moves the pip to it and settles there.
@@ -152883,8 +153051,8 @@ static fn check_kit_states(void)
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
                 ui_wheel_turn(&ui, &glide, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0});
                 frames = sweep_settle_scroll(&ui, &glide);
-                check("kit states: a wheel notch glides to its row and the region goes idle there",
-                      frames > 0 && !scroll_gliding(&glide) && !scroll_back(&glide) && glide.scroll == UI_ROW && scroll_at(&glide) == scroll_aim(&glide));
+                check("kit states: a wheel notch runs to its step and the region goes idle there",
+                      frames > 0 && !scroll_gliding(&glide) && !scroll_back(&glide) && glide.scroll == (int)ui_wheel_notch(&ui, &glide, 0) && scroll_at(&glide) == scroll_aim(&glide));
         }
 
         // Scroll: a throw carries the region on from its speed and stops where it aims, idle.
@@ -156164,6 +156332,7 @@ static fn field_check(struct ui address_to wui)
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);
+        check_code_wheel(wui);
         check_kit_pointer_send(wui);
         check_tabs_marks(wui);
         check_doc_columns();
@@ -162100,6 +162269,8 @@ b32 main()
         check_pad_pinch();
         check_pad_scroll();
         check_wheel_stream();
+        check_wheel_mouse();
+        check_scroll_bits();
         check_wheel_memory();
         check_kit_precise_stream();
         check_stream_notch();

@@ -2517,7 +2517,7 @@ static void compositor_wl_drain(int row)
                 else
                         // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward. A stream's
                         // notch is a wheel's (value120), a finger's turn is the window's notch in pixels (UI_NOTCH). The Scrolling
-                        // group's natural direction, off, turns the turn the other way for the client too (WINDOW_SCROLL_FLIP).
+                        // group's natural direction, on, turns the turn the other way for the client too (WINDOW_SCROLL_FLIP).
                         wayland_pointer_axis(row, b != 0, table->scroll_off & WINDOW_SCROLL_FLIP ? -(b ? a : -a) : b ? a : -a,
                                              (flags & WINDOW_WHEEL_PRECISE) && !(flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 0);
         }

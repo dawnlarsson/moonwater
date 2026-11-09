@@ -570,6 +570,7 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
         terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100, terminal.bar.y = 0;
         terminal.bar.height = (int)terminal.height, terminal.bar.inset = UI_CLOSE_BOTTOM;
         terminal.bar.content = (int)total * cell, terminal.bar.view = (int)shown * cell, terminal.bar.scale = terminal_scale();
+        terminal.bar.wheel = 3 * cell; // a notch of a wheel is three lines, as every terminal's is
         ui_body_fit(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE);
         // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
         if (!ui_body_going(&terminal.bar.body) && ui_body_px(&terminal.bar.body) != (int)first * cell)

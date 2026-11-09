@@ -341,12 +341,12 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
-    //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch glides to its row over a short time and a
-    //  fast spin travels further; off, a notch moves a whole row at once.
+    //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch runs to its step (two and a half rows) over a
+    //  short time, starting at once and easing out; off, a notch moves a whole step at once.
     SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas wheel smooth [on|off]",
-                      .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
+                      .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
