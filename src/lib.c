@@ -19083,6 +19083,21 @@ ASM_FUNC(positive_to_string)
     ASM_FUNC(positive_into_string)
     "mov $2, %r11d\n   jmp positive_into_core\n"
     ASM_END(positive_into_string)
+    //
+    //       Size-class variant for 10 to 99: one halfword load and store, the
+    //       terminator, the count 2. Only callers that know the size is in
+    //       the class use it.
+    //
+    ASM_FUNC(positive_into_string_2_2)
+    "lea digit_pairs(%rip), %r8\n   movzwl (%r8,%rsi,2), %eax\n   mov %ax, (%rdi)\n   movb $0, 2(%rdi)\n   mov $2, %eax\n" ASM_RET
+    ASM_END(positive_into_string_2_2)
+    //
+    //       Size-class variant for 10^8 to 10^12 - 1: the straight-line body in
+    //       positive_into_twelve, entered with the terminator mode set.
+    //
+    ASM_FUNC(positive_into_string_9_12)
+    "mov $2, %r11d\n   jmp " ASM_LABEL(positive_into_twelve) "\n"
+    ASM_END(positive_into_string_9_12)
     ASM_FUNC(bipolar_into)
     "cmp $9999, %rsi\n   jg " ASM_LABEL(bipolar_into_wide) "\n   test %rsi, %rsi\n   js " ASM_LABEL(bipolar_into_negative) "\n"
     "cmp $99, %rsi\n   ja " ASM_LABEL(bipolar_into_four) "\n   lea digit_pairs(%rip), %r8\n   cmp $10, %rsi\n   jae " ASM_LABEL(bipolar_into_two) "\n"
@@ -19120,7 +19135,8 @@ ASM_FUNC(positive_to_string)
     "mov %esi, %eax\n   imul $5243, %eax, %edx\n   shr $19, %edx\n   imul $100, %edx, %ecx\n   sub %ecx, %eax\n   cmp $10, %edx\n   jae 2f\n   movzbl 1(%r8,%rdx,2), %ecx\n"
     "mov %cl, (%rdi)\n   movzwl (%r8,%rax,2), %eax\n   mov %ax, 1(%rdi)\n   mov $3, %eax\n   jmp " ASM_LABEL(positive_into_done) "\n"
     "2:  movzwl (%r8,%rdx,2), %ecx\n   mov %cx, (%rdi)\n   movzwl (%r8,%rax,2), %eax\n   mov %ax, 2(%rdi)\n   mov $4, %eax\n   jmp " ASM_LABEL(positive_into_done) "\n"
-    "" ASM_LABEL(positive_into_wide) ":\n   sub $56, %rsp  # aligned calls; scratch occupies the top twenty bytes\n"
+    "" ASM_LABEL(positive_into_wide) ":\n"
+    "" ASM_LABEL(positive_into_wide_legacy) ":\n   sub $56, %rsp  # aligned calls; scratch occupies the top twenty bytes\n"
     "mov %rdi, (%rsp)\n   mov %r11, 8(%rsp)\n   lea 56(%rsp), %rdi\n   call positive_digits_core\n"
     //
     //       The scratch was written a halfword at a time, ending at an even
@@ -19137,6 +19153,22 @@ ASM_FUNC(positive_to_string)
     "1:  movzwl (%rdi,%rcx), %eax\n   mov %ax, (%r8,%rcx)\n   add $2, %rcx\n   cmp %rsi, %rcx\n   jb 1b\n   mov %rsi, %rax\n   mov %r8, %rdi\n   mov 8(%rsp), %r11\n"
     "test $2, %r11d\n   jz 3f\n   movb $0, (%rdi,%rax)\n"
     "3:\n   and $1, %r11d\n   add %r11, %rax\n   add $56, %rsp\n" ASM_RET
+    "" ASM_LABEL(positive_into_twelve) ":\n"
+    "push %r12\n   push %r13\n   movabs $0xABCC77118461CEFD, %rdx\n   mov %rsi, %rax\n   mul %rdx\n   shr $26, %rdx\n   mov %rdx, %r9\n"
+    "imul $100000000, %rdx, %rax\n   mov %rsi, %rcx\n   sub %rax, %rcx\n"
+    "mov %ecx, %eax\n   movabs $3518437209, %rdx\n   imul %rdx, %rax\n   shr $45, %rax\n   imul $10000, %rax, %rdx\n   sub %edx, %ecx\n"
+    "lea digit_pairs(%rip), %r8\n   imul $5243, %eax, %edx\n   shr $19, %edx\n   imul $100, %edx, %esi\n   mov %eax, %r10d\n   sub %esi, %r10d\n"
+    "imul $5243, %ecx, %r12d\n   shr $19, %r12d\n   imul $100, %r12d, %esi\n   mov %ecx, %r13d\n   sub %esi, %r13d\n"
+    "cmp $999, %r9\n   ja " ASM_LABEL(positive_into_twelve_d4) "\n   cmp $99, %r9\n   ja " ASM_LABEL(positive_into_twelve_d3) "\n   cmp $9, %r9\n   ja " ASM_LABEL(positive_into_twelve_d2) "\n"
+    "lea 48(%r9), %eax\n   mov %al, (%rdi)\n   lea 1(%rdi), %rsi\n   jmp " ASM_LABEL(positive_into_twelve_lo) "\n"
+    "" ASM_LABEL(positive_into_twelve_d2) ":\n   movzwl (%r8,%r9,2), %eax\n   mov %ax, (%rdi)\n   lea 2(%rdi), %rsi\n   jmp " ASM_LABEL(positive_into_twelve_lo) "\n"
+    "" ASM_LABEL(positive_into_twelve_d3) ":\n   imul $5243, %r9d, %eax\n   shr $19, %eax\n   imul $100, %eax, %ecx\n   mov %r9d, %esi\n   sub %ecx, %esi\n"
+    "movzwl (%r8,%rsi,2), %ecx\n   mov %cx, 1(%rdi)\n   add $48, %eax\n   mov %al, (%rdi)\n   lea 3(%rdi), %rsi\n   jmp " ASM_LABEL(positive_into_twelve_lo) "\n"
+    "" ASM_LABEL(positive_into_twelve_d4) ":\n   imul $5243, %r9d, %eax\n   shr $19, %eax\n   imul $100, %eax, %ecx\n   mov %r9d, %esi\n   sub %ecx, %esi\n"
+    "movzwl (%r8,%rax,2), %ecx\n   mov %cx, (%rdi)\n   movzwl (%r8,%rsi,2), %ecx\n   mov %cx, 2(%rdi)\n   lea 4(%rdi), %rsi\n"
+    "" ASM_LABEL(positive_into_twelve_lo) ":\n   movzwl (%r8,%rdx,2), %eax\n   mov %ax, (%rsi)\n   movzwl (%r8,%r10,2), %eax\n   mov %ax, 2(%rsi)\n"
+    "movzwl (%r8,%r12,2), %eax\n   mov %ax, 4(%rsi)\n   movzwl (%r8,%r13,2), %eax\n   mov %ax, 6(%rsi)\n   lea 8(%rsi), %rax\n   sub %rdi, %rax\n"
+    "pop %r13\n   pop %r12\n   jmp " ASM_LABEL(positive_into_done) "\n"
     "" ASM_LABEL(positive_into_done) ":\n   test $2, %r11d\n   jz 4f\n   movb $0, (%rdi,%rax)\n"
     "4:  and $1, %r11d\n   add %r11, %rax\n" ASM_RET
     ASM_LOCAL_END(positive_into_core)
@@ -28087,6 +28119,22 @@ ASM_FUNC(positive_to_string)
     ASM_FUNC(positive_into_string)
     "mov x11, #2\n   b positive_into_core\n"
     ASM_END(positive_into_string)
+    //
+    //       Size-class variant for 10 to 99: the pair is one halfword load and
+    //       one store, the terminator a byte store, the count 2. Callers with a
+    //       known size in the class call this entry; the generic routine is
+    //       unchanged for every other size.
+    //
+    ASM_FUNC(positive_into_string_2_2)
+    "adrp x8, " ASM_PAGE(digit_pairs) "\n   add x8, x8, " ASM_LO12(digit_pairs) "\n   ldrh w3, [x8, x1, lsl #1]\n   strh w3, [x0]\n   strb wzr, [x0, #2]\n   mov x0, #2\n" ASM_RET
+    ASM_END(positive_into_string_2_2)
+    //
+    //       Size-class variant for 10^8 to 10^12 - 1 (nine to twelve digits):
+    //       the straight-line body below, entered with the terminator mode set.
+    //
+    ASM_FUNC(positive_into_string_9_12)
+    "mov x11, #2\n   b " ASM_LABEL(positive_into_twelve) "\n"
+    ASM_END(positive_into_string_9_12)
     ASM_FUNC(bipolar_into)
     "mov x11, xzr\n   b bipolar_into_core\n"
     ASM_END(bipolar_into)
@@ -28119,6 +28167,26 @@ ASM_FUNC(positive_to_string)
     "ldrh w15, [x12, w14, uxtw #1]\n   strh w15, [x0, #1]\n   ldrh w15, [x12, w8, uxtw #1]\n   strh w15, [x0, #3]\n   ldrh w15, [x12, w10, uxtw #1]\n   strh w15, [x0, #5]\n   mov x8, #7\n   b " ASM_LABEL(positive_into_done) "\n"
     "" ASM_LABEL(positive_into_mid_four) ":\n   umull x13, w3, w7\n   lsr x13, x13, #19\n   msub w14, w13, w9, w3\n   ldrh w15, [x12, w13, uxtw #1]\n   strh w15, [x0]\n"
     "ldrh w15, [x12, w14, uxtw #1]\n   strh w15, [x0, #2]\n   ldrh w15, [x12, w8, uxtw #1]\n   strh w15, [x0, #4]\n   ldrh w15, [x12, w10, uxtw #1]\n   strh w15, [x0, #6]\n   mov x8, #8\n   b " ASM_LABEL(positive_into_done) "\n"
+    "" ASM_LABEL(positive_into_twelve) ":\n"
+    "movz x14, #0xCEFD\n   movk x14, #0x8461, lsl #16\n   movk x14, #0x7711, lsl #32\n   movk x14, #0xABCC, lsl #48\n"
+    "umulh x15, x1, x14\n   lsr x15, x15, #26\n   mov w7, #0xE100\n   movk w7, #0x5F5, lsl #16\n   msub w2, w15, w7, w1\n"
+    "mov w5, #0x1759\n   movk w5, #0xD1B7, lsl #16\n   umull x3, w2, w5\n   lsr x3, x3, #45\n   mov w6, #10000\n   msub w4, w3, w6, w2\n"
+    "mov w7, #5243\n   mov w9, #100\n   umull x8, w3, w7\n   lsr x8, x8, #19\n   msub w10, w8, w9, w3\n"
+    "umull x13, w4, w7\n   lsr x13, x13, #19\n   msub w14, w13, w9, w4\n"
+    "adrp x12, " ASM_PAGE(digit_pairs) "\n   add x12, x12, " ASM_LO12(digit_pairs) "\n"
+    "cmp w15, #999\n   b.hi " ASM_LABEL(positive_into_twelve_four) "\n   cmp w15, #99\n   b.hi " ASM_LABEL(positive_into_twelve_three) "\n   cmp w15, #9\n   b.hi " ASM_LABEL(positive_into_twelve_two) "\n"
+    "add w3, w15, #48\n   strb w3, [x0]\n"
+    "ldrh w3, [x12, w8, uxtw #1]\n   strh w3, [x0, #1]\n   ldrh w3, [x12, w10, uxtw #1]\n   strh w3, [x0, #3]\n   ldrh w3, [x12, w13, uxtw #1]\n   strh w3, [x0, #5]\n   ldrh w3, [x12, w14, uxtw #1]\n   strh w3, [x0, #7]\n"
+    "mov x8, #9\n   b " ASM_LABEL(positive_into_done) "\n"
+    "" ASM_LABEL(positive_into_twelve_two) ":\n   ldrh w3, [x12, w15, uxtw #1]\n   strh w3, [x0]\n"
+    "ldrh w3, [x12, w8, uxtw #1]\n   strh w3, [x0, #2]\n   ldrh w3, [x12, w10, uxtw #1]\n   strh w3, [x0, #4]\n   ldrh w3, [x12, w13, uxtw #1]\n   strh w3, [x0, #6]\n   ldrh w3, [x12, w14, uxtw #1]\n   strh w3, [x0, #8]\n"
+    "mov x8, #10\n   b " ASM_LABEL(positive_into_done) "\n"
+    "" ASM_LABEL(positive_into_twelve_three) ":\n   umull x3, w15, w7\n   lsr x3, x3, #19\n   msub w5, w3, w9, w15\n   add w3, w3, #48\n   strb w3, [x0]\n   ldrh w5, [x12, w5, uxtw #1]\n   strh w5, [x0, #1]\n"
+    "ldrh w3, [x12, w8, uxtw #1]\n   strh w3, [x0, #3]\n   ldrh w3, [x12, w10, uxtw #1]\n   strh w3, [x0, #5]\n   ldrh w3, [x12, w13, uxtw #1]\n   strh w3, [x0, #7]\n   ldrh w3, [x12, w14, uxtw #1]\n   strh w3, [x0, #9]\n"
+    "mov x8, #11\n   b " ASM_LABEL(positive_into_done) "\n"
+    "" ASM_LABEL(positive_into_twelve_four) ":\n   umull x3, w15, w7\n   lsr x3, x3, #19\n   msub w5, w3, w9, w15\n   ldrh w3, [x12, w3, uxtw #1]\n   strh w3, [x0]\n   ldrh w5, [x12, w5, uxtw #1]\n   strh w5, [x0, #2]\n"
+    "ldrh w3, [x12, w8, uxtw #1]\n   strh w3, [x0, #4]\n   ldrh w3, [x12, w10, uxtw #1]\n   strh w3, [x0, #6]\n   ldrh w3, [x12, w13, uxtw #1]\n   strh w3, [x0, #8]\n   ldrh w3, [x12, w14, uxtw #1]\n   strh w3, [x0, #10]\n"
+    "mov x8, #12\n   b " ASM_LABEL(positive_into_done) "\n"
     "" ASM_LABEL(positive_into_big) ":\n   stp x29, x30, [sp,  #-64]!\n   mov x29, sp\n   str x0, [sp, #16]\n   str x11, [sp, #24]\n   add x0, sp, #64\n"
     "bl positive_digits_core\n   ldr x2, [sp, #16]\n   mov x8, x1\n   cmp x1, #16\n   b.lo 6f\n   ldr q0, [x0]\n   add x3, x0, x1\n   ldur q1, [x3, #-16]\n   str q0, [x2]\n   add x4, x2, x1\n   stur q1, [x4, #-16]\n   b 8f\n"
     "6:  cmp x1, #8\n   b.lo 7f\n   ldr x5, [x0]\n   add x3, x0, x1\n   ldur x6, [x3, #-8]\n   str x5, [x2]\n   add x4, x2, x1\n   stur x6, [x4, #-8]\n   b 8f\n"
