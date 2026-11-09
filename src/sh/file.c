@@ -28351,6 +28351,17 @@ static bool split_lines_chunk(p8 address_to input, positive length,
                                         return true;
                                 chunk_end += chunk_size + (positive)(chunk_no < rem);
                                 chunk_no++;
+                                /*
+                                        With -e there is no empty piece to make
+                                        past the remainder: a zero-size chunk
+                                        leaves the boundary where it is, so
+                                        once the input is all written it never
+                                        passes n_written and this loop would
+                                        go on for ever with next still set.
+                                        split -e -n l/10 over "a\n" hung here.
+                                */
+                                if (!k && output->elide && !chunk_size && chunk_no > rem)
+                                        break;
                                 if (chunk_end <= n_written)
                                 {
                                                 if (!k && !output->elide)
