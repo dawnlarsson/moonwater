@@ -175490,6 +175490,39 @@ static void test_outputs(void)
         wayland_stop();
 }
 
+/*
+        Damage in a surface's units at a fractional scale: one unit at 150 percent is the buffer's pixels 1.5 to 3.0, which are
+        pixels 1 and 2, so a damage of (1, 1, 1, 1) must copy pixel 1 as well as pixel 2. Each edge is rounded to the nearest
+        pixel, so the copy used to start at 2 and miss the pixel the damage touches.
+*/
+static void test_fractional_damage(void)
+{
+        struct scale_window w;
+        struct wlc *c;
+        unsigned long buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        fake.screen.scale = 150;
+        wayland_screens_changed();
+        scale_open(&w, 1, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 21L, 16L);
+        scale_show(&w, 32, 24);
+        buffer = wl_buffer_of(&w.s, 32, 24, 0xffcc4422, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, w.s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, w.s.surface, WLQ_wl_surface_damage, 1L, 1L, 1L, 1L);
+        wlc_send(c, w.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0, "a damage of one unit at 150 percent is no error (%s)", c->error_text);
+        WLCHECK(fake.row[0].pixels[1 * FAKE_W + 1] == 0xffcc4422,
+                "the pixel a damaged unit covers in part is copied (pixel 1 is %08x)", fake.row[0].pixels[1 * FAKE_W + 1]);
+        WLCHECK(fake.row[0].pixels[2 * FAKE_W + 2] == 0xffcc4422, "and the pixel it covers whole is copied (%08x)", fake.row[0].pixels[2 * FAKE_W + 2]);
+        WLCHECK(fake.row[0].pixels[0] == 0xff336699, "and nothing outside the damage is (%08x)", fake.row[0].pixels[0]);
+        wlc_end(c);
+        leak_check("fractional damage");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -175528,6 +175561,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_games();
         test_scale();
+        test_fractional_damage();
         test_outputs();
         test_logical_space();
         test_tree_fuzz(rounds);

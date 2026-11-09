@@ -945,6 +945,34 @@ static inline long wayland_pixels(long units, long scale120)
         return v >= 0 ? (v + WAYLAND_UNIT / 2) / WAYLAND_UNIT : -((-v + WAYLAND_UNIT / 2) / WAYLAND_UNIT);
 }
 
+// Units to pixels, rounded down and rounded up: the pixel a span's start is in, and the pixel its end's edge is in.
+static inline long wayland_pixels_floor(long units, long scale120)
+{
+        long v = units * scale120;
+
+        return v >= 0 ? v / WAYLAND_UNIT : -((-v + WAYLAND_UNIT - 1) / WAYLAND_UNIT);
+}
+
+static inline long wayland_pixels_ceil(long units, long scale120)
+{
+        long v = units * scale120;
+
+        return v >= 0 ? (v + WAYLAND_UNIT - 1) / WAYLAND_UNIT : -(-v / WAYLAND_UNIT);
+}
+
+// The pixels a rectangle in units covers at a scale in 120ths: every pixel any of its units is in, so no damage is lost at an edge
+// that falls part way through a pixel (at a whole scale this is the rectangle, pixel for unit).
+static inline struct wayland_rect wayland_cover(struct wayland_rect r, long scale120)
+{
+        long x2 = wayland_pixels_ceil(r.x + r.width, scale120), y2 = wayland_pixels_ceil(r.y + r.height, scale120);
+
+        r.x = wayland_pixels_floor(r.x, scale120);
+        r.y = wayland_pixels_floor(r.y, scale120);
+        r.width = x2 - r.x;
+        r.height = y2 - r.y;
+        return r;
+}
+
 // Pixels to units, as the 24.8 fixed number an event carries.
 static inline unsigned long wayland_units_fixed(long pixels, long scale120)
 {
@@ -1868,12 +1896,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                                 struct wayland_rect r = s->damage[at];
 
                                 if (!s->damage_kind[at])
-                                {
-                                        r.x = wayland_pixels(r.x, s->scale120);
-                                        r.y = wayland_pixels(r.y, s->scale120);
-                                        r.width = wayland_pixels(r.width, s->scale120);
-                                        r.height = wayland_pixels(r.height, s->scale120);
-                                }
+                                        r = wayland_cover(r, s->scale120);
                                 r.x += ox;
                                 r.y += oy;
                                 wayland_child_copy(c, s, &r, &window);
@@ -2440,12 +2463,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 long x2, y2;
 
                 if (!s->damage_kind[at])
-                {
-                        r.x = wayland_pixels(r.x, scale120);
-                        r.y = wayland_pixels(r.y, scale120);
-                        r.width = wayland_pixels(r.width, scale120);
-                        r.height = wayland_pixels(r.height, scale120);
-                }
+                        r = wayland_cover(r, scale120);
                 x2 = wayland_min(r.x + r.width, b->width);
                 y2 = wayland_min(r.y + r.height, b->height);
                 r.x = wayland_max(r.x, 0);
