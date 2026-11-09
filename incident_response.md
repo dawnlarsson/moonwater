@@ -41,6 +41,39 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-166: a window's language word, which every program may write, was made into a file path without a check
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 (hardening: the path is checked where it is made; one file is the most it could name) |
+| Class | CWE-22 (a path from shared state that is not checked: `..` and `/` in the code's bytes) and CWE-20 (the language word is not validated where the kit reads it) |
+| Attacker | a program that maps the compositor's window table (every window program maps it read-write, `windows_take` in `src/canvas/window.c`, and its comment says a peer may write any of it); no other input |
+| Moonwater exposure window | from `0e411f857` (2026-11-03 17:51:23 +01:00, the language table: `ui_kit_language_take` reads `table->language` and `language_take` makes a path from its bytes) to the fixing commit, about 6 days |
+| Fixed by | the commit that adds this entry (`src/canvas/ui/language.c` `language_take`, with `language_code_ok`) |
+| Tests that fail without it | `CHECK_terminal`, `language: a table word that is no code (bytes that would make a path) is English, and no file is named by it` (`test/checks.c`, the language block) |
+
+**What it was.** The compositor writes a language code into the table only after it passes `windows_language_code` (two or
+three lower-case letters). The kit's readers take the word from the table where it sits (`ui_kit_language_take`) and
+`language_take` packed its low bytes into a path: `/usr/share/moonwater/language/` followed by the code's bytes and
+`.txt`. A word whose bytes are `..` and `/` made `/usr/share/moonwater/language/../.txt`, which is the file
+`/usr/share/moonwater/.txt`, and the file was read and parsed as a language if it existed.
+
+**How it was exposed.** Only the one name above: three bytes is the most the word carries, so `..` and `/` are the most
+a path can climb, and every other name the word could make ends in `.txt` inside the language directory. Nothing was
+written, no other file was opened, and the file's lines are used only as keyed words of the kit's text. The fix refuses
+any word that is not two or three lower-case letters (English, as the table's zero is), so no path is made of it.
+
+**The fix.** `language_code_ok` (language.c) answers whether the word is that shape, and `language_take` takes English for
+a word that is not. A valid code is unchanged, and so is the compositor's own path.
+
+**Tests that fail without it.** `CHECK_terminal`, `language: a table word that is no code (bytes that would make a path)
+is English, and no file is named by it`: the table's word is set to `..` and `/`, the kit takes it, and the code is left as
+the word (`language.code` is not 0). Run on the box (gcc, `CHECK_terminal` built from this tree and from a copy with the
+guard removed): without the fix 4139 checks, 1 failure (this row); with it, 4139 checks, 0 failures.
+
+**Still open.** Nothing known. The table's word is still written by any window program; the kit no longer makes a path of a
+word that is not a code, which is the only use of it.
+
 ### MW-2026-165: a touch's handles drew past the terminal's window picture (out-of-bounds write in the terminal)
 
 | | |

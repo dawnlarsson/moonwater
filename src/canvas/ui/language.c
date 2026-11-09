@@ -264,8 +264,27 @@ static fn language_listen(void (*again)(void))
         (and English if there is none, or it does not read). A code already taken does nothing, so the loops
         may ask at every pass.
 */
+// Whether a code is two or three lower-case letters, a byte each from the low end (windows_language_code's packing). The table's word is
+// one a peer may write, and the code is made into a path, so any other value is English and no path is made of it.
+static b32 language_code_ok(unsigned int code)
+{
+        unsigned int length = 0;
+
+        while (length < 3 && (code >> (8 * length) & 255))
+        {
+                unsigned int c = code >> (8 * length) & 255;
+
+                if (c < 'a' || c > 'z')
+                        return false;
+                length++;
+        }
+        return length >= 2 && !(code >> (8 * length));
+}
+
 static fn language_take(unsigned int code)
 {
+        if (code && !language_code_ok(code))
+                code = 0;
         if (code == LANGUAGE_ENGLISH)
                 code = 0;
         if (code == language.code)

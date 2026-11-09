@@ -158424,6 +158424,12 @@ static fn language_runtime_check(void)
         ui_kit_language_take(&table);
         check("language: a code with no file is English, and no word of it is blank",
               WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data);
+        // The table's word is a peer's to write: bytes that are no two or three letters (here ".." and "/", which would make the path
+        // ".../language/../.txt") are English, and no file is named by them.
+        table.language = '.' | '.' << 8 | '/' << 16;
+        ui_kit_language_take(&table);
+        check("language: a table word that is no code (bytes that would make a path) is English, and no file is named by it",
+              language.code == 0 && WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english);
         table.language = 0;
         ui_kit_language_take(&table);
         // The compositor's side: a change of the code counts the table's theme up once, the same code not at all.
