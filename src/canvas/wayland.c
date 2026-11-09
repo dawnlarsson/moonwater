@@ -7215,15 +7215,19 @@ WAYLAND_API long wayland_frame_wanted(void)
         for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_facts facts;
+                int waits;
 
                 if (!c)
                         continue;
-                if (c->surfaces[wayland.row_surface[row]].readies)
+                waits = c->surfaces[wayland.row_surface[row]].readies != 0;
+                for (long at = 0; !waits && at < WAYLAND_SURFACES; at++)
+                        waits = c->surfaces[at].live && c->surfaces[at].readies && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
+                                wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]];
+                // A window put away is told of no frame (wayland_frame), so no frame is wanted for its callbacks: they are answered by the
+                // first frame drawn once it is shown, which the compositor draws for any window it shows.
+                if (waits && !(wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED)))
                         return 1;
-                for (long at = 0; at < WAYLAND_SURFACES; at++)
-                        if (c->surfaces[at].live && c->surfaces[at].readies && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE &&
-                            wayland_root_of(c, &c->surfaces[at]) == &c->surfaces[wayland.row_surface[row]])
-                                return 1;
         }
         return 0;
 }

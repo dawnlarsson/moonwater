@@ -170754,10 +170754,12 @@ static void test_frames(void)
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
         wlc_forget(c);
+        WLCHECK(!wayland_frame_wanted(), "a window put away is not woken for the frame no one will answer");
         wayland_frame();
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0, "no frame for a window put away");
         fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
+        WLCHECK(wayland_frame_wanted(), "and a frame is wanted again once it is shown");
         wayland_frame();
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "and the next one when it is shown again");
