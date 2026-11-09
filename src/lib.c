@@ -14635,7 +14635,7 @@ __asm__(
     "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
     "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
     "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
-    "vpbroadcastd 2048(%rax), %zmm12\n   mov $0xffffff, %r10d\n   vpbroadcastd %r10d, %zmm13\n   mov $0xffff, %r13d\n"
+    "vpbroadcastd 2048(%rax), %zmm12\n   mov $0xffffff, %r10d\n   vpbroadcastd %r10d, %zmm13\n   vpandd %zmm13, %zmm12, %zmm12\n   mov $0xffff, %r13d\n"
     "" ASM_LABEL(blend_x64_row) ":\n   xor %r10d, %r10d\n"
     "" ASM_LABEL(blend_x64_piece) ":\n   mov %r8, %rbx\n   sub %r10, %rbx\n   bzhi %ebx, %r13d, %ebx\n   cmp $16, %r8\n   jb 1f\n"
     "lea 16(%r10), %rax\n   cmp %r8, %rax\n   ja 1f\n   mov $0xffff, %ebx\n"
@@ -14654,7 +14654,7 @@ __asm__(
     //  pixel-at-a-time path only when a lane is neither, and the pixel kept
     //  under a zero byte by and/andn/or. A branch on the byte mispredicts at
     //  every edge of every stroke.
-    "" ASM_LABEL(blend_x64_narrow) ":\n   mov 2048(%r12), %r13d\n   movd %r13d, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0xffffff, %eax\n"
+    "" ASM_LABEL(blend_x64_narrow) ":\n   mov 2048(%r12), %r13d\n   and $0xffffff, %r13d\n   movd %r13d, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0xffffff, %eax\n"
     "movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n   pxor %xmm7, %xmm7\n"
     "" ASM_LABEL(blend_x64_narrow_row) ":\n   xor %r10d, %r10d\n"
     "" ASM_LABEL(blend_x64_narrow_four) ":\n   lea 4(%r10), %rax\n   cmp %r8, %rax\n   ja " ASM_LABEL(blend_x64_narrow_one) "\n"
@@ -14700,7 +14700,7 @@ __asm__(
     //
     //       memory_blend_u32_rect: the baseline above, with two changes. The
     //       ground is the low 24 bits of its word, as the contract says, in both
-    //       bodies (the baseline compares the whole word). And a chunk of
+    //       bodies, the baseline's included. And a chunk of
     //       sixteen whose coverage bytes are all zero is passed over before its
     //       lookups: nothing in it is written and nothing in it stops the run.
     //       The lookup is TR32B_X64_LOOKUP, which makes the words without the
@@ -25857,7 +25857,7 @@ __asm__(
     //       clang's loop and 45-75% of GCC's. The x86_64 block carries the
     //       contract.
     ASM_FUNC(memory_blend_u32_rect_baseline)
-    "cbz x4, 8f\n   cbz x5, 8f\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   mov x8, xzr\n   dup v30.4s, w7\n   movi v31.4s, #0xff, msl #16\n"
+    "cbz x4, 8f\n   cbz x5, 8f\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   and w7, w7, #0xffffff\n   mov x8, xzr\n   dup v30.4s, w7\n   movi v31.4s, #0xff, msl #16\n"
     "1:  mov x9, xzr\n"
     "2:  add x10, x9, #4\n   cmp x10, x4\n   b.hi 3f\n   ldr w10, [x2, x9]\n   add x16, x0, x9, lsl #2\n   ldr q1, [x16]\n"
     "ubfx w11, w10, #8, #8\n   ubfx w12, w10, #16, #8\n   lsr w13, w10, #24\n   and w14, w10, #0xff\n   fmov s0, w10\n"
@@ -25885,8 +25885,8 @@ __asm__(
     //       with no stop gathers table[byte] for every lane (a zero byte gathers
     //       table[0], which is then not used) and stores each pixel as the table
     //       word where its byte is nonzero and the pixel itself where it is zero.
-    //       The ground is masked to its low 24 bits, as the contract says; the
-    //       baseline above compares the whole word. It uses x0-x17 and v0-v7,
+    //       The ground is masked to its low 24 bits, as the contract says, and
+    //       so is the baseline above. It uses x0-x17 and v0-v7,
     //       v16-v31, and never v8-v15, which the caller keeps.
     ASM_FUNC(memory_blend_u32_rect)
     "cbz x4, " ASM_LABEL(bln_done) "\n   cbz x5, " ASM_LABEL(bln_done) "\n   lsl x1, x1, #2\n   ldr w7, [x6, #2048]\n   and w7, w7, #0xffffff\n"
