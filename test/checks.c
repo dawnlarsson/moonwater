@@ -187699,6 +187699,49 @@ static void pt_test_requests(void)
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed, "freed");
 }
 
+// A stream corked and uncorked a little short of its prebuf plays on from what it holds: a cork does not ask for the prebuf again. Re-armed,
+// it waited for a fill that the program, asked for less than its minreq, does not write, and it never started (the shortfall here is 512 bytes,
+// under the minreq of 1024).
+static void pt_test_restart(void)
+{
+        long slot;
+        unsigned long channel, index, missing, fill, before, after;
+        static unsigned char out[AUDIO_BLOCK * 4];
+        struct pt_w w = {{0}, 0};
+
+        pt_make_source();
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 99, 35, "Restart");
+        PTCHECK(pt_create(slot, 35, 20, 4096, 4096, 1024, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "stream created");
+        pt_data(slot, channel, pt_source, 4096, 0, 0);
+        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        PTCHECK(!pt_engine.stream[0].underrun, "it starts once its prebuf is in");
+        w.n = 0;
+        pt_u32(&w, channel);
+        pt_bool(&w, 1);
+        pt_command(slot, PULSE_COMMAND_CORK_PLAYBACK_STREAM, 50, &w);
+        for (int block = 0; block < 4; block++)
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        w.n = 0;
+        pt_u32(&w, channel);
+        pt_bool(&w, 0);
+        pt_command(slot, PULSE_COMMAND_CORK_PLAYBACK_STREAM, 51, &w);
+        pt_collect(slot);
+        fill = audio_ring_fill(&pt_engine.stream[0].voice.ring);
+        PTCHECK(fill < 4096 && fill + 1024 > 4096, "uncorked short of its prebuf by less than minreq: %lu queued", fill);
+        PTCHECK(!pt_engine.stream[0].underrun, "a cork is not a new start: the stream is not waiting for its prebuf");
+        before = pt_engine.stream[0].voice.ring.read;
+        for (int block = 0; block < 4; block++)
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        after = pt_engine.stream[0].voice.ring.read;
+        PTCHECK(after > before, "and it plays on from what it holds: read %lu to %lu", before, after);
+        pulse_client_close(&pt_engine, slot);
+        for (int block = 0; block < 4; block++)
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases, "all given back");
+}
+
 // Cork, flush, trigger, prebuf, a stream that is muted and one at no volume, the rate, the name.
 static void pt_test_control(void)
 {
@@ -192620,6 +192663,7 @@ int main(void)
         pt_test_period_clock();
         pt_test_stream();
         pt_test_requests();
+        pt_test_restart();
         pt_test_control();
         pt_test_volume();
         pt_test_dying();

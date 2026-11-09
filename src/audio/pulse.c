@@ -3226,9 +3226,9 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                // A cork does not re-arm the prebuf: that is for the start and for an underrun. Re-armed, a stream whose ramp had taken
+                // the last of its prebuf (short by less than minreq) waited for a fill it was never asked for, and never started.
                 s->corked = cork;
-                if (cork)
-                        s->underrun = 1;
                 pulse_stream_apply(s);
                 pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
