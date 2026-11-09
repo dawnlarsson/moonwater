@@ -4199,20 +4199,22 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
         bool regular = !directory &&
                        (!type || type == '0' || type == '7' || type == 'S');
 
-        if (!tar_preserve && (directory || regular ||
-                              type == '3' || type == '4' || type == '6'))
-                final_mode &= ~tar_session_mask;
-
         if (!directory && !regular && type != '1' && type != '2' &&
             type != '3' && type != '4' && type != '6')
         {
                 p8 shown[2] = {type, end};
 
-                /* GNU extracts such a member as a normal file, and says so. */
+                /* GNU extracts such a member as a normal file, and says so.
+                   It is a normal file before the umask is taken, so it gets
+                   the same mode a regular member gets (0777 reads as 0755). */
                 string_format(log_error, "tar: %w: Unknown file type '%s', extracted as normal file\n",
                               writer_terminal_name, path, shown);
                 regular = true;
         }
+
+        if (!tar_preserve && (directory || regular ||
+                              type == '3' || type == '4' || type == '6'))
+                final_mode &= ~tar_session_mask;
 
         if (!tar_extract_type_allowed(type))
         {
