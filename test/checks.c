@@ -122396,7 +122396,9 @@ static long gpu_fake_userptr;
 // The fake card's losses: a submit answers ECANCELED while gpu_fake_cancel is set (and the call is not made), and a node is absent (ENOENT) while
 // gpu_fake_absent counts down.
 static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
-#define GPU_SUBMIT_FAKE(error) do { if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; } while (0)
+// The words of the IB of the last job submitted (gpu_run_job's ib, which is in scope where this is expanded), kept before any answer is made: a check reads the packets a job sent.
+static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
+#define GPU_SUBMIT_FAKE(error) do { gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
@@ -223968,6 +223970,62 @@ static void gpu_pool_rows(void)
 }
 
 /*
+        The registers a compute job's IB sets, read from the words the fake submit kept (gpu_fake_ib): a job after another must not read the shared state the
+        last one left, so the thread management of every shader engine (COMPUTE_STATIC_THREAD_MGMT_SE0 to SE3, dwords 0x216, 0x217, 0x219, 0x21a from the
+        SH registers' base, gc_10_3_0_offset.h's mm minus 0x19a0) is all enabled, and COMPUTE_PGM_RSRC3 (0x228) is set, with the registers the job set
+        before kept as they were. The self-test's hash is the same: it is drawn by the job whose packets are read here.
+*/
+static void gpu_preamble_rows(void)
+{
+        enum { FIRST = 0x200, REGISTERS = 0x80 };
+        static const unsigned int mgmt[4] = {0x216, 0x217, 0x219, 0x21a};
+        unsigned int value[REGISTERS], seen[REGISTERS], dispatches = 0, sets = 0, all = 0xffffffffu;
+        b32 shaped, enabled = true;
+
+        if (gpu.fd < 0 || gpu.broken)
+        {
+                check("gpu preamble: no card here, so no job's packets are read", true);
+                return;
+        }
+        memory_zero(value, sizeof(value)), memory_zero(seen, sizeof(seen));
+        gpu_fake_ib_words = 0;
+        check("gpu preamble: the self-test is drawn right by the job whose packets are read", gpu_test_hash() == GPU_TEST_HASH);
+        shaped = gpu_fake_ib_words > 0;
+        for (unsigned int at = 0; shaped && at < gpu_fake_ib_words;)
+        {
+                unsigned int head = gpu_fake_ib[at], body = (head >> 16 & 0x3fff) + 1, op = head >> 8 & 255;
+
+                if (head >> 30 != 3 || at + 1 + body > gpu_fake_ib_words)
+                {
+                        shaped = false;
+                        break;
+                }
+                if (op == 0x76) // SET_SH_REG: the first dword is the register, the rest its value and those of the registers after it
+                        for (unsigned int n = 1; n < body; n++)
+                        {
+                                unsigned int reg = gpu_fake_ib[at + 1] + n - 1;
+
+                                if (reg - FIRST < REGISTERS)
+                                        value[reg - FIRST] = gpu_fake_ib[at + 1 + n], seen[reg - FIRST]++, sets++;
+                        }
+                if (op == 0x15) // DISPATCH_DIRECT
+                        dispatches++;
+                at += 1 + body;
+        }
+        check("gpu preamble: the job's words are whole packets, one dispatch, and end before the arguments at byte 512",
+              shaped && dispatches == 1 && gpu_fake_ib_words * 4 <= 512);
+        for (unsigned int i = 0; i < 4; i++)
+                enabled &= seen[mgmt[i] - FIRST] == 1 && value[mgmt[i] - FIRST] == all;
+        check("gpu preamble: the thread management of all four shader engines is all enabled (0xffffffff, once each)", enabled);
+        check("gpu preamble: COMPUTE_PGM_RSRC3 is set (0, no shared vector registers), once", seen[0x228 - FIRST] == 1 && value[0x228 - FIRST] == 0);
+        check("gpu preamble: the registers the job set before are as they were (limits 0, tmpring 0x100, threads 64 by 1 by 1, program and user data once each)",
+              seen[0x215 - FIRST] == 1 && value[0x215 - FIRST] == 0 && seen[0x218 - FIRST] == 1 && value[0x218 - FIRST] == 0x100 && seen[0x207 - FIRST] == 1 &&
+              value[0x207 - FIRST] == 64 && value[0x208 - FIRST] == 1 && value[0x209 - FIRST] == 1 && seen[0x20c - FIRST] == 1 && seen[0x20d - FIRST] == 1 &&
+              seen[0x212 - FIRST] == 1 && seen[0x213 - FIRST] == 1 && seen[0x240 - FIRST] == 1 && seen[0x245 - FIRST] == 1);
+        string_format(log, "  gpu preamble: %p words, %p register writes in all\n", (positive)gpu_fake_ib_words, (positive)sets);
+}
+
+/*
         The card's hang and loss, held back: while the card cools after a hang, or a restart is due, or a submit said the card lost its state, a list is
         not drawn on the card (the context and the maps are the old ones); and a restart due waits while the job given up on may still run (a new context
         is not started on the queue that job is on). The card is up (gpu_loss_rows started it).
@@ -226296,6 +226354,7 @@ b32 main(void)
                         gpu_drop(0, GPU_GONE_RECOVER);
         }
         gpu_pool_rows();
+        gpu_preamble_rows();
         gpu_loss_rows();
         gpu_lent_rows();
         gpu_held_rows();

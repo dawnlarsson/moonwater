@@ -1475,10 +1475,15 @@ static b32 gpu_run_job(void)
             // rewrote since -- are emptied before the dispatch, as every driver does; a job that follows another read stale arguments one time in three without it.
             GPU_PKT(0x58, 6), 0, 0xffffffffu, 0xffffff, 0, 0, 10, 1 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 14,
             GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
-            GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 1), 0x218, 0x100,
+            // COMPUTE_STATIC_THREAD_MGMT_SE0, SE1, (COMPUTE_TMPRING_SIZE), SE2, SE3 (0x216 to 0x21a of the SH registers, gc_10_3_0_offset.h): every compute unit of every shader
+            // engine enabled, so that no value an earlier job left in them decides which units this one runs on. COMPUTE_PGM_RSRC3 (0x228) is 0, no shared vector registers,
+            // for the same reason.
+            GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 5), 0x216, 0xffffffffu, 0xffffffffu, 0x100, 0xffffffffu, 0xffffffffu,
+            GPU_PKT(0x76, 1), 0x228, 0,
             GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
             GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
             GPU_PKT(0x15, 3), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows, 1, 0x45};
+        _Static_assert(sizeof(ib) <= 512, "the packets end where the arguments begin (GPU_ARGS)");
         // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
         p64 bos[1 + 8 + GPU_MAPS], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
