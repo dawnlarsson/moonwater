@@ -27468,14 +27468,16 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
                 at++;
                 positive base = 1024;
 
-                if (byte_to_upper(string_get(at)) == 'B' &&
+                //      KB and KD are the thousands, in capitals only: GNU
+                //      refuses 1kb, 1Kb and 1kib, and takes 1KD as it takes
+                //      1KB.
+                if ((string_is(at, 'B') || string_is(at, 'D')) &&
                     !string_get(at + 1))
                 {
                         base = 1000;
                         at++;
                 }
-                else if (string_is(at, 'i') &&
-                         byte_to_upper(string_get(at + 1)) == 'B' &&
+                else if (string_is(at, 'i') && string_is(at + 1, 'B') &&
                          !string_get(at + 2))
                         at += 2;
                 else if (string_get(at))
@@ -30554,7 +30556,8 @@ static bool truncate_size(string_address text, b64 address_to out,
                 text++;
                 p64 base = 1024;
 
-                if (string_is(text, 'B'))
+                //      KD is the thousands as KB is, as GNU's truncate reads it.
+                if (string_is(text, 'B') || string_is(text, 'D'))
                 {
                         base = 1000;
                         text++;
