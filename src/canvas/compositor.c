@@ -19587,10 +19587,14 @@ static b32 compositor_main()
                         until = !until || frame < until ? frame : until;
                 }
                 // A copy or a paste that stalls is ended when its time is up.
-                if (compositor_wl.started && compositor_wl_due())
                 {
-                        now = clock_monotonic_nanoseconds();
-                        until = !until || compositor_wl_due() < until ? compositor_wl_due() : until;
+                        positive wl_due = compositor_wl.started ? compositor_wl_due() : 0;
+
+                        if (wl_due)
+                        {
+                                now = clock_monotonic_nanoseconds();
+                                until = !until || wl_due < until ? wl_due : until;
+                        }
                 }
 #endif
                 if (compositor.damages)

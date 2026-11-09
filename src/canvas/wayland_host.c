@@ -1994,10 +1994,13 @@ static void compositor_wl_table(void)
         table->wl_shortcuts = 0;
         for (long row = 0; row < WINDOWS; row++)
         {
-                table->wl_content[row] = (unsigned char)wayland_row_content(row);
-                table->wl_modal[row] = (unsigned char)wayland_row_modal(row);
-                table->wl_icon[row] = (unsigned char)wayland_row_icon(row);
-                table->wl_shortcuts += wayland_row_shortcuts(row) != 0;
+                long content, icon, modal, shortcuts;
+
+                wayland_row_hints(row, &content, &icon, &modal, &shortcuts);
+                table->wl_content[row] = (unsigned char)content;
+                table->wl_modal[row] = (unsigned char)modal;
+                table->wl_icon[row] = (unsigned char)icon;
+                table->wl_shortcuts += shortcuts != 0;
         }
 }
 

@@ -7752,6 +7752,21 @@ WAYLAND_API long wayland_row_modal(long row)
         return s ? s->modal : 0;
 }
 
+/*
+        The four hints of a row in one lookup, as the accessors give them one by one (wayland_row_content, _icon, _modal, _shortcuts):
+        compositor_wl_table asks every row of them each turn, so a row's surface is found once, not four times.
+*/
+WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *modal, long *shortcuts)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        *content = s ? (long)s->content : WLN_wp_content_type_v1_type_none;
+        *icon = s ? s->icon : 0;
+        *modal = s ? s->modal : 0;
+        *shortcuts = s && (s->shortcuts || s->xgrab) ? s->shortcut_active : 0;
+}
+
 /* The client a row belongs to, or -1: the compositor asks before it treats a row as a program's. */
 WAYLAND_API long wayland_row_owner(long row)
 {
