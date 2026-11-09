@@ -98655,7 +98655,7 @@ static fn fast_view_nodev(void)
                 }
                 else
                 {
-                        bowl_become_user();
+                        bowl_become_user(false);
                         if (system_call(syscall(getuid)) != BOWL_USER_ID ||
                             system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
                                 exit(77);
