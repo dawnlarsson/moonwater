@@ -633,6 +633,15 @@ static bool tar_pax_apply(tar_pax_state address_to state,
         {
                 p8 digits[32];
                 positive record;
+
+                /*      A NUL where a record's length should start is the
+                        end of the records, not a bad one, as GNU reads it:
+                        a payload that starts with one has none. A NUL
+                        inside a record is its value's, as in a binary
+                        xattr. */
+                if (!body[at])
+                        return true;
+
                 string_address cursor = digits;
                 p8 address_to space = memory_first_of(body + at, ' ',
                                                        length - at);
