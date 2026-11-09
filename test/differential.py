@@ -12874,6 +12874,42 @@ def files_statfs_names(farm):
     return passed, total, notes
 
 
+def files_stat_refused_widths(farm):
+    """A width or precision past INT_MAX in stat's format: the reference's
+    printf refuses the directive and prints nothing for it. Ours padded such a
+    directive to about a gigabyte from a format of fifteen bytes. Each run is
+    read to one megabyte at most, and a longer output is a failure."""
+    import subprocess
+    import tempfile
+
+    formats = ("a%99999999999sb", "a%2147483648sb", "a%99999999999Yb", "a%-99999999999ub",
+               "a%.99999999999sb")
+    limit = 1 << 20
+    passed = total = 0
+    notes = []
+    for fmt in formats:
+        answers = []
+        for program in (shutil.which("stat", path=os.defpath), str(Path(farm) / "stat")):
+            with tempfile.TemporaryDirectory() as work:
+                (Path(work) / "f").write_bytes(b"alpha\n")
+                child = subprocess.Popen([program, "-c", fmt, "f"], cwd=work,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                shown = child.stdout.read(limit + 1)
+                if len(shown) > limit:
+                    child.kill()
+                    child.wait()
+                    answers.append(("longer than a megabyte", None, None))
+                    continue
+                child.wait(timeout=30)
+                answers.append((child.returncode, shown, child.stderr.read()))
+        total += 1
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"{fmt}: reference {answers[0][:2]!r} ours {answers[1][:2]!r}")
+    return passed, total, notes
+
+
 def files_deep_walks(farm):
     """A tree nested far deeper than the old fixed ceiling, walked by the
     serial find (an -execdir forces it) and by the parallel one. Both have to
@@ -13266,7 +13302,7 @@ FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, fi
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
-                files_floor_address_cap, files_daystart_zones, files_statfs_names,
+                files_floor_address_cap, files_daystart_zones, files_statfs_names, files_stat_refused_widths,
                 files_deep_walks, files_parents_deep, files_chmod_link_operand, files_mktemp_t_environment, files_cp_skip_before_open, files_write_error_stdout,
                 files_exec_refusals, files_regex_switch,
                 files_codec_operands, files_mode_words, files_chmod_unreadable_report,

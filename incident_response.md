@@ -41,6 +41,34 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-171: stat padded a directive's width to a gigabyte from a format of fifteen bytes
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-09 (resource use from the format string: output size, no memory written) |
+| Class | Unbounded resource use from input (CWE-400), and a width the reference refuses |
+| Attacker | none outside the machine: the format is whatever the person or script running `stat -c` passes |
+| Moonwater exposure window | from `ea2be8881` (2026-09-27, the stat format engine) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/sh/file.c` `stat_digits`, `stat_spec_read`, `stat_out_text`, `stat_out_number`, `stat_out_epoch`) |
+| Tests that fail without it | `files_stat_refused_widths` in `test/differential.py`: 0 of 5 before the fix, 5 of 5 after, against GNU stat |
+
+**What it was.** `stat_digits` read a width or precision digit by digit and stopped multiplying once the value reached
+100000000. So `%99999999999s` padded its field to 1000000002 bytes, and `%10000000000s` to 100000001 bytes, from a
+format of fifteen bytes. GNU's stat hands the directive to printf, which refuses a width past INT_MAX, so GNU prints
+nothing for that directive (`a%99999999999sb` gives `ab`). The same cap padded the epoch fields (`%99999999999.9X`)
+to about a gigabyte, where GNU clamps their width and precision at INT_MAX.
+
+**The fix.** `stat_digits` reads exactly up to INT_MAX and saturates one past it. A number or text directive whose
+width or precision is past INT_MAX prints nothing (`stat_spec.refused`). The epoch fields clamp their width and
+precision to INT_MAX, as GNU does. No output changes for any width or precision up to INT_MAX that was exact before.
+
+**Tests that fail without it.** `files_stat_refused_widths` in `test/differential.py` (run by the `files` lane):
+five formats, each read to one megabyte at most, compared with the reference's stdout, stderr and status.
+
+**Still open.** The epoch fields with a width or precision of INT_MAX still write two gigabytes, as GNU does. The
+`ls -l --time-style=+%99999999999` directive writes 2147483675 bytes for one file, where GNU's ls writes 38. Its
+formatter is `date_shape` in `src/sh/file.c` at line 51019, past the range this entry changes, and it was not changed here.
+
 ### MW-2026-181: the machine named to build on could be an ssh option (argument injection, a command run on the builder's own machine)
 
 | | |

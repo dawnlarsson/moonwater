@@ -19041,9 +19041,15 @@ static RETURNS_NONNULL string_address file_kind_told(
 */
 typedef struct
 {
-        bool left, plus, space, alternate, zero, precise;
+        bool left, plus, space, alternate, zero, precise, refused;
         positive width, precision;
 } stat_spec;
+
+/* A width or precision past INT_MAX is one printf refuses: GNU's stat prints
+   nothing at all for such a directive. The digits stop at this value, one past
+   INT_MAX, and it stays there. */
+#define STAT_INT_MAX 2147483647u
+#define STAT_TOO_LARGE (STAT_INT_MAX + 1)
 
 /* The digits at the front of a directive's first bound bytes: the directive
    is read out of a copy that ends where its bound does, not at a terminator. */
@@ -19055,9 +19061,12 @@ static positive stat_digits(string_address at, positive bound,
         address_to value = 0;
         while (length < bound && byte_is_digit(string_get(at + length)))
         {
-                if (address_to value < 100000000u)
-                        address_to value = address_to value * 10 +
-                                           (positive)(string_get(at + length) - '0');
+                positive digit = (positive)(string_get(at + length) - '0');
+
+                if (address_to value < STAT_TOO_LARGE)
+                        address_to value = address_to value > (STAT_INT_MAX - digit) / 10
+                                               ? STAT_TOO_LARGE
+                                               : address_to value * 10 + digit;
                 length++;
         }
         return length;
@@ -19086,6 +19095,8 @@ static fn stat_spec_read(string_address prefix, positive length,
                 stat_digits(prefix + at + 1, length - at - 1,
                             address_of spec->precision);
         }
+        spec->refused = spec->width > STAT_INT_MAX ||
+                        (spec->precise && spec->precision > STAT_INT_MAX);
 }
 
 static fn stat_pad(positive count, p8 byte)
@@ -19096,6 +19107,8 @@ static fn stat_pad(positive count, p8 byte)
 static positive stat_out_text(stat_spec address_to spec, string_address text,
                               positive length)
 {
+        if (spec->refused)
+                return 0;
         if (spec->precise && length > spec->precision)
                 length = spec->precision;
 
@@ -19124,6 +19137,8 @@ static positive stat_out_number(stat_spec address_to given, p8 kind,
         positive count = 0;
         positive signs = 0;
 
+        if (spec.refused)
+                return 0;
         if (kind != 'd')
                 spec.plus = spec.space = false;
         if (kind == 'd' || kind == 'u')
@@ -19213,7 +19228,11 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
 
                 shape_length = before;
                 if (before + 1 < length && byte_is_digit(string_get(dot + 1)))
+                {
                         stat_digits(dot + 1, length - before - 1, address_of precision);
+                        if (precision > STAT_INT_MAX)
+                                precision = STAT_INT_MAX;
+                }
                 else
                         precision = 9;
 
@@ -19224,6 +19243,8 @@ static fn stat_out_epoch(string_address prefix, positive length, b64 seconds,
                         while (run && byte_is_digit(string_get(prefix + run - 1)))
                                 run--;
                         stat_digits(prefix + run, before - run, address_of width);
+                        if (width > STAT_INT_MAX)
+                                width = STAT_INT_MAX;
                         if (width > 1)
                         {
                                 run += string_get(prefix + run) == '0';
