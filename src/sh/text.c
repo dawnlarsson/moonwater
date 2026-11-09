@@ -33878,7 +33878,10 @@ static inline INLINE fn sed_output(p8 address_to bytes, positive length, bool en
         text_put(bytes, length);
         if (ended)
                 text_put_character(text_delimiter);
-        else if (length)
+        else
+                // An empty write without its delimiter still owes one, as
+                // GNU's output_missing_newline has it: printf abc | sed 'z;p'
+                // writes a newline.
                 sed_output_state |= SED_OUTPUT_UNTERMINATED;
 }
 
