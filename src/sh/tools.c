@@ -16888,6 +16888,11 @@ static bool tools_dmesg_span_number(p8 address_to address_to cursor,
         return true;
 }
 
+/* A record clock past this many seconds (about 34,800 years) is not a clock:
+   the microsecond sum and the wall-clock base added to it stay inside 64 bits
+   only below it. */
+#define DMESG_SECONDS_LIMIT ((positive)1 << 40)
+
 static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                                       p32 inherited, bool first,
                                       tools_dmesg_record address_to record)
@@ -16935,7 +16940,7 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                 while (at < stop && byte_is_digit(*at))
                 {
                         if (!positive_append_digit(address_of seconds, *at++ - '0',
-                                                   positive_max))
+                                                   DMESG_SECONDS_LIMIT))
                                 return false;
                         any = true;
                 }
@@ -16996,7 +17001,8 @@ static bool tools_dmesg_kmsg_record(p8 address_to bytes, positive length,
                                       address_of sequence) ||
             !tools_dmesg_span_number(address_of at, stop, ',',
                                       address_of microseconds) ||
-            priority > 191)
+            priority > 191 ||
+            microseconds / 1000000 > DMESG_SECONDS_LIMIT)
                 return false;
         (void)sequence;
 
