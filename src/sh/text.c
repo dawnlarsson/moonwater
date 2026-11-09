@@ -33652,7 +33652,9 @@ static fn sed_parse()
                         p8 name[128];
                         positive have = sed_label_of(name, sizeof(name));
 
-                        if (kind == ':' && !have)
+                        // A label is a place in the script, not a command, so
+                        // it takes no address: GNU refuses 1:a.
+                        if (kind == ':' && (!have || command->first_type != SED_ADDRESS_NONE))
                         {
                                 sed_broken = true;
                                 return;
