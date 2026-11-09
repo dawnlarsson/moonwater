@@ -5510,6 +5510,11 @@ INPUTS["x_run"] = b"x" * 5000 + b"\n"
 #       falls inside, and a shorter one that ends in a tab and a letter.
 INPUTS["wide_blanks"] = ("x" + "\u3000" * 8 + "y\n" + "x" + "\u3000" * 4 + "\tq\n").encode("utf-8")
 
+#       A U+3000 that the tab stop falls inside, after a run of columns with no
+#       blank: GNU keeps it whole. Its lead byte was once replaced by the tab,
+#       which left two continuation bytes on their own.
+INPUTS["wide_at_stop"] = ("1234567\u3000x\n" + "1234567\u3000\u3000x\n").encode("utf-8")
+
 #       Two numbers of a thousand and more digits that differ only in their
 #       last digit: a numeric sort under a locale with thousands separators
 #       must order them, and the localized copy of a number is not capped.
@@ -105418,6 +105423,7 @@ PINNED = r"""
 {"case":{"argv":["[:upper:]"],"env":[["LC_ALL","C.UTF-8"]],"tier":"pinned"},"domain":"text","list":"regression","utility":"tr"},
 {"case":{"argv":["-"],"fixture":"dash_file","tier":"pinned"},"domain":"text","list":"regression","utility":"ul"},
 {"case":{"argv":["-a"],"env":[["LC_ALL","C.UTF-8"]],"stdin":"wide_blanks","tier":"pinned"},"domain":"text","list":"regression","utility":"unexpand"},
+{"case":{"argv":["-a"],"env":[["LC_ALL","C.UTF-8"]],"stdin":"wide_at_stop","tier":"pinned"},"domain":"text","list":"regression","utility":"unexpand"},
 {"case":{"argv":["multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
 {"case":{"argv":["-o","value","-s","TYPE","multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
 {"case":{"argv":["--getalignoff","-v","--getdiscardzeroes","dir"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},

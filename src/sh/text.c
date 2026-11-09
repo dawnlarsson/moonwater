@@ -12734,6 +12734,7 @@ static bool text_tab_next(positive column, positive address_to next,
 static p8 address_to text_unexpand_raw;
 static positive text_unexpand_raw_room;
 static positive text_unexpand_raw_used;
+static positive text_unexpand_raw_head;
 static bool text_unexpand_raw_on;
 
 // The blanks of a run are kept whole until its tab or its end is known, so the
@@ -12755,9 +12756,16 @@ static fn text_unexpand_pending(positive count, bool first_tab)
 
         if (text_unexpand_raw_on)
         {
-                if (first_tab)
-                        text_unexpand_raw[0] = '\t';
-                text_put(text_unexpand_raw, text_unexpand_raw_used);
+                //      A tab takes the place of a space only. A wide blank the
+                //      run starts with is kept whole: its lead byte is not a
+                //      tab, and its continuation bytes are not left behind.
+                if (first_tab && text_unexpand_raw[0] == ' ')
+                {
+                        text_put_character('\t');
+                        text_put(text_unexpand_raw + 1, text_unexpand_raw_used - 1);
+                }
+                else
+                        text_put(text_unexpand_raw, text_unexpand_raw_used);
                 text_unexpand_raw_on = false;
                 text_unexpand_raw_used = 0;
                 return;
@@ -13113,6 +13121,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                         text_unexpand_raw_grow(pending + got);
                                                                         text_unexpand_raw_on = true;
                                                                         text_unexpand_raw_used = 0;
+                                                                        text_unexpand_raw_head = pending ? 1 : got;
                                                                         for (positive k = 0; k < pending; k++)
                                                                                 text_unexpand_raw[text_unexpand_raw_used++] = ' ';
                                                                 }
@@ -13136,7 +13145,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                 text_unexpand_raw_used = 0;
                                                         }
                                                         else if (text_unexpand_raw_on)
-                                                                text_unexpand_raw_used = 1;
+                                                                text_unexpand_raw_used = text_unexpand_raw_head;
                                                         suppress = true;
                                                 }
 
@@ -13226,7 +13235,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
 
                                                         else if (text_unexpand_raw_on)
 
-                                                                text_unexpand_raw_used = 1;
+                                                                text_unexpand_raw_used = text_unexpand_raw_head;
                                                 }
                                                 else
                                                 {
@@ -13268,7 +13277,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
 
                                                         else if (text_unexpand_raw_on)
 
-                                                                text_unexpand_raw_used = 1;
+                                                                text_unexpand_raw_used = text_unexpand_raw_head;
                                                         suppress = true;
                                                 }
                                         }
