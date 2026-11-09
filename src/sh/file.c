@@ -11337,6 +11337,7 @@ typedef struct
         file_color_span sequence;
         bool exact;
         bool ignored;
+        positive chain;
 } ls_suffix_color;
 
 static ls_suffix_color address_to ls_extensions;
@@ -11483,8 +11484,41 @@ static bool ls_extension_add(file_color_span suffix)
         if (!array_store_reserve(ls_extensions, ls_extension_room, ls_extension_count,
                                  ls_extension_count + 1, 64))
                 return false;
-        ls_extensions[ls_extension_count++] = (ls_suffix_color){suffix, {null, 0}, false, false};
+        ls_extensions[ls_extension_count++] = (ls_suffix_color){suffix, {null, 0}, false, false, 0};
         return true;
+}
+
+/*
+        The extension table, chained by the folded last byte of each suffix.
+        A name can only end in a suffix whose last byte folds to the name's
+        own last byte, exact or not, so a lookup walks the one chain for the
+        name's last byte, newest first, instead of every suffix in the table.
+        ls_extension_heads holds the newest suffix of each chain and every
+        entry's chain is the next older one, both as index plus one. A table
+        with an empty suffix matches every name, so it keeps the plain walk.
+*/
+static positive ls_extension_heads[256];
+static bool ls_extension_linked;
+
+static void ls_extension_index(void)
+{
+        memory_zero(ls_extension_heads, sizeof(ls_extension_heads));
+        ls_extension_linked = true;
+        for (positive at = 0; at < ls_extension_count; at++)
+        {
+                ls_suffix_color address_to each = ls_extensions + at;
+                positive size = each->suffix.length;
+
+                if (!size)
+                {
+                        ls_extension_linked = false;
+                        return;
+                }
+                positive key = byte_to_lower(each->suffix.text[size - 1]);
+
+                each->chain = ls_extension_heads[key];
+                ls_extension_heads[key] = at + 1;
+        }
 }
 
 /*
@@ -11624,6 +11658,7 @@ static bool ls_color_parse()
                 }
         }
 
+        ls_extension_index();
         ls_color_referent = file_color_span_is(ls_indicators[LS_LN], (string_address) "target");
         return true;
 }
@@ -11632,6 +11667,24 @@ static bool ls_color_parse()
 static ls_suffix_color address_to ls_extension_of(string_address name)
 {
         positive length = string_length(name);
+
+        if (ls_extension_linked && length)
+        {
+                for (positive at = ls_extension_heads[byte_to_lower(name[length - 1])]; at;
+                     at = ls_extensions[at - 1].chain)
+                {
+                        ls_suffix_color address_to each = ls_extensions + at - 1;
+                        positive size = each->suffix.length;
+
+                        if (each->ignored || size > length)
+                                continue;
+                        if (each->exact ? !memory_compare(name + length - size, each->suffix.text, size)
+                                        : !memory_compare_ascii_case(name + length - size, each->suffix.text,
+                                                                     size))
+                                return each;
+                }
+                return null;
+        }
 
         for (positive at = ls_extension_count; at--;)
         {
