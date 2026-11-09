@@ -434,6 +434,9 @@ cover('folds_already', 'length', 'fast_argmax_f32',
 cover('nothing_to_fold', None, 'memory_transpose_rect_core',
       'the edge rectangle memory_transpose_u32 hands to it in bytes, with the edges it computes at run time; no call '
       'site names it')
+cover('nothing_to_fold', None, 'memory_copy_rect_nt_row',
+      'the row memory_copy_rect_u32 hands to it in bytes, after a head it computes from the destination at run time; no '
+      'call site names it')
 cover('folds_already', 'rows', 'memory_transpose_u32',
       'windows_rotate_u32 hands it the rows and columns of each tile at run time: a picture of any size leaves its edge '
       'tiles at whatever size the picture allows, so no reachable call site passes a literal for both, and the tile is '

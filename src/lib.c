@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        457 routines (433 public, 24 local), 447 of them on all three and 10 local to one.
+        477 routines (451 public, 26 local), 463 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -155,6 +155,9 @@
           f32_pair_clip_2_3              public  yes     yes     yes
           f32_pair_to_f32                public  yes     yes     yes
           f32_pair_to_s16                public  yes     yes     yes
+          f32_pair_to_s16_1_2            public  yes     yes     yes
+          f32_pair_to_s16_3_3            public  yes     yes     yes
+          f32_pair_to_s16_5_7            public  yes     yes     yes
           f32_pair_to_s24_32             public  yes     yes     yes
           f32_pair_to_s32                public  yes     yes     yes
           f32_planes_from_f32            public  yes     yes     yes
@@ -243,6 +246,7 @@
           memory_copy_changed_u32        public  yes     yes     yes
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
+          memory_copy_rect_nt_row        local   yes     --      --
           memory_copy_rect_stream_u32    public  yes     yes     yes
           memory_copy_rect_u32           public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
@@ -387,6 +391,8 @@
           positive_into_padded           public  yes     yes     yes
           positive_into_pair             public  yes     yes     yes
           positive_into_string           public  yes     yes     yes
+          positive_into_string_2_2       public  yes     yes     --
+          positive_into_string_9_12      public  yes     yes     --
           positive_to_base_field         public  yes     yes     yes
           positive_to_human_1024         public  yes     yes     yes
           positive_to_padded             public  yes     yes     yes
@@ -441,9 +447,9 @@
           string_copy_bounded_3_16       public  yes     yes     yes
           string_copy_end                public  yes     yes     yes
           string_copy_max                public  yes     yes     yes
+          string_copy_max_3_15           public  yes     yes     yes
           string_copy_max_end            public  yes     yes     yes
           string_copy_max_endptr         public  yes     yes     yes
-          string_copy_max_3_15         public  yes     yes     yes
           string_cut                     public  yes     yes     yes
           string_diagnostic              public  yes     yes     yes
           string_digits                  public  yes     yes     yes
@@ -544,6 +550,7 @@
         Private to one machine, by choice:
           cpu_vector_detect -- local to riscv64
           deflate_tokens_encode_bmi2 -- local to x86_64
+          memory_copy_rect_nt_row -- local to x86_64
           memory_offsets_fields_arm64 -- local to arm64
           memory_offsets_fields_rv -- local to riscv64
           memory_offsets_fields_x64 -- local to x86_64
@@ -555,6 +562,8 @@
 
         Not yet on every machine:
           memory_blend_u32_rect_baseline -- missing on riscv64
+          positive_into_string_2_2 -- missing on riscv64
+          positive_into_string_9_12 -- missing on riscv64
 */
 
 /*
@@ -16066,6 +16075,18 @@ __asm__(
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx512", "3f")
     "cmp $512, %rbp\n   jbe 3f\n"
+    //
+    //       A rectangle of at least 16 MiB whose rows are 1 KiB or more goes row by row through
+    //       memory_copy_rect_nt_row, whose destination is written with non-temporal stores. Measured on the 9950X
+    //       (2026-11-09, one core, copy of 3840x2160 into a 3840-wide scanout, minimum of rounds): cur 5074 us (6.5
+    //       GB/s), rep movsb 4805 us, non-temporal 2435 us (13.6 GB/s); 7680x4320 cur 23808 us, rep 20980 us,
+    //       non-temporal 12989 us. Below that size the destination stays in the L3 and the temporal stores win: 2560x1440
+    //       (14.7 MB) cur 763 us and non-temporal 733 us, 1920x1080 cur 124 us and non-temporal 384 us. The 16 MiB gate is
+    //       the rectangle's own bytes, which is where the copy's source and destination together pass one CCD's 32 MiB L3.
+    //
+    "mov %rbx, %rax\n   imul %rbp, %rax\n   cmp $0x1000000, %rax\n   jb 4f\n   cmp $1024, %rbp\n   jb 4f\n"
+    "5:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_rect_nt_row\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 5b\n   sfence\n   jmp 7f\n"
     "4:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   mov %r12, %rax\n   call " ASM_LABEL(memory_copy_apart_zmm) "\n"
     "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 4b\n   jmp 7f\n"
     )
@@ -16074,6 +16095,33 @@ __asm__(
     "7:  pop %rbp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_copy_rect_nt_row -- rdi into, rsi from, rdx bytes, at least 1024 of them, a multiple of 4: one row of
+    //       memory_copy_rect_u32 for a rectangle of 16 MiB or more, with the destination written by non-temporal stores.
+    //       The head up to the first 64-byte line of the destination is memory_copy_apart; then 256 bytes a turn, the
+    //       source read with 64-byte loads (all four before the four stores) and the destination written with vmovntdq,
+    //       which is the one store that does not fetch the line first; then the tail, under 256 bytes, as memory_copy_apart.
+    //       The stores are weakly ordered, so the caller ends the rectangle with sfence. Preserves rbx and r12-r15.
+    //
+    //       Userspace only: the zmm and the non-temporal store are the wide body's, and the kernel has no vector state to use.
+    //
+    ASM_USERSPACE_WIDE(
+    ASM_LOCAL_FUNC(memory_copy_rect_nt_row)
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %rdi, %rbx\n   mov %rsi, %r12\n   mov %rdx, %r13\n"
+    "mov %rbx, %r14\n   neg %r14\n   and $63, %r14\n"
+    "mov %r14, %rdx\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   call memory_copy_apart\n"
+    "add %r14, %rbx\n   add %r14, %r12\n   sub %r14, %r13\n"
+    "mov %r13, %r15\n   and $-256, %r15\n   xor %ecx, %ecx\n"
+    ".balign 16\n"
+    "1:  vmovdqu64 (%r12,%rcx), %zmm0\n   vmovdqu64 64(%r12,%rcx), %zmm1\n   vmovdqu64 128(%r12,%rcx), %zmm2\n   vmovdqu64 192(%r12,%rcx), %zmm3\n"
+    "vmovntdq %zmm0, (%rbx,%rcx)\n   vmovntdq %zmm1, 64(%rbx,%rcx)\n   vmovntdq %zmm2, 128(%rbx,%rcx)\n   vmovntdq %zmm3, 192(%rbx,%rcx)\n"
+    "add $256, %rcx\n   cmp %r15, %rcx\n   jb 1b\n"
+    "lea (%rbx,%r15), %rdi\n   lea (%r12,%r15), %rsi\n   mov %r13, %rdx\n   sub %r15, %rdx\n   jz 2f\n   call memory_copy_apart\n"
+    "2:  vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ASM_LOCAL_END(memory_copy_rect_nt_row)
+    )
 
     //
     //       memory_transpose_u32 -- rdi into, rsi into_pitch in words, rdx from, rcx from_column in words (signed), r8

@@ -406,6 +406,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_u32
       'paired timing against the row loop compositor_blit had, one memory_copy a row, over a window 1160 words wide '
       'with rows 2560 apart, a sliver of 40 words, a band of 300 and a row of 96, with AVX-512 and without, '
       'NEON, and V and scalar on riscv64')
+cover('benchmark_context', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_nt_row',
+      'the non-temporal row memory_copy_rect_u32 takes for a rectangle of 16 MiB or more on x86_64 with AVX-512; the '
+      'BENCH_copy_rect shapes are all under that gate, so its timing is the 3840x2160 and 7680x4320 A/B run recorded with the change, '
+      'not this row', {'memory_copy_rect_nt_row': 'memory_copy_rect_u32'})
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_stream_u32',
       'paired timing against memory_copy_rect_u32 over the same windows of ordinary memory, a control that the streaming '
       'loads lose nothing where they have nothing to win (they are for a GPU buffer mapped write-combined, 9x faster to '
