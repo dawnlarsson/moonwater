@@ -27406,9 +27406,22 @@ static bool split_digits(string_address address_to text, positive base,
         string_address at = address_to text;
         positive got = 0;
 
+        //      A count is read as GNU's strtoumax reads it: blanks and a plus
+        //      sign before the digits are taken, so -l ' 2' and -n +2 are two.
+        at += string_span(at, string_set_space);
+        if (string_is(at, '+'))
+                at++;
+
+        string_address first = at;
+
         split_overflowed = false;
         if (!saturate)
-                return string_digits_checked(text, base, value);
+        {
+                if (!string_digits_checked(address_of at, base, value))
+                        return false;
+                address_to text = at;
+                return true;
+        }
 
         for (positive digit; (digit = digit_known(string_get(at), base)) < base; at++)
         {
@@ -27417,7 +27430,7 @@ static bool split_digits(string_address address_to text, positive base,
                 got = split_overflowed ? SPLIT_COUNT_MAX : got * base + digit;
         }
 
-        if (at == address_to text)
+        if (at == first)
                 return false;
 
         address_to text = at;
@@ -34254,15 +34267,23 @@ static bool shuf_seen(p8 letter, string_address value)
         {
                 positive lines;
 
-                if (!file_unsigned_decimal(value, address_of lines))
+                //      Read as GNU's strtoumax reads it: blanks and a plus
+                //      sign before the digits are taken, and no 0x -- 0x2 is
+                //      a line count GNU refuses.
+                string_address start = value + string_span(value, string_set_space);
+
+                if (string_is(start, '+'))
+                        start++;
+
+                if (!string_digits_checked_exact(start, 10, address_of lines))
                 {
                         //      A count too large for a number is no ceiling at
                         //      all, as the reference reads it, and a run of
                         //      digits is all that is let through: what is not
                         //      a number is still refused.
-                        positive digits = string_span_of_set(value, "0123456789");
+                        positive digits = string_span_of_set(start, "0123456789");
 
-                        if (digits && !value[digits])
+                        if (digits && !start[digits])
                                 return true;
 
                         return string_report(log_error, false,
@@ -53018,10 +53039,17 @@ static bool xargs_count_value(string_address value, p8 letter, positive address_
 
         // A count too wide for the word saturates, as strtol hands GNU its
         // LONG_MAX, rather than wrapping round to a small one.
-        string_digits(value, address_of taken);
-        string_digits_checked_exact(value, 10, address_of made);
+        //      Blanks and a plus sign before the digits are taken, as GNU's
+        //      strtoul takes them; the message still quotes the word as given.
+        string_address digits = value + string_span(value, string_set_space);
 
-        if (!taken || string_get(value + taken))
+        if (string_is(digits, '+'))
+                digits++;
+
+        string_digits(digits, address_of taken);
+        string_digits_checked_exact(digits, 10, address_of made);
+
+        if (!taken || string_get(digits + taken))
         {
                 return string_report(log_error, false, "xargs: invalid number \"%s\" for -%s option\n",
                               value, named);
