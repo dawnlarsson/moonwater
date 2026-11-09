@@ -5169,6 +5169,13 @@ static fn tar_read_members(tar_members address_to run)
                 tar_member_link(block, tar_link,
                                 have_long_link ? long_link : null);
 
+                /*      A regular member with no data whose name ends in a
+                        slash is a directory: V7 writes its directories so, and
+                        GNU lists, compares and makes them as directories. */
+                if ((type == '0' || !type) && !size && !tar_sparse_active &&
+                    tar_name[0] && tar_name[string_length(tar_name) - 1] == '/')
+                        type = '5';
+
                 have_long_name = false;
                 have_long_link = false;
                 long_name[0] = end;
