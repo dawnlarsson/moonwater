@@ -25838,9 +25838,10 @@ static bool grep_path_add(string_address path)
 
 // What an entry is once getdents has had its say, where it says anything: a
 // filesystem that does not know answers DT_UNKNOWN, and a link is asked of the
-// name it points at. A directory and a file are themselves and anything else
-// is DT_FIFO, a thing a walk does not read; nothing at all is a name that
-// cannot be asked, 0, which the caller passes over.
+// name it points at under -R and of itself otherwise. A directory and a file
+// are themselves and anything else is DT_FIFO, a thing a walk does not read;
+// nothing at all is a name that cannot be asked, 0, which the caller passes
+// over.
 static p8 grep_entry_kind(bipolar directory, string_address name, p8 kind)
 {
         file_facts facts;
@@ -25848,10 +25849,17 @@ static p8 grep_entry_kind(bipolar directory, string_address name, p8 kind)
         if (kind != DT_UNKNOWN && kind != DT_LNK)
                 return kind;
 
-        if (!file_look(directory, name, 0, address_of facts))
+        // Without a d_type the link is asked by its own name, and only -R
+        // follows it: -r leaves a link in the tree unread, as the link case
+        // above does for an entry that has one.
+        if (!file_look(directory, name, grep_dereference ? 0 : AT_SYMLINK_NOFOLLOW,
+                       address_of facts))
                 return 0;
 
         p32 mode = facts.mode & MODE_FORMAT;
+
+        if (mode == MODE_LINK)
+                return DT_LNK;
 
         return mode == MODE_DIRECTORY ? DT_DIR : mode == MODE_FILE ? DT_REG : DT_FIFO;
 }
