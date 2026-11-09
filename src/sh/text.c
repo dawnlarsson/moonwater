@@ -33977,7 +33977,7 @@ static fn sed_put_listing(positive wrap)
                 {
                         sed_stdio(2);
                         text_put_character('\\');
-                        text_put_character('\n');
+                        text_put_character(text_delimiter);
                         column = 0;
                         done = memory_into_spelled(shown, bytes, 1, sizeof(shown), table);
                 }
@@ -33994,9 +33994,11 @@ static fn sed_put_listing(positive wrap)
                 length -= done.x;
         }
 
+        // The line ends with the record delimiter, which -z makes NUL, as GNU
+        // sed's l does: a -z listing is records of NUL-ended lines.
         sed_stdio(2);
         text_put_character('$');
-        text_put_character('\n');
+        text_put_character(text_delimiter);
 }
 
 // What r names, whole, wherever the cycle's output had reached. A name that
