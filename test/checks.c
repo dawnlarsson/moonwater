@@ -172918,6 +172918,48 @@ static void tree_open(struct tree *t, int desync)
         wlc_send(c, t->child, WLQ_wl_surface_commit);
 }
 
+/* How many releases the client was sent for one of its buffers. */
+static long releases_of(struct wlc *c, unsigned long object)
+{
+        long count = 0;
+
+        for (long at = 0; at < c->events; at++)
+                count += c->ev[at].object == object && c->ev[at].opcode == WLE_wl_buffer_release;
+        return count;
+}
+
+/*
+        A window's own buffer that it commits again while a subsurface is laid over it is its picture still: it is not released
+        (the window's commit lets go of nothing it still shows). Once the subsurface is gone the same buffer's commit releases it
+        once, not twice. A subsurface set to the place it has is no move: its window is not laid again (only its own damage is copied).
+*/
+static void test_holds(void)
+{
+        struct tree t;
+        struct wlc *c;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        wlc_forget(c);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(releases_of(c, t.s.buffer) == 0 && c->errors == 0, "a window's buffer committed again under a subsurface is not let go (%ld)",
+                releases_of(c, t.s.buffer));
+        wlc_forget(c);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(releases_of(c, t.s.buffer) == 1 && c->errors == 0, "then, with the subsurface gone, it is released once (%ld)", releases_of(c, t.s.buffer));
+        wlc_end(c);
+}
+
 static void test_subsurfaces(void)
 {
         struct tree t;
@@ -175558,6 +175600,7 @@ int main(int argc, char **argv)
         test_caps();
         test_seat();
         test_subsurfaces();
+        test_holds();
         test_tree_cost();
         test_geometry();
         test_cursor();

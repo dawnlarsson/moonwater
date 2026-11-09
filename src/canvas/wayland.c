@@ -2704,9 +2704,13 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         // A window with subsurfaces keeps its picture, as they do, to lay them over again; they are laid on now.
                         struct wayland_rect window;
 
-                        wayland_unhold(c, s);
-                        b->held++;
-                        s->held = (unsigned short)(c->objects[buffer].link + 1);
+                        // The buffer it already holds is kept as it is: letting it go here would send its release while it is the picture.
+                        if (s->held != (unsigned short)(c->objects[buffer].link + 1))
+                        {
+                                wayland_unhold(c, s);
+                                b->held++;
+                                s->held = (unsigned short)(c->objects[buffer].link + 1);
+                        }
                         window = wayland_window_of(c, s);
                         wayland_flatten(c, wayland_surface_index(c, s), s->shown_full ? 0 : &s->shown_rect, &window);
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
@@ -2715,10 +2719,19 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 else
                 {
                         unsigned short now = (unsigned short)(c->objects[buffer].link + 1);
+                        struct wayland_buffer *again = &c->buffers[c->objects[buffer].link];
 
-                        wayland_unhold(c, s);
-                        // A buffer the surface still holds as its picture, or as the one it replaced, is let go of by the shim later.
-                        if (s->lent != now && s->lent_gone != now)
+                        // The buffer the surface held as its picture (committed again) ends that hold here, and is released once, by
+                        // the hold's end or by this commit, never by both; a buffer something else holds, or the surface still holds as
+                        // the one it replaced, is let go of later.
+                        if (s->held == now)
+                        {
+                                s->held = 0;
+                                again->held--;
+                        }
+                        else
+                                wayland_unhold(c, s);
+                        if (again->held <= 0 && s->lent != now && s->lent_gone != now)
                                 wayland_release_buffer(c, buffer);
                 }
         }
