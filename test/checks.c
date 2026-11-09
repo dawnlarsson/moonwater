@@ -169419,6 +169419,7 @@ static struct fake_host_state
         struct fake_row row[WAYLAND_ROWS];
         long fds_open, fds_closed, maps, unmaps, allocs, releases;
         long refuse_open;
+        long copied; // pixels of pictures the shim handed the host, counted per pixel read (test_holds)
         long now;
         long locks, caps, keymap_fd, rate, delay;
         struct wayland_screen screen;
@@ -169559,6 +169560,8 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
                                 {
                                         long dx = picture->dest_x + x, dy = picture->dest_y + y;
                                         unsigned source = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
+
+                                        fake.copied++;
 
                                         if (dx < 0 || dy < 0 || dx >= FAKE_W || dy >= FAKE_H || dx >= r->width || dy >= r->height)
                                                 continue;
@@ -172957,6 +172960,21 @@ static void test_holds(void)
         wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
         wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
         WLCHECK(releases_of(c, t.s.buffer) == 1 && c->errors == 0, "then, with the subsurface gone, it is released once (%ld)", releases_of(c, t.s.buffer));
+        wlc_end(c);
+
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        fake.copied = 0;
+        for (int at = 0; at < 10; at++)
+        {
+                wlc_send(c, t.sub, WLQ_wl_subsurface_set_position, 4L, 4L);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+        }
+        WLCHECK(fake.copied == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00 && c->errors == 0,
+                "a subsurface set to its own place, with nothing new, copies nothing (%ld copied)", fake.copied);
         wlc_end(c);
 }
 

@@ -3003,7 +3003,8 @@ static int wayland_subsurface_request(struct wayland_client *c, struct wayland_o
         case WLQ_wl_subsurface_set_position:
                 s->pend_x = wayland_max(-(1L << 20), wayland_min(a[0].i, 1L << 20));
                 s->pend_y = wayland_max(-(1L << 20), wayland_min(a[1].i, 1L << 20));
-                s->pend_pos = 1;
+                // The place it has is no move: the window is laid again (wayland_sub_apply) only for a different one.
+                s->pend_pos = s->pend_x != s->sub_x || s->pend_y != s->sub_y;
                 return WAYLAND_OK;
         case WLQ_wl_subsurface_place_above:
         case WLQ_wl_subsurface_place_below:
