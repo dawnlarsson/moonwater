@@ -875,10 +875,18 @@ static p8 tar_pack_from_magic(p8 address_to magic, positive n)
         return TAR_PACK_NONE;
 }
 
-static bool tar_header_gnu_old(p8 address_to block)
+/*      The prefix field is a directory only under the ustar magic. A V7,
+        GNU or unknown header's bytes there are not part of the name: GNU
+        lists "f" for a prefix of "dir" under any other magic, and "dir/f"
+        under ustar. */
+static bool tar_header_ustar(p8 address_to block)
 {
-        return !memory_compare(block + 257, "ustar ", 6) &&
-               block[263] == ' ' && !block[264];
+        return !memory_compare(block + 257, "ustar", 5);
+}
+
+static bool tar_header_prefixed(p8 address_to block)
+{
+        return tar_header_ustar(block) && !block[262];
 }
 
 /*
@@ -928,7 +936,7 @@ static bool tar_member_name(p8 address_to block, p8 address_to into,
         }
 
         /* GNU old format stores atime/sparse maps where ustar keeps prefix. */
-        if (tar_header_gnu_old(block))
+        if (!tar_header_prefixed(block))
         {
                 tar_field_text(block, TAR_NAME, into, TAR_PATH);
                 return into[0] != end;
@@ -1337,10 +1345,13 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                 letters[0] = '?';
 
         //      A pax uname or gname stands in for the header's own field.
+        //      The header's names are read under the ustar magic only, as
+        //      GNU reads them: otherwise the owner is the number.
+        bool named = tar_header_ustar(block);
         positive owner_length = tar_header_word(owner, user_name ? (p8 address_to)user_name : block + 265,
-                                                user_name ? 63 : 32, user, numeric);
+                                                user_name ? 63 : 32, user, numeric || !(user_name || named));
         positive group_length = tar_header_word(grouped, group_name ? (p8 address_to)group_name : block + 297,
-                                                group_name ? 63 : 32, group, numeric);
+                                                group_name ? 63 : 32, group, numeric || !(group_name || named));
 
         widths = owner_length + group_length;
 
@@ -4742,7 +4753,7 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
         p8 word[33];
         p64 want_user = user;
         p64 want_group = group;
-        if (!numeric)
+        if (!numeric && tar_header_ustar(block))
         {
                 tar_field_text(block + 265, 32, word, sizeof(word));
                 bipolar named = word[0] ? file_user_id(word) : -1;
@@ -6435,7 +6446,7 @@ static bipolar tar_scan_end(bipolar handle)
                                 return -1;
                         if (have_long)
                                 string_copy_bounded((char address_to)name, (string_address)long_name, sizeof(name));
-                        else if (tar_header_gnu_old(block))
+                        else if (!tar_header_prefixed(block))
                                 tar_field_text(block, TAR_NAME, name, sizeof(name));
                         else if (!tar_join_name(block + 345, block, name, sizeof(name)))
                                 name[0] = end;
