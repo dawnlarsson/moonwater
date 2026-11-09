@@ -20850,7 +20850,7 @@ static b32 text_fold()
             (!text_unsigned_option(file_option_value(address_of taking, 'w'), false,
                                    address_of width) ||
              !width || width == (positive)-1))
-                return text_done(string_diagnostic(&text_diagnostic, 1, file_option_value(address_of taking, 'w'), "invalid number of columns"));
+                return text_done(fold_columns_refused(file_option_value(address_of taking, 'w')));
 
         b32 inputs = text_input_count();
         // With -b outside UTF-8 every byte is one column and nothing needs
@@ -41386,43 +41386,85 @@ static positive sort_default_budget(positive address_space, bool limited)
         return size > SORT_BUDGET_MINIMUM ? size : SORT_BUDGET_MINIMUM;
 }
 
-// A size sort_size_valid has already accepted, in bytes.
-static positive sort_size_bytes(string_address said)
+// The multiplier of one -S suffix letter as a power of two: b is one byte, and
+// a letter is K, M, G and so on up to Q; -1 for anything else.
+static bipolar sort_size_shift(p8 letter)
 {
+        switch (letter)
+        {
+        case 'b': return 0;
+        case 'k': case 'K': return 10;
+        case 'm': case 'M': return 20;
+        case 'g': case 'G': return 30;
+        case 't': case 'T': return 40;
+        case 'P': return 50;
+        case 'E': return 60;
+        case 'Z': return 70;
+        case 'Y': return 80;
+        case 'R': return 90;
+        case 'Q': return 100;
+        default: return -1;
+        }
+}
+
+/*
+        GNU's -S: blanks and a plus, a count, then nothing, a percent, or one
+        suffix letter with nothing after it. A bare count is kilobytes. The
+        answer is the size in bytes, or why it was refused: no count at all
+        is "invalid -S argument"; a count with anything else after it is
+        "invalid suffix in -S argument"; and a size that does not fit in an
+        unsigned 64-bit count of bytes is "too large". That order is GNU's: a
+        bad suffix is named before a count too large for it is.
+*/
+enum
+{
+        SORT_SIZE_OK,
+        SORT_SIZE_NUMBER,
+        SORT_SIZE_SUFFIX,
+        SORT_SIZE_LARGE,
+};
+
+static b32 sort_size_read(string_address said, positive address_to bytes)
+{
+        string_address at = said + string_span(said, string_set_space);
         positive value = 0;
         positive total = 0;
         positive available = 0;
-        positive scale = 1024;
-        positive power = 1;
+        bool over = false;
+        bipolar shift = 10;
 
-        file_decimal_read(address_of said, true, address_of value);
+        at += at[0] == '+';
+        if (!byte_is_digit(at[0]))
+                return SORT_SIZE_NUMBER;
 
-        if (said[0] == 'b')
-                return value;
+        while (byte_is_digit(at[0]))
+        {
+                positive digit = (positive)(at[0] - '0');
 
-        if (said[0] == '%')
+                if (value > (positive_max - digit) / 10)
+                        over = true;
+                else
+                        value = value * 10 + digit;
+                at++;
+        }
+
+        if (at[0] == '%' && !at[1])
         {
                 sort_memory(address_of total, address_of available);
-                return total / 100 && value > positive_max / (total / 100)
-                           ? positive_max
-                           : total / 100 * value;
+                *bytes = over ? positive_max
+                         : total / 100 && value > positive_max / (total / 100) ? positive_max
+                                                                               : total / 100 * value;
+                return SORT_SIZE_OK;
         }
 
-        if (said[0])
-        {
-                string_address letters = (string_address) "kmgtpezy";
+        if (at[0] && (at[1] || (shift = sort_size_shift(at[0])) < 0))
+                return SORT_SIZE_SUFFIX;
 
-                power = (positive)(string_first_of(letters, (p8)(said[0] | 0x20)) -
-                                   letters) + 1;
+        if (over || (shift < 64 ? value > (positive_max >> shift) : value != 0))
+                return SORT_SIZE_LARGE;
 
-                if (said[1] == 'B')
-                        scale = 1000;
-        }
-
-        while (power--)
-                value = value > positive_max / scale ? positive_max : value * scale;
-
-        return value;
+        *bytes = shift < 64 ? value << shift : 0;
+        return SORT_SIZE_OK;
 }
 
 static fn sort_release()
@@ -42120,34 +42162,6 @@ static fn sort_operand(b32 which)
                                       : null);
 }
 
-// -S takes a count with GNU's suffixes or a percentage; the number is not
-// used, but a script that misspells it is told so.
-static bool sort_size_valid(string_address said)
-{
-        positive value;
-
-        if (!byte_is_digit(said[0]) ||
-            !file_decimal_read(address_of said, true, address_of value))
-                return false;
-
-        if (!said[0])
-                return true;
-
-        if (!string_first_of((string_address) "bkKmMgGtTpPeEzZyY%", said[0]))
-                return false;
-
-        if (!said[1])
-                return true;
-
-        if (said[0] == '%' || said[0] == 'b')
-                return false;
-
-        if (said[1] == 'B' && !said[2])
-                return true;
-
-        return said[1] == 'i' && said[2] == 'B' && !said[3];
-}
-
 // -k comes as many times as there are keys, and one value per letter cannot
 // hold them: they are parsed as the options arrive. -o may come again only
 // naming the same file, as GNU compares each -o with the one before it.
@@ -42217,15 +42231,24 @@ static bool sort_key_seen(p8 letter, string_address value)
                 sort_tab = tab;
         }
 
-        if (letter == 'S' && !sort_size_valid(value))
-        {
-                return text_complain("%s: invalid -S argument '%w'\n",
-                              text_name, writer_terminal_quoted_name, value);
-        }
-
         if (letter == 'S')
         {
-                positive bytes = sort_size_bytes(value);
+                positive bytes = 0;
+
+                switch (sort_size_read(value, address_of bytes))
+                {
+                case SORT_SIZE_NUMBER:
+                        return text_complain("%s: invalid -S argument '%w'\n",
+                                             text_name, writer_terminal_quoted_name, value);
+                case SORT_SIZE_SUFFIX:
+                        return text_complain("%s: invalid suffix in -S argument '%w'\n",
+                                             text_name, writer_terminal_quoted_name, value);
+                case SORT_SIZE_LARGE:
+                        return text_complain("%s: -S argument '%w' too large\n",
+                                             text_name, writer_terminal_quoted_name, value);
+                default:
+                        break;
+                }
 
                 if (bytes < SORT_BUDGET_MINIMUM)
                         bytes = SORT_BUDGET_MINIMUM;
