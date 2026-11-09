@@ -49006,13 +49006,13 @@ static fn env_signal_name(positive number, p8 address_to into)
         //      glibc's table has POLL where this one lists IO first.
         if (number == 29)
         {
-                string_copy_bounded(into, "POLL", 16);
+                string_copy_bounded_3_16(into, "POLL", 16);
                 return;
         }
         for (positive i = 0; i < array_count(kill_table); i++)
                 if (kill_table[i].number == number && number < KILL_LEAST_REAL)
                 {
-                        string_copy_bounded(into, kill_table[i].name, 16);
+                        string_copy_bounded_3_16(into, kill_table[i].name, 16);
                         return;
                 }
         if (number < KILL_LEAST_REAL)
@@ -49025,7 +49025,7 @@ static fn env_signal_name(positive number, p8 address_to into)
         positive from_most = KILL_MOST - number;
         bool low = from_least <= (KILL_MOST - KILL_LEAST_REAL) / 2;
 
-        string_copy_bounded(into, low ? "RTMIN" : "RTMAX", 16);
+        string_copy_bounded_3_16(into, low ? "RTMIN" : "RTMAX", 16);
         if (low ? from_least : from_most)
         {
                 into[5] = low ? '+' : '-';
