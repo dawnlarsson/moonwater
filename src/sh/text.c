@@ -7697,13 +7697,35 @@ static fn wc_utf8_finish(wc_utf8 address_to state)
 
 static positive wc_total_mode;
 
+// argmatch's refusal: a word that begins two or more of the values is
+// ambiguous (the empty word begins all four), any other word is invalid.
+static void wc_total_refused(string_address value)
+{
+        positive length = string_length(value);
+        positive begins = 0;
+
+        for (positive i = 0; i < 4; i++)
+                if (length <= string_length(wc_totals[i]) &&
+                    !string_compare_max(value, wc_totals[i], length))
+                        begins++;
+
+        text_complain("%s: %s argument '%w' for '--total'\nValid arguments are:\n"
+                      "  - 'auto'\n  - 'always'\n  - 'only'\n  - 'never'\n"
+                      "Try '%s --help' for more information.\n",
+                      text_name, begins > 1 ? "ambiguous" : "invalid",
+                      writer_terminal_quoted_name, value, text_name);
+}
+
 static bool wc_option_seen(p8 letter, string_address value)
 {
         if (letter != 'T' || !value)
                 return true;
 
         if (!text_word_of(value, wc_totals, 4, address_of wc_total_mode))
-                return string_diagnostic(&text_diagnostic, 0, value, "invalid argument");
+        {
+                wc_total_refused(value);
+                return false;
+        }
 
         return true;
 }
@@ -20682,6 +20704,23 @@ static b32 text_line_command()
 // Every -w is checked as it arrives, and the last of -b and -c wins.
 static p8 fold_counting;
 
+// xdectoumax's refusal: a word that is no number is "WORD" alone after the
+// message, and a number that is zero or too large to hold is out of range.
+static b32 fold_columns_refused(string_address value)
+{
+        string_address at = value + string_span(value, string_set_space);
+        string_address digits;
+
+        at += at[0] == '+';
+        digits = at;
+        while (at[0] >= '0' && at[0] <= '9')
+                at++;
+
+        return text_report(1, "%s: invalid number of columns: '%w'%s\n", text_name,
+                           writer_terminal_quoted_name, value,
+                           at != digits && !at[0] ? ": Numerical result out of range" : "");
+}
+
 static bool fold_option_seen(p8 letter, string_address value)
 {
         positive width;
@@ -20691,7 +20730,10 @@ static bool fold_option_seen(p8 letter, string_address value)
         else if (letter == 'w' &&
                  (!text_unsigned_option(value, false, address_of width) ||
                   !width || width == (positive)-1))
-                return string_diagnostic(&text_diagnostic, 0, value, "invalid number of columns");
+        {
+                fold_columns_refused(value);
+                return false;
+        }
 
         return true;
 }
