@@ -134107,6 +134107,33 @@ static void caret_fade_check(void)
 }
 
 /*
+        A fade is drawn on the steps of UI_CARET_STEP_NS (16 ms into the cycle) and at no other time: a wake between two steps reads the cover the step drew and the
+        loop's frame is not due. The compositor knocks a program after each frame it takes, the knock wakes it at once, and a cover that moved a part in 255 between
+        two wakes was a frame each time (a frame a millisecond through each fade, 52 to 202 frames a second at rest in Settings with its filter focused).
+*/
+static void caret_step_check(void)
+{
+    positive since = 1000000000ull, due = 0, due_in = 0;
+    unsigned int saved = ui_kit.caret_speed, step_start, in_step, late_in_step, next_step, solid, gone;
+    // 1.06 s a cycle: the caret is read a quarter of a cycle in, and its fade down runs from 490.25 ms to 569.75 ms into the cycle, so 496 ms is a step's start in it
+    positive at_496 = since + 496000000ull - 265000000ull;
+
+    ui_kit.caret_speed = UI_CARET_NORMAL;
+    step_start = (ui_kit.now = ui_kit.test_clock = (b64)(at_496), ui_caret_at(since, since, &due));
+    in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 4000000ull), ui_caret_at(since, since, &due));
+    due_in = due - (at_496 + 4000000ull);
+    late_in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 15900000ull), ui_caret_at(since, since, &due));
+    next_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 16000000ull), ui_caret_at(since, since, &due));
+    solid = (ui_kit.now = ui_kit.test_clock = (b64)(since + 100000000ull), ui_caret_at(since, since, &due));
+    gone = (ui_kit.now = ui_kit.test_clock = (b64)(since + 400000000ull), ui_caret_at(since, since, &due));
+    ui_kit.caret_speed = saved;
+    check("caret: a fade in the middle of a step shows the cover the step drew", step_start == in_step && step_start == late_in_step);
+    check("caret: the next step is another cover, and a fading caret is between solid and gone", next_step != step_start && step_start > 0 && step_start < UI_CARET_FULL);
+    check("caret: the loop's wait in a fade ends at the next step", due_in == 12000000ull);
+    check("caret: away from the fades it is solid, then gone", solid == UI_CARET_FULL && gone == 0);
+}
+
+/*
         The scroll region's motion, read off its body (ui_body, s->body), in 256ths of a device pixel (the unit the rows are
         written in). at is where the motion has carried the body (past an end, the overscroll is in it); aim is the notch's
         target while one is followed, else at; shown is where it is drawn (the rubber band's share past an end). gliding is a
@@ -156708,6 +156735,7 @@ static fn field_check(struct ui address_to wui)
         check_doc_collapse();
         check_doc_crlf_pieces();
         caret_fade_check();
+    caret_step_check();
         check_code_finger(wui);
         switch_cancel_check(wui);
         fling_scale_check();

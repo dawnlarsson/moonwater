@@ -12957,18 +12957,19 @@ static b32 ui_caret_flat(b64 q, b64 cycle)
         return (q >= reach && q < half - reach) || (q >= half + reach && q < cycle - reach);
 }
 
-// The ns from q until the cover can next change: to the next fade while it is flat, and a frame's step while it fades.
+// The ns from q until the cover can next change: to the next fade while it is flat, and to the next step of the fade (a multiple of UI_CARET_STEP_NS into the cycle:
+// ui_caret_at draws a fade on those and no other) while it fades, but not past the fade's end.
 static b64 ui_caret_until(b64 q, b64 cycle)
 {
         b64 half = cycle / 2, reach = half * UI_CARET_EDGE_PERCENT / 100 / 2, stops[4] = {reach, half - reach, half + reach, cycle - reach};
-        b64 next = cycle - q;
+        b64 next = cycle - q, step = UI_CARET_STEP_NS - q % UI_CARET_STEP_NS;
 
         for (positive k = 0; k < 4; k++)
                 if (stops[k] > q && stops[k] - q < next)
                         next = stops[k] - q;
-        if (ui_caret_flat(q, cycle) || next < UI_CARET_STEP_NS)
+        if (ui_caret_flat(q, cycle) || next < step)
                 return next;
-        return UI_CARET_STEP_NS;
+        return step;
 }
 
 // The caret is solid for the next half cycle whatever the blink says: it is moving, or just typed at. Its phase starts a
@@ -12998,7 +12999,10 @@ static unsigned int ui_caret_at(positive since, positive awake, positive address
         if (!cycle || (now > awake && now - awake >= UI_TEXT_BLINK_FOR_NS))
                 return UI_CARET_FULL;
         q = now < since ? cycle / 4 : (now - since + cycle / 4) % cycle;
-        cover = ui_caret_wave(q, cycle);
+        // A fade is drawn on the steps of UI_CARET_STEP_NS and at no other time: its cover is the one at the step's start, so a wake between two steps (the compositor's
+        // knock after each frame wakes the program at once) finds the cover it drew and draws nothing. Read at every wake the cover moved by a few parts in 255 each time,
+        // and each frame's knock woke the next: Settings with its filter focused and the pointer still drew 52 to 202 frames a second, a frame a millisecond through each fade.
+        cover = ui_caret_wave(ui_caret_flat(q, cycle) ? q : q - q % UI_CARET_STEP_NS, cycle);
         *due = now + ui_caret_until(q, cycle);
         // The caret stops at ten seconds, whatever phase it is in: the wait ends there, so a caret gone then is drawn then.
         if (now >= awake && awake + UI_TEXT_BLINK_FOR_NS < *due)
