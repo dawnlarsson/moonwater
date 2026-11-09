@@ -767,7 +767,12 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         if (!tar_pax_attr_add(3, "", 0, equal + 1, value))
                                 return false;
                 }
-                else if (key > 11 && !memory_compare(mark + 1, "GNU.sparse.", 11))
+                /*      A global header describes no member, so its sparse
+                        records are not kept: kept, they made every later
+                        regular member a map to read, and the archive was
+                        refused where GNU extracts it. */
+                else if (state != address_of tar_pax_global && key > 11 &&
+                         !memory_compare(mark + 1, "GNU.sparse.", 11))
                 {
                         p64 number = 0;
                         string_address name = mark + 12;
