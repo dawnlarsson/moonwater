@@ -4998,7 +4998,11 @@ static fn tar_read_members(tar_members address_to run)
                            archive follows it. At STRICT_TIGHT an archive
                            that stops there is refused as cut short. */
                         p64 at = (tar_stream_taken - (tar_have - tar_at)) / TAR_BLOCK;
-                        p8 address_to second = tar_next_block(handle, false);
+                        /*      A short block after the zero one is the end, not
+                                a cut archive: GNU reads it as EOF whatever
+                                it holds (512 zeros then one byte is a lone
+                                zero block at 1, status 0). */
+                        p8 address_to second = tar_next_block(handle, true);
 
                         if (second && tar_header_zero(second))
                                 break;
