@@ -402,9 +402,10 @@ static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
                 w->state |= COMPOSITOR_XWM_TITLE_AGAIN;
                 return;
         }
-        w->asking = 2;
+        // The title is _NET_WM_NAME's when it has one, and WM_NAME's when it has not: WM_NAME is asked of only then (its reply is the
+        // second of the two, and it is counted in asking until it comes).
+        w->asking = 1;
         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]);
-        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING);
 }
 
 /* One of a window's title requests has been answered, or refused: when the last is, a title that changed meanwhile is asked of. */
@@ -490,7 +491,12 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                         if (length)
                                 w->state |= COMPOSITOR_XWM_NET_TITLE;
                         else
+                        {
+                                // No _NET_WM_NAME: the title is WM_NAME's, asked of now. The request in hand stays counted until that reply.
                                 w->state &= ~COMPOSITOR_XWM_NET_TITLE;
+                                compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING);
+                                return;
+                        }
                 }
                 if ((p->what == COMPOSITOR_XWM_PROP_NET_NAME && length) || (p->what == COMPOSITOR_XWM_PROP_NAME && !(w->state & COMPOSITOR_XWM_NET_TITLE)))
                 {
@@ -789,7 +795,9 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 w = compositor_xwm_find(e->window, 0);
                 if (!w)
                         break;
-                if (e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_NAME] || e->atom == COMPOSITOR_XWM_XA_WM_NAME)
+                // A window's _NET_WM_NAME is its title; its WM_NAME changes what the title is only while it has no _NET_WM_NAME.
+                if (e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_NAME] ||
+                    (e->atom == COMPOSITOR_XWM_XA_WM_NAME && !(w->state & COMPOSITOR_XWM_NET_TITLE)))
                         compositor_xwm_ask_title(w);
                 else if (e->atom == compositor_xwm.atoms[COMPOSITOR_XWM_A_PROTOCOLS])
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_PROTOCOLS, e->atom, COMPOSITOR_XWM_ATOM_TYPE);
