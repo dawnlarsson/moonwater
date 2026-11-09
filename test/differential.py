@@ -32579,6 +32579,73 @@ import json, os, pathlib, sys
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "contacted").exists())
 
+    def test_a_build_host_that_is_an_option_is_refused_before_ssh_runs(self):
+        """The machine to build on is a word of ssh's and rsync's command
+        lines, where one that begins with a dash is an option, and
+        -oProxyCommand=CMD runs CMD on this machine before anything is
+        connected. A name from --host, --host= or MOONWATER_BUILD_HOST that
+        begins with a dash, or holds a blank or a control byte, is refused
+        before either tool is started; an ordinary name still reaches ssh."""
+        if platform.system() == "Linux":
+            build_tool(HARNESS_ROOT)
+        for name in ("rsync", "ssh"):
+            self.executable(name, '#!/bin/sh\nprintf contacted >>"$BUILD_FIXTURE/contacted"\nexit 1\n')
+        # The tool runs from a tree: the shape the remote-build test makes.
+        for name in ("src", "kernel"):
+            (self.work / name).mkdir()
+        (self.work / "build.sh").touch()
+        marker = self.work / "marker"
+        hosts = ["-oProxyCommand=touch " + str(marker), "-p2222", "-", "a b", "a\nb", "a\tb"]
+        # build.sh hands over to the C tool on Linux and keeps the host's own
+        # code for the Mac, so the second pass names this machine Darwin to
+        # reach that code on either.
+        mac = self.work / "mac"
+        mac.mkdir()
+        (mac / "uname").write_text("#!/bin/sh\ncase $1 in -m) echo arm64 ;; *) echo Darwin ;; esac\n")
+        (mac / "uname").chmod(0o755)
+        routes = (("native", self.env),
+                  ("mac", dict(self.env, PATH=str(mac) + os.pathsep + self.env["PATH"])))
+        for route, base in routes:
+            for how in ("--host", "--host=", "MOONWATER_BUILD_HOST"):
+                for host in hosts:
+                    env = dict(base)
+                    line = ["arch/x64"]
+                    if how == "--host":
+                        line += ["--host", host]
+                    elif how == "--host=":
+                        line += ["--host=" + host]
+                    else:
+                        env["MOONWATER_BUILD_HOST"] = host
+                    result = subprocess.run(["/bin/sh", str(HARNESS_ROOT / "build.sh"), *line],
+                                            cwd=self.work, env=env, capture_output=True,
+                                            text=True, timeout=30)
+                    where = "%s %s %r" % (route, how, host)
+                    self.assertNotEqual(result.returncode, 0, where)
+                    self.assertIn("not a machine to build on", result.stdout + result.stderr, where)
+                    self.assertFalse((self.work / "contacted").exists(), "ssh ran for " + where)
+                    self.assertFalse(marker.exists(), where)
+            # The control: an ordinary name is not refused, and reaches ssh.
+            result = subprocess.run(["/bin/sh", str(HARNESS_ROOT / "build.sh"), "arch/x64",
+                                     "--host", "dawn@build-fixture.example"],
+                                    cwd=self.work, env=base, capture_output=True,
+                                    text=True, timeout=30)
+            self.assertNotIn("not a machine to build on", result.stdout + result.stderr, route)
+            self.assertTrue((self.work / "contacted").exists(),
+                            "an ordinary host never reached ssh on the %s route" % route)
+            (self.work / "contacted").unlink()
+
+    def test_onbox_refuses_a_host_that_is_an_option(self):
+        for name in ("rsync", "ssh"):
+            self.executable(name, '#!/bin/sh\nprintf contacted >>"$BUILD_FIXTURE/contacted"\nexit 0\n')
+        for host in ("-oProxyCommand=touch " + str(self.work / "marker"), "a b", "a\nb"):
+            result = subprocess.run(["sh", str(HARNESS_ROOT / "test/onbox"), "run", "kit"],
+                                    cwd=HARNESS_ROOT, env=dict(self.env, MOONWATER_BUILD_HOST=host),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0, repr(host))
+            self.assertIn("not a machine to build on", result.stderr, repr(host))
+            self.assertFalse((self.work / "contacted").exists(), repr(host))
+            self.assertFalse((self.work / "marker").exists(), repr(host))
+
     def test_onbox_quotes_remote_arguments_and_omits_agent_worktrees(self):
         for name in ("rsync", "ssh"):
             self.executable(name, '''#!/usr/bin/env python3

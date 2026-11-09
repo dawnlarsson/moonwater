@@ -41,6 +41,25 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-181: the machine named to build on could be an ssh option (argument injection, a command run on the builder's own machine)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | CWE-88 argument injection into ssh and rsync, ending in CWE-78 command execution through `-oProxyCommand=` |
+| Upstream | OpenSSH 10.6 (2026-10-06) refuses command-line user names holding `$` or a backslash, because untrusted input reached ProxyCommand or Match exec as shell injection; 10.3 (2026-04-02) fixed the same door for `%u` in Match exec. The shape here is the destination word itself, which ssh also reads as an option when it begins with a dash. |
+| Attacker | Whoever sets the build host without being the person running the build: `MOONWATER_BUILD_HOST` or `--host` from a CI job, a wrapper script or an environment a pull request controls. A person typing it on their own command line crosses nothing. |
+| Moonwater exposure window | `--host` in `build.sh` from `232195192` (2026-08-25 23:15:05 +02:00); in the C tool from `ef53b00c6` (2026-09-09 16:16:16 +02:00); `test/onbox` (reads `MOONWATER_BUILD_HOST` too); to the fixing commit |
+| Fixed by | the commit that adds this entry (`git log -S 'MW-2026-181' -- incident_response.md`); `build.sh`, `src/build/build.c` `build_host_valid`, `test/onbox` |
+
+**What it was.** The build host reaches `ssh` as its destination word (`ssh -n -o BatchMode=yes -o ConnectTimeout=20 HOST uname -m`, `... HOST true`, the copy and the build) and `rsync` as `HOST:path`, from `build.sh` (the Mac's own code), from `src/build/build.c` (`build_remote`, `build_remote_fetch`) and from `test/onbox`, with no check and no `--`. `ssh` reads a word that begins with a dash as an option, so `--host '-oProxyCommand=touch MARKER'` ran the command on the machine doing the build before any connection was made; `MOONWATER_BUILD_HOST` took the same value. Shown with a copy of `build.sh` on a box, its marker file made.
+
+**The fix.** A host that begins with a dash, or holds a blank or a control byte (a newline included), is refused before either tool starts: `case` in `build.sh` and `test/onbox`, `build_host_valid` in `build.c`, saying "not a machine to build on". `user@host`, a fully qualified name, an alias from `~/.ssh/config` and `ssh://` spellings are untouched.
+
+**Tests that fail without it.** `python3 test/differential.py --harness build_tools` (the lane that runs it already existed): `test_a_build_host_that_is_an_option_is_refused_before_ssh_runs` gives `--host HOST`, `--host=HOST` and `MOONWATER_BUILD_HOST` six hostile names (an `-oProxyCommand=`, `-p2222`, a lone dash, a blank, a newline, a tab) on two routes, the C tool and `build.sh` as the Mac runs it (the test names the machine Darwin), with `ssh` and `rsync` replaced by stubs that note a call: every row must be refused with the message and with no stub called and no marker made, and an ordinary name must still reach `ssh` on both routes. `test_onbox_refuses_a_host_that_is_an_option` does the same for `test/onbox`. On the parent both are red (the tool answers "Checking -oProxyCommand=...", "cannot reach" from the stub; onbox exits 0 and calls the stubs); with the fix 18 of 18 pass. The parent `build.sh` beside the fixed tool is red on the Mac route alone.
+
+**Still open.** Nothing passes `--` before the destination as a second guard; the check above is the only one.
+
 ### MW-2026-180: grep -r read through a link swapped in after its walk had listed the name (symlink following, race)
 
 | | |

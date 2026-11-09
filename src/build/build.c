@@ -6390,6 +6390,22 @@ static bipolar build_remote_fetch_stage(bipolar parent, p8 address_to name,
         return -EEXIST;
 }
 
+/* The machine to build on is a word of ssh's and rsync's command lines, where
+   one that begins with a dash is an option: -oProxyCommand=CMD runs CMD on
+   this machine before anything is connected. A name is never that, and none
+   holds a blank or a control byte. */
+static bool build_host_valid(string_address host)
+{
+        if (host[0] == '-')
+                return false;
+
+        for (string_address at = host; *at; at++)
+                if ((p8)*at <= ' ' || (p8)*at == 0x7f)
+                        return false;
+
+        return true;
+}
+
 /* Stream inside a private directory, sync and mode the completed bytes, then
    rename over the name itself.  Parent components and the private stage are
    held through no-follow descriptors, so neither an intermediate, temporary
@@ -7377,6 +7393,10 @@ b32 main()
                 }
 
                 profiles[chosen] = null;
+
+                if (host && *host && !build_host_valid(host))
+                        return build_die(build_join("not a machine to build on: ",
+                                                    host, null));
 
                 /*
                         Which architecture. An arch/ profile on the line is the

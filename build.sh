@@ -279,6 +279,14 @@ while [ "$remaining" -gt 0 ]; do
         esac
 done
 
+#       The machine to build on is a word of ssh's and rsync's command lines,
+#       where one that begins with a dash is an option: -oProxyCommand=CMD
+#       runs CMD on this machine before anything is connected. A name is
+#       never that, and none holds a blank or a control byte.
+case $host in
+-* | *[[:space:][:cntrl:]]*) die "not a machine to build on: $host" ;;
+esac
+
 #       Which architecture.
 #
 #       An arch/ profile on the line is the whole answer, and the build is

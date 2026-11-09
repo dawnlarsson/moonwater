@@ -26,6 +26,15 @@ case "$name" in
 esac
 
 host=${MOONWATER_BUILD_HOST:-box}
+
+# A host is a word of ssh's and rsync's command lines, where one that begins
+# with a dash is an option (-oProxyCommand=CMD runs CMD here): no name is that.
+case $host in
+-* | *[[:space:][:cntrl:]]*)
+        echo "onbox: not a machine to build on: $host" >&2
+        exit 1 ;;
+esac
+
 remote="dawning-$name"
 
 # shellcheck disable=SC1007
