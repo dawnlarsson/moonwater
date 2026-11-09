@@ -7752,13 +7752,16 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         compositor_gpu_publish();
 }
 
-// The card's buffer as the compositor's scene is laid out in it (the ops, the tables): made again when the card is started again.
+// The card's buffer as the compositor's scene is laid out in it (the ops, the tables): made again when the card is started again. A new buffer holds
+// none of the old one's tables, so the cache of the tables (kept, tables_used) is let go with it: a remembered place would read the new buffer's bytes
+// there, a cover of 0 (the corner squares drawn as the ground, the line and the picture both missing) until the pool happened to be refilled.
 static void compositor_gpu_layout(void)
 {
         struct compositor_gscene *g = &compositor_gscene;
 
         g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
         g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
+        g->kept = 0, g->tables_used = 0;
 }
 
 // The late probe: a card that is not there yet (no render node, a driver or its firmware that loads late) is looked for again while canvas gpu is on and a present

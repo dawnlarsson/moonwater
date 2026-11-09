@@ -224889,6 +224889,45 @@ b32 main(void)
                                         }
                         }
                 }
+                // A card started again has a new buffer, which holds none of the tables the scene remembers (gpu_start makes it): compositor_gpu_layout lets
+                // them go with the layout. One rounded frame (a line of 12 and a radius of 12, no picture) drawn, the buffer made again, and the same frame
+                // drawn again: each is the processor's pixels, corner for corner. Without the layout forgetting them, the second draw reads the new buffer's
+                // bytes where the remembered tables were.
+                {
+                        struct compositor_frame lone;
+                        unsigned int ground = 0xff102030u;
+                        unsigned int bad[2] = {0, 0};
+
+                        memory_zero(&lone, sizeof(lone));
+                        lone.x = 120, lone.y = 60, lone.width = 260, lone.height = 200, lone.source_w = 260, lone.source_h = 200;
+                        lone.scale = 100, lone.line = 12, lone.radius = 12, lone.edge = 0xff3366aau;
+                        reference = (struct compositor_target){gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
+                        memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
+                        compositor_draw(&reference, &lone);
+                        compositor_gscene.kept = 0, compositor_gscene.tables_used = 0;
+                        for (int pass = 0; pass < 2; pass++)
+                        {
+                                if (pass)
+                                {
+                                        memory_zero((p8 address_to)gpu.at + tables_at, 1 << 20);
+                                        compositor_gpu_layout();
+                                        compositor_gscene.ops = ops, compositor_gscene.room = 4096;
+                                        compositor_gscene.tables = (unsigned char address_to)((p8 address_to)gpu.at + tables_at), compositor_gscene.tables_at = (unsigned int)tables_at;
+                                        compositor_gscene.tables_size = 1 << 20;
+                                }
+                                for (positive i = 0; i < (positive)PP * PH; i++)
+                                        pic[i] = 0;
+                                if (!compositor_gpu_frames(&lone, 1, ground) || !gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH))
+                                        bad[pass] = PP * PH;
+                                else
+                                        for (unsigned int y = 0; y < (unsigned int)PH; y++)
+                                                for (unsigned int x = 0; x < 696; x++)
+                                                        bad[pass] += pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x];
+                        }
+                        string_format(log, "  gpu restart: %p and %p pixels differ before and after the card starts again\n", (positive)bad[0], (positive)bad[1]);
+                        check("gpu restart: the frame is drawn the processor's way before the card starts again", bad[0] == 0);
+                        check("gpu restart: after the card starts again its remembered tables are not read, and the frame is the processor's way", bad[1] == 0);
+                }
         }
 
         // The snap preview's shape at the picture's edges, every small size (1 to 6 by 1 to 6) with every line (0 to 8), radius 0, a radius of 1, and one
