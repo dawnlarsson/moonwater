@@ -2602,6 +2602,28 @@ static int wayland_hold_wanted(struct wayland_client *c, struct wayland_surface 
 }
 
 /*
+        The pending state a commit takes, once it is sure to be made: its barrier (wp_fifo's set_barrier, up from this frame), its
+        wait, its time, and the alpha, icon and tearing hint, which are the pending state at every commit, with or without a
+        buffer (the protocol's double buffering). Taken once only: a commit that stalls before it is made again with all of it.
+*/
+static void wayland_commit_take(struct wayland_surface *s)
+{
+        if (s->pending_barrier)
+        {
+                s->barrier = 1;
+                s->barrier_frame = wayland.frames;
+                s->pending_barrier = 0;
+        }
+        s->alpha = s->pending_alpha;
+        s->icon = s->pending_icon;
+        s->async_hint = s->pending_async;
+        s->fifo_wait = s->pending_fifo;
+        s->pending_fifo = 0;
+        s->timestamp = s->pending_timestamp;
+        s->pending_timestamp = 0;
+}
+
+/*
         A commit. The pending state becomes the shown one: a buffer attached is copied (the damaged rows of it) into the
         surface's window and released at once, a null buffer unmaps the window, and the frame callbacks the client
         asked for are taken, to be answered when the frame is on the screen. A window's first commit has no buffer and
@@ -2626,24 +2648,9 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 c->stalled_fd = -1;
                 return WAYLAND_STALL;
         }
-        if (s->pending_barrier)
-        {
-                s->barrier = 1;
-                s->barrier_frame = wayland.frames;
-                s->pending_barrier = 0;
-        }
-
-        // The alpha multiplier and the tearing hint are the pending state at every commit, with or without a buffer (the
-        // protocol's double buffering).
-        s->alpha = s->pending_alpha;
-        s->icon = s->pending_icon;
-        s->async_hint = s->pending_async;
-        s->fifo_wait = s->pending_fifo;
-        s->pending_fifo = 0;
-        s->timestamp = s->pending_timestamp;
-        s->pending_timestamp = 0;
-
-        // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time.
+        // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
+        // pending state is taken (wayland_commit_take) only once the commit is sure to be made, so a commit that waits here or
+        // for its dma-buf is made again with the state it was sent with.
         if (!wayland_budget_left(c))
         {
                 c->stalled_fd = -1;
@@ -2651,7 +2658,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         }
         shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
+        {
+                wayland_commit_take(s);
                 return wayland_sub_commit(c, self, s);
+        }
         if (xdg)
         {
                 if (!s->role_id)
@@ -2684,6 +2694,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         return WAYLAND_STALL;
                 }
         }
+        wayland_commit_take(s);
         if ((s->min_width && s->max_width && s->min_width > s->max_width) ||
             (s->min_height && s->max_height && s->min_height > s->max_height))
                 return wayland_fail(c, s->role_id, WLN_xdg_toplevel_error_invalid_size, "the minimum size is above the maximum");

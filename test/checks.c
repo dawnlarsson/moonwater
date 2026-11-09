@@ -174995,6 +174995,128 @@ static void test_budget(void)
         wayland_stop();
 }
 
+/* One commit of the session's window, as the budget rows send them: a picture of 32 by 24 when it is made. */
+static void stall_commit(struct wlc *c, struct session *s)
+{
+        wlc_send(c, s->surface, WLQ_wl_surface_attach, s->buffer, 0L, 0L);
+        wlc_send(c, s->surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s->surface, WLQ_wl_surface_commit);
+}
+
+/*
+        A commit that is taken for its state (wp_fifo's wait, wp_commit_timing's time, wp_fifo's set_barrier) and then held
+        back for its budget is made again in its turn with the state it was sent with: the wait and the time are the
+        commit's, and the barrier it sets is up from the frame it is made in, so a commit that waits for it is held. The
+        state is taken once the commit is sure to be made, not before, so a commit that waits again takes none twice.
+*/
+static void test_stall_state(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long fifos, timers, fifo, timer;
+        long pictures;
+
+        wl_reset();
+        fake.screen.width = 64;
+        fake.screen.height = 48;
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        fifos = wl_global(c, s.registry, WLI_wp_fifo_manager_v1, 1);
+        timers = wl_global(c, s.registry, WLI_wp_commit_timing_manager_v1, 1);
+        wlc_forget(c);
+        fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
+        wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, fifo, s.surface);
+        timer = wlc_id(c, WLI_wp_commit_timer_v1, 1);
+        wlc_send(c, timers, WLQ_wp_commit_timing_manager_v1_get_timer, timer, s.surface);
+        fake.clock_still = 1;
+
+        // A commit with a wait and a time, past the budget: held, and made again in the next window with both.
+        fake.now += WAYLAND_BUDGET_MS;
+        pictures = fake.row[0].pictures;
+        for (int k = 0; k < 8; k++)
+                stall_commit(c, &s);
+        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8, "eight commits spend the budget (%ld)",
+                fake.row[0].pictures - pictures);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 0ul, 500000ul);
+        stall_commit(c, &s);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8,
+                "a commit with a wait and a time is held for the budget (%ld, %s)", fake.row[0].pictures - pictures, c->error_text);
+        fake.now += WAYLAND_BUDGET_MS;
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 9,
+                "in its window it is made (%ld, %s)", fake.row[0].pictures - pictures, c->error_text);
+        wlc_pump(c);
+        WLCHECK(wayland_row_fifo(0) == 1, "the commit made again still waits for the barrier (%ld)", wayland_row_fifo(0));
+        WLCHECK(wayland_row_timestamp(0) == 500000ul, "and is for its time, the one it was sent with (%lu)", wayland_row_timestamp(0));
+
+        // A commit that sets a barrier, held for the budget, with a frame drawn while it waits: the barrier is up from the
+        // frame it is made in, so the commit that waits for it after is held.
+        fake.now += WAYLAND_BUDGET_MS;
+        pictures = fake.row[0].pictures;
+        for (int k = 0; k < 8; k++)
+                stall_commit(c, &s);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_set_barrier);
+        stall_commit(c, &s);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 8,
+                "a commit that sets a barrier is held for the budget (%ld)", fake.row[0].pictures - pictures);
+        wayland_frame();
+        fake.now += WAYLAND_BUDGET_MS;
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot), "and is made in its window (%s)",
+                c->error_text);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot),
+                "the barrier the commit made is up in the frame it is made in, so the next wait is held (%s)", c->error_text);
+        wayland_frame();
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot), "the frame after clears it: the wait is made");
+        wlc_end(c);
+        leak_check("stall state");
+        fake.clock_still = 0;
+        wayland_stop();
+}
+
+/*
+        A commit of a dma-buf its GPU is not done with is held as a commit for the budget is: when the GPU says done it is made
+        with the wp_fifo wait and the commit time it was sent with.
+*/
+static void test_stall_dmabuf(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long fifos, timers, fifo, timer, buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        fifos = wl_global(c, s.registry, WLI_wp_fifo_manager_v1, 1);
+        timers = wl_global(c, s.registry, WLI_wp_commit_timing_manager_v1, 1);
+        wlc_forget(c);
+        fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
+        wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, fifo, s.surface);
+        timer = wlc_id(c, WLI_wp_commit_timer_v1, 1);
+        wlc_send(c, timers, WLQ_wp_commit_timing_manager_v1_get_timer, timer, s.surface);
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff300000u, DRM_XRGB8888);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 0ul, 500000ul);
+        fake.pattern = "NR";
+        fake.pattern_at = 0;
+        fake.asked = 0;
+        dmabuf_commit(&s, buffer, 16, 8);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot), "a commit of a dma-buf whose GPU is not done is held (%ld asked)", fake.asked);
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) &&
+                    fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x300000u),
+                "and is made once it is done (%s)", c->error_text);
+        WLCHECK(wayland_row_fifo(0) == 1, "made with the wait it was sent with (%ld)", wayland_row_fifo(0));
+        WLCHECK(wayland_row_timestamp(0) == 500000ul, "and the time it was sent with (%lu)", wayland_row_timestamp(0));
+        wlc_end(c);
+        leak_check("stall dmabuf");
+        wayland_stop();
+}
+
 static void test_dmabuf(void)
 {
         struct session s, other;
@@ -176232,7 +176354,9 @@ int main(int argc, char **argv)
         test_geometry();
         test_cursor();
         test_budget();
+        test_stall_state();
         test_dmabuf();
+        test_stall_dmabuf();
         test_games();
         test_scale();
         test_fractional_damage();
