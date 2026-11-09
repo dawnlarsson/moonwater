@@ -170784,6 +170784,36 @@ static void test_frames(void)
 }
 
 /*
+        A surface that commits more frame callbacks than it holds ready, with no frame drawn between them: each callback is
+        answered by the frame that comes, none is let go without its done (the client waits for it, and a video that waits
+        for its frame never starts again).
+*/
+static void test_frame_overflow(void)
+{
+        struct session s;
+        struct wlc *c;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        wlc_forget(c);
+        for (int at = 0; at < WAYLAND_CALLBACKS + 1; at++)
+        {
+                wlc_send(c, s.surface, WLQ_wl_surface_frame, wlc_id(c, WLI_wl_callback, 1));
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        }
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == WAYLAND_CALLBACKS + 1,
+                "every frame callback is answered: %ld of %d", wlc_count(c, WLI_wl_callback, WLE_wl_callback_done), WAYLAND_CALLBACKS + 1);
+        wlc_end(c);
+        leak_check("frame overflow");
+        wayland_stop();
+}
+
+/*
         wp_presentation: the feedback a commit takes is answered by the frame it is drawn in, with the flip's time, the period
         and the count; a timer's frame that drew nothing answers none. A surface past its limit, a surface with no window and
         a surface destroyed each discard, as the protocol says, and every object is let go by its event.
@@ -175469,6 +175499,7 @@ int main(int argc, char **argv)
         test_destroy_orders();
         test_shm();
         test_frames();
+        test_frame_overflow();
         test_presentation();
         test_touch();
         test_axis_stop();

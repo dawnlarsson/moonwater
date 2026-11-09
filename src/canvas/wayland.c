@@ -1369,23 +1369,31 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         (void)c;
 }
 
+/*
+        One frame callback answered: its done with the time, and its id let go with it. A callback the shim cannot keep waiting
+        (a surface with WAYLAND_CALLBACKS ready already, and no frame drawn between) is answered this way at its commit, as
+        one over the request's cap is, so the client is never left waiting for a done that no frame will bring.
+*/
+static void wayland_callback_answer(struct wayland_client *c, unsigned int id, long time)
+{
+        long slot = wayland_find(c, id, WLI_wl_callback);
+
+        if (slot < 0)
+                return;
+        {
+                struct wayland_event e = wayland_begin(c, id, WLE_wl_callback_done);
+
+                wayland_word(&e, (unsigned long)time);
+                wayland_end(&e);
+        }
+        wayland_object_delete(c, slot);
+}
+
 /* The callbacks of a surface that have waited for a frame: done, and their ids let go. */
 static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surface *s, long time)
 {
         for (long at = 0; at < s->readies; at++)
-        {
-                long slot = wayland_find(c, s->ready[at], WLI_wl_callback);
-
-                if (slot < 0)
-                        continue;
-                {
-                        struct wayland_event e = wayland_begin(c, s->ready[at], WLE_wl_callback_done);
-
-                        wayland_word(&e, (unsigned long)time);
-                        wayland_end(&e);
-                }
-                wayland_object_delete(c, slot);
-        }
+                wayland_callback_answer(c, s->ready[at], time);
         s->readies = 0;
 }
 
@@ -1916,12 +1924,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 if (s->readies < WAYLAND_CALLBACKS)
                         s->ready[s->readies++] = s->callback[at];
                 else
-                {
-                        long slot = wayland_find(c, s->callback[at], WLI_wl_callback);
-
-                        if (slot >= 0)
-                                wayland_object_free(c, slot);
-                }
+                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
         s->callbacks = 0;
         wayland_feedback_take(c, s, 1);
 }
@@ -1961,6 +1964,8 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
                 for (long at = 0; at < s->callbacks; at++)
                         if (s->readies < WAYLAND_CALLBACKS)
                                 s->ready[s->readies++] = s->callback[at];
+                        else
+                                wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
                 s->callbacks = 0;
                 wayland_feedback_take(c, s, 0);
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
@@ -2713,12 +2718,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (s->readies < WAYLAND_CALLBACKS)
                         s->ready[s->readies++] = s->callback[at];
                 else
-                {
-                        long slot = wayland_find(c, s->callback[at], WLI_wl_callback);
-
-                        if (slot >= 0)
-                                wayland_object_free(c, slot);
-                }
+                        wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
         }
         s->callbacks = 0;
         wayland_feedback_take(c, s, s->row >= 0);
@@ -2766,13 +2766,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                 if (s->callbacks < WAYLAND_CALLBACKS)
                         s->callback[s->callbacks++] = c->objects[a[0].slot].id;
                 else
-                {
-                        struct wayland_event e = wayland_begin(c, c->objects[a[0].slot].id, WLE_wl_callback_done);
-
-                        wayland_word(&e, (unsigned long)wayland.host->now(wayland.host->context));
-                        wayland_end(&e);
-                        wayland_object_delete(c, a[0].slot);
-                }
+                        wayland_callback_answer(c, c->objects[a[0].slot].id, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
         case WLQ_wl_surface_set_input_region:
                 // A region with nothing added is a surface the pointer passes through, which a subsurface over its window may ask
