@@ -306,6 +306,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =System notices	fa89	Sistem bildirimleri
 =Taskbar	d759	Görev çubuğu
 =Taskbar display	042b	Görev çubuğu ekranı
+=Taskbar hides for fullscreen	f2f8	Tam ekranda görev çubuğu gizlenir
 =Taskbar launcher button	dd4d	Görev çubuğunda başlatıcı düğmesi
 =Taskbar position	81b8	Görev çubuğu konumu
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

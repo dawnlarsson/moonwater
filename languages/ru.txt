@@ -306,6 +306,7 @@ ui_field_full	fe02	больше не помещается
 =System notices	fa89	Уведомления системы
 =Taskbar	d759	Панель задач
 =Taskbar display	042b	Экран панели задач
+=Taskbar hides for fullscreen	f2f8	Панель задач скрывается в полноэкранном режиме
 =Taskbar launcher button	dd4d	Кнопка запуска на панели задач
 =Taskbar position	81b8	Положение панели задач
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

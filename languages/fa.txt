@@ -307,6 +307,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =System notices	fa89	اعلان‌های سیستم
 =Taskbar	d759	نوار وظیفه
 =Taskbar display	042b	نمایشگر نوار وظیفه
+=Taskbar hides for fullscreen	f2f8	نوار وظیفه در حالت تمام‌صفحه پنهان می‌شود
 =Taskbar launcher button	dd4d	دکمه راه‌انداز در نوار وظیفه
 =Taskbar position	81b8	موقعیت نوار وظیفه
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

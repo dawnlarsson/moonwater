@@ -306,6 +306,7 @@ ui_field_full	fe02	meer past er niet in
 =System notices	fa89	Systeemmeldingen
 =Taskbar	d759	Taakbalk
 =Taskbar display	042b	Scherm van de taakbalk
+=Taskbar hides for fullscreen	f2f8	Taakbalk verbergt zich bij volledig scherm
 =Taskbar launcher button	dd4d	Starterknop op de taakbalk
 =Taskbar position	81b8	Positie van de taakbalk
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

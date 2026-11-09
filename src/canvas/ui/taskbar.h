@@ -115,6 +115,7 @@ static int taskbar_display_all(void);
 static void taskbar_text_set(int edge);
 static void taskbar_tray_set(const char *text);
 static void taskbar_launcher_set(int on);
+static void taskbar_hide_set(int on);
 static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
@@ -157,6 +158,7 @@ static inline int taskbar_display_all(void) { return 0; }
 static inline void taskbar_text_set(int edge) { (void)edge; }
 static inline void taskbar_tray_set(const char *text) { (void)text; }
 static inline void taskbar_launcher_set(int on) { (void)on; }
+static inline void taskbar_hide_set(int on) { (void)on; }
 static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_volume_set(int present, int percent, int muted, int flash)

@@ -306,6 +306,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =System notices	fa89	Powiadomienia systemu
 =Taskbar	d759	Pasek zadań
 =Taskbar display	042b	Ekran paska zadań
+=Taskbar hides for fullscreen	f2f8	Pasek zadań chowa się przy pełnym ekranie
 =Taskbar launcher button	dd4d	Przycisk uruchamiania na pasku zadań
 =Taskbar position	81b8	Położenie paska zadań
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

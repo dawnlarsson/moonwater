@@ -306,6 +306,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =System notices	fa89	Ειδοποιήσεις συστήματος
 =Taskbar	d759	Γραμμή εργασιών
 =Taskbar display	042b	Οθόνη της γραμμής εργασιών
+=Taskbar hides for fullscreen	f2f8	Η γραμμή εργασιών κρύβεται σε πλήρη οθόνη
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

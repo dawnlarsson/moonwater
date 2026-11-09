@@ -306,6 +306,7 @@ ui_field_full	fe02	that is as much as it holds
 =System notices	fa89	System notices
 =Taskbar	d759	Taskbar
 =Taskbar display	042b	Taskbar display
+=Taskbar hides for fullscreen	f2f8	Taskbar hides for fullscreen
 =Taskbar launcher button	dd4d	Taskbar launcher button
 =Taskbar position	81b8	Taskbar position
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

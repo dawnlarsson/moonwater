@@ -306,6 +306,7 @@ ui_field_full	fe02	não cabe mais que isso
 =System notices	fa89	Avisos do sistema
 =Taskbar	d759	Barra de tarefas
 =Taskbar display	042b	Tela da barra de tarefas
+=Taskbar hides for fullscreen	f2f8	A barra de tarefas se oculta em tela cheia
 =Taskbar launcher button	dd4d	Botão do lançador na barra de tarefas
 =Taskbar position	81b8	Posição da barra de tarefas
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja da barra de tarefas (texto com {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

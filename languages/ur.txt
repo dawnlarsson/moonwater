@@ -307,6 +307,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =System notices	fa89	سسٹم اطلاعات
 =Taskbar	d759	ٹاسک بار
 =Taskbar display	042b	ٹاسک بار کی اسکرین
+=Taskbar hides for fullscreen	f2f8	فل اسکرین میں ٹاسک بار چھپ جاتا ہے
 =Taskbar launcher button	dd4d	ٹاسک بار میں لانچر کا بٹن
 =Taskbar position	81b8	ٹاسک بار کی جگہ
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ٹاسک بار کی ٹرے ({names} والا متن: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

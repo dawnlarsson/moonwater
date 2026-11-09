@@ -307,6 +307,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =System notices	fa89	הודעות המערכת
 =Taskbar	d759	שורת המשימות
 =Taskbar display	042b	מסך שורת המשימות
+=Taskbar hides for fullscreen	f2f8	שורת המשימות מוסתרת במסך מלא
 =Taskbar launcher button	dd4d	כפתור המשגר בשורת המשימות
 =Taskbar position	81b8	מיקום שורת המשימות
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

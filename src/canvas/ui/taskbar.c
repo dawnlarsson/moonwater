@@ -46,6 +46,7 @@ static struct taskbar_state
         char tray_text[SETTING_TRAY_MOST * 4];  // what it says this minute
         int tray_chars;                         // characters in tray_text
         int launcher;                           // `taskbar launcher on`: the band has a launcher button at its leading end
+        int hide_fullscreen;                    // `taskbar fullscreen on`: the band slides off its edge while a window is fullscreen
         int volume_item;                        // the sound server is there: the tray has a volume cell before the battery's
         int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
         int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
@@ -1201,6 +1202,12 @@ static void taskbar_launcher_set(int on)
 {
         taskbar.launcher = on != 0;
         taskbar.stale = 1;
+}
+
+// `taskbar fullscreen`: on, the band slides off its edge while a window is fullscreen (taskbar_slide_now).
+static void taskbar_hide_set(int on)
+{
+        taskbar.hide_fullscreen = on != 0;
 }
 
 // The same for a cell of the tray: where a popup opens beside, the cell's length along the edge and the band's whole thickness across it.

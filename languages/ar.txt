@@ -307,6 +307,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =System notices	fa89	إشعارات النظام
 =Taskbar	d759	شريط المهام
 =Taskbar display	042b	شاشة شريط المهام
+=Taskbar hides for fullscreen	f2f8	يختفي شريط المهام في ملء الشاشة
 =Taskbar launcher button	dd4d	زر المشغل في شريط المهام
 =Taskbar position	81b8	موضع شريط المهام
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
