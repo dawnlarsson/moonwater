@@ -35641,7 +35641,7 @@ static b32 text_sed()
                                                 sed_stdio_follow(1, true);
                                         }
                                         text_put_string(called ? called : (string_address) "-");
-                                        text_put_character('\n');
+                                        text_put_character(text_delimiter);
                                         break;
                                 case 'n':
                                 case 'N':
