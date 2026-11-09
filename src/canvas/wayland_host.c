@@ -800,6 +800,23 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         return 1;
 }
 
+// The bytes of a pool picture the card reads: from its first pixel to the end of its last row, inside its pool (a picture that runs past the
+// pool's end is cut there, and a rectangle past that is not found in the map). 0 for a picture that is not in its pool or has no rows.
+static unsigned long compositor_wl_picture_bytes(const struct wayland_picture *picture)
+{
+        unsigned long used, room;
+
+        if (picture->pixels < picture->map || picture->map_bytes <= 0 || picture->width <= 0 || picture->height <= 0 || picture->stride < picture->width * 4)
+                return 0;
+        if ((unsigned long)(picture->pixels - picture->map) >= (unsigned long)picture->map_bytes)
+                return 0;
+        room = (unsigned long)picture->map_bytes - (unsigned long)(picture->pixels - picture->map);
+        if ((unsigned long)(picture->height - 1) > room / (unsigned long)picture->stride)
+                return room;
+        used = (unsigned long)(picture->height - 1) * (unsigned long)picture->stride + (unsigned long)picture->width * 4;
+        return used < room ? used : room;
+}
+
 /*
         A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
         being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
@@ -812,7 +829,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
 static int compositor_wl_card_rect(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
                                    long dx, long dy, long sx, long sy, long w, long h, int wanted)
 {
-        unsigned long stride = (unsigned long)picture->stride, extent;
+        unsigned long stride = (unsigned long)picture->stride, extent, span;
         const unsigned char *src;
         positive src_va, dst_va;
         volatile unsigned int probe;
@@ -830,8 +847,11 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 return 0;
         if (picture->sync_fd < 0)
         {
+                // The card maps the picture's own pages (from the page of its first byte to the end of the page of its last), not the pool's: every
+                // submit that names a map walks all its pages, and a page that moves undoes all of them, so a picture in a pool of a gigabyte is not
+                // a gigabyte of either. The processor and the copies keep the pool's whole mapping.
                 src_va = gpu_va_bytes(src, extent);
-                if (!src_va && gpu_map(picture->map, (positive)picture->map_bytes))
+                if (!src_va && (span = compositor_wl_picture_bytes(picture)) && gpu_map(picture->pixels, (positive)span))
                         src_va = gpu_va_bytes(src, extent);
                 if (!src_va)
                         return 0;

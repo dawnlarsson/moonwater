@@ -223898,6 +223898,76 @@ static void gpu_lent_rows(void)
 }
 
 /*
+        A client's pool read by the card (compositor_wl_card_rect): the card maps the picture's own rows, not the pool. A pool of 64 MiB holds a picture
+        of 1 MiB at a byte that is not a page's; two rectangles of it are copied by the card, the first at the picture's first pixel and the second
+        ending at its last, and the read map the card holds must be the picture's pages (from the page of its first byte to the end of the page of its
+        last, which the second rectangle is found in without another map) and no more of the pool, and the card's rectangles equal the processor's
+        copy of the same pixels, byte for byte.
+*/
+static void gpu_pool_rows(void)
+{
+        enum { POOL = 64 << 20, OFFSET = (40 << 20) + 1000, PW = 512, PH = 512, STRIDE = PW * 4, DW = 640, DH = 480, DBYTES = DW * DH * 4 };
+        const positive extent = (positive)STRIDE * (PH - 1) + PW * 4, expected = ((positive)(OFFSET & 4095) + extent + 4095) & ~4095ull;
+        static const int rect[2][4] = {{0, 0, 300, 200}, {PW - 250, PH - 100, 250, 100}}; // sx, sy, w, h: the first pixel's corner, then the last pixel's
+        struct wayland_picture picture;
+        long pool = system_call_6(syscall(mmap), 0, POOL, 3, 0x21, (positive)-1, 0), out = system_call_6(syscall(mmap), 0, DBYTES, 3, 0x22, (positive)-1, 0);
+        unsigned int address_to want = (unsigned int address_to)memory(DBYTES), address_to to = (unsigned int address_to)out;
+        unsigned int address_to pixels;
+        unsigned long saved_buffer = compositor.buffer;
+        unsigned int held, mapped = 0, found = 0;
+        positive from = 0, bytes = 0;
+        b32 drew[2] = {false, false}, same = true;
+
+        if (gpu.fd < 0 || gpu.broken)
+        {
+                check("gpu pool: no card here, so no pool is read by one", true);
+                return;
+        }
+        if ((pool < 0 && pool > -4096) || (out < 0 && out > -4096))
+        {
+                check("gpu pool: memory for a pool of 64 MiB and a picture to copy into", false);
+                return;
+        }
+        while (gpu_map_count)
+                gpu_drop(0, GPU_GONE_RECOVER);
+        pixels = (unsigned int address_to)((p8 address_to)pool + OFFSET);
+        for (unsigned int i = 0; i < (positive)STRIDE * PH / 4; i++)
+                pixels[i] = gpu_random();
+        memory_zero(want, DBYTES);
+        memory_zero(&picture, sizeof(picture));
+        picture.pixels = (const unsigned char *)pixels, picture.stride = STRIDE, picture.width = PW, picture.height = PH;
+        picture.sync_fd = -1, picture.map = (const unsigned char *)pool, picture.map_bytes = POOL, picture.full = 1, picture.last = 1;
+        compositor.buffer = DBYTES;
+        held = gpu_map_count;
+        for (int k = 0; k < 2; k++)
+        {
+                const int sx = rect[k][0], sy = rect[k][1], w = rect[k][2], h = rect[k][3], dx = 7 + 11 * k, dy = 5 + 13 * k;
+
+                drew[k] = compositor_wl_card_rect(5, &picture, to, DW, dx, dy, sx, sy, w, h, 1) != 0;
+                for (int y = 0; y < h; y++)
+                        memory_copy(want + (positive)(dy + y) * DW + dx, pixels + (positive)(sy + y) * PW + sx, (positive)w * 4);
+                if (k == 0)
+                        mapped = gpu_map_count - held; // the read map of the picture and the written one of the picture's destination
+        }
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (!gpu_maps[i].written && (positive)pixels >= gpu_maps[i].from && (positive)pixels < gpu_maps[i].to)
+                        found++, from = gpu_maps[i].from, bytes = gpu_maps[i].to - gpu_maps[i].from;
+        same = !memory_compare(to, want, DBYTES);
+        check("gpu pool: the card copies a rectangle at the picture's first pixel and one ending at its last", drew[0] && drew[1]);
+        check("gpu pool: the card's rectangles are the processor's copy, byte for byte", same);
+        check("gpu pool: one read map holds the picture, and the second rectangle is found in it (two maps in all: the picture's and the destination's)",
+              found == 1 && mapped == 2 && gpu_map_count == held + 2);
+        check("gpu pool: the read map starts at the page of the picture's first byte", from == ((positive)pixels & ~4095ull));
+        check("gpu pool: the read map is the picture's extent rounded to pages, not the pool", bytes == expected);
+        string_format(log, "  gpu pool: a picture of %p bytes in a pool of %p, the card's read map %p bytes\n", extent, (positive)POOL, bytes);
+        while (gpu_map_count)
+                gpu_drop(0, GPU_GONE_RECOVER);
+        compositor.buffer = saved_buffer;
+        system_call_2(syscall(munmap), (positive)pool, POOL);
+        system_call_2(syscall(munmap), (positive)out, DBYTES);
+}
+
+/*
         The card's hang and loss, held back: while the card cools after a hang, or a restart is due, or a submit said the card lost its state, a list is
         not drawn on the card (the context and the maps are the old ones); and a restart due waits while the job given up on may still run (a new context
         is not started on the queue that job is on). The card is up (gpu_loss_rows started it).
@@ -226225,6 +226295,7 @@ b32 main(void)
                 while (gpu_map_count)
                         gpu_drop(0, GPU_GONE_RECOVER);
         }
+        gpu_pool_rows();
         gpu_loss_rows();
         gpu_lent_rows();
         gpu_held_rows();
