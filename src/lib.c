@@ -18931,6 +18931,7 @@ __asm__(
     //
     ASM_FUNC(string_copy_max_3_15)
 #ifndef KERNEL_MODE
+    "lea -1(%rdx), %rcx\n   cmp $15, %rcx\n   ja " ASM_LABEL(copy_max_3_15_generic) "  # a bound of zero, or above sixteen, is the generic's\n"
     "mov %rdi, %rax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja " ASM_LABEL(copy_max_3_15_generic) "\n"
     "movdqu (%rsi), %xmm0\n   pxor %xmm1, %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   or $0x10000, %ecx\n   bsf %ecx, %ecx\n"
     "cmp %rdx, %rcx\n   jae " ASM_LABEL(copy_max_3_15_bound) "\n   inc %ecx\n   jmp " ASM_LABEL(copy_max_3_15_count) "\n"
@@ -28430,6 +28431,7 @@ __asm__(
     //
     ASM_FUNC(string_copy_max_3_15)
 #ifndef KERNEL_MODE
+    "sub x10, x2, #1\n   cmp x10, #15\n   b.hi " ASM_LABEL(copy_max_3_15_generic) "\n"
     "and x9, x1, #0xfff\n   cmp x9, #0xff0\n   b.hi " ASM_LABEL(copy_max_3_15_generic) "\n"
     "ldr q0, [x1]\n   cmeq v1.16b, v0.16b, #0\n   shrn v1.8b, v1.8h, #4\n   fmov x3, d1\n"
     "rbit x3, x3\n   clz x3, x3\n   lsr x3, x3, #2\n"
