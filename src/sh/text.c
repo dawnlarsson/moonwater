@@ -35627,6 +35627,11 @@ static b32 text_sed()
                                 case 'Q':
                                         leaving = (b32)command->which;
                                         dropped = kind == 'Q';
+                                        // q writes the pattern space as a whole
+                                        // record, so an input whose last line
+                                        // has no delimiter gets one, as GNU's does.
+                                        if (kind == 'q')
+                                                sed_pattern.ended = true;
                                         goto cycle_done;
                                 case 'F':
                                         sed_output_start();
