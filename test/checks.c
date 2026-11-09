@@ -122383,8 +122383,8 @@ static long gpu_fake_userptr;
 #define GPU_MAP_FAKE(taken) do { if (gpu_fake_userptr) (taken) = -gpu_fake_userptr; } while (0)
 // The fake card's losses: a submit answers ECANCELED while gpu_fake_cancel is set (and the call is not made), and a node is absent (ENOENT) while
 // gpu_fake_absent counts down.
-static int gpu_fake_cancel, gpu_fake_absent;
-#define GPU_SUBMIT_FAKE(error) do { if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; } while (0)
+static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
+#define GPU_SUBMIT_FAKE(error) do { if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
@@ -222836,6 +222836,15 @@ static void gpu_loss_rows(void)
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0}, started;
 
+        // A submit answered EAGAIN (a page of a userptr moved as it was submitted: the kernel asks for the call again): the scene is drawn after eight of them, and is
+        // not drawn when every submit is answered so (error 11 kept); neither is a lost card.
+        memory_copy(ops, q, 32);
+        gpu_fake_again = 8;
+        check("gpu loss: a submit answered EAGAIN eight times is asked again and the scene is drawn", gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && !gpu_lost && gpu_fake_again == 0);
+        gpu_fake_again = 1000;
+        check("gpu loss: a submit answered EAGAIN every time gives the job up with the error kept, and the card is not lost",
+              !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_last_error == 11 && !gpu_lost);
+        gpu_fake_again = 0;
         // A submit answered ECANCELED: the card is lost (the scene is not drawn; the caller recovers), and the recovery draws the self-test right again.
         memory_copy(ops, q, 32);
         gpu_fake_cancel = 1;

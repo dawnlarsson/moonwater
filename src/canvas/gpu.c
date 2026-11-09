@@ -1454,6 +1454,7 @@ static void gpu_handed_clear(void)
                 gpu_maps[i].handed = 0;
 }
 
+#define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_run_job)
 // Run the kernel over the arguments' w by rows pixels; false if it did not finish (then gpu_idle holds the buffer until it has).
 static b32 gpu_run_job(void)
 {
@@ -1472,7 +1473,7 @@ static b32 gpu_run_job(void)
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
         p64 bos[1 + 8 + GPU_MAPS], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
             list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
-        unsigned int named, tries = 0;
+        unsigned int named, tries = 0, again = 0;
 
         if (!gpu_idle())
                 return false;
@@ -1504,6 +1505,14 @@ static b32 gpu_run_job(void)
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
                         gpu_lost = 1;
                         return false;
+                }
+                // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
+                // ten), and the kernel asks for the call again, which takes the pages afresh. Asked again up to GPU_AGAIN times with the processor let go of between: three
+                // calls in a row failed the job, the present was the processor's, a list was refused, and three such jobs in a row cooled the card for two seconds.
+                if (gpu_last_error == 11 && again++ < GPU_AGAIN)
+                {
+                        system_call_2(syscall(sched_yield), 0, 0);
+                        continue;
                 }
                 // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
                 if (++tries == 3 || gpu_drop_unmapped())
