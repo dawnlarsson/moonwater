@@ -1022,7 +1022,7 @@ static p32 font_advance_units(const font_face address_to face, p32 glyph)
         return font_u16(face, face->hmtx + 4 * (positive)(glyph < face->metrics ? glyph : face->metrics - 1));
 }
 
-b32 font_advance(const font_face address_to face, p32 glyph, p32 size)
+__attribute__((used)) b32 font_advance(const font_face address_to face, p32 glyph, p32 size)
 {
         return font_fixed(face, font_advance_units(face, glyph), size);
 }
@@ -9628,7 +9628,7 @@ __asm__(".intel_syntax noprefix\n"
         FONT_SIZE(font_kern)
         ".att_syntax prefix\n");
 #else
-static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
+static __attribute__((used)) b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
 {
         return font_kern_reference(e, face, left, right, size);
 }
