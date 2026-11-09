@@ -31057,8 +31057,12 @@ static fn grep_tree_enter(address_any context, address_any node_address,
 
                 kind = grep_entry_kind(directory, name, kind);
 
+                // An entry that cannot be looked at is read as a file, so the
+                // open says why: a dangling link under -R is "No such file or
+                // directory" and status 2, as GNU says. Dropping it here was
+                // silent, and the run ended with status 0.
                 if (!kind)
-                        continue;
+                        kind = DT_REG;
 
                 bool below = kind == DT_DIR;
 

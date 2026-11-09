@@ -143,6 +143,42 @@ refused cases print the number and exit 0 (measured on the unfixed binary:
 between 2^21 and 2^31, which gawk writes. That is a deliberate bound, and the
 number can be raised with `AWK_FIELDS_MAX` if a program needs more.
 
+### MW-2026-168: grep -R dropped a tree entry it could not look at, with no message, and exited 0
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-09 |
+| Class | Unchecked error (CWE-754): a failed lookup of a tree entry was taken for "not there", so the walk went on without a word and the run ended with status 0 over entries it never read |
+| Attacker | none needed: a dangling symbolic link in a tree that someone searches with `grep -R` |
+| Reachable | src/sh/text.c `grep_tree_enter`, where `grep_entry_kind` returns 0 for an entry it cannot stat (a link under -R whose target is missing) and the entry was skipped with `continue` |
+| Exposure window | the `continue` is in the parent of d36009218 (2026-09-30, retire grep_walk), where the same skip sits in the walk's own stat block; the first commit that wrote it was not traced |
+| Fixed by | the commit that carries this entry |
+
+**What happened.** `grep -R` classifies an entry by stat when the directory
+gives no type, and for a symbolic link it follows the link (only `-R` does).
+A link whose target does not exist fails that stat. `grep_entry_kind` answered
+0 and the walk dropped the entry with no diagnostic, and the search went on to
+its end with status 0. GNU grep names the entry, says "No such file or
+directory" and exits 2.
+
+Measured on the box before the fix, with `grep` built with the undefined-
+behaviour traps:
+
+    grep -R needle d      stdout d/a:needle; stderr none; status 0
+    GNU grep -R needle d  stdout d/a:needle; stderr "grep: d/dang: No such file or directory"; status 2
+
+The fix reads the entry as a regular file when it cannot be classified, so the
+open that follows says why, through the same path an operand takes. A link
+that is not dangling, a file that cannot be read, and -r (which does not follow
+links) keep the answers they had.
+
+**Regression check.** `test/differential.py`, `_TEXT_GREP_LINK_EXTRA`: nine
+spellings over the `text_links` fixture (the text set with `tree/gone.txt`, a
+dangling link), `-R` with -c, -l, -L, -q, -h, -s and plain, and `-r`. Before the
+fix the candidate failed three of them: the plain spelling and -s with status
+0 against GNU's 2, and the plain and -q spellings with no stderr line; after it
+the grep matrix passes in full.
+
 ### MW-2026-165: a touch's handles drew past the terminal's window picture (out-of-bounds write in the terminal)
 
 | | |

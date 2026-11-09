@@ -23648,6 +23648,15 @@ FIXTURES["text_binary"] = {
     "nulrun": b"a\n" + b"\0" * 5000 + b"\nb\n",
 }
 
+#       The text set with a dangling link in its tree. Under -R GNU reads
+#       the link, finds no file behind it and says so with status 2; under
+#       -r a link is not followed and nothing is said.
+FIXTURES["text_links"] = {**FIXTURES["text"], "tree/gone.txt": ("link", "nowhere")}
+_TEXT_GREP_LINK_EXTRA = tuple({"fixture": "text_links", "argv": argv} for argv in (
+    ("-R", "alpha", "tree"), ("-R", "-c", "alpha", "tree"), ("-R", "-l", "alpha", "tree"),
+    ("-R", "-L", "alpha", "tree"), ("-R", "-q", "alpha", "tree"), ("-R", "-h", "alpha", "tree"),
+    ("-r", "alpha", "tree"), ("-r", "-c", "alpha", "tree"), ("-R", "-s", "alpha", "tree"),
+))
 _TEXT_GREP_BINARY_EXTRA = tuple({"fixture": "text_binary", "argv": argv} for argv in (
     ("alpha", "late_nul"), ("-n", "alpha", "late_nul"), ("-c", "alpha", "late_nul"),
     ("-l", "alpha", "late_nul"), ("-L", "alpha", "early_nul"), ("-q", "alpha", "early_nul"),
@@ -26145,7 +26154,7 @@ TEXT_UTILITIES = (
                        ("-w", "20", "utf8_edge.txt"))))),
     Utility("grep", options=_TEXT_GREP_OPTIONS, operands=_TEXT_GREP_OPERANDS, stdin=_TEXT_GREP_STDIN,
             fixture="text", valid=text_grep_valid, walks=text_grep_walks,
-            extra=_TEXT_GREP_EXTRA + _TEXT_GREP_BINARY_EXTRA,
+            extra=_TEXT_GREP_EXTRA + _TEXT_GREP_BINARY_EXTRA + _TEXT_GREP_LINK_EXTRA,
             env=(("GREP_COLORS", "ms=01;31:mc=01;31:sl=:cx=:fn=35:ln=32:bn=32:se=36"),)),
     Utility("head",
             options=(Option("-n", _TEXT_COUNT_VALUES, None), Option("--lines", ("3", "+3", "-2"), True),
