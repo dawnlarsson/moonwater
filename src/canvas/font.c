@@ -11982,7 +11982,8 @@ fn font_cell_plan(font_engine address_to e, const font_face address_to const add
         b32 dx, dy;
         b16 ink[2];
 
-        memory_zero(plan, sizeof(*plan));
+        //      Zeroed in line: memory_zero is a call into lib.c, made for every cell.
+        *plan = (font_cell_plan_t){0};
         plan->ground = background & 0xffffff;
         if (background & FONT_UNKNOWN)
         {
