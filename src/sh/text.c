@@ -9778,7 +9778,7 @@ static fn text_head_short(positive count, bool by_bytes)
                 positive floor = text_stream_floor();
 
                 text_stream_span(floor,
-                                 by_bytes ? (count < size - floor ? size - count
+                                 by_bytes ? (count < difference_or_zero(size, floor) ? size - count
                                                                   : floor)
                                           : text_tail_start(text_input.handle,
                                                             size, count, floor));
@@ -10244,7 +10244,7 @@ static inline INLINE bool tail_input(positive count, bool by_bytes, bool marked)
                 positive floor = text_stream_floor();
 
                 text_stream_from(
-                    by_bytes ? (count < size - floor ? size - count
+                    by_bytes ? (count < difference_or_zero(size, floor) ? size - count
                                                      : floor)
                              : text_tail_start(text_input.handle, size,
                                                count, floor));

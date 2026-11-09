@@ -25650,6 +25650,11 @@ _TEXT_STREAM_SOURCES = {
     "live": ("env mkfifo go\n"
              "{{ printf 'one\\t\\001\\n'; read -r x < go; printf 'two\\n'; }} | "
              "{{ run {words}; echo \"status $?\"; }} | {{ env head -n 1; echo > go; env cat; }}"),
+    #   A descriptor whose offset is past the end of the file, as a command
+    #   before it leaves it when the file has been cut short since: nothing
+    #   is left after the offset, so the tail of it is nothing, GNU's answer
+    #   for every count and not only the ones that fit in the file.
+    "beyond": ("{{ env head -c 17 > /dev/null; env truncate -s 5 six; run {words}; echo \"status $?\"; }} < six | env md5sum"),
 }
 _TEXT_STREAM_CASES = (
     ("tac", "pipe"), ("tac", "file"), ("tac", "offset"), ("tac", "big"), ("tac", "full"),
@@ -25658,6 +25663,10 @@ _TEXT_STREAM_CASES = (
     #   tail -c +N seeks where the input seeks, from wherever it was left.
     ("tail", "offset", "-c", "+5"), ("tail", "file", "-c", "+100000"), ("tail", "offset", "-c", "+1"),
     ("tail", "shared", "-c", "+3"), ("tail", "big", "-c", "+6888890"),
+    #   ... and a count from an offset past the end of the file is nothing,
+    #   whether or not the count is larger than the file.
+    ("tail", "beyond", "-c", "3"), ("tail", "beyond", "-c", "40"), ("tail", "beyond", "-n", "1"),
+    ("head", "beyond", "-c", "-3"), ("head", "beyond", "-c", "-40"),
     #   ... and an N - 1 past the largest offset is no seek at all.
     *(("tail", "offset", "-c", "+" + count)
       for count in ("9223372036854775808", "9223372036854775809", "18446744073709551615")),
