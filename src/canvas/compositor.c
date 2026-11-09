@@ -8487,8 +8487,18 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         if (view.cover_used)
         {
                 cover_from = (positive)list + view.cover_at - COMPOSITOR_GPU_LIST_REACH, cover_to = (positive)list + view.cover_at + view.cover_used + COMPOSITOR_GPU_LIST_REACH;
-                if (!gpu_map((const void *)cover_from, cover_to - cover_from) || !(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
-                        return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
+                // The map of an earlier frame holds this one's cover bytes when the span is inside it: a frame's cover bytes are a few more or less than the last's, and a map
+                // a frame was a userptr, a mapping of the card's and, 120 presents on, both undone again (697 maps for 665 frames in the animation lane, and a map named in
+                // every job of its present). A map made is rounded up to 64 KiB, inside the list, so the frames after it are in it.
+                if (!(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
+                {
+                        positive last = (positive)list + list_bytes, room = (cover_to + 65535) & ~65535ull;
+
+                        room = room > last ? last : room;
+                        room = room < cover_to ? cover_to : room;
+                        if (!gpu_map((const void *)cover_from, room - cover_from) || !(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
+                                return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
+                }
                 bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
         }
         bytes = 4 * ((positive)pitch * (positive)(height - 1) + w4);

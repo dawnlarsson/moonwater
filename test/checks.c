@@ -223276,6 +223276,22 @@ b32 main(void)
                                                                 string_format(log, "  FAIL gpu list render round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                                               (positive)list_picture[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
                                                 }
+                                        // The same list again (the next frame of a window whose cover bytes are the same, or a few less): its cover bytes are in the map the
+                                        // first frame made, and no map is made for them (a map a frame was a userptr and a mapping of the card's each time).
+                                        {
+                                                unsigned int mapped = gpu_maps_user + gpu_maps_dma, held = gpu_map_count;
+                                                int again = compositor_gpu_list_render_bytes(5, list_memory, LIST_BYTES, list_picture, TP, TW, TH, damage);
+
+                                                check("gpu list render: the same list drawn again makes no map", again == 1 && gpu_maps_user + gpu_maps_dma == mapped && gpu_map_count == held);
+                                        }
+                                        if (round == 0)
+                                        {
+                                                positive began = clock_monotonic_nanoseconds();
+
+                                                for (unsigned int k = 0; k < 64; k++)
+                                                        compositor_gpu_list_render_bytes(5, list_memory, LIST_BYTES, list_picture, TP, TW, TH, damage);
+                                                string_format(log, "  gpu list render: 64 frames of one list took %p us, %p maps held\n", (clock_monotonic_nanoseconds() - began) / 1000, (positive)gpu_map_count);
+                                        }
                                         gpu_trim();
                                 }
                                 // The same runs with their bitmaps named by a base of the table (a list's memfd is mapped at an address of its own): the text op's word 6 holds the
