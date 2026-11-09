@@ -43579,7 +43579,10 @@ static bool sleep_read_other(string_address text, positive address_to total)
                 nanoseconds <<= 1;
                 exponent--;
         }
-        address_to total = exponent > 0 || nanoseconds > positive_max
+        //      Zero stays zero whatever its exponent: 0x0p5 is not a span of
+        //      forever, and sleep returns at once for it, as GNU's does.
+        address_to total = !nanoseconds ? 0
+                         : exponent > 0 || nanoseconds > positive_max
                                ? positive_max : (positive)nanoseconds;
         if (!address_to total && mantissa)
                 address_to total = 1;
