@@ -170739,10 +170739,12 @@ static void test_frames(void)
         wlc_send(c, s.surface, WLQ_wl_surface_frame, callback);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0, "a frame callback waits for the frame");
+        WLCHECK(wayland.client[c->slot]->waiting == 1, "and the client counts one surface waiting for it (%ld)", wayland.client[c->slot]->waiting);
         WLCHECK(wayland_frame_wanted(), "and the compositor is told one is wanted");
         wayland_frame();
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "it is answered when the frame is drawn");
+        WLCHECK(wayland.client[c->slot]->waiting == 0, "and the client counts none waiting after it");
         WLCHECK(!wayland_frame_wanted(), "and nothing waits after it");
         wayland_frame();
         wlc_pump(c);

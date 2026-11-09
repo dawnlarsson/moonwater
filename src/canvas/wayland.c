@@ -537,6 +537,7 @@ struct wayland_client
         unsigned char stash[WAYLAND_STASH];
         long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
         long budget_at, budget_used; // the window of time the client's copies are counted in (its start, ms), and its pixels so far
+        long waiting;                // surfaces of the client whose frame callbacks are ready (readies above zero), exact: a client with none is passed over by a frame
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
@@ -1398,6 +1399,17 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
 }
 
 /*
+        A callback waits for a frame on a surface: the one place readies grows, so the client's count of waiting surfaces
+        (waiting) is kept exact here, in callbacks_done and in surface_drop, and nowhere else.
+*/
+static inline void wayland_ready_add(struct wayland_client *c, struct wayland_surface *s, unsigned int id)
+{
+        if (!s->readies)
+                c->waiting++;
+        s->ready[s->readies++] = id;
+}
+
+/*
         One frame callback answered: its done with the time, and its id let go with it. A callback the shim cannot keep waiting
         (a surface with WAYLAND_CALLBACKS ready already, and no frame drawn between) is answered this way at its commit, as
         one over the request's cap is, so the client is never left waiting for a done that no frame will bring.
@@ -1422,6 +1434,8 @@ static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surf
 {
         for (long at = 0; at < s->readies; at++)
                 wayland_callback_answer(c, s->ready[at], time);
+        if (s->readies)
+                c->waiting--;
         s->readies = 0;
 }
 
@@ -1945,7 +1959,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         s->async_hint = s->pending_async;
         for (long at = 0; at < s->callbacks; at++)
                 if (s->readies < WAYLAND_CALLBACKS)
-                        s->ready[s->readies++] = s->callback[at];
+                        wayland_ready_add(c, s, s->callback[at]);
                 else
                         wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
         s->callbacks = 0;
@@ -1986,7 +2000,7 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
                 s->damages = 0;
                 for (long at = 0; at < s->callbacks; at++)
                         if (s->readies < WAYLAND_CALLBACKS)
-                                s->ready[s->readies++] = s->callback[at];
+                                wayland_ready_add(c, s, s->callback[at]);
                         else
                                 wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
                 s->callbacks = 0;
@@ -2057,6 +2071,11 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
 
                 if (slot >= 0)
                         wayland_object_free(c, slot);
+        }
+        if (s->readies)
+        {
+                c->waiting--;
+                s->readies = 0;
         }
         // The surface the pointer was over, or a window it was over, is nowhere now, and the next motion enters it again.
         if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot &&
@@ -2734,7 +2753,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         for (long at = 0; at < s->callbacks; at++)
         {
                 if (s->readies < WAYLAND_CALLBACKS)
-                        s->ready[s->readies++] = s->callback[at];
+                        wayland_ready_add(c, s, s->callback[at]);
                 else
                         wayland_callback_answer(c, s->callback[at], wayland.host->now(wayland.host->context));
         }
@@ -7120,7 +7139,7 @@ WAYLAND_API void wayland_frame(void)
         for (long row = 0; row < WAYLAND_ROWS; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
-                struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
+                struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row_surface[row]] : 0;
                 struct wayland_facts facts;
 
                 int any = s && s->live && s->readies;
@@ -7218,7 +7237,7 @@ WAYLAND_API long wayland_frame_wanted(void)
                 struct wayland_facts facts;
                 int waits;
 
-                if (!c)
+                if (!c || !c->waiting)
                         continue;
                 waits = c->surfaces[wayland.row_surface[row]].readies != 0;
                 for (long at = 0; !waits && at < WAYLAND_SURFACES; at++)
