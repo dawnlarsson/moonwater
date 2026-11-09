@@ -6142,18 +6142,29 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
 
         memory_copy(number_text, printed, number_length);
 
-        p8 unit[2];
+        p8 unit[8];
         positive unit_length = 0;
 
         if (output_power)
         {
                 static const p8 powers[] = "kMGTPEZYRQ";
-                unit[unit_length++] = powers[output_power - 1];
 
-                if (output_power == 1)
-                        unit[0] = numfmt.to == NUMFMT_SCALE_SI ? 'k' : 'K';
-                if (numfmt.to == NUMFMT_SCALE_IEC_I)
-                        unit[unit_length++] = 'i';
+                /* Rounding can carry a value past Q (999.5Q prints as 1000Q), where the table has no letter: GNU writes
+                   (error) there, and so does this. The letter at powers[10] is the terminator, which was written as a unit. */
+                if (output_power > sizeof(powers) - 1)
+                {
+                        memory_copy(unit, "(error)", 7);
+                        unit_length = 7;
+                }
+                else
+                {
+                        unit[unit_length++] = powers[output_power - 1];
+
+                        if (output_power == 1)
+                                unit[0] = numfmt.to == NUMFMT_SCALE_SI ? 'k' : 'K';
+                        if (numfmt.to == NUMFMT_SCALE_IEC_I)
+                                unit[unit_length++] = 'i';
+                }
         }
 
         numfmt_body_out(number_text, number_length, unit, unit_length,

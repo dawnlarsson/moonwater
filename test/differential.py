@@ -14610,6 +14610,8 @@ MISC_UTILITIES = (
             #   refused whatever it says.
             extra=(*(("--to=" + to, "--round=" + mode, "--") + _MISC_NUMFMT_EDGES
                      for to in ("si", "iec", "iec-i", "none") for mode in ("up", "down", "from-zero", "towards-zero", "nearest")),
+                   # Rounding up to 1000Q: GNU writes (error) for the unit, and no NUL.
+                   ("--to=si", "999500000000000000000000000000000"), ("--to=si", "999600000000000000000000000000001"),
                    ("--field", "-foo", "1"), ("--field", "--3", "1"), ("--field", "1-2-3", "1"),
                    ("--field", "18446744073709551615,22", "1"), ("--field", "0-1", "1"),
                    ("--field", "1,2 4", "--to=si", "1000 2000 3000 4000"),
