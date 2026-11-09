@@ -9204,7 +9204,12 @@ __asm__(
     */
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", "40f")
-    "cmp $8, %rsi\n   jb 40f\n"
+    //       A destination that is not a whole word takes the scalar body. The
+    //       aligned loop below stores a word pattern at 32-byte boundaries, and
+    //       those keep the word phase of the destination only when it starts on
+    //       a word; the scalar body stores eight bytes at the destination and
+    //       is right at any address.
+    "cmp $8, %rsi\n   jb 40f\n   test $3, %dil\n   jnz 40f\n"
     "vmovd %edx, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n   lea (%rdi,%rsi,4), %rcx\n"
     "cmp $16, %rsi\n   ja 41f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
     "41: cmp $32, %rsi\n   ja 42f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, -64(%rcx)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
