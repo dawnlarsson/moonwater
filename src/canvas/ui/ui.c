@@ -5987,7 +5987,7 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         the position one for one, and past an end the rubber band draws it. A wheel's notch moves a target that the position
         runs to at once and eases out (BODY_NOTCH_RATE: the first frame already shows a quarter of the way, and a notch on a notch just moves the
         target on), and a notch into an end counts BODY_NOTCH_PULL times, so that it stretches the band. A release's coast starts at BODY_CARRY of the lift's speed and
-        falls by e in BODY_TAU_NS. A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
+        falls by e in BODY_TAU_NS (a trackpad's hand; a finger's throw goes as far as Android's, ui_body_finger_tau). A coast that starts at an end or reaches one starts at BODY_EDGE_CARRY and falls by e in
         BODY_TAU_EDGE_NS, so it pushes past briefly, drawn with the rubber band b = (1 - 1/(x c / d + 1)) d, and then springs
         home, critically damped at BODY_SPRING_OMEGA. The OS's own momentum deltas (a Mac through QEMU) move the position by
         BODY_VIEW_FACTOR of each, the share the view shows.
@@ -6035,6 +6035,7 @@ struct ui_body
         b64 target;          // a notch's target, units (Q30): where the position is going while BODY_NOTCH
         b64 pushed;          // when the last notch moved the target, ns: past an end the band is held while notches keep coming
         b64 sent;            // a free throw's position already given as whole pixels (ui_body_given)
+        b64 tau;             // this coast's speed falls by e in this long, ns: a pad's (BODY_TAU_NS) or a finger's (ui_body_finger_tau)
 };
 
 static b64 ui_body_far(const struct ui_body address_to b)
@@ -6148,6 +6149,7 @@ static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 
         b->shown = place;
         b->rest = 0;
         b->speed = 0;
+        b->tau = 0;
         b->state = BODY_IDLE;
         b->at = at;
         ui_body_note(b);
@@ -6286,6 +6288,33 @@ static void ui_body_settle(struct ui_body address_to b)
 }
 
 /*
+        A finger's throw (a touch screen's) goes as far as Android's does (OverScroller's spline: its distance goes as the speed to the 1.736th, 193 dp
+        at 1000 dp/s, 1315 at 3000, 4390 at 6000, 7240 at the 8000 cap), and not as a trackpad's, which is the Mac's fit (BODY_CARRY of the lift's
+        speed, falling by e in BODY_TAU_NS: 18 percent of the speed, a distance that goes as the speed). The throw is the same exponential, with the time
+        constant that carries it that far: this table, linear between its rows, in ms for the lift's speed in dp a second (0.193 s at 1000, a longer
+        one the faster it is thrown).
+*/
+static const struct { int speed, ms; } ui_body_finger_rows[] = {
+    {300, 80}, {500, 116}, {1000, 193}, {2000, 322}, {3000, 433}, {4000, 536}, {6000, 722}, {8000, 892}};
+
+// the time constant (ns) of a finger's throw at speed (units a second, Q30; the sign does not matter) on a screen at the scale
+static b64 ui_body_finger_tau(b64 speed, int scale)
+{
+        const int rows = (int)(sizeof(ui_body_finger_rows) / sizeof(ui_body_finger_rows[0]));
+        b64 dp = (speed < 0 ? -speed : speed) / UI_ONE * 100 / (scale > 0 ? scale : 100);
+        int at = 1;
+
+        if (dp <= ui_body_finger_rows[0].speed)
+                return (b64)ui_body_finger_rows[0].ms * 1000000;
+        while (at < rows - 1 && dp > ui_body_finger_rows[at].speed)
+                at++;
+        if (dp >= ui_body_finger_rows[rows - 1].speed)
+                return (b64)ui_body_finger_rows[rows - 1].ms * 1000000;
+        return ((b64)ui_body_finger_rows[at - 1].ms + ((b64)ui_body_finger_rows[at].ms - ui_body_finger_rows[at - 1].ms) *
+                                                         (dp - ui_body_finger_rows[at - 1].speed) / (ui_body_finger_rows[at].speed - ui_body_finger_rows[at - 1].speed)) * 1000000;
+}
+
+/*
         The throw's floor and cap, in dp a second at the scale (a dp is a logical pixel): the same speed is the same flick on every screen,
         whatever its scale. The body judges both (ui_body_let_go): a release under the floor throws nothing, and one over the cap is thrown
         at the cap. These are the only two throw numbers.
@@ -6307,7 +6336,7 @@ static b32 ui_throws(long speed, int scale)
 
 // a finger lets go at a speed (units a second, positive toward the far end) on a screen at the scale: a speed under BODY_STILL, or under
 // the floor (ui_throws), throws nothing, and one over the cap (ui_throw_most) is thrown at the cap
-static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at, int scale)
+static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at, int scale, b32 finger)
 {
         b64 far, most = (b64)ui_throw_most(scale) * UI_ONE;
         b32 edge;
@@ -6325,7 +6354,8 @@ static void ui_body_let_go(struct ui_body address_to b, b64 speed, b64 at, int s
                 ui_body_note(b);
                 return;
         }
-        b->vel = ui_qmul(speed, edge ? BODY_EDGE_CARRY : BODY_CARRY);
+        b->vel = ui_qmul(speed, edge ? BODY_EDGE_CARRY : finger ? UI_ONE : BODY_CARRY);
+        b->tau = finger ? ui_body_finger_tau(speed, scale) : BODY_TAU_NS;
         b->state = BODY_COAST;
         ui_body_note(b);
 }
@@ -6344,7 +6374,7 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
                 left -= ns;
                 if (b->state == BODY_COAST)
                 {
-                        b64 tau = ui_body_outside(b) ? BODY_TAU_EDGE_NS : BODY_TAU_NS;
+                        b64 tau = ui_body_outside(b) ? BODY_TAU_EDGE_NS : b->tau > 0 ? b->tau : BODY_TAU_NS;
 
                         b->raw += ui_qmul(b->vel, dt);
                         if (ui_body_pin(b))
@@ -6397,11 +6427,11 @@ static b32 ui_body_step(struct ui_body address_to b, b64 at)
         A throw with no ends: the alternate screen's arrows and a text's lines are moved by whole pixels (ui_body_given), and no place
         of it is an end. It starts BODY_FREE_AT units along, with its far end as far again, so the throw never reaches either one.
 */
-static void ui_body_free(struct ui_body address_to b, long speed, b64 at, int scale)
+static void ui_body_free(struct ui_body address_to b, long speed, b64 at, int scale, b32 finger)
 {
         ui_body_set(b, UI_ONE, BODY_FREE_AT * 2, BODY_FREE_AT, at);
         b->sent = BODY_FREE_AT;
-        ui_body_let_go(b, (b64)speed * UI_ONE, at, scale);
+        ui_body_let_go(b, (b64)speed * UI_ONE, at, scale, finger);
 }
 
 // The whole pixels a free throw has moved since they were last given, stepped to at: the caller moves its lines by them.
@@ -6710,7 +6740,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, long speed)
         if (s->body.state != BODY_TRACK)
                 return;
         ui_scroll_extent(s);
-        ui_body_let_go(&s->body, (b64)speed * UI_ONE, ui_kit_time(), s->scale);
+        ui_body_let_go(&s->body, (b64)speed * UI_ONE, ui_kit_time(), s->scale, !s->precise);
         s->precise = 0;
         s->scroll = ui_body_px(&s->body);
 }
@@ -13628,7 +13658,7 @@ static p32 ui_select_finger_up(struct ui address_to ui, struct ui_select address
                         }
                         return asks;
                 }
-                ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale);
+                ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale, true);
                 return ui_body_going(&s->fling) ? asks : 0;
         }
         if (finger == UI_SELECT_FINGER_HANDLE)
@@ -13985,7 +14015,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         if (!s->wheel_on)
                                 return 0;
                         s->wheel_on = false;
-                        ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale);
+                        ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale, false);
                         return ui_body_going(&s->fling) ? UI_TEXT_MOVED : 0;
                 }
                 if (!well)

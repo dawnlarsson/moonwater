@@ -134698,7 +134698,7 @@ static b32 check_throw_flick(int scale, int step, int reports, long ms)
         (ui_kit.now = (b64)(start + (positive)k * (positive)ms * 1000000ull), ui_press_track(&drag, 100 + step * k));
     ui_kit.now = (b64)lift;
     memory_zero(&thrown, sizeof(thrown));
-    ui_body_free(&thrown, ui_press_velocity(&drag, ui_press_now()), lift, scale);
+    ui_body_free(&thrown, ui_press_velocity(&drag, ui_press_now()), lift, scale, true);
     return ui_body_going(&thrown);
 }
 
@@ -136688,7 +136688,7 @@ static void check_ui_press(void)
         // 0.7 of that speed and falls by e in 0.26 s, so it covers about 0.18 s of it (the body's numbers, where the old tracker's throw
         // went at the full speed and fell by e in 0.325 s, 325 px).
         memory_zero(&list, sizeof(list));
-        ui_body_free(&list, ui_press_velocity(&drag, now), now, 100);
+        ui_body_free(&list, ui_press_velocity(&drag, now), now, 100, true);
         check("ui press: let go moving, it is thrown", ui_body_going(&list));
         while (ui_body_going(&list) && steps < 1000)
                 total += (ui_kit.now = (b64)(now += UI_BODY_FRAME_NS), (int)ui_body_given(&list, now)), steps++;
@@ -136704,18 +136704,18 @@ static void check_ui_press(void)
                         positive frame = which ? 8333333ul : 16666667ul, at = 0;
 
                         memory_zero(&throw_at[which], sizeof(throw_at[which]));
-                        ui_body_free(&throw_at[which], 600, at, 100);
+                        ui_body_free(&throw_at[which], 600, at, 100, true);
                         while (ui_body_going(&throw_at[which]) && at < 5000000000ul)
                                 covered[which] += (int)ui_body_given(&throw_at[which], at += frame);
                 }
-                check("ui press: a throw of 600 pixels a second covers the same distance at 60 Hz steps and at 120 Hz",
-                      covered[0] > 90 && covered[0] < 125 && (covered[0] > covered[1] ? covered[0] - covered[1] : covered[1] - covered[0]) <= 1);
+                check("ui press: a finger's throw of 600 pixels a second covers the same distance (about 79) at 60 Hz steps and at 120 Hz",
+                      covered[0] > 70 && covered[0] < 90 && (covered[0] > covered[1] ? covered[0] - covered[1] : covered[1] - covered[0]) <= 1);
         }
         (ui_kit.now = (b64)(now), ui_press_track_start(&drag, 0));
         (ui_kit.now = (b64)(now += 10000000ull), ui_press_track(&drag, 30));
         now += 200000000ull;
         memory_zero(&list, sizeof(list));
-        ui_body_free(&list, ui_press_velocity(&drag, now), now, 100);
+        ui_body_free(&list, ui_press_velocity(&drag, now), now, 100, true);
         check("ui press: a finger that stopped before it lifted throws nothing", !ui_body_going(&list));
 }
 #endif
@@ -148250,7 +148250,7 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
     expect = top ? terminal_rubber_px(-terminal.bar.body.raw) : -terminal_rubber_px(terminal.bar.body.raw - far);
     *body_match = (top ? shift > 4 : shift < -4) && shift - expect >= -1 && shift - expect <= 1;
     // Let go at no speed: the body springs home, and each frame the grid is drawn until it is whole.
-    ui_body_let_go(&terminal.bar.body, 0, (b64)clock, 100);
+    ui_body_let_go(&terminal.bar.body, 0, (b64)clock, 100, true);
     for (int k = 0; k < 120; k++)
     {
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
@@ -148969,12 +148969,14 @@ static fn check_kit_scroll_robust(void)
                         for (int k = 0; k < RB_GESTURES; k++)
                                 if (rb_gestures[k].flick)
                                 {
-                                        long expect = rb_gestures[k].peak * 182 / 1000; // the body carries 0.7 of the speed for 260 ms: 0.182 of it
+                                        // A pad's hand carries 0.7 of the speed for 260 ms: 0.182 of it. A finger's goes as far as Android's: its time constant at the speed
+                                        long expect = kind == 1 ? (long)(rb_gestures[k].peak * ui_body_finger_tau((b64)rb_gestures[k].peak << UI_Q, 100) / 1000000000)
+                                                                : rb_gestures[k].peak * 182 / 1000;
 
-                                        alike = alike && throw_min[kind][k] * 100 >= expect * 45 && throw_max[kind][k] * 100 <= expect * 115 &&
+                                        alike = alike && throw_min[kind][k] * 100 >= expect * 45 && throw_max[kind][k] * 100 <= expect * 130 &&
                                                 throw_max[kind][k] * 100 <= throw_min[kind][k] * 140;
                                 }
-                check("kit scroll matrix: a flick throws alike at every report rate, near 0.182 of its speed (0.7 for the body's 260 ms)", alike);
+                check("kit scroll matrix: a flick throws alike at every report rate, near what its speed throws (a pad's 0.182 of it, a finger's Android's distance)", alike);
         }
 }
 
@@ -151128,7 +151130,7 @@ static void check_kit_body(void)
         check("kit body: a finger moves the position one for one: touch T00's deltas end at the recorded 178 px", finger_ok);
 
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 4148ll << UI_Q, 0);
-        ui_body_let_go(&b, -4903ll << UI_Q, 0, 100);
+        ui_body_let_go(&b, -4903ll << UI_Q, 0, 100, false);
         worst_coast = 0;
         coast_ok = 1;
         for (k = 0; k < 8; k++)
@@ -151152,9 +151154,9 @@ static void check_kit_body(void)
                 struct ui_body capped, at_cap;
 
                 ui_body_set(&capped, 772ll << UI_Q, 30000ll << UI_Q, 10000ll << UI_Q, 0);
-                ui_body_let_go(&capped, -20000ll << UI_Q, 0, 100);
+                ui_body_let_go(&capped, -20000ll << UI_Q, 0, 100, false);
                 ui_body_set(&at_cap, 772ll << UI_Q, 30000ll << UI_Q, 10000ll << UI_Q, 0);
-                ui_body_let_go(&at_cap, -8000ll << UI_Q, 0, 100);
+                ui_body_let_go(&at_cap, -8000ll << UI_Q, 0, 100, false);
                 ui_body_step(&capped, 1000000000ll);
                 ui_body_step(&at_cap, 1000000000ll);
                 check("kit body: a release at 20000 px a second coasts no farther than one at 8000, the cap (Android's maximum fling velocity)",
@@ -151162,7 +151164,7 @@ static void check_kit_body(void)
         }
 
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
-        ui_body_let_go(&b, -914ll << UI_Q, 0, 100);
+        ui_body_let_go(&b, -914ll << UI_Q, 0, 100, false);
         worst_dip = 0;
         dip_low = 0;
         dip_ok = 1;
@@ -151196,7 +151198,7 @@ static void check_kit_body(void)
               ui_body_drawn(&b) == 100ll << UI_Q && b.state != BODY_DRIVEN);
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_track(&b, -300ll << UI_Q, 0);
-        ui_body_let_go(&b, 0, 0, 100);
+        ui_body_let_go(&b, 0, 0, 100, false);
         ui_body_step(&b, 2000000000ll);
         check("kit body: momentum off, a finger 300 px past the top still springs home to 0", ui_body_drawn(&b) == 0 && !ui_body_going(&b));
         ui_kit.scroll_off = 0;
@@ -151211,7 +151213,7 @@ static void check_kit_body(void)
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_track(&b, -300ll << UI_Q, 0);
         drawn = ui_body_drawn(&b);
-        ui_body_let_go(&b, 0, 0, 100);
+        ui_body_let_go(&b, 0, 0, 100, false);
         ui_body_step(&b, 2000000000ll);
         check("kit body: a finger 300 px past the top is drawn in the band (above the rest, nearer than 300) and springs to rest at 0",
               drawn < 0 && drawn > -(300ll << UI_Q) && ui_body_drawn(&b) == 0 && !ui_body_going(&b));
@@ -153132,11 +153134,12 @@ static fn check_kit_states(void)
                 throw_.x = 100, throw_.y = 10, throw_.height = 200, throw_.content = 1000, throw_.view = 200;
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
                 ui_scroll_drag(&throw_, 80);
-                ui_scroll_let_go(&throw_, 3000);
+                ui_scroll_let_go(&throw_, 1500);
                 frames = sweep_settle_scroll(&ui, &throw_);
-                // The body carries 0.7 of the speed for its 260 ms: 3000 px a second from 80 is 546 px on, to about 626.
-                check("kit states: a throw glides on from its speed (0.7 of it for 260 ms, about 546 px from 80) and goes idle where it stops",
-                      frames > 0 && !scroll_gliding(&throw_) && !scroll_dragging(&throw_) && !scroll_back(&throw_) && throw_.scroll >= 620 && throw_.scroll <= 632);
+                // A finger's throw goes as far as Android's: 1500 px a second falls by e in 257 ms (ui_body_finger_tau), 386 px on from 80, a few short of
+                // that where the coast is cut at BODY_STILL: to about 461.
+                check("kit states: a finger's throw glides on from its speed (Android's distance: 1500 px a second is about 381 px from 80) and goes idle where it stops",
+                      frames > 0 && !scroll_gliding(&throw_) && !scroll_dragging(&throw_) && !scroll_back(&throw_) && throw_.scroll >= 455 && throw_.scroll <= 470);
         }
 
         // Scroll: the hand comes onto the thumb and leaves it; the bar goes lit and back, and the frame is idle after each.

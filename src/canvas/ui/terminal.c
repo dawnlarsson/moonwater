@@ -2448,11 +2448,11 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 
                 if (!alternate)
                 {
-                        ui_body_let_go(&terminal.bar.body, -(b64)speed * UI_ONE, ui_kit_time(), terminal_scale());
+                        ui_body_let_go(&terminal.bar.body, -(b64)speed * UI_ONE, ui_kit_time(), terminal_scale(), true);
                         terminal.dirty = true;
                 }
                 else
-                        ui_body_free(&terminal.alt, speed, ui_kit_time(), terminal_scale());
+                        ui_body_free(&terminal.alt, speed, ui_kit_time(), terminal_scale(), true);
         }
         return true;
 }
