@@ -16625,6 +16625,12 @@ typedef struct
         p8 name[EXEC_COPROC_NAME + 1];
         positive name_length;
         bipolar pid;
+        // The two pipe ends this shell keeps for the coprocess (-1 where they
+        // could not be identified), and the device and inode each was made
+        // as, so a later child closes an end only while it is that pipe.
+        bipolar ends[2];
+        p64 device[2];
+        p64 inode[2];
 } exec_coproc_slot;
 
 // As many coprocesses as the shell is given, as bash keeps them: the table
@@ -16712,7 +16718,7 @@ static fn exec_coproc_drop_finished()
 }
 
 static fn exec_coproc_remember(string_address name, positive name_length,
-                               bipolar pid)
+                               bipolar pid, bipolar ends[2])
 {
         exec_coproc_slot address_to slot;
 
@@ -16724,6 +16730,49 @@ static fn exec_coproc_remember(string_address name, positive name_length,
         slot->name[name_length] = end;
         slot->name_length = name_length;
         slot->pid = pid;
+
+        for (b32 side = 0; side < 2; side++)
+        {
+                file_facts facts;
+
+                slot->ends[side] = ends[side];
+                slot->device[side] = 0;
+                slot->inode[side] = 0;
+                if (ends[side] < 0 ||
+                    !file_look(ends[side], "", AT_EMPTY_PATH, address_of facts))
+                {
+                        slot->ends[side] = -1;
+                        continue;
+                }
+                slot->device[side] = facts.device_major;
+                slot->inode[side] = facts.inode;
+        }
+}
+
+/* A coprocess forked from this shell inherits every other coprocess's pipe
+   ends, and a child that holds one keeps that coprocess's input open after the
+   shell has closed its own copy: `coproc A { cat; }; coproc B { sleep 60; }`
+   then closing A's input left cat waiting for an end of file that did not come
+   until B ended. Bash's children do not hold them. Each end is closed only
+   while it is still the pipe it was made as, so a descriptor the script has
+   since reused is left alone. */
+static fn exec_coproc_siblings_close()
+{
+        for (positive at = 0; at < exec_coproc_count; at++)
+                for (b32 side = 0; side < 2; side++)
+                {
+                        exec_coproc_slot address_to slot = exec_coprocs + at;
+                        file_facts facts;
+
+                        if (slot->ends[side] < 0 ||
+                            !file_look(slot->ends[side], "", AT_EMPTY_PATH,
+                                       address_of facts) ||
+                            facts.device_major != slot->device[side] ||
+                            facts.inode != slot->inode[side])
+                                continue;
+
+                        system_close(slot->ends[side]);
+                }
 }
 
 /* A subreaper can acquire an orphan which has no shell bookkeeping row. Reap
@@ -16862,6 +16911,7 @@ static b32 exec_coproc(b32 index)
 
                 if (!exec_child_signals(!monitor, false))
                         system_call_1(syscall(exit_group), 126);
+                exec_coproc_siblings_close();
                 exec_child_began();
 
                 if (parse_nodes[node->left].kind == NODE_SUBSHELL)
@@ -16913,7 +16963,7 @@ static b32 exec_coproc(b32 index)
         job_started(address_of child, 1, monitor ? child : 0, index,
                     false, true);
 
-        exec_coproc_remember(name, name_length, child);
+        exec_coproc_remember(name, name_length, child, pair);
 
         return 0;
 }

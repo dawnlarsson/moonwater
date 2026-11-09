@@ -16844,6 +16844,13 @@ shell_PIPE_FD_COLLISIONS = Utility(
                "read -t 0.2 value <&${C[0]}; eof=$?; "
                "kill \"$sleeper\" 2>/dev/null; wait \"$sleeper\" 2>/dev/null; "
                "wait \"$copid\" 2>/dev/null; printf 'closed:%s\\n' \"$eof\""),
+        # A second coprocess is a fork, and it must not hold the first one's
+        # input open: closing A's input still ends A at once.
+        ("-c", "coproc A { cat; }; coproc B { /bin/sleep 3; }; "
+               "exec {A[1]}>&-; read -t 0.5 value <&${A[0]}; eof=$?; "
+               "kill \"$B_PID\" 2>/dev/null; "
+               "wait \"$B_PID\" 2>/dev/null; wait \"$A_PID\" 2>/dev/null; "
+               "printf 'siblings:%s\\n' \"$eof\""),
     ),
     stdin=("empty",),
     fixture="shell",
