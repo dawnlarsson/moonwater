@@ -477,6 +477,14 @@ static void compositor_record_capture(unsigned long long when)
         unsigned int width = compositor.width, height = compositor.height, stride = compositor.scanout_pitch / 4;
         struct compositor_record_shot *cur;
 
+        // The screen changed size while the block was in use (a screen came or went, or the arrangement moved the space): the frames copied below are
+        // the new size, and the block was made for the old one, so it is made again and the recording's frames start over. Copied into the old block, a
+        // frame of a larger screen ran past its end.
+        if (compositor_record_block && (width != compositor_record_width || height != compositor_record_height))
+        {
+                compositor_record_free();
+                compositor_record_taken = compositor_record_ring_at = compositor_record_ring_count = 0;
+        }
         if (!compositor.scanout || !compositor_record_alloc())
         {
                 compositor_record_refused_size = 1;

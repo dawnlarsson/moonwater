@@ -41,6 +41,26 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-169: a present record's frame copy ran past its block when the screen changed size during a recording (out-of-bounds write in the root compositor)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | Out-of-bounds write in the root compositor (CWE-787): a block made for one screen size, written at another |
+| Attacker | none on the machine: the trigger is a change of screen size while `moonwater canvas record` runs (a screen connected or taken away, or the arrangement moving the space); the program is root's compositor |
+| Moonwater exposure window | from `75657e50e` (2026-11-04 21:57:44 +01:00, the present record's classified frames and their block) to the fixing commit (2026-11-09) |
+| Fixed by | this entry's commit, the one whose subject begins "canvas: the present record's block is made again" (`src/canvas/record.h` `compositor_record_capture`) |
+
+**What it was.** `compositor_record_alloc` makes the record's block once, at the first frame of a recording, for the screen's size then: three frames and a quarter-size ring. It returns early while the block exists. `compositor_record_capture` copies each frame at the size the compositor has now (`compositor.width` and `height`, which the layout sets at the scanout's change), so once the screen was larger than the block's size, a frame ran past the block's three frames into the ring and, for a screen several times larger, past the end of the mapping (a SIGSEGV in the root compositor). The block was freed only when the recording ended.
+
+**Reachability.** The layout changes the size on a screen change (a display connected or disconnected, the arrangement, a mode change). A recording is started by root (`moonwater canvas record`), so the write is reached by the machine's own screen change during a recording, not by a program.
+
+**The fix.** A frame whose size differs from the one the block was made for frees the block, and the recording's frames start over at the new size; the next frame makes the block for it.
+
+**Tests that fail without it.** `CHECK_terminal` `record: a frame of a screen that changed size is copied into a block made for that size` (in `record_rows`, called from the terminal check's main). With the old `record.h` it fails, and with it the terminal check's later rows (the glyph and touch rows, which read the state the failing row leaves) fail as well: 5 failures against 0.
+
+**Still open.** The frames of a recording before and after a size change are not compared with each other (by design: they are different screens). `compositor_record_classify` uses the block's size, which is the frame's size now.
+
 ### MW-2026-166: a window's language word, which every program may write, was made into a file path without a check
 
 | | |

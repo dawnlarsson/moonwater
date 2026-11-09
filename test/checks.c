@@ -162693,6 +162693,36 @@ static void terminal_theme_check(void)
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
 }
 
+/*
+        The present record's frames (record.h): a recording whose screen changes size between two of its frames copies the second at its new size. The block
+        was made for the first size, so the copy ran past its end (a 128 by 64 frame into a block of 64 by 32: three 8 KiB frames, then the ring). The block is
+        made again for the new size and the recording's frames start over.
+*/
+static void record_rows(void)
+{
+        static unsigned int small[64 * 32], large[128 * 64];
+        unsigned int *saved_scanout = compositor.scanout;
+        int saved_width = compositor.width, saved_height = compositor.height;
+        unsigned long saved_pitch = compositor.scanout_pitch;
+
+        compositor_record_free();
+        compositor_record_refused_size = 0;
+        for (unsigned int i = 0; i < 64 * 32; i++)
+                small[i] = 0x11111111u;
+        for (unsigned int i = 0; i < 128 * 64; i++)
+                large[i] = 0x22222222u;
+
+        compositor.scanout = small, compositor.width = 64, compositor.height = 32, compositor.scanout_pitch = 64 * 4;
+        compositor_record_capture(1);
+        compositor.scanout = large, compositor.width = 128, compositor.height = 64, compositor.scanout_pitch = 128 * 4;
+        compositor_record_capture(2);
+        check("record: a frame of a screen that changed size is copied into a block made for that size",
+              compositor_record_width == 128 && compositor_record_height == 64 && compositor_record_taken == 1 && compositor_record_shots[0].pixels[0] == 0x22222222u);
+
+        compositor_record_free();
+        compositor.scanout = saved_scanout, compositor.width = saved_width, compositor.height = saved_height, compositor.scanout_pitch = saved_pitch;
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -162713,6 +162743,7 @@ b32 main()
               terminal.ui.regular == &terminal.ui.faces[0] && terminal.ui.bold == &terminal.ui.faces[1] && terminal.plain[0] != terminal.ui.regular);
         if (failures)
                 return test_report(null);
+        record_rows();
 
         {
                 unsigned int shipped = 0, wanted = 0;
