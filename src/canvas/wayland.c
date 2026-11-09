@@ -3336,6 +3336,23 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
         }
 }
 
+/*
+        A toplevel that changed while its client had WAYLAND_SERIALS configures unacknowledged was not told (wayland_configure sends none
+        then, and keeps what it last told). Once the client has acknowledged some, what the window is now is sent, as the next change
+        would have sent it; nothing else would, if the window stays as it is.
+*/
+static void wayland_configure_owed(struct wayland_client *c, struct wayland_surface *s)
+{
+        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+
+        if (s->role != WAYLAND_ROLE_TOPLEVEL || !s->told || s->row < 0 || s->serials >= WAYLAND_SERIALS)
+                return;
+        if (wayland.host->row_facts(wayland.host->context, s->row, &facts) < 0)
+                return;
+        if (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states)
+                wayland_configure(c, s, 0);
+}
+
 static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
@@ -3412,6 +3429,7 @@ static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_
                                 s->serials = (unsigned char)(s->serials - at - 1);
                                 s->flags |= WAYLAND_SURFACE_CONFIGURED;
                                 s->last_serial = (unsigned int)a[0].u;
+                                wayland_configure_owed(c, s);
                                 return WAYLAND_OK;
                         }
                 return wayland_fail(c, self->id, WLN_xdg_surface_error_invalid_serial, "the serial was not sent");

@@ -170522,6 +170522,46 @@ static unsigned long state_ack(struct session *s, struct wl_event_seen *e)
         return e ? e->u[2] : 0;
 }
 
+/*
+        A window that changed while its client had WAYLAND_SERIALS configures unacknowledged is told of the change once the client has
+        acknowledged them: the configure that was not sent is owed, and nothing else would send it until the window changed again.
+*/
+static void test_configure_owed(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long serial[WAYLAND_SERIALS];
+        long count = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff112233);
+        c = s.c;
+        wlc_forget(c);
+        for (int at = 0; at < WAYLAND_SERIALS + 2; at++)
+        {
+                fake.row[0].width_asked = 100 + at;
+                wayland_row_wake(0);
+        }
+        wlc_pump(c);
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_xdg_surface && c->ev[at].opcode == WLE_xdg_surface_configure && count < WAYLAND_SERIALS)
+                        serial[count++] = c->ev[at].u[0];
+        WLCHECK(count == WAYLAND_SERIALS, "the configures up to the cap are sent (%ld)", count);
+        wlc_forget(c);
+        for (long at = 0; at < count; at++)
+                wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, (long)serial[at]);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 109 && c->errors == 0,
+                "a change made while the client had the cap unacknowledged is told once it acknowledges (%lu)", e ? e->u[0] : 0UL);
+        wlc_end(c);
+        leak_check("configure owed");
+        wayland_stop();
+}
+
 static void test_state_remap(void)
 {
         struct session s;
@@ -175767,6 +175807,7 @@ int main(int argc, char **argv)
         test_popup_place();
         test_flow();
         test_configure();
+        test_configure_owed();
         test_state_remap();
         test_destroy_orders();
         test_shm();
