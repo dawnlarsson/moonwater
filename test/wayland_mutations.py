@@ -35,9 +35,12 @@ M = [
     ("a picture's copy is not counted",
      "        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;\n",
      "\n"),
-    ("a copy's pipe end is not the shim's",
-     "        c->out_fd_owned[c->out_fd_count] = 1;\n",
-     "        c->out_fd_owned[c->out_fd_count] = 0;\n"),
+    ("the compositor's own take-away of fullscreen is not kept for the next show",
+     "        if (!(facts.states & WAYLAND_STATE_FULLSCREEN))\n                        s->want_fullscreen = 0;\n",
+     "        if (0)\n                        s->want_fullscreen = 0;\n"),
+    ("a fullscreen request is never kept for the next show",
+     "                else if (what == WAYLAND_DO_FULLSCREEN)\n                        s->want_fullscreen = 1;\n",
+     "                else if (what == WAYLAND_DO_FULLSCREEN && 0)\n                        s->want_fullscreen = 1;\n"),
 ]
 
 

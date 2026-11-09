@@ -170488,6 +170488,179 @@ static void test_configure(void)
         wayland_stop();
 }
 
+/*
+        A toplevel's fullscreen and maximized are the client's last word on them, whatever window they were asked of: a window that a
+        null buffer took away and that is shown again is in the state the client last asked, not an older one, nor none.
+*/
+static void state_role(struct session *s)
+{
+        struct wlc *c = s->c;
+        unsigned pixels[32 * 24];
+
+        for (int at = 0; at < 32 * 24; at++)
+                pixels[at] = 0xff00ff00u;
+        s->fd = wl_file(32 * 24 * 4 * 2, 0);
+        wl_file_put(s->fd, 0, pixels, sizeof pixels);
+        s->pool = wlc_id(c, WLI_wl_shm_pool, 1);
+        wlc_send(c, s->shm, WLQ_wl_shm_create_pool, s->pool, s->fd, (long)(32 * 24 * 4 * 2));
+        close((int)s->fd);
+        s->buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s->pool, WLQ_wl_shm_pool_create_buffer, s->buffer, 0L, 32L, 24L, 128L, (long)WLN_wl_shm_format_xrgb8888);
+        s->surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s->compositor, WLQ_wl_compositor_create_surface, s->surface);
+        s->xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s->wm_base, WLQ_xdg_wm_base_get_xdg_surface, s->xdg, s->surface);
+        s->toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s->xdg, WLQ_xdg_surface_get_toplevel, s->toplevel);
+}
+
+/* The configure a commit was answered with, acknowledged; its state words are the array's length (4 for each). */
+static unsigned long state_ack(struct session *s, struct wl_event_seen *e)
+{
+        if (e)
+                wlc_send(s->c, s->xdg, WLQ_xdg_surface_ack_configure, (long)e->u[0]);
+        return e ? e->u[2] : 0;
+}
+
+static void test_state_remap(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* fullscreen asked before the window is shown, let go while it is shown, the window unmapped and shown again: not fullscreen */
+        session_open(&s);
+        state_role(&s);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_fullscreen, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        WLCHECK(e != 0, "the initial configure comes with the first commit");
+        state_ack(&s, e);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_forget(c);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && (fake.row[0].states & WAYLAND_STATE_FULLSCREEN), "a fullscreen asked before the first buffer is shown (%s)",
+                c->error_text);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[2] == 4, "and told in the configure (states %lu)", e ? e->u[2] : 0UL);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_unset_fullscreen);
+        wlc_forget(c);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[2] == 0 && !(fake.row[0].states & WAYLAND_STATE_FULLSCREEN), "unfullscreen while shown is a configure with no state");
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "a null buffer unmaps the window (%s)", c->error_text);
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        WLCHECK(e != 0, "the next commit is the initial one again");
+        state_ack(&s, e);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && fake.row[0].used && !(fake.row[0].states & WAYLAND_STATE_FULLSCREEN),
+                "a window shown again is not fullscreen when the client let go of it (states %ld)", fake.row[0].states);
+        wlc_end(c);
+        leak_check("state, unfullscreen then remapped");
+        wayland_stop();
+
+        /* fullscreen asked while shown, the window unmapped and shown again: still asked for, so fullscreen again */
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        state_role(&s);
+        c = s.c;
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_fullscreen, 0L);
+        wayland_row_wake(0);
+        wlc_forget(c);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && (fake.row[0].states & WAYLAND_STATE_FULLSCREEN), "fullscreen asked while shown is done (%s)", c->error_text);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && fake.row[0].used && (fake.row[0].states & WAYLAND_STATE_FULLSCREEN),
+                "a window shown again is fullscreen when the client has not let go of it (states %ld)", fake.row[0].states);
+        wlc_end(c);
+        leak_check("state, fullscreen then remapped");
+        wayland_stop();
+
+        /* fullscreen asked while shown, the compositor takes it away, the window unmapped and shown again: not asked for any more */
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        state_role(&s);
+        c = s.c;
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_fullscreen, 0L);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && (fake.row[0].states & WAYLAND_STATE_FULLSCREEN), "fullscreen asked while shown is done (%s)", c->error_text);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        fake.row[0].states &= ~(long)WAYLAND_STATE_FULLSCREEN; /* the compositor (the person) takes the fullscreen away, the client not asking */
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure) != 0, "the compositor's own change of state is a configure");
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        state_ack(&s, wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && fake.row[0].used && !(fake.row[0].states & WAYLAND_STATE_FULLSCREEN),
+                "a window the compositor took out of fullscreen is not put back in it when shown again (states %ld)", fake.row[0].states);
+        wlc_end(c);
+        leak_check("state, fullscreen taken away then remapped");
+        wayland_stop();
+}
+
 /* A window's life in every order a client can end it in. */
 static void test_destroy_orders(void)
 {
@@ -175594,6 +175767,7 @@ int main(int argc, char **argv)
         test_popup_place();
         test_flow();
         test_configure();
+        test_state_remap();
         test_destroy_orders();
         test_shm();
         test_frames();

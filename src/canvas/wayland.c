@@ -2552,7 +2552,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         }
         if (first)
         {
-                // What was asked before the window was shown is done now that it is.
+                // What the client last asked of the window (maximized, fullscreen) is done now that it is shown, asked before or not.
                 if (s->want_maximized)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAXIMIZE, 0, 0);
                 if (s->want_fullscreen)
@@ -3450,6 +3450,7 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                 s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
                 s->serials = 0;
                 s->width = s->height = 0;
+                s->want_maximized = s->want_fullscreen = 0; // a toplevel made after this one starts with no state asked
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_parent:
                 if (a[0].slot < 0)
@@ -3515,10 +3516,10 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                             : op == WLQ_xdg_toplevel_unset_fullscreen ? WAYLAND_DO_UNFULLSCREEN
                                                                        : WAYLAND_DO_MINIMIZE;
 
-                // Asked before the window is shown, it is done when it is; asked after, at once.
-                if (row >= 0)
-                        wayland.host->row_do(wayland.host->context, (int)row, what, 0, 0);
-                else if (what == WAYLAND_DO_MAXIMIZE)
+                // The client's last word on maximized and fullscreen is kept whatever window it was asked of: a window shown again (after a
+                // null buffer took it away) is in the state last asked (wayland_show does it at the first show). Asked of a shown window,
+                // it is done now.
+                if (what == WAYLAND_DO_MAXIMIZE)
                         s->want_maximized = 1;
                 else if (what == WAYLAND_DO_UNMAXIMIZE)
                         s->want_maximized = 0;
@@ -3526,6 +3527,8 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                         s->want_fullscreen = 1;
                 else if (what == WAYLAND_DO_UNFULLSCREEN)
                         s->want_fullscreen = 0;
+                if (row >= 0)
+                        wayland.host->row_do(wayland.host->context, (int)row, what, 0, 0);
                 return WAYLAND_OK;
         }
         default:
@@ -7132,6 +7135,15 @@ WAYLAND_API void wayland_row_wake(long row)
                         wayland_end(&e);
                 }
                 return;
+        }
+        // The compositor's own word on the state is the last word too: a window it took out of fullscreen (or out of maximized) is not
+        // put back in it when it is shown again, for a request the compositor has since let go of.
+        if (s->role == WAYLAND_ROLE_TOPLEVEL)
+        {
+                if (!(facts.states & WAYLAND_STATE_FULLSCREEN))
+                        s->want_fullscreen = 0;
+                if (!(facts.states & (WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_FULLSCREEN)))
+                        s->want_maximized = 0;
         }
         if (s->role == WAYLAND_ROLE_TOPLEVEL && s->told &&
             (facts.width != s->told_width || facts.height != s->told_height || facts.states != s->told_states))
