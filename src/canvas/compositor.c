@@ -11141,7 +11141,8 @@ static void compositor_taskbar_settings_read(void)
         taskbar_tray_set(tray);
         taskbar_launcher_set(string_equals((string_address)launcher, (string_address) "on"));
         compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
-        taskbar_hide_set(string_equals((string_address)fullscreen, (string_address) "on"));
+        // The row's standard is on: no file, or a file that says default, hides the band as on does; only "off" keeps it.
+        taskbar_hide_set(!string_equals((string_address)fullscreen, (string_address) "off"));
         compositor_band_room();
         compositor_tabs_changed();
         compositor_bands_where(now);

@@ -113,7 +113,7 @@ moonwater audio test                   play a second of 440 Hz through the sound
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar launcher [on|off]    a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]
-moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [off]
+moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [on]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
 moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
 moonwater ntp [on|off]                 set the clock from the network [on]

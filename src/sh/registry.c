@@ -459,12 +459,12 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "taskbar launcher [on|off]",
                       .help = "a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]"),
-    //  Off, which is the default, the band stays where it is over a fullscreen window. On, it slides off its edge while a window is
-    //  fullscreen (compositor.c takes it from its file) and comes back when none is.
+    //  On, which is the default, the band slides off its edge while a window is fullscreen (compositor.c takes it from its file,
+    //  and a missing file or a file that says default is on) and comes back when none is. Off, the band stays where it is.
     SETTING_PLAIN_ROW(null, "Taskbar hides for fullscreen", SETTINGS_SWITCH, 0, ("taskbar", "fullscreen"), "fullscreen ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_FULLSCREEN_PATH, .standard = "off", .need = "how Canvas draws",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_FULLSCREEN_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "taskbar fullscreen [on|off]",
-                      .help = "the taskbar slides away while a window is fullscreen, and comes back when none is [off]"),
+                      .help = "the taskbar slides away while a window is fullscreen, and comes back when none is [on]"),
     //  The letters' tops toward the middle by default: a side band is then the bottom band stood on its end, its titles
     //  facing the round corners of its tabs as the bottom band's do. Flipping the default is this row's standard, its
     //  help and the README's line; the compositor takes the standard from here, and a file that says default follows it.
