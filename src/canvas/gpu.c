@@ -1485,8 +1485,10 @@ static b32 gpu_run_job(void)
                         bos[named++] = gpu.imported[i];
                 // Of the maps, the ones this present used (its records' addresses are in them alone): the kernel looks at the pages of every map named at
                 // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job.
+                // A map the compositor let go of (gpu_forget: its pages are unmapped, from and to are 0) that no record of this job holds is not named: the kernel
+                // refuses a job that names a buffer whose pages are gone (EFAULT), and a glass scratch grown in the tick that used it made every job of the tick fail.
                 for (unsigned int i = 0; i < gpu_map_count; i++)
-                        if (gpu_maps[i].used == gpu_tick)
+                        if (gpu_maps[i].used == gpu_tick && (gpu_maps[i].from || gpu_maps[i].to || gpu_maps[i].handed))
                                 bos[named++] = gpu_maps[i].handle;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none

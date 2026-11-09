@@ -224224,6 +224224,23 @@ b32 main(void)
                         gpu_trim(); // a present is over
                         system_call_2(syscall(munmap), (positive)gone, 1 << 20);
                         GPU_HOSTILE("a scene runs after pages the GPU was given are unmapped", grown, 256, 0);
+                        // The tick that used a map is the one that lets it go (a glass scratch grown after a present read it): compositor_scratch's gpu_forget and munmap, with no
+                        // present between. The job that follows does not name it (the kernel refuses a job that names a buffer whose pages are gone, EFAULT, three times and
+                        // gives the present to the processor), and it is not a hang.
+                        {
+                                long scratch = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
+                                unsigned int held = gpu_map_count;
+
+                                if (scratch < 0 && scratch > -4096)
+                                        return 1;
+                                check("gpu hostile: a scratch's pages are mapped for a present", gpu_map((const void address_to)scratch, 1 << 20) && gpu_map_count == held + 1 &&
+                                                                                                    gpu_maps[gpu_map_count - 1].used == gpu_tick);
+                                gpu_forget((const void address_to)scratch, 1 << 20);
+                                system_call_2(syscall(munmap), (positive)scratch, 1 << 20);
+                                GPU_HOSTILE("a scene runs in the tick that used a map the compositor then forgot and unmapped", grown, 256, 0);
+                                check("gpu hostile: no job of that tick failed", gpu_last_error == 0);
+                                gpu_trim();
+                        }
                         // The tail of a map's pages let go of and its head a window's picture again (an address used again): the map holds the picture, so the present's
                         // job reads it and is refused; the map is dropped with it, and the next present maps the picture afresh.
                         system_call_2(syscall(munmap), (positive)reused + (1 << 20), 1 << 20);
