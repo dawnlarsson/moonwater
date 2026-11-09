@@ -24567,6 +24567,11 @@ static b32 util_linux_ionice()
                 data = 0;
         else if (class == 3)
                 data = 7;
+        /* The priority word has 13 bits for the data; a larger number would be
+           masked and set another level (-n 8192 set level 0), so it is refused
+           where it would be used. */
+        if (data > UL_IOPRIO_DATA_MASK)
+                return string_report(log_error, 1, "%s: %s\n", "ionice", "invalid class data");
 
         if (!setting && !which && taking.first == count)
                 return ul_ionice_get(UL_IOPRIO_PROCESS, 0);
