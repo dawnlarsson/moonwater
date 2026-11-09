@@ -10610,45 +10610,50 @@ static fn ls_human_1000(writer write, p64 value)
 
         divisor *= 1000;
 
-        p64 whole = value / divisor;
-        p64 rest = value % divisor;
         p8 text[16];
         positive length;
 
-        if (whole < 10)
+        /* A value that rounds up to a thousand of this unit is the next unit's
+           one, and is spelled again there: 999999 is 1.0M as 1000000 is. */
+        for (;;)
         {
-                p64 tenths = (rest * 10 + divisor - 1) / divisor;
-
-                if (tenths == 10)
-                {
-                        whole++;
-                        tenths = 0;
-                }
+                p64 whole = value / divisor;
+                p64 rest = value % divisor;
 
                 if (whole < 10)
                 {
-                        length = positive_into_string(text, whole);
-                        text[length++] = '.';
-                        text[length++] = (p8)('0' + tenths);
-                        text[length++] = units[unit];
-                        return write(text, length);
+                        p64 tenths = (rest * 10 + divisor - 1) / divisor;
+
+                        if (tenths == 10)
+                        {
+                                whole++;
+                                tenths = 0;
+                        }
+
+                        if (whole < 10)
+                        {
+                                length = positive_into_string(text, whole);
+                                text[length++] = '.';
+                                text[length++] = (p8)('0' + tenths);
+                                text[length++] = units[unit];
+                                return write(text, length);
+                        }
                 }
+                else
+                        whole += rest != 0;
+
+                if (whole >= 1000 && unit + 1 < sizeof(units) - 1)
+                {
+                        divisor *= 1000;
+                        unit++;
+                        continue;
+                }
+
+                length = positive_into_string(text, whole);
+                text[length++] = units[unit];
+                write(text, length);
+                return;
         }
-        else
-                whole += rest != 0;
-
-        if (whole >= 1000 && unit + 1 < sizeof(units) - 1)
-        {
-                p64 next = whole / 1000 + (whole % 1000 != 0);
-
-                length = positive_into_string(text, next);
-                text[length++] = units[unit + 1];
-                return write(text, length);
-        }
-
-        length = positive_into_string(text, whole);
-        text[length++] = units[unit];
-        write(text, length);
 }
 
 // The library spells a value that rounds up to 1024 in its own unit, as
