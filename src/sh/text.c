@@ -20213,6 +20213,13 @@ static b32 text_col()
         terminal_state counted = state;
 
         terminal_scan(address_of input, address_of counted, false);
+
+        // A line is held in 32 bits (terminal_event.line), and a newline is two
+        // half-lines, so past about a billion newlines the blank lines between
+        // events were lost and the text ran together. Refused, not printed wrong.
+        if (counted.maximum_line > b32_max || counted.minimum_line < b32_min)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null, "input too large"));
+
         terminal_events = (terminal_event address_to)utility_arena_take(
             counted.events * sizeof(terminal_event));
         return_if(counted.events && !terminal_events, text_done(1));
