@@ -139381,6 +139381,20 @@ static fn check_settings(string_address regular, string_address bold)
                                       settings_unread_only((positive)clock_row));
                                 memory_zero(settings.unread, sizeof(settings.unread));
                         }
+                        {
+                                // The first reading's count: the rows a verb reads, and not the rows the Display map and the notices
+                                // read from the compositor's table, which no verb asks and which are never unread or failed.
+                                unsigned char kept[SETTINGS_ROWS];
+
+                                memory_copy(kept, settings.state, sizeof(kept));
+                                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                                        settings.state[at] = settings_rows[at].output == SETTINGS_OUT_NONE ? SETTINGS_READ : SETTINGS_UNREAD;
+                                check("settings: the rows the compositor's table reads are not counted as unread: every verb row read, none counted",
+                                      settings_not_understood() == 0);
+                                settings.state[battery] = SETTINGS_FAILED;
+                                check("settings: a verb row that is not understood is counted once", settings_not_understood() == 1);
+                                memory_copy(settings.state, kept, sizeof(kept));
+                        }
                         settings.own.table = table;
                         settings.page.chosen = bt_group;
                         settings.page.card = false;

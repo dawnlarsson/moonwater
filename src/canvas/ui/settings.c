@@ -2344,6 +2344,18 @@ static int settings_unread_any(void)
         return 0;
 }
 
+// The rows a verb reads that are unread or not understood. A row the page reads from the compositor's table (its output is not
+// SETTINGS_OUT_NONE: the Display map, the notices) is never asked by a verb, so its state is never set, and it is not counted.
+static positive settings_not_understood(void)
+{
+        positive failed = 0;
+
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].output == SETTINGS_OUT_NONE)
+                        failed += settings.state[at] == SETTINGS_FAILED || settings.state[at] == SETTINGS_UNREAD;
+        return failed;
+}
+
 // The next verb to run: a change first, then the rows not yet asked, then help.
 static fn settings_next_job(void)
 {
@@ -2936,10 +2948,8 @@ static fn settings_finished(b32 killed)
         // The first reading of every row, said once where the machine's log is: how many were unread or not understood.
         if (!settings.told && !settings_unread_any() && settings.child <= 0 && !settings.queued)
         {
-                positive failed = 0;
+                positive failed = settings_not_understood();
 
-                for (positive at = 0; at < SETTINGS_ROWS; at++)
-                        failed += settings.state[at] == SETTINGS_FAILED || settings.state[at] == SETTINGS_UNREAD;
                 settings.told = true;
                 // None is a number too: compositor_kmsg writes no number for a zero, which is its way to say none, so the
                 // 0 is the tail here.
