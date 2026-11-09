@@ -5873,6 +5873,47 @@ static void compositor_band_damage(int x, int y, int width, int height)
         compositor.damage_by = 0;
 }
 
+// The damage of the band's move: where it was (before) and where it is now, on every band. A slide damages nothing else.
+static void compositor_taskbar_damage(b64 before)
+{
+        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_taskbar_view();
+                int x, y, width, height;
+
+                taskbar_slide_rect(&view, before, &x, &y, &width, &height);
+                compositor_band_damage(x, y, width, height);
+        }
+        compositor.band_at = 0;
+}
+
+// Whether a window is fullscreen and on the screen: a fullscreen window that is put away is not, and the taskbar slides away for one
+// that is (taskbar_slide_now).
+static int compositor_fullscreen_up(void)
+{
+        for (unsigned int row = 0; row < WINDOWS; row++)
+                if (compositor.fullscreen[row] && compositor_visible((int)row))
+                        return 1;
+        return 0;
+}
+
+// The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
+// and a window is fullscreen. A move damages the band where it was and where it goes.
+static void compositor_taskbar_slide(positive now)
+{
+        b64 before = 0;
+
+        if (taskbar_slide_now(compositor_fullscreen_up(), now, compositor_glides(), &before))
+                compositor_taskbar_damage(before);
+}
+
+// After a present: a slide still going is damaged again, so the next frame draws the band where it has got to.
+static void compositor_taskbar_keep(positive now)
+{
+        if (taskbar_sliding(now))
+                compositor_taskbar_damage(taskbar_shift());
+}
+
 #define COMPOSITOR_TABS_ALL (~0ul)
 
 // Redoes the slots redo names on the taskbar: the glass is made over their span and the blur's reach, and the band is
@@ -19705,6 +19746,9 @@ static b32 compositor_main()
                 compositor_wl_wake();
 #endif
 
+                // The taskbar's place for this frame, before the frame is drawn: a slide is one step a pass.
+                compositor_taskbar_slide(clock_monotonic_nanoseconds());
+
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.
                 if (compositor.damages)
@@ -19721,6 +19765,7 @@ static b32 compositor_main()
 #endif
                                 compositor_land_keep();
                                 compositor_glide_keep();
+                                compositor_taskbar_keep(clock_monotonic_nanoseconds());
                                 compositor_preview_keep();
                                 compositor_overlays_keep();
                                 if (compositor.motion_ts)

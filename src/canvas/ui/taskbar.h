@@ -116,6 +116,10 @@ static void taskbar_text_set(int edge);
 static void taskbar_tray_set(const char *text);
 static void taskbar_launcher_set(int on);
 static void taskbar_hide_set(int on);
+static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
+static int taskbar_sliding(positive now);
+static b64 taskbar_shift(void);
+static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
 static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
@@ -159,6 +163,12 @@ static inline void taskbar_text_set(int edge) { (void)edge; }
 static inline void taskbar_tray_set(const char *text) { (void)text; }
 static inline void taskbar_launcher_set(int on) { (void)on; }
 static inline void taskbar_hide_set(int on) { (void)on; }
+static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
+{ (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
+static inline int taskbar_sliding(positive now) { (void)now; return 0; }
+static inline b64 taskbar_shift(void) { return 0; }
+static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
+{ (void)view, (void)before, *x = *y = *width = *height = 0; }
 static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_volume_set(int present, int percent, int muted, int flash)

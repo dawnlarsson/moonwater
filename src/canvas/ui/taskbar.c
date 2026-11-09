@@ -47,6 +47,8 @@ static struct taskbar_state
         int tray_chars;                         // characters in tray_text
         int launcher;                           // `taskbar launcher on`: the band has a launcher button at its leading end
         int hide_fullscreen;                    // `taskbar fullscreen on`: the band slides off its edge while a window is fullscreen
+        b64 shift, slide_from, slide_to;        // how far off its edge the band is now (UI_ONE: all of its thickness), and the slide it is in
+        positive slide_at;                      // when that slide began on the clock (0: none is going, the band is at slide_to)
         int volume_item;                        // the sound server is there: the tray has a volume cell before the battery's
         int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
         int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
@@ -97,29 +99,105 @@ static int taskbar_vertical(unsigned int position)
         return position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
 }
 
-// The band: along the edge its position names, COMPOSITOR_PANEL logical pixels thick.
-static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+// The band at a shift: along the edge its position names, COMPOSITOR_PANEL logical pixels thick, and moved off that edge by shift of
+// its thickness (UI_ONE is all of it, which is off the output).
+static void taskbar_band_at(const struct taskbar_view *view, b64 shift, int *x, int *y, int *width, int *height)
 {
         int thick = COMPOSITOR_PANEL * view->scale / 100;
+        int off = (int)(((long long)thick * (long long)shift) / (long long)UI_ONE);
 
         switch (view->position)
         {
         case TASKBAR_TOP:
-                *x = 0, *y = 0, *width = view->width, *height = thick;
+                *x = 0, *y = -off, *width = view->width, *height = thick;
                 break;
         case TASKBAR_LEFT:
-                *x = 0, *y = 0, *width = thick, *height = view->height;
+                *x = -off, *y = 0, *width = thick, *height = view->height;
                 break;
         case TASKBAR_RIGHT:
-                *x = view->width - thick, *y = 0, *width = thick, *height = view->height;
+                *x = view->width - thick + off, *y = 0, *width = thick, *height = view->height;
                 break;
         default:
-                *x = 0, *y = view->height - thick, *width = view->width, *height = thick;
+                *x = 0, *y = view->height - thick + off, *width = view->width, *height = thick;
                 break;
         }
         // On its screen, wherever that screen is in the space: every rectangle below is made from this one.
         *x += view->x;
         *y += view->y;
+}
+
+// The band: where it is now, which is its place unless it is sliding off (taskbar_slide_now).
+static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        taskbar_band_at(view, taskbar.shift, x, y, width, height);
+}
+
+/*
+        The slide (`taskbar fullscreen on`): while a window is fullscreen the band moves off its edge, and back when none is. The
+        move is the kit's window motion (UI_WINDOW_NS on --ease, the glide a window makes), from where the band is when it is
+        asked to go. The compositor asks on every pass of its loop, with the clock (taskbar_slide_now), damages the band where it
+        was and where it goes when the answer moves it, and keeps asking through taskbar_sliding while it is still going.
+*/
+#define TASKBAR_SLIDE_NS UI_WINDOW_NS
+
+// How far off its edge the band is at now: the slide's share of the way from slide_from to slide_to, on the ease.
+static b64 taskbar_shift_at(positive now)
+{
+        b64 done;
+        long long moved;
+
+        if (!taskbar.slide_at)
+                return taskbar.slide_to;
+        if (now <= taskbar.slide_at)
+                return taskbar.slide_from;
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(now - taskbar.slide_at), TASKBAR_SLIDE_NS));
+        moved = ((long long)taskbar.slide_to - (long long)taskbar.slide_from) * (long long)done / (long long)UI_ONE;
+        return (b64)((long long)taskbar.slide_from + moved);
+}
+
+// The band's place for now: off its edge while `taskbar fullscreen on` and fullscreen is up, else on it. A change of place begins a
+// slide from where the band is, which at once when animate is 0 (reduced motion). Returns whether the band moved, and before is the
+// shift it was at before this call, for the damage of its old place.
+static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
+{
+        b64 target = taskbar.hide_fullscreen && fullscreen ? UI_ONE : 0, was = taskbar.shift;
+
+        *before = was;
+        if (target != taskbar.slide_to)
+        {
+                taskbar.slide_from = was;
+                taskbar.slide_to = target;
+                taskbar.slide_at = animate ? now : 0;
+        }
+        taskbar.shift = taskbar_shift_at(now);
+        return taskbar.shift != was;
+}
+
+// Whether a slide is still going at now: its band is damaged again after each present until it ends.
+static int taskbar_sliding(positive now)
+{
+        return taskbar.slide_at && now > taskbar.slide_at && now - taskbar.slide_at < TASKBAR_SLIDE_NS;
+}
+
+// How far off its edge the band is now.
+static b64 taskbar_shift(void)
+{
+        return taskbar.shift;
+}
+
+// The one rectangle the band covers while it moves from before to where it is now, so that its damage covers both places.
+static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
+{
+        int x0, y0, w0, h0, x1, y1, w1, h1, right, bottom;
+
+        taskbar_band_at(view, before, &x0, &y0, &w0, &h0);
+        taskbar_band_at(view, taskbar.shift, &x1, &y1, &w1, &h1);
+        right = x0 + w0 > x1 + w1 ? x0 + w0 : x1 + w1;
+        bottom = y0 + h0 > y1 + h1 ? y0 + h0 : y1 + h1;
+        *x = x0 < x1 ? x0 : x1;
+        *y = y0 < y1 ? y0 : y1;
+        *width = right - *x;
+        *height = bottom - *y;
 }
 
 /*

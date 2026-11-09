@@ -126200,6 +126200,140 @@ static p64 band_hash(p64 hash)
 }
 
 /*
+        The taskbar slides away while a window is fullscreen, when `taskbar fullscreen on` says so, and comes back when none is.
+        Off, which is the default, the band stays where it is over a fullscreen window and nothing is damaged. On, the band's place
+        moves off its edge over UI_WINDOW_NS on the kit's ease: half way through it is part of the way (a slide that jumps is a red
+        row), at its end it is off the output and takes no press where it was, and each step damages the band where it was and where
+        it goes. A slide still going is damaged after each present, so the loop does not go idle half way, and one that has ended is
+        not. A fullscreen window that is put away (minimised) does not count, and the band comes back when none is fullscreen.
+*/
+static void fullscreen_band(int *rect)
+{
+    struct taskbar_view view = compositor_taskbar_view();
+
+    taskbar_band(&view, &rect[0], &rect[1], &rect[2], &rect[3]);
+}
+
+// Whether a band's rectangle is off the output on its own edge: nothing of it is on the screen.
+static int fullscreen_off(const int *rect)
+{
+    switch (taskbar_position())
+    {
+    case TASKBAR_TOP:
+        return rect[1] + rect[3] <= 0;
+    case TASKBAR_LEFT:
+        return rect[0] + rect[2] <= 0;
+    case TASKBAR_RIGHT:
+        return rect[0] >= compositor.width;
+    default:
+        return rect[1] >= compositor.height;
+    }
+}
+
+// Whether one damaged rectangle holds all of rect's part on the output (damage is cut to the output), so a step that damages
+// the band's old and new places has damaged both. A rectangle with none of it on the output has nothing to damage.
+static int fullscreen_covers(const int *rect)
+{
+    int x1 = rect[0] < 0 ? 0 : rect[0], y1 = rect[1] < 0 ? 0 : rect[1];
+    int x2 = rect[0] + rect[2] > compositor.width ? compositor.width : rect[0] + rect[2];
+    int y2 = rect[1] + rect[3] > compositor.height ? compositor.height : rect[1] + rect[3];
+
+    if (x2 <= x1 || y2 <= y1)
+        return 1;
+    for (unsigned int at = 0; at < compositor.damages; at++)
+        if (compositor.damage[at][0] <= x1 && compositor.damage[at][1] <= y1 && compositor.damage[at][2] >= x2 && compositor.damage[at][3] >= y2)
+            return 1;
+    return 0;
+}
+
+static void check_taskbar_fullscreen(void)
+{
+    static const char *const words[4] = {"bottom", "top", "left", "right"};
+    static struct windows table;
+    const positive half = UI_WINDOW_NS / 2, whole = UI_WINDOW_NS + 1000000ull;
+    int off_stays = 1, between = 1, at_end = 1, takes_no_press = 1, damage_old_new = 1, keeps = 1, ends_idle = 1, back = 1,
+        minimised_stays = 1;
+
+    for (int at = 0; at < 4; at++)
+    {
+        struct taskbar_view view;
+        int base[4], rect[4];
+        // The clock only goes on: each position's steps are later than the last one's (the band's slide is kept between them).
+        positive t0 = 1000000000ull + (positive)at * 4000000000ull, t1 = t0 + whole, t2, t3;
+
+        memory_zero(&compositor, sizeof(compositor));
+        memory_zero(&table, sizeof(table));
+        compositor.table = &table;
+        compositor.width = BAND_W;
+        compositor.height = BAND_H;
+        compositor.scale = 100;
+        taskbar_settings_set(words[at], "primary", "battery none\n");
+        taskbar_tray_set("");
+        compositor.showing[1] = 1;
+        compositor.fullscreen[1] = 1;
+        fullscreen_band(base);
+
+        // Off: a fullscreen window leaves the band where it is, through a whole slide's time, and nothing is damaged.
+        taskbar_hide_set(0);
+        compositor.damages = 0;
+        compositor_taskbar_slide(t0);
+        compositor_taskbar_slide(t0 + half);
+        compositor_taskbar_slide(t0 + whole);
+        fullscreen_band(rect);
+        off_stays &= memory_compare(rect, base, sizeof(rect)) == 0 && compositor.damages == 0 && taskbar_shift() == 0;
+
+        // On: the band moves. The slide is only begun at the first step; half way it is part of the way and its old and new places
+        // are damaged, and a slide still going is damaged after a present.
+        taskbar_hide_set(1);
+        compositor_taskbar_slide(t1);
+        compositor.damages = 0;
+        compositor_taskbar_slide(t1 + half);
+        between &= taskbar_shift() > 0 && taskbar_shift() < UI_ONE;
+        fullscreen_band(rect);
+        damage_old_new &= fullscreen_covers(base) && fullscreen_covers(rect);
+        compositor.damages = 0;
+        compositor_taskbar_keep(t1 + half);
+        keeps &= compositor.damages > 0;
+        compositor_taskbar_slide(t1 + whole);
+        compositor.damages = 0;
+        compositor_taskbar_keep(t1 + whole);
+        ends_idle &= compositor.damages == 0;
+
+        // At its end the band is off the output, and a press where it was is none.
+        view = compositor_taskbar_view();
+        fullscreen_band(rect);
+        at_end &= taskbar_shift() == UI_ONE && fullscreen_off(rect);
+        takes_no_press &= taskbar_hit(&view, base[0] + base[2] / 2, base[1] + base[3] / 2) == TASKBAR_HIT_NONE;
+
+        // Back: fullscreen is over, and the band slides to its place and is there.
+        t2 = t1 + 2 * whole;
+        compositor.fullscreen[1] = 0;
+        compositor_taskbar_slide(t2);
+        compositor_taskbar_slide(t2 + half);
+        between &= taskbar_shift() > 0 && taskbar_shift() < UI_ONE;
+        compositor_taskbar_slide(t2 + whole);
+        fullscreen_band(rect);
+        back &= taskbar_shift() == 0 && memory_compare(rect, base, sizeof(rect)) == 0;
+
+        // A window put away is not fullscreen: the band stays.
+        t3 = t2 + 2 * whole;
+        compositor.fullscreen[1] = 1;
+        compositor.state[1] = WINDOW_MINIMIZED;
+        compositor_taskbar_slide(t3);
+        compositor_taskbar_slide(t3 + whole);
+        minimised_stays &= taskbar_shift() == 0;
+    }
+    taskbar_hide_set(0);
+    check("taskbar fullscreen: off, a fullscreen window leaves the band where it is, and nothing is damaged", off_stays);
+    check("taskbar fullscreen: on, the band is part of the way off its edge half way through the slide, both ways", between);
+    check("taskbar fullscreen: on, at the end of the slide the band is off the output and a press where it was is none", at_end && takes_no_press);
+    check("taskbar fullscreen: each step damages the band where it was and where it goes", damage_old_new);
+    check("taskbar fullscreen: a slide still going is damaged after each present, and one that has ended is not", keeps && ends_idle);
+    check("taskbar fullscreen: when none is fullscreen the band comes back to its place", back);
+    check("taskbar fullscreen: a fullscreen window that is put away does not hide the band", minimised_stays);
+}
+
+/*
         The launcher button of the panel (`taskbar launcher on`). Off, which is the default, the band is what it was: the tabs and
         the tray are where the band's own formula puts them with nothing taken from its start, whatever the position and the scale.
         On, the button is a tab-sized square a gap in from the leading end of the band (the left of a bottom or top one, the top of
@@ -162668,6 +162802,7 @@ b32 main()
         check_rtl_chrome();
         check_taskbar_tray();
         check_taskbar_launcher();
+        check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY
         check_kit_motion();
         check_kit_theme();
