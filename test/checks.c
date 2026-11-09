@@ -224017,11 +224017,13 @@ static void gpu_fault_rows(void)
         compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 
-// A job the wait gave up on (a hang: gpu_run_job leaves gpu.pending set) may still run on the card. The restart after the cool-down waits for the card to
-// be idle (compositor_gpu_restart_check): its maps are not unmapped under it. Each step's answer is the fake fence's (gpu_fake_busy, gpu_fake_idle).
+// A job the wait gave up on (a hang: gpu_run_job leaves gpu.pending set) may still run on the card. Its maps are not unmapped, and its import is not unmapped, under
+// it: the restart after the cool-down waits for the card to be idle (compositor_gpu_restart_check), and an import released meanwhile is unmapped by the trim
+// once the card is idle (gpu_unimport, gpu_trim). Each step's answer is the fake fence's (gpu_fake_busy, gpu_fake_idle).
 static void gpu_flight_rows(void)
 {
         int saved_card = compositor.card, saved_gpu = compositor_gpu;
+        unsigned int before;
         // The card's and the compositor's state as the rows before found them: a recovery starts the card again, and a present after it would lay the card's
         // buffer out anew (the rows after this one see the state the rows before left, not this one's).
         unsigned char kept_gpu[sizeof(gpu)], kept_req[sizeof(gpu_req)], kept_state[sizeof(compositor_gpu_state)];
@@ -224053,6 +224055,20 @@ static void gpu_flight_rows(void)
               gpu_map_count == 0 && gpu_gone_at >= 1 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_RECOVER && gpu.pending == 0 &&
               !compositor_gpu_state.restart_due && compositor_gpu_state.dead);
         gpu_fake_absent = 0, compositor_gpu_state.dead = 0, compositor_gpu_state.up = 1;
+
+        // 3. An import of a scanout's buffer let go of while a job may still read it (pending 77, busy): kept, released, not unmapped.
+        gpu.imports = 1, gpu.imported[0] = 5, gpu.imported_va[0] = 0x40000000ull, gpu.imported_bytes[0] = 8192, gpu.imported_dead[0] = 0;
+        gpu.pending = 77, gpu_fake_busy = 1, gpu_fake_idle = 0;
+        before = gpu_gone_at;
+        gpu_unimport(0x40000000ull, GPU_GONE_UNIMPORT);
+        check("flight: an import let go of while a job may still read it is released, not unmapped",
+              gpu.imports == 1 && gpu.imported_dead[0] && gpu.imported_va[0] == 0x40000000ull && gpu_gone_at == before && gpu.pending == 77);
+
+        // 4. The job has ended: the trim unmaps the released import (its reason is the release's), and nothing is pending.
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        gpu_trim();
+        check("flight: once the card is idle the trim unmaps the released import, for the release's reason",
+              gpu.imports == 0 && gpu.pending == 0 && gpu_gone[(gpu_gone_at - 1) % GPU_GONE].why == GPU_GONE_RELEASE);
 
         gpu_fake_busy = 0, gpu_fake_idle = 0, gpu_fake_absent = 0, gpu_map_count = 0;
         memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&gpu_req, kept_req, sizeof(gpu_req)), memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));

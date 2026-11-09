@@ -1118,6 +1118,7 @@ static positive gpu_va_written(const void *pointer, positive bytes)
 
 static b32 gpu_idle(void);
 static void gpu_unimport(positive at, enum gpu_gone_why why);
+static void gpu_release_import(positive at);
 
 // A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed, and the maps and imports let go of while
 // a job might still read them (gpu_forget, gpu_release_import) are dropped once the card is idle.
@@ -1233,9 +1234,15 @@ static void gpu_forget(const void *addr, positive bytes)
                 }
 }
 
-// A buffer gpu_import made, let go of for the reason why (its mode changed, it was made again, the card is idle): unmapped and closed.
+// A buffer gpu_import made, let go of for the reason why (its mode changed, it was made again, the card is idle): unmapped, and its handle let go of. A job the
+// wait gave up on may still read it (gpu_run_job's pending): then it is only released, and gpu_trim unmaps it once the card is idle.
 static void gpu_unimport(positive at, enum gpu_gone_why why)
 {
+        if (at && gpu.pending && !gpu_idle())
+        {
+                gpu_release_import(at);
+                return;
+        }
         for (unsigned int i = 0; at && i < gpu.imports; i++)
                 if (gpu.imported_va[i] == at)
                 {
