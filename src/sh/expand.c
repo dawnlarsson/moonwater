@@ -11780,8 +11780,8 @@ static bool expand_brace_range(string_address word, string_address open,
         return false;
 }
 
-static HOT positive shell_expand_braces(string_address word,
-                                    shell_words address_to out, bool split)
+static HOT positive shell_expand_braces_run(string_address word,
+                                            shell_words address_to out, bool split)
 {
         string_address open = word;
 
@@ -11876,6 +11876,35 @@ static HOT positive shell_expand_braces(string_address word,
         }
 
         return shell_expand_without_braces(word, out, split);
+}
+
+/*
+        One level of brace expansion per group the word holds, and each
+        level's answer is the word with that group replaced -- which recurses.
+        A word of five thousand single-alternative groups took a 1 MiB stack
+        down at about 200 bytes a level, with nothing asking how deep it was.
+        Past EXPAND_DEPTH_ASKED levels the stack is asked, as the arithmetic
+        nesting asks it, and a word that has used three quarters of it is
+        refused as too long.
+*/
+static positive expand_brace_depth;
+
+static HOT positive shell_expand_braces(string_address word,
+                                        shell_words address_to out, bool split)
+{
+        positive count;
+
+        if (expand_brace_depth >= EXPAND_DEPTH_ASKED && !shell_stack_within(75))
+        {
+                expand_fail_state();
+                return out->count;
+        }
+
+        expand_brace_depth++;
+        count = shell_expand_braces_run(word, out, split);
+        expand_brace_depth--;
+
+        return count;
 }
 
 /*
