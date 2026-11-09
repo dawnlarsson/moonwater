@@ -9917,18 +9917,30 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         }
 }
 
-// Whether a press at px (device pixels) is on the expander of row id: the chevron and the badge at the row's right end (its left end reading from
-// the right), which open and close its lines rather than acting on the row.
+// Whether a press at px (device pixels) is on the expander of row id: the strip its chevron and its badge are drawn in, at the row's end
+// (left of a switch, which sits at that end). Those open and close its lines rather than acting on the row. The strip is the one
+// ui_list_row lays out (the chevron's slot, the badge's width), so a switch, a field or a dropdown's value beside it is not in it.
 static b32 ui_list_expander_at(const struct ui address_to ui, const struct ui_list address_to l, int id, int px)
 {
         struct ui_row row;
-        int across, wide, width = ui_dev(ui, 150);
+        struct ui_control measure;
+        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10), base, strip = 2 * ui_dev(ui, 4) + gap;
 
         ui_list_describe(l, id, &row);
         if (!row.expander)
                 return false;
-        ui_list_across(l, &across, &wide);
-        return ui_rtl() ? px >= across && px < across + width : px >= across + wide - width && px < across + wide;
+        if (row.badge)
+        {
+                memory_zero(&measure, sizeof(measure));
+                measure.kind = UI_BADGE, measure.label = row.badge_words;
+                ui_control_size(ui, &measure);
+                strip += ui_dev(ui, measure.w) + gap;
+        }
+        // The end of the row, inset, where ui_list_row starts reading; a switch is at that end, so the strip is beyond it.
+        base = ui_rtl() ? x + inset : x + w - inset;
+        if (row.kind == UI_ROW_SWITCH)
+                base += ui_rtl() ? ui_dev(ui, 52) + gap : -(ui_dev(ui, 52) + gap);
+        return ui_rtl() ? px >= base && px < base + strip : px >= base - strip && px < base;
 }
 
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.

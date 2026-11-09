@@ -141116,6 +141116,173 @@ static fn settings_seam_draw(void)
         settings_draw_rows(settings_frames_whole, 0, 0);
 }
 
+/*
+        A press on a row's switch, or on a dropdown's own box and arrow, acts on that control. A row with an expander (its lines fold: the GPU's,
+        or a row with an issue) has a strip at its end for the chevron and the badge, and a press in it opens and closes the lines; a press on
+        the switch or the dropdown beside that strip is the control's. Every group is laid out at this scale, and every switch's centre is
+        tested against its row's band and against the expander strip; the GPU rendering switch (a row with an expander) is pressed for real
+        and must change the switch, not fold the row; a dropdown's arrow and value (a row given an issue, so that it has an expander) are
+        outside the strip. Nothing is left changed: the window, the kit and the board are put back as they were.
+*/
+static fn check_settings_press(int x, int y)
+{
+        struct window_event event = {WINDOW_EVENT_MOTION, 0, x, y};
+
+        settings.child = 1; // a press that changes a setting queues it: no job starts here
+        settings_event_at(&event);
+        event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        settings_event_at(&event);
+        event = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        settings_event_at(&event);
+        settings.child = 0;
+}
+
+static fn check_settings_clicks(void)
+{
+        // The window, the kit and the board as they are, put back at the end: the presses leave their ripples and holds in the kit.
+        static p8 kept_settings[sizeof(settings)], kept_kit[sizeof(ui_kit)], kept_board[sizeof(settings_board)];
+        struct ui address_to ui = &settings.ui;
+        struct ui_list address_to list = &settings.list;
+        static struct windows click_table;
+        int before = settings.page.chosen, scroll_before = list->scroll.scroll, seen = 0, wrong = 0, strips = 0;
+        int gpu = settings_row_named("GPU rendering"), keyboard = settings_row_named("Keyboard");
+        unsigned char gpu_fold = gpu >= 0 ? settings_expanded[gpu] : 0;
+        positive queued = settings.queued;
+        b32 gpu_pressed = false, gpu_ok = false, arrow_ok = false, value_ok = false, hover_ok = false;
+
+        memory_copy(kept_settings, &settings, sizeof(settings));
+        memory_copy(kept_kit, &ui_kit, sizeof(ui_kit));
+        memory_copy(kept_board, &settings_board, sizeof(settings_board));
+
+        settings.page.menu_row = -1;
+        ui_field_close(&settings.edit);
+        for (int group = 0; group < settings_groups(); group++)
+        {
+                settings_group_choose(group);
+                settings_layout();
+                for (int at = 0; at < list->count; at++)
+                {
+                        int id = list->id[at], across, wide, px, py;
+                        struct ui_row row;
+
+                        if (id >= (int)SETTINGS_ALL)
+                                continue;
+                        ui_list_describe(list, id, &row);
+                        if (row.kind != UI_ROW_SWITCH)
+                                continue;
+                        ui_scroll_set(&list->scroll, list->top[at]);
+                        ui_list_across(list, &across, &wide);
+                        px = across + wide - ui_dev(ui, UI_INSET) - ui_dev(ui, 26);
+                        py = ui_list_row_y(list, at) + list->tall[at] / 2;
+                        if (py < list->y || py >= list->y + list->h)
+                                continue;
+                        seen++;
+                        if (ui_list_hit(ui, list, px, py) != id)
+                        {
+                                wrong++;
+                                string_format(log, "  settings click: %s's switch is not its own row's\n", settings_label_shown(id));
+                                log_flush();
+                        }
+                        if (ui_list_expander_at(ui, list, id, px))
+                        {
+                                strips++;
+                                string_format(log, "  settings click: %s's switch is in its expander's strip\n", settings_label_shown(id));
+                                log_flush();
+                        }
+                }
+        }
+        check("settings click: a switch's centre is its own row's, in every group, at this scale", seen > 0 && wrong == 0);
+        check("settings click: a switch's centre is not in its row's expander strip, in every group, at this scale", strips == 0);
+
+        // The GPU rendering switch, read as "off" for the press (a switch is drawn only for a row that is read), scrolled into view.
+        if (gpu >= 0)
+        {
+                unsigned int state_before = settings.state[gpu];
+                char value_before[SETTINGS_VALUE];
+                int at, px, py, across, wide;
+
+                string_copy_bounded((string_address)value_before, (string_address)settings.value[gpu], sizeof(value_before));
+                settings.state[gpu] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[gpu], (string_address) "off", SETTINGS_VALUE);
+                settings_group_choose(settings_group_of(gpu));
+                settings_layout();
+                at = ui_list_at(list, gpu);
+                if (at >= 0)
+                {
+                        ui_scroll_set(&list->scroll, list->top[at]);
+                        ui_list_across(list, &across, &wide);
+                        px = across + wide - ui_dev(ui, UI_INSET) - ui_dev(ui, 26);
+                        py = ui_list_row_y(list, at) + list->tall[at] / 2;
+                        check_settings_press(px, py);
+                        gpu_pressed = true;
+                        gpu_ok = settings_expanded[gpu] == gpu_fold && settings.queued == queued + 1;
+                        if (settings_expanded[gpu] != gpu_fold)
+                                settings_toggle(gpu);
+                        settings.queued = queued;
+                }
+                settings.state[gpu] = state_before;
+                string_copy_bounded((string_address)settings.value[gpu], (string_address)value_before, SETTINGS_VALUE);
+                settings_layout();
+        }
+        check("settings click: a press on the GPU rendering switch changes the switch, and does not fold its lines", gpu_pressed && gpu_ok);
+
+        // A dropdown with an expander: the Keyboard row, given a warning on its key (the code is GPU_LISTS only because one is needed; the
+        // row's badge reads the severity) so that it has one. Its arrow and its value are left of the strip.
+        if (keyboard >= 0)
+        {
+                int at, right, strip_left, py, gap = ui_dev(ui, 10), badge_w = 0;
+                struct ui_row row;
+                struct ui_control measure;
+                struct window_event event;
+                unsigned char keyboard_fold = settings_expanded[keyboard];
+
+                windows_issue_set(&click_table, "keyboard", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+                windows_issues_read(&click_table, &settings_board);
+                settings_group_choose(settings_group_of(keyboard));
+                settings_layout();
+                at = ui_list_at(list, keyboard);
+                if (at >= 0)
+                {
+                        ui_scroll_set(&list->scroll, list->top[at]);
+                        py = ui_list_row_y(list, at) + list->tall[at] / 2;
+                        // Where ui_list_row draws the chevron and the badge (from the row's end): the dropdown's arrow and value are left of them.
+                        ui_list_describe(list, keyboard, &row);
+                        if (row.badge)
+                        {
+                                memory_zero(&measure, sizeof(measure));
+                                measure.kind = UI_BADGE, measure.label = row.badge_words;
+                                ui_control_size(ui, &measure);
+                                badge_w = ui_dev(ui, measure.w) + gap;
+                        }
+                        right = list->x + list->w - ui_dev(ui, UI_INSET);
+                        strip_left = right - badge_w - (2 * ui_dev(ui, 4) + gap);
+                        // The arrow's box and the value's are left of the strip, so a press on either is the dropdown's (settings_press_at asks
+                        // the strip first). Geometry only: a press would open the menu, and a menu is not left behind by a check.
+                        arrow_ok = !ui_list_expander_at(ui, list, keyboard, strip_left - ui_dev(ui, 4));
+                        value_ok = !ui_list_expander_at(ui, list, keyboard, strip_left - ui_dev(ui, 24));
+                        // Hover: the pointer over the arrow lights the dropdown's row, as it does on any row.
+                        event = (struct window_event){WINDOW_EVENT_MOTION, 0, strip_left - ui_dev(ui, 4), py};
+                        settings_event_at(&event);
+                        hover_ok = settings.list.hover == keyboard;
+                }
+                windows_issue_clear(&click_table, "keyboard", WINDOWS_ISSUE_ANY);
+                windows_issues_read(&click_table, &settings_board);
+                settings_layout();
+        }
+        check("settings click: a dropdown's arrow is not in its row's expander strip, so a press on it is the dropdown's", arrow_ok);
+        check("settings click: a dropdown's value is not in its row's expander strip, so a press on it is the dropdown's", value_ok);
+        check("settings click: the pointer over a dropdown's arrow lights its row", hover_ok);
+
+        settings_group_choose(before);
+        settings_layout();
+        ui_scroll_set(&list->scroll, scroll_before);
+        settings_layout();
+        memory_copy(&settings, kept_settings, sizeof(settings));
+        memory_copy(&ui_kit, kept_kit, sizeof(ui_kit));
+        memory_copy(&settings_board, kept_board, sizeof(settings_board));
+        ui_page_redraw(&settings.page);
+}
+
 static fn check_settings_seam(void)
 {
         struct ui address_to ui = &settings.ui;
@@ -141301,6 +141468,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_frames_pass();
         check_settings_search();
         check_settings_seam();
+        check_settings_clicks();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
                                  "Open windows where they were last put", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);
