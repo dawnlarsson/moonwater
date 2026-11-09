@@ -6980,6 +6980,7 @@ struct ui_popmenu
         char typed[16];
         int typed_length;
         positive typed_at;
+        int wheel_rest, wheel_left;  // a wheel's turn under a whole pixel (120ths, ui_wheel_pixels) and under a whole item (pixels), kept for the next turn
 };
 
 static fn ui_popmenu_add(struct ui_popmenu address_to m, const char address_to label, const char address_to keys, p32 flags, int id)
@@ -7324,9 +7325,25 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         m->hot = at;
                 return UI_MENU_NOTHING;
         }
-        // A scroll (the wheel's or a touchpad's) over the menu closes it, as a scroll anywhere does (ui_popmenu_scroll).
+        // A scroll (the wheel's or a touchpad's) over a menu that fits closes it, as a scroll anywhere does (ui_popmenu_scroll). A menu taller
+        // than its window scrolls under a vertical turn, three items a notch (a trackpad's turns add up to the items they make), and stays open.
         if (event->type == WINDOW_EVENT_WHEEL)
-                return UI_MENU_GONE;
+        {
+                int row = ui_popmenu_row(ui, m), most = m->count > m->rows_shown ? m->count - m->rows_shown : 0, items, to;
+                long pixels;
+
+                if (m->scroll.content <= m->scroll.view || event->b)
+                        return UI_MENU_GONE;
+                if (event->flags & WINDOW_WHEEL_STOP)
+                        return UI_MENU_NOTHING;
+                pixels = ui_wheel_pixels(ui, event, 3L * row, &m->wheel_rest) + m->wheel_left;
+                items = row > 0 ? (int)(pixels / row) : 0;
+                m->wheel_left = (int)(pixels - (long)items * row);
+                to = m->top + items;
+                m->top = to < 0 ? 0 : to > most ? most : to;
+                ui_scroll_set(&m->scroll, ui_popmenu_offset(ui, m, m->top));
+                return UI_MENU_NOTHING;
+        }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
         {
                 int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1, clicked;
@@ -13978,7 +13995,8 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 s->quiet_at = now + UI_SELECT_BAR_AFTER_NS;
                 // A turn is pixels (a notch three lines or columns, a precise turn its share of UI_NOTCH, natural direction applied), and the view
                 // moves by the lines they make: the rest under a line is kept for the next turn, and no turn is rounded up to a line of its own.
-                if (event->b)
+                // Shift turns a vertical wheel across, as every editor's does
+                if (event->b || (event->flags & WINDOW_KEY_SHIFT))
                 {
                         pixels = ui_wheel_pixels(ui, event, 3 * (long)t->cell, &s->wheel_rest_x);
                         t->scroll_x = t->scroll_x + pixels > 0 ? t->scroll_x + pixels : 0;

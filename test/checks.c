@@ -134407,6 +134407,24 @@ static void check_code_wheel(struct ui address_to wui)
     spent = !ui_body_going(&view.sel.fling) && thrown_lines > 3;
     check("code view wheel: the lift of a quick hand throws the view, and the app's ticks spend the throw", thrown && spent);
     ui_text_close(&view);
+
+    {
+        struct window_event across = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, -120, 0};
+        struct window_event zoomed = {WINDOW_EVENT_WHEEL, WINDOW_KEY_CONTROL, 120, 0};
+        long moved_across, lines_down;
+        int zoom;
+
+        scroll_setup(0);
+        scroll_code(wui, &view, 10);
+        ui_text_event(wui, &view, &across, x, y);
+        moved_across = (long)view.scroll_x;
+        lines_down = (long)view.top_line - 10;
+        zoom = view.zoom;
+        ui_text_event(wui, &view, &zoomed, x, y);
+        check("code view wheel: Shift turns a notch across (three columns), and no line moves; Control zooms the view", moved_across == 3 * (long)view.cell &&
+              lines_down == 0 && view.zoom == zoom + 1);
+        ui_text_close(&view);
+    }
 }
 
 /*
@@ -150382,6 +150400,56 @@ static fn check_scroll_bits(void)
         check("scroll switches: each is read on its own, and a word that is none of the row's is the standard", mixed && junk);
 }
 
+// The keys held are the wheel's too: a wheel turned with Control or Shift held says so in its flags, the way a key's event does (Control zooms a view,
+// Shift turns the wheel across), and a wheel with none held carries none.
+static fn check_wheel_modifiers(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        struct windows address_to table;
+        unsigned int at, with_control, with_both, with_none;
+
+        for (int row = 0; row < WINDOWS; row++)
+                compositor_popup_parent[row] = -1;
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("wheel modifiers: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+        table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+        table->glass[1] = WINDOW_GLASS;
+        glass_paint(1, 0, 0, 120, 80, 0, true);
+        compositor_present();
+        compositor_focus(1);
+        compositor.input_count = 1;
+        compositor.grab = 1;
+        compositor.held[0] = CK_HELD_LCONTROL;
+        compositor_wheel(120, 0, 0);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        with_control = table->event_flags[1][at];
+        compositor.held[0] = CK_HELD_LCONTROL | CK_HELD_RSHIFT;
+        compositor_wheel(-120, 0, WINDOW_WHEEL_PRECISE);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        with_both = table->event_flags[1][at];
+        compositor.held[0] = 0;
+        compositor_wheel(120, 1, 0);
+        at = (table->event_head[1] - 1) % WINDOWS_EVENTS;
+        with_none = table->event_flags[1][at];
+        check("wheel modifiers: a wheel turned with Control held carries Control, with Control and Shift both and the precise bit kept, and with none none",
+              (with_control & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) == WINDOW_KEY_CONTROL &&
+                  (with_both & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT | WINDOW_WHEEL_PRECISE)) == (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT | WINDOW_WHEEL_PRECISE) &&
+                  (with_none & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT | WINDOW_KEY_ALT)) == 0);
+        compositor_leave(1);
+}
+
 // A mouse is never a stream: a wheel spun at 100 notches a second, and a lone notch after the spin (which a tablet would still take for the
 // stream's, for three seconds) are all stepped. A tablet's notches 16 ms apart are a stream, as they were.
 static fn check_wheel_mouse(void)
@@ -154547,6 +154615,36 @@ static fn popmenu_bar_check(struct ui address_to wui)
         ui_popmenu_event(wui, &m, &motion, x, y + 100);
         ui_popmenu_event(wui, &m, &release, x, y + 100);
         check("popup menu: a thumb dragged 100 pixels down moves the menu's top with it", m.top > 0 && m.scroll.scroll > 0);
+        {
+                // The wheel over a long menu scrolls it, three items a notch, and does not close it; a trackpad's small turns add up to items; the
+                // ends hold it; a menu that fits is still closed by it.
+                struct window_event notch = {WINDOW_EVENT_WHEEL, 0, -120, 0}, back = {WINDOW_EVENT_WHEEL, 0, 120, 0};
+                struct window_event small = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -12, 0};
+                static struct ui_popmenu fits;
+                int one, two, up, closed_fits;
+
+                ui_popmenu_size(wui, &m, 300);
+                m.top = 0, m.wheel_rest = m.wheel_left = 0;
+                one = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && m.top == 3;
+                two = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && m.top == 6;
+                up = ui_popmenu_event(wui, &m, &back, 5, 5) == UI_MENU_NOTHING && m.top == 3;
+                for (int k = 0; k < 40; k++)
+                        ui_popmenu_event(wui, &m, &notch, 5, 5);
+                one = one && m.top == m.count - m.rows_shown;
+                for (int k = 0; k < 40; k++)
+                        ui_popmenu_event(wui, &m, &back, 5, 5);
+                one = one && m.top == 0;
+                for (int k = 0; k < 20; k++)
+                        ui_popmenu_event(wui, &m, &small, 5, 5);
+                two = two && m.top >= 1 && m.top <= 3;
+                memory_zero(&fits, sizeof(fits));
+                for (int at = 0; at < 3; at++)
+                        ui_popmenu_add(&fits, "Item", null, 0, at + 1);
+                ui_popmenu_size(wui, &fits, 300);
+                closed_fits = ui_popmenu_event(wui, &fits, &notch, 5, 5) == UI_MENU_GONE;
+                check("popup menu: the wheel over a long menu scrolls it three items a notch and holds at its ends, and does not close it", one && two && up);
+                check("popup menu: a trackpad's small turns add up to the items they make, and a menu that fits is still closed by the wheel", two && closed_fits);
+        }
         compositor_call(syscall(munmap), (positive)pixels, 400 * 400 * 4, 0, 0, 0, 0);
 }
 
@@ -162213,6 +162311,7 @@ b32 main()
         check_dropdown_labels();
         check_dropdown_selected();
         check_dropdown_scroll();
+        check_wheel_modifiers();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
         check_compositor_popup_holds();

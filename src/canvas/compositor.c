@@ -17007,6 +17007,9 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab;
 
+        // The keys held are the wheel's too (Control zooms a view, Shift turns a wheel across): the window reads them from the event as it does a key's.
+        flags |= compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
+
         // A motion read with the wheel in one batch has moved the pointer and not yet kept it on a screen (that is
         // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
         // no window, or to one in the room beside a shorter screen.
