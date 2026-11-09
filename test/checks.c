@@ -122417,7 +122417,12 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #endif
 #ifdef CHECK_gpu_kit
 static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fake_busy is set, every job waited for is answered as still running (nothing on the card is held); gpu_fake_idle answers done
-#define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
+static unsigned int gpu_fake_waits; // the waits answered as still running before the fence goes on to say what gpu_fake_idle or the card says: a job that ends within the late cap
+static int gpu_fake_errno;          // a wait the kernel refuses is answered as failed while it is set (the fence has an error)
+#define GPU_WAIT_CS(wait) (gpu_fake_errno ? false : gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_fake_waits ? (gpu_fake_waits--, (wait)[0] = 1, true) : gpu_fake_idle ? ((wait)[0] = 0, true) : gpu_io(3u, 9, 32, wait))
+// The fake card with no hardware under it: the submit is taken (its sequence number 1) without a call, and the kernel's log has a page fault in it while gpu_fake_fault is set.
+static int gpu_fake_card, gpu_fake_fault;
+#define GPU_LOG_FAKE(since, out) do { if (gpu_fake_fault) (out)->have_at = 1, (out)->at = 0x2000000100ull; } while (0)
 // The fake card's prerequisites: gpu_fake_step names the step that fails, with gpu_fake_error for its error (gpu.c's gpu_req_step).
 static int gpu_fake_step = -1;
 static unsigned int gpu_fake_error;
@@ -122430,7 +122435,7 @@ static long gpu_fake_userptr;
 static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
 // The words of the IB of the last job submitted (gpu_run_job's ib, which is in scope where this is expanded), kept before any answer is made: a check reads the packets a job sent.
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
-#define GPU_SUBMIT_FAKE(error) do { gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; } while (0)
+#define GPU_SUBMIT_FAKE(error, taken) do { gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true; } while (0)
 #define GPU_OPEN_FAKE(fd) do { if (gpu_fake_absent) gpu_fake_absent--, (fd) = -2; } while (0)
 // The buffers the last submit named (gpu_run_job's bos, seen before the call is made or answered): the rows ask whether a map's handle is in the list.
 static p64 gpu_seen_bos[1 + 8 + 256];
@@ -224277,13 +224282,13 @@ static void gpu_fault_rows(void)
         // it up for the session, and the board says so.
         compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0;
         compositor_gpu_state.hung_at = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_steps = 0;
-        gpu_last_error = 62;
+        gpu_last_error = 62, gpu_end = GPU_END_HUNG;
         compositor_gpu_job_failed();
         check("hang: one hang cools the card for two seconds, and marks it to start again with no maps",
               compositor_gpu_state.cool_until > clock_monotonic_nanoseconds() && compositor_gpu_state.restart_due && !compositor_gpu_state.dead &&
               !compositor_gpu_state.hung_off);
         check("hang: while it cools, a present is the processor's and the card is not tried", compositor_gpu_draw(0, 0) == COMPOSITOR_GPU_WHY_DEAD);
-        gpu_last_error = 62;
+        gpu_last_error = 62, gpu_end = GPU_END_HUNG;
         compositor_gpu_job_failed();
         check("hang: a second hang within a minute gives the card up for the session", compositor_gpu_state.dead && compositor_gpu_state.hung_off &&
               compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG && !compositor_gpu_state.restart_due);
@@ -224299,7 +224304,7 @@ static void gpu_fault_rows(void)
         check("fault: the board carries the card's fault text", count && want[0].code == WINDOWS_ISSUE_GPU_FAULT && gpu_text_has(want[0].detail, "card faulted reading 0x203fd75000"));
         compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
         compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
-        compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_map_count = 0, gpu_fault[0] = 0;
+        compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 
 /*
@@ -224634,6 +224639,127 @@ static void gpu_flight_rows(void)
         compositor_gpu = saved_gpu, compositor.card = saved_card;
 }
 
+static unsigned int gpu_late_buffer[(4 << 20) / 4]; // the fake card's buffer (gpu_late_rows): the ops, the tables and the bins of a 64 by 4 scene
+static unsigned int gpu_late_screen[64 * 4];        // and its scanout
+
+// The compositor's state as a card that has just started has it, and the fake card (no descriptor, a submit the fake takes, a fence it answers).
+static void gpu_late_reset(void)
+{
+        gpu.pending = 0, gpu_owed = 0, gpu_found = GPU_END_NONE, gpu_end = GPU_END_NONE, gpu_last_error = 0;
+        gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_fake_waits = 0, gpu_fake_errno = 0, gpu_fake_fault = 0;
+        compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.told = 1, compositor_gpu_state.force = 1, compositor_gpu_state.cool_until = 0;
+        compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.hung_at = 0, compositor_gpu_state.hung_off = 0;
+        compositor_gpu_state.cool_steps = 0;
+}
+
+/*
+        A job the card is late with, with no card (the buffer is memory, the descriptor none, the fence the fake's, the submit one the fake takes): the wait is
+        in slices up to a tick and then gives the job up as late, pending, and the present is the processor's with no cool-down; the card is hung only by the
+        late job's end (its fence answers an error, the kernel's log has a page fault since it was submitted, or it is two seconds old). The present is
+        compositor_gpu_present on a headless 64 by 4 scanout held by a written map, drawn by the card when the job finishes.
+*/
+static void gpu_late_rows(void)
+{
+        unsigned char kept_gpu[sizeof(gpu)], kept_state[sizeof(compositor_gpu_state)], kept_gscene[sizeof(compositor_gscene)], kept_map[sizeof(gpu_maps[0])];
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick;
+        int kept_card = compositor.card, kept_gpu_on = compositor_gpu, kept_width = compositor.width, kept_height = compositor.height, kept_damages = compositor.damages;
+        int kept_damage[4];
+        unsigned int *kept_scanout = compositor.scanout;
+        unsigned long kept_pitch = compositor.scanout_pitch, kept_bytes = compositor.scanout_bytes;
+        positive base = GPU_DATA + 65536, ops_at = base, bins_at = base + 4096, d_at = base + 8192, now;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_late_buffer + ops_at);
+        unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0};
+        struct compositor_frame f;
+        int drew;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state));
+        memory_copy(kept_gscene, &compositor_gscene, sizeof(compositor_gscene)), memory_copy(kept_map, &gpu_maps[0], sizeof(gpu_maps[0]));
+        memory_copy(kept_damage, compositor.damage[0], sizeof(kept_damage));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_late_buffer, gpu.size = sizeof(gpu_late_buffer), gpu.imports = 0;
+        gpu_fake_card = 1, gpu_tick = 100, gpu_map_count = 1;
+        gpu_maps[0].from = (positive)gpu_late_screen, gpu_maps[0].to = (positive)gpu_late_screen + sizeof(gpu_late_screen), gpu_maps[0].va = GPU_VA_MAPS;
+        gpu_maps[0].bytes = sizeof(gpu_late_screen), gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick, gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0;
+        compositor_gpu = 1, compositor.card = -1, compositor.width = 64, compositor.height = 4, compositor.scanout = gpu_late_screen, compositor.scanout_pitch = 64 * 4;
+        compositor.scanout_bytes = sizeof(gpu_late_screen), compositor.damages = 1, compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = 64;
+        compositor.damage[0][3] = 4;
+        memory_zero(&f, sizeof(f));
+        gpu_late_reset();
+        compositor_gpu_layout();
+
+        // 1. A job the fence ends within the cap: the wait goes on in slices, three of them answered running, and the job is done: nothing pending, no end.
+        memory_copy(ops, q, 32);
+        gpu_fake_waits = 3;
+        check("gpu late: a job the fence ends within the late cap is waited for in slices and done", gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) &&
+              !gpu.pending && gpu_end == GPU_END_NONE && gpu_fake_waits == 0 && !gpu_owed);
+
+        // 2. A job still running at the cap: given up on as late with the job pending; the present is the processor's, and nothing is cooled, counted or restarted.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1;
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: a job still running at the late cap is given up on as late, held as pending", gpu.pending && gpu_end == GPU_END_LATE && gpu_owed);
+        check("gpu late: and that present is the processor's", !drew);
+        check("gpu late: no cool-down, no restart, no failure counted, the card not given up", compositor_gpu_state.cool_until == 0 && !compositor_gpu_state.restart_due &&
+              compositor_gpu_state.failures == 0 && !compositor_gpu_state.dead && compositor_gpu_state.hung_at == 0 && compositor_gpu_state.cool_steps == 0);
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: while the job may run the next present is the processor's too, still with no cool-down and the job still pending",
+              !drew && gpu.pending && compositor_gpu_state.cool_until == 0 && compositor_gpu_state.hung_at == 0);
+
+        // 3. The late job's fence then says done: it is over, nothing is escalated, and the card draws the next present.
+        gpu_fake_busy = 0, gpu_fake_idle = 1;
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: a late job that finishes costs nothing, and the card draws the next present", drew == 1 && !gpu.pending && !gpu_owed && compositor_gpu_state.cool_until == 0 &&
+              compositor_gpu_state.failures == 0 && compositor_gpu_state.hung_at == 0);
+
+        // 4. A late job two seconds old and still running takes the hang path: the card cools and is to start again, the present is the processor's.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1;
+        compositor_gpu_present(&f, 0);
+        gpu_job_began = clock_monotonic_nanoseconds() - (GPU_HANG_NS - 500000000ull); // the job is a second and a half old
+        compositor_gpu_present(&f, 0);
+        check("gpu late: a late job a second and a half old and still running is not yet a hang", gpu.pending && compositor_gpu_state.cool_until == 0 &&
+              compositor_gpu_state.hung_at == 0);
+        now = clock_monotonic_nanoseconds();
+        gpu_job_began = now - GPU_HANG_NS; // and now it is two seconds old
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: a late job two seconds old and still running takes the hang path (cool-down, restart due, the hang counted)", !drew && gpu_end == GPU_END_HUNG &&
+              gpu_last_error == 62 && compositor_gpu_state.cool_until > now && compositor_gpu_state.restart_due && compositor_gpu_state.hung_at != 0 &&
+              compositor_gpu_state.cool_steps == 1 && !compositor_gpu_state.dead);
+        check("gpu late: the hang is said once (the job's end is no longer owed)", !gpu_owed && gpu.pending);
+
+        // 5. A late job whose fence then answers an error is a hang, at its first look.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1;
+        compositor_gpu_present(&f, 0);
+        check("gpu late: before its fence answers an error the late job is nothing", gpu.pending && compositor_gpu_state.cool_until == 0);
+        gpu_fake_busy = 0, gpu_fake_errno = 1;
+        now = clock_monotonic_nanoseconds();
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: a late job whose fence answers an error takes the hang path", !drew && gpu_end == GPU_END_WAIT && compositor_gpu_state.cool_until > now &&
+              compositor_gpu_state.hung_at != 0 && compositor_gpu_state.restart_due);
+
+        // 6. A page fault in the kernel's log since the late job was submitted is a hang, at the next look at the log.
+        gpu_late_reset();
+        gpu_fake_idle = 0, gpu_fake_busy = 1;
+        compositor_gpu_present(&f, 0);
+        gpu_fault[0] = 0, gpu_fake_fault = 1, gpu_fault_poll = clock_monotonic_nanoseconds() + 3600000000000ull;
+        compositor_gpu_present(&f, 0);
+        check("gpu late: the log is not looked at before its time (a frame does not pay for it)", gpu.pending && compositor_gpu_state.cool_until == 0 && !gpu_fault[0]);
+        gpu_fault_poll = 0;
+        now = clock_monotonic_nanoseconds();
+        drew = compositor_gpu_present(&f, 0);
+        check("gpu late: a page fault in the kernel's log since the late job was submitted takes the hang path", !drew && gpu_end == GPU_END_HUNG &&
+              compositor_gpu_state.cool_until > now && compositor_gpu_state.hung_at != 0 && gpu_text_has(gpu_fault, "card faulted reading 0x2000000100"));
+
+        gpu_late_reset();
+        gpu_fake_card = 0, gpu_fake_idle = 0, gpu_fake_busy = 0;
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));
+        memory_copy(&compositor_gscene, kept_gscene, sizeof(compositor_gscene)), memory_copy(&gpu_maps[0], kept_map, sizeof(gpu_maps[0]));
+        memory_copy(compositor.damage[0], kept_damage, sizeof(kept_damage));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_fault[0] = 0;
+        compositor.card = kept_card, compositor_gpu = kept_gpu_on, compositor.width = kept_width, compositor.height = kept_height, compositor.damages = kept_damages;
+        compositor.scanout = kept_scanout, compositor.scanout_pitch = kept_pitch, compositor.scanout_bytes = kept_bytes;
+}
+
 // A flip the card has not completed is waited for (compositor_flip_wait), to a deadline of COMPOSITOR_FLIP_PERIODS periods after it was asked: a present tried against
 // it composed nothing and used up its period. No flip in flight, or one past the deadline (a screen that is off never answers), is no wait.
 static void flip_wait_rows(void)
@@ -224659,6 +224785,7 @@ b32 main(void)
         gpu_bo_rows();
         gpu_vmfault_rows();
         gpu_flight_rows();
+        gpu_late_rows();
         flip_wait_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
@@ -224731,6 +224858,10 @@ b32 main(void)
                 check("gpu: the version call answers the name's whole length and ends nothing it copies",
                       system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && ver[2] == 6 && name[0] == 'a' && name[2] == 'd' && name[3] == 'x');
         }
+        // The rows with a card wait for each job the whole two seconds of a hang, as the self-test does (gpu_patient): the late cap is a tick, and on a loaded box (the
+        // kernel's scheduler thread that hands the job to the ring is a thread like another) a job takes longer than that to start; the blocks that test the late state set
+        // it to 0 for themselves.
+        gpu_patient = 1;
         gpu_route_rows();
         gpu_node_rows();
         pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
@@ -226163,7 +226294,7 @@ b32 main(void)
                         b32 refused, kept = true, idle;
 
                         ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0xff336699u, ops[6] = ops[7] = 0;
-                        gpu_fake_busy = 1;
+                        gpu_fake_busy = 1, gpu_patient = 0;
                         refused = !gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && gpu.pending;
                         for (int i = 0; i < 8; i++)
                                 records[i] = 0xdeadbeefu;
@@ -226171,7 +226302,7 @@ b32 main(void)
                         refused = refused && !compositor_gpu_present(&f, 1) && !gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && !gpu_idle();
                         for (int i = 0; i < 8; i++)
                                 kept = kept && records[i] == 0xdeadbeefu;
-                        gpu_fake_busy = 0; // the real fence: the job may still be on the card for some microseconds
+                        gpu_fake_busy = 0, gpu_patient = 1; // the real fence: the job may still be on the card for some microseconds
                         for (positive began = clock_monotonic_nanoseconds(); !(idle = gpu_idle()) && clock_monotonic_nanoseconds() - began < 1000000000ull;)
                                 ;
                         check("gpu pending: a scene whose job is not seen done is given up on, and the job held as pending", refused);
@@ -226183,18 +226314,24 @@ b32 main(void)
                         pic[0] = 0;
                         check("gpu pending: the new context runs a scene", gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && pic[0] == 0xff336699u);
                 }
-                // A hang is the processor's present, and the card is given up for two seconds: the presents in them are the processor's, and when the cool-down
-                // is over the card is started again once with no maps (gpu_recover), and the next present draws. A second hang within a minute gives the card up
-                // for the session: the processor's presents from then on, and canvas gpu turned off and on does not bring it back (compositor_gpu_settings).
+                // A hang (a job two seconds old and still running; the fake fence says running, and the job's age is set back) is the processor's present, and the card
+                // is given up for two seconds: the presents in them are the processor's, and when the cool-down is over the card is started again once with no maps
+                // (gpu_recover), and the next present draws. A second hang within a minute gives the card up for the session: the processor's presents from then on,
+                // and canvas gpu turned off and on does not bring it back (compositor_gpu_settings). A job that is only late is the processor's present and no more.
                 {
                         unsigned int recovered = gpu_recovered;
                         int cooling, drew;
 
-                        gpu_fake_busy = 1;
+                        gpu_fake_busy = 1, gpu_patient = 0;
+                        check("gpu hang: a job still running at the late cap is the processor's present, held as pending, with no cool-down",
+                              !compositor_gpu_present(&f, 1) && gpu.pending && compositor_gpu_state.cool_until == 0 && !compositor_gpu_state.restart_due);
+                        gpu_job_began = clock_monotonic_nanoseconds() - GPU_HANG_NS;
                         check("gpu hang: a hang is the processor's present, and cools the card for two seconds to start again with no maps",
                               !compositor_gpu_present(&f, 1) && compositor_gpu_state.cool_until > clock_monotonic_nanoseconds() && compositor_gpu_state.restart_due &&
                               compositor_gpu_state.failures == 0 && !compositor_gpu_state.dead);
-                        gpu_fake_busy = 0;
+                        gpu_fake_busy = 0, gpu_patient = 1;
+                        for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                                ; // the real job the fake said was running is over before a made-up one is put in its place (on a loaded box it may not be)
                         gpu.pending = 1ull << 40;
                         gpu_idle(); // the hung job is over (a new context: the card reset)
                         cooling = !compositor_gpu_present(&f, 1);
@@ -226205,10 +226342,14 @@ b32 main(void)
                         drew = compositor_gpu_present(&f, 1) == 1;
                         check("gpu hang: when the cool-down is over the card starts again once, with no maps, and draws", drew && gpu_recovered == recovered + 1 &&
                               !compositor_gpu_state.restart_due);
-                        gpu_fake_busy = 1;
+                        gpu_fake_busy = 1, gpu_patient = 0;
+                        compositor_gpu_present(&f, 1); // late
+                        gpu_job_began = clock_monotonic_nanoseconds() - GPU_HANG_NS;
                         check("gpu hang: a second hang within a minute gives the card up for the session", !compositor_gpu_present(&f, 1) && compositor_gpu_state.dead &&
                               compositor_gpu_state.hung_off && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_HANG);
-                        gpu_fake_busy = 0;
+                        gpu_fake_busy = 0, gpu_patient = 1;
+                        for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                                ; // the real job the fake said was running is over before a made-up one is put in its place (on a loaded box it may not be)
                         gpu.pending = 1ull << 40;
                         gpu_idle();
                         compositor_gpu = 0;
@@ -226659,7 +226800,7 @@ b32 main(void)
                         // is not in the cache either), not the one warm rectangle, which the processor would copy from its own cache.
                         long area = system_call_6(syscall(mmap), 0, (128 + 8) << 20, 3, 0x22, (positive)-1, 0);
                         unsigned int address_to from, address_to into;
-                        b32 same = true;
+                        b32 same = true, mapped;
                         unsigned int slot = 0;
 
                         if (area < 0 && area > -4096)
@@ -226667,9 +226808,11 @@ b32 main(void)
                         from = (unsigned int address_to)area, into = from + (128 << 20) / 4;
                         memory_fill_u32(from, (128 << 20) / 4, 0x5a3c1e7fu);
                         memory_fill_u32(into, (8 << 20) / 4, 0);
-                        gpu_map((const void address_to)from, 128 << 20);
-                        gpu_map_written((const void address_to)into, 8 << 20);
-                        for (int size = 0; size < COPY_SIZES; size++)
+                        mapped = gpu_map((const void address_to)from, 128 << 20) && gpu_map_written((const void address_to)into, 8 << 20);
+                        if (!mapped) // a copy named by no map reads the card's address 0: every row after it would fail on a card the fault reset
+                                string_format(log, "  gpu copy bench: the maps were refused (step %p, error %p)\n", (positive)(gpu_map_why & 255), (positive)(gpu_map_why >> 8));
+                        check("gpu copy: the bench's source and destination are mapped for the card", mapped);
+                        for (int size = 0; mapped && size < COPY_SIZES; size++)
                         {
                                 unsigned int w = side[size], h = side[size], bytes = 4 * (COPY_PITCH * (h - 1) + w);
                                 unsigned int address_to src;

@@ -7856,8 +7856,11 @@ static int compositor_gpu_held(void)
 }
 
 /*
-        A job of the card that failed (gpu_last_error says why, as this call's answer). A hang (62 ETIME: the ring did not finish it in two seconds; 5 the wait
-        itself failed) is the card's one lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
+        A job of the card that failed (gpu_end says how, gpu_last_error why, as this call's answer). A late job (GPU_END_LATE: not done in a tick) has not
+        failed: the processor draws this frame, the job stays pending (gpu_idle holds the buffer, and every present after is the processor's while it runs),
+        and nothing is cooled or counted. It becomes a hang only by its end (compositor_gpu_late_check): its fence answers an error, a page fault is in the
+        kernel's log, or it is two seconds old. A hang (HUNG: the ring did not finish the job in two seconds; WAIT: the wait itself failed) is the card's one
+        lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
         started again with a clean table of maps (gpu_recover lets every map go: a present no longer names the addresses the hang read). A second hang within
         a minute gives the card up for the session, the processor draws until it ends, and the board says so. Any other refused job counts as it always did:
         three in a row cool the card down, each cool-down longer.
@@ -7868,7 +7871,9 @@ static void compositor_gpu_job_failed(void)
 {
         b64 now = clock_monotonic_nanoseconds();
 
-        if (gpu_last_error != 62 && gpu_last_error != 5)
+        if (gpu_end == GPU_END_LATE)
+                return;
+        if (gpu_end != GPU_END_HUNG && gpu_end != GPU_END_WAIT)
         {
                 if (++compositor_gpu_state.failures >= 3)
                 {
@@ -7894,6 +7899,20 @@ static void compositor_gpu_job_failed(void)
         compositor_gpu_state.restart_due = 1; // started again when the cool-down is over, with no maps (gpu_recover)
         string_format(log, "compositor: the GPU hung (%s): the processor draws for two seconds, then the card starts again with no maps\n", gpu_fault);
         log_flush();
+}
+
+// A job the card was late with (gpu.c's gpu_run_job: not done in a tick) is looked at before each present draws: when it has come to a bad end the card is hung
+// as a job that did not finish in two seconds was (compositor_gpu_job_failed); a late job that finishes, or is still within bounds, is nothing.
+static void compositor_gpu_late_check(void)
+{
+        if (gpu_late_end())
+                compositor_gpu_job_failed();
+}
+
+// Why a job the card did not finish is the present's loss: it was late (a job that may still run: busy), or it hung or was refused.
+static enum compositor_gpu_why compositor_gpu_job_why(void)
+{
+        return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : COMPOSITOR_GPU_WHY_HANG;
 }
 
 // The scanout's address for the GPU, made when the scanout is new.
@@ -8123,7 +8142,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 if (!gpu_scale(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, (unsigned int)f->width, (unsigned int)f->height))
                 {
                         compositor_gpu_job_failed();
-                        return COMPOSITOR_GPU_WHY_HANG;
+                        return compositor_gpu_job_why();
                 }
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
@@ -8142,6 +8161,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
+        compositor_gpu_late_check(); // a job given up on as late has ended badly, or is two seconds old
         compositor_gpu_restart_check(); // a machine that slept, or a gap between presents that is one, starts the card again before this present
         compositor_gpu_lost_check();
         if (compositor_gpu_state.dead)
@@ -8199,9 +8219,9 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
                         compositor_gpu_recover();
                 // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
-                // a minute is the session's (compositor_gpu_job_failed).
+                // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
                 compositor_gpu_job_failed();
-                return COMPOSITOR_GPU_WHY_HANG;
+                return compositor_gpu_job_why();
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
