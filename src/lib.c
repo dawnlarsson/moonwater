@@ -14404,13 +14404,36 @@ __asm__(
     "" ASM_LABEL(blend_x64_out) ":\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_END(memory_blend_u32_rect_baseline)
 
+    //       TR32B_X64_LOOKUP: the table word of each of the sixteen coverage
+    //       bytes in xmm0, into zmm8, with no transpose. zmm1 holds, at byte
+    //       4p+k, the coverage byte of pixel p (a vpmulld of its zero-extended
+    //       value by 0x01010101, zmm4), so each plane k is looked up over all
+    //       64 bytes by a vpermt2b pair on its 256 bytes (zmm16 to zmm31; k4 is
+    //       the bit seven of each index byte), and byte 4p+k of the result is
+    //       taken from plane k by a ternary logic under the byte masks in zmm9-11
+    //       (0xff00, 0xff0000 and 0xff000000 in each dword), plane 0 the start.
+    //       It uses zmm1-4, zmm8 and k4; zmm4 and zmm9-11 are set once, in the
+    //       setup of memory_blend_u32_rect below.
+    //
+#define TR32B_X64_LOOKUP \
+    "vpmovzxbd %xmm0, %zmm1\n   vpmulld %zmm4, %zmm1, %zmm1\n   vpmovb2m %zmm1, %k4\n" \
+    "vmovdqa64 %zmm16, %zmm2\n   vpermt2b %zmm17, %zmm1, %zmm2\n   vmovdqa64 %zmm18, %zmm3\n   vpermt2b %zmm19, %zmm1, %zmm3\n" \
+    "vmovdqu8 %zmm3, %zmm2{%k4}\n   vmovdqa64 %zmm2, %zmm8\n" \
+    "vmovdqa64 %zmm20, %zmm2\n   vpermt2b %zmm21, %zmm1, %zmm2\n   vmovdqa64 %zmm22, %zmm3\n   vpermt2b %zmm23, %zmm1, %zmm3\n" \
+    "vmovdqu8 %zmm3, %zmm2{%k4}\n   vpternlogq $0xd8, %zmm9, %zmm2, %zmm8\n" \
+    "vmovdqa64 %zmm24, %zmm2\n   vpermt2b %zmm25, %zmm1, %zmm2\n   vmovdqa64 %zmm26, %zmm3\n   vpermt2b %zmm27, %zmm1, %zmm3\n" \
+    "vmovdqu8 %zmm3, %zmm2{%k4}\n   vpternlogq $0xd8, %zmm10, %zmm2, %zmm8\n" \
+    "vmovdqa64 %zmm28, %zmm2\n   vpermt2b %zmm29, %zmm1, %zmm2\n   vmovdqa64 %zmm30, %zmm3\n   vpermt2b %zmm31, %zmm1, %zmm3\n" \
+    "vmovdqu8 %zmm3, %zmm2{%k4}\n   vpternlogq $0xd8, %zmm11, %zmm2, %zmm8\n"
     //
     //       memory_blend_u32_rect: the baseline above, with two changes. The
     //       ground is the low 24 bits of its word, as the contract says, in both
     //       bodies (the baseline compares the whole word). And a chunk of
     //       sixteen whose coverage bytes are all zero is passed over before its
     //       lookups: nothing in it is written and nothing in it stops the run.
-    //       The rest is the baseline's code, its labels renamed.
+    //       The lookup is TR32B_X64_LOOKUP, which makes the words without the
+    //       transpose that TR32_X64_LOOKUP does. The rest is the baseline's
+    //       code, its labels renamed.
     //
     ASM_FUNC(memory_blend_u32_rect)
     "mov 8(%rsp), %rax\n   push %rbx\n   push %r12\n   push %r13\n   xor %r11d, %r11d\n   test %r8, %r8\n   jz " ASM_LABEL(bln2x_done) "\n"
@@ -14420,13 +14443,14 @@ __asm__(
     "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
     "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
     "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
+    "mov $0x01010101, %r10d\n   vpbroadcastd %r10d, %zmm4\n   mov $0xff00, %r10d\n   vpbroadcastd %r10d, %zmm9\n   mov $0xff0000, %r10d\n   vpbroadcastd %r10d, %zmm10\n   mov $0xff000000, %r10d\n   vpbroadcastd %r10d, %zmm11\n"
     "vpbroadcastd 2048(%rax), %zmm12\n   mov $0xffffff, %r10d\n   vpbroadcastd %r10d, %zmm13\n   vpandd %zmm13, %zmm12, %zmm12\n   mov $0xffff, %r13d\n"
     "" ASM_LABEL(bln2x_row) ":\n   xor %r10d, %r10d\n"
     "" ASM_LABEL(bln2x_piece) ":\n   mov %r8, %rbx\n   sub %r10, %rbx\n   bzhi %ebx, %r13d, %ebx\n   cmp $16, %r8\n   jb 1f\n"
     "lea 16(%r10), %rax\n   cmp %r8, %rax\n   ja 1f\n   mov $0xffff, %ebx\n"
     "1:  kmovw %ebx, %k1\n   vmovdqu8 (%rdx,%r10), %xmm0{%k1}{z}\n"
     "vptestmb %xmm0, %xmm0, %k3\n   kortestw %k3, %k3\n   jz " ASM_LABEL(bln2x_next) "\n"
-    TR32_X64_LOOKUP
+    TR32B_X64_LOOKUP
     "vmovdqu32 (%rdi,%r10,4), %zmm14{%k1}{z}\n   vpandd %zmm13, %zmm14, %zmm15\n   vpcmpeqd %zmm12, %zmm15, %k2\n"
     "kandnw %k3, %k2, %k5\n   kortestw %k5, %k5\n   jnz " ASM_LABEL(bln2x_stop) "\n"
     "vmovdqu32 %zmm8, (%rdi,%r10,4){%k3}\n"
