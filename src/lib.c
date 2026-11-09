@@ -35805,7 +35805,7 @@ __asm__(
     //       with it at VLEN 128 and 256; cycles unmeasured. The x86_64 block
     //       carries the contract.
     ASM_FUNC(memory_blend_u32_rect)
-    "beqz a4, 8f\n   beqz a5, 8f\n   addi a7, a6, 2047\n   lw a7, 1(a7)\n   li t6, 0xffffff\n   li t4, 0\n"
+    "beqz a4, 8f\n   beqz a5, 8f\n   addi a7, a6, 2047\n   lw a7, 1(a7)\n   li t6, 0xffffff\n   and a7, a7, t6\n   li t4, 0\n"
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t5, 2\n   beq t3, t5, 0f\n   bnez t3, 4f\n"
     "addi sp, sp, -32\n   sd ra, 8(sp)\n   sd a5, 16(sp)\n   sd a6, 24(sp)\n   call cpu_vector_detect\n"
