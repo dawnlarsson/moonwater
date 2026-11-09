@@ -98,4 +98,18 @@ for mode in card cardoff processor; do
         echo "== $mode"
         cat "$work/$mode.classify.txt" 2> /dev/null || echo "no classification ($(tail -1 "$work/$mode.session.out" 2> /dev/null))"
 done
+# The card's session drew every list its windows published, and no job of it failed: a list the card refuses is a frame the window shows one behind until its program
+# paints it in pixels (a map the compositor let go of in the tick that used it, named in the jobs after it, made the kernel refuse them: error 14).
+if grep -Eq '^  lists +[0-9]+ windows drawn from their lists, 0 refused' "$work/card.touched.txt" 2> /dev/null; then
+        echo "ok the card's session refused no list"
+else
+        echo "FAIL the card's session refused a list ($(grep -E '^  list(s| refused)' "$work/card.touched.txt" 2> /dev/null | tr -s ' ' | tr '\n' ';'))"
+        failures=$((failures + 1))
+fi
+if grep -q '^  gpu fault' "$work/card.touched.txt" 2> /dev/null; then
+        echo "FAIL the card's session had a job fail ($(grep -E '^  gpu fault' "$work/card.touched.txt" | tr -s ' '))"
+        failures=$((failures + 1))
+else
+        echo "ok the card's session had no job fail"
+fi
 exit "$failures"
