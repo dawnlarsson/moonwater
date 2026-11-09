@@ -175450,6 +175450,37 @@ static void test_dmabuf(void)
         wayland_stop();
 }
 
+/*
+        Xwayland asks a feedback of every surface it has (get_surface_feedback), and one of its default: an X server with eight windows
+        mapped in one flush has nine surfaces, and nine feedbacks. The client must not be ended for the ninth (the eighth window
+        never got its surface, and its serial never reached the window manager).
+*/
+static void test_dmabuf_feedbacks(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long surface, feedback;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        WLCHECK(s.dmabuf != 0, "zwp_linux_dmabuf_v1 is offered for the feedbacks of nine surfaces");
+        for (long at = 0; at < 9; at++)
+        {
+                surface = wlc_id(c, WLI_wl_surface, 6);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface);
+                feedback = wlc_id(c, WLI_zwp_linux_dmabuf_feedback_v1, 4);
+                wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_surface_feedback, feedback, surface);
+        }
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && c->malformed == 0 && wlc_count(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_done) == 9,
+                "nine surface feedbacks are each answered, and the client is kept (%s)", c->error_text);
+        wlc_end(c);
+        leak_check("dmabuf feedbacks");
+        wayland_stop();
+}
+
 /* ---- games: the pointer held, motion without a place ---- */
 
 struct gamec
@@ -176364,6 +176395,7 @@ int main(int argc, char **argv)
         test_stall_state();
         test_dmabuf();
         test_stall_dmabuf();
+        test_dmabuf_feedbacks();
         test_games();
         test_scale();
         test_fractional_damage();

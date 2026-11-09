@@ -99,7 +99,7 @@
 #define WAYLAND_DMABUF_ENTRIES 32    // format and modifier pairs the compositor takes
 #define WAYLAND_DMABUF_TRANCHES 4
 #define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
-#define WAYLAND_FEEDBACKS 8          // zwp_linux_dmabuf_feedback_v1 one client holds
+#define WAYLAND_FEEDBACKS (WAYLAND_SURFACES + 1) // zwp_linux_dmabuf_feedback_v1 one client holds: a surface's, one each, and a default
 #define WAYLAND_DMABUFS 48           // buffers made of dma-bufs one client has (each holds a descriptor)
 #define WAYLAND_DMABUFS_ALL 192      // and all clients together
 #define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
