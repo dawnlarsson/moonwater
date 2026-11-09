@@ -41,6 +41,25 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-180: grep -r read through a link swapped in after its walk had listed the name (symlink following, race)
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-09 |
+| Class | CWE-59 and CWE-367: a time-of-check to time-of-use race that follows a symlink; information disclosure of any file the grep can read |
+| Upstream | The same shape as GNU sed `-i --follow-symlinks` (CVE-2026-5958, published 2026-04-20; fixed in sed 4.10): a name is checked, then opened by name. GNU grep -r is not affected: 0 of 20 rounds of the race below read through a link. |
+| Attacker | A writer of a tree that a more privileged user searches with `grep -r` (a shared directory, a spool, a checkout): the attacker needs to see the output, and to win a race that the repro wins in 10 of 12 rounds |
+| Moonwater exposure window | the recursive walk by name from `e6086e321` (2026-08-28 11:56:16 +02:00); the parallel walk that the repro measures from `ed4ed2dd5` (2026-09-15 09:12:27 +02:00); to the fixing commit |
+| Fixed by | the commit that adds this entry (`git log -S 'MW-2026-180' -- incident_response.md`); `src/sh/text.c` `grep_open`, `grep_tree`, `grep_tree_leaf` |
+
+**What it was.** `grep -r` lists a directory with getdents, decides from each entry's type whether it is a file or a directory, and opens it later by name. `-r` follows no link below the directory it is given (only `-R` does), and the listing skipped a link, but the opens did not refuse one: the pool opened a child directory, and a leaf opened a file, with no `O_NOFOLLOW`; and every file the walk handed back to the line loop (`-C`, `-o`, `--color`, a file the leaf could not read whole) was opened by its full path, which follows a link at every step. A name exchanged for a link to a file outside the tree between the listing and the open was read through, and its lines were printed with the tree's own name. Every other tree walker (find, du, chmod, chown, cp, rm) already passed `O_NOFOLLOW`; grep passed 0.
+
+**The fix.** With `-r`, the pool opens child directories with `O_NOFOLLOW` (the `open_flags` argument of `parallel_tree`, as find passes it) and a leaf opens its files with `O_NOFOLLOW`. A file handed back to the line loop is opened by `grep_open` with openat2 beneath the walk's root descriptor, resolved with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`, so a link at any step is an error (the kernel's `EAGAIN` for a rename that raced it is retried). A name given on the command line, a link given as the root, and everything under `-R` are followed as before.
+
+**Tests that fail without it.** `python3 test/differential.py --harness grep_tree_race --binary ours=PATH` (the text lane runs it): a forked child exchanges, as fast as it can, 4 directories with links to a directory outside, 4 nested pairs and 24 files with links to a file outside, while grep -r runs in four shapes (the parallel walk, and `-C1`, `-o`, `--color=always`, which hand every file to the line loop), 12 rounds each. On the parent the four race rows are red: 10, 11, 12 and 12 of 12 rounds printed the outside marker (7 of 11 rows pass). With the fix all 11 rows pass, and the controls that nothing racing is searched exactly as before pass in both: every file of the tree is found, `-r` does not enter a link, `-R` does, and a link named as the root is followed. Three one-line mutants each turn a row red: no `O_NOFOLLOW` on the leaf's open (1 row), the deferred open not beneath the root (4 rows), no `open_flags` on the pool (1 row).
+
+**Still open.** `-R` follows links by definition and is raced the way GNU's is. A kernel without openat2 (before 5.6) is given a component walk by no-follow descriptors in its place (`system_open_parent_nofollow`, as tar uses); it was exercised by a scratch build in which openat2 answered `ENOSYS`, which passes the same rows, and no lane builds it.
+
 ### MW-2026-170: a present record's screen frames were written world-readable (0644) into a directory any account can list
 
 | | |

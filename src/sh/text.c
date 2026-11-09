@@ -29091,7 +29091,66 @@ typedef struct
         // -q has its answer, and nothing more is read.
         bool quit;
         b32 trouble;
+        // The directory a walk began in and how much of a path is its name
+        // (-1 and 0 outside a walk); below says the file grep_one is about
+        // to open was found by that walk, and is opened beneath it.
+        bipolar tree;
+        positive tree_skip;
+        bool below;
 } grep_run;
+
+/*
+        What grep_one opens. A file the walk found is opened the way the walk
+        saw it, and -r follows no link below the root it was given (only -R
+        does): the open is beneath the root's descriptor, by a resolution
+        that refuses a link at every step. A name swapped for a link after the
+        walk listed it is an error, as it is for GNU, and not another file's
+        bytes read into the output. A name given on the command line is
+        followed, as it always was.
+*/
+static bool grep_open(grep_run address_to run, string_address name)
+{
+        bipolar opened = -ERROR_AGAIN;
+
+        if (!run->below || run->tree < 0)
+                return text_open(name);
+
+        // The kernel answers EAGAIN when a rename raced the resolution.
+        for (positive tries = 0; tries < 8 && opened == -ERROR_AGAIN; tries++)
+                opened = system_open_resolved(
+                    run->tree, name + run->tree_skip, FILE_READ | O_CLOEXEC,
+                    SYSTEM_RESOLVE_BENEATH | SYSTEM_RESOLVE_NO_SYMLINKS |
+                        SYSTEM_RESOLVE_NO_MAGICLINKS);
+
+        // A kernel without openat2 walks the names one at a time instead,
+        // each directory held by a descriptor opened without following.
+        if (opened == -ERROR_AGAIN || opened == -ERROR_NO_SYSTEM_CALL)
+        {
+                p8 leaf[TEXT_PATH_MAX];
+                bipolar parent = system_open_parent_nofollow(
+                    run->tree, name + run->tree_skip, false, 0, leaf, sizeof(leaf));
+
+                opened = parent;
+
+                if (parent >= 0)
+                {
+                        opened = system_open_at(parent, leaf,
+                                                FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+                        system_close(parent);
+                }
+        }
+
+        if (text_reader_attach(address_of text_input, opened, name))
+        {
+                if (!text_out_stdio_size)
+                        text_out_stdio_size = text_stdio_buffer(text_out_handle);
+
+                return true;
+        }
+
+        text_status = text_status ? text_status : 1;
+        return false;
+}
 
 /*
         The plan the readers hand the span engine: what the program is, what a
@@ -29185,7 +29244,7 @@ static bool grep_one(grep_run address_to run, string_address name)
         bool split = run->shown_any;
         bool found_before = run->found_any;
 
-        if (!text_open(name))
+        if (!grep_open(run, name))
         {
                 run->trouble = 2;
 
@@ -30933,10 +30992,14 @@ static fn grep_tree_leaf(address_any context, address_any node_address,
                 if (!parallel_reserve(into, sizeof(record)))
                         return;
 
+                // -r reads no link below its root, so the open refuses one: the
+                // walk listed this name as a file, and a link put there since
+                // is not it.
                 bipolar handle = scratch && scratch->buffer &&
                                          !((grep_run address_to)context)->serial
                                      ? system_open_at(directory, path + name_at,
-                                                      FILE_READ | O_CLOEXEC)
+                                                      FILE_READ | O_CLOEXEC |
+                                                          (grep_dereference ? 0 : O_NOFOLLOW))
                                      : -1;
 
                 if (handle >= 0)
@@ -31149,7 +31212,13 @@ static bool grep_tree_sink(address_any context, address_any node_address,
 
                 if (record.kind == GREP_RECORD_DEFER)
                 {
-                        if (!grep_one(run, path))
+                        run->below = !grep_dereference;
+
+                        bool going = grep_one(run, path);
+
+                        run->below = false;
+
+                        if (!going)
                                 return false;
 
                         continue;
@@ -31240,9 +31309,23 @@ static bool grep_tree(grep_run address_to run, string_address path)
                 (void)asked;
         }
 
-        bool whole = parallel_tree(grep_tree_enter, null, grep_tree_sink, run, handle,
-                                   root, 0);
+        // The names the walk makes are the root's name, a slash and a name
+        // (grep_node_new's rule), so a name below the root is this far in.
+        positive kept = length - path_trailing_slashes(path, length);
 
+        if (kept == 1 && path[0] == '/')
+                kept = 0;
+
+        run->tree = handle;
+        run->tree_skip = kept + (kept || path[0] == '/');
+
+        // A directory below the root is opened without following a link, as
+        // find and the other walkers open theirs, unless -R asked to follow.
+        bool whole = parallel_tree(grep_tree_enter, null, grep_tree_sink, run, handle,
+                                   root, grep_dereference ? 0 : O_NOFOLLOW);
+
+        run->tree = -1;
+        run->tree_skip = 0;
         system_close(handle);
         grep_slots_release();
 
@@ -31726,6 +31809,7 @@ static b32 text_grep_run()
             .discarded = discarded,
             .refuse_output = refuse_output,
             .serial = serial,
+            .tree = -1,
         };
 
         for (b32 i = 0; i < inputs; i++)

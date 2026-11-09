@@ -79474,6 +79474,182 @@ def harness_pathname_race(argv):
     return checks.verdict("pathname race", "pathname-race")
 
 
+def harness_grep_tree_race(argv):
+    """grep -r over a tree whose names are swapped for links while it walks.
+
+    -r reads no link below the directory it was given (only -R does, and a
+    link named on the command line is followed). The walk lists a name as a
+    file or a directory, and the open comes later: an entry exchanged for a
+    link to a file outside the tree in between used to be read through, so a
+    writer of the tree got other files' bytes into the output of whoever ran
+    grep -r over it (CWE-59, CWE-367). A forked child exchanges, as fast as it
+    can, a directory with a link to a directory outside, a file with a link
+    to a file outside, and a nested pair, while grep -r runs in four shapes
+    (the parallel walk, and the three that hand every file to the line loop:
+    -C, -o, --color). The marker that lives only outside the tree must never
+    reach the output. The controls run with nothing racing: the files of the
+    tree are all found, -r does not enter the links, -R does, and a link
+    given as the root is followed.
+
+        python3 test/differential.py --harness grep_tree_race --binary ours=PATH
+        MOONWATER_GREP_RACE_ROUNDS=60 python3 test/differential.py \\
+            --harness grep_tree_race --binary ours=PATH
+
+    Returns 2 (NOT RUN) when renameat2 or fork is unavailable.
+    """
+    import argparse
+    import ctypes
+    import signal
+    import tempfile
+    import time
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="grep_tree_race")
+    parser.add_argument("--binary", action="append", required=True,
+                        metavar="LABEL=PATH")
+    parser.add_argument("--rounds", type=int, default=int(
+        os.environ.get("MOONWATER_GREP_RACE_ROUNDS", "12")),
+        help="runs of each shape while the exchanger works (default 12, or "
+             "MOONWATER_GREP_RACE_ROUNDS)")
+    opts = parser.parse_args(argv)
+    if opts.rounds < 1:
+        parser.error("--rounds must be positive")
+    binaries = []
+    for specification in opts.binary:
+        label, sep, binary = specification.partition("=")
+        if not sep or not label or not Path(binary).is_file():
+            parser.error("--binary requires LABEL=existing-file")
+        binaries.append((label, str(Path(binary).resolve())))
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None or not hasattr(os, "fork"):
+        print("grep tree race: NOT RUN -- no renameat2 or fork")
+        return 2
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                          ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    AT_FDCWD = -100
+    RENAME_EXCHANGE = 2
+
+    OUTSIDE = b"SECRET-MARK-XYZZY"
+    INSIDE = b"inside-mark-plain"
+    checks = Checks()
+
+    def build(work):
+        """The tree and what is outside it; the pairs the exchanger swaps."""
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+        outside = work / "outside"
+        tree = work / "tree"
+        outside.mkdir(parents=True)
+        for i in range(6):
+            (outside / ("o%d" % i)).write_bytes(OUTSIDE + b"\n")
+        pairs = []
+        inside = []
+        for d in range(4):
+            base = tree / ("d%d" % d)
+            (base / "sub" / "deep").mkdir(parents=True)
+            for j in range(8):
+                for path in (base / "sub" / ("f%d" % j),
+                             base / "sub" / "deep" / ("g%d" % j),
+                             base / ("h%d" % j)):
+                    path.write_bytes(INSIDE + b"\n")
+                    inside.append(path)
+            os.symlink(outside, base / "lnk")
+            os.symlink(outside, base / "sub" / "dlnk")
+            pairs.append((base / "sub", base / "lnk"))
+            pairs.append((base / "sub" / "deep", base / "sub" / "dlnk"))
+        files = tree / "files"
+        files.mkdir()
+        for i in range(24):
+            (files / ("p%d" % i)).write_bytes(INSIDE + b"\n")
+            inside.append(files / ("p%d" % i))
+            os.symlink(outside / "o0", files / ("q%d" % i))
+            pairs.append((files / ("p%d" % i), files / ("q%d" % i)))
+        return tree, outside, pairs, inside
+
+    def exchanger(pairs):
+        """Forked: swap every pair, again and again, until killed."""
+        encoded = [(os.fsencode(a), os.fsencode(b)) for a, b in pairs]
+        while True:
+            for a, b in encoded:
+                renameat2(AT_FDCWD, a, AT_FDCWD, b, RENAME_EXCHANGE)
+
+    def run(argv_, stdout_limit=1 << 20):
+        ran = subprocess.run(argv_, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, timeout=60)
+        return ran.returncode, ran.stdout[:stdout_limit], ran.stderr[:4096]
+
+    shapes = (("-r",), ("-r", "-C1"), ("-r", "-o"), ("-r", "--color=always"))
+
+    with tempfile.TemporaryDirectory(prefix="grep-tree-race-") as temporary:
+        root = Path(temporary)
+        for label, binary in binaries:
+            farm = root / ("bin-" + label)
+            farm.mkdir()
+            (farm / "grep").symlink_to(binary)
+            grep = str(farm / "grep")
+            work = root / ("w-" + label)
+
+            # Nothing racing: everything inside is found, and only that.
+            tree, outside, pairs, inside = build(work)
+            code, out, _ = run([grep, "-rl", INSIDE.decode(), str(tree)])
+            found = sorted(out.decode().split())
+            checks(found == sorted(str(p) for p in inside),
+                   "%s: grep -rl finds every file of the tree and no link's "
+                   "target (%d of %d, status %s)" %
+                   (label, len(found), len(inside), code))
+            for shape in shapes[1:]:
+                code, out, _ = run([grep, *shape, INSIDE.decode(), str(tree)])
+                checks(code == 0 and OUTSIDE not in out
+                       and out.count(INSIDE) >= len(inside),
+                       "%s: grep %s reads the files of the tree (status %s)" %
+                       (label, " ".join(shape), code))
+            code, out, _ = run([grep, "-rl", OUTSIDE.decode(), str(tree)])
+            checks(code == 1 and not out,
+                   "%s: grep -r does not enter a link below its root "
+                   "(status %s, %r)" % (label, code, out[:80]))
+            code, out, _ = run([grep, "-Rl", OUTSIDE.decode(), str(tree)])
+            checks(code == 0 and b"/lnk/" in out,
+                   "%s: grep -R follows the links (status %s)" % (label, code))
+            code, out, _ = run([grep, "-r", OUTSIDE.decode(),
+                                str(tree / "d0" / "lnk")])
+            checks(code == 0 and out.count(OUTSIDE) == 6,
+                   "%s: grep -r follows a link named as its root "
+                   "(status %s, %d lines)" %
+                   (label, code, out.count(OUTSIDE)))
+
+            # Racing: the marker outside never reaches the output.
+            for shape in shapes:
+                escaped = 0
+                first = b""
+                for _ in range(opts.rounds):
+                    tree, outside, pairs, inside = build(work)
+                    child = os.fork()
+                    if child == 0:
+                        try:
+                            exchanger(pairs)
+                        finally:
+                            os._exit(0)
+                    time.sleep(0.002)
+                    try:
+                        _, out, _ = run([grep, *shape, OUTSIDE.decode(),
+                                         str(tree)])
+                    except subprocess.TimeoutExpired:
+                        out = b""
+                    os.kill(child, signal.SIGKILL)
+                    os.waitpid(child, 0)
+                    if OUTSIDE in out:
+                        escaped += 1
+                        first = first or out[:120]
+                checks(not escaped,
+                       "%s: grep %s over a tree being swapped for links never "
+                       "prints a file outside it (%d of %d rounds did: %r)" %
+                       (label, " ".join(shape), escaped, opts.rounds, first))
+
+    return checks.verdict("grep tree race", "grep-tree-race")
+
 
 def harness_machine_scan(argv):
     """The kernel's machine-script scanner against bash, over generated scripts.
@@ -99175,6 +99351,7 @@ HARNESS_CHECKS = {
     "net_dependency_closure": harness_net_dependency_closure,
     "security_hygiene": harness_security_hygiene,
     "pathname_race": harness_pathname_race,
+    "grep_tree_race": harness_grep_tree_race,
     "protected_links": harness_protected_links,
     "hostile_strings": harness_hostile_strings,
     "state_cuts": harness_state_cuts,
