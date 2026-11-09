@@ -2147,6 +2147,8 @@ static void compositor_wl_start(void)
         }
         compositor_wl.started = 1;
         compositor_xwm_start();
+        // The X server's protocols go to the user the window manager's socket takes (compositor_xwm_accept), and to no other.
+        wayland_xwayland_user(compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0));
         for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
                 compositor_wl.transfer[at].in = compositor_wl.transfer[at].out = compositor_wl.transfer[at].keep = -1;
         // EFD_CLOEXEC | EFD_NONBLOCK: what the transfers' threads knock on; with none, no copy or paste is taken.

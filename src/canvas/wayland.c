@@ -637,6 +637,7 @@ static struct
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
         unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
+        long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
 } wayland;
 
 /* ---- the wire ---- */
@@ -1074,10 +1075,25 @@ static const struct wayland_global wayland_globals[] = {
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
-// Whether a global is offered: all are, but the dma-buf one, which waits for a compositor that takes dma-bufs.
-static int wayland_global_offered(long name)
+/*
+        Whether a global is offered to a client: all are, but the dma-buf one, which waits for a compositor that takes dma-bufs, and
+        the two an X server uses (xwayland_shell_v1, the keyboard grab), which are offered only to the user the X window manager's
+        socket takes (wayland_xwayland_user, the same word as compositor_xwm_accept's). Any other client that could bind them
+        would name an X window's serial before its X server did and have its surface shown in that window's place, with that
+        window's keys.
+*/
+static int wayland_global_offered(const struct wayland_client *c, long name)
 {
-        return name < 1 || name > WAYLAND_GLOBAL_COUNT || wayland_globals[name - 1].iface != WLI_zwp_linux_dmabuf_v1 || wayland.dmabuf.count > 0;
+        long iface;
+
+        if (name < 1 || name > WAYLAND_GLOBAL_COUNT)
+                return 1;
+        iface = wayland_globals[name - 1].iface;
+        if (iface == WLI_zwp_linux_dmabuf_v1)
+                return wayland.dmabuf.count > 0;
+        if (iface == WLI_xwayland_shell_v1 || iface == WLI_zwp_xwayland_keyboard_grab_manager_v1)
+                return wayland.xwayland_uid >= 0 && c->uid == wayland.xwayland_uid;
+        return 1;
 }
 
 static int wayland_name_is(const unsigned char *text, long length, const char *name)
@@ -2128,7 +2144,7 @@ static int wayland_display_request(struct wayland_client *c, long op, struct way
                 return WAYLAND_OK;
         }
         for (long name = 1; name <= WAYLAND_GLOBAL_COUNT; name++)
-                if (wayland_global_offered(name))
+                if (wayland_global_offered(c, name))
                         wayland_global_send(c, c->objects[a[0].slot].id, name);
         for (long screen = 0; screen < wayland.screens; screen++)
                 wayland_global_send(c, c->objects[a[0].slot].id, wayland_output_name(screen));
@@ -2144,7 +2160,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         long name = (long)a[0].u, iface, version, slot;
         unsigned long id = a[1].u;
 
-        if (name >= 1 && name <= WAYLAND_GLOBAL_COUNT && wayland_global_offered(name))
+        if (name >= 1 && name <= WAYLAND_GLOBAL_COUNT && wayland_global_offered(c, name))
         {
                 iface = wayland_globals[name - 1].iface;
                 version = wayland_globals[name - 1].version;
@@ -6696,6 +6712,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         for (long row = 0; row < WAYLAND_ROWS; row++)
                 wayland.row_client[row] = wayland.row_surface[row] = -1;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
+        wayland.xwayland_uid = -1;
         wayland.host = host;
         wayland.input_at = host->now(host->context);
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
@@ -6704,6 +6721,12 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         wayland_dmabuf_load();
         wayland.hold_row = -1;
         return 0;
+}
+
+/* The user whose clients are offered the X server's protocols: the one the X window manager's socket takes. None until the host says. */
+WAYLAND_API void wayland_xwayland_user(long uid)
+{
+        wayland.xwayland_uid = uid;
 }
 
 /* A client's socket accepted: its record, with the display, or a refusal. */

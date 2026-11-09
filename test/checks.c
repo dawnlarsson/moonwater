@@ -170759,9 +170759,13 @@ static unsigned long wl_global(struct wlc *c, unsigned long registry, long iface
         return 0;
 }
 
+/* The user a session names to the shim as the one the X window manager's socket takes (the host's word); wlc_open's clients are 1000. */
+static long wl_check_xuser = 1000;
+
 static void session_open(struct session *s)
 {
         memset(s, 0, sizeof *s);
+        wayland_xwayland_user(wl_check_xuser);
         s->c = wlc_open();
         s->registry = wlc_id(s->c, WLI_wl_registry, 1);
         wlc_send(s->c, 1, WLQ_wl_display_get_registry, s->registry);
@@ -175908,6 +175912,33 @@ static void test_games(void)
                 WLCHECK(cd->errors == 0 && wayland_row_shortcuts(d.k.row) == 0, "and lets them go with its destroy (%s)", cd->error_text);
         }
         wlc_end(cd);
+        /* the X server's protocols are offered to the user the X window manager's socket takes and to no other, and to nobody while
+           none is named: a client of another user sees neither global, and binding either by its name is refused as no such
+           global, so it cannot name an X window's serial before its X server does */
+        for (int who = 0; who < 2; who++)
+        {
+                wl_check_xuser = who ? 2000 : -1; /* the clients of wlc_open are 1000 */
+                game_open(&d);
+                cd = d.k.s.c;
+                WLCHECK(!d.k.s.xshell && !d.k.s.xgrab, "the Xwayland shell and the keyboard grab manager are not offered to %s",
+                        who ? "another user's client" : "any client while no user is named");
+                wlc_end(cd);
+                for (long name = 1; name <= WAYLAND_GLOBAL_COUNT; name++)
+                {
+                        long iface = wayland_globals[name - 1].iface;
+
+                        if (iface != WLI_xwayland_shell_v1 && iface != WLI_zwp_xwayland_keyboard_grab_manager_v1)
+                                continue;
+                        game_open(&d);
+                        cd = d.k.s.c;
+                        wlc_send(cd, d.k.s.registry, WLQ_wl_registry_bind, (unsigned long)name, wl_interfaces[iface].name, 1L,
+                                 wlc_id(cd, iface, 1));
+                        WLCHECK(refused_with(cd, WAYLAND_INVALID_OBJECT), "%s, bound by its name, is refused to %s", wl_interfaces[iface].name,
+                                who ? "another user's client" : "any client while no user is named");
+                        wlc_end(cd);
+                }
+        }
+        wl_check_xuser = 1000;
         game_open(&d);
         cd = d.k.s.c;
         {
