@@ -6372,10 +6372,11 @@ static int wayland_gestures_request(struct wayland_client *c, struct wayland_obj
         handler runs, and nothing is left over.
 */
 static int wayland_args(struct wayland_client *c, const struct wayland_object *self, const struct wl_message *msg,
-                        const unsigned char *at, long left, struct wayland_arg *a)
+                        const unsigned char *at, long left, struct wayland_arg *a, long *begun)
 {
         long n = 0;
 
+        *begun = 0;
         for (const unsigned char *kind = msg->args; kind[0]; kind += 2)
         {
                 struct wayland_arg *arg;
@@ -6384,6 +6385,7 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                 if (n >= WAYLAND_ARGS)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "too many arguments");
                 arg = &a[n++];
+                *begun = n; // every argument begun is initialized below, so the caller reads no further than this
                 arg->u = 0;
                 arg->i = 0;
                 arg->text = 0;
@@ -6483,6 +6485,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         const struct wl_message *msg;
         struct wayland_object *o;
         struct wayland_arg a[WAYLAND_ARGS];
+        long begun;
         int status;
 
         if (slot < 0)
@@ -6492,9 +6495,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         if (op >= info->requests || info->request[op].since > o->version)
                 return wayland_fail(c, id, WAYLAND_INVALID_METHOD, "no such request");
         msg = &info->request[op];
-        for (n = 0; n < WAYLAND_ARGS; n++)
-                a[n].fd = -1;
-        status = wayland_args(c, o, msg, message + 8, size - 8, a);
+        status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun);
         if (status >= 0)
         {
                 switch (o->iface)
@@ -6651,7 +6652,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 }
         }
         // A descriptor a handler did not take is closed here, whatever became of the request.
-        for (n = 0; n < WAYLAND_ARGS; n++)
+        for (n = 0; n < begun; n++)
                 if (a[n].fd >= 0)
                 {
                         wayland.host->close(wayland.host->context, a[n].fd);
