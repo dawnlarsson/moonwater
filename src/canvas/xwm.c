@@ -66,7 +66,7 @@
 #define COMPOSITOR_XWM_XA_WM_NAME 39          // predefined atoms: WM_NAME, and the types STRING and ATOM
 #define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_TITLE 128              // a title's bytes, its NUL included (the shim takes fewer)
-#define COMPOSITOR_XWM_PENDING 32             // the property requests whose replies are waited for (the oldest is forgotten past it)
+#define COMPOSITOR_XWM_PENDING 512            // the property requests whose replies are waited for, in the order they were asked (a full table closes the connection)
 #define COMPOSITOR_XWM_PROP_NET_NAME 1
 #define COMPOSITOR_XWM_PROP_NAME 2
 #define COMPOSITOR_XWM_PROP_PROTOCOLS 3
@@ -139,7 +139,7 @@ struct compositor_xwm
         unsigned char in[COMPOSITOR_XWM_IN], out[COMPOSITOR_XWM_OUT];
         struct compositor_xwm_window window[COMPOSITOR_XWM_WINDOWS];
         struct compositor_xwm_pending pending[COMPOSITOR_XWM_PENDING];
-        unsigned int pending_at;
+        unsigned int pending_at, pending_count; // the oldest request waited for (a ring), and how many are waited for
         int focus_row;                 // the row with the keys at the last pass
 };
 
@@ -357,21 +357,38 @@ static void compositor_xwm_composite(const unsigned char *in, long size)
 
 /* ---- the properties: a request, and the table that says whose reply it is ---- */
 
-/* GetProperty for a window's property (the first 128 bytes of it), the reply to be found by its sequence. */
+/* GetProperty for a window's property (the first 128 bytes of it), the reply to be found by its sequence. The replies come back in
+   the order of the requests, so the table is a queue: a reply or an error to the oldest one asked is its answer. */
 static void compositor_xwm_ask(unsigned int window, unsigned int what, unsigned int property, unsigned int type)
 {
         struct compositor_xwm *x = &compositor_xwm;
         unsigned char req[32];
         long n = xwm_enc_get_property(req, sizeof req, 0, window, property, type, 0, 32);
+        struct compositor_xwm_pending *p;
 
-        if (n > 0 && compositor_xwm_queue(req, n) == 0)
+        if (n <= 0 || compositor_xwm_queue(req, n) != 0)
+                return;
+        // A table that is full is a server that does not answer: the connection is closed at the pass (a reply that is forgotten
+        // leaves its window without the word it waits for, so the window is never shown).
+        if (x->pending_count == COMPOSITOR_XWM_PENDING)
         {
-                struct compositor_xwm_pending *p = &x->pending[x->pending_at++ % COMPOSITOR_XWM_PENDING];
-
-                p->seq = x->seq;
-                p->window = window;
-                p->what = what;
+                x->broken = 1;
+                return;
         }
+        p = &x->pending[(x->pending_at + x->pending_count) % COMPOSITOR_XWM_PENDING];
+        p->seq = x->seq;
+        p->window = window;
+        p->what = what;
+        x->pending_count++;
+}
+
+/* The oldest request waited for has been answered (or refused): it is no longer waited for. */
+static void compositor_xwm_pending_done(void)
+{
+        struct compositor_xwm *x = &compositor_xwm;
+
+        x->pending_at = (x->pending_at + 1) % COMPOSITOR_XWM_PENDING;
+        x->pending_count--;
 }
 
 static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int add);
@@ -389,6 +406,16 @@ static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
         w->asking = 2;
         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]);
         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING);
+}
+
+/* One of a window's title requests has been answered, or refused: when the last is, a title that changed meanwhile is asked of. */
+static void compositor_xwm_title_done(struct compositor_xwm_window *w)
+{
+        if (w->asking && --w->asking == 0 && (w->state & COMPOSITOR_XWM_TITLE_AGAIN))
+        {
+                w->state &= ~COMPOSITOR_XWM_TITLE_AGAIN;
+                compositor_xwm_ask_title(w);
+        }
 }
 
 /* A title's bytes as plain text, cut to what the record takes: control bytes become spaces, and a byte that is no valid UTF-8 (or any
@@ -472,11 +499,7 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                                 w->title[at] = text[at];
                         w->dirty = 1;
                 }
-                if (w->asking && --w->asking == 0 && (w->state & COMPOSITOR_XWM_TITLE_AGAIN))
-                {
-                        w->state &= ~COMPOSITOR_XWM_TITLE_AGAIN;
-                        compositor_xwm_ask_title(w);
-                }
+                compositor_xwm_title_done(w);
         }
         else if (p->what == COMPOSITOR_XWM_PROP_TRANSIENT)
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
@@ -827,6 +850,17 @@ static void compositor_xwm_error(const unsigned char *in)
                 compositor_xwm_drop("the server refused the root's events (another window manager runs)");
                 return;
         }
+        // A property request that is refused (its window is gone) is answered: a title it was asked for is no longer waited for.
+        if (compositor_xwm.pending_count && compositor_xwm.pending[compositor_xwm.pending_at].seq == err.sequence)
+        {
+                struct compositor_xwm_pending failed = compositor_xwm.pending[compositor_xwm.pending_at];
+                struct compositor_xwm_window *w;
+
+                compositor_xwm_pending_done();
+                w = compositor_xwm_find(failed.window, 0);
+                if (w && (failed.what == COMPOSITOR_XWM_PROP_NET_NAME || failed.what == COMPOSITOR_XWM_PROP_NAME))
+                        compositor_xwm_title_done(w);
+        }
 }
 
 /* One message the server sent, whole, at the start of the input: a reply, an error or an event. */
@@ -839,19 +873,13 @@ static void compositor_xwm_message(const unsigned char *in, long size, long type
                 compositor_xwm_error(in);
                 return;
         }
-        if (type == XWM_REPLY)
+        if (type == XWM_REPLY && x->pending_count && x->pending[x->pending_at].seq == xwm_get16(in + 2))
         {
-                unsigned int sequence = xwm_get16(in + 2);
+                struct compositor_xwm_pending found = x->pending[x->pending_at];
 
-                for (unsigned int at = 0; at < COMPOSITOR_XWM_PENDING; at++)
-                        if (x->pending[at].window && x->pending[at].seq == sequence)
-                        {
-                                struct compositor_xwm_pending found = x->pending[at];
-
-                                x->pending[at].window = 0;
-                                compositor_xwm_property(in, size, &found);
-                                return;
-                        }
+                compositor_xwm_pending_done();
+                compositor_xwm_property(in, size, &found);
+                return;
         }
         if (type == XWM_REPLY && xwm_get16(in + 2) == COMPOSITOR_XWM_COMPOSITE_SEQ)
         {
@@ -976,8 +1004,7 @@ static void compositor_xwm_close_rows(void)
                         wayland_xwindow_gone(w->serial);
                 w->id = 0;
         }
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_PENDING; at++)
-                x->pending[at].window = 0;
+        x->pending_at = x->pending_count = 0;
         x->focus_row = -2;
 }
 
