@@ -28,7 +28,15 @@ static struct
         int count;
         struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
         struct ui_text field[2]; // the fields' engines: a node's name, which takes a name's characters, and a region
+        int band_top, band_bottom; // the rows a motion that moved only a slider's ghost draws again (none: the whole page)
 } gallery;
+
+// A control's pointer state as a motion finds it (gallery_event): its hover, what it is on, and a slider's hover_x (its ghost).
+struct gallery_mark
+{
+        b32 hover;
+        int item, hover_x;
+};
 
 static struct ui_control address_to gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
 {
@@ -230,6 +238,7 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
         int offset = s->scroll * 100 / ui->scale;
         b32 moved = false;
 
+        gallery.band_top = gallery.band_bottom = 0;
         gallery_place(ui, width, height);
         if (event->type == WINDOW_EVENT_MOTION)
                 ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
@@ -271,6 +280,9 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
         else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
                 int x = ui_kit.pointer_x, y = ui_kit.pointer_y, bar;
+                b32 hover_scroll = s->hover;
+                struct gallery_mark was[GALLERY_MOST];
+                b32 quiet;
 
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                         return true;
@@ -279,6 +291,21 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
                         moved = ui_scroll_set(s, bar) || true;
                 else
                 {
+                        /*
+                                A motion with nothing held, that moves no hover (a control's or the scroll bar's) and drags no field,
+                                can change only the ghost of the slider it is over (ui_kit_pointer's hover_x): then only that
+                                slider's rows are drawn again (gallery.band_top, band_bottom). A body that moves or stretches
+                                draws the whole page, as every motion did.
+                        */
+                        quiet = event->type == WINDOW_EVENT_MOTION && !ui_kit_held && !s->held && s->hover == hover_scroll &&
+                                !(event->flags & WINDOW_KEY_TOUCH) && !ui_body_going(&s->body) && s->scroll >= 0 && s->scroll <= ui_scroll_most(s) &&
+                                !gallery.field[0].sel.dragging && !gallery.field[1].sel.dragging;
+                        for (int at = 0; at < gallery.count; at++)
+                        {
+                                was[at].hover = gallery.control[at].hover;
+                                was[at].item = gallery.control[at].item;
+                                was[at].hover_x = gallery.control[at].hover_x;
+                        }
                         // The controls are drawn with the scroll taken off; the pointer is put on the page. A press off
                         // the fields takes their keys away.
                         for (int at = 0; at < gallery.count; at++)
@@ -291,6 +318,30 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
                                 if (gallery.control[at].edit)
                                         ui_field_focus(gallery.control[at].edit, gallery.control[at].focused);
                         moved = true;
+                        for (int at = 0; quiet && at < gallery.count; at++)
+                                if (gallery.control[at].hover != was[at].hover || gallery.control[at].item != was[at].item)
+                                        quiet = false;
+                        if (quiet)
+                        {
+                                int top = 0, bottom = 0;
+                                b32 ghost = false;
+
+                                // A slider's rows: its box and a row each way (the thumb and its ring lie in the box), in the window's device rows.
+                                for (int at = 0; at < gallery.count; at++)
+                                {
+                                        struct ui_control address_to c = &gallery.control[at];
+                                        int from, to;
+
+                                        if (c->kind != UI_SLIDER || c->hover_x == was[at].hover_x)
+                                                continue;
+                                        from = ui_dev(ui, c->y - offset - 8), to = ui_dev(ui, c->y - offset + c->h + 8);
+                                        top = ghost && top < from ? top : from;
+                                        bottom = ghost && bottom > to ? bottom : to;
+                                        ghost = true;
+                                }
+                                if (ghost)
+                                        gallery.band_top = top < 0 ? 0 : top, gallery.band_bottom = bottom > height ? height : bottom;
+                        }
                 }
         }
         *redraw = moved;

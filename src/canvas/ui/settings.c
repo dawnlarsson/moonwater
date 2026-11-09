@@ -4236,7 +4236,9 @@ static b32 settings_event(const struct window_event address_to event)
         {
                 b32 redraw = false, keep = gallery_event(&settings.ui, settings.width, settings.height, &settings.popup, event, &redraw);
 
-                if (redraw)
+                if (redraw && gallery.band_bottom > gallery.band_top)
+                        ui_page_damage(&settings.page, gallery.band_top, gallery.band_bottom);
+                else if (redraw)
                         ui_page_redraw(&settings.page);
                 return keep;
         }
