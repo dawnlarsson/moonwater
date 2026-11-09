@@ -7116,7 +7116,7 @@ RANGED_SITES
 src/sh/text.c|1|cat-n|cat -n "$IN3"; cat -nA "$IN3"; cat -b "$IN"; cat -nT "$IN"
 src/sh/text.c|1|rev|rev "$IN3"; LC_ALL=C.UTF-8 rev "$IN3"; rev -0 < "$IN"; rev "$BIG"; LC_ALL=C.UTF-8 rev < "$BIG"
 src/sh/text.c|1|fold|fold -w 7 "$IN3"; fold -b -w 33 "$IN3"; fold -c -w 60 < "$IN"; LC_ALL=C.UTF-8 fold -w 20 "$IN3"; fold "$BIG"; tr ': ' '\t\t' < "$FIELDS" | fold -w 30
-src/sh/text.c|1|uniq|uniq "$IN3"; uniq -c "$IN3"; sort "$IN3" | uniq -c; sort "$IN3" | uniq -d; sort "$IN3" | uniq -u; sort "$BIG" | uniq -cd; uniq -z -c < "$IN"; LC_ALL=C.UTF-8 sort "$IN3" | uniq
+src/sh/text.c|1|uniq|uniq "$IN3"; uniq -c "$IN3"; sort "$IN3" | uniq -c; sort "$IN3" | uniq -d; sort "$IN3" | uniq -u; sort "$BIG" | uniq -cd; uniq -z -c < "$IN"; LC_ALL=C.UTF-8 sort "$IN3" | uniq; printf 'x\ny\0x\nz\0' | uniq -z -f1 -c
 src/sh/text.c|1|paste|paste "$IN3" "$IN"; paste -d, "$IN" "$FIELDS"; paste "$BIG" "$IN3"; paste -z "$IN" "$IN3"; paste - - < "$IN3"; paste "$IN" "$IN3" "$IN"
 src/sh/text.c|2|cut-f|cut -d: -f2,4 "$FIELDS"; cut -s -d: -f3- < "$FIELDS"; cut -d: --complement -f1 "$BIG"; cut -d: -f2 "$BIG"
 RANGED_SITES_END

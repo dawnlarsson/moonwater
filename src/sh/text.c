@@ -24556,7 +24556,9 @@ static positive uniq_bytes_of(p8 address_to line, positive length, positive coun
 static positive uniq_skipped(p8 address_to line, positive length,
                              positive fields, positive characters)
 {
-        positive skip = text_blank_skip(line, length, 0, fields, '\t');
+        // A field separator is a space, a tab or a newline, as GNU's field_sep
+        // has it: with -z a record holds newlines, and they separate fields too.
+        positive skip = text_blank_skip(line, length, 0, fields, '\n');
 
         return skip + uniq_bytes_of(line + skip, length - skip, characters);
 }
