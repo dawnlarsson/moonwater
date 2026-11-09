@@ -876,6 +876,23 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
         ui_scene_touch(scene, scene->ox + pen_x + first, scene->oy + from, scene->ox + pen_x + last, scene->oy + to);
 }
 
+// The place of a key's copy in the pool, when the frame has one (the lookup ui_scene_copy makes first, without copying): false when it has none.
+static b32 ui_scene_find(struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, unsigned long address_to at)
+{
+        p32 slot = (p32)((((a * 0x9e3779b97f4a7c15ull) ^ (b * 0xc2b2ae3d27d4eb4full)) ^ c) >> 55);
+
+        for (p32 probe = 0; probe < UI_SCENE_SLOTS && slots[slot].used; probe++)
+        {
+                if (slots[slot].a == a && slots[slot].b == b && slots[slot].c == c)
+                {
+                        *at = slots[slot].at;
+                        return true;
+                }
+                slot = (slot + 1) & (UI_SCENE_SLOTS - 1);
+        }
+        return false;
+}
+
 // The pool's copy of count bytes for a key, once per frame: the copy's place from the list's base, 16-aligned; false when the frame has no room
 // for it (and the table or the pool is full). A key is the pointer and what its bytes depend on (a, b, c), so the same key is the same bytes.
 static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, const void address_to bytes,
@@ -929,15 +946,24 @@ static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_
                 scene->lost = UI_LOST_CELL;
                 return false;
         }
-        for (b32 r = 0; r < h; r++)
-                memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
         if (!ui_scene_copy(scene, scene->tone_slots, (p64)(unsigned long)plan->tones, (p64)colour << 32 | (background & 0xffffff), plan->strength,
-                           plan->tones, 256 * sizeof(p32), &tones_at) ||
-            !ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
-                           (unsigned long)w * (unsigned long)h, &cover_at))
+                           plan->tones, 256 * sizeof(p32), &tones_at))
         {
                 scene->lost = UI_LOST_POOL;
                 return false;
+        }
+        //      The coverage's rows are gathered only when the frame does not hold it yet: a glyph is found again by its key, and the
+        //      gather was a copy per row for every cell.
+        if (!ui_scene_find(scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, &cover_at))
+        {
+                for (b32 r = 0; r < h; r++)
+                        memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
+                if (!ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, 0, rows,
+                                   (unsigned long)w * (unsigned long)h, &cover_at))
+                {
+                        scene->lost = UI_LOST_POOL;
+                        return false;
+                }
         }
         op = scene->ops + 8 * scene->count++;
         op[0] = 10u | (unsigned int)w << 8, op[1] = (unsigned int)(ox + plan->from), op[2] = (unsigned int)(oy + plan->above);
