@@ -7296,6 +7296,17 @@ def builtins_mapfile_records(rng):
         "printf 'status:%s n:%s\\n' \"$?\" \"${#a[@]}\"; printf '<%s>\\n' \"${a[@]}\"\n")
 
 
+def builtins_mapfile_callback_reentry(rng):
+    """A -C callback that runs mapfile itself leaves the outer records alone."""
+    quantum = rng.choice(("1", "2"))
+    return "builtins-mapfile-callback-reentry", ("bash", "posix"), (
+        "printf 'a\\nb\\nc\\nd\\n' > records\n"
+        "printf 'X1\\nX2\\nX3\\n' > other\n"
+        "cb() { mapfile -t inner < other; }\n"
+        "mapfile -C cb -c " + quantum + " -t a < records\n"
+        "printf 'status:%s n:%s\\n' \"$?\" \"${#a[@]}\"; printf '<%s>\\n' \"${a[@]}\"\n")
+
+
 def builtins_getopts_state(rng):
     spec = rng.choice(("ab:", ":ab:", "a:b", ":a:b"))
     words = rng.choice((("-a", "-b", "value", "tail"), ("-abvalue",),
@@ -7624,7 +7635,8 @@ BUILTINS_FAMILIES = (
     builtins_read_limit_state, builtins_read_stream_state, builtins_read_array_state, builtins_printf_formats,
     builtins_printf_hex_roundtrip, builtins_printf_dynamic_fields,
     builtins_printf_escapes, builtins_printf_collectors, builtins_option_walk,
-    builtins_mapfile_records, builtins_getopts_state, builtins_getopts_reset,
+    builtins_mapfile_records, builtins_mapfile_callback_reentry,
+    builtins_getopts_state, builtins_getopts_reset,
     builtins_getopts_scope, builtins_array_machinery, builtins_nameref,
     builtins_scope_snapshot, builtins_readonly_scope, builtins_pipestatus,
     builtins_dynamic_variables, builtins_umask_symbolic, builtins_test_forms,

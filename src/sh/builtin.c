@@ -15364,9 +15364,22 @@ static COLD bool mapfile_callback_run(string_address callback, positive index,
                 text.bytes[text.used++] = '\n';
                 text.bytes[text.used] = end;
 
+                //      The callback may run mapfile itself. The table it reads
+                //      records into is this one, and the records still to come
+                //      sit in it past the line being assigned, so the callee
+                //      gets a table of its own and this call's is put back.
+                p8 address_to outer_text = mapfile_text;
+                positive outer_room = mapfile_room;
+
+                mapfile_text = null;
+                mapfile_room = 0;
                 parse_nest_enter();
                 run_lines(text.bytes);
                 parse_nest_leave();
+                if (mapfile_text)
+                        memory_free(mapfile_text, mapfile_room);
+                mapfile_text = outer_text;
+                mapfile_room = outer_room;
         }
         if (text.bytes)
                 memory_free(text.bytes, text.room);
