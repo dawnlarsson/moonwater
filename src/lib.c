@@ -35506,14 +35506,17 @@ __asm__(
 #endif
 
 #ifndef KERNEL_MODE
-    //       memory_mix_u32_row: with V, thirty-two bit lanes, four pixels a
-    //       turn at VLEN 128 (as many as the machine takes): the lane mix of
-    //       the x86_64 block with the cover of each pixel zero-extended from
-    //       its byte (vzext.vf4), 255 - c by vrsub, the colour channels one
-    //       at a time (vsrl and vand, two vmul, vadd, 127, x + (x >> 8) + 1,
-    //       >> 8, then shifted back into place and or-ed), the alpha byte
-    //       cleared before the mix, and cover 0 and 255 chosen by vmerge
-    //       under masks. Without V, a pixel at a time in the same lane mix,
+    //       memory_mix_u32_row: with V, the pixels as four byte planes (vlseg4e8
+    //       deinterleaves the sixteen pixels of a turn at VLEN 128, as many as
+    //       the machine takes), 255 - c by vrsub, and each plane's products
+    //       by vwmulu and vwmaccu into sixteen-bit lanes: g (255 - c) + i c,
+    //       then + 128, then s + (s >> 8) by vsrl and vadd, and the >> 8 is
+    //       the narrowing vnsrl back to bytes, which is the x86_64 block's
+    //       floor (x / 255) for x = the sum + 127 (the same mulhi identity,
+    //       checked for every sum). The alpha plane is the same, and is kept
+    //       only where the cover is 0 or 255, by vminu and vmerge: a cover of
+    //       0 leaves the pixel whole and 255 takes the ink whole, both by the
+    //       arithmetic itself. Without V, a pixel at a time in the same lane mix,
     //       the colours in two words of two sixteen-bit lanes each: the
     //       blue and red of a pixel in one word, the green in the other.
     //       A vector body that does not have a vector unit is never run: the
@@ -35540,28 +35543,24 @@ __asm__(
     "4: addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 1\n   addi a3, a3, -1\n   bnez a3, 2b\n"
     "j 9f\n"
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
-    "30: li t5, 0x00ffffff\n   li t6, 255\n   li a5, 127\n"
-    "31: vsetvli t0, a3, e32, m1, ta, ma\n"
-    "vle32.v v13, (a0)\n   vle32.v v1, (a1)\n"
-    "vsetvli zero, t0, e8, m1, ta, ma\n   vle8.v v3, (a2)\n"
-    "vsetvli zero, t0, e32, m1, ta, ma\n   vzext.vf4 v2, v3\n"
-    "vmv.v.x v8, t5\n   vmv.v.x v11, t6\n   vmv.v.i v7, 0\n"
-    "vand.vv v4, v13, v8\n   vand.vv v5, v1, v8\n   vrsub.vx v6, v2, t6\n"
-    "vsrl.vi v10, v4, 0\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 0\n   vand.vv v12, v12, v11\n"
-    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
-    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
-    "vor.vv v7, v7, v10\n"
-    "vsrl.vi v10, v4, 8\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 8\n   vand.vv v12, v12, v11\n"
-    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
-    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
-    "vsll.vi v10, v10, 8\n   vor.vv v7, v7, v10\n"
-    "vsrl.vi v10, v4, 16\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 16\n   vand.vv v12, v12, v11\n"
-    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
-    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
-    "vsll.vi v10, v10, 16\n   vor.vv v7, v7, v10\n"
-    "vmseq.vx v0, v2, t6\n   vmerge.vvm v7, v7, v1, v0\n"
-    "vmseq.vi v0, v2, 0\n   vmerge.vvm v7, v7, v13, v0\n"
-    "vse32.v v7, (a0)\n"
+    "30: li t6, 255\n   li a5, 128\n"
+    "vsetvli t0, x0, e8, m1, ta, ma\n   vmv.v.i v18, 0\n"
+    "31: vsetvli t0, a3, e8, m1, ta, ma\n"
+    "vlseg4e8.v v8, (a0)\n   vlseg4e8.v v12, (a1)\n   vle8.v v16, (a2)\n"
+    "vrsub.vx v17, v16, t6\n"
+    "vwmulu.vv v20, v8, v17\n   vwmaccu.vv v20, v12, v16\n"
+    "vwmulu.vv v22, v9, v17\n   vwmaccu.vv v22, v13, v16\n"
+    "vwmulu.vv v24, v10, v17\n   vwmaccu.vv v24, v14, v16\n"
+    "vwmulu.vv v26, v11, v17\n   vwmaccu.vv v26, v15, v16\n"
+    "vsetvli zero, t0, e16, m2, ta, ma\n"
+    "vadd.vx v20, v20, a5\n   vsrl.vi v28, v20, 8\n   vadd.vv v20, v20, v28\n"
+    "vadd.vx v22, v22, a5\n   vsrl.vi v28, v22, 8\n   vadd.vv v22, v22, v28\n"
+    "vadd.vx v24, v24, a5\n   vsrl.vi v28, v24, 8\n   vadd.vv v24, v24, v28\n"
+    "vadd.vx v26, v26, a5\n   vsrl.vi v28, v26, 8\n   vadd.vv v26, v26, v28\n"
+    "vsetvli zero, t0, e8, m1, ta, ma\n"
+    "vnsrl.wi v4, v20, 8\n   vnsrl.wi v5, v22, 8\n   vnsrl.wi v6, v24, 8\n   vnsrl.wi v7, v26, 8\n"
+    "vminu.vv v28, v16, v17\n   vmseq.vi v0, v28, 0\n   vmerge.vvm v7, v18, v7, v0\n"
+    "vsseg4e8.v v4, (a0)\n"
     "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   add a2, a2, t0\n   sub a3, a3, t0\n   bnez a3, 31b\n"
     "j 9f\n"
 #endif
