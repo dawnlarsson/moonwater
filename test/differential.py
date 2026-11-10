@@ -46511,10 +46511,11 @@ def moonwater_sandbox(shell, top):
                     except OSError:
                         pass
 
+        # chroot is in /usr/sbin on Debian-family hosts, so the PATH has it.
         try:
             ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
                                  stdin=subprocess.DEVNULL, capture_output=True,
-                                 timeout=600, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+                                 timeout=600, env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"})
         except subprocess.TimeoutExpired:
             sweep()
             return [], False
