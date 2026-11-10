@@ -9832,7 +9832,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         container, other the warning container, free room the outline (a track of nothing), and a disk with no table the info container.
 */
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
-#define UI_STRIP_GAP 2   // logical pixels between two segments, each end of the strip rounded
+#define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
 
 static int ui_strip_role(unsigned int role)
 {
@@ -9854,12 +9854,12 @@ static int ui_strip_ink(unsigned int role)
 
 /*
         The strip's segments from left to right, each as wide as its share of the bytes: a pill of its own, its ends rounded, with
-        UI_STRIP_GAP between it and the next. A segment wide enough for its size has the size in its middle, in its role's ink.
+        UI_SEGMENT_GAP between it and the next. A segment wide enough for its size has the size in its middle, in its role's ink.
 */
 static fn ui_strip(struct ui address_to ui, int left, int top, int width, int height, const struct ui_row address_to row)
 {
         unsigned long long total = 0, run = 0;
-        int cursor = left, gap = ui_dev(ui, UI_STRIP_GAP);
+        int cursor = left, gap = ui_dev(ui, UI_SEGMENT_GAP);
 
         for (int at = 0; at < row->strip_count; at++)
                 total += row->strip_bytes[at];
