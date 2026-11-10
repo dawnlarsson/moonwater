@@ -706,8 +706,11 @@ static b32 link_group_join(string_address address_to words, positive count)
         positive at = 1;
         p8 grants[96];
         bipolar lock;
+        p8 fresh[32];
+        bool derived;
 
         scope_exit(crypto_forget(typed, sizeof typed));
+        scope_exit(crypto_forget(fresh, sizeof fresh));
 
         if (!link_name_good(namespace) ||
             string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
@@ -763,6 +766,16 @@ static b32 link_group_join(string_address address_to words, positive count)
                 secret = (string_address)made;
         }
 
+        /*      The slow part of a secret that was given is made here, before the
+                peers lock: the listener takes that lock for every greeting it
+                hears, so a derivation made under it stood the listener still for
+                as long as it took. A secret made below, for a new group with none
+                given, is derived under the lock, once. */
+        derived = secret != null;
+        if (derived)
+                waterlink_group_derive(namespace, (p8 address_to)secret,
+                                       string_length(secret),
+                                       WATERLINK_GROUP_ROUNDS, fresh);
         {
                 scope_exit(crypto_forget(made, sizeof made);
                            crypto_forget(address_of groups, sizeof groups));
@@ -835,9 +848,12 @@ static b32 link_group_join(string_address address_to words, positive count)
                         //      against only if the guess is made slowly. A script
                         //      that joins at every boot says `link group NAMESPACE`
                         //      and keeps the group it has.
-                        waterlink_group_derive(namespace, (p8 address_to)secret,
-                                               string_length(secret),
-                                               WATERLINK_GROUP_ROUNDS, record->key);
+                        if (derived)
+                                memory_copy(record->key, fresh, sizeof fresh);
+                        else
+                                waterlink_group_derive(namespace, (p8 address_to)secret,
+                                                       string_length(secret),
+                                                       WATERLINK_GROUP_ROUNDS, record->key);
                         memory_zero(record->check, sizeof record->check);
                 }
                 if (granted)
@@ -1251,7 +1267,7 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
                           link_before address_to before)
 {
         p64 until = link_boot_seconds() + link_pair_seconds() + 2;
-        bipolar signals = link_signals_open();
+        bipolar signals = link_signals_open(false);
         b32 stopped = 0;
         bool closed = false;
 

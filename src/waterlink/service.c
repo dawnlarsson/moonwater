@@ -2745,10 +2745,15 @@ static bipolar link_socket_open(p16 port, bool any)
         return handle;
 }
 
-static bipolar link_signals_open(void)
+/*      Only a client's window size is a signal it reads (28, SIGWINCH). Anywhere
+        else a resize is no reason to stop: a terminal's `link serve` or
+        `link pair` was ended by it, and SIGWINCH's own default is to be
+        ignored, which is what it is left to be. */
+static bipolar link_signals_open(bool resize)
 {
         positive blocked = 1ul << (1 - 1) | 1ul << (2 - 1) | 1ul << (15 - 1) |
-                           1ul << (17 - 1) | 1ul << (13 - 1) | 1ul << (28 - 1);
+                           1ul << (17 - 1) | 1ul << (13 - 1) |
+                           (resize ? 1ul << (28 - 1) : 0);
 
         (void)system_signal_mask(0, address_of blocked, null, 8);
         return system_call_4(syscall(signalfd4), (positive)(bipolar)-1,
@@ -2990,7 +2995,7 @@ static b32 link_serve(string_address ready_text)
         link_self.state_dirty = true;
         link_stamps_load();
 
-        signals = link_signals_open();
+        signals = link_signals_open(false);
 
         for (;;)
         {
@@ -3310,7 +3315,7 @@ static b32 link_client_run(string_address name, p8 kind,
         s->reads[0].done = true;
         link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
         link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
-        signals = link_signals_open();
+        signals = link_signals_open(true);
 
         for (;;)
         {
