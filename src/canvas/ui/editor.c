@@ -745,9 +745,11 @@ static b32 editor_event(const struct window_event address_to event)
         struct editor_tab address_to tab = editor_now();
         p32 asks;
 
-        // A key or a press other than the one that asked is a change of mind: the next such key asks again.
+        // A key or a press other than the one that asked is a change of mind: the next such key asks again. A modifier alone is
+        // no key of its own (Ctrl+W, let go, Ctrl+W again is the second press), so its press leaves the confirm armed.
         if ((event->flags & WINDOW_KEY_DOWN) &&
-            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && ui_key_command(event) != editor.confirm.what)))
+            (event->type == WINDOW_EVENT_BUTTON ||
+             (event->type == WINDOW_EVENT_KEY && !ui_key_modifier(event->a) && ui_key_command(event) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
         if (editor_tabs_event(event))
                 return true;
