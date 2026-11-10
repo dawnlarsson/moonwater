@@ -4507,6 +4507,20 @@ static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to 
         }
 }
 
+// A slider's value said as a whole number into out (a sign, then the digits): its length.
+static positive ui_slider_say(b64 value, char address_to out)
+{
+        b64 whole = (value + UI_HALF) >> UI_Q;
+        positive length = 0;
+
+        // A negative value is its sign and then its digits (the digits are unsigned, so the sign is put here).
+        if (whole < 0)
+                out[length++] = '-', whole = -whole;
+        length += positive_into_string((p8 address_to)out + length, (positive)whole);
+        out[length] = 0;
+        return length;
+}
+
 static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
@@ -4688,16 +4702,10 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                             c->hover || c->down ? 64 : 0);
         }
         {
-                b64 whole = (value + UI_HALF) >> UI_Q;
-                positive length = 0;
                 int width;
                 b32 vx;
 
-                // A negative value is its sign and then its digits (the digits are unsigned, so the sign is put here).
-                if (whole < 0)
-                        shown[length++] = '-', whole = -whole;
-                length += positive_into_string((p8 address_to)shown + length, (positive)whole);
-                shown[length] = 0;
+                ui_slider_say(value, shown);
                 width = ui_kit_measure(ui, (string_address)shown, UI_BODY_LARGE);
                 vx = origin + (b32)ui_qmul((ui_rtl() ? rx : rx + rw - width * 256) - origin, UI_ONE + squish);
                 ui_kit_text(ui, (ox + tx + (b32)ui_qmul(vx - ox, sx)) / 256, baseline, (string_address)shown, UI_BODY_LARGE,
@@ -9931,12 +9939,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // A slider row's number and its unit, from the slider's own value (the hand's while it holds it), at the slider's left.
         if (trailing && row.kind == UI_ROW_SLIDER)
         {
-                b64 whole = (trailing->value + UI_HALF) >> UI_Q;
-                positive length = 0;
+                positive length = ui_slider_say(trailing->value, number);
 
-                if (whole < 0)
-                        number[length++] = '-', whole = -whole;
-                length += positive_into_string((p8 address_to)number + length, (positive)whole);
                 if (row.words && row.words[0] && length + 2 < sizeof(number))
                 {
                         number[length++] = ' ';
