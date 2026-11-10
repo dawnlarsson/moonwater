@@ -49371,8 +49371,10 @@ while True:
         #       A boot whose desktop cannot be started (no process can be made) says so,
         #       and takes its marker away so that the next boot asks again. The shell
         #       cannot fork under the limit, so the verb is the last thing it runs.
+        #       The sandbox's shell is dash, which has no ulimit -u, so the limit is
+        #       set by prlimit, the same process limit, on the verb.
         lines, finished = session("rm -f /run/moonwater/desktop.booted\n"
-                                  "ulimit -u 1\nexec /tmp/moonwater desktop boot 2>&1\n")
+                                  "exec prlimit --nproc=1 /tmp/moonwater desktop boot 2>&1\n")
         left, _ = session("test -e /run/moonwater/desktop.booted && echo @@left || echo @@gone\n")
         check(not finished and any(line.startswith("[Moonwater] desktop: ") for line in lines) and
               "@@gone" in left,
