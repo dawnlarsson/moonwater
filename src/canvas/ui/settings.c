@@ -2731,7 +2731,8 @@ static fn settings_feed_devices(void)
 /*
         The devices the system sees, as device list says them: two blanks, then the name a press
         allows or blocks (a port, or a drive's name), the kind, the size and the state, which ends
-        the line: allowed, blocked or waiting. A line that does not say allowed is not allowed.
+        the line: allowed, blocked or waiting. A line that does not say allowed is not allowed. A drive's line
+        has drive as its second word and is a note: no verb holds a drive, so a press on it does nothing.
 */
 static fn settings_feed_hardware(void)
 {
@@ -2744,7 +2745,12 @@ static fn settings_feed_hardware(void)
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
                 if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
-                        items[count].kind = SETTINGS_PORT;
+                        positive word = 0;
+
+                        // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
+                        while (word < size && text[word] != ' ')
+                                word++;
+                        items[count].kind = word + 7 <= size && !memory_compare(text + word + 1, "drive ", 6) ? SETTINGS_NOTE : SETTINGS_PORT;
                         items[count].flags = size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0;
                         settings_item_label(&items[count++], text + 2, size - 2);
                 }

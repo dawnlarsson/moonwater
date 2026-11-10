@@ -17048,7 +17048,8 @@ static bool usb_list_disk(string_address directory, string_address name, address
             host_read_kernel(sysfs, text, sizeof(text)) > 0)
                 for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
                         sectors = sectors * 10 + (unsigned long long)(text[at] - '0');
-        host_say(log, "  %s drive %p MB allowed\n", name, (positive)(sectors * 512 / 1000000ull));
+        // No verb holds a drive, so its row is shown and not pressed: it says what is true of it.
+        host_say(log, "  %s drive %p MB view only\n", name, (positive)(sectors * 512 / 1000000ull));
         return true;
 }
 
