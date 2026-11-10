@@ -920,7 +920,7 @@ static void settings_copy(int at)
         if (at < 0 || at >= settings_sub_count)
                 return;
         windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, settings_sub[at].text, string_length((string_address)settings_sub[at].text));
-        settings_say(WORDS(settings_copied));
+        settings_say((string_address)WORDS(settings_copied));
 }
 
 // The row's badge, when the board has an issue under its key: the worst severity, its words.
