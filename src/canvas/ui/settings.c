@@ -745,6 +745,9 @@ static struct
         // The child is ending: 1 its output ended and it is not yet reaped, 2 it was killed and is not yet reaped. Its exit is polled
         // (settings_reap) from the window's timers, never waited for, so the window's events go on while it goes.
         int ending;
+        // The child has exited but its output has not ended (a process it left behind holds the output open): what is written is read to
+        // where it stops, and then it is reaped (settings_tick, settings_drain).
+        b32 exited;
         positive said_length, began;
         // What the buffer does not keep: once it is full it is cut back to its last whole line, and what follows is counted (the
         // lines, and the rows a list reads: two blanks and a word), for the note of how many were not shown.
@@ -2305,6 +2308,7 @@ static b32 settings_start(string_address address_to words, positive count, const
         settings.child = child;
         settings.output = ends[0];
         settings.ending = 0;
+        settings.exited = 0;
         settings.said_length = 0;
         settings.said_cut = false;
         settings.cut_lines = settings.cut_rows = settings.cut_at = settings.cut_blank = 0;
@@ -3310,6 +3314,16 @@ static fn settings_complete(b32 killed, positive status)
         }
 }
 
+// Whether the child has exited, its exit left in place for the reap: waitid with WNOWAIT and WNOHANG (WEXITED 4, WNOWAIT 0x01000000).
+static b32 settings_exited(void)
+{
+        b32 info[32] = {0};
+        bipolar got = system_call_5(syscall(waitid), 1, (positive)settings.child, (positive)info, 4 | 0x01000000 | 1, 0);
+        bipolar pid = (bipolar)info[4];
+
+        return got == 0 && pid == settings.child;
+}
+
 /*
         The child that is ending is reaped without waiting for it (WNOHANG, the wait's 1): true when it had exited and the verb is complete
         (settings_complete), false while it has not, which settings_tick asks again every SETTINGS_REAP_NS. A child that has gone already is
@@ -3445,7 +3459,8 @@ static fn settings_drain(void)
                                 return;
                         continue;
                 }
-                if (got == 0 || (got != -EAGAIN && got != -EINTR))
+                // Nothing more to read: the output's end, a read that failed, or (the child having exited) nothing there now.
+                if (got == 0 || (got != -EAGAIN && got != -EINTR) || (got == -EAGAIN && settings.exited))
                         settings_finished(false);
                 return;
         }
@@ -5209,6 +5224,15 @@ static long settings_tick(long timeout, long address_to other)
                 }
                 *other = -1;
                 return timeout < 0 || timeout > SETTINGS_REAP_NS ? (long)SETTINGS_REAP_NS : timeout;
+        }
+        // A verb that has exited while a process it left behind holds its output open gets no end of output to hear: its exit is heard
+        // here, its output read to where it stops, and it is reaped then (settings_drain). Without this it was never finished, or was
+        // killed at its time as one that ran too long.
+        if (settings.child > 0 && !settings.ending && settings_exited())
+        {
+                settings.exited = true;
+                settings_drain();
+                return 0;
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
