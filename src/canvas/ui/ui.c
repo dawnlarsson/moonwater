@@ -7196,7 +7196,8 @@ static long ui_map(positive size)
 
 /*
         The overscroll stretch, Android 12's: a region pulled past an end is its picture drawn stretched from the end it is pulled at, which stays
-        where it is, the content not shifted. The region draws its rows at rest (clamped to its ends) and ui_stretch then remaps the picture:
+        where it is, the content not shifted. The region draws its rows at rest (ui_scroll_rest, clamped to its ends) and ui_scroll_pull then
+        remaps the picture through ui_stretch, for every region that scrolls by its body (lists, a page's column, the gallery, the terminal):
         a row at distance u (a share of the view) from the pinned end is shown at u + p (u - u^2 + u^3/3), so the content is p times larger at the
         end and falls back to its own size at the far side, rows past the view going out of it, and every row is the two rows of the picture it
         falls between, blended (vertical only). p is UI_STRETCH_K times the band's share of the view (the rubber band's drawn distance, ui_body_drawn),
@@ -7293,6 +7294,32 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
                                 to[k] = ui_stretch_blend(a[k], b[k], f);
         }
         return true;
+}
+
+/*
+        The rest a region's content is drawn at (device pixels), for a region of view pixels whose body is at drawn: the drawn place clamped
+        to its ends, so a pull past an end draws the content at the end it is pulled from, and ui_scroll_pull stretches the picture by the pull.
+        A view taller than UI_STRETCH_VIEW is not stretched: it is drawn where the body is, and shifts as it did.
+*/
+static int ui_scroll_rest(const struct ui_scroll address_to s, int drawn, int view)
+{
+        int most = ui_scroll_most(s);
+
+        if (view > UI_STRETCH_VIEW)
+                return drawn;
+        return drawn < 0 ? 0 : drawn > most ? most : drawn;
+}
+
+/*
+        The overscroll stretch of a region: after its content is drawn at rest (ui_scroll_rest), the picture (x, y, width, height, device
+        pixels) is stretched from the end its body (drawn) is pulled past. Every region that scrolls by its body calls it, so a pull looks
+        the same in a list, a page's column, the gallery and the terminal. True when the picture was stretched.
+*/
+static b32 ui_scroll_pull(struct ui address_to ui, const struct ui_scroll address_to s, int drawn, int x, int y, int width, int height)
+{
+        int rest = ui_scroll_rest(s, drawn, height);
+
+        return drawn != rest && ui_stretch(ui, x, y, width, height, drawn - rest);
 }
 
 // A font engine and its atlas, atlas pixels a side, as one mapping. The default, 512, is 256 KiB of the image's address space
@@ -10198,11 +10225,9 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest;
 
         ui_scroll_frame(ui, &l->scroll);
-        // The rows are drawn at rest, inside the list's ends, and a pull past an end is the picture stretched (ui_stretch), as Android 12's is.
+        // The rows are drawn at rest, inside the list's ends, and a pull past an end is the picture stretched (ui_scroll_pull), as Android 12's is.
         drawn = l->scroll.scroll;
-        rest = drawn < 0 ? 0 : drawn > ui_scroll_most(&l->scroll) ? ui_scroll_most(&l->scroll) : drawn;
-        if (l->h > UI_STRETCH_VIEW)
-                rest = drawn;
+        rest = ui_scroll_rest(&l->scroll, drawn, l->h);
         l->scroll.scroll = rest;
         ui->top = l->y;
         ui->bottom = l->y + l->h;
@@ -10234,8 +10259,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         }
         l->scroll.scroll = drawn;
         // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
-        if (drawn != rest)
-                ui_stretch(ui, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h, drawn - rest);
+        ui_scroll_pull(ui, &l->scroll, drawn, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h);
         ui_scroll_draw(ui, &l->scroll);
 }
 
@@ -10651,7 +10675,7 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
-        int chosen = p->chosen, drawn, rest;
+        int chosen = p->chosen, rest;
 
         if (!p->column_on)
                 return;
@@ -10664,9 +10688,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->at = chosen;
         }
         c->x = ui_rtl() ? p->width * 100 / ui->scale - UI_PAD - p->column_w * 100 / ui->scale : UI_PAD;
-        // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_stretch)
-        drawn = p->column_scroll.scroll;
-        rest = drawn < 0 ? 0 : drawn > ui_scroll_most(&p->column_scroll) ? ui_scroll_most(&p->column_scroll) : drawn;
+        // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_scroll_pull)
+        rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top);
         c->y = (p->top - rest) * 100 / ui->scale;
         c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
@@ -10682,8 +10705,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
         ui_control_draw(ui, c);
-        if (drawn != rest)
-                ui_stretch(ui, ui_rtl() ? p->seam : 0, p->top, ui_rtl() ? p->width - p->seam : p->seam, p->bottom - p->top, drawn - rest);
+        ui_scroll_pull(ui, &p->column_scroll, p->column_scroll.scroll, ui_rtl() ? p->seam : 0, p->top, ui_rtl() ? p->width - p->seam : p->seam, p->bottom - p->top);
 }
 
 // The column's bar, drawn last of the page (after the body's rows): its track lies across the seam, so the body's rows (their hover,
