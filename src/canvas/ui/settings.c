@@ -578,6 +578,12 @@ static b32 settings_word(const char address_to words, positive index, char addre
         return false;
 }
 
+// How far a slider row moves for a key and between the places its slider rests at: 5 where the range is 100 or more, else 1.
+static int settings_slider_step(const struct settings_row address_to row)
+{
+        return row->high - row->low >= 100 ? 5 : 1;
+}
+
 /*
         What a switch or a step goes to from value, one way (1) or the other
         (-1): a switch to the other of on and off (2 throws it on and -2
@@ -3900,6 +3906,23 @@ static fn settings_activate(int row, int way)
         case SETTINGS_CHOICE:
                 settings_menu_open(row);
                 return;
+        case SETTINGS_SLIDER:
+        {
+                // Left and Right (and Enter, which is a step on) move it a step, held inside its range; the pointer's is the slider's (settings_slid).
+                long number = 0, to;
+
+                setting_whole((string_address)settings.value[row], &number);
+                to = number + way * settings_slider_step(which);
+                to = to < which->low ? which->low : to > which->high ? which->high : to;
+                if (to != number)
+                {
+                        char word[SETTINGS_VALUE];
+
+                        positive_into_string((p8 address_to)word, (positive)to);
+                        settings_change(row, word);
+                }
+                return;
+        }
         case SETTINGS_ACTION:
                 // A set asked for while one is running or waiting is that set: the clock is set once for it.
                 if (settings_slot(row) < settings.queued || (settings.child > 0 && settings.job == row && settings.job_sets))
@@ -4112,10 +4135,10 @@ static b32 settings_filter_starts(const struct window_event address_to event)
         return event->b != ' ';
 }
 
-// Whether Left and Right move a row: a step does. A switch is turned by Enter or Space only, so the arrows never change it.
+// Whether Left and Right move a row: a step does, and a slider by its step. A switch is turned by Enter or Space only, so the arrows never change it.
 static b32 settings_steps(int row)
 {
-        return row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_STEP;
+        return row < SETTINGS_ANY && (settings_rows[row].kind == SETTINGS_STEP || settings_rows[row].kind == SETTINGS_SLIDER);
 }
 
 // A key on the card of what a command said: it scrolls as a page of text does, and Escape, Enter, Space or Backspace go back to the list.
@@ -4487,6 +4510,15 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_CHOICE;
         else if (which->kind == SETTINGS_STEP)
                 row->kind = UI_ROW_STEP;
+        else if (which->kind == SETTINGS_SLIDER)
+        {
+                // The number the verb says, on a slider from the row's least to its greatest; its unit is said after the number.
+                long number = 0;
+
+                setting_whole((string_address)shown, &number);
+                row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
+                row->step = settings_slider_step(which), row->words = which->unit;
+        }
 }
 
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
@@ -4557,6 +4589,21 @@ static void settings_map_release(void)
 }
 
 static fn settings_press_at(void);
+
+// A slider the hand let go of (the kit's ui_list_slider): its row is changed to the value it was left at, once.
+static void settings_slid(void)
+{
+        int row = settings.list.slid - 1;
+        char word[SETTINGS_VALUE];
+
+        if (settings.list.slid <= 0)
+                return;
+        settings.list.slid = 0;
+        if (row < 0 || row >= SETTINGS_ANY || settings_rows[row].kind != SETTINGS_SLIDER || settings.state[row] != SETTINGS_READ)
+                return;
+        positive_into_string((p8 address_to)word, (positive)settings.list.slid_value);
+        settings_change(row, word);
+}
 
 static b32 settings_event(const struct window_event address_to event)
 {
@@ -4648,6 +4695,7 @@ static b32 settings_event(const struct window_event address_to event)
         case WINDOW_EVENT_BUTTON:
                 // The rows, the column, a press and a finger: the kit's page (its press is done by settings_press_at).
                 ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at);
+                settings_slid();
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
@@ -4719,7 +4767,7 @@ static fn settings_press_at(void)
                         settings_change(row, word);
                 return;
         }
-        if (settings_editing() != row)
+        if (settings_editing() != row && !(row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SLIDER))
                 settings_activate(row, settings.list.way);
 }
 

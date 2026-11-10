@@ -3800,6 +3800,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
 #define UI_SLIDER_VERTICAL 4 // stood on its end, without a label: the mixer's (ui_vslider_draw)
+#define UI_SLIDER_BARE 8     // a track and its thumb alone, in the middle of its box: no label, no number, no spot (a list row's slider)
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
 #define UI_TABS_VERTICAL 2 // the segmented strip stood on its end: a column of items h tall, the pip travelling along y
@@ -4506,7 +4507,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         b32 line = c->variant & UI_SLIDER_LINE;
         int thumb = line ? 20 : c->down ? 12 : c->hover ? 20 : 16;
         int bar = line ? (c->down ? 4 : c->hover ? 8 : 6) : thumb;
-        b32 track_y = ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // the bars' middle: 48 tall, 8 above the row's bottom
+        b32 bare = (c->variant & UI_SLIDER_BARE) != 0;
+        b32 track_y = bare ? ry + rh / 2 : ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // the bars' middle: 48 tall, 8 above the row's bottom (a bare one's box is as tall as its thumb)
         b32 stop, gap = ui_q8(ui, 2), origin;
         struct ui_box fill, rest;
         unsigned int accent = ui_role(UI_PRIMARY), off = ui_role(UI_CONTROL_OFF), ink;
@@ -4558,7 +4560,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 if (spot > 0)
                 {
                         // spot_x is the press's logical x in the control: scaled with the rest, not added in device pixels as it was.
-                        b32 spx = ui_q8(ui, c->x + c->spot_x), spy = ry + rh - ui_q8(ui, 24);
+                        b32 spx = ui_q8(ui, c->x + c->spot_x), spy = bare ? track_y : ry + rh - ui_q8(ui, 24);
 
                         // A radial ellipse 180 by 80, the accent at its middle to nothing at 70%: rings of it, outermost first.
                         for (int ring = 7; ring >= 0; ring--)
@@ -4670,7 +4672,9 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 }
         }
 
-        // The label and the value, which ride the squish too.
+        // The label and the value, which ride the squish too. A bare slider has neither: its row says them.
+        if (bare)
+                return;
         ink = c->hover || c->down ? accent : ui_role(UI_ON_SURFACE);
         baseline = ui_kit_baseline(ui, (ry + ui_q8(ui, 8) + ty) / 256, UI_BODY_LARGE);
         {
@@ -9461,6 +9465,8 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_TABS 4
 #define UI_ROW_SWATCHES 5
 #define UI_ROW_FIELD 6
+#define UI_ROW_SLIDER 7 // a whole number from low to high on a slider at the row's right, its number and unit before it
+#define UI_ROW_SLIDER_W 160 // the slider's length, logical pixels
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
 #define UI_ROW_BADGE_ERROR 2
@@ -9482,13 +9488,14 @@ struct ui_row
         const char address_to label;       // at the left
         const char address_to value;       // at the right
         const char address_to note;        // a quiet word before the value: what the row is, where it is from
-        const char address_to words;       // a tabs row's choices, a swatches row's colours (rrggbb): words a blank apart
+        const char address_to words;       // a tabs row's choices, a swatches row's colours (rrggbb): words a blank apart; a slider row's unit, said after its number
         const char address_to header;      // the header of its section, over the section's first row
         struct ui_text address_to edit;    // a field's engine (its text, dots when masked, its caret and its rules)
         const char address_to placeholder; // and what it says while empty
         int section;                       // the section it is in: a header where it changes
         int kind;                          // UI_ROW_*
-        int at;                            // a tabs or a swatches row's choice now, -1 none
+        int at;                            // a tabs or a swatches row's choice now, -1 none; a slider row's value
+        int low, high, step;               // a slider row's range and the step its value takes
         int bars;                          // the bars of a signal at its edge, 1 to 4 (0 none)
         const unsigned long long address_to strip_bytes; // a drive's partition strip: the bytes of each segment, in order (none when null)
         const unsigned char address_to strip_roles;      // and each segment's role, UI_STRIP_*
@@ -9528,6 +9535,8 @@ struct ui_list
         struct ui_scroll scroll;
         int hover, down;                   // the row under the pointer and the row pressed, -1 none
         int part, way;                     // a press's: the item of a tabs or swatches row it was on (-1 none), a step's way
+        int slide;                         // the row (plus one) whose slider the pointer is dragging, 0 none: what the hand holds is the slider's (ui_list_slider)
+        int slid, slid_value;              // the row (plus one) whose slider was let go, and the value the hand left it at: the app takes them and clears slid
         struct ui_press press;             // the press on a row (ui_list_click): where it went down, and whether it is a drag
         int pointer_x, pointer_y;
         struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
@@ -9725,7 +9734,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                                                      int right, int y, int room)
 {
         struct ui_control address_to c = ui_list_control(l, id, 1);
-        unsigned char kind = row->kind == UI_ROW_TABS ? UI_TABS : row->kind == UI_ROW_SWATCHES ? UI_SWATCHES : UI_INPUT;
+        unsigned char kind = row->kind == UI_ROW_TABS ? UI_TABS : row->kind == UI_ROW_SWATCHES ? UI_SWATCHES : row->kind == UI_ROW_SLIDER ? UI_SLIDER : UI_INPUT;
         int height = ui_dev(ui, UI_ROW);
 
         if (!c)
@@ -9734,8 +9743,24 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         {
                 memory_zero(c, sizeof(*c));
                 c->kind = kind;
-                c->variant = kind == UI_TABS ? UI_TABS_SEGMENTED : kind == UI_INPUT ? UI_FIELD_BARE : 0;
+                c->variant = kind == UI_TABS ? UI_TABS_SEGMENTED : kind == UI_INPUT ? UI_FIELD_BARE : kind == UI_SLIDER ? UI_SLIDER_BARE : 0;
                 ui_control_start(c);
+        }
+        if (kind == UI_SLIDER)
+        {
+                // The app's value is the slider's while no hand has it: one let go keeps where it was left until the app's value changes (c->at is the app's
+                // value this slider last took), so it does not spring back to the old value while the change is made.
+                c->low = ui_q(row->low), c->high = ui_q(row->high), c->step = ui_q(row->step > 0 ? row->step : 1);
+                if (!c->down && !c->sliding && c->at != row->at)
+                        c->value = ui_q(row->at), c->at = row->at;
+                c->w = UI_ROW_SLIDER_W, c->h = 32;
+                c->y = (y + height / 2) * 100 / ui->scale - 16;
+                c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
+                c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y);
+                c->hover = c->item >= 0 && l->hover == id;
+                c->hover_x = c->hover ? ui_point(l->pointer_x, ui_dev(ui, c->x), ui_dev(ui, c->w)) : -1;
+                c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
+                return c;
         }
         if (kind == UI_INPUT)
         {
@@ -9820,7 +9845,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null, address_to badge = null;
         int badge_w = 0, badge_right = 0, chevron_w = 0;
-        char cut[UI_CUT_TEXT];
+        char cut[UI_CUT_TEXT], number[40];
+        int number_w = 0, trailing_right;
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
@@ -9892,8 +9918,27 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_signal(ui, ui_mirror(right - ui_signal_width(ui), ui_signal_width(ui), x, w) + ui_signal_width(ui), y + height / 2, row.bars);
                 right -= ui_dev(ui, 18) + gap;
         }
-        if (row.kind == UI_ROW_TABS || row.kind == UI_ROW_SWATCHES)
+        trailing_right = right;
+        if (row.kind == UI_ROW_TABS || row.kind == UI_ROW_SWATCHES || row.kind == UI_ROW_SLIDER)
                 trailing = ui_list_trailing(ui, l, id, &row, right, y, 0);
+        // A slider row's number and its unit, from the slider's own value (the hand's while it holds it), at the slider's left.
+        if (trailing && row.kind == UI_ROW_SLIDER)
+        {
+                b64 whole = (trailing->value + UI_HALF) >> UI_Q;
+                positive length = 0;
+
+                if (whole < 0)
+                        number[length++] = '-', whole = -whole;
+                length += positive_into_string((p8 address_to)number + length, (positive)whole);
+                if (row.words && row.words[0] && length + 2 < sizeof(number))
+                {
+                        number[length++] = ' ';
+                        string_copy_bounded((string_address)number + length, (string_address)row.words, sizeof(number) - length);
+                }
+                else
+                        number[length] = 0;
+                number_w = ui_kit_measure(ui, (string_address)number, UI_BODY_MEDIUM) + gap;
+        }
         // The badge: the row's own second control, at the right (left of a switch, which is at the very right). Its width comes out of the
         // room the label and the value have, and a row that is no switch has its right edge moved in by it.
         if (row.badge)
@@ -9933,7 +9978,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if (row.kind != UI_ROW_SWITCH)
                         right -= chevron_w;
         }
-        label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap
+        label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap + number_w
                                          : row.kind == UI_ROW_FIELD && row.head ? (w - 2 * inset) * 2 / 3 : (w - 2 * inset) / 3);
         // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
         // motion is read, and no word measured: its label's width places only its value and a field's well.
@@ -9945,6 +9990,10 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if (trailing)
         {
                 ui_control_draw(ui, trailing);
+                // A slider's number is at its left, right aligned to it; where the slider is, in the left to right layout the row is made in.
+                if (row.kind == UI_ROW_SLIDER && seen)
+                        ui_kit_text_flipped(ui, trailing_right - ui_dev(ui, trailing->w) - number_w, baseline, (string_address)number, UI_BODY_MEDIUM,
+                                            row.dim ? quiet : ui_text_colour(ui, UI_ON_SURFACE), 0, x, w);
                 return;
         }
         if (row.kind == UI_ROW_FIELD)
@@ -10122,8 +10171,8 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                         ui_list_damage(ui, l, id);
                         l->hover = id;
                 }
-                else if (id >= 0 && (trailing = ui_list_control(l, id, 1)) && (trailing->kind == UI_TABS || trailing->kind == UI_SWATCHES))
-                        ui_list_damage(ui, l, id); // a segment or a swatch under it
+                else if (id >= 0 && (trailing = ui_list_control(l, id, 1)) && (trailing->kind == UI_TABS || trailing->kind == UI_SWATCHES || trailing->kind == UI_SLIDER))
+                        ui_list_damage(ui, l, id); // a segment or a swatch under it, or a slider's ghost
                 // A row under the pointer is the hand's, or the I-beam's over its field (ui_kit_shape_note, as the press's controls are).
                 if (id >= 0 && (own = ui_list_control(l, id, 0)))
                         ui_kit_shape_note(own);
@@ -10880,6 +10929,77 @@ static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page ad
 }
 
 /*
+        A slider row's drag (UI_ROW_SLIDER). A press on the row's slider is the slider's and not the row's click: the kit's slider takes the
+        pointer (ui_kit_pointer) and every motion until the release moves it, the value following the hand, or sliding to a click. The value is
+        the app's once, when the hand lets go: l->slid is the row (plus one) and l->slid_value the value, which the app takes and clears, so a
+        drag does not start a change at every step; a release the compositor took back, or a finger that took the page's drag instead (the
+        slider lets go of the other axis), leaves none. A press elsewhere on the row is the row's. True when the event was the slider's.
+*/
+static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
+                          const struct window_event address_to event)
+{
+        struct ui_control address_to c;
+        int id, x, y;
+
+        if (l->slide)
+        {
+                id = l->slide - 1;
+                c = ui_list_control(l, id, 1);
+                if (!c || c->kind != UI_SLIDER || ui_kit_held != c)
+                {
+                        l->slide = 0;
+                        return false;
+                }
+                if (event->type == WINDOW_EVENT_MOTION)
+                {
+                        if (ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags))
+                                l->slid_value = (int)((c->value + UI_HALF) >> UI_Q);
+                        if (ui_kit_held != c)
+                                l->slide = 0;
+                        ui_list_damage(ui, l, id);
+                        return true;
+                }
+                if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_DOWN))
+                {
+                        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false, event->flags);
+                        if (!(event->flags & WINDOW_KEY_CANCEL))
+                                l->slid = id + 1;
+                        l->slide = 0;
+                        ui_list_damage(ui, l, id);
+                        return true;
+                }
+                return false;
+        }
+        if (p->card || event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !(event->flags & WINDOW_KEY_DOWN))
+                return false;
+        x = ui_kit.pointer_x, y = ui_kit.pointer_y;
+        id = ui_list_hit(ui, l, x, y);
+        if (id < 0)
+                return false;
+        {
+                struct ui_row row;
+
+                ui_list_describe(l, id, &row);
+                if (row.kind != UI_ROW_SLIDER)
+                        return false;
+        }
+        c = ui_list_control(l, id, 1);
+        if (!c || c->kind != UI_SLIDER || ui_control_hit(ui, c, x, y) < 0)
+                return false;
+        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, x, y, true, event->flags);
+        if (ui_kit_held != c)
+                return false;
+        l->slide = id + 1, l->slid = 0;
+        l->slid_value = (int)((ui_slider_at((struct ui address_to)ui, c, x, y) + UI_HALF) >> UI_Q);
+        ui_list_damage(ui, l, l->focus);
+        l->focus = id, l->hover = id;
+        ui_list_damage(ui, l, id);
+        p->pane = 1;
+        ui_page_changed(p);
+        return true;
+}
+
+/*
         The page's pointer: a motion or a button of the mouse or a finger, forwarded here by the app (its map, bars and fields
         have had the first say). done is the app's press action.
 */
@@ -10888,6 +11008,8 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
 {
         // The event's own touch flag, as ui_event_context sets it for the loop's events (a menu the press opens is a finger's).
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        if (ui_list_slider(ui, p, l, event))
+                return;
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 if (event->flags & WINDOW_KEY_TOUCH)

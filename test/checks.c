@@ -150236,6 +150236,130 @@ static fn check_kit_page_pointer(void)
         ui_kit.test_clock = 0;
 }
 
+/*
+        A slider row of a list (UI_ROW_SLIDER, ui_list_slider): the slider is the kit's UI_SLIDER with no label and no number of its own (the
+        row says them), its value the app's until a hand holds it and after it until the app's own value changes; a press on it is the slider's
+        and no click of the row, the pointer is its until the release, the value follows the hand through the step it takes and holds inside the
+        range, and the row is changed once, on the release, to the value the hand left it at (l->slid, l->slid_value); a release the compositor
+        took back changes nothing; a press elsewhere on the row is the row's click.
+*/
+static int slider_app_value[2] = {100, 150};
+
+static void slider_row(int id, struct ui_row address_to row)
+{
+        row->label = "Taskbar scale";
+        row->kind = UI_ROW_SLIDER;
+        row->at = slider_app_value[id];
+        row->low = 50, row->high = 200, row->step = 5, row->words = "percent";
+}
+
+static fn check_kit_slider_row(void)
+{
+        struct ui ui;
+        struct ui_page p;
+        struct ui_list l;
+        struct ui_row row;
+        struct ui_control address_to c;
+        struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event up = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event cancel = {WINDOW_EVENT_BUTTON, WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0};
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, 0, 0};
+        int right, x, y, made = 0, pressed = 0, dragged = 0, clamped = 0, once = 0, cancelled = 0, elsewhere = 0, kept = 0, followed = 0;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.scale = 100;
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 200, p.top = 0, p.bottom = 200, p.left = 0, p.right = 400;
+        memory_zero(&l, sizeof(l));
+        l.count = 2, l.ids = 2, l.describe = slider_row, l.focus = l.hover = l.down = -1;
+        l.id[0] = 0, l.id[1] = 1;
+        ui_list_place(&ui, &l, 0, 0, 400, 200);
+        ui_list_layout(&ui, &l);
+        ui_kit.motion = 0;
+        ui_kit.test_clock = 5000000000ull, ui_kit.now = ui_kit.test_clock;
+        right = 400 - ui_dev(&ui, UI_INSET);
+
+        // The control as a draw makes it: a bare slider over the row's range at the app's value.
+        ui_list_describe(&l, 0, &row);
+        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        made = c && c->kind == UI_SLIDER && (c->variant & UI_SLIDER_BARE) && c->low == ui_q(50) && c->high == ui_q(200) && c->step == ui_q(5) &&
+               c->value == ui_q(100) && c->w == UI_ROW_SLIDER_W && c->x + c->w <= right;
+        check("kit slider row: its slider is a bare kit slider over the row's range, at the app's value, ending at the row's right", made);
+        if (!c)
+                return;
+
+        // A press at the middle of the track is the slider's: the row is not clicked, the pointer is the slider's, the focus is the row's.
+        x = ui_dev(&ui, c->x + c->w / 2), y = ui_dev(&ui, c->y + c->h / 2);
+        motion.a = x, motion.b = y;
+        ui_kit_track(&motion);
+        kit_pointer_done = 0;
+        ui_event_context(&down);
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        pressed = l.slide == 1 && l.slid == 0 && l.slid_value == 125 && ui_kit_held == c && l.focus == 0 && p.pane == 1 && kit_pointer_done == 0;
+        ui_event_context(&up);
+        ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
+        once = l.slid == 1 && l.slid_value == 125 && l.slide == 0 && ui_kit_held == null && kit_pointer_done == 0;
+        check("kit slider row: a press on the slider is the slider's and no click of the row, and the release names the value the press chose", pressed && once);
+        l.slid = 0;
+
+        // A drag: the value follows the hand through the step (a quarter of the way is 87.5, which rests at 90) and holds inside the range.
+        x = ui_dev(&ui, c->x + c->w / 4);
+        motion.a = x, motion.b = y;
+        ui_kit_track(&motion);
+        ui_event_context(&down);
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        x = ui_dev(&ui, c->x + c->w / 2 + c->w / 4);
+        motion.a = x, motion.b = y;
+        ui_event_context(&motion);
+        ui_page_pointer(&ui, &p, &l, &motion, check_kit_pointer_done);
+        followed = l.slide == 1 && l.slid_value == 165;
+        x = ui_dev(&ui, c->x + c->w + 80);
+        motion.a = x, motion.b = y;
+        ui_event_context(&motion);
+        ui_page_pointer(&ui, &p, &l, &motion, check_kit_pointer_done);
+        clamped = l.slid_value == 200 && c->value == ui_q(200);
+        ui_event_context(&up);
+        ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
+        dragged = l.slid == 1 && l.slid_value == 200 && l.slide == 0;
+        check("kit slider row: a drag follows the hand through the step and holds inside the range, and the release names where it was left",
+              followed && clamped && dragged);
+        l.slid = 0;
+
+        // The app's value is not taken back while it has not changed: the slider stays where the hand left it, and follows the app when it does.
+        ui_list_describe(&l, 0, &row);
+        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        kept = c->value == ui_q(200);
+        slider_app_value[0] = 70;
+        ui_list_describe(&l, 0, &row);
+        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        check("kit slider row: let go, it keeps the hand's value until the app's own changes, and then follows it", kept && c->value == ui_q(70));
+
+        // A release the compositor took back changes nothing.
+        x = ui_dev(&ui, c->x + c->w / 2);
+        motion.a = x, motion.b = y;
+        ui_kit_track(&motion);
+        ui_event_context(&down);
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        ui_event_context(&cancel);
+        ui_page_pointer(&ui, &p, &l, &cancel, check_kit_pointer_done);
+        cancelled = l.slid == 0 && l.slide == 0 && ui_kit_held == null;
+        check("kit slider row: a release the compositor took back changes nothing", cancelled);
+
+        // A press on the row away from the slider is the row's click, done on its release.
+        x = ui_dev(&ui, 20), y = ui_dev(&ui, 20);
+        motion.a = x, motion.b = y;
+        ui_kit_track(&motion);
+        kit_pointer_done = 0;
+        ui_event_context(&down);
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        ui_event_context(&up);
+        ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
+        elsewhere = l.slide == 0 && l.slid == 0 && kit_pointer_done == 1;
+        check("kit slider row: a press on the row away from its slider is the row's click, and no change of the slider", elsewhere);
+        slider_app_value[0] = 100;
+        ui_kit.test_clock = 0;
+}
+
 // A finger pulling a bounded region past an end holds it by at most a view, however far it goes, and the stretch springs home in
 // the one time: a pull of 2400 px is not a stretch of 2400 px that takes seconds to run down.
 static fn check_kit_finger_pull(void)
@@ -163806,6 +163930,7 @@ b32 main()
         check_kit_event_context();
         check_kit_buffers();
         check_kit_page_pointer();
+        check_kit_slider_row();
         check_kit_finger_pull();
         check_kit_confirm_repeat();
         check_kit_hand();

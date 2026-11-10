@@ -45,6 +45,7 @@
 #define SETTINGS_DEVICE 9u
 #define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
 #define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
+#define SETTINGS_SLIDER 12u // a whole number from the row's low to its high on a slider (the kit's UI_SLIDER); the verb sets any number in range
 #define SETTINGS_PORT 12u   // a device the system sees, in the Devices list: a press allows or blocks it
 #define SETTINGS_LINK 13u // a machine linked, as moonwater link says it: its name and what it was last heard as (not pressed)
 
