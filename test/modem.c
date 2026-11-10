@@ -22,9 +22,9 @@
 /* sha256 of the samples of the golden frame: payload "golden frame", seq 42, the test key. Pins the wire format of each
    configuration that has a pin: the default (40 samples, 8 tones at 96 kHz) and the 16-tone option. */
 #if MODEM_SYM == 40 && MODEM_TONES == 8
-#define MODEM_GOLDEN "2535d90caec9a60f752370d789ad4eedc1986b07ad1512bfc26e6943b7809260"
+#define MODEM_GOLDEN "8ae2b67add424fe852b915d1204acb5ae218df2acdb4e57ba8ac14bf0fc8f2c2"
 #elif MODEM_SYM == 40 && MODEM_TONES == 16
-#define MODEM_GOLDEN "ff1ba5d9ed62dca9930870adebbfe6837293996ab2811ece1092936635889287"
+#define MODEM_GOLDEN "e850103c140e4fa8f44b2d17d3b8d02416e29aa30440d86c8e80495ccce6f430"
 #endif
 
 #ifndef MODEM_FUZZ /* the self-test; the fuzz build below uses none of it */
@@ -343,7 +343,7 @@ static void test_noise(void)
 		printf("      snr %4.0f dB: %2d of 50 frames (32 bytes) decode\n", snrs[i], ok);
 	}
 #if MODEM_SYM == 40 && MODEM_TONES == 8
-	/* The default configuration's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 10 of 50. */
+	/* The default configuration's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 5 of 50. */
 	check(decoded[3] == 50, "at 0 dB every frame decodes");
 	check(decoded[4] >= 5, "at -3 dB at least 5 of 50 frames decode");
 #elif MODEM_SYM == 40 && MODEM_TONES == 16

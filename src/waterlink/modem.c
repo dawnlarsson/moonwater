@@ -20,10 +20,12 @@
 	option (MODEM_TONES 16, at the same rate) carries 9600 bit/s, and its top
 	tone is 38.4 kHz: it needs a cable and a card that pass that.
 
-	A frame: lead-in (MODEM_PRE bytes of 0x55), sync 5A C3 96 3C, LEN (one
-	byte, 0..255), SEQ (four bytes, big-endian), payload, then a 32-byte
-	HMAC-SHA256 over LEN, SEQ and payload. The receiver uses nothing until
-	the tag checks. A receiver's session starts from 0, so its first frame is 1; a sender goes on from the last number it
+	A frame: lead-in (MODEM_PRE bytes of 0x55), sync A7 3D 69 C5 (the wire
+	version: version 1 frames, with a 32-byte tag, had 5A C3 96 3C), LEN
+	(one byte, 0..255), SEQ (four bytes, big-endian), payload, then a
+	16-byte tag: the first 16 bytes of HMAC-SHA256 over LEN, SEQ and payload
+	(the HMAC truncated to 128 bits). The receiver uses nothing until the
+	tag checks. A receiver's session starts from 0, so its first frame is 1; a sender goes on from the last number it
 	sent under the same key (the send section keeps it), so one recording can hold any number of sends, and the receiver takes
 	each frame that follows the one before.
 
@@ -70,7 +72,8 @@
 #define MODEM_SYNC_BYTES 4
 #define MODEM_HDR 5	      /* LEN and SEQ */
 #define MODEM_PAYLOAD_MAX 255 /* the largest a one-byte LEN carries */
-#define MODEM_TAG 32
+#define MODEM_MAC 32 /* HMAC-SHA256's output */
+#define MODEM_TAG 16 /* a frame's tag: HMAC-SHA256 truncated to its first 16 bytes (a 128-bit tag), 16 bytes a frame less than 32 */
 #define MODEM_KEY_MIN 16
 #define MODEM_MAX_SAMPLES (1u << 20) /* about 10.9 seconds at 96 kHz: the most one decode call reads */
 #define MODEM_WINDOW 1024u
@@ -347,7 +350,20 @@ static void modem_hmac(const uint8_t *key, size_t klen, const uint8_t *msg, size
 
 /* ---- framing ----------------------------------------------------------- */
 
-#define MODEM_SYNC_WORD 0x3C96C35Au /* 5A C3 96 3C read least significant bit first */
+/* The frame's tag: HMAC-SHA256 under key over data, truncated to its first MODEM_TAG bytes (RFC 2104, FIPS 198-1 truncation
+   to the left-most bits). The full 32 bytes are made and the rest is dropped; the comparison is over MODEM_TAG bytes only. */
+static void modem_tag(const uint8_t *key, size_t klen, const uint8_t *msg, size_t mlen, uint8_t out[MODEM_TAG])
+{
+	uint8_t mac[MODEM_MAC];
+
+	modem_hmac(key, klen, msg, mlen, mac);
+	memcpy(out, mac, MODEM_TAG);
+	memset(mac, 0, sizeof(mac));
+}
+
+/* The sync word is the wire version: a frame with a 16-byte tag carries A7 3D 69 C5, read least significant bit first. Version 1
+   (a 32-byte tag) carried 5A C3 96 3C, so a receiver of one version never reads frames of the other as its own. */
+#define MODEM_SYNC_WORD 0xC5693DA7u
 
 /* One scratch buffer for the demodulated bits, sized for the largest input the decoder takes. */
 static uint8_t modem_bits[(MODEM_MAX_SAMPLES / MODEM_SYM + 1) * MODEM_SYM_BITS];
@@ -370,7 +386,7 @@ size_t modem_encode_samples(size_t len)
 size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t *payload, size_t len,
 		    int16_t *pcm, size_t cap)
 {
-	static const uint8_t sync[MODEM_SYNC_BYTES] = {0x5A, 0xC3, 0x96, 0x3C};
+	static const uint8_t sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
 	uint8_t fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
 	size_t nb, at, total, body, bit, nbits;
 
@@ -393,7 +409,7 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 	if (len > 0)
 		memcpy(fb + nb, payload, len);
 	nb += len;
-	modem_hmac(key, klen, fb + body, MODEM_HDR + len, fb + nb);
+	modem_tag(key, klen, fb + body, MODEM_HDR + len, fb + nb);
 	nb += MODEM_TAG;
 
 	/* Symbols from the frame's bit stream (least significant bit of each byte first). A short last symbol is
@@ -472,7 +488,7 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 			len = buf[0];
 			if (len <= MODEM_PAYLOAD_MAX && modem_read_bytes(bits, nb, p, buf, MODEM_HDR + len + MODEM_TAG))
 			{
-				modem_hmac(key, klen, buf, MODEM_HDR + len, mac);
+				modem_tag(key, klen, buf, MODEM_HDR + len, mac);
 				for (t = 0; t < MODEM_TAG; t++)
 					diff |= (unsigned)(mac[t] ^ buf[MODEM_HDR + len + t]);
 				if (diff) {
@@ -906,9 +922,9 @@ static bipolar modem_send_pcm(unsigned long channel, const int16_t address_to pc
         label under the key, so the record counts for that key and no other), the last frame's sequence number, and the
         datagram id after it, both big endian. A record for another key, or none, counts from 0.
 */
-#define MODEM_SEQ_RECORD (MODEM_TAG + 4 + 2)
+#define MODEM_SEQ_RECORD (MODEM_MAC + 4 + 2) /* the fingerprint is the full HMAC: the records a version 1 box kept still read */
 
-static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_TAG])
+static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_MAC])
 {
         static const uint8_t label[] = "waterlink modem sequence";
 
@@ -919,7 +935,7 @@ static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_TAG])
    record: that is refused rather than read as a count of 0, which would send numbers the receiver has already taken. */
 static bipolar modem_seq_load(string_address path, const uint8_t *key, uint32_t *seq, uint16_t *id)
 {
-        uint8_t record[MODEM_SEQ_RECORD], fingerprint[MODEM_TAG];
+        uint8_t record[MODEM_SEQ_RECORD], fingerprint[MODEM_MAC];
         positive got = 0;
         bipolar read;
         unsigned diff = 0;
@@ -934,13 +950,13 @@ static bipolar modem_seq_load(string_address path, const uint8_t *key, uint32_t 
                 return read;
         if (got != sizeof record)
                 return -EIO;
-        for (positive i = 0; i < MODEM_TAG; i++)
+        for (positive i = 0; i < MODEM_MAC; i++)
                 diff |= (unsigned)(record[i] ^ fingerprint[i]);
         if (diff)
                 return 0;
-        *seq = ((uint32_t)record[MODEM_TAG] << 24) | ((uint32_t)record[MODEM_TAG + 1] << 16) |
-               ((uint32_t)record[MODEM_TAG + 2] << 8) | (uint32_t)record[MODEM_TAG + 3];
-        *id = (uint16_t)(((unsigned)record[MODEM_TAG + 4] << 8) | record[MODEM_TAG + 5]);
+        *seq = ((uint32_t)record[MODEM_MAC] << 24) | ((uint32_t)record[MODEM_MAC + 1] << 16) |
+               ((uint32_t)record[MODEM_MAC + 2] << 8) | (uint32_t)record[MODEM_MAC + 3];
+        *id = (uint16_t)(((unsigned)record[MODEM_MAC + 4] << 8) | record[MODEM_MAC + 5]);
         return 0;
 }
 
@@ -950,12 +966,12 @@ static bipolar modem_seq_save(string_address path, const uint8_t *key, uint32_t 
         uint8_t record[MODEM_SEQ_RECORD];
 
         modem_seq_fingerprint(key, record);
-        record[MODEM_TAG] = (uint8_t)(seq >> 24);
-        record[MODEM_TAG + 1] = (uint8_t)(seq >> 16);
-        record[MODEM_TAG + 2] = (uint8_t)(seq >> 8);
-        record[MODEM_TAG + 3] = (uint8_t)seq;
-        record[MODEM_TAG + 4] = (uint8_t)(id >> 8);
-        record[MODEM_TAG + 5] = (uint8_t)id;
+        record[MODEM_MAC] = (uint8_t)(seq >> 24);
+        record[MODEM_MAC + 1] = (uint8_t)(seq >> 16);
+        record[MODEM_MAC + 2] = (uint8_t)(seq >> 8);
+        record[MODEM_MAC + 3] = (uint8_t)seq;
+        record[MODEM_MAC + 4] = (uint8_t)(id >> 8);
+        record[MODEM_MAC + 5] = (uint8_t)id;
         return link_file_replace(path, record, sizeof record, true);
 }
 
