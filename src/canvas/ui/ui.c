@@ -10119,6 +10119,11 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 }
                 else if (id >= 0 && (trailing = ui_list_control(l, id, 1)) && (trailing->kind == UI_TABS || trailing->kind == UI_SWATCHES))
                         ui_list_damage(ui, l, id); // a segment or a swatch under it
+                // A row under the pointer is the hand's, or the I-beam's over its field (ui_kit_shape_note, as the press's controls are).
+                if (id >= 0 && (own = ui_list_control(l, id, 0)))
+                        ui_kit_shape_note(own);
+                else if (id >= 0)
+                        ui_kit_shape = WINDOW_POINTER_HAND;
                 return -1;
         }
         if (type != WINDOW_EVENT_BUTTON)
@@ -14704,6 +14709,10 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
         p32 asks;
         b32 ending = false;
 
+        // A field's well is the I-beam's over the pointer's hover too (ui_text_pointer does it for a drag, which this passes on).
+        if (event->type == WINDOW_EVENT_MOTION && !t->sel.dragging && x >= t->well_left && x < t->well_right && y >= t->well_top &&
+            y < t->well_bottom)
+                ui_kit_shape = WINDOW_POINTER_TEXT;
         if (event->type == WINDOW_EVENT_WHEEL || (event->type == WINDOW_EVENT_MOTION && !t->sel.dragging))
                 return 0;
         if (event->type == WINDOW_EVENT_BUTTON)

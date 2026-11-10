@@ -556,6 +556,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                         continue;
                 windows_reset_row(table, (unsigned int)row);
                 compositor_wl.laying[row].open = 0;
+                compositor_wl.cursor_asked[row] = 0;
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
                 // The person's own launch takes the keys with its first window, as a program of the compositor's does.
@@ -586,8 +587,9 @@ static void compositor_wl_unlend(int row);
 static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
+        // The cursor the client asked for is its own: a program that takes the row next has none asked (the kit's shape shows).
         if (row >= 0 && row < WINDOWS)
-                compositor_wl.laying[row].open = 0, compositor_wl_unlend(row);
+                compositor_wl.laying[row].open = 0, compositor_wl.cursor_asked[row] = 0, compositor_wl_unlend(row);
         if (row >= 0 && row < WINDOWS && compositor_wl.source[row].va)
         {
                 if (compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
