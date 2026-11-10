@@ -8359,7 +8359,8 @@ static p32 ui_buttons_pointer(struct ui address_to ui, struct ui_buttons address
                 ui_confirm_drop(&b->confirm);
                 return asks;
         }
-        if (clicked)
+        // A release that is another control's hold (captured from elsewhere on the page) clicks none of this row's buttons.
+        if (clicked && clicked >= b->button && clicked < b->button + b->count)
                 return asks | ui_buttons_press(b, (int)(clicked - b->button));
         return asks | (held ? UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN : 0);
 }
