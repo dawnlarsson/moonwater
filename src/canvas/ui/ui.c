@@ -10584,8 +10584,12 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
 static fn ui_page_column_press(const struct ui address_to ui, struct ui_page address_to p, int group, int x, int y)
 {
         struct ui_control address_to c = &p->column;
+        int rx, rw;
 
-        ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + group * c->h), ui_dev(ui, c->w), ui_dev(ui, c->h), 8);
+        // The column is drawn from its row, edge to edge (ui_vtabs_row), so the ripple starts from the row too: from the
+        // column's own box it began UI_PAD to the left of the press.
+        ui_vtabs_row(c, &rx, &rw);
+        ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + group * c->h), ui_dev(ui, rw), ui_dev(ui, c->h), 8);
 }
 
 /*
