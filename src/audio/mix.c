@@ -238,7 +238,7 @@ AUDIO_API void audio_init(void)
 */
 #define AUDIO_WIDE 4096 // lanes a pass holds
 
-AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, long channels, float *const *dst)
+AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, long channels, float **dst)
 {
         long bytes = audio_format_bytes(format), done = 0;
         unsigned long kind;
