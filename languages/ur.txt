@@ -19,6 +19,7 @@ editor_no_match	7de7	کوئی مطابقت نہیں
 editor_not_regular	5955	عام فائل نہیں ہے: مسترد
 editor_pattern_bad	5d57	پیٹرن درست نہیں ہے
 editor_position	3696	لائن %1$d، کالم %2$d
+editor_read_failed	5f78	فائل پڑھی نہیں جا سکی: وہ کھولی نہیں گئی
 editor_replace_usage	c677	تبدیلی کی شکل: تلاش/متبادل
 editor_replaced	1128	%d تبدیل کیے گئے
 editor_save_failed	069d	محفوظ کرنا ناکام رہا: فائل جیسی تھی ویسی ہی ہے

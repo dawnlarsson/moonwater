@@ -18,6 +18,7 @@ editor_no_match	7de7	eşleşme yok
 editor_not_regular	5955	normal bir dosya değil: reddedildi
 editor_pattern_bad	5d57	desen derlenmiyor
 editor_position	3696	Sat %1$d, Sütun %2$d
+editor_read_failed	5f78	dosya okunamadı: açılmadı
 editor_replace_usage	c677	değiştirme ARANAN/YERİNE biçimindedir
 editor_replaced	1128	%d değiştirildi
 editor_save_failed	069d	kaydedilemedi: dosya eskisi gibi

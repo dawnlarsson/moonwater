@@ -18,6 +18,7 @@ editor_no_match	7de7	καμία αντιστοιχία
 editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
 editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
 editor_position	3696	Γρ %1$d, Στ %2$d
+editor_read_failed	5f78	το αρχείο δεν μπόρεσε να διαβαστεί: δεν ανοίγεται
 editor_replace_usage	c677	η αντικατάσταση είναι ΑΝΑΖΗΤΗΣΗ/ΑΝΤΙΚΑΤΑΣΤΑΣΗ
 editor_replaced	1128	αντικαταστάθηκαν: %d
 editor_save_failed	069d	η αποθήκευση απέτυχε: το αρχείο είναι όπως ήταν

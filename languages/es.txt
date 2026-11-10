@@ -18,6 +18,7 @@ editor_no_match	7de7	sin coincidencias
 editor_not_regular	5955	no es un archivo normal: rechazado
 editor_pattern_bad	5d57	el patrón no se compila
 editor_position	3696	Ln %1$d, Col %2$d
+editor_read_failed	5f78	no se pudo leer el archivo: no se abre
 editor_replace_usage	c677	reemplazar es BUSCAR/REEMPLAZO
 editor_replaced	1128	%d reemplazados
 editor_save_failed	069d	no se pudo guardar: el archivo sigue como estaba

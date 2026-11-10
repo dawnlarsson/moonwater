@@ -19,6 +19,7 @@ editor_no_match	7de7	موردی یافت نشد
 editor_not_regular	5955	پرونده عادی نیست: رد شد
 editor_pattern_bad	5d57	الگو معتبر نیست
 editor_position	3696	سطر %1$d، ستون %2$d
+editor_read_failed	5f78	پرونده خوانده نشد: باز نمی‌شود
 editor_replace_usage	c677	قالب جایگزینی: جستجو/جایگزین
 editor_replaced	1128	%d مورد جایگزین شد
 editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که بود مانده است

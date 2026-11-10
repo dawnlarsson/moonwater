@@ -18,6 +18,7 @@ editor_no_match	7de7	нет совпадений
 editor_not_regular	5955	не обычный файл: отказано
 editor_pattern_bad	5d57	шаблон не компилируется
 editor_position	3696	Стр %1$d, Стлб %2$d
+editor_read_failed	5f78	не удалось прочитать файл: он не открыт
 editor_replace_usage	c677	замена — НАЙТИ/ЗАМЕНА
 editor_replaced	1128	заменено: %d
 editor_save_failed	069d	не удалось сохранить: файл не изменился

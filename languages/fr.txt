@@ -18,6 +18,7 @@ editor_no_match	7de7	aucune correspondance
 editor_not_regular	5955	pas un fichier ordinaire : refusé
 editor_pattern_bad	5d57	le motif ne se compile pas
 editor_position	3696	Ln %1$d, Col %2$d
+editor_read_failed	5f78	le fichier n'a pas pu être lu : il n'est pas ouvert
 editor_replace_usage	c677	remplacer s'écrit RECHERCHE/REMPLACEMENT
 editor_replaced	1128	%d remplacés
 editor_save_failed	069d	l'enregistrement a échoué : le fichier est inchangé

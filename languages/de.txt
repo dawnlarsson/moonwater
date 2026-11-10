@@ -18,6 +18,7 @@ editor_no_match	7de7	kein Treffer
 editor_not_regular	5955	keine normale Datei: abgelehnt
 editor_pattern_bad	5d57	das Muster lässt sich nicht übersetzen
 editor_position	3696	Z %1$d, Sp %2$d
+editor_read_failed	5f78	die Datei ließ sich nicht lesen: sie wird nicht geöffnet
 editor_replace_usage	c677	Ersetzen heißt SUCHEN/ERSATZ
 editor_replaced	1128	%d ersetzt
 editor_save_failed	069d	Speichern fehlgeschlagen: die Datei ist unverändert
