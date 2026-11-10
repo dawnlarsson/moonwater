@@ -1902,6 +1902,8 @@ static int settings_map_inset(void)
         return settings_map_height();
 }
 
+static fn settings_edit_end(void);
+
 /*
         The rows that match the filter, laid out; the focus stays on its row
         when that still shows, and else goes to the first. The view stays
@@ -1931,6 +1933,10 @@ static fn settings_rebuild(void)
                                 settings.list.id[count++] = (unsigned short)row;
                 }
         settings.list.count = count;
+        // A row typed in that is no longer listed (the group changed under it, or a window asked for another page) is not typed in any more:
+        // its field closes, so the keys do not go on into a field nobody sees.
+        if (settings_editing() >= 0 && settings_pos(settings_editing()) < 0)
+                settings_edit_end();
         if (settings.page.menu_row >= 0 && settings_pos(settings.page.menu_row) < 0)
                 settings.page.menu_row = -1, ui_popmenu_close(&settings.popup);
         if (settings_pos(settings.list.focus) < 0 && count)
