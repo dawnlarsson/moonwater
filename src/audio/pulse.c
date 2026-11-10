@@ -495,7 +495,8 @@ static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
         // the string is the bytes before it; not found, the frame or the string ran out first.
         start = r->at + 1;
         avail = r->length - start < PULSE_STRING + 1 ? r->length - start : PULSE_STRING + 1;
-        nul = avail > 0 ? memory_first_of(r->p + start, 0, (unsigned long)avail) : 0;
+        // memory_first_of takes a void * but only reads the block, so the const of the frame is cast away here and nothing is written through it.
+        nul = avail > 0 ? memory_first_of((address_any)(r->p + start), 0, (unsigned long)avail) : 0;
         if (!nul)
         {
                 r->bad = 1;

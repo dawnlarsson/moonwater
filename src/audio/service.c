@@ -324,7 +324,7 @@ static void audio_say(string_address what, bipolar value)
         log_flush();
 }
 
-static void audio_say_text(string_address what, string_address text)
+static void audio_say_text(string_address what, const char *text)
 {
         string_format(log, "audio: %s %s\n", what, text);
         log_flush();
