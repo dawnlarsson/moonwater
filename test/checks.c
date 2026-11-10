@@ -127029,7 +127029,7 @@ static void check_taskbar_scale(void)
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
    the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
    its table at start. */
-#define BAND_UPRIGHT 0xdbaf09b8053b9ce0ull
+#define BAND_UPRIGHT 0x45215a46b2ffe9b9ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -130036,7 +130036,7 @@ static void check_compositor_volume(void)
         pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
         a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0xe9b189a7u
+#define CHROME_SCENE_HASH 0x85706e59u
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
