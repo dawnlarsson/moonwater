@@ -135,6 +135,7 @@ settings_name_long	f2c0	a name is under 32 characters
 settings_no_rates	185b	The screen lists no rates
 settings_no_screen	55fd	No screen is connected
 settings_not_here	4e20	not on this machine
+settings_not_shown	8efd	%d more not shown
 settings_nothing_kept	85a2	nothing typed: the value is kept
 settings_nothing_matches	14e9	Nothing matches what is typed
 settings_nothing_typed	edce	nothing typed

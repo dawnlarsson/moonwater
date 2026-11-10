@@ -237,6 +237,7 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_HEARD 4u
 #define SETTINGS_ITEM_OPEN 8u    // asks for no passphrase
 #define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
+#define SETTINGS_ITEM_DRIVE 32u  // a drive the device list shows: its strip, and no verb holds it
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
 #define SETTINGS_LEGEND 200
@@ -248,6 +249,7 @@ struct settings_item
         signed short dbm;
         unsigned char bars, flags, kind;
         unsigned char segment_count;                    // a drive's partitions and free room, in order (SETTINGS_SEGMENTS most)
+        unsigned short segment_more;                    // a drive's partitions the host did not show (its "more" line)
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
         char legend[SETTINGS_LEGEND];                   // what the strip is, in words: role and size of each segment
@@ -738,6 +740,10 @@ static struct
         // (settings_reap) from the window's timers, never waited for, so the window's events go on while it goes.
         int ending;
         positive said_length, began;
+        // What the buffer does not keep: once it is full it is cut back to its last whole line, and what follows is counted (the
+        // lines, and the rows a list reads: two blanks and a word), for the note of how many were not shown.
+        b32 said_cut;
+        positive cut_lines, cut_rows, cut_at, cut_blank;
         int job;
         b32 job_sets;
         char job_value[SETTINGS_TYPED];
@@ -2188,6 +2194,19 @@ static fn settings_card_fill(void)
         }
         while (made && settings_large->card[made - 1] == '\n')
                 made--;
+        // The lines the buffer did not keep are the card's last line: how many there were.
+        if (settings.cut_lines && made + SETTINGS_ITEM_LABEL < sizeof(settings_large->card))
+        {
+                char note[SETTINGS_ITEM_LABEL];
+                positive size;
+
+                language_format(note, sizeof(note), WORDS(settings_not_shown), (long)settings.cut_lines);
+                size = string_length((string_address)note);
+                if (made)
+                        settings_large->card[made++] = '\n';
+                memory_copy(settings_large->card + made, note, size);
+                made += size;
+        }
         ui_lines_set(&settings.card_text, settings_large->card, made, settings_large->card_at, settings_large->card_size, SETTINGS_CARD_LINES);
 }
 
@@ -2278,6 +2297,8 @@ static b32 settings_start(string_address address_to words, positive count, const
         settings.output = ends[0];
         settings.ending = 0;
         settings.said_length = 0;
+        settings.said_cut = false;
+        settings.cut_lines = settings.cut_rows = settings.cut_at = settings.cut_blank = 0;
         settings.began = (positive)ui_kit.now;
         return true;
 }
@@ -2811,6 +2832,9 @@ static const char address_to settings_role_word(unsigned int role)
 static fn settings_legend(struct settings_item address_to item)
 {
         item->legend[0] = 0;
+        // The partitions the host did not show come first, where the legend's room cannot cut them off.
+        if (item->segment_more)
+                language_format(item->legend, sizeof(item->legend), WORDS(settings_not_shown), (long)item->segment_more);
         for (positive at = 0; at < item->segment_count; at++)
         {
                 unsigned long long bytes = item->segment_bytes[at];
@@ -2820,6 +2844,8 @@ static fn settings_legend(struct settings_item address_to item)
 
                 if (at)
                         string_append_bounded((string_address)item->legend, (string_address)", ", sizeof(item->legend));
+                else if (item->segment_more)
+                        string_append_bounded((string_address)item->legend, (string_address)"; ", sizeof(item->legend));
                 string_append_bounded((string_address)item->legend, (string_address)settings_role_word(item->segment_role[at]), sizeof(item->legend));
                 do
                 {
@@ -2847,7 +2873,7 @@ static fn settings_feed_hardware(void)
         struct settings_item address_to items = settings_large->item[2];
         char line[SETTINGS_PROBE];
         char address_to text;
-        positive at, size, count = 0;
+        positive at, size, count = 0, hidden = 0;
         b32 open = false; // the row before is a drive that is kept: the part lines after it are its strip
 
         memory_zero(items, sizeof(settings_large->item[2]));
@@ -2880,24 +2906,51 @@ static fn settings_feed_hardware(void)
                         }
                         continue;
                 }
+                // A drive's "more" line, after its parts: the partitions its strip does not show, said in its legend.
+                if (open && size > 9 && !memory_compare(text, "    more ", 9))
+                {
+                        positive more = 0;
+
+                        for (positive digit = 9; digit < size && text[digit] >= '0' && text[digit] <= '9'; digit++)
+                                more = more * 10 + (positive)(text[digit] - '0');
+                        items[count - 1].segment_more = (unsigned short)more;
+                        continue;
+                }
                 // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.
                 open = false;
-                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
+                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ')
                 {
                         positive word = 2;
 
+                        // A row past the list's rows is not shown: it is counted, and the note under the rows says how many.
+                        if (count + 1 >= SETTINGS_LIST_ROWS)
+                        {
+                                hidden++;
+                                continue;
+                        }
                         // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
                         // The name starts at text[2], so the first blank after it ends the first word.
                         while (word < size && text[word] != ' ')
                                 word++;
                         items[count].kind = word + 7 <= size && !memory_compare(text + word + 1, "drive ", 6) ? SETTINGS_NOTE : SETTINGS_PORT;
-                        items[count].flags = size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0;
+                        items[count].flags = (size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
+                                             (items[count].kind == SETTINGS_NOTE ? SETTINGS_ITEM_DRIVE : 0);
                         open = items[count].kind == SETTINGS_NOTE;
                         settings_item_label_state(&items[count++], text + 2, size - 2);
                 }
         }
+        // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown.
+        hidden += settings.cut_rows;
+        if (hidden && count < SETTINGS_LIST_ROWS)
+        {
+                char note[SETTINGS_ITEM_LABEL];
+
+                language_format(note, sizeof(note), WORDS(settings_not_shown), (long)hidden);
+                items[count].kind = SETTINGS_NOTE;
+                settings_item_label(&items[count++], note, string_length((string_address)note));
+        }
         for (positive each = 0; each < count; each++)
-                if (items[each].kind == SETTINGS_NOTE && items[each].segment_count)
+                if (items[each].kind == SETTINGS_NOTE && (items[each].segment_count || items[each].segment_more))
                         settings_legend(&items[each]);
         settings.item_count[2] = (unsigned short)count;
 }
@@ -3270,6 +3323,46 @@ static fn settings_feed_drop(void)
 //      with the window frozen. What is left is read on the next wake.
 #define SETTINGS_DRAIN_BUDGET (64u << 10)
 
+// What the buffer does not keep, counted as it goes past: its lines, and its rows (a line that starts with two blanks and a
+// word, the shape a list reads as a row). The counts are what the note of how many were not shown says.
+static fn settings_cut_count(const char address_to bytes, positive count)
+{
+        for (positive at = 0; at < count; at++)
+        {
+                char c = bytes[at];
+
+                if (c == '\n')
+                {
+                        settings.cut_lines++;
+                        settings.cut_at = 0;
+                        settings.cut_blank = 0;
+                        continue;
+                }
+                if (settings.cut_at == 2 && c != ' ' && settings.cut_blank == 2)
+                        settings.cut_rows++;
+                if (settings.cut_at < 2 && c == ' ')
+                        settings.cut_blank++;
+                if (settings.cut_at < 3)
+                        settings.cut_at++;
+        }
+}
+
+// The buffer is full: it is cut back to its last whole line, so that no line is cut in two, and what comes after is counted.
+// A buffer with no line end in it keeps what it holds, its one line cut where the buffer ends.
+static fn settings_said_cut(void)
+{
+        positive at = settings.said_length;
+
+        while (at > 0 && settings_large->said[at - 1] != '\n')
+                at--;
+        if (at)
+        {
+                settings_cut_count(settings_large->said + at, settings.said_length - at);
+                settings.said_length = at;
+        }
+        settings.said_cut = true;
+}
+
 // What the verb running has said, read; its end, heard.
 static fn settings_drain(void)
 {
@@ -3278,19 +3371,25 @@ static fn settings_drain(void)
         for (;;)
         {
                 bipolar got;
+                char spill[256];
 
-                if (settings.said_length >= sizeof(settings_large->said))
+                if (!settings.said_cut && settings.said_length >= sizeof(settings_large->said))
+                        settings_said_cut();
+                if (settings.said_cut)
                 {
-                        char spill[256];
-
                         got = system_read_once(settings.output, spill, sizeof(spill));
+                        if (got > 0)
+                                settings_cut_count(spill, (positive)got);
                 }
                 else
+                {
                         got = system_read_once(settings.output, settings_large->said + settings.said_length,
                                                sizeof(settings_large->said) - settings.said_length);
+                        if (got > 0)
+                                settings.said_length += (positive)got;
+                }
                 if (got > 0)
                 {
-                        settings.said_length += settings.said_length < sizeof(settings_large->said) ? (positive)got : 0;
                         settings_waiting_say();
                         budget = budget > (positive)got ? budget - (positive)got : 0;
                         if (!budget)
@@ -4471,11 +4570,14 @@ static fn settings_describe(int id, struct ui_row address_to row)
                         row->value = WORDS(settings_kept);
                 else if (item->kind == SETTINGS_PORT)
                         row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
-                else if (item->kind == SETTINGS_NOTE && item->segment_count)
+                else if (item->kind == SETTINGS_NOTE && (item->segment_count || item->segment_more))
                 {
-                        row->strip_bytes = item->segment_bytes;
-                        row->strip_roles = item->segment_role;
-                        row->strip_count = item->segment_count;
+                        if (item->segment_count)
+                        {
+                                row->strip_bytes = item->segment_bytes;
+                                row->strip_roles = item->segment_role;
+                                row->strip_count = item->segment_count;
+                        }
                         row->value = item->legend;
                 }
                 row->dim |= item->kind == SETTINGS_NOTE;
