@@ -3842,11 +3842,15 @@ static fn settings_chose(int id);
 
 static fn settings_menu_answer(int answer)
 {
-        if (answer != UI_MENU_NOTHING)
+        // A key that only moved the hot item (no answer) is drawn now: the keys come to this window, not to the popup's pump, which reads nothing.
+        if (answer == UI_MENU_NOTHING)
         {
-                ui_popmenu_close(&settings.popup);
-                settings_chose(answer);
+                if (settings.popup.open)
+                        ui_popmenu_present(&settings.popup);
+                return;
         }
+        ui_popmenu_close(&settings.popup);
+        settings_chose(answer);
 }
 
 static fn settings_menu_close(void)
