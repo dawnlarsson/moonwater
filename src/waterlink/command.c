@@ -660,6 +660,16 @@ static b32 link_switch(bool on, bool say)
         return 0;
 }
 
+//      Whether the switch says on: the machine process starts the listener
+//      from it, and a person's `link on` or Settings switch is what sets it.
+static bool link_switch_is_on(void)
+{
+        p8 word[16];
+
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        return string_equals((string_address)word, "on");
+}
+
 static p32 link_grants_of(string_address address_to words, positive count,
                           bool address_to good)
 {
@@ -696,7 +706,8 @@ static p32 link_grants_of(string_address address_to words, positive count,
         once: what a member got from the group it does not keep after the
         group no longer gives it. A grant the group starts giving is not
         handed to the machines already paired, which are each given more by
-        name, as before. The link is switched on.
+        name, as before. A join does not switch the listener on: `link on`
+        does, and says the listener is off when it is.
 */
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
 #define LINK_SECRET_LEAST 8
@@ -936,7 +947,13 @@ static b32 link_group_join(string_address address_to words, positive count)
                                                  "the network; leave it out and "
                                                  "one is made\n");
         }
-        return link_switch(true, true);
+
+        //      A join does not switch the listener on: that is `link on`, a
+        //      person's word, and the listener reads the groups it runs with
+        //      from the file, so a join made while it runs takes at once.
+        if (!link_switch_is_on())
+                host_say(log, host_label "the listener is off: moonwater link on starts it\n");
+        return 0;
 }
 
 // group leave NAMESPACE [forget]: stop announcing it, and maybe its machines too.
