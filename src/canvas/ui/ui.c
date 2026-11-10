@@ -5765,7 +5765,8 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 b32 right = dx > 0, toward = (right != ui_rtl()) != (c->kind == UI_RADIOS ? c->item == c->at : c->on);
                                 b64 fill;
 
-                                if (!c->moved && dx < 3 * ui->scale / 100 && dx > -3 * ui->scale / 100 && dy < 3 * ui->scale / 100 && dy > -3 * ui->scale / 100)
+                                // The one slop of every press (UI_SLOP): a click that jitters less than that is still a click.
+                                if (!c->moved && !ui_press_past(ui, c->press_x, c->press_y, x, y))
                                         return null;
                                 c->moved = 1;
                                 if (c->kind != UI_RADIOS)
