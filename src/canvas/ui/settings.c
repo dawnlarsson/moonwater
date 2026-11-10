@@ -2862,6 +2862,7 @@ static fn settings_feed_hardware(void)
         settings.item_count[2] = (unsigned short)count;
 }
 
+/*
         What moonwater link said, as the machines linked: a machine's line is its name, two blanks, its key and what it may do
         (so the name is what comes before the first two blanks, and the line has "...  may " in it); the lines under it, six
         blanks in, say what the listener last heard of it, and are added to its name's label. A line that says nobody is
