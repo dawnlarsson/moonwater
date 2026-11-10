@@ -17,6 +17,14 @@
 #           sh build.sh --env setup [--yes]   wrappers, and brew installs with --yes
 #           sh build.sh --env prove           link an x86-64 program and run it under the VM
 #
+#       Where a build goes when no --host is named: on a Mac whose Lima VM
+#       "default" is running, the VM (host lima-default), which has the Linux
+#       and the case-sensitive disk a kernel build needs. Its ssh settings are
+#       read from
+#       $LIMA_HOME/default/ssh.config, LIMA_HOME defaulting to ~/.lima, the
+#       same place limactl reads them. MOONWATER_NO_LIMA=1 turns that off, and
+#       then a Mac without --host refuses to build. --host always wins.
+#
 #       Memory is what a live image keeps its bowls in, so it is the room a
 #       setup has: Arch's tree is 0.6 GB on x86-64 and 2.1 GB on arm64, with
 #       the download beside it, and a tmpfs holds half of the memory by default.
@@ -536,6 +544,12 @@ exec "$@"'
                 return 0
         fi
 
+        # The build takes its lock with flock(1), from util-linux. Without it
+        # every remote build would fail at the lock, so say which tool is
+        # missing here rather than leave the build's own error to explain it.
+        ssh -n -o BatchMode=yes "$host" 'command -v flock >/dev/null 2>&1' ||
+                die "$host has no flock(1), which the build lock needs (util-linux)"
+
         say "Copying the tree to $host:$remote"
 
         # Prepare the stage over ssh first. macOS openrsync splits
@@ -596,8 +610,10 @@ exec "$@"'
         carry=""
         [ -z "${MOONWATER_STOCK:-}" ] || carry="MOONWATER_STOCK=1"
 
-        # One build at a time on the build host: a build holds /tmp/moonwater-build.lock, so builds from several
+        # One build at a time on the build host: the build holds /tmp/moonwater-build.lock, so builds from several
         # trees queue here rather than running out of memory together (a kernel build wants most of an 8 GB VM).
+        # The lock is taken by this file's build only. A tree whose build.sh predates it runs its build without
+        # the lock, and the clean above and the image fetch below take none either.
         # shellcheck disable=SC2029
         ssh -n "$host" "$(remote_command flock /tmp/moonwater-build.lock sudo env $carry sh build.sh "$@")" ||
                 die "the build failed on $host"
@@ -744,13 +760,16 @@ sensitive filesystem, and this is $(uname). Name a machine that has them with
 #       A Mac with its Lima VM running builds in that VM when no machine was
 #       named: the kernel wants Linux and a case-sensitive disk, and the VM
 #       has both. Lima's own ssh settings are used, and ~/.ssh is left alone.
-#       MOONWATER_NO_LIMA=1 keeps the refusal below.
+#       The settings are $LIMA_HOME/default/ssh.config (~/.lima when LIMA_HOME
+#       is unset), where limactl keeps the VM. MOONWATER_NO_LIMA=1 keeps the
+#       refusal below.
 #
+lima_home=${LIMA_HOME:-$HOME/.lima}
 lima_ssh=
 if [ -z "$host" ] && [ "$(uname -s)" = Darwin ] && [ -z "${MOONWATER_NO_LIMA:-}" ] &&
-        command -v limactl > /dev/null 2>&1 && [ -f "$HOME/.lima/default/ssh.config" ] &&
+        command -v limactl > /dev/null 2>&1 && [ -f "$lima_home/default/ssh.config" ] &&
         limactl list --format '{{.Name}} {{.Status}}' 2> /dev/null | grep -qx 'default Running'; then
-        lima_ssh="$HOME/.lima/default/ssh.config"
+        lima_ssh="$lima_home/default/ssh.config"
         host=lima-default
 fi
 if [ -n "$lima_ssh" ]; then
