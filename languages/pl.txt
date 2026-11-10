@@ -208,7 +208,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Allow recording	f7e5	Zezwalaj na nagrywanie
 =Always off	48b1	Zawsze wyłączona
 =Always on	fab5	Zawsze włączona
-=Audio	1439	Dźwięk
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
 =Automatic	6784	Automatycznie
 =Background	0abd	Tło
@@ -216,11 +215,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =Battery	e12e	Bateria
 =Battery shown	2a23	Wyświetlana bateria
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Adaptery Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Uruchamianie
 =Brightness	324a	Jasność
-=Cameras	cea7	Kamery
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Szybkość migania kursora tekstowego
 =Caret thickness	1e9a	Grubość kursora tekstowego
@@ -233,11 +230,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Cursor look	34ce	Wygląd wskaźnika
 =Cursor size	65d4	Rozmiar wskaźnika
 =Date format	7a44	Format daty
+=Devices	f320	Urządzenia
+=Devices in this machine	d7b8	Urządzenia w tej maszynie
 =Display	d9b5	Ekran
 =Editor	bf98	Edytor
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
 =Gallery	4cdd	Galeria
-=Hubs	456d	Huby
 =Identify	033d	Identyfikuj
 =In range and saved	7941	W zasięgu i zapisane
 =Input	e11b	Wprowadzanie
@@ -250,7 +248,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Key repeat delay (ms, or default)	4eb7	Opóźnienie powtarzania klawiszy (ms lub default)
 =Key repeat rate (per second, off or default)	1e94	Szybkość powtarzania klawiszy (na sekundę, off lub default)
 =Keyboard	a714	Klawiatura
-=Keyboards and mice	c352	Klawiatury i myszy
 =Language	db9b	Język
 =Large pointer stays (ms, or default)	5626	Duży wskaźnik pozostaje (ms lub default)
 =Launcher	44b1	Uruchamianie
@@ -269,13 +266,11 @@ ui_field_full	fe02	więcej się nie zmieści
 =Names over TLS	075a	Nazwy przez TLS
 =Natural direction	d977	Naturalny kierunek
 =Network	ad65	Sieć
-=Network adapters	88ef	Karty sieciowe
-=New USB devices	c15c	Nowe urządzenia USB
+=New devices	5e0e	Nowe urządzenia
 =Normal	2772	Normalnie
 =Notices	8f06	Powiadomienia
 =On-screen keyboard	97f8	Klawiatura ekranowa
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
-=Other devices	8362	Inne urządzenia
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Plain Text	2bbe	Zwykły tekst
 =Power	a5e6	Zasilanie
@@ -301,7 +296,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Sound	9a34	Dźwięk
 =Sound server	84bf	Serwer dźwięku
 =Start the desktop	be4c	Uruchom pulpit
-=Storage	df06	Pamięć masowa
 =System	84bc	System
 =System notices	fa89	Powiadomienia systemu
 =Taskbar	d759	Pasek zadań
@@ -320,7 +314,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo
-=USB	da81	USB
 =Upside down	9dc1	Do góry nogami
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
 =Wi-Fi	0ec1	Wi-Fi

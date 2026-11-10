@@ -209,7 +209,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Allow recording	f7e5	אפשר הקלטה
 =Always off	48b1	תמיד כבוי
 =Always on	fab5	תמיד מופעל
-=Audio	1439	שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
 =Automatic	6784	אוטומטי
 =Background	0abd	רקע
@@ -217,11 +216,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Battery	e12e	סוללה
 =Battery shown	2a23	הסוללה המוצגת
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	מתאמי Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	אתחול
 =Brightness	324a	בהירות
-=Cameras	cea7	מצלמות
 =Canvas	5091	Canvas
 =Caret blink speed	4085	מהירות הבהוב סמן הטקסט
 =Caret thickness	1e9a	עובי סמן הטקסט
@@ -234,11 +231,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Cursor look	34ce	מראה המצביע
 =Cursor size	65d4	גודל המצביע
 =Date format	7a44	תבנית תאריך
+=Devices	f320	התקנים
+=Devices in this machine	d7b8	התקנים במכונה זו
 =Display	d9b5	מסך
 =Editor	bf98	עורך
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה
-=Hubs	456d	רכזות
 =Identify	033d	זיהוי
 =In range and saved	7941	בטווח ושמורות
 =Input	e11b	קלט
@@ -251,7 +249,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Key repeat delay (ms, or default)	4eb7	השהיית חזרת מקש (ms או default)
 =Key repeat rate (per second, off or default)	1e94	קצב חזרת מקש (בשנייה, off או default)
 =Keyboard	a714	מקלדת
-=Keyboards and mice	c352	מקלדות ועכברים
 =Language	db9b	שפה
 =Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
 =Launcher	44b1	משגר
@@ -270,13 +267,11 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Names over TLS	075a	שמות דרך TLS
 =Natural direction	d977	כיוון טבעי
 =Network	ad65	רשת
-=Network adapters	88ef	מתאמי רשת
-=New USB devices	c15c	התקני USB חדשים
+=New devices	5e0e	התקנים חדשים
 =Normal	2772	רגיל
 =Notices	8f06	הודעות
 =On-screen keyboard	97f8	מקלדת על המסך
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
-=Other devices	8362	התקנים אחרים
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Plain Text	2bbe	טקסט פשוט
 =Power	a5e6	צריכת חשמל
@@ -302,7 +297,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Sound	9a34	צליל
 =Sound server	84bf	שרת השמע
 =Start the desktop	be4c	הפעל את שולחן העבודה
-=Storage	df06	אחסון
 =System	84bc	מערכת
 =System notices	fa89	הודעות המערכת
 =Taskbar	d759	שורת המשימות
@@ -321,7 +315,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה
-=USB	da81	USB
 =Upside down	9dc1	הפוך
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Wi-Fi	0ec1	Wi-Fi

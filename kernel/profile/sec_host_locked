@@ -6,7 +6,7 @@
 # and /proc shows a process to its own user and to root only (hidepid).
 #
 # And no USB device the firmware does not declare internal is configured
-# from the first moment of boot until moonwater usb lets it in: the policy
+# from the first moment of boot until moonwater device lets it in: the policy
 # is read once /root is, and without this word a stick or a keyboard plugged
 # in before then is up until it is (USB-D1 in .github/SECURITY.md).
 #

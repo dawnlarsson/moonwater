@@ -208,7 +208,6 @@ ui_field_full	fe02	meer past er niet in
 =Allow recording	f7e5	Opnemen toestaan
 =Always off	48b1	Altijd uit
 =Always on	fab5	Altijd aan
-=Audio	1439	Audio
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
 =Automatic	6784	Automatisch
 =Background	0abd	Achtergrond
@@ -216,11 +215,9 @@ ui_field_full	fe02	meer past er niet in
 =Battery	e12e	Batterij
 =Battery shown	2a23	Getoonde batterij
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Bluetooth-adapters
 =Boost	a6cc	Boost
 =Boot	38f5	Opstarten
 =Brightness	324a	Helderheid
-=Cameras	cea7	Camera's
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Knippersnelheid van de tekstcursor
 =Caret thickness	1e9a	Dikte van de tekstcursor
@@ -233,11 +230,12 @@ ui_field_full	fe02	meer past er niet in
 =Cursor look	34ce	Uiterlijk van de aanwijzer
 =Cursor size	65d4	Grootte van de aanwijzer
 =Date format	7a44	Datumnotatie
+=Devices	f320	Apparaten
+=Devices in this machine	d7b8	Apparaten in deze machine
 =Display	d9b5	Scherm
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij
-=Hubs	456d	Hubs
 =Identify	033d	Identificeren
 =In range and saved	7941	In bereik en opgeslagen
 =Input	e11b	Invoer
@@ -250,7 +248,6 @@ ui_field_full	fe02	meer past er niet in
 =Key repeat delay (ms, or default)	4eb7	Vertraging toetsherhaling (ms of default)
 =Key repeat rate (per second, off or default)	1e94	Herhaalsnelheid van toetsen (per seconde, off of default)
 =Keyboard	a714	Toetsenbord
-=Keyboards and mice	c352	Toetsenborden en muizen
 =Language	db9b	Taal
 =Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
 =Launcher	44b1	Starter
@@ -269,13 +266,11 @@ ui_field_full	fe02	meer past er niet in
 =Names over TLS	075a	Namen via TLS
 =Natural direction	d977	Natuurlijke richting
 =Network	ad65	Netwerk
-=Network adapters	88ef	Netwerkadapters
-=New USB devices	c15c	Nieuwe USB-apparaten
+=New devices	5e0e	Nieuwe apparaten
 =Normal	2772	Normaal
 =Notices	8f06	Meldingen
 =On-screen keyboard	97f8	Toetsenbord op het scherm
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
-=Other devices	8362	Andere apparaten
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Plain Text	2bbe	Platte tekst
 =Power	a5e6	Energie
@@ -301,7 +296,6 @@ ui_field_full	fe02	meer past er niet in
 =Sound	9a34	Geluid
 =Sound server	84bf	Geluidsserver
 =Start the desktop	be4c	Bureaublad starten
-=Storage	df06	Opslag
 =System	84bc	Systeem
 =System notices	fa89	Systeemmeldingen
 =Taskbar	d759	Taakbalk
@@ -320,7 +314,6 @@ ui_field_full	fe02	meer past er niet in
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid
-=USB	da81	USB
 =Upside down	9dc1	Ondersteboven
 =Volume (percent, or default)	f6e3	Volume (procent of default)
 =Wi-Fi	0ec1	Wi-Fi

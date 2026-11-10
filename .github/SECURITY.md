@@ -28,7 +28,7 @@ never a pass.
    on or booting (a stick, a keyboard that types, a hub, a network or audio or
    camera function, a DMA-capable bus device). It speaks descriptors and
    protocol bytes to the kernel and chooses the classes it claims. The policy
-   that holds against it is `moonwater usb` (an unknown device and every
+   that holds against it is `moonwater device` (an unknown device and every
    interface of a known one stay unauthorized until a rule or the owner lets
    them in); what it cannot hold against is what the kernel does before a
    device is authorized (reading its device descriptor, the hub's own work) and
@@ -672,22 +672,22 @@ attacker gets its invariants here once there is a lane that proves them.
   again. **It fails closed:** a reader that cannot be confined reads nothing,
   and the listener hears no machine nearby (the link without discovery).
 - **USB-D1, a device plugged in is let in by a rule (attacker 5,
-  `moonwater usb`, src/sh/host.c).** The kernel holds the switches and the
+  `moonwater device`, src/sh/host.c).** The kernel holds the switches and the
   policy turns them: each device's and each interface's `authorized`, each
   root hub's `authorized_default` and `interface_authorized_default`, and
   usbcore's `authorized_default` for a controller that arrives later.
-  `usb lock` keeps every device plugged in at the time as an allow rule
+  `device lock` keeps every device plugged in at the time as an allow rule
   (`VID:PID/SERIAL`; `VID:PID/-#HASH`, the serial's xxh64, for one too long
   to keep; `VID:PID/-@PLACE` for one with no serial, the place being the
   root hub's serial (its controller's bus address), the root hub's product
   and the port path, which a boot that numbers the buses in another order
   does not move; a `-@1-4` pin of an older policy is read by its bus port
-  until `usb lock` writes it again) with the classes of the interfaces it
+  until `device lock` writes it again) with the classes of the interfaces it
   has then, denies every
   class, and puts it in force: a new device is then never configured, so no
   driver binds to it. Locked, the interfaces of a device that is configured
   wait at 0 until each is judged, and are authorized and probed only for a
-  class its rule keeps or a class allowed (`usb class storage allow`, which
+  class its rule keeps or a class allowed (`device class storage allow`, which
   also has a new device configured so its interfaces can be judged): a stick
   that comes back as a keyboard as well has the keyboard held. A device the
   kernel holds unconfigured when the lock is taken (the command line holds
@@ -735,7 +735,7 @@ attacker gets its invariants here once there is a lane that proves them.
   the cap) gets no rule. A lock that cannot be written to `/root` (or
   finds there something it cannot read, which is not written over, at boot
   or when asked for) is in force from `/run` until the machine restarts or a verb keeps one, on
-  every tier, and `usb` says why. A verb waits for the usb lock 20 seconds at
+  every tier, and `device` says why. A verb waits for the device lock 20 seconds at
   most and changes nothing if it cannot have it. The default tier changes
   nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
   through the whole build's level and does not compose `sec_host_locked`, so

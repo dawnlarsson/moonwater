@@ -208,7 +208,6 @@ ui_field_full	fe02	більше не вміщається
 =Allow recording	f7e5	Дозволити запис
 =Always off	48b1	Завжди вимкнено
 =Always on	fab5	Завжди увімкнено
-=Audio	1439	Звук
 =Authenticated time (NTS)	e533	Автентифікований час (NTS)
 =Automatic	6784	Автоматично
 =Background	0abd	Тло
@@ -216,11 +215,9 @@ ui_field_full	fe02	більше не вміщається
 =Battery	e12e	Батарея
 =Battery shown	2a23	Показувана батарея
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Адаптери Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Завантаження
 =Brightness	324a	Яскравість
-=Cameras	cea7	Камери
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Швидкість блимання текстового курсора
 =Caret thickness	1e9a	Товщина текстового курсора
@@ -233,11 +230,12 @@ ui_field_full	fe02	більше не вміщається
 =Cursor look	34ce	Вигляд вказівника
 =Cursor size	65d4	Розмір вказівника
 =Date format	7a44	Формат дати
+=Devices	f320	Пристрої
+=Devices in this machine	d7b8	Пристрої цієї машини
 =Display	d9b5	Екран
 =Editor	bf98	Редактор
 =GPU rendering (alpha)	e5e6	Рендеринг на GPU (альфа)
 =Gallery	4cdd	Галерея
-=Hubs	456d	Хаби
 =Identify	033d	Визначити
 =In range and saved	7941	У зоні дії та збережені
 =Input	e11b	Введення
@@ -250,7 +248,6 @@ ui_field_full	fe02	більше не вміщається
 =Key repeat delay (ms, or default)	4eb7	Затримка повтору клавіш (мс або default)
 =Key repeat rate (per second, off or default)	1e94	Швидкість повтору клавіш (за секунду, off або default)
 =Keyboard	a714	Клавіатура
-=Keyboards and mice	c352	Клавіатури та миші
 =Language	db9b	Мова
 =Large pointer stays (ms, or default)	5626	Великий вказівник залишається (мс або default)
 =Launcher	44b1	Запуск
@@ -269,13 +266,11 @@ ui_field_full	fe02	більше не вміщається
 =Names over TLS	075a	Імена через TLS
 =Natural direction	d977	Природний напрямок
 =Network	ad65	Мережа
-=Network adapters	88ef	Мережеві адаптери
-=New USB devices	c15c	Нові USB-пристрої
+=New devices	5e0e	Нові пристрої
 =Normal	2772	Звичайний
 =Notices	8f06	Сповіщення
 =On-screen keyboard	97f8	Екранна клавіатура
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
-=Other devices	8362	Інші пристрої
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Plain Text	2bbe	Звичайний текст
 =Power	a5e6	Живлення
@@ -301,7 +296,6 @@ ui_field_full	fe02	більше не вміщається
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковий сервер
 =Start the desktop	be4c	Запускати робочий стіл
-=Storage	df06	Накопичувачі
 =System	84bc	Система
 =System notices	fa89	Сповіщення системи
 =Taskbar	d759	Панель завдань
@@ -320,7 +314,6 @@ ui_field_full	fe02	більше не вміщається
 =Turned by the screen	ea45	Повертає екран
 =Turned left	507c	Повернуто ліворуч
 =Turned right	7a49	Повернуто праворуч
-=USB	da81	USB
 =Upside down	9dc1	Догори дриґом
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
 =Wi-Fi	0ec1	Wi-Fi

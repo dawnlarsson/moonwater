@@ -208,7 +208,6 @@ ui_field_full	fe02	that is as much as it holds
 =Allow recording	f7e5	Allow recording
 =Always off	48b1	Always off
 =Always on	fab5	Always on
-=Audio	1439	Audio
 =Authenticated time (NTS)	e533	Authenticated time (NTS)
 =Automatic	6784	Automatic
 =Background	0abd	Background
@@ -216,11 +215,9 @@ ui_field_full	fe02	that is as much as it holds
 =Battery	e12e	Battery
 =Battery shown	2a23	Battery shown
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Bluetooth adapters
 =Boost	a6cc	Boost
 =Boot	38f5	Boot
 =Brightness	324a	Brightness
-=Cameras	cea7	Cameras
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Caret blink speed
 =Caret thickness	1e9a	Caret thickness
@@ -233,11 +230,12 @@ ui_field_full	fe02	that is as much as it holds
 =Cursor look	34ce	Cursor look
 =Cursor size	65d4	Cursor size
 =Date format	7a44	Date format
+=Devices	f320	Devices
+=Devices in this machine	d7b8	Devices in this machine
 =Display	d9b5	Display
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =Gallery	4cdd	Gallery
-=Hubs	456d	Hubs
 =Identify	033d	Identify
 =In range and saved	7941	In range and saved
 =Input	e11b	Input
@@ -250,7 +248,6 @@ ui_field_full	fe02	that is as much as it holds
 =Key repeat delay (ms, or default)	4eb7	Key repeat delay (ms, or default)
 =Key repeat rate (per second, off or default)	1e94	Key repeat rate (per second, off or default)
 =Keyboard	a714	Keyboard
-=Keyboards and mice	c352	Keyboards and mice
 =Language	db9b	Language
 =Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
 =Launcher	44b1	Launcher
@@ -269,13 +266,11 @@ ui_field_full	fe02	that is as much as it holds
 =Names over TLS	075a	Names over TLS
 =Natural direction	d977	Natural direction
 =Network	ad65	Network
-=Network adapters	88ef	Network adapters
-=New USB devices	c15c	New USB devices
+=New devices	5e0e	New devices
 =Normal	2772	Normal
 =Notices	8f06	Notices
 =On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
-=Other devices	8362	Other devices
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Plain Text	2bbe	Plain Text
 =Power	a5e6	Power
@@ -301,7 +296,6 @@ ui_field_full	fe02	that is as much as it holds
 =Sound	9a34	Sound
 =Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop
-=Storage	df06	Storage
 =System	84bc	System
 =System notices	fa89	System notices
 =Taskbar	d759	Taskbar
@@ -320,7 +314,6 @@ ui_field_full	fe02	that is as much as it holds
 =Turned by the screen	ea45	Turned by the screen
 =Turned left	507c	Turned left
 =Turned right	7a49	Turned right
-=USB	da81	USB
 =Upside down	9dc1	Upside down
 =Volume (percent, or default)	f6e3	Volume (percent, or default)
 =Wi-Fi	0ec1	Wi-Fi

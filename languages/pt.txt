@@ -208,7 +208,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Allow recording	f7e5	Permitir gravação
 =Always off	48b1	Sempre desativado
 =Always on	fab5	Sempre ativado
-=Audio	1439	Áudio
 =Authenticated time (NTS)	e533	Hora autenticada (NTS)
 =Automatic	6784	Automático
 =Background	0abd	Plano de fundo
@@ -216,11 +215,9 @@ ui_field_full	fe02	não cabe mais que isso
 =Battery	e12e	Bateria
 =Battery shown	2a23	Bateria mostrada
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Adaptadores Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Inicialização
 =Brightness	324a	Brilho
-=Cameras	cea7	Câmeras
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Velocidade de piscar do cursor de texto
 =Caret thickness	1e9a	Espessura do cursor de texto
@@ -233,11 +230,12 @@ ui_field_full	fe02	não cabe mais que isso
 =Cursor look	34ce	Aparência do ponteiro
 =Cursor size	65d4	Tamanho do ponteiro
 =Date format	7a44	Formato da data
+=Devices	f320	Dispositivos
+=Devices in this machine	d7b8	Dispositivos nesta máquina
 =Display	d9b5	Tela
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	Renderização por GPU (alfa)
 =Gallery	4cdd	Galeria
-=Hubs	456d	Hubs
 =Identify	033d	Identificar
 =In range and saved	7941	No alcance e salvas
 =Input	e11b	Entrada
@@ -250,7 +248,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Key repeat delay (ms, or default)	4eb7	Atraso da repetição de teclas (ms ou default)
 =Key repeat rate (per second, off or default)	1e94	Taxa de repetição de teclas (por segundo, off ou default)
 =Keyboard	a714	Teclado
-=Keyboards and mice	c352	Teclados e mouses
 =Language	db9b	Idioma
 =Large pointer stays (ms, or default)	5626	O ponteiro grande permanece (ms ou default)
 =Launcher	44b1	Lançador
@@ -269,13 +266,11 @@ ui_field_full	fe02	não cabe mais que isso
 =Names over TLS	075a	Nomes por TLS
 =Natural direction	d977	Direção natural
 =Network	ad65	Rede
-=Network adapters	88ef	Adaptadores de rede
-=New USB devices	c15c	Novos dispositivos USB
+=New devices	5e0e	Novos dispositivos
 =Normal	2772	Normal
 =Notices	8f06	Avisos
 =On-screen keyboard	97f8	Teclado na tela
 =Open windows where they were last put	8711	Abrir janelas onde foram deixadas
-=Other devices	8362	Outros dispositivos
 =Output device (name, or default)	d73c	Dispositivo de saída (nome ou default)
 =Plain Text	2bbe	Texto simples
 =Power	a5e6	Energia
@@ -301,7 +296,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Sound	9a34	Som
 =Sound server	84bf	Servidor de som
 =Start the desktop	be4c	Iniciar a área de trabalho
-=Storage	df06	Armazenamento
 =System	84bc	Sistema
 =System notices	fa89	Avisos do sistema
 =Taskbar	d759	Barra de tarefas
@@ -320,7 +314,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Turned by the screen	ea45	Girado pela tela
 =Turned left	507c	Girada para a esquerda
 =Turned right	7a49	Girada para a direita
-=USB	da81	USB
 =Upside down	9dc1	De cabeça para baixo
 =Volume (percent, or default)	f6e3	Volume (porcentagem ou default)
 =Wi-Fi	0ec1	Wi-Fi

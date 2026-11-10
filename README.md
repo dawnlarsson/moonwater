@@ -148,13 +148,14 @@ moonwater wifi [on|off]                the radio, saved networks and those in ra
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
 moonwater bluetooth add NAME           keep the name of a device, found once the radio is on
 moonwater bluetooth remove NAME        forget a bluetooth device
-moonwater usb [lock|unlock]            lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
-moonwater usb class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
-moonwater usb allow|deny ID|PORT       let one device in, or hold it, now and at every plug;
-                                       ID is VID:PID, or VID:PID/SERIAL as usb shows it
-moonwater usb forget ID|PORT           drop the rule of one device
-moonwater usb log [N]                  the last decisions, the newest last [20]
-moonwater usb apply                    judge every device again now, as boot does
+moonwater device [lock|unlock]         lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
+moonwater device class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
+moonwater device list                  the devices the system sees, each allowed, blocked or waiting
+moonwater device allow|deny ID|PORT    let one device in, or hold it, now and at every plug;
+                                       ID is VID:PID, or VID:PID/SERIAL as device shows it
+moonwater device forget ID|PORT        drop the rule of one device
+moonwater device log [N]               the last decisions, the newest last [20]
+moonwater device apply                 judge every device again now, as boot does
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
@@ -242,13 +243,13 @@ them: a machine that has not asked for a radio has it soft-blocked from boot, an
 used one (a saved network, a remembered device) keeps it on as it was, and `airplane off`
 brings back what was on.
 
-`moonwater usb lock` holds what somebody plugs in: a stick, a keyboard that types on its
+`moonwater device lock` holds what somebody plugs in: a stick, a keyboard that types on its
 own, a hub, a network, audio or camera function. Every device plugged in when it runs
 becomes a rule in /root/usb.policy, with the classes it shows then (one the kernel holds
 unconfigured is configured first to show them), and keeps working; one with no serial is
 pinned to its place, the controller, root hub and port path, which survive a boot that
 numbers the buses otherwise. A new device, one no rule names, or a class a known device never had (a stick that comes
-back as a keyboard too) stays unauthorized until `usb allow` lets it in or `usb class`
+back as a keyboard too) stays unauthorized until `device allow` lets it in or `device class`
 allows what it is. The kernel holds the switches (the `authorized` file of each device
 and interface, the defaults of each root hub), so a held device is never configured and
 no driver sees it; a watcher puts the policy in force at each plug, and every decision is
@@ -261,7 +262,7 @@ until then: only the kernel command line `usbcore.authorized_default=2`, which
 `sec_host_locked` sets, closes that window. The tight tier locks at the first boot, once
 USB has settled, and a /root it takes later with no policy of its own; a lock that cannot
 be written to /root, or finds a policy there it cannot read (which it does not write over), is in
-force from /run until the machine restarts, and `usb` says why.
+force from /run until the machine restarts, and `device` says why.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, display, input, taskbar, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are

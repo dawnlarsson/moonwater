@@ -138156,18 +138156,27 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: a verb's word after its label and its escapes",
               settings_parsed(keyboard, "\x1b[1m[Moonwater]\x1b[0m keyboard us\n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "us"));
-        // A device chooses what it is called, and usb prints that after `; "` on the device's line: a name that says "this
+        // A device chooses what it is called, and device prints that after `; "` on the device's line: a name that says "this
         // machine has no" is a name and takes no row of the USB group away.
         {
-                int usb = settings_row_named("New USB devices");
+                int usb = settings_row_named("New devices");
 
-                check("settings: a device's own name does not take the USB rows away",
+                check("settings: a device's own name does not take the Devices rows away",
                       usb >= 0 &&
-                          settings_parsed(usb, "[Moonwater] usb lock\n[Moonwater]   1-1 1234:5678/-@1-1 allowed (rule); \"x this machine has no y\"\n",
+                          settings_parsed(usb, "[Moonwater] device lock\n[Moonwater]   1-1 1234:5678/-@1-1 allowed (rule); \"x this machine has no y\"\n",
                                           value) == SETTINGS_READ &&
                           string_equals((string_address)value, (string_address) "lock") &&
-                          settings_parsed(usb, "[Moonwater] usb lock\n[Moonwater]   this machine has no usb\n", value) != SETTINGS_READ);
+                          settings_parsed(usb, "[Moonwater] device lock\n[Moonwater]   this machine has no usb\n", value) != SETTINGS_READ);
         }
+        // The class rows are gone (a press on the Devices list allows or blocks a device, and device class is the command), and the
+        // list is fed by device list: its feed is the Devices group's, and its rows are not a class switch.
+        check("settings: the class rows are gone and the Devices list is fed by device list",
+              settings_row_named("Storage") == 0 && settings_row_named("Audio") == 0 && settings_row_named("Hubs") == 0 &&
+                  settings_row_named("Other devices") == 0 && settings_row_named("New USB devices") == 0 &&
+                  settings_feeds[2].group != null && string_equals((string_address)settings_feeds[2].group, (string_address)"Devices") &&
+                  string_equals((string_address)settings_feeds[2].read[0], (string_address)"device") &&
+                  string_equals((string_address)settings_feeds[2].read[1], (string_address)"list") &&
+                  settings_feeds[2].kind == SETTINGS_FEED_HARDWARE);
         check("settings: a name is the whole of its line", settings_parsed(name, "patient-cricket\n", value) == SETTINGS_READ &&
                                                                string_equals((string_address)value, (string_address) "patient-cricket"));
         check("settings: a zone is the word before its comma",
@@ -138440,13 +138449,14 @@ static fn check_settings(string_address regular, string_address bold)
 "  bluetooth [on|off]                the radio and the remembered devices [off]\n"
 "  bluetooth add NAME                keep the name of a device, found once the radio is on\n"
 "  bluetooth remove NAME             forget a bluetooth device\n"
-"  usb [lock|unlock]                 lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]\n"
-"  usb class NAME [allow|deny]       what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]\n"
-"  usb allow|deny ID|PORT            let one device in, or hold it, now and at every plug;\n"
-"                                    ID is VID:PID, or VID:PID/SERIAL as usb shows it\n"
-"  usb forget ID|PORT                drop the rule of one device\n"
-"  usb log [N]                       the last decisions, the newest last [20]\n"
-"  usb apply                         judge every device again now, as boot does\n"
+"  device [lock|unlock]              lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]\n"
+"  device class NAME [allow|deny]    what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]\n"
+"  device list                       the devices the system sees, each allowed, blocked or waiting\n"
+"  device allow|deny ID|PORT         let one device in, or hold it, now and at every plug;\n"
+"                                    ID is VID:PID, or VID:PID/SERIAL as device shows it\n"
+"  device forget ID|PORT             drop the rule of one device\n"
+"  device log [N]                    the last decisions, the newest last [20]\n"
+"  device apply                      judge every device again now, as boot does\n"
 "  priority [internet [wired|wifi]]  which link wins when both are up [wired]\n"
 "  time [sync]                       the clock; sync sets it and the zone now\n"
 "  timezone [ZONE|list]              IANA name, country, +1 or POSIX; manual\n"
@@ -141150,7 +141160,7 @@ static int settings_groups_named(const char address_to name)
 static fn check_settings_groups(void)
 {
         static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
-                                                "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot", "System"};
+                                                "Network", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System"};
         static const struct
         {
                 const char address_to words[3];
@@ -141163,7 +141173,7 @@ static fn check_settings_groups(void)
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
-            {{"bluetooth"}, "Bluetooth"}, {{"usb"}, "USB"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
+            {{"bluetooth"}, "Bluetooth"}, {{"device"}, "Devices"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
             {{"cpu"}, "Power"}, {{"bind"}, "Boot"}};
         static const struct
         {

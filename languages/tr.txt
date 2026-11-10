@@ -208,7 +208,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Allow recording	f7e5	Kayda izin ver
 =Always off	48b1	Her zaman kapalı
 =Always on	fab5	Her zaman açık
-=Audio	1439	Ses
 =Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)
 =Automatic	6784	Otomatik
 =Background	0abd	Arka plan
@@ -216,11 +215,9 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Battery	e12e	Pil
 =Battery shown	2a23	Gösterilen pil
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Bluetooth bağdaştırıcıları
 =Boost	a6cc	Boost
 =Boot	38f5	Açılış
 =Brightness	324a	Parlaklık
-=Cameras	cea7	Kameralar
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Metin imlecinin yanıp sönme hızı
 =Caret thickness	1e9a	Metin imlecinin kalınlığı
@@ -233,11 +230,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Cursor look	34ce	İşaretçi görünümü
 =Cursor size	65d4	İşaretçi boyutu
 =Date format	7a44	Tarih biçimi
+=Devices	f320	Aygıtlar
+=Devices in this machine	d7b8	Bu makinedeki aygıtlar
 =Display	d9b5	Ekran
 =Editor	bf98	Düzenleyici
 =GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
 =Gallery	4cdd	Galeri
-=Hubs	456d	Hub'lar
 =Identify	033d	Tanımla
 =In range and saved	7941	Menzilde ve kayıtlı
 =Input	e11b	Giriş
@@ -250,7 +248,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Key repeat delay (ms, or default)	4eb7	Tuş tekrarı gecikmesi (ms veya default)
 =Key repeat rate (per second, off or default)	1e94	Tuş tekrar hızı (saniyede, off veya default)
 =Keyboard	a714	Klavye
-=Keyboards and mice	c352	Klavyeler ve fareler
 =Language	db9b	Dil
 =Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
 =Launcher	44b1	Başlatıcı
@@ -269,13 +266,11 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Names over TLS	075a	TLS üzerinden adlar
 =Natural direction	d977	Doğal yön
 =Network	ad65	Ağ
-=Network adapters	88ef	Ağ bağdaştırıcıları
-=New USB devices	c15c	Yeni USB aygıtları
+=New devices	5e0e	Yeni aygıtlar
 =Normal	2772	Normal
 =Notices	8f06	Bildirimler
 =On-screen keyboard	97f8	Ekran klavyesi
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
-=Other devices	8362	Diğer aygıtlar
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Plain Text	2bbe	Düz Metin
 =Power	a5e6	Güç
@@ -301,7 +296,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Sound	9a34	Ses
 =Sound server	84bf	Ses sunucusu
 =Start the desktop	be4c	Masaüstünü başlat
-=Storage	df06	Depolama
 =System	84bc	Sistem
 =System notices	fa89	Sistem bildirimleri
 =Taskbar	d759	Görev çubuğu
@@ -320,7 +314,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Turned by the screen	ea45	Ekran tarafından döndürülür
 =Turned left	507c	Sola döndürülmüş
 =Turned right	7a49	Sağa döndürülmüş
-=USB	da81	USB
 =Upside down	9dc1	Baş aşağı
 =Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
 =Wi-Fi	0ec1	Wi-Fi

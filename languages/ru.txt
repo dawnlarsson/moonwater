@@ -208,7 +208,6 @@ ui_field_full	fe02	больше не помещается
 =Allow recording	f7e5	Разрешить запись
 =Always off	48b1	Всегда выключена
 =Always on	fab5	Всегда включена
-=Audio	1439	Звук
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
 =Automatic	6784	Автоматически
 =Background	0abd	Фон
@@ -216,11 +215,9 @@ ui_field_full	fe02	больше не помещается
 =Battery	e12e	Батарея
 =Battery shown	2a23	Показываемая батарея
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Адаптеры Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Загрузка
 =Brightness	324a	Яркость
-=Cameras	cea7	Камеры
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Скорость мигания текстового курсора
 =Caret thickness	1e9a	Толщина текстового курсора
@@ -233,11 +230,12 @@ ui_field_full	fe02	больше не помещается
 =Cursor look	34ce	Вид указателя
 =Cursor size	65d4	Размер указателя
 =Date format	7a44	Формат даты
+=Devices	f320	Устройства
+=Devices in this machine	d7b8	Устройства этой машины
 =Display	d9b5	Экран
 =Editor	bf98	Редактор
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =Gallery	4cdd	Галерея
-=Hubs	456d	Хабы
 =Identify	033d	Определить
 =In range and saved	7941	В зоне действия и сохранённые
 =Input	e11b	Ввод
@@ -250,7 +248,6 @@ ui_field_full	fe02	больше не помещается
 =Key repeat delay (ms, or default)	4eb7	Задержка повтора клавиш (мс или default)
 =Key repeat rate (per second, off or default)	1e94	Скорость повтора клавиш (в секунду, off или default)
 =Keyboard	a714	Клавиатура
-=Keyboards and mice	c352	Клавиатуры и мыши
 =Language	db9b	Язык
 =Large pointer stays (ms, or default)	5626	Крупный указатель остаётся (мс или default)
 =Launcher	44b1	Запуск
@@ -269,13 +266,11 @@ ui_field_full	fe02	больше не помещается
 =Names over TLS	075a	Имена через TLS
 =Natural direction	d977	Естественное направление
 =Network	ad65	Сеть
-=Network adapters	88ef	Сетевые адаптеры
-=New USB devices	c15c	Новые USB-устройства
+=New devices	5e0e	Новые устройства
 =Normal	2772	Обычный
 =Notices	8f06	Уведомления
 =On-screen keyboard	97f8	Экранная клавиатура
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
-=Other devices	8362	Другие устройства
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Plain Text	2bbe	Простой текст
 =Power	a5e6	Питание
@@ -301,7 +296,6 @@ ui_field_full	fe02	больше не помещается
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
-=Storage	df06	Накопители
 =System	84bc	Система
 =System notices	fa89	Уведомления системы
 =Taskbar	d759	Панель задач
@@ -320,7 +314,6 @@ ui_field_full	fe02	больше не помещается
 =Turned by the screen	ea45	Поворачивает экран
 =Turned left	507c	Повёрнут влево
 =Turned right	7a49	Повёрнут вправо
-=USB	da81	USB
 =Upside down	9dc1	Перевёрнут
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Wi-Fi	0ec1	Wi-Fi

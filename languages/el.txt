@@ -208,7 +208,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
 =Always off	48b1	Πάντα ανενεργό
 =Always on	fab5	Πάντα ενεργό
-=Audio	1439	Ήχος
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
 =Automatic	6784	Αυτόματο
 =Background	0abd	Φόντο
@@ -216,11 +215,9 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Battery	e12e	Μπαταρία
 =Battery shown	2a23	Μπαταρία που εμφανίζεται
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Προσαρμογείς Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Εκκίνηση
 =Brightness	324a	Φωτεινότητα
-=Cameras	cea7	Κάμερες
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Ταχύτητα αναβοσβήματος του δρομέα κειμένου
 =Caret thickness	1e9a	Πάχος του δρομέα κειμένου
@@ -233,11 +230,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Cursor look	34ce	Εμφάνιση δείκτη
 =Cursor size	65d4	Μέγεθος δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
+=Devices	f320	Συσκευές
+=Devices in this machine	d7b8	Συσκευές σε αυτό το μηχάνημα
 =Display	d9b5	Οθόνη
 =Editor	bf98	Επεξεργαστής
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =Gallery	4cdd	Συλλογή
-=Hubs	456d	Διανομείς
 =Identify	033d	Αναγνώριση
 =In range and saved	7941	Σε εμβέλεια και αποθηκευμένα
 =Input	e11b	Είσοδος
@@ -250,7 +248,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Key repeat delay (ms, or default)	4eb7	Καθυστέρηση επανάληψης πλήκτρων (ms ή default)
 =Key repeat rate (per second, off or default)	1e94	Ρυθμός επανάληψης πλήκτρων (ανά δευτερόλεπτο, off ή default)
 =Keyboard	a714	Πληκτρολόγιο
-=Keyboards and mice	c352	Πληκτρολόγια και ποντίκια
 =Language	db9b	Γλώσσα
 =Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
 =Launcher	44b1	Εκκινητής
@@ -269,13 +266,11 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Names over TLS	075a	Ονόματα μέσω TLS
 =Natural direction	d977	Φυσική κατεύθυνση
 =Network	ad65	Δίκτυο
-=Network adapters	88ef	Προσαρμογείς δικτύου
-=New USB devices	c15c	Νέες συσκευές USB
+=New devices	5e0e	Νέες συσκευές
 =Normal	2772	Κανονική
 =Notices	8f06	Ειδοποιήσεις
 =On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
-=Other devices	8362	Άλλες συσκευές
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Plain Text	2bbe	Απλό κείμενο
 =Power	a5e6	Ενέργεια
@@ -301,7 +296,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Sound	9a34	Ήχος
 =Sound server	84bf	Διακομιστής ήχου
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
-=Storage	df06	Αποθήκευση
 =System	84bc	Σύστημα
 =System notices	fa89	Ειδοποιήσεις συστήματος
 =Taskbar	d759	Γραμμή εργασιών
@@ -320,7 +314,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά
-=USB	da81	USB
 =Upside down	9dc1	Ανάποδα
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
 =Wi-Fi	0ec1	Wi-Fi

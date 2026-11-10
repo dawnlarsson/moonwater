@@ -45,6 +45,7 @@
 #define SETTINGS_DEVICE 9u
 #define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
 #define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
+#define SETTINGS_PORT 12u   // a device the system sees, in the Devices list: a press allows or blocks it
 
 // How a row's value is taken from the line it is on.
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
@@ -203,7 +204,7 @@ struct settings_row
         desktop is drawn and what its windows keep), Display (the screens),
         Input (the keyboard, the mouse, the pointer and touch), Taskbar (the
         panel), Time (the clock, its zone and where it is set from), Network, Wi-Fi,
-        Bluetooth, USB, Power and Boot. A row is in the group a person looks
+        Bluetooth, Devices, Power and Boot. A row is in the group a person looks
         for it in, by what it does and not by the program that applies it: the
         pointer's size is an Input row though the compositor draws it.
 */
@@ -521,19 +522,9 @@ static const struct settings_row settings_rows[] = {
      .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range [off]"},
     {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,
      .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices [off]"},
-    // A class row reads its word off the classes line usb says before any device, so what a device calls itself is never read.
-    {"USB", "New USB devices", SETTINGS_CHOICE, 0, 0, {"usb"}, "usb ", null, {"usb"}, "unlock lock", 0, null,
-     .usage = "usb [lock|unlock]", .help = "lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]"},
-    {null, "Storage", SETTINGS_CHOICE, 0, 0, {"usb"}, "storage ", null, {"usb", "class", "storage"}, "deny allow", 0, null,
-     .usage = "usb class NAME [allow|deny]",
-     .help = "what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]"},
-    {null, "Keyboards and mice", SETTINGS_CHOICE, 0, 0, {"usb"}, "hid ", null, {"usb", "class", "hid"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Audio", SETTINGS_CHOICE, 0, 0, {"usb"}, "audio ", null, {"usb", "class", "audio"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Cameras", SETTINGS_CHOICE, 0, 0, {"usb"}, "video ", null, {"usb", "class", "video"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Network adapters", SETTINGS_CHOICE, 0, 0, {"usb"}, "net ", null, {"usb", "class", "net"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Bluetooth adapters", SETTINGS_CHOICE, 0, 0, {"usb"}, "bluetooth ", null, {"usb", "class", "bluetooth"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Hubs", SETTINGS_CHOICE, 0, 0, {"usb"}, "hub ", null, {"usb", "class", "hub"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Other devices", SETTINGS_CHOICE, 0, 0, {"usb"}, "other ", null, {"usb", "class", "other"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
+    // The Devices group: the devices the system sees are a list under this row (the feed device list, settings.c), and a press
+    // on one allows or blocks it. The row says what device lock says: whether a new device waits for its allow.
+    {"Devices", "New devices", SETTINGS_INFO, 0, SETTINGS_LINE, {"device"}, "device ", null, {null}, null, ';', null},
     {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
     {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0, null,
      .usage = "battery [NAME|auto|none]", .help = "which battery the Battery row reads: auto is the first present one, none is no battery [auto]"},

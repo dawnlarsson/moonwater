@@ -209,7 +209,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
-=Audio	1439	آڈیو
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس منظر
@@ -217,11 +216,9 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Battery	e12e	بیٹری
 =Battery shown	2a23	دکھائی گئی بیٹری
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Bluetooth اڈاپٹرز
 =Boost	a6cc	Boost
 =Boot	38f5	بوٹ
 =Brightness	324a	چمک
-=Cameras	cea7	کیمرے
 =Canvas	5091	Canvas
 =Caret blink speed	4085	ٹیکسٹ کرسر کے جھپکنے کی رفتار
 =Caret thickness	1e9a	ٹیکسٹ کرسر کی موٹائی
@@ -234,11 +231,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Cursor look	34ce	پوائنٹر کی شکل
 =Cursor size	65d4	پوائنٹر کا سائز
 =Date format	7a44	تاریخ کی شکل
+=Devices	f320	ڈیوائسز
+=Devices in this machine	d7b8	اس مشین کے ڈیوائسز
 =Display	d9b5	اسکرین
 =Editor	bf98	ایڈیٹر
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
 =Gallery	4cdd	گیلری
-=Hubs	456d	ہبز
 =Identify	033d	شناخت
 =In range and saved	7941	رینج میں اور محفوظ
 =Input	e11b	ان پٹ
@@ -251,7 +249,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Key repeat delay (ms, or default)	4eb7	کلید دہرانے کی تاخیر (ms یا default)
 =Key repeat rate (per second, off or default)	1e94	کلید دہرانے کی شرح (فی سیکنڈ، off یا default)
 =Keyboard	a714	کی بورڈ
-=Keyboards and mice	c352	کی بورڈز اور ماؤس
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	بڑا پوائنٹر کتنی دیر رہے (ms یا default)
 =Launcher	44b1	لانچر
@@ -270,13 +267,11 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Names over TLS	075a	TLS پر نام
 =Natural direction	d977	قدرتی سمت
 =Network	ad65	نیٹ ورک
-=Network adapters	88ef	نیٹ ورک اڈاپٹرز
-=New USB devices	c15c	نئی USB ڈیوائسز
+=New devices	5e0e	نئی ڈیوائسز
 =Normal	2772	عام
 =Notices	8f06	اطلاعات
 =On-screen keyboard	97f8	اسکرین کی بورڈ
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
-=Other devices	8362	دیگر ڈیوائسز
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Plain Text	2bbe	سادہ متن
 =Power	a5e6	پاور
@@ -302,7 +297,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Sound	9a34	آواز
 =Sound server	84bf	آواز کا سرور
 =Start the desktop	be4c	ڈیسک ٹاپ شروع کریں
-=Storage	df06	اسٹوریج
 =System	84bc	سسٹم
 =System notices	fa89	سسٹم اطلاعات
 =Taskbar	d759	ٹاسک بار
@@ -321,7 +315,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Turned by the screen	ea45	اسکرین کی طرف سے گھمایا گیا
 =Turned left	507c	بائیں گھمایا گیا
 =Turned right	7a49	دائیں گھمایا گیا
-=USB	da81	USB
 =Upside down	9dc1	الٹا
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
 =Wi-Fi	0ec1	Wi-Fi

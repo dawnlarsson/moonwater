@@ -193,7 +193,8 @@ struct settings_change
 #define SETTINGS_FEED_ROWS 1u
 #define SETTINGS_FEED_WIFI 2u
 #define SETTINGS_FEED_DEVICES 3u
-#define SETTINGS_LISTS 2 // the list feeds, which come first in the table
+#define SETTINGS_FEED_HARDWARE 4u // the devices the system sees, allowed or blocked by a press (device list)
+#define SETTINGS_LISTS 3 // the list feeds, which come first in the table
 #define SETTINGS_LIST_ROWS 24
 #define SETTINGS_ITEM_LABEL 96
 #define SETTINGS_FEED_WAIT_NS 8000000000ll
@@ -212,6 +213,7 @@ struct settings_feed
 static const struct settings_feed settings_feeds[] = {
     {"Wi-Fi", "Wi-Fi", {"wifi"}, "In range and saved", 2000, SETTINGS_FEED_WIFI},
     {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
+    {"Devices", null, {"device", "list"}, "Devices in this machine", 3000, SETTINGS_FEED_HARDWARE},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
 };
@@ -392,7 +394,7 @@ static b32 settings_absent(const char address_to line, positive length)
                settings_find(line, length, "no wireless hardware") < length;
 }
 
-// The part of a line that a machine said of itself: what follows `; "` is a name some device chose (usb says each device's product
+// The part of a line that a machine said of itself: what follows `; "` is a name some device chose (device says each device's product
 // there, escaped so that no quote but the opening one is bare), and a device that calls itself "this machine has no" must not take
 // every row of its verb away.
 static positive settings_unquoted(const char address_to line, positive length)
@@ -2283,7 +2285,8 @@ static const char address_to settings_act_words(string_address address_to words)
         string_address radio = (string_address) "wifi", how = (string_address) "add";
 
         words[0] = null;
-        if (!what[0] || what[1] != '\n' || !(what[0] == 'j' || what[0] == 'f' || what[0] == 'a' || what[0] == 'd'))
+        if (!what[0] || what[1] != '\n' || !(what[0] == 'j' || what[0] == 'f' || what[0] == 'a' || what[0] == 'd' ||
+                                              what[0] == 'v' || what[0] == 'x'))
                 return null;
         name = what + 2;
         for (char address_to at = name; *at; at++)
@@ -2299,6 +2302,11 @@ static const char address_to settings_act_words(string_address address_to words)
                 radio = (string_address) "bluetooth";
         if (what[0] == 'f' || what[0] == 'd')
                 how = (string_address) "remove";
+        if (what[0] == 'v' || what[0] == 'x')
+        {
+                radio = (string_address) "device";
+                how = what[0] == 'v' ? (string_address) "allow" : (string_address) "deny";
+        }
         pass = what[0] == 'j' && pass && pass[0] ? pass : null;
         words[0] = settings.moonwater;
         words[1] = radio;
@@ -2720,6 +2728,29 @@ static fn settings_feed_devices(void)
         settings.item_count[1] = (unsigned short)count;
 }
 
+/*
+        The devices the system sees, as device list says them: two blanks, then the name a press
+        allows or blocks (a port, or a drive's name), the kind, the size and the state, which ends
+        the line: allowed, blocked or waiting. A line that does not say allowed is not allowed.
+*/
+static fn settings_feed_hardware(void)
+{
+        struct settings_item address_to items = settings_large->item[2];
+        char line[SETTINGS_PROBE];
+        char address_to text;
+        positive at, size, count = 0;
+
+        memory_zero(items, sizeof(settings_large->item[2]));
+        for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
+                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
+                {
+                        items[count].kind = SETTINGS_PORT;
+                        items[count].flags = size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0;
+                        settings_item_label(&items[count++], text + 2, size - 2);
+                }
+        settings.item_count[2] = (unsigned short)count;
+}
+
 // A sum of a list as it stands, to tell whether a reading changed what is shown.
 static positive settings_list_sum(int list)
 {
@@ -2785,6 +2816,8 @@ static fn settings_feed_read(b32 killed, b32 failed)
 
         if (settings_feeds[feed].kind == SETTINGS_FEED_WIFI)
                 settings_feed_wifi();
+        else if (settings_feeds[feed].kind == SETTINGS_FEED_HARDWARE)
+                settings_feed_hardware();
         else
                 settings_feed_devices();
         if (settings_list_sum(list) == before && !changed)
@@ -3523,6 +3556,20 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                         settings_say((string_address)WORDS(settings_type_passphrase));
                 }
         }
+        else if (item->kind == SETTINGS_PORT)
+        {
+                char name[SETTINGS_ITEM_LABEL];
+                positive at = 0;
+
+                // The first word of its line is the name device allow and device deny take; a press turns it.
+                while (item->label[at] && item->label[at] != ' ' && at + 1 < sizeof(name))
+                {
+                        name[at] = item->label[at];
+                        at++;
+                }
+                name[at] = 0;
+                settings_act((item->flags & SETTINGS_ITEM_JOINED) ? 'x' : 'v', name, null);
+        }
         else if (item->kind == SETTINGS_ADD)
         {
                 settings_edit_begin(row, "", false);
@@ -4135,6 +4182,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 }
                 else if (item->kind == SETTINGS_DEVICE)
                         row->value = WORDS(settings_kept);
+                else if (item->kind == SETTINGS_PORT)
+                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
         }

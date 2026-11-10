@@ -209,7 +209,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Allow recording	f7e5	اجازهٔ ضبط
 =Always off	48b1	همیشه خاموش
 =Always on	fab5	همیشه روشن
-=Audio	1439	صدا
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس‌زمینه
@@ -217,11 +216,9 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Battery	e12e	باتری
 =Battery shown	2a23	باتری نمایش‌داده‌شده
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	آداپتورهای Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	بوت
 =Brightness	324a	روشنایی
-=Cameras	cea7	دوربین‌ها
 =Canvas	5091	Canvas
 =Caret blink speed	4085	سرعت چشمک‌زدن مکان‌نما
 =Caret thickness	1e9a	ضخامت مکان‌نما
@@ -234,11 +231,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Cursor look	34ce	ظاهر نشانگر
 =Cursor size	65d4	اندازه نشانگر
 =Date format	7a44	قالب تاریخ
+=Devices	f320	دستگاه‌ها
+=Devices in this machine	d7b8	دستگاه‌های این دستگاه
 =Display	d9b5	نمایشگر
 =Editor	bf98	ویرایشگر
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =Gallery	4cdd	گالری
-=Hubs	456d	هاب‌ها
 =Identify	033d	شناسایی
 =In range and saved	7941	در برد و ذخیره‌شده
 =Input	e11b	ورودی
@@ -251,7 +249,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Key repeat delay (ms, or default)	4eb7	تأخیر تکرار کلید (ms یا default)
 =Key repeat rate (per second, off or default)	1e94	نرخ تکرار کلید (در ثانیه، off یا default)
 =Keyboard	a714	صفحه‌کلید
-=Keyboards and mice	c352	صفحه‌کلیدها و ماوس‌ها
 =Language	db9b	زبان
 =Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
 =Launcher	44b1	راه‌انداز
@@ -270,13 +267,11 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Names over TLS	075a	نام‌ها از طریق TLS
 =Natural direction	d977	جهت طبیعی
 =Network	ad65	شبکه
-=Network adapters	88ef	آداپتورهای شبکه
-=New USB devices	c15c	دستگاه‌های USB جدید
+=New devices	5e0e	دستگاه‌های جدید
 =Normal	2772	عادی
 =Notices	8f06	اعلان‌ها
 =On-screen keyboard	97f8	صفحه‌کلید روی صفحه
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
-=Other devices	8362	دستگاه‌های دیگر
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Plain Text	2bbe	متن ساده
 =Power	a5e6	انرژی
@@ -302,7 +297,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Sound	9a34	صدا
 =Sound server	84bf	کارساز صدا
 =Start the desktop	be4c	اجرای رومیزی
-=Storage	df06	ذخیره‌سازی
 =System	84bc	سیستم
 =System notices	fa89	اعلان‌های سیستم
 =Taskbar	d759	نوار وظیفه
@@ -321,7 +315,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست
-=USB	da81	USB
 =Upside down	9dc1	وارونه
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Wi-Fi	0ec1	Wi-Fi

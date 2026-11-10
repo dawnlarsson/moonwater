@@ -208,7 +208,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Allow recording	f7e5	Autoriser l'enregistrement
 =Always off	48b1	Toujours désactivé
 =Always on	fab5	Toujours activé
-=Audio	1439	Audio
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)
 =Automatic	6784	Automatique
 =Background	0abd	Arrière-plan
@@ -216,11 +215,9 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Battery	e12e	Batterie
 =Battery shown	2a23	Batterie affichée
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Adaptateurs Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Démarrage
 =Brightness	324a	Luminosité
-=Cameras	cea7	Caméras
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Vitesse de clignotement du curseur de texte
 =Caret thickness	1e9a	Épaisseur du curseur de texte
@@ -233,11 +230,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Cursor look	34ce	Apparence du pointeur
 =Cursor size	65d4	Taille du pointeur
 =Date format	7a44	Format de la date
+=Devices	f320	Périphériques
+=Devices in this machine	d7b8	Périphériques de cette machine
 =Display	d9b5	Écran
 =Editor	bf98	Éditeur
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =Gallery	4cdd	Galerie
-=Hubs	456d	Concentrateurs
 =Identify	033d	Identifier
 =In range and saved	7941	À portée et enregistrés
 =Input	e11b	Saisie
@@ -250,7 +248,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Key repeat delay (ms, or default)	4eb7	Délai de répétition des touches (ms ou default)
 =Key repeat rate (per second, off or default)	1e94	Cadence de répétition des touches (par seconde, off ou default)
 =Keyboard	a714	Clavier
-=Keyboards and mice	c352	Claviers et souris
 =Language	db9b	Langue
 =Large pointer stays (ms, or default)	5626	Le grand pointeur reste (ms ou default)
 =Launcher	44b1	Lanceur
@@ -269,13 +266,11 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Names over TLS	075a	Noms par TLS
 =Natural direction	d977	Sens naturel
 =Network	ad65	Réseau
-=Network adapters	88ef	Adaptateurs réseau
-=New USB devices	c15c	Nouveaux périphériques USB
+=New devices	5e0e	Nouveaux périphériques
 =Normal	2772	Normal
 =Notices	8f06	Notifications
 =On-screen keyboard	97f8	Clavier à l'écran
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
-=Other devices	8362	Autres périphériques
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Plain Text	2bbe	Texte brut
 =Power	a5e6	Alimentation
@@ -301,7 +296,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Sound	9a34	Son
 =Sound server	84bf	Serveur de son
 =Start the desktop	be4c	Démarrer le bureau
-=Storage	df06	Stockage
 =System	84bc	Système
 =System notices	fa89	Avis du système
 =Taskbar	d759	Barre des tâches
@@ -320,7 +314,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Turned by the screen	ea45	Pivoté par l'écran
 =Turned left	507c	Pivoté à gauche
 =Turned right	7a49	Pivoté à droite
-=USB	da81	USB
 =Upside down	9dc1	À l'envers
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Wi-Fi	0ec1	Wi-Fi

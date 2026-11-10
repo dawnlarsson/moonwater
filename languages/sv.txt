@@ -208,7 +208,6 @@ ui_field_full	fe02	mer ryms inte
 =Allow recording	f7e5	Tillåt inspelning
 =Always off	48b1	Alltid av
 =Always on	fab5	Alltid på
-=Audio	1439	Ljud
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
 =Automatic	6784	Automatiskt
 =Background	0abd	Bakgrund
@@ -216,11 +215,9 @@ ui_field_full	fe02	mer ryms inte
 =Battery	e12e	Batteri
 =Battery shown	2a23	Visat batteri
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	Bluetooth-adaptrar
 =Boost	a6cc	Boost
 =Boot	38f5	Start
 =Brightness	324a	Ljusstyrka
-=Cameras	cea7	Kameror
 =Canvas	5091	Canvas
 =Caret blink speed	4085	Textmarkörens blinkhastighet
 =Caret thickness	1e9a	Textmarkörens tjocklek
@@ -233,11 +230,12 @@ ui_field_full	fe02	mer ryms inte
 =Cursor look	34ce	Pekarens utseende
 =Cursor size	65d4	Pekarens storlek
 =Date format	7a44	Datumformat
+=Devices	f320	Enheter
+=Devices in this machine	d7b8	Enheter i den här datorn
 =Display	d9b5	Skärm
 =Editor	bf98	Redigerare
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =Gallery	4cdd	Galleri
-=Hubs	456d	Hubbar
 =Identify	033d	Identifiera
 =In range and saved	7941	I närheten och sparade
 =Input	e11b	Inmatning
@@ -250,7 +248,6 @@ ui_field_full	fe02	mer ryms inte
 =Key repeat delay (ms, or default)	4eb7	Fördröjning för tangentupprepning (ms eller default)
 =Key repeat rate (per second, off or default)	1e94	Tangentupprepning (per sekund, off eller default)
 =Keyboard	a714	Tangentbord
-=Keyboards and mice	c352	Tangentbord och möss
 =Language	db9b	Språk
 =Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
 =Launcher	44b1	Startare
@@ -269,13 +266,11 @@ ui_field_full	fe02	mer ryms inte
 =Names over TLS	075a	Namn över TLS
 =Natural direction	d977	Naturlig riktning
 =Network	ad65	Nätverk
-=Network adapters	88ef	Nätverksadaptrar
-=New USB devices	c15c	Nya USB-enheter
+=New devices	5e0e	Nya enheter
 =Normal	2772	Normal
 =Notices	8f06	Meddelanden
 =On-screen keyboard	97f8	Skärmtangentbord
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
-=Other devices	8362	Andra enheter
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Plain Text	2bbe	Oformaterad text
 =Power	a5e6	Ström
@@ -301,7 +296,6 @@ ui_field_full	fe02	mer ryms inte
 =Sound	9a34	Ljud
 =Sound server	84bf	Ljudserver
 =Start the desktop	be4c	Starta skrivbordet
-=Storage	df06	Lagring
 =System	84bc	System
 =System notices	fa89	Systemmeddelanden
 =Taskbar	d759	Aktivitetsfält
@@ -320,7 +314,6 @@ ui_field_full	fe02	mer ryms inte
 =Turned by the screen	ea45	Vänds av skärmen
 =Turned left	507c	Vriden åt vänster
 =Turned right	7a49	Vriden åt höger
-=USB	da81	USB
 =Upside down	9dc1	Upp och ned
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Wi-Fi	0ec1	Wi-Fi

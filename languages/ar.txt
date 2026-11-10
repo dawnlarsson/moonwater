@@ -209,7 +209,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Allow recording	f7e5	السماح بالتسجيل
 =Always off	48b1	دائماً إيقاف
 =Always on	fab5	دائماً تشغيل
-=Audio	1439	الصوت
 =Authenticated time (NTS)	e533	الوقت الموثق (NTS)
 =Automatic	6784	تلقائي
 =Background	0abd	الخلفية
@@ -217,11 +216,9 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Battery	e12e	البطارية
 =Battery shown	2a23	البطارية المعروضة
 =Bluetooth	14bd	Bluetooth
-=Bluetooth adapters	3bb7	محولات Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	الإقلاع
 =Brightness	324a	السطوع
-=Cameras	cea7	الكاميرات
 =Canvas	5091	Canvas
 =Caret blink speed	4085	سرعة وميض مؤشر النص
 =Caret thickness	1e9a	سماكة مؤشر النص
@@ -234,11 +231,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Cursor look	34ce	شكل المؤشر
 =Cursor size	65d4	حجم المؤشر
 =Date format	7a44	تنسيق التاريخ
+=Devices	f320	الأجهزة
+=Devices in this machine	d7b8	الأجهزة في هذا الجهاز
 =Display	d9b5	الشاشة
 =Editor	bf98	المحرر
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض
-=Hubs	456d	المحاور
 =Identify	033d	تعريف
 =In range and saved	7941	ضمن النطاق والمحفوظة
 =Input	e11b	الإدخال
@@ -251,7 +249,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Key repeat delay (ms, or default)	4eb7	تأخير تكرار المفتاح (ms أو default)
 =Key repeat rate (per second, off or default)	1e94	معدل تكرار المفتاح (في الثانية، off أو default)
 =Keyboard	a714	لوحة المفاتيح
-=Keyboards and mice	c352	لوحات المفاتيح والماوس
 =Language	db9b	اللغة
 =Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
 =Launcher	44b1	المشغل
@@ -270,13 +267,11 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Names over TLS	075a	الأسماء عبر TLS
 =Natural direction	d977	الاتجاه الطبيعي
 =Network	ad65	الشبكة
-=Network adapters	88ef	محولات الشبكة
-=New USB devices	c15c	أجهزة USB الجديدة
+=New devices	5e0e	أجهزة جديدة
 =Normal	2772	عادي
 =Notices	8f06	الإشعارات
 =On-screen keyboard	97f8	لوحة المفاتيح على الشاشة
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
-=Other devices	8362	أجهزة أخرى
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Plain Text	2bbe	نص عادي
 =Power	a5e6	الطاقة
@@ -302,7 +297,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Sound	9a34	الصوت
 =Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب
-=Storage	df06	التخزين
 =System	84bc	النظام
 =System notices	fa89	إشعارات النظام
 =Taskbar	d759	شريط المهام
@@ -321,7 +315,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Turned by the screen	ea45	التدوير بواسطة الشاشة
 =Turned left	507c	مدار لليسار
 =Turned right	7a49	مدار لليمين
-=USB	da81	USB
 =Upside down	9dc1	مقلوب
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Wi-Fi	0ec1	Wi-Fi
