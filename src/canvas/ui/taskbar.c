@@ -9,7 +9,9 @@
         thickness less an inset, and it hangs off the output's edge it is along, so
         its round corners show on the side towards the middle of the output. A
         bottom or top band runs left to right, with the tray at the right end and
-        the tabs centred in what the tray leaves; a left or right band runs top to
+        the tabs centred on the band itself, not in what the tray leaves of it
+        (moved off the middle only as far as the button or the tray would
+        otherwise be run into); a left or right band runs top to
         bottom, with the tray at the bottom, the battery above the clock. A band
         on a side writes its titles and its tray turned a quarter, the tops of
         the letters toward the middle of its output or toward the edge it is
@@ -256,11 +258,21 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         for (int at = 0; lay->most && at < lay->count; at++)
                 windows += taskbar_tab_width(lay, at) + lay->gap;
         lay->windows = windows;
-        // Along a bottom or top band the tray is at the right end and the tabs are centred in what it leaves; along a side
-        // one the tabs start below a gap at the top and the tray is held to the bottom.
-        lay->start = lay->vertical ? lay->origin + lay->gap + lay->lead
-                                   : lay->origin + lay->lead + (lay->length - lay->lead - lay->tray - windows) / 2;
+        // The tray is held to the far end. Along a bottom or top band the tabs are centred on the band itself, whatever the button
+        // at one end and the tray at the other take of it, and are moved off the middle only as far as they would otherwise run into
+        // one of them; along a side one the tabs start below a gap at the top.
         lay->tray_at = lay->origin + lay->length - lay->gap - lay->tray;
+        if (lay->vertical)
+                lay->start = lay->origin + lay->gap + lay->lead;
+        else
+        {
+                int group = windows > lay->gap ? windows - lay->gap : 0; // the tabs and the gaps between them, not the one after the last
+                int least = lay->origin + lay->lead + lay->gap, most_at = lay->tray_at - lay->gap - group;
+
+                lay->start = lay->origin + (lay->length - group) / 2;
+                lay->start = lay->start > most_at ? most_at : lay->start;
+                lay->start = lay->start < least ? least : lay->start;
+        }
         lay->across = lay->vertical ? (view->position == TASKBAR_LEFT ? lay->bx : lay->bx + lay->inset)
                                     : (view->position == TASKBAR_TOP ? lay->by : lay->by + lay->inset);
         lay->across_len = lay->thick - lay->inset;

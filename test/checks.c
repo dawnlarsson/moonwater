@@ -126552,9 +126552,19 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
         wide[at] = width < most ? width : most;
         windows += wide[at] + gap;
     }
-    *start = position == TASKBAR_LEFT || position == TASKBAR_RIGHT ? origin + gap + lead : origin + lead + (length - lead - tray - windows) / 2;
     *tray_at = origin + length - gap - tray;
     *tray_length = tray;
+    // Along a bottom or top band the tabs are centred on the band, held off the button and the tray; along a side one they start below a gap.
+    if (position == TASKBAR_LEFT || position == TASKBAR_RIGHT)
+        *start = origin + gap + lead;
+    else
+    {
+        int group = windows > gap ? windows - gap : 0;
+
+        *start = origin + (length - group) / 2;
+        *start = *start > *tray_at - gap - group ? *tray_at - gap - group : *start;
+        *start = *start < origin + lead + gap ? origin + lead + gap : *start;
+    }
 }
 
 static unsigned int launcher_band_pixels[BAND_W * 2 * COMPOSITOR_PANEL];
@@ -126728,6 +126738,92 @@ static void check_taskbar_launcher(void)
           taskbar_tab_ink(TASKBAR_LAUNCHER, 0) == taskbar_tab_ink(0, 0) && taskbar_tab_ink(-2, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(-2, 0));
     taskbar_launcher_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
+}
+
+/*
+        The tabs of a bottom or top band are centred on the band itself and not in what the tray leaves of it: the space before the first
+        tab and the space after the last are the same to a pixel, whatever the tray takes at the far end (the standard tray; with the
+        microphone, the volume and the notices dot added; a long format of the person's) and with the launcher button on or off, reading
+        from the left and from the right. Only when the tabs are too many to be centred are they moved off the middle, and then they keep
+        clear of the button and of the tray.
+*/
+static void check_taskbar_centre(void)
+{
+    static const unsigned char few[3] = {5, 15, 30};
+    static const unsigned char many[12] = {30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30};
+    static const char *const formats[4] = {"", "", "", "{time.24h.hour}:{time.24h.min}  {date.year}-{date.month}-{date.day}  {cpu.load} {mem.used} {host}"};
+    b32 centred = true, still = true, clear = true;
+    int first_start = 0;
+
+    language_directory = "languages/";
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
+    for (int mode = 0; mode < 2; mode++)
+    {
+        language_take(mode ? ('a' | 'r' << 8) : 0);
+        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_TOP; position++)
+            for (int launcher = 0; launcher < 2; launcher++)
+                for (int tray = 0; tray < 4; tray++)
+                {
+                    struct taskbar_view view;
+                    int bx, by, bw, bh, x, y, w, h, ex, ey, ew, eh, lo, hi;
+
+                    memory_zero(&view, sizeof(view));
+                    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = position;
+                    view.count = 3, view.lengths = few;
+                    taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
+                    taskbar_launcher_set(launcher);
+                    taskbar_tray_set(formats[tray]);
+                    taskbar_volume_set(tray == 1 || tray == 2, 50, 0, 0);
+                    taskbar_mic_set(tray == 2, 0);
+                    taskbar_notices_set(tray == 2, WINDOWS_ISSUE_WARNING);
+                    taskbar_band(&view, &bx, &by, &bw, &bh);
+                    if (!taskbar_slot(&view, 0, &x, &y, &w, &h) || !taskbar_slot(&view, 2, &ex, &ey, &ew, &eh))
+                    {
+                        centred = false;
+                        continue;
+                    }
+                    lo = x < ex ? x : ex, hi = x + w > ex + ew ? x + w : ex + ew;
+                    // The group's two ends are as far from the band's two ends as each other, to a pixel.
+                    centred &= (lo - bx) - (bx + bw - hi) >= -1 && (lo - bx) - (bx + bw - hi) <= 1 && lo > bx;
+                    // And the tray's width is not in it: the first tab is where it is with the standard tray, whatever else the tray holds.
+                    if (position == TASKBAR_BOTTOM && !launcher && !mode)
+                    {
+                        first_start = tray == 0 ? x : first_start;
+                        still &= x == first_start;
+                    }
+                }
+        // Too many to be centred: they keep clear of the button and of the tray.
+        for (int launcher = 0; launcher < 2; launcher++)
+        {
+            struct taskbar_view view;
+            int x, y, w, h, ex, ey, ew, eh, tx, ty, tw, th, kx = 0, ky = 0, kw = 0, kh = 0, lo, hi;
+
+            memory_zero(&view, sizeof(view));
+            view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM;
+            view.count = 12, view.lengths = many;
+            taskbar_settings_set("bottom", "primary", "battery none\n");
+            taskbar_launcher_set(launcher);
+            taskbar_tray_set("");
+            taskbar_volume_set(1, 50, 0, 0);
+            taskbar_mic_set(1, 0);
+            taskbar_notices_set(1, WINDOWS_ISSUE_WARNING);
+            clear &= taskbar_slot(&view, 0, &x, &y, &w, &h) && taskbar_slot(&view, 11, &ex, &ey, &ew, &eh) &&
+                     taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (!launcher || taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh));
+            lo = x < ex ? x : ex, hi = x + w > ex + ew ? x + w : ex + ew;
+            clear &= (hi <= tx || lo >= tx + tw) && (!launcher || hi <= kx || lo >= kx + kw);
+        }
+    }
+    language_take(0);
+    taskbar_launcher_set(0);
+    taskbar_tray_set("");
+    taskbar_volume_set(0, 0, 0, 0);
+    taskbar_mic_set(0, 0);
+    taskbar_notices_set(0, 0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    check("taskbar centre: the tabs of a bottom and a top band are centred on the band, to a pixel, with any tray and the launcher button on or off, from the left and from the right", centred);
+    check("taskbar centre: a tray of more cells, or a long format, does not move the tabs", still);
+    check("taskbar centre: tabs too many to be centred are kept clear of the launcher button and of the tray", clear);
 }
 
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
@@ -163316,6 +163412,7 @@ b32 main()
         check_rtl_chrome();
         check_taskbar_tray();
         check_taskbar_launcher();
+        check_taskbar_centre();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY
         check_kit_motion();
