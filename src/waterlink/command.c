@@ -126,8 +126,11 @@ static b32 link_status(void)
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
         p8 key[48];
 
-        //      A listener that is off, or older than this, left no state.
-        if (link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
+        //      A listener that is off, or older than this, left no state. One
+        //      that was killed left its state behind, and it says nothing of
+        //      sessions or peers heard now: a clean stop removes the file.
+        if (owner <= 0 ||
+            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
                                       sizeof state, sizeof state,
                                       address_of state_length) < 0 ||
             state_length != sizeof state)
@@ -296,8 +299,9 @@ static b32 link_status(void)
                                            "this machine, not the other way\n");
         }
 
-        for (positive at = 0, shown = 0;
-             at < state.open_count && at < LINK_SESSIONS; at++)
+        positive shown = 0;
+
+        for (positive at = 0; at < state.open_count && at < LINK_SESSIONS; at++)
         {
                 link_open_entry address_to open = state.open + at;
                 p8 place[64];
@@ -597,6 +601,18 @@ static b32 link_switch(bool on, bool say)
         struct waterlink_identity me;
         p8 key[48];
 
+        //      Switched on, the word is written only once the listener has a
+        //      key to run with: without one a refused `link on` left the switch
+        //      on, and the machine process retried a listener that could never
+        //      start, at every backoff, for as long as the key stayed unreadable.
+        if (on)
+        {
+                if (link_identity(address_of me, true) < 0)
+                        return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
+                link_key_text(me.public, key);
+                crypto_forget(address_of me, sizeof me);
+        }
+
         if (radio_write_word(LINK_SWITCH_PATH, on ? "on" : "off") < 0)
                 return host_refuse("%s could not be written\n",
                                    LINK_SWITCH_PATH);
@@ -612,11 +628,6 @@ static b32 link_switch(bool on, bool say)
                 }
                 return 0;
         }
-
-        if (link_identity(address_of me, true) < 0)
-                return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
-        link_key_text(me.public, key);
-        crypto_forget(address_of me, sizeof me);
 
         if (host_lock_owner(LINK_LOCK_PATH) <= 0)
         {
@@ -970,6 +981,7 @@ static b32 link_group_leave(string_address namespace, bool forget)
                 bipolar held = link_peers_lock();
                 positive dropped = 0;
                 bool read = held >= 0 && link_peers_for_change(address_of peers);
+                bool wrote = false;
 
                 for (positive at = 0; read && at < peers.count; at++)
                         if (peers.peer[at].group == keys.mark)
@@ -978,8 +990,18 @@ static b32 link_group_leave(string_address namespace, bool forget)
                                 dropped++;
                         }
                 if (read)
-                        (void)link_peers_save(address_of peers);
+                        wrote = link_peers_save(address_of peers) >= 0;
                 link_peers_unlock(held);
+                //      The group is gone from its file already; a peers file
+                //      that did not take the forget is said, not reported as done.
+                if (read && !wrote)
+                {
+                        crypto_forget(address_of keys, sizeof keys);
+                        return host_refuse("left group %s, but %s could not be "
+                                           "written: the machines it linked are "
+                                           "kept\n",
+                                           namespace, LINK_PEERS_PATH);
+                }
                 if (read)
                         host_say(log, host_label "left group %s and removed the "
                                                  "%p machines it linked\n",
