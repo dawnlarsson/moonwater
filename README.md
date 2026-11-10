@@ -178,7 +178,7 @@ moonwater link pair [NAME]             a code, and wait for the other machine to
 moonwater link NAME CODE               link to the machine called NAME, which waits
 moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all
 moonwater link on|off                  the listener, kept across boots [off]
-moonwater link transport [network|modem]   how linked machines reach each other: network, or the audio modem, not available yet [network]
+moonwater link transport [network|modem]   how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]
 ```
 
 `moonwater` alone prints the main page, and `moonwater help VERB` every row of one: the
