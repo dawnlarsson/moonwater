@@ -126869,11 +126869,11 @@ static void check_taskbar_centre(void)
 static void check_taskbar_scale(void)
 {
     static const unsigned char few[3] = {5, 15, 30};
-    static const int screens[3] = {100, 150, 200}, scales[4] = {100, 125, 150, 200}, paddings[5] = {0, 1, 4, 10, 24};
+    static const int screens[3] = {100, 150, 200}, scales[6] = {50, 75, 100, 125, 150, 200}, paddings[5] = {0, 1, 4, 10, 24};
     static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
     static const char *const words[4] = {"bottom", "top", "left", "right"};
     b32 thick_ok = true, bytes_ok = true, gap_ok = true, ends_ok = true, standard_ok = true, drawn = true, rows_ok = true;
-    long place = -1, number = -1;
+    long number = -1;
 
     memory_zero(&compositor, sizeof(compositor));
     compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
@@ -126881,7 +126881,7 @@ static void check_taskbar_scale(void)
     taskbar_launcher_set(1);
     for (int at = 0; at < 4; at++)
         for (int screen = 0; screen < 3; screen++)
-            for (int each = 0; each < 4; each++)
+            for (int each = 0; each < 6; each++)
             {
                 struct taskbar_view view;
                 int bx, by, bw, bh, thick, want = COMPOSITOR_PANEL * (screens[screen] * scales[each] / 100) / 100;
@@ -126902,7 +126902,7 @@ static void check_taskbar_scale(void)
 
     // The padding is the gap: between the tabs, from the band's start to the button and from the tray to the band's end.
     for (int screen = 0; screen < 3; screen++)
-        for (int each = 0; each < 4; each++)
+        for (int each = 0; each < 6; each++)
             for (int pad = 0; pad < 5; pad++)
             {
                 struct taskbar_view view;
@@ -126929,7 +126929,7 @@ static void check_taskbar_scale(void)
     {
         struct taskbar_view view;
         int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1;
-        static const int bad_scales[4] = {0, 99, 201, -100}, bad_paddings[3] = {-1, 25, 1000};
+        static const int bad_scales[4] = {0, 49, 201, -100}, bad_paddings[3] = {-1, 25, 1000};
 
         memory_zero(&view, sizeof(view));
         view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM;
@@ -126951,14 +126951,16 @@ static void check_taskbar_scale(void)
         }
     }
 
-    // The rows' words: a scale is its place among 100 125 150 200, a padding a whole number from 0 to 24, and nothing else is kept.
-    compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "100", &place); /* the row's reset word: not kept, the standard */
-    rows_ok &= place == 0;
-    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "125", &place) && place == 1;
-    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "150", &place) && place == 2;
-    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "200", &place) && place == 3;
-    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "175", &place) && place == 0;
-    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "300", &place) && !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "", &place);
+    // The rows' words: a scale is any whole number from 50 to 200 and a padding one from 0 to 24, and nothing else is kept.
+    compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "100", &number); /* the row's reset word: not kept, the standard */
+    rows_ok &= number == TASKBAR_SCALE_STANDARD;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "50", &number) && number == 50;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "75", &number) && number == 75;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "137", &number) && number == 137;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "200", &number) && number == 200;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "49", &number) && number == TASKBAR_SCALE_STANDARD;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "201", &number) && !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "", &number) &&
+               !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "1.5", &number);
     rows_ok &= compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "0", &number) && number == 0;
     rows_ok &= compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "24", &number) && number == 24;
     rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "25", &number) && number == TASKBAR_PADDING_STANDARD;
@@ -126994,12 +126996,12 @@ static void check_taskbar_scale(void)
     taskbar_padding_set(TASKBAR_PADDING_STANDARD);
     taskbar_launcher_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
-    check("taskbar scale: the band is as thick as the screen's scale and the taskbar's make it, on every edge, at 100 to 200 percent of each", thick_ok);
+    check("taskbar scale: the band is as thick as the screen's scale and the taskbar's make it, on every edge, at 50 to 200 percent of each", thick_ok);
     check("taskbar scale: the memory kept for the band and its glass holds it at every scale", bytes_ok);
     check("taskbar padding: the gap between the tabs is the padding at the scale, from 0 (edge to edge) to 24", gap_ok);
     check("taskbar padding: the launcher button is a padding in from the band's start and the tray a padding from its end", ends_ok);
-    check("taskbar scale: a scale outside the choices and a padding outside the range are the standard", standard_ok);
-    check("taskbar scale: the rows' words are the places and numbers the compositor reads", rows_ok);
+    check("taskbar scale: a scale and a padding outside their ranges are the standard", standard_ok);
+    check("taskbar scale: the rows' words are the numbers the compositor reads, any in range", rows_ok);
     check("taskbar scale: a whole band at 200 percent, the widest padding and every cell is drawn inside its memory", drawn);
 }
 
@@ -138625,6 +138627,40 @@ static fn check_settings(string_address regular, string_address bold)
         settings_activate(wifi, -2);
         check("settings: and a change to a row waiting replaces its change", settings.queued == 2 &&
                   string_equals((string_address)settings.queue[0].value, (string_address) "off"));
+        settings.queued = 0;
+        // A slider row (the taskbar scale): the kit's slider over the row's range at the number the verb said, moved a step by the keys inside
+        // its range, and changed once to the value the hand left it at.
+        {
+                int scale = settings_row_named("Taskbar scale (percent)");
+                struct ui_row described;
+
+                settings.state[scale] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[scale], (string_address) "125", SETTINGS_VALUE);
+                memory_zero(&described, sizeof(described));
+                settings_describe(scale, &described);
+                check("settings: the taskbar scale is a slider row over 50 to 200 at the number the verb said, in percent",
+                      described.kind == UI_ROW_SLIDER && described.at == 125 && described.low == 50 && described.high == 200 && described.step == 5 &&
+                          described.words && string_equals((string_address)described.words, (string_address) "percent"));
+                check("settings: the keys step a slider row, which is no field and no choice", settings_steps(scale) &&
+                          settings_rows[scale].kind == SETTINGS_SLIDER);
+                settings_activate(scale, 1);
+                check("settings: Right moves a slider a step on", settings.queued == 1 && settings.queue[0].row == scale &&
+                          string_equals((string_address)settings.queue[0].value, (string_address) "130"));
+                settings.queued = 0;
+                string_copy_bounded((string_address)settings.value[scale], (string_address) "200", SETTINGS_VALUE);
+                settings_activate(scale, 1);
+                string_copy_bounded((string_address)settings.value[scale], (string_address) "50", SETTINGS_VALUE);
+                settings_activate(scale, -1);
+                check("settings: and a slider is held inside its range by the keys", settings.queued == 0);
+                settings.list.slid = scale + 1, settings.list.slid_value = 80;
+                settings_slid();
+                check("settings: a slider the hand let go changes its row to the value it was left at, once", settings.queued == 1 &&
+                          settings.queue[0].row == scale && string_equals((string_address)settings.queue[0].value, (string_address) "80") &&
+                          settings.list.slid == 0);
+                settings_slid();
+                check("settings: and asks nothing more", settings.queued == 1);
+                settings.queued = 0;
+        }
         settings.child = 0;
         settings.queued = 0;
 

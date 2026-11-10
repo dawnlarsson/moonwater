@@ -1315,11 +1315,11 @@ static void taskbar_launcher_set(int on)
         taskbar.stale = 1;
 }
 
-// `taskbar scale`: the band, and what is drawn in it, at this percent of its screen's scale (100 to TASKBAR_SCALE_MOST; anything else is
-// the standard). Its thickness changes with it, so the compositor reads its rectangle and its memory again (compositor_taskbar_settings_read).
+// `taskbar scale`: the band, and what is drawn in it, at this percent of its screen's scale (TASKBAR_SCALE_LEAST to TASKBAR_SCALE_MOST, under
+// 100 a band and a text smaller than the screen's own; anything else is the standard). Its thickness changes with it, so the compositor reads its rectangle and its memory again (compositor_taskbar_settings_read).
 static void taskbar_scale_set(int percent)
 {
-        taskbar.scale = percent >= TASKBAR_SCALE_STANDARD && percent <= TASKBAR_SCALE_MOST ? percent : TASKBAR_SCALE_STANDARD;
+        taskbar.scale = percent >= TASKBAR_SCALE_LEAST && percent <= TASKBAR_SCALE_MOST ? percent : TASKBAR_SCALE_STANDARD;
         taskbar.stale = 1;
 }
 

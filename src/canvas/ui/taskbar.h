@@ -59,8 +59,9 @@
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
 // The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale): the
-// choices of the one and the range of the other, and what each is when nothing is kept. The padding's standard is the kit's gap between
+// range of each, and what each is when nothing is kept. The padding's standard is the kit's gap between
 // pieces that go together (UI_GAP1, which taskbar.c holds it to).
+#define TASKBAR_SCALE_LEAST 50
 #define TASKBAR_SCALE_STANDARD 100
 #define TASKBAR_SCALE_MOST 200
 #define TASKBAR_PADDING_STANDARD 4

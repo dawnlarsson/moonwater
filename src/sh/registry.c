@@ -460,13 +460,14 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
                       .usage = "taskbar display [primary|all]", .help = "the screens the taskbar is on: the primary, or all, each listing its windows [primary]"),
     //  The taskbar's own size, on top of its screen's scale: how thick the band is and how large everything in it is drawn (its tabs'
-    //  text, the tray, the launcher button's mark), and the room round its items: the space between them and at the band's ends.
-    //  The compositor takes both from their files (compositor_taskbar_settings_read), a missing file or a word that is none being the standard.
-    SETTING_PLAIN_ROW(null, "Taskbar scale (percent)", SETTINGS_CHOICE, 0, ("taskbar", "scale"), "scale ", "100 125 150 200",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_SCALE_PATH, .standard = "100", .reset = "100",
-                      .need = "how Canvas draws", .refusal = "taskbar scale is 100, 125, 150 or 200, not %s\n",
-                      .usage = "taskbar scale [100|125|150|200]",
-                      .help = "how large the taskbar and what it shows are, in percent of the screen scale [100]"),
+    //  text, the tray, the launcher's mark), from half to twice; and the room round the text of each tab. Each is a slider in the window and
+    //  any number in range to the verb. The compositor takes both from their files (compositor_taskbar_settings_read), a missing file or a
+    //  word that is none being the standard.
+    SETTING_PLAIN_ROW(null, "Taskbar scale (percent)", SETTINGS_SLIDER, 0, ("taskbar", "scale"), "scale ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_SCALE_PATH, .standard = "100",
+                      .unit = "percent", .low = 50, .high = 200, .need = "how Canvas draws",
+                      .usage = "taskbar scale [PERCENT|default]",
+                      .help = "how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]"),
     SETTING_PLAIN_ROW(null, "Taskbar padding (pixels, or default)", SETTINGS_FIELD, 0, ("taskbar", "padding"), "padding ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "4",
                       .unit = "px", .low = 0, .high = 24, .need = "how Canvas draws",

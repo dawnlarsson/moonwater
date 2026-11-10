@@ -11143,9 +11143,7 @@ static void compositor_taskbar_settings_read(void)
 {
         char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8], launcher[16], fullscreen[16], scale[16], padding[16];
         int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
-        // The words of the Taskbar scale row (registry.c), in the row's order.
-        static const int scales[4] = {100, 125, 150, 200};
-        long edge, place = 0, pixels = TASKBAR_PADDING_STANDARD;
+        long edge, percent = TASKBAR_SCALE_STANDARD, pixels = TASKBAR_PADDING_STANDARD;
 
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
@@ -11174,9 +11172,9 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
         compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));
-        // The standard when nothing is kept, or what is kept is none of the row's words or outside its range.
+        // The standard when nothing is kept, or what is kept is no number or outside the row's range.
         compositor_word(SETTING_TASKBAR_SCALE_PATH, scale, sizeof(scale));
-        compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, scale, &place);
+        compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, scale, &percent);
         compositor_word(SETTING_TASKBAR_PADDING_PATH, padding, sizeof(padding));
         compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, padding, &pixels);
         compositor_bands_where(was);
@@ -11185,7 +11183,7 @@ static void compositor_taskbar_settings_read(void)
         taskbar_text_set(edge == 1);
         taskbar_tray_set(tray);
         taskbar_launcher_set(string_equals((string_address)launcher, (string_address) "on"));
-        taskbar_scale_set(place >= 0 && place < 4 ? scales[place] : TASKBAR_SCALE_STANDARD);
+        taskbar_scale_set((int)percent);
         taskbar_padding_set((int)pixels);
         compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
         // The row's standard is on: no file, or a file that says default, hides the band as on does; only "off" keeps it.
