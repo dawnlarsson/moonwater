@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
 
 describe()
 {
@@ -192,6 +192,7 @@ describe()
         fold)     echo "the constant-size fold we put in the kernel string header" ;;
         allocator) echo "malloc, free, calloc and realloc against glibc's" ;;
         reserve) echo "movable mappings, growth failures, relocation and sparse-page residency" ;;
+        modem) echo "the audio modem (src/waterlink/modem.c) as a last-resort physical layer: SHA-256 and HMAC vectors, round trips at random lengths and offsets, the pinned wire format, input bounds, wrong keys, replay, the receiver session, a noise sweep, a benchmark; MODEM_FUZZ_SECONDS adds the libFuzzer target" ;;
         link) echo "moonwater link end to end between two network namespaces: run, shell over a pty, netem loss, refusals, rekeys, on and off" ;;
         netem) echo "the DHCP and SNTP clients against a hostile server over a veth pair with netem loss, duplication, reordering and delay (NOT RUN without unprivileged namespaces, veth and netem)" ;;
         waterlink) echo "the waterlink core as a pure transform: supersession, reliable per-key delivery and congestion over a generated lossy network, the seal, the Noise IK handshake against a reference, and the replay window" ;;
@@ -3755,6 +3756,46 @@ lane_reserve()   { freestanding_checks_lane reserve reserve; }
 #       the native binary's `noise` mode against one written in the harness
 #       and, where it imports, the noiseprotocol package.
 #
+lane_modem()
+(
+	#	The audio modem (src/waterlink/modem.c): its self-test under the sanitizers,
+	#	and, when the compiler has libFuzzer and MODEM_FUZZ_SECONDS is set, its fuzz
+	#	target for that many seconds.
+	modem_work=$work/modem
+	mkdir -p "$modem_work" || exit 1
+	modem_flags="-std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
+	$compiler $modem_flags -o "$modem_work/selftest" test/modem.c -lm 2> "$modem_work/build.err" || {
+		note "modem: test/modem.c did not build with $compiler"
+		cat "$modem_work/build.err" >&2
+		exit 1
+	}
+	modem_status=0
+	"$modem_work/selftest" > "$modem_work/out" 2>&1 || modem_status=$?
+	#	Each check the self-test printed counts once: its "ok" or "FAIL" row.
+	#	A tally name is one word: the tally file is read by fields, so the spaces
+	#	of a check's text become underscores.
+	while IFS= read -r modem_row; do
+		case $modem_row in
+		'ok  '*) modem_name=$(printf '%s' "$modem_row" | sed -e 's/^ *ok *//' -e 's/ /_/g'); tally "modem.$modem_name" 1 1 ;;
+		'FAIL  '*) modem_name=$(printf '%s' "$modem_row" | sed -e 's/^FAIL *//' -e 's/ /_/g'); tally "modem.$modem_name" 0 1 ;;
+		esac
+	done < "$modem_work/out"
+	[ "$modem_status" = 0 ] || {
+		cat "$modem_work/out" >&2
+		note "modem: the self-test failed under $compiler"
+		exit 1
+	}
+	if [ -n "${MODEM_FUZZ_SECONDS:-}" ] && echo 'int x;' | $compiler -fsanitize=fuzzer,address -c -x c -o /dev/null - 2>/dev/null; then
+		$compiler $modem_flags -DMODEM_FUZZ -fsanitize=fuzzer -o "$modem_work/fuzz" test/modem.c -lm || exit 1
+		mkdir -p "$modem_work/corpus"
+		"$modem_work/fuzz" -max_total_time="$MODEM_FUZZ_SECONDS" -max_len=4096 "$modem_work/corpus" > "$modem_work/fuzz.out" 2>&1 || {
+			tail -20 "$modem_work/fuzz.out" >&2
+			note "modem: the fuzz target failed"
+			exit 1
+		}
+	fi
+)
+
 lane_waterlink()
 {
         freestanding_checks_lane waterlink waterlink
