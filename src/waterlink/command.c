@@ -232,8 +232,8 @@ static b32 link_status(void)
         if (!link_peers_for_change(address_of peers))
                 string_format(log, "  %s could not be read\n", LINK_PEERS_PATH);
         else if (!peers.count)
-                string_format(log, "  nobody linked yet: moonwater link pair here, "
-                                   "and moonwater link NAME CODE there\n");
+                string_format(log, "  nobody linked yet: moonwater link pair, "
+                                   "and on the other machine moonwater link NAME CODE\n");
 
         for (positive at = 0; at < peers.count; at++)
         {
