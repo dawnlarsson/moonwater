@@ -220,6 +220,10 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 tab->folder = -1;
                 return false;
         }
+        /*
+                A file that cannot be mapped is read instead, and a read that fails is refused: a buffer cut short by an
+                error would be the file's end to the editor, and a save would write that prefix over the whole file.
+        */
         if (facts.st_size >= EDITOR_MAP_FROM)
         {
                 long mapped = (long)system_call_6(syscall(mmap), 0, (positive)facts.st_size, 1, 2, (positive)handle, 0);
@@ -228,23 +232,41 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 {
                         tab->bytes = (p8 address_to)mapped, tab->length = tab->mapped = (positive)facts.st_size;
                         editor_bus_catch();
+                        system_close(handle);
+                        return true;
                 }
         }
-        else
         {
                 positive room = 0;
+                b32 failed = false;
 
                 while (tab->length < EDITOR_READ_MOST)
                 {
                         if (!array_store_reserve(tab->bytes, room, tab->length, tab->length + 65536, 65536))
+                        {
+                                failed = true;
                                 break;
-                        got = system_read_once((b32)handle, tab->bytes + tab->length, room - tab->length);
-                        if (got <= 0)
+                        }
+                        got = system_read_retry((positive)handle, tab->bytes + tab->length, room - tab->length);
+                        if (got < 0)
+                        {
+                                failed = true;
+                                break;
+                        }
+                        if (got == 0)
                                 break;
                         tab->length += (positive)got;
                 }
+                system_close(handle);
+                if (failed)
+                {
+                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_read_failed), sizeof(editor.status));
+                        if (tab->folder >= 0)
+                                system_close(tab->folder);
+                        tab->folder = -1;
+                        return false;
+                }
         }
-        system_close(handle);
         return true;
 }
 
@@ -305,13 +327,22 @@ static b32 editor_save(struct editor_tab address_to tab)
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
                 return false;
         }
+        /*
+                system_write_all returns the bytes accepted, which is never negative, so a short write (a full disk, an
+                I/O error) is told by its count and its error: a save of the prefix would replace the file with less.
+        */
         if (tab->view.doc.bom)
-                ok &= system_write_all((b32)handle, "\xef\xbb\xbf", 3) >= 0;
+        {
+                system_write_result wrote = system_write_all_checked((b32)handle, "\xef\xbb\xbf", 3);
+
+                ok &= wrote.error == 0 && wrote.bytes == 3;
+        }
         while (ok && at < doc_length(&tab->view.doc))
         {
                 positive got = doc_read(&tab->view.doc, at, chunk, sizeof(chunk));
+                system_write_result wrote = system_write_all_checked((b32)handle, chunk, got);
 
-                ok &= system_write_all((b32)handle, chunk, got) >= 0;
+                ok &= got > 0 && wrote.error == 0 && wrote.bytes == got;
                 at += got;
         }
         /*
