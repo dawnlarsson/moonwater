@@ -140080,8 +140080,18 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a feed due is run: its verb is started, as a reading and not a change",
                               settings.child > 0 && settings.job == SETTINGS_JOB_FEED && !settings.job_sets && settings.feed_list == 1);
                         settings_feed_drop();
-                        check("settings: a change that arrives drops a reading under way, which is had again later",
-                              settings.child <= 0 && settings.feed_due > (positive)ui_kit.now);
+                        // The killed child is not waited for by the drop: it is reaped by settings_reap when it has gone, polled here as the
+                        // window's timers poll it (settings_tick), so the check polls too.
+                        for (int tries = 0; settings.child > 0 && tries < 200; tries++)
+                        {
+                                timespec nap = {0, 10000000};
+
+                                if (settings_reap())
+                                        break;
+                                system_call_2(syscall(nanosleep), (positive)&nap, 0);
+                        }
+                        check("settings: a change that arrives drops a reading under way, which is reaped once it has gone and had again later",
+                              settings.child <= 0 && !settings.ending && settings.feed_due > (positive)ui_kit.now);
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
                         settings.own.table = null, settings.page.buffers.shown = -1;
