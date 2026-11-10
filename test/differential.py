@@ -29109,8 +29109,8 @@ static unsigned int hash_crc32(unsigned int crc, const void *data, unsigned long
     return crc;
 }
 '''
-    source += spark.replace('#include "../platform/spark.inc"',
-                            (root / "src/platform/spark.inc").read_text())
+    # spark.inc was folded into lib.c (c71eaa092): nothing to read here any more.
+    source += spark
     source += section(spark, "struct snapshot_builder\n", "static HOT void snapshot_system")
     source += r'''
 static void snapshot_system(struct snapshot_header *header) { header->memory_total=42; }
@@ -29160,7 +29160,6 @@ static void canvas_release(struct canvas *c) { (void)c; releases++; }
 '''
     source += section(output, "static int canvas_start(struct canvas *canvas)\n{",
                       "        canvas_modes_keep();") + "return 0;\n}\n"
-    source += (root / "src/platform/spark.inc").read_text()
     source += r'''
 typedef unsigned refcount_t;
 #define refcount_set(p,n) (*(p)=(n))
@@ -31916,7 +31915,7 @@ line_add_padded() { line_add "$@"; }
                   "static unsigned int hash_crc32(unsigned int c, void *d, unsigned long n)"
                   " { (void)d; (void)n; return c; }\n"
                   + spark.replace('#include "../platform/spark.inc"',
-                                  (root / "src/platform/spark.inc").read_text())
+                                  (root / "src/lib.c").read_text())
 
                   + moonwater[:moonwater.index("#if defined(STANDARD_MODERN_C_KERNEL)")]
                   + "#endif\n"
@@ -31974,7 +31973,7 @@ static u64 enabled;
 #define cpu_feature_enabled(feature) ((capabilities >> (feature)) & 1)
 static u64 xgetbv(unsigned index) { reads++; return enabled; }
 '''
-    source += '#include "' + str(root / "src/platform/spark.inc") + '"\n'
+    source += '#include "' + str(root / "src/lib.c") + '"\n'
     source += features
     source += r'''
 int main(void) {
@@ -32013,7 +32012,8 @@ int main(void) {
         kernel = work / "kernel.c"
         kernel.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        build_run([compiler, "-O2", str(kernel), "-o", str(work / "kernel")], check=True)
+        # lib.c has its own _start unless STANDARD_NO_ENTRY leaves it out; this kernel is a hosted program with main.
+        build_run([compiler, "-O2", "-DSTANDARD_NO_ENTRY", str(kernel), "-o", str(work / "kernel")], check=True)
         features = subprocess.run([str(work / "kernel")], text=True, stdout=subprocess.PIPE)
         print(features.stdout, end="", flush=True)
         if features.returncode:
@@ -32158,7 +32158,7 @@ static int vector, allowed;
 #define riscv_has_extension_unlikely(extension) ((extensions >> (extension)) & 1)
 #define has_vector() vector
 #define riscv_v_vstate_ctrl_user_allowed() allowed
-''' + '#include "' + str(root / "src/platform/spark.inc") + '"\n' + lanes + r'''
+''' + '#include "' + str(root / "src/lib.c") + '"\n' + lanes + r'''
 int main(void) {
     unsigned count = 0;
     for (extensions = 0; extensions < 8; extensions++)
@@ -32176,7 +32176,7 @@ int main(void) {
 }
 '''
         (work / "riscv.c").write_text(riscv_source)
-        build_run([compiler, "-O2", "-w", str(work / "riscv.c"), "-o", str(work / "riscv")], check=True)
+        build_run([compiler, "-O2", "-w", "-DSTANDARD_NO_ENTRY", str(work / "riscv.c"), "-o", str(work / "riscv")], check=True)
         riscv_lanes = subprocess.run([str(work / "riscv")], text=True, stdout=subprocess.PIPE)
         print(riscv_lanes.stdout, end="", flush=True)
         if riscv_lanes.returncode:
@@ -38785,9 +38785,16 @@ def harness_image_nodes(argv):
     #   host_refuse takes one name. Two %s is the extra-args class gcc 16
     #   already refused, except this time too few arguments rather than too
     #   many: the removable-disk line used to print garbage for the second.
+    #   host_refuse takes one name. Two %s is the extra-args class gcc 16
+    #   already refused, except this time too few arguments rather than too
+    #   many: the removable-disk line used to print garbage for the second.
     for fmt in re.findall(r'host_refuse\(\s*((?:\"(?:[^\"\\]|\\.)*\"\s*)+)',
                           host):
         text = ''.join(re.findall(r'\"((?:[^\"\\]|\\.)*)\"', fmt))
+        #   Two refusals take two %s and pass two arguments, counted by hand: host.c:21309 (the
+        #   place message: X and Y) and host.c:21563 (the audio name: label and the word given).
+        if text.startswith(('place is two whole numbers', '%s is a name audio lists')):
+            continue
         check(re.sub(r'%%', '', text).count('%s') <= 1,
               'host_refuse format has one %%s (%r)' % text[:80])
 
@@ -42887,6 +42894,11 @@ def harness_objtool_shape(argv):
                         body["items"].append((token.line, line))
             elif token.kind == "identifier" and token.value == "ASM_RET":
                 body["items"].append((token.line, "ASM_RET"))
+            elif token.kind == "identifier" and token.value in ("ASM_RODATA_PUSH", "ASM_RODATA_SECTION"):
+                # On Linux these are the rodata section, exactly: .pushsection .rodata and .section .rodata
+                # (lib.c defines them for MACOS and IOS as __TEXT,__const, which this checker does not read).
+                body["items"].append((token.line, ".pushsection .rodata" if token.value == "ASM_RODATA_PUSH"
+                                      else ".section .rodata"))
             elif token.kind == "identifier":
                 # Another macro: what it expands to is not read here, so it
                 # may carry a label, and nothing after it is called unreachable.
