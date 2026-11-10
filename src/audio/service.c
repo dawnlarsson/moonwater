@@ -894,7 +894,7 @@ static void audio_settings_read(int first)
 static void audio_settings_write(void)
 {
         struct pulse_sink *sink = audio_service.pulse.sink + audio_service.sink;
-        unsigned long percent = sink->volume[0] * 100 / AUDIO_VOLUME_NORM;
+        unsigned long percent = (sink->volume[0] * 100 + AUDIO_VOLUME_NORM / 2) / AUDIO_VOLUME_NORM; // rounded, as the mixer and the tray show it
         char text[16];
         long length;
 
@@ -918,7 +918,7 @@ static void audio_inputs_save(int bits)
                 return;
         if (bits & 4)
         {
-                unsigned long percent = p->source[p->default_source].volume[0] * 100 / AUDIO_VOLUME_NORM;
+                unsigned long percent = (p->source[p->default_source].volume[0] * 100 + AUDIO_VOLUME_NORM / 2) / AUDIO_VOLUME_NORM; // rounded, as audio_settings_write
 
                 audio_service.applied_in_volume = percent * AUDIO_VOLUME_NORM / 100; // what the file says, read back (as audio_settings_write)
                 audio_service.applied_in_mute = p->source[p->default_source].muted;
