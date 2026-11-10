@@ -258,6 +258,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Input device (name, or default)	af7b	Dispositivo di ingresso (nome o default)
 =Input mute	ad50	Disattiva ingresso
 =Input volume (percent, or default)	263f	Volume di ingresso (percentuale o default)
+=Internet sharing over Bluetooth	afe8	Condivisione internet tramite Bluetooth
 =Keep a device by its name	9c51	Conserva un dispositivo per nome
 =Keep the lowest-delay sample	d8b9	Mantieni il campione con il ritardo minore
 =Kernel log	e57a	Registro del kernel

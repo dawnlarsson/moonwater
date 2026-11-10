@@ -258,6 +258,7 @@ ui_field_full	fe02	больше не помещается
 =Input device (name, or default)	af7b	Устройство ввода (имя или default)
 =Input mute	ad50	Отключить микрофон
 =Input volume (percent, or default)	263f	Громкость микрофона (проценты или default)
+=Internet sharing over Bluetooth	afe8	Общий интернет через Bluetooth
 =Keep a device by its name	9c51	Запомнить устройство по имени
 =Keep the lowest-delay sample	d8b9	Оставлять замер с наименьшей задержкой
 =Kernel log	e57a	Журнал ядра

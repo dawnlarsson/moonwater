@@ -258,6 +258,7 @@ ui_field_full	fe02	mer ryms inte
 =Input device (name, or default)	af7b	Ingångsenhet (namn eller default)
 =Input mute	ad50	Stäng av ingång
 =Input volume (percent, or default)	263f	Ingångsvolym (procent eller default)
+=Internet sharing over Bluetooth	afe8	Internetdelning via Bluetooth
 =Keep a device by its name	9c51	Spara en enhet med namn
 =Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
 =Kernel log	e57a	Kärnlogg

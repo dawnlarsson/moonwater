@@ -25,6 +25,11 @@
 #define NET_WIRED_POWER "/root/wired.power"
 #define NET_BLUETOOTH_LIST "/root/bluetooth"
 #define NET_BLUETOOTH_POWER "/root/bluetooth.power"
+// Internet sharing over Bluetooth: the word that says whether it is on (absent is off), the pid of the bt-network it
+// started (under the state directory, so a boot takes it away), and the bridge that network access point is joined to.
+#define NET_BLUETOOTH_SHARE "/root/bluetooth.share"
+#define NET_BLUETOOTH_SHARE_PID NET_STATE_DIR "/bluetooth.share.pid"
+#define NET_BLUETOOTH_SHARE_BRIDGE "pan0"
 
 /*
         The words this was called with come from the process, not from the

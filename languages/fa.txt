@@ -259,6 +259,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Input device (name, or default)	af7b	دستگاه ورودی (نام یا default)
 =Input mute	ad50	بی‌صدا کردن ورودی
 =Input volume (percent, or default)	263f	بلندی ورودی (درصد یا default)
+=Internet sharing over Bluetooth	afe8	اشتراک‌گذاری اینترنت از طریق Bluetooth
 =Keep a device by its name	9c51	نگه‌داشتن دستگاه با نامش
 =Keep the lowest-delay sample	d8b9	نگه‌داشتن نمونه با کمترین تأخیر
 =Kernel log	e57a	گزارش هسته

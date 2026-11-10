@@ -258,6 +258,7 @@ ui_field_full	fe02	no cabe más
 =Input device (name, or default)	af7b	Dispositivo de entrada (nombre o default)
 =Input mute	ad50	Silenciar entrada
 =Input volume (percent, or default)	263f	Volumen de entrada (porcentaje o default)
+=Internet sharing over Bluetooth	afe8	Compartir internet por Bluetooth
 =Keep a device by its name	9c51	Guardar un dispositivo por su nombre
 =Keep the lowest-delay sample	d8b9	Conservar la muestra de menor retardo
 =Kernel log	e57a	Registro del kernel

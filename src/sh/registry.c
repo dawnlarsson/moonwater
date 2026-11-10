@@ -558,6 +558,11 @@ static const struct settings_row settings_rows[] = {
      .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range [off]"},
     {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,
      .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices [off]"},
+    //  Internet sharing over Bluetooth: the machine's connection, offered to the devices that pair with it. Its verb (host.c's
+    //  radio_share) starts and stops the sharing, so the row is not a plain one; the word it reads is the verb's own output.
+    {null, "Internet sharing over Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth", "share"}, "share ", null, {"bluetooth", "share"}, null, 0, null,
+     .usage = "bluetooth share [on|off]",
+     .help = "the machine's internet, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]"},
     // The Devices group: the devices the system sees are a list under this row (the feed device list, settings.c), and a press
     // on one allows or blocks it. The row says what device lock says: whether a new device waits for its allow.
     {"Devices", "New devices", SETTINGS_CHOICE, 0, 0, {"device"}, "device ", null, {"device"}, "unlock lock", 0, null,

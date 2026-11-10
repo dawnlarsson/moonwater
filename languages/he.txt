@@ -259,6 +259,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Input device (name, or default)	af7b	התקן קלט (שם או default)
 =Input mute	ad50	השתקת קלט
 =Input volume (percent, or default)	263f	עוצמת קלט (אחוזים או default)
+=Internet sharing over Bluetooth	afe8	שיתוף אינטרנט דרך Bluetooth
 =Keep a device by its name	9c51	שמור התקן לפי שמו
 =Keep the lowest-delay sample	d8b9	שמור את הדגימה עם ההשהיה הנמוכה ביותר
 =Kernel log	e57a	יומן הליבה

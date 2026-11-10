@@ -13235,6 +13235,145 @@ static b32 host_wifi(string_address address_to arguments, positive count)
         return host_usage();
 }
 
+/*
+        Internet sharing over Bluetooth: the machine's connection to the internet, offered to the devices that pair with it as
+        a PAN network access point (bt-network, on the bridge pan0, through the machine's BlueZ). Off until a person turns it
+        on, and only `moonwater bluetooth share on` starts it: boot and every other verb read the kept word and never start
+        it. The word is in /root; the pid of the process it started is under /run, so a boot takes that away, and the status
+        says when a word is on and nothing runs.
+*/
+#define RADIO_SHARE_TOOL "/usr/bin/bt-network"
+#define RADIO_SHARE_DAEMON "/usr/lib/bluetooth/bluetoothd"
+#define RADIO_SHARE_DAEMON_OTHER "/usr/libexec/bluetooth/bluetoothd"
+#define RADIO_SHARE_BRIDGE "/sys/class/net/" NET_BLUETOOTH_SHARE_BRIDGE
+#define RADIO_SHARE_START_NS 1000000000ll
+
+// Whether the kept word says on: none, or neither word, is off.
+static bool radio_share_kept(void)
+{
+        p8 text[16];
+
+        return host_read_word(NET_BLUETOOTH_SHARE, text, sizeof(text)) >= 0 && host_onoff((string_address)text) == 1;
+}
+
+// The pid the sharing was started with, read from its file; 0 when none is kept.
+static positive radio_share_pid(void)
+{
+        p8 text[24];
+        positive pid = 0;
+
+        if (host_read_word(NET_BLUETOOTH_SHARE_PID, text, sizeof(text)) < 0)
+                return 0;
+        for (positive at = 0; at < 10 && text[at] >= '0' && text[at] <= '9'; at++)
+                pid = pid * 10 + (positive)(text[at] - '0');
+        return pid > 1 ? pid : 0;
+}
+
+// Whether the process the sharing was started as is still there.
+static bool radio_share_running(void)
+{
+        positive pid = radio_share_pid();
+
+        return pid && system_call_2(syscall(kill), (positive)pid, 0) == 0;
+}
+
+// The sharing taken down: its process told to stop, and its pid let go.
+static fn radio_share_stop(void)
+{
+        positive pid = radio_share_pid();
+
+        if (pid)
+                system_call_2(syscall(kill), (positive)pid, 15); // SIGTERM
+        (void)system_remove_at(AT_FDCWD, NET_BLUETOOTH_SHARE_PID, 0);
+}
+
+// The first thing the image lacks for a sharing, named for the refusal; null when all of it is there.
+static string_address radio_share_missing(void)
+{
+        if (system_access_at(AT_FDCWD, RADIO_SHARE_TOOL, 0) < 0)
+                return "bt-network (the bluez-tools package)";
+        if (system_access_at(AT_FDCWD, RADIO_SHARE_DAEMON, 0) < 0 &&
+            system_access_at(AT_FDCWD, RADIO_SHARE_DAEMON_OTHER, 0) < 0)
+                return "bluetoothd (BlueZ)";
+        if (system_access_at(AT_FDCWD, RADIO_SHARE_BRIDGE, 0) < 0)
+                return "the bridge " NET_BLUETOOTH_SHARE_BRIDGE;
+        return null;
+}
+
+// The process the sharing is: in the daemon host_detach made, its pid kept under /run, then bt-network on the bridge. Never returns.
+static fn radio_share_run(void)
+{
+        string_address argv[] = {RADIO_SHARE_TOOL, "-s", "nap", NET_BLUETOOTH_SHARE_BRIDGE, null};
+        p8 text[24];
+        positive length;
+
+        length = positive_into_string(text, (positive)system_call(syscall(getpid)));
+        text[length++] = '\n';
+        if (host_write_file(NET_BLUETOOTH_SHARE_PID, text, length, 0644, false) >= 0)
+                (void)shell_exec_file(argv[0], argv, pointer_vector_count(argv), file_environment_all());
+        system_call_1(syscall(exit), 127);
+}
+
+// The sharing started, and still there a second on: a process that ended at once says what it needs, bluetoothd most likely.
+static b32 radio_share_start(void)
+{
+        (void)system_remove_at(AT_FDCWD, NET_BLUETOOTH_SHARE_PID, 0);
+        if (host_detach(descriptors_none, descriptors_none))
+                radio_share_run();
+        host_pause(RADIO_SHARE_START_NS);
+        if (radio_share_running())
+                return 0;
+        return host_refuse("bluetooth share: bt-network stopped at once, so bluetoothd is probably not running; "
+                           "nothing is kept\n");
+}
+
+/*
+        moonwater bluetooth share [on|off]: whether the machine shares its internet over Bluetooth (radio_share_*). Bare, it says
+        the kept word, and whether the sharing runs when it is on. on checks the tools and the bridge, and that bluetooth is on,
+        before anything is started or kept; off keeps the word and stops it.
+*/
+static b32 radio_share(string_address address_to arguments, positive count)
+{
+        string_address missing;
+
+        return_if(count > 4, host_usage());
+        if (count == 3)
+        {
+                bool kept = radio_share_kept();
+
+                string_format(log, host_label "bluetooth share %s%s\n", kept ? "on" : "off",
+                              kept && !radio_share_running()
+                                  ? "; not running: moonwater bluetooth share on starts it" : "");
+                return 0;
+        }
+        if (host_onoff(arguments[3]) < 0)
+                return host_refuse("bluetooth share is on or off, not %s\n", arguments[3]);
+        host_need_root();
+        if (host_onoff(arguments[3]) == 0)
+        {
+                if (host_save("bluetooth share", NET_BLUETOOTH_SHARE, "off"))
+                        return 1;
+                radio_share_stop();
+                host_say(log, host_label "bluetooth share off\n");
+                return 0;
+        }
+        missing = radio_share_missing();
+        if (missing)
+                return host_refuse("bluetooth share needs %s, which this machine does not have: nothing is started or kept\n",
+                                   missing);
+        if (radio_kept(NET_BLUETOOTH_POWER) == 0)
+                return host_refuse("bluetooth share needs bluetooth on: moonwater bluetooth on first; nothing is started or kept\n");
+        if (!radio_share_running() && radio_share_start())
+                return 1;
+        if (host_save("bluetooth share", NET_BLUETOOTH_SHARE, "on"))
+        {
+                radio_share_stop();
+                return 1;
+        }
+        host_say(log, host_label "bluetooth share on\n");
+        return 0;
+}
+
 static b32 host_bluetooth(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
@@ -13242,6 +13381,8 @@ static b32 host_bluetooth(string_address address_to arguments, positive count)
 
         if (count < 3)
                 return radio_bluetooth_status();
+        if (string_equals(word, "share"))
+                return radio_share(arguments, count);
         if (power >= 0)
         {
                 host_need_root();
@@ -25392,6 +25533,7 @@ static const host_row host_rows[] = {
     {null, "@bluetooth", null, 'r'},
     {null, "bluetooth add NAME", "keep the name of a device, found once the radio is on", 'b'},
     {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
+    {null, "bluetooth share [on|off]", "the machine's internet over Bluetooth to the devices that pair with it; off until on (root)", 'b'},
     {null, "@device", null, 'r'},
     {null, "device [lock|unlock]", "lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]", 'b'},
     {null, "device class NAME [allow|deny]", "what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]", 'b'},
@@ -25817,6 +25959,7 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(NET_WIRED_POWER),
     HOST_WIPE_KEEP(NET_BLUETOOTH_LIST),
     HOST_WIPE_KEEP(NET_BLUETOOTH_POWER),
+    HOST_WIPE_KEEP(NET_BLUETOOTH_SHARE),
     HOST_WIPE_KEEP(USB_POLICY),
     HOST_WIPE_KEEP(USB_LOG),
     HOST_WIPE_KEEP(NET_INTERNET_ROOT),
