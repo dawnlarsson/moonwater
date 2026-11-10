@@ -25,6 +25,7 @@ static struct
 {
         b32 on;
         struct ui_control control[GALLERY_MOST];
+        struct ui_control spare;    // a control made past GALLERY_MOST: it takes its fields and is never drawn, hit or started
         int count;
         struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
         struct ui_text field[2]; // the fields' engines: a node's name, which takes a name's characters, and a region
@@ -40,7 +41,7 @@ struct gallery_mark
 
 static struct ui_control address_to gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
 {
-        struct ui_control address_to c = &gallery.control[gallery.count < GALLERY_MOST - 1 ? gallery.count++ : gallery.count];
+        struct ui_control address_to c = gallery.count < GALLERY_MOST ? &gallery.control[gallery.count++] : &gallery.spare;
 
         memory_zero(c, sizeof(*c));
         c->kind = (unsigned char)kind, c->variant = (unsigned char)variant;
