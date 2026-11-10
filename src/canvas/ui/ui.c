@@ -5927,7 +5927,9 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 {
                         int dx = x - c->press_x;
                         b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100);
-                        b32 right = dx > 0;
+                        // The drag's way toward the on side: a right-to-left layout's on is at the left, as the press's
+                        // motion reads it (toward), so the same drag that turns it on in one turns it on in the other.
+                        b32 right = (dx > 0) != ui_rtl();
 
                         b32 was = c->kind == UI_RADIOS ? c->item == c->at : c->on;
 
@@ -11110,12 +11112,24 @@ static fn ui_lines_set(struct ui_lines address_to l, const char address_to text,
 static int ui_lines_width(struct ui address_to ui, const struct ui_lines address_to l, positive from, positive to)
 {
         char probe[UI_LINES_PROBE] = {0};
-        positive size = to - from;
+        int width = 0;
 
-        size = size >= sizeof(probe) ? sizeof(probe) - 1 : size;
-        memory_copy(probe, l->text + from, size);
-        probe[size] = 0;
-        return ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
+        // A run longer than the probe is measured in pieces, each cut between characters, so the width is the whole run's
+        // (a probe of only its first bytes let a line of more than 511 bytes run past the window).
+        while (to - from >= UI_LINES_PROBE)
+        {
+                positive cut = from + UI_LINES_PROBE - 1;
+
+                while (cut > from + 1 && ((unsigned char)l->text[cut] & 0xc0) == 0x80)
+                        cut--;
+                memory_copy(probe, l->text + from, cut - from);
+                probe[cut - from] = 0;
+                width += ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
+                from = cut;
+        }
+        memory_copy(probe, l->text + from, to - from);
+        probe[to - from] = 0;
+        return width + ui_kit_measure(ui, (string_address)probe, UI_BODY_MEDIUM);
 }
 
 // A run of the text laid on as it is measured: the pen after the bytes from its start to at, so a wider prefix costs its new
@@ -11184,9 +11198,19 @@ static fn ui_lines_wrap(struct ui address_to ui, struct ui_lines address_to l, i
                         // One word wider than the window: as many of its bytes as fit.
                         if (fit == start && start < over)
                         {
-                                fit = start + 1;
-                                while (fit < over && (plain ? ui_lines_run_width(ui, l, &run, start, fit + 1) : ui_lines_width(ui, l, start, fit + 1)) <= room)
-                                        fit++;
+                                // The longest run from start that fits (a width grows with its bytes: a search, not a count of them).
+                                positive low = start + 1, high = over;
+
+                                while (low < high)
+                                {
+                                        positive mid = low + (high - low + 1) / 2;
+
+                                        if ((plain ? ui_lines_run_width(ui, l, &run, start, mid) : ui_lines_width(ui, l, start, mid)) <= room)
+                                                low = mid;
+                                        else
+                                                high = mid - 1;
+                                }
+                                fit = low;
                                 // Not inside a character: a line ends before the continuation bytes of one that did not fit.
                                 while (fit > start + 1 && fit < over && ((unsigned char)l->text[fit] & 0xc0) == 0x80)
                                         fit--;

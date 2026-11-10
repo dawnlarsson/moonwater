@@ -139328,6 +139328,33 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_card_fill();
                                 ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         }
+                        {
+                                // One line of 1400 bytes with blanks in it, no newline: each line the wrap makes is measured whole (the
+                                // whole run's own width, not a probe of its first bytes) and must fit the window.
+                                static char long_line[1400], run[1400];
+                                positive length = 0;
+                                b32 within_whole = true;
+
+                                for (; length + 40 < sizeof(long_line); length += 40)
+                                        memory_copy(long_line + length, "alpha beta gamma delta epsilon zeta eta theta iota ", 40);
+                                memory_copy(settings_large->said, long_line, length);
+                                settings.said_length = length;
+                                settings.width = 300;
+                                settings_card_fill();
+                                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
+                                room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
+                                for (int at = 0; at < settings.card_text.count; at++)
+                                {
+                                        int size = settings_large->card_size[at];
+
+                                        memory_copy(run, settings_large->card + settings_large->card_at[at], size);
+                                        run[size] = 0;
+                                        within_whole &= ui_kit_measure(&settings.ui, (string_address)run, UI_BODY_MEDIUM) <= room;
+                                }
+                                check("settings: a line of more than 512 bytes with no newline is cut into lines each within the window, measured whole",
+                                      settings.card_text.count >= 4 && within_whole);
+                                settings.width = 300;
+                        }
                         settings_card_open("moonwater status");
                         settings_press(UI_KEY_DOWN);
                         check("settings: a card is scrolled by the keys", settings.page.card && settings.card.scroll > 0);
@@ -148021,6 +148048,45 @@ static fn check_kit_place(void)
                 moved_still = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
                 check("kit place: a control the layout moves (a resize) is drawn where it is with its pip, nothing animating from its old place",
                       moved_still);
+        }
+
+        // A switch dragged 130 px toward its on side turns on, and the other way it stays off. Its on side is the right in a
+        // left-to-right layout and the left in a right-to-left one (the drag's bars run the same way the press's motion says).
+        {
+                struct ui_control sw[4];
+                b32 ltr_right, ltr_left, rtl_left, rtl_right;
+
+                // Four switches, all off: each takes one drag, from its press at x 120 or 140 to where the hand is at 250 or 10.
+                for (int k = 0; k < 4; k++)
+                {
+                        memory_zero(&sw[k], sizeof(sw[k]));
+                        sw[k].kind = UI_SWITCH, sw[k].label = "";
+                        sw[k].x = 100, sw[k].y = 220, sw[k].w = 52, sw[k].h = 48;
+                        ui_control_start(&sw[k]);
+                }
+                // Left to right: a drag right turns it on, a drag left (back toward the off side) does not.
+                ui_kit.rtl = 0;
+                ui_kit_pointer(&ui, &sw[0], 1, WINDOW_EVENT_BUTTON, 120, 244, true, 0);
+                ui_kit_pointer(&ui, &sw[0], 1, WINDOW_EVENT_MOTION, 250, 244, false, 0);
+                ui_kit_pointer(&ui, &sw[0], 1, WINDOW_EVENT_BUTTON, 250, 244, false, 0);
+                ltr_right = sw[0].on;
+                ui_kit_pointer(&ui, &sw[1], 1, WINDOW_EVENT_BUTTON, 140, 244, true, 0);
+                ui_kit_pointer(&ui, &sw[1], 1, WINDOW_EVENT_MOTION, 10, 244, false, 0);
+                ui_kit_pointer(&ui, &sw[1], 1, WINDOW_EVENT_BUTTON, 10, 244, false, 0);
+                ltr_left = sw[1].on;
+                // Right to left: on is at the left, so a drag left turns it on, and a drag right does not.
+                ui_kit.rtl = 1;
+                ui_kit_pointer(&ui, &sw[2], 1, WINDOW_EVENT_BUTTON, 140, 244, true, 0);
+                ui_kit_pointer(&ui, &sw[2], 1, WINDOW_EVENT_MOTION, 10, 244, false, 0);
+                ui_kit_pointer(&ui, &sw[2], 1, WINDOW_EVENT_BUTTON, 10, 244, false, 0);
+                rtl_left = sw[2].on;
+                ui_kit_pointer(&ui, &sw[3], 1, WINDOW_EVENT_BUTTON, 120, 244, true, 0);
+                ui_kit_pointer(&ui, &sw[3], 1, WINDOW_EVENT_MOTION, 250, 244, false, 0);
+                ui_kit_pointer(&ui, &sw[3], 1, WINDOW_EVENT_BUTTON, 250, 244, false, 0);
+                rtl_right = sw[3].on;
+                ui_kit.rtl = 0;
+                check("kit switch: a drag toward the on side turns it on, left to right by the right and right to left by the left",
+                      ltr_right && !ltr_left && rtl_left && !rtl_right);
         }
 
         // A press on a row ripples across the whole row, edge to edge, and not past it: a switch whose box is its pill
