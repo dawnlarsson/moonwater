@@ -238,7 +238,7 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_OPEN 8u    // asks for no passphrase
 #define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
 
-#define SETTINGS_SEGMENTS 12
+#define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
 #define SETTINGS_LEGEND 200
 
 struct settings_item
@@ -2587,6 +2587,30 @@ static fn settings_item_label(struct settings_item address_to item, const char a
         item->label[size] = 0;
 }
 
+/*
+        A device's line as its label. A line too long for the label is cut in its middle, with "..." where the cut is, so that
+        the last word (its state: allowed, blocked or waiting) is still there; a cut at the end would take the state away.
+*/
+static fn settings_item_label_state(struct settings_item address_to item, const char address_to text, positive size)
+{
+        positive state = size, tail, head;
+
+        if (size < sizeof(item->label))
+                return settings_item_label(item, text, size);
+        while (state > 0 && text[state - 1] != ' ')
+                state--;
+        if (!state)
+                return settings_item_label(item, text, size);
+        tail = size - state + 1;
+        if (tail + 4 >= sizeof(item->label))
+                return settings_item_label(item, text, size);
+        head = sizeof(item->label) - 1 - 3 - tail;
+        memory_copy(item->label, text, head);
+        memory_copy(item->label + head, "...", 3);
+        memory_copy(item->label + head + 3, text + state - 1, tail);
+        item->label[head + 3 + tail] = 0;
+}
+
 static struct settings_item address_to settings_item_find(int list, const char address_to name, positive size)
 {
         for (int at = 0; at < settings.item_count[list]; at++)
@@ -2813,13 +2837,14 @@ static fn settings_feed_hardware(void)
         char line[SETTINGS_PROBE];
         char address_to text;
         positive at, size, count = 0;
+        b32 open = false; // the row before is a drive that is kept: the part lines after it are its strip
 
         memory_zero(items, sizeof(settings_large->item[2]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
         {
                 if (size > 9 && text[0] == ' ' && text[1] == ' ' && text[2] == ' ' && text[3] == ' ' && !memory_compare(text + 4, "part ", 5))
                 {
-                        struct settings_item address_to drive = count ? &items[count - 1] : null;
+                        struct settings_item address_to drive = open ? &items[count - 1] : null;
                         positive word = 9, role_at, role_length;
                         unsigned long long bytes = 0;
                         int code;
@@ -2844,16 +2869,20 @@ static fn settings_feed_hardware(void)
                         }
                         continue;
                 }
+                // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.
+                open = false;
                 if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
-                        positive word = 0;
+                        positive word = 2;
 
                         // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
+                        // The name starts at text[2], so the first blank after it ends the first word.
                         while (word < size && text[word] != ' ')
                                 word++;
                         items[count].kind = word + 7 <= size && !memory_compare(text + word + 1, "drive ", 6) ? SETTINGS_NOTE : SETTINGS_PORT;
                         items[count].flags = size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0;
-                        settings_item_label(&items[count++], text + 2, size - 2);
+                        open = items[count].kind == SETTINGS_NOTE;
+                        settings_item_label_state(&items[count++], text + 2, size - 2);
                 }
         }
         for (positive each = 0; each < count; each++)

@@ -141532,6 +141532,53 @@ static fn check_settings_device_strip(void)
               string_find((string_address)items[0].legend, (string_address) "EFI") != null &&
                   string_find((string_address)items[0].legend, (string_address) "EFI system 536 MB") != null &&
                   string_find((string_address)items[0].legend, (string_address) "Linux data 1 GB") != null);
+        {
+                //      Twenty-three ports fill the rows: the drive after them has no row, so its parts are no one's strip, and the
+                //      port before it keeps none. A drive with thirteen segments keeps all of them (the host sends up to 33).
+                static char rows[2048];
+                static const char part[] = "    part 2048 1048576 free -\n";
+                positive length = 0;
+
+                for (positive each = 0; each < 23; each++)
+                        for (const char address_to line = "  1-1 usb 0627:0001 Stick allowed\n"; *line; line++)
+                                rows[length++] = *line;
+                for (const char address_to line = "  vdb drive 1 MB view only\n    part 2048 1048576 linux -\n"; *line; line++)
+                        rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                check("settings: a drive past the rows has no strip, and the port before it keeps none",
+                      settings.item_count[2] == 23 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0);
+                length = 0;
+                for (const char address_to line = "  vdc drive 1024 MB view only\n"; *line; line++)
+                        rows[length++] = *line;
+                for (positive each = 0; each < 13; each++)
+                        for (const char address_to line = part; *line; line++)
+                                rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                check("settings: a drive with thirteen segments keeps every one of them",
+                      settings.item_count[2] == 1 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 13 &&
+                          items[0].segment_bytes[12] == 1048576ull);
+                length = 0;
+                for (const char address_to line = "  1-2 usb 0627:0001 "; *line; line++)
+                        rows[length++] = *line;
+                for (positive each = 0; each < 80; each++)
+                        rows[length++] = 'x';
+                for (const char address_to line = " blocked\n"; *line; line++)
+                        rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                check("settings: a device line too long for its label keeps its state word",
+                      settings.item_count[2] == 1 && string_length((string_address)items[0].label) == 95 &&
+                          string_find((string_address)items[0].label, (string_address) "...") != null &&
+                          string_find((string_address)items[0].label, (string_address) " blocked") != null);
+        }
 }
 
 static fn check_settings_groups(void)
