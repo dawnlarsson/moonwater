@@ -141651,8 +141651,22 @@ static fn check_settings_device_strip(void)
                   string_find((string_address)items[0].legend, (string_address) "EFI system 536 MB") != null &&
                   string_find((string_address)items[0].legend, (string_address) "Linux data 1 GB") != null);
         {
+                // The host shows one partition of this drive and says one more is not shown: the note comes first in the legend.
+                static const char more[] = "  vde drive 1 MB view only\n    part 2048 1048576 linux -\n    more 3\n";
+                positive length = sizeof(more) - 1;
+
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = more[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                check("settings: a drive's partitions the host did not show are said first in its legend",
+                      settings.item_count[2] == 1 && items[0].segment_more == 3 && items[0].segment_count == 1 &&
+                          string_equals((string_address)items[0].legend, (string_address) "3 more not shown; Linux data 1 MB"));
+        }
+        {
                 //      Twenty-three ports fill the rows: the drive after them has no row, so its parts are no one's strip, and the
-                //      port before it keeps none. A drive with thirteen segments keeps all of them (the host sends up to 33).
+                //      port before it keeps none. The row after the last is a note: one more is not shown. A drive with thirteen
+                //      segments keeps all of them (the host sends up to 33).
                 static char rows[2048];
                 static const char part[] = "    part 2048 1048576 free -\n";
                 positive length = 0;
@@ -141666,8 +141680,9 @@ static fn check_settings_device_strip(void)
                         settings_large->said[at] = rows[at];
                 settings.said_length = length;
                 settings_feed_hardware();
-                check("settings: a drive past the rows has no strip, and the port before it keeps none",
-                      settings.item_count[2] == 23 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0);
+                check("settings: a drive past the rows has no strip, the port before it keeps none, and a note says one is not shown",
+                      settings.item_count[2] == 24 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0 &&
+                          items[23].kind == SETTINGS_NOTE && string_equals((string_address)items[23].label, (string_address) "1 more not shown"));
                 length = 0;
                 for (const char address_to line = "  vdc drive 1024 MB view only\n"; *line; line++)
                         rows[length++] = *line;
