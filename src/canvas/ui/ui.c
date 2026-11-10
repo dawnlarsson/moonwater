@@ -5929,6 +5929,14 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 ui_kit_held = null;
                 if (!c)
                         return null;
+                // Disabled while it was held (with no motion to let it go): its release clicks, toggles and picks nothing, and
+                // the hold lets go as a cancel's does.
+                if (!ui_control_live(c))
+                {
+                        ui_kit_let_go_held(c);
+                        c->hover = 0, c->item = -1;
+                        return null;
+                }
                 c->down = 0;
                 ui_kit_ripples_exit(c);
                 if (c->kind == UI_BUTTON)
