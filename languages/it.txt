@@ -314,7 +314,9 @@ ui_field_full	fe02	non ce ne sta di più
 =Taskbar display	042b	Schermo della barra delle applicazioni
 =Taskbar hides for fullscreen	f2f8	La barra delle applicazioni si nasconde a schermo intero
 =Taskbar launcher button	dd4d	Pulsante dell'avviatore nella barra delle applicazioni
+=Taskbar padding (pixels, or default)	8880	Spaziatura della barra delle applicazioni (pixel o default)
 =Taskbar position	81b8	Posizione della barra delle applicazioni
+=Taskbar scale (percent)	810b	Scala della barra delle applicazioni (percentuale)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Area di notifica della barra (testo con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminale
 =Text size (percent, or default)	51d7	Dimensione del testo (percentuale o default)

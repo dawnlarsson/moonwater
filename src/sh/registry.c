@@ -97,6 +97,8 @@
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
+#define SETTING_TASKBAR_SCALE_PATH "/root/taskbar.scale"
+#define SETTING_TASKBAR_PADDING_PATH "/root/taskbar.padding"
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
 #define SETTING_TASKBAR_LAUNCHER_PATH "/root/taskbar.launcher"
 #define SETTING_TASKBAR_FULLSCREEN_PATH "/root/taskbar.fullscreen"
@@ -456,6 +458,19 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
                       .usage = "taskbar display [primary|all]", .help = "the screens the taskbar is on: the primary, or all, each listing its windows [primary]"),
+    //  The taskbar's own size, on top of its screen's scale: how thick the band is and how large everything in it is drawn (its tabs'
+    //  text, the tray, the launcher button's mark), and the room round its items: the space between them and at the band's ends.
+    //  The compositor takes both from their files (compositor_taskbar_settings_read), a missing file or a word that is none being the standard.
+    SETTING_PLAIN_ROW(null, "Taskbar scale (percent)", SETTINGS_CHOICE, 0, ("taskbar", "scale"), "scale ", "100 125 150 200",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_SCALE_PATH, .standard = "100", .reset = "100",
+                      .need = "how Canvas draws", .refusal = "taskbar scale is 100, 125, 150 or 200, not %s\n",
+                      .usage = "taskbar scale [100|125|150|200]",
+                      .help = "how large the taskbar and what it shows are, in percent of the screen scale [100]"),
+    SETTING_PLAIN_ROW(null, "Taskbar padding (pixels, or default)", SETTINGS_FIELD, 0, ("taskbar", "padding"), "padding ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "4",
+                      .unit = "px", .low = 0, .high = 24, .need = "how Canvas draws",
+                      .usage = "taskbar padding [PX|default]",
+                      .help = "the space between the taskbar items and at its ends, 0 to 24 pixels at the taskbar scale [4]"),
     //  Off by default: the launcher opens from its key alone. On, the band has a button at its leading end (the left of a
     //  bottom or top band, the top of a side one) that opens and closes the launcher beside it.
     SETTING_PLAIN_ROW(null, "Taskbar launcher button", SETTINGS_SWITCH, 0, ("taskbar", "launcher"), "launcher ", null,

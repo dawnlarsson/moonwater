@@ -57,7 +57,11 @@ static struct taskbar_state
         int mic_item, mic_muted;                // a program records from a microphone (or its mute was just thrown): the tray has a microphone cell, struck when muted
         int notices_item;                       // the board holds a notice or an issue: the tray starts with a notices dot (at the leading end)
         unsigned int notices_severity;          // the worst of them: WINDOWS_ISSUE_ERROR (red) or WINDOWS_ISSUE_WARNING (amber)
-} taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
+        int scale;                              // `taskbar scale`: percent of its screen's scale the band is laid out and drawn at
+        int padding;                            // `taskbar padding`: logical pixels, at that scale, between its items and at its ends
+} taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0, .scale = TASKBAR_SCALE_STANDARD, .padding = TASKBAR_PADDING_STANDARD};
+
+_Static_assert(TASKBAR_PADDING_STANDARD == UI_GAP1, "the standard padding is the kit's gap between pieces that go together");
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
 #define TASKBAR_TAB_CHUNK 256
@@ -101,11 +105,23 @@ static int taskbar_vertical(unsigned int position)
         return position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
 }
 
+// The scale the band is laid out and drawn at: its screen's (percent) and its own on top (`taskbar scale`).
+static int taskbar_scaled(int scale)
+{
+        return scale * taskbar.scale / 100;
+}
+
+// How thick the band is across the edge, in device pixels, on a screen at scale (percent).
+static int taskbar_thick(int scale)
+{
+        return COMPOSITOR_PANEL * taskbar_scaled(scale) / 100;
+}
+
 // The band at a shift: along the edge its position names, COMPOSITOR_PANEL logical pixels thick, and moved off that edge by shift of
 // its thickness (UI_ONE is all of it, which is off the output).
 static void taskbar_band_at(const struct taskbar_view *view, b64 shift, int *x, int *y, int *width, int *height)
 {
-        int thick = COMPOSITOR_PANEL * view->scale / 100;
+        int thick = taskbar_thick(view->scale);
         int off = (int)(((long long)thick * (long long)shift) / (long long)UI_ONE);
 
         switch (view->position)
@@ -240,9 +256,9 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->thick = lay->vertical ? lay->bw : lay->bh;
         lay->length = lay->vertical ? lay->bh : lay->bw;
         lay->origin = lay->vertical ? lay->by : lay->bx;
-        lay->gap = UI_GAP1 * view->scale / 100; // the kit's gap between pieces that go together: the tabs of a row
-        lay->inset = 3 * view->scale / 100;
-        lay->high = lay->thick - 3 * view->scale / 100;
+        lay->gap = taskbar.padding * taskbar_scaled(view->scale) / 100; // `taskbar padding`, the kit's gap between pieces that go together at its standard
+        lay->inset = 3 * taskbar_scaled(view->scale) / 100;
+        lay->high = lay->thick - lay->inset;
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
         lay->tray = taskbar_tray(lay->high);
@@ -496,7 +512,7 @@ static struct ui taskbar_cell_ui;
 
 static struct ui address_to taskbar_cell(const struct taskbar_view *view, int bw)
 {
-        taskbar_cell_ui.pixels = view->pixels, taskbar_cell_ui.pitch = (unsigned long)bw, taskbar_cell_ui.scale = view->scale;
+        taskbar_cell_ui.pixels = view->pixels, taskbar_cell_ui.pitch = (unsigned long)bw, taskbar_cell_ui.scale = taskbar_scaled(view->scale);
         taskbar_cell_ui.engine = view->engine, taskbar_cell_ui.regular = view->face;
         return &taskbar_cell_ui;
 }
@@ -896,7 +912,7 @@ static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct
         left = x - lay->bx + (width - span) / 2;
         top = y - lay->by + (height - span) / 2;
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
         ui.scene = view->scene;
         for (int row = 0; row < 3; row++)
                 for (int column = 0; column < 3; column++)
@@ -941,7 +957,7 @@ static void taskbar_volume_cell(const struct taskbar_view *view, const struct ta
                 return;
         }
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
         ui.scene = view->scene;
         ui_speaker(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, waves, taskbar.volume_muted, ink | 0xff000000u);
 }
@@ -956,7 +972,7 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
         int size = (width < height ? width : height) * 70 / 100;
 
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
         ui.scene = view->scene;
         ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, compositor_ink_role(UI_ERROR) | 0xff000000u);
 }
@@ -972,7 +988,7 @@ static void taskbar_notices_cell(const struct taskbar_view *view, const struct t
         int size;
 
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
         ui.scene = view->scene;
         size = ui_px(&ui, UI_DOT);
         ui_kit_dot(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, colour | 0xff000000u);
@@ -1146,9 +1162,10 @@ static int taskbar_stale(void)
 // The memory the band's pixels and its glass take at most, for any position at this output and scale.
 static void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
 {
-        // The scale is percent: whole device pixels of a logical one, rounded up, so these bound what is drawn.
+        // The scale is percent: whole device pixels of a logical one, rounded up, so these bound what is drawn. The band is as thick as the
+        // taskbar's own scale makes it; the blur's reach is the screen's.
         int px = (scale + 99) / 100;
-        int thick = COMPOSITOR_PANEL * px, across = COMPOSITOR_GLASS_ACROSS * px, down = COMPOSITOR_GLASS_DOWN * px;
+        int thick = COMPOSITOR_PANEL * ((taskbar_scaled(scale) + 99) / 100), across = COMPOSITOR_GLASS_ACROSS * px, down = COMPOSITOR_GLASS_DOWN * px;
         long along = width > height ? width : height;
         long wide = (long)(width + 2 * across) * (long)(thick + 2 * down);
         long tall = (long)(thick + 2 * across) * (long)(height + 2 * down);
@@ -1295,6 +1312,22 @@ static void taskbar_text_set(int edge)
 static void taskbar_launcher_set(int on)
 {
         taskbar.launcher = on != 0;
+        taskbar.stale = 1;
+}
+
+// `taskbar scale`: the band, and what is drawn in it, at this percent of its screen's scale (100 to TASKBAR_SCALE_MOST; anything else is
+// the standard). Its thickness changes with it, so the compositor reads its rectangle and its memory again (compositor_taskbar_settings_read).
+static void taskbar_scale_set(int percent)
+{
+        taskbar.scale = percent >= TASKBAR_SCALE_STANDARD && percent <= TASKBAR_SCALE_MOST ? percent : TASKBAR_SCALE_STANDARD;
+        taskbar.stale = 1;
+}
+
+// `taskbar padding`: the space between the band's items and at its ends, in logical pixels at the taskbar's scale (0 to
+// TASKBAR_PADDING_MOST; anything else is the standard).
+static void taskbar_padding_set(int pixels)
+{
+        taskbar.padding = pixels >= 0 && pixels <= TASKBAR_PADDING_MOST ? pixels : TASKBAR_PADDING_STANDARD;
         taskbar.stale = 1;
 }
 

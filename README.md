@@ -112,6 +112,8 @@ moonwater audio input mute [on|off]    silence the microphone, and keep its volu
 moonwater audio test                   play a second of 440 Hz through the sound server and say what became of it: no server, no card, a mixer that is off, muted, or played on this card
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
+moonwater taskbar scale [100|125|150|200]  how large the taskbar and what it shows are, in percent of the screen scale [100]
+moonwater taskbar padding [PX|default]  the space between the taskbar items and at its ends, 0 to 24 pixels at the taskbar scale [4]
 moonwater taskbar launcher [on|off]    a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]
 moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [on]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]

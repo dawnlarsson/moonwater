@@ -49783,6 +49783,10 @@ while True:
              "acceleration off", "acceleration on"),
             ("taskbar text", "taskbar.text", "edge", "edge", ["middle", "Center", "left", '""', "edge,center"],
              "text edge", "text center"),
+            ("taskbar scale", "taskbar.scale", "150", "150", ["99", "175", "300", "1.5", "0", '""', "100,125"],
+             "scale 150", "scale 100"),
+            ("taskbar padding", "taskbar.padding", "12", "12", ["-1", "25", "x", "1.5", '""', "1000000000"],
+             "padding 12 px", "padding 4 px"),
             ("canvas touch", "canvas.touch", "off", "off", ["maybe", "OFF", "0", '""', "off,on"],
              "touch off", "touch on"),
         ]

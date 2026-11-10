@@ -58,6 +58,13 @@
 // A window's tab: lit while it has the keys, dim while it is put away.
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
+// The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale): the
+// choices of the one and the range of the other, and what each is when nothing is kept. The padding's standard is the kit's gap between
+// pieces that go together (UI_GAP1, which taskbar.c holds it to).
+#define TASKBAR_SCALE_STANDARD 100
+#define TASKBAR_SCALE_MOST 200
+#define TASKBAR_PADDING_STANDARD 4
+#define TASKBAR_PADDING_MOST 24
 // The blur under the tabs: the glass is halved this many times, a block of the output a side, and the small blur's reach
 // in blocks. Its reach is what a change of the band reaches through the blur and the rise, in device pixels.
 #define COMPOSITOR_GLASS_LEVELS 3
@@ -116,6 +123,9 @@ static void taskbar_text_set(int edge);
 static void taskbar_tray_set(const char *text);
 static void taskbar_launcher_set(int on);
 static void taskbar_hide_set(int on);
+static void taskbar_scale_set(int percent);
+static void taskbar_padding_set(int pixels);
+static int taskbar_thick(int scale);
 static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
 static int taskbar_sliding(positive now);
 static b64 taskbar_shift(void);
@@ -163,6 +173,9 @@ static inline void taskbar_text_set(int edge) { (void)edge; }
 static inline void taskbar_tray_set(const char *text) { (void)text; }
 static inline void taskbar_launcher_set(int on) { (void)on; }
 static inline void taskbar_hide_set(int on) { (void)on; }
+static inline void taskbar_scale_set(int percent) { (void)percent; }
+static inline void taskbar_padding_set(int pixels) { (void)pixels; }
+static inline int taskbar_thick(int scale) { return COMPOSITOR_PANEL * scale / 100; }
 static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
 { (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
 static inline int taskbar_sliding(positive now) { (void)now; return 0; }

@@ -126859,6 +126859,150 @@ static void check_taskbar_centre(void)
     check("taskbar centre: tabs too many to be centred are kept clear of the launcher button and of the tray", clear);
 }
 
+/*
+        `taskbar scale` and `taskbar padding`. The band is as thick as the screen's scale and the taskbar's own make it (24 logical pixels at
+        the two together), on every edge, and the memory the compositor keeps for it (taskbar_bytes) holds it; the gap between the items and at
+        the band's ends is the padding at that scale (0 puts the tabs edge to edge), and what is outside the choices and the range is the
+        standard. The rows' words are what the compositor reads: the place of a scale among the row's choices, and a padding in its range.
+        A whole band drawn at the largest scale stays inside its memory.
+*/
+static void check_taskbar_scale(void)
+{
+    static const unsigned char few[3] = {5, 15, 30};
+    static const int screens[3] = {100, 150, 200}, scales[4] = {100, 125, 150, 200}, paddings[5] = {0, 1, 4, 10, 24};
+    static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
+    static const char *const words[4] = {"bottom", "top", "left", "right"};
+    b32 thick_ok = true, bytes_ok = true, gap_ok = true, ends_ok = true, standard_ok = true, drawn = true, rows_ok = true;
+    long place = -1, number = -1;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = BAND_W, compositor.height = BAND_H, compositor.scale = 100;
+    taskbar_tray_set("");
+    taskbar_launcher_set(1);
+    for (int at = 0; at < 4; at++)
+        for (int screen = 0; screen < 3; screen++)
+            for (int each = 0; each < 4; each++)
+            {
+                struct taskbar_view view;
+                int bx, by, bw, bh, thick, want = COMPOSITOR_PANEL * (screens[screen] * scales[each] / 100) / 100;
+                unsigned long band = 0, glass = 0;
+
+                memory_zero(&view, sizeof(view));
+                view.width = BAND_W, view.height = BAND_H, view.scale = screens[screen], view.position = positions[at];
+                view.count = 3, view.lengths = few;
+                taskbar_settings_set(words[at], "primary", "battery none\n");
+                taskbar_scale_set(scales[each]);
+                taskbar_padding_set(TASKBAR_PADDING_STANDARD);
+                taskbar_band(&view, &bx, &by, &bw, &bh);
+                thick = positions[at] == TASKBAR_LEFT || positions[at] == TASKBAR_RIGHT ? bw : bh;
+                thick_ok &= thick == want && taskbar_thick(screens[screen]) == want;
+                taskbar_bytes(BAND_W, BAND_H, screens[screen], &band, &glass);
+                bytes_ok &= band >= (unsigned long)bw * (unsigned long)bh * 4 && glass >= (unsigned long)bw * (unsigned long)bh * 4;
+            }
+
+    // The padding is the gap: between the tabs, from the band's start to the button and from the tray to the band's end.
+    for (int screen = 0; screen < 3; screen++)
+        for (int each = 0; each < 4; each++)
+            for (int pad = 0; pad < 5; pad++)
+            {
+                struct taskbar_view view;
+                int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1, kx, ky, kw, kh, tx, ty, tw, th, gap = paddings[pad] * (screens[screen] * scales[each] / 100) / 100;
+
+                memory_zero(&view, sizeof(view));
+                view.width = BAND_W, view.height = BAND_H, view.scale = screens[screen], view.position = TASKBAR_BOTTOM;
+                view.count = 3, view.lengths = few;
+                taskbar_settings_set("bottom", "primary", "battery none\n");
+                taskbar_scale_set(scales[each]);
+                taskbar_padding_set(paddings[pad]);
+                taskbar_band(&view, &bx, &by, &bw, &bh);
+                if (!taskbar_slot(&view, 0, &x0, &y0, &w0, &h0) || !taskbar_slot(&view, 1, &x1, &y1, &w1, &h1) ||
+                    !taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh) || !taskbar_slot(&view, -2, &tx, &ty, &tw, &th))
+                {
+                    gap_ok = ends_ok = false;
+                    continue;
+                }
+                gap_ok &= x1 - (x0 + w0) == gap;
+                ends_ok &= kx == bx + gap && tx + tw == bx + bw - gap;
+            }
+
+    // What is outside the choices and the range is the standard.
+    {
+        struct taskbar_view view;
+        int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1;
+        static const int bad_scales[4] = {0, 99, 201, -100}, bad_paddings[3] = {-1, 25, 1000};
+
+        memory_zero(&view, sizeof(view));
+        view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.position = TASKBAR_BOTTOM;
+        view.count = 3, view.lengths = few;
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        for (int at = 0; at < 4; at++)
+        {
+            taskbar_scale_set(bad_scales[at]);
+            taskbar_band(&view, &bx, &by, &bw, &bh);
+            standard_ok &= bh == COMPOSITOR_PANEL;
+        }
+        taskbar_scale_set(TASKBAR_SCALE_STANDARD);
+        for (int at = 0; at < 3; at++)
+        {
+            taskbar_padding_set(bad_paddings[at]);
+            taskbar_slot(&view, 0, &x0, &y0, &w0, &h0);
+            taskbar_slot(&view, 1, &x1, &y1, &w1, &h1);
+            standard_ok &= x1 - (x0 + w0) == TASKBAR_PADDING_STANDARD;
+        }
+    }
+
+    // The rows' words: a scale is its place among 100 125 150 200, a padding a whole number from 0 to 24, and nothing else is kept.
+    compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "100", &place); /* the row's reset word: not kept, the standard */
+    rows_ok &= place == 0;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "125", &place) && place == 1;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "150", &place) && place == 2;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "200", &place) && place == 3;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "175", &place) && place == 0;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "300", &place) && !compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, "", &place);
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "0", &number) && number == 0;
+    rows_ok &= compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "24", &number) && number == 24;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "25", &number) && number == TASKBAR_PADDING_STANDARD;
+    rows_ok &= !compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "-1", &number) && !compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, "x", &number);
+
+    // A whole band at the largest scale on a 1920 screen is drawn, every slot of it, inside the memory the band is given: twice the standard's.
+    {
+        struct taskbar_view view = band_view(TASKBAR_BOTTOM, null);
+        int rect[4];
+
+        memory_zero(launcher_band_pixels, sizeof(launcher_band_pixels));
+        view.pixels = launcher_band_pixels, view.band_bytes = sizeof(launcher_band_pixels);
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_scale_set(TASKBAR_SCALE_MOST);
+        taskbar_padding_set(TASKBAR_PADDING_MOST);
+        taskbar_volume_set(1, 50, 0, 0);
+        taskbar_mic_set(1, 0);
+        taskbar_notices_set(1, WINDOWS_ISSUE_ERROR);
+        drawn &= taskbar_draw(&view, ~0ul, band_glass, null, rect) == 1;
+        // The band's last row is drawn (it is 48 rows, twice the standard's), and the memory has no more than that.
+        {
+            int ink = 0;
+
+            for (int column = 0; column < BAND_W; column++)
+                ink += launcher_band_pixels[(unsigned long)(2 * COMPOSITOR_PANEL - 1) * BAND_W + (unsigned long)column] != 0;
+            drawn &= ink > 0;
+        }
+    }
+    taskbar_notices_set(0, 0);
+    taskbar_mic_set(0, 0);
+    taskbar_volume_set(0, 0, 0, 0);
+    taskbar_scale_set(TASKBAR_SCALE_STANDARD);
+    taskbar_padding_set(TASKBAR_PADDING_STANDARD);
+    taskbar_launcher_set(0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    check("taskbar scale: the band is as thick as the screen's scale and the taskbar's make it, on every edge, at 100 to 200 percent of each", thick_ok);
+    check("taskbar scale: the memory kept for the band and its glass holds it at every scale", bytes_ok);
+    check("taskbar padding: the gap between the tabs is the padding at the scale, from 0 (edge to edge) to 24", gap_ok);
+    check("taskbar padding: the launcher button is a padding in from the band's start and the tray a padding from its end", ends_ok);
+    check("taskbar scale: a scale outside the choices and a padding outside the range are the standard", standard_ok);
+    check("taskbar scale: the rows' words are the places and numbers the compositor reads", rows_ok);
+    check("taskbar scale: a whole band at 200 percent, the widest padding and every cell is drawn inside its memory", drawn);
+}
+
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
    the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
    its table at start. */
@@ -163511,6 +163655,7 @@ b32 main()
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
+        check_taskbar_scale();
 #if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
         check_notices_dot();
 #endif

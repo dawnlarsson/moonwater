@@ -314,7 +314,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar display	042b	Ekran paska zadań
 =Taskbar hides for fullscreen	f2f8	Pasek zadań chowa się przy pełnym ekranie
 =Taskbar launcher button	dd4d	Przycisk uruchamiania na pasku zadań
+=Taskbar padding (pixels, or default)	8880	Odstępy na pasku zadań (piksele lub default)
 =Taskbar position	81b8	Położenie paska zadań
+=Taskbar scale (percent)	810b	Skala paska zadań (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)

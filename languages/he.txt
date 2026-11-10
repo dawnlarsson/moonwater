@@ -315,7 +315,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Taskbar display	042b	מסך שורת המשימות
 =Taskbar hides for fullscreen	f2f8	שורת המשימות מוסתרת במסך מלא
 =Taskbar launcher button	dd4d	כפתור המשגר בשורת המשימות
+=Taskbar padding (pixels, or default)	8880	ריווח בשורת המשימות (פיקסלים או default)
 =Taskbar position	81b8	מיקום שורת המשימות
+=Taskbar scale (percent)	810b	קנה המידה של שורת המשימות (אחוזים)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	מסוף
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)

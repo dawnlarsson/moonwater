@@ -11141,9 +11141,11 @@ static void compositor_bands_where(int (*rects)[4])
 
 static void compositor_taskbar_settings_read(void)
 {
-        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8], launcher[16], fullscreen[16];
+        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8], launcher[16], fullscreen[16], scale[16], padding[16];
         int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
-        long edge;
+        // The words of the Taskbar scale row (registry.c), in the row's order.
+        static const int scales[4] = {100, 125, 150, 200};
+        long edge, place = 0, pixels = TASKBAR_PADDING_STANDARD;
 
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
@@ -11172,12 +11174,19 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
         compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));
+        // The standard when nothing is kept, or what is kept is none of the row's words or outside its range.
+        compositor_word(SETTING_TASKBAR_SCALE_PATH, scale, sizeof(scale));
+        compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, scale, &place);
+        compositor_word(SETTING_TASKBAR_PADDING_PATH, padding, sizeof(padding));
+        compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, padding, &pixels);
         compositor_bands_where(was);
         compositor_tabs_changed();
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
         taskbar_tray_set(tray);
         taskbar_launcher_set(string_equals((string_address)launcher, (string_address) "on"));
+        taskbar_scale_set(place >= 0 && place < 4 ? scales[place] : TASKBAR_SCALE_STANDARD);
+        taskbar_padding_set((int)pixels);
         compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
         // The row's standard is on: no file, or a file that says default, hides the band as on does; only "off" keeps it.
         taskbar_hide_set(!string_equals((string_address)fullscreen, (string_address) "off"));
@@ -18269,7 +18278,7 @@ static void compositor_swipe_hand(unsigned int at, positive now, const struct ui
 static void compositor_swipe_launcher(int x, const int *rect, int number)
 {
         struct windows *table = compositor.table;
-        int w = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100, h = COMPOSITOR_PANEL * compositor.scale / 100;
+        int w = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100, h = taskbar_thick(compositor.scale);
 
         if (table)
         {
@@ -18305,7 +18314,7 @@ static void compositor_swipe_side(int side, int y, const int *rect, int number)
 {
         struct windows *table = compositor.table;
         int what = side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right;
-        int w = COMPOSITOR_PANEL * compositor.scale / 100, h = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100;
+        int w = taskbar_thick(compositor.scale), h = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100;
 
         if (what == COMPOSITOR_SIDE_WINDOWS)
         {

@@ -314,7 +314,9 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar display	042b	Aktivitetsfältets skärm
 =Taskbar hides for fullscreen	f2f8	Aktivitetsfältet döljs i helskärm
 =Taskbar launcher button	dd4d	Startarknapp i aktivitetsfältet
+=Taskbar padding (pixels, or default)	8880	Aktivitetsfältets avstånd (pixlar eller default)
 =Taskbar position	81b8	Aktivitetsfältets plats
+=Taskbar scale (percent)	810b	Aktivitetsfältets skala (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Terminal	62d1	Terminal
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
