@@ -139797,10 +139797,13 @@ static fn check_settings(string_address regular, string_address bold)
                                   string_equals((string_address)settings_group_name(wifi_group), (string_address) "Wi-Fi") &&
                                   string_equals((string_address)settings_group_name(bt_group), (string_address) "Bluetooth"));
                         settings.page.chosen = wifi_group;
-                        check("settings: the feeds are of Wi-Fi, Bluetooth, Power and Time and no others",
+                        // The table of feeds (settings_feeds) is Wi-Fi, Bluetooth, Devices, Waterlink, Power and Time, in that order.
+                        check("settings: the feeds are of Wi-Fi, Bluetooth, Devices, Waterlink, Power and Time and no others",
                               settings_feed_of_group() == 0 && (settings.page.chosen = bt_group, settings_feed_of_group() == 1) &&
-                                  (settings.page.chosen = settings_group_of(battery), settings_feed_of_group() == 2) &&
-                                  (settings.page.chosen = settings_group_of(clock_row), settings_feed_of_group() == 3) &&
+                                  (settings.page.chosen = settings_group_of(settings_row_named("New devices")), settings_feed_of_group() == 2) &&
+                                  (settings.page.chosen = settings_group_of(settings_row_named("Pair a machine")), settings_feed_of_group() == 3) &&
+                                  (settings.page.chosen = settings_group_of(battery), settings_feed_of_group() == 4) &&
+                                  (settings.page.chosen = settings_group_of(clock_row), settings_feed_of_group() == 5) &&
                                   (settings.page.chosen = 0, settings_feed_of_group() < 0));
 
                         // What moonwater wifi says, as the list: marker, name (with blanks), dBm, bars, what it asks for.
