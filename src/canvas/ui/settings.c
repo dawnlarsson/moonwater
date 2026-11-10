@@ -3911,7 +3911,9 @@ static fn settings_activate(int row, int way)
                 // Left and Right (and Enter, which is a step on) move it a step, held inside its range; the pointer's is the slider's (settings_slid).
                 long number = 0, to;
 
-                setting_whole((string_address)settings.value[row], &number);
+                // A value not read as a number (or not read at all) is not stepped: the step would start from 0 and write the row's least.
+                if (settings.state[row] != SETTINGS_READ || !setting_whole((string_address)settings.value[row], &number))
+                        return;
                 to = number + way * settings_slider_step(which);
                 to = to < which->low ? which->low : to > which->high ? which->high : to;
                 if (to != number)
