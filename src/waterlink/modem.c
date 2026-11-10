@@ -417,50 +417,84 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 	return -1;
 }
 
+/* Symbol decisions for every start sample, computed once. A window that starts at s correlates with tone c as
+   P*cos(c*s) + Q*sin(c*s), where P and Q are the sums of x[t]*cos and x[t]*sin over the window in absolute
+   sample positions t. P and Q slide one sample at a time, so each start costs about 4*MODEM_TONES multiplies,
+   not the 2*MODEM_TONES*MODEM_SYM of a window computed afresh. The result is exact integer arithmetic. */
+static uint8_t modem_best[MODEM_MAX_SAMPLES];
+
 static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
 			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused)
 {
-	size_t off;
-	int tagfail = 0;
+	int64_t P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
+	size_t ia[MODEM_TONES + 1], ir[MODEM_TONES + 1], is[MODEM_TONES + 1];
+	size_t s, off;
+	int tagfail = 0, c, k;
 
 	if (!pcm || !out || !seq || !modem_key_ok(key, klen) || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
 		return -1;
 
-	for (off = 0; off < MODEM_SYM; off++)
-	{
-		size_t nb = 0, s;
+	/* The window for start 0 covers samples 0..MODEM_SYM-1. The tone indices (c*t) mod MODEM_SYM are kept per
+	   tone and stepped by c each sample, with one compare and subtract, not a modulo. */
+	for (c = 1; c <= MODEM_TONES; c++) {
+		P[c] = 0;
+		Q[c] = 0;
+		for (k = 0; k < MODEM_SYM; k++) {
+			size_t idx = ((size_t)c * (size_t)k) % MODEM_SYM;
+
+			P[c] += (int64_t)pcm[k] * modem_cos_tab[idx];
+			Q[c] += (int64_t)pcm[k] * modem_sin_tab[idx];
+		}
+		ia[c] = ((size_t)c * (MODEM_SYM - 1)) % MODEM_SYM; /* the entering sample at s = 0, s+N-1; stepped before use */
+		ir[c] = 0;                                         /* the sample that leaves: the one at s-1, set at s = 1 */
+		is[c] = 0;
+	}
+	for (s = 0; s + MODEM_SYM <= n; s++) {
+		int64_t best = -1;
+		unsigned bestv = 0;
+
+		if (s > 0) {
+			int64_t xa = pcm[s + MODEM_SYM - 1], xr = pcm[s - 1];
+
+			for (c = 1; c <= MODEM_TONES; c++) {
+				/* ia is for the entering sample s+N-1: step it onto that before use. ir is for the leaving sample
+				   s-1, which is used as it stands and stepped after. */
+				ia[c] += (size_t)c;
+				if (ia[c] >= MODEM_SYM)
+					ia[c] -= MODEM_SYM;
+				P[c] += xa * modem_cos_tab[ia[c]] - xr * modem_cos_tab[ir[c]];
+				Q[c] += xa * modem_sin_tab[ia[c]] - xr * modem_sin_tab[ir[c]];
+				ir[c] += (size_t)c;
+				if (ir[c] >= MODEM_SYM)
+					ir[c] -= MODEM_SYM;
+			}
+		}
+		for (c = 1; c <= MODEM_TONES; c++) {
+			int64_t cs = modem_cos_tab[is[c]], ss = modem_sin_tab[is[c]];
+			int64_t mc = (P[c] * cs + Q[c] * ss) >> 24;
+			int64_t ms = (Q[c] * cs - P[c] * ss) >> 24;
+			int64_t e = mc * mc + ms * ms;
+
+			if (e > best) {
+				best = e;
+				bestv = (unsigned)(c - 1);
+			}
+			is[c] += (size_t)c;
+			if (is[c] >= MODEM_SYM)
+				is[c] -= MODEM_SYM;
+		}
+		modem_best[s] = (uint8_t)bestv;
+	}
+
+	for (off = 0; off < MODEM_SYM; off++) {
+		size_t nb = 0, at;
 		int r;
 
-		for (s = off; s + MODEM_SYM <= n; s += MODEM_SYM)
-		{
-			int64_t best = -1;
-			unsigned bestv = 0, j;
-			int c;
+		for (at = off; at + MODEM_SYM <= n; at += MODEM_SYM) {
+			unsigned j, v = modem_best[at];
 
-			for (c = 1; c <= MODEM_TONES; c++)
-			{
-				int64_t mc = 0, ms = 0, e;
-				int k;
-
-				for (k = 0; k < MODEM_SYM; k++)
-				{
-					int64_t x = pcm[s + (size_t)k];
-					size_t idx = (size_t)((c * k) % MODEM_SYM);
-
-					mc += x * modem_cos_tab[idx];
-					ms += x * modem_sin_tab[idx];
-				}
-				mc /= MODEM_CORR_SHIFT;
-				ms /= MODEM_CORR_SHIFT;
-				e = mc * mc + ms * ms;
-				if (e > best)
-				{
-					best = e;
-					bestv = (unsigned)(c - 1);
-				}
-			}
 			for (j = 0; j < MODEM_SYM_BITS; j++)
-				modem_bits[nb++] = (uint8_t)((bestv >> j) & 1);
+				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
 		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &tagfail);
 		if (r >= 0)
