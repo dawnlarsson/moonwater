@@ -7816,7 +7816,8 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         m->hot = at;
                         if (ui_popmenu_choosable(m, at))
                         {
-                                int top = ui_menu_sizes(ui, m->touch).vpad + ui_popmenu_offset(ui, m, at);
+                                // The item's top as it is drawn: the draw starts at the top item, so the offsets are taken from it.
+                                int top = ui_menu_sizes(ui, m->touch).vpad + ui_popmenu_offset(ui, m, at) - ui_popmenu_offset(ui, m, m->top);
 
                                 ui_ripple_go(&m->ripple, ui_qdiv(ui_q(x), ui_q(ui->scale) / 100), ui_qdiv(ui_q(y - top), ui_q(ui->scale) / 100),
                                              ui_qdiv(ui_q(m->width), ui_q(ui->scale) / 100), ui_qdiv(ui_q(ui_popmenu_row(ui, m)), ui_q(ui->scale) / 100), 0);
