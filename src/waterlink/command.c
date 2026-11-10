@@ -1529,6 +1529,7 @@ static b32 link_port_verb(string_address word)
 //      (the send section of src/waterlink/modem.c, after the sound server's client).
 static b32 modem_send_file(string_address path);
 static int audio_test_page(struct audio_state *copy);
+static void link_modem_streams_say(void);
 
 /*
         The reason the audio modem is not ready, in words, or null when it is.
@@ -1620,7 +1621,11 @@ static b32 link_transport_verb(string_address word)
                 if (why)
                         host_say(log, host_label "audio modem not ready: %s\n", why);
                 else
+                {
                         host_say(log, host_label "audio modem ready\n");
+                        if (link_modem_in_use())
+                                link_modem_streams_say();
+                }
                 return 0;
         }
         if (string_equals(word, "modem"))

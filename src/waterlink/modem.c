@@ -11,7 +11,8 @@
 	  - the transmitter sends only when the operator starts a session;
 	  - the cable is galvanically isolated at both ends.
 
-	Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit mono. A symbol
+	Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit. Each channel of the card is a mono stream of its own: the link
+	carries one on each (see the end of this file). A symbol
 	is MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
 	whole cycles in the symbol window, so the tones are orthogonal and the
 	receiver needs only the sample offset, not a clock. The default is 40
@@ -944,9 +945,9 @@ static bipolar modem_send_read(bipolar handle, p8 address_to into, positive n)
         return (bipolar)done;
 }
 
-/* Plays count mono samples through the open stream c, as the same sound in both channels. Answers 0, or -1 when the
-   connection failed. Each write is waited for within c's budget, which the call starts. */
-static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const int16_t address_to pcm, positive count)
+/* Plays count samples through the open stream c: the left channel carries left, and the right carries right, or silence when
+   right is null. Answers 0, or -1 when the connection failed. Each write is waited for within c's budget, which the call starts. */
+static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const int16_t address_to left, const int16_t address_to right, positive count)
 {
         positive at = 0;
 
@@ -957,8 +958,8 @@ static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const in
 
                 for (positive i = 0; i < frames; i++)
                 {
-                        tone[2 * i] = pcm[at + i];
-                        tone[2 * i + 1] = pcm[at + i];
+                        tone[2 * i] = left[at + i];
+                        tone[2 * i + 1] = right ? right[at + i] : 0;
                 }
                 ctl_budget(c);
                 ctl_put_be(modem_frame, (unsigned long)(frames * 4));
@@ -971,10 +972,11 @@ static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const in
         return 0;
 }
 
-/* Plays count mono samples through the file's stream. Answers 0, or -1 when the connection failed. */
+/* Plays count samples through the file's stream on the left channel: the right is silent, so the file's stream is the left alone.
+   Answers 0, or -1 when the connection failed. */
 static bipolar modem_send_pcm(unsigned long channel, const int16_t address_to pcm, positive count)
 {
-        return modem_play_samples(&modem_ctl, channel, pcm, count);
+        return modem_play_samples(&modem_ctl, channel, pcm, 0, count);
 }
 
 /*
@@ -1227,16 +1229,29 @@ static b32 modem_send_file(string_address path)
 
 /*
         While `link transport modem` says so and the modem is ready, the listener carries the link's datagrams over the modem
-        (link_send_to, service.c): each one goes into a queue instead of onto the socket, and the queue is played through a
-        playback stream at the modem's rate, never more than MODEM_LEAD_US ahead of the sound server's clock. The sound card's
-        record stream is read in the same turn: its frames go into a window that modem_chunk_take searches, and each datagram it
-        completes enters the link (link_modem_heard) as one that came from nowhere in particular, so the session keeps its place.
+        (link_send_to, service.c). Each one goes into a queue instead of onto the socket. The queue is played in pairs, at the
+        modem's rate and never more than MODEM_LEAD_US ahead of the sound server's clock: the first datagram of a pair goes on
+        the left channel and the second on the right, so both channels carry a stream at once. A pair with one datagram plays
+        it alone, and the right is silent for it.
 
-        The two counts are kept in records of their own, as the send's count is: LINK_MODEM_SEQ_PATH for the last frame sent under
-        the key (written before a datagram's sound is played), and LINK_MODEM_RX_PATH for the last frame taken from the far side.
-        A restart of the listener, or the transport going to the network and back, keeps the freshness rule: the far side's count
-        is not taken from zero, which would refuse every frame it has sent since. A full queue drops the datagram, which the link
-        sends again on its own timers.
+        Two streams are kept apart in three ways. The left is the modem key's stream, as it always was. The right is a stream
+        under a key of its own, the modem key under a label (modem_lane_key): a frame of one channel that reaches the other
+        fails its tag there, so crosstalk shows up as refused frames and never as a datagram from the wrong channel. Each
+        channel has its own receiver (modem_wl_rx) with its own last frame. The sender's count is one count for both channels,
+        so the frames of the two streams carry rising numbers together: a receiver sees gaps where the other channel's frames
+        went, and takes each frame that is newer than its own channel's last.
+
+        The capture is read as two channels and looked at as it comes in (modem_look). A live sample that differs from its
+        other channel is two streams, at once. Over a second, when every live frame has the two channels equal, the card gave
+        one channel to both (a mono device: the sound server copies it); when the right is never live while the left is, the
+        cable or card gives no right channel. Either way the capture is one stream: the left is searched and the right is not,
+        and the status says which (modem_streams_set). A right channel whose own receiver closes on refusals is left alone too,
+        and the left goes on; the left's own refusals close the modem, as before.
+
+        The two counts are kept in records of their own, as the send's count is: LINK_MODEM_SEQ_PATH for the last frame sent,
+        written before a pair's sound is played, and LINK_MODEM_RX_PATH for the last frame taken from the far side (the newer
+        of the two channels' lasts). A restart of the listener, or the transport going to the network and back, keeps the
+        freshness rule. A full queue drops the datagram, which the link sends again on its own timers.
 
         Both machines need the same modem key, and a cable from each one's line out to the other's line in. A machine that hears
         its own sound takes its own frames for the far side's: the modem cannot tell them apart.
@@ -1244,13 +1259,24 @@ static b32 modem_send_file(string_address path)
 
 #define MODEM_QUEUE 8          /* datagrams waiting to be played: about twenty seconds of the modem's time */
 #define MODEM_LEAD_US 500000   /* the most sound queued ahead of the sound server's clock: half a second */
-#define MODEM_IN_SAMPLES 65536 /* captured samples held: 0.68 seconds at 96 kHz, twice the longest frame */
-#define MODEM_IN_STEP 8192     /* new captured samples that bring the window to a search */
+#define MODEM_IN_SAMPLES 65536 /* captured samples held for a channel: 0.68 seconds at 96 kHz, twice the longest frame */
+#define MODEM_IN_STEP 8192     /* new captured samples in a channel that bring its window to a search */
 #define MODEM_IN_POLL_US 20000 /* how often a listening modem looks at its capture, when nothing else wakes it */
 #define MODEM_CHECK_US 1000000 /* how often the transport setting is read */
 #define MODEM_RETRY_US 5000000 /* before a modem that would not open, or that broke, is tried again */
 #define MODEM_FRAME_IN 32768   /* the most a record frame carries: the server's chunk is 16 KB */
 #define MODEM_IO_MS 1000       /* the longest a frame's bytes are waited for, once its first byte is there */
+#define MODEM_LANES 2          /* the card's channels, and the streams the link carries on them: lane 0 the left, lane 1 the right */
+#define MODEM_LIVE 1024        /* a sample at least this loud (of 32768) is signal and not the card's hiss */
+#define MODEM_LOOK_FRAMES MODEM_RATE /* the frames the streams are read from for a copy or no right: a second, so a gap is not no channel */
+#define LINK_MODEM_STREAMS_PATH HOST_STATE "/link.modem.streams" /* the streams the listener has, one word, for `link transport` */
+
+/* What the capture is: two streams, one (copied, or with no right channel), the right's receiver closed, or not listening. */
+#define MODEM_STREAMS_TWO 0
+#define MODEM_STREAMS_COPY 1
+#define MODEM_STREAMS_LEFT 2
+#define MODEM_STREAMS_CLOSED 3
+#define MODEM_STREAMS_OFF 4
 
 /*
         The retransmission floor and the window's ceiling over the modem. A datagram put when the queue has room waits behind
@@ -1269,7 +1295,7 @@ static struct
         p64 when; /* the send time the link gave the datagram: the time its frames were sent */
 } modem_queue[MODEM_QUEUE];
 static positive modem_queue_at, modem_queue_count;
-static p64 modem_wl_when; /* the send time of the datagram being written, while modem_wl_count is set */
+static p64 modem_wl_when; /* the send time of the first datagram of the pair being written, while modem_wl_count is set */
 
 static struct ctl modem_play, modem_record;
 static unsigned long modem_play_channel, modem_record_channel;
@@ -1277,14 +1303,56 @@ static bool modem_open;
 static bool modem_warned;
 static p64 modem_checked, modem_retry_at, modem_busy_until;
 static uint8_t modem_key[32];
-static modem_tx modem_wl_tx;
-static modem_chunk_rx modem_wl_rx;
+static uint8_t modem_lane_keys[MODEM_LANES][32];
+static uint32_t modem_wl_seq;
+static uint16_t modem_wl_id;
+static modem_chunk_rx modem_wl_rx[MODEM_LANES];
 static positive modem_wl_count, modem_wl_at;
-static int16_t modem_wl_pcm[MODEM_SEND_SAMPLES];
-static int16_t modem_in[MODEM_IN_SAMPLES];
-static positive modem_in_fill, modem_in_seen;
+static int16_t modem_wl_pcm[MODEM_LANES][MODEM_SEND_SAMPLES];
+static int16_t modem_in[MODEM_LANES][MODEM_IN_SAMPLES];
+static positive modem_in_fill[MODEM_LANES], modem_in_seen[MODEM_LANES];
 static unsigned char modem_frame_in[MODEM_FRAME_IN];
+static int modem_streams = MODEM_STREAMS_OFF;
+static positive modem_look_frames, modem_look_live, modem_look_right, modem_look_diff;
 
+/*
+        The key of a lane: the left's is the modem key itself, so the left stream is the stream it always was; the right's is the
+        modem key under a label, so a frame of one channel never passes the other channel's tag.
+*/
+static void modem_lane_key(const uint8_t key[32], unsigned lane, uint8_t out[32])
+{
+        static const uint8_t label[] = "waterlink modem right channel";
+        modem_mac mac;
+
+        if (lane == 0)
+                memory_copy(out, (address_any)key, 32);
+        else
+        {
+                modem_mac_open(&mac, key, 32);
+                modem_hmac(&mac, label, sizeof label - 1, out);
+                memset(&mac, 0, sizeof mac);
+        }
+}
+
+/*
+        Codes one datagram on a lane, under the lane's key, from the one count both lanes share (seq and id), which it moves on.
+        Answers the samples, or 0 when the datagram does not fit cap.
+*/
+static size_t modem_lane_encode(const uint8_t lane_key[32], uint32_t *seq, uint16_t *id, const uint8_t *dg, size_t len,
+                                int16_t *pcm, size_t cap)
+{
+        modem_tx tx;
+        size_t got;
+
+        modem_tx_open(&tx, lane_key, 32);
+        tx.seq = *seq;
+        tx.id = *id;
+        got = modem_tx_datagram(&tx, dg, len, pcm, cap);
+        *seq = tx.seq;
+        *id = tx.id;
+        crypto_forget(&tx.mac, sizeof tx.mac);
+        return got;
+}
 /*
         Queues one sealed datagram for the modem, from the link's send, sent at when. False when the queue is full. The link's
         own datagrams are filled only while the queue has room (link_modem_free, service.c), so they never find it full; a
@@ -1340,24 +1408,92 @@ static bool link_modem_carrying(void)
         return modem_open;
 }
 
-/* Drops count samples from the front of the window. */
-static void modem_in_drop(positive count)
+/* Drops count samples from the front of a channel's window. */
+static void modem_in_drop(unsigned lane, positive count)
 {
-        for (positive k = count; k < modem_in_fill; k++)
-                modem_in[k - count] = modem_in[k];
-        modem_in_fill -= count;
-        modem_in_seen = modem_in_seen > count ? modem_in_seen - count : 0;
+        positive fill = modem_in_fill[lane];
+
+        if (count > fill)
+                count = fill;
+        for (positive k = count; k < fill; k++)
+                modem_in[lane][k - count] = modem_in[lane][k];
+        modem_in_fill[lane] = fill - count;
+        modem_in_seen[lane] = modem_in_seen[lane] > count ? modem_in_seen[lane] - count : 0;
 }
 
-/* Puts the left channel of record frame bytes (16-bit stereo, little-endian) into the window, the older half dropped when
-   the window is full. */
+/*
+        Says which streams the capture is, when it changes: the log says it in words, and the status file says it in one word for
+        `link transport`. A closed right channel stays closed until the modem is off.
+*/
+static void modem_streams_set(int streams)
+{
+        static const char *const word[] = {"two", "copy", "left", "closed", "off"};
+        static const char *const said[] = {
+            "the modem's capture is two streams: the left and the right, each with its own receiver\n",
+            "the modem's capture is one stream: the right channel is a copy of the left (a mono device, or a cable a card reads as mono)\n",
+            "the modem's capture is one stream: the cable or card gives no right channel, so the left is taken alone\n",
+            "the modem's right channel is closed after refused frames, so the left is taken alone\n",
+            "the modem is not listening\n"};
+
+        if (streams == modem_streams || (modem_streams == MODEM_STREAMS_CLOSED && streams != MODEM_STREAMS_OFF))
+                return;
+        modem_streams = streams;
+        host_say(log, host_label "%s", said[streams]);
+        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)ctl_length(word[streams]), false);
+}
+
+/*
+        Looks at one frame of the capture as it comes in. A sample is live when it is at least MODEM_LIVE. Two live samples that
+        differ are two streams, at once: a copy is never different. Over a second of frames, when every live frame has the two
+        channels equal the right was copied from the left, and when the right is never live while the left is, the cable or card
+        gives no right channel. Those two decide one stream, the left; anything else is two.
+*/
+static void modem_look(int l, int r)
+{
+        int al = l < 0 ? -l : l, ar = r < 0 ? -r : r;
+
+        modem_look_frames++;
+        if (al >= MODEM_LIVE || ar >= MODEM_LIVE)
+        {
+                modem_look_live++;
+                if (l != r)
+                {
+                        modem_look_diff++;
+                        modem_streams_set(MODEM_STREAMS_TWO);
+                }
+        }
+        if (ar >= MODEM_LIVE)
+                modem_look_right++;
+        if (modem_look_frames < MODEM_LOOK_FRAMES)
+                return;
+        if (modem_look_live)
+                modem_streams_set(modem_look_diff == 0    ? MODEM_STREAMS_COPY
+                                  : modem_look_right == 0 ? MODEM_STREAMS_LEFT
+                                                          : MODEM_STREAMS_TWO);
+        modem_look_frames = 0;
+        modem_look_live = 0;
+        modem_look_right = 0;
+        modem_look_diff = 0;
+}
+
+/*
+        Puts the frames of record bytes (16-bit stereo, little-endian) into the two channels' windows: the left into lane 0 and the
+        right into lane 1, each window's older half dropped when it is full. Every frame is looked at as it goes in.
+*/
 static void modem_capture(const unsigned char *bytes, positive size)
 {
         for (positive at = 0; at + 4 <= size; at += 4)
         {
-                if (modem_in_fill == MODEM_IN_SAMPLES)
-                        modem_in_drop(MODEM_IN_SAMPLES / 2);
-                modem_in[modem_in_fill++] = (int16_t)((unsigned)bytes[at] | ((unsigned)bytes[at + 1] << 8));
+                int l = (int16_t)((unsigned)bytes[at] | ((unsigned)bytes[at + 1] << 8));
+                int r = (int16_t)((unsigned)bytes[at + 2] | ((unsigned)bytes[at + 3] << 8));
+
+                for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+                {
+                        if (modem_in_fill[lane] == MODEM_IN_SAMPLES)
+                                modem_in_drop(lane, MODEM_IN_SAMPLES / 2);
+                        modem_in[lane][modem_in_fill[lane]++] = (int16_t)(lane ? r : l);
+                }
+                modem_look(l, r);
         }
 }
 
@@ -1461,14 +1597,23 @@ static void link_modem_stop(void)
         ctl_disconnect(&modem_play);
         ctl_disconnect(&modem_record);
         crypto_forget(modem_key, sizeof modem_key);
-        crypto_forget(&modem_wl_tx.mac, sizeof modem_wl_tx.mac);
-        crypto_forget(&modem_wl_rx.rx.mac, sizeof modem_wl_rx.rx.mac);
+        crypto_forget(modem_lane_keys, sizeof modem_lane_keys);
+        for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+                crypto_forget(&modem_wl_rx[lane].rx.mac, sizeof modem_wl_rx[lane].rx.mac);
         modem_open = false;
         modem_queue_count = 0;
         modem_wl_count = 0;
         modem_wl_at = 0;
-        modem_in_fill = 0;
-        modem_in_seen = 0;
+        for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+        {
+                modem_in_fill[lane] = 0;
+                modem_in_seen[lane] = 0;
+        }
+        modem_look_frames = 0;
+        modem_look_live = 0;
+        modem_look_right = 0;
+        modem_look_diff = 0;
+        modem_streams_set(MODEM_STREAMS_OFF);
 }
 
 /*
@@ -1525,28 +1670,75 @@ static bool link_modem_start(p64 now)
                 return false;
         }
         modem_warned = false;
-        modem_tx_open(&modem_wl_tx, modem_key, sizeof modem_key);
-        modem_wl_tx.seq = seq;
-        modem_wl_tx.id = id;
-        modem_chunk_open(&modem_wl_rx, modem_key, sizeof modem_key);
-        modem_wl_rx.rx.consume = 1;
-        modem_wl_rx.rx.last = rx_seq;
+        for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+        {
+                modem_lane_key(modem_key, lane, modem_lane_keys[lane]);
+                modem_chunk_open(&modem_wl_rx[lane], modem_lane_keys[lane], 32);
+                modem_wl_rx[lane].rx.consume = 1;
+                modem_wl_rx[lane].rx.last = rx_seq;
+                modem_in_fill[lane] = 0;
+                modem_in_seen[lane] = 0;
+        }
+        modem_wl_seq = seq;
+        modem_wl_id = id;
         modem_queue_at = 0;
         modem_queue_count = 0;
         modem_wl_count = 0;
         modem_wl_at = 0;
-        modem_in_fill = 0;
-        modem_in_seen = 0;
+        modem_look_frames = 0;
+        modem_look_live = 0;
+        modem_look_right = 0;
+        modem_look_diff = 0;
         modem_busy_until = now;
         modem_open = true;
+        modem_streams_set(MODEM_STREAMS_TWO);
         host_say(log, host_label "the Waterlink datagrams go over the audio modem\n");
         return true;
 }
 
 /*
-        Plays the queue at the modem's rate: a datagram is coded when the one before it is played, its count is written before its
-        sound, and it is written in pieces while the sound server has room for half a second ahead: a poll every MODEM_IN_POLL_US
-        keeps the lead near MODEM_LEAD_US. Answers false when the playback connection failed, and sets *next to the next poll.
+        Codes the next pair of datagrams from the queue: the first on the left lane, the second on the right, a lane with none
+        silent. A datagram a lane cannot code is dropped. The count is written before the pair's sound is played, so a later send
+        cannot reuse a number. Answers the pair's length in samples, or 0 when nothing was coded.
+*/
+static positive link_modem_pair(void)
+{
+        positive count[MODEM_LANES] = {0, 0}, longest = 0;
+
+        for (unsigned lane = 0; lane < MODEM_LANES && modem_queue_count; lane++)
+        {
+                size_t got;
+
+                if (lane == 0)
+                        modem_wl_when = modem_queue[modem_queue_at].when;
+                got = modem_lane_encode(modem_lane_keys[lane], &modem_wl_seq, &modem_wl_id, modem_queue[modem_queue_at].bytes,
+                                        modem_queue[modem_queue_at].length, modem_wl_pcm[lane], MODEM_SEND_SAMPLES);
+
+                modem_queue_at = (modem_queue_at + 1) % MODEM_QUEUE;
+                modem_queue_count--;
+                count[lane] = (positive)got;
+                if (count[lane] > longest)
+                        longest = count[lane];
+        }
+        if (!longest)
+                return 0;
+        if (modem_seq_save(LINK_MODEM_SEQ_PATH, modem_key, modem_wl_seq, modem_wl_id) < 0)
+        {
+                if (!modem_warned)
+                        host_say(log, host_label "the audio modem's count could not be saved to %s: the datagrams are not played\n", LINK_MODEM_SEQ_PATH);
+                modem_warned = true;
+                return 0;
+        }
+        modem_warned = false;
+        for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+                memory_zero(modem_wl_pcm[lane] + count[lane], (longest - count[lane]) * sizeof(int16_t));
+        return longest;
+}
+
+/*
+        Plays the queue at the modem's rate: a pair is coded when the one before it is played, and it is written in pieces while
+        the sound server has room for half a second ahead: a poll every MODEM_IN_POLL_US keeps the lead near MODEM_LEAD_US. Answers
+        false when the playback connection failed, and sets *next to the next poll.
 */
 static bool link_modem_play(p64 now, p64 *next)
 {
@@ -1557,30 +1749,10 @@ static bool link_modem_play(p64 now, p64 *next)
         {
                 positive room, left;
 
+                while (!modem_wl_count && modem_queue_count)
+                        modem_wl_count = link_modem_pair();
                 if (!modem_wl_count)
-                {
-                        if (!modem_queue_count)
-                                return true;
-                        modem_wl_when = modem_queue[modem_queue_at].when;
-                        modem_wl_count = modem_tx_datagram(&modem_wl_tx, modem_queue[modem_queue_at].bytes,
-                                                           modem_queue[modem_queue_at].length, modem_wl_pcm,
-                                                           MODEM_SEND_SAMPLES);
-                        modem_queue_at = (modem_queue_at + 1) % MODEM_QUEUE;
-                        modem_queue_count--;
-                        modem_wl_at = 0;
-                        if (!modem_wl_count)
-                                continue; /* the modem refused the datagram (its frames do not fit): it is dropped */
-                        /* the count is kept before the sound that carries it is played, so a later send cannot reuse it */
-                        if (modem_seq_save(LINK_MODEM_SEQ_PATH, modem_key, modem_wl_tx.seq, modem_wl_tx.id) < 0)
-                        {
-                                modem_wl_count = 0;
-                                if (!modem_warned)
-                                        host_say(log, host_label "the audio modem's count could not be saved to %s: the datagram is not played\n", LINK_MODEM_SEQ_PATH);
-                                modem_warned = true;
-                                continue;
-                        }
-                        modem_warned = false;
-                }
+                        return true;
                 if (modem_busy_until - now >= MODEM_LEAD_US)
                 {
                         *next = now + MODEM_IN_POLL_US;
@@ -1591,7 +1763,8 @@ static bool link_modem_play(p64 now, p64 *next)
                 left = modem_wl_count - modem_wl_at;
                 if (room > left)
                         room = left;
-                if (room && modem_play_samples(&modem_play, modem_play_channel, modem_wl_pcm + modem_wl_at, room) < 0)
+                if (room && modem_play_samples(&modem_play, modem_play_channel, modem_wl_pcm[0] + modem_wl_at,
+                                               modem_wl_pcm[1] + modem_wl_at, room) < 0)
                         return false;
                 modem_wl_at += room;
                 modem_busy_until += (p64)room * 1000 / 48;
@@ -1605,23 +1778,29 @@ static bool link_modem_play(p64 now, p64 *next)
         }
 }
 
+/* The far side's count, as its record keeps it: the newer of the two channels' last frames. */
+static uint32_t link_modem_far(void)
+{
+        uint32_t left = modem_wl_rx[0].rx.last, right = modem_wl_rx[1].rx.last;
+
+        return right > left ? right : left;
+}
+
 /*
-        Searches the window for the datagrams in it, once the search is due. Each datagram it completes goes to the link, and what
-        it took or refused is dropped from the window, so no frame is searched twice. The count of the far side is kept when it
-        has moved. Answers -1 when the receiver is closed.
+        Takes the datagrams a channel's window completes: each goes to the link, and what the search took or refused is dropped
+        from the window, so no frame is searched twice. Answers -1 when that channel's receiver is closed, else 0.
 */
-static int link_modem_hear(p64 now)
+static int link_modem_lane(unsigned lane, p64 now)
 {
         uint8_t datagram[WATERLINK_DATAGRAM];
-        uint32_t before = modem_wl_rx.rx.last;
         int result = 0;
 
         for (;;)
         {
                 size_t used = 0;
-                int got = modem_chunk_take(&modem_wl_rx, modem_in, modem_in_fill, datagram, sizeof datagram, &used);
+                int got = modem_chunk_take(&modem_wl_rx[lane], modem_in[lane], modem_in_fill[lane], datagram, sizeof datagram, &used);
 
-                modem_in_drop(used < modem_in_fill ? (positive)used : modem_in_fill);
+                modem_in_drop(lane, used < modem_in_fill[lane] ? (positive)used : modem_in_fill[lane]);
                 if (got > 0)
                 {
                         link_modem_heard(datagram, (positive)got, now);
@@ -1631,9 +1810,40 @@ static int link_modem_hear(p64 now)
                         result = -1;
                 break;
         }
-        modem_in_seen = modem_in_fill;
-        if (modem_wl_rx.rx.last != before)
-                (void)modem_seq_save(LINK_MODEM_RX_PATH, modem_key, modem_wl_rx.rx.last, 0);
+        modem_in_seen[lane] = modem_in_fill[lane];
+        return result;
+}
+
+/*
+        Searches the windows that are due (a window with MODEM_IN_STEP new samples), each once: the left always, and the right
+        while the capture is two streams and its receiver is open. A right channel whose receiver closes is set aside, and the
+        left goes on. The far side's count is kept when it has moved. Answers -1 when the left's receiver is closed.
+*/
+static int link_modem_hear(p64 now)
+{
+        uint32_t before = link_modem_far();
+        int result = 0;
+
+        for (unsigned lane = 0; lane < MODEM_LANES; lane++)
+        {
+                if (modem_in_fill[lane] - modem_in_seen[lane] < MODEM_IN_STEP)
+                        continue;
+                if (lane == 1 && modem_streams != MODEM_STREAMS_TWO)
+                        continue;
+                if (link_modem_lane(lane, now) < 0)
+                {
+                        if (lane == 0)
+                                result = -1;
+                        else
+                        {
+                                host_say(log, host_label "the right channel's receiver closed after %p refused frames: crosstalk or noise on it\n",
+                                         (positive)modem_wl_rx[1].rx.refused);
+                                modem_streams_set(MODEM_STREAMS_CLOSED);
+                        }
+                }
+        }
+        if (link_modem_far() != before)
+                (void)modem_seq_save(LINK_MODEM_RX_PATH, modem_key, link_modem_far(), 0);
         return result;
 }
 
@@ -1648,9 +1858,29 @@ static p64 link_modem_fail(p64 now, string_address why)
 }
 
 /*
+        The streams the listener has, for `link transport`: read from its status file while the modem is in use. A listener that
+        is off says so in the file, and nothing is said then.
+*/
+static void link_modem_streams_say(void)
+{
+        p8 word[16];
+
+        if (host_read_word(LINK_MODEM_STREAMS_PATH, word, sizeof word) < 0)
+                return;
+        if (string_equals((string_address)word, "two"))
+                host_say(log, host_label "audio modem streams: two, the left and the right, each with its own receiver\n");
+        else if (string_equals((string_address)word, "copy"))
+                host_say(log, host_label "audio modem streams: one, the right is a copy of the left (a mono device or cable)\n");
+        else if (string_equals((string_address)word, "left"))
+                host_say(log, host_label "audio modem streams: one, no right channel, the left alone\n");
+        else if (string_equals((string_address)word, "closed"))
+                host_say(log, host_label "audio modem streams: one, the right's receiver closed after refused frames\n");
+}
+
+/*
         The modem's turn, once a loop: the transport is read every second (the modem opens when the transport is the modem and the
-        sound card is ready, and closes when either stops); then the queue plays, the capture is read and, once a step of it is
-        new, searched. Answers the time the modem next needs a turn by.
+        sound card is ready, and closes when either stops); then the queue plays, the capture is read and, once a window of either
+        channel is due, searched. Answers the time the modem next needs a turn by.
 */
 static p64 link_modem_turn(p64 now)
 {
@@ -1669,7 +1899,7 @@ static p64 link_modem_turn(p64 now)
         if (!link_modem_play(now, &play) || !modem_read_frames(&modem_play, CTL_NONE, false) ||
             !modem_read_frames(&modem_record, modem_record_channel, true))
                 return link_modem_fail(now, "the sound server's streams for the audio modem broke: the modem is off for now");
-        if (modem_in_fill - modem_in_seen >= MODEM_IN_STEP && link_modem_hear(now) < 0)
+        if (link_modem_hear(now) < 0)
                 return link_modem_fail(now, "the audio modem's receiver is closed after too many refused frames: the modem is off for now");
         return play < now + MODEM_IN_POLL_US ? play : now + MODEM_IN_POLL_US;
 }
