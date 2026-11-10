@@ -3799,7 +3799,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_BUTTON_KEY_RADIUS 8
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
-#define UI_SLIDER_VERTICAL 4 // stood on its end, without a label: the mixer's (ui_vslider_draw)
+#define UI_SLIDER_VERTICAL 4 // stood on its end, with no label or number: the mixer's strips (ui_slider_draw turns it)
 #define UI_SLIDER_BARE 8     // a track and its thumb alone, in the middle of its box: no label, no number, no spot (a list row's slider)
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
@@ -4388,7 +4388,8 @@ static fn ui_radios_choose(struct ui_control address_to c, int item)
         kit's unregistered properties do. Hovered, a ghost previews where a
         press would land (the accent at 40% on the control-off); a press slides
         there and lands with a squish; a drag follows the hand and stretches
-        past an end like a band; the spot under the hand fades in .3s.
+        past an end like a band; the spot under the hand fades in .3s. Stood on its end (UI_SLIDER_VERTICAL) it is the same, turned:
+        see ui_slider_point.
 */
 static b64 ui_slider_ratio(const struct ui_control address_to c, b64 value)
 {
@@ -4414,97 +4415,85 @@ static int ui_slider_thumb(const struct ui_control address_to c)
         return c->variant & UI_SLIDER_LINE ? 20 : c->down ? 12 : c->hover ? 20 : 16;
 }
 
-// The value a device x lands on, lx from the control's left end (the reading from the left): the thumb's centre runs from half a thumb in
-// from the left end to half a thumb short of the right (the draw's travel), so the thumb under the hand is the value the press takes.
+/*
+        A slider stood on its end (UI_SLIDER_VERTICAL, the mixer's strips) is the same slider turned: its low end is the bottom, its
+        track is the box's height, and it has no label and no number (the strip says the volume). Along the track is y for it and x for a
+        flat one; ui_slider_point and ui_slider_box take either, and ui_slider_fill lays a stood box as it is (its placement already
+        reads from the window's side) where a flat one is turned over its middle when the window reads from the right.
+*/
+// The length of a slider's track, device pixels: its height stood on its end, else its width.
+static int ui_slider_span(const struct ui address_to ui, const struct ui_control address_to c)
+{
+        return ui_dev(ui, c->variant & UI_SLIDER_VERTICAL ? c->h : c->w);
+}
+
+// How far a device point is along a slider from its low end (the left, or the bottom of a stood one), device pixels.
+static int ui_slider_along(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
+{
+        if (c->variant & UI_SLIDER_VERTICAL)
+                return ui_dev(ui, c->y) + ui_dev(ui, c->h) - y;
+        return ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) - ui_dev(ui, c->x);
+}
+
+// A coordinate along the track, zero being the low end and p (256ths) the distance from it: an x across a flat slider, a y up a stood one.
+static b32 ui_slider_point(b32 vertical, b32 zero, b32 p)
+{
+        return vertical ? zero - p : zero + p;
+}
+
+// A box from the along coordinates a0 to a1 and the across ones b0 to b1 (either order), its corner radii ra along the track and rb across it.
+static struct ui_box ui_slider_box(b32 vertical, b32 a0, b32 a1, b32 b0, b32 b1, b32 ra, b32 rb)
+{
+        b32 lo = a0 < a1 ? a0 : a1, hi = a0 < a1 ? a1 : a0;
+
+        if (vertical)
+                return (struct ui_box){b0, lo, b1, hi, rb, ra};
+        return (struct ui_box){lo, b0, hi, b1, ra, rb};
+}
+
+// A box stretched along the track by squish (the bend, Q30) about its origin along the track and the across line through the middle.
+static struct ui_box ui_slider_stretch(b32 vertical, struct ui_box box, b64 squish, b32 origin, b32 across)
+{
+        if (vertical)
+                return ui_box_transform(box, UI_ONE, UI_ONE + squish, across, origin, 0, 0);
+        return ui_box_transform(box, UI_ONE + squish, UI_ONE, origin, across, 0, 0);
+}
+
+// A slider's box into the picture (sum: a flat one's left and right edges added, turned over its middle when the window reads from the right).
+static fn ui_slider_fill(struct ui address_to ui, const struct ui_control address_to c, struct ui_box box, unsigned int argb, const struct ui_box address_to clip, b32 sum)
+{
+        if (c->variant & UI_SLIDER_VERTICAL)
+                ui_kit_fill(ui, &box, argb, clip);
+        else
+                ui_kit_fill_in(ui, box, argb, clip, sum);
+}
+
+// The press's place along a slider as spot_x keeps it: logical, from the left, or from the bottom of a stood one.
+static int ui_slider_spot(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
+{
+        if (c->variant & UI_SLIDER_VERTICAL)
+                return c->y + c->h - y * 100 / ui->scale;
+        return ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 100 / ui->scale - c->x;
+}
+
+// A box's across edges taken from a bar's, so a ghost runs along the bar it is in.
+static void ui_slider_bar_across(b32 vertical, struct ui_box address_to box, const struct ui_box address_to bar)
+{
+        if (vertical)
+                box->x0 = bar->x0, box->x1 = bar->x1;
+        else
+                box->y0 = bar->y0, box->y1 = bar->y1;
+}
+
+// The value a device point lands on along a slider, lx from its low end (ui_slider_along): the thumb's centre runs from half a thumb in
+// from the low end to half a thumb short of the high end (the draw's travel), so the thumb under the hand is the value the press takes.
 static b64 ui_slider_of(const struct ui address_to ui, const struct ui_control address_to c, int lx)
 {
-        int thumb = ui_dev(ui, ui_slider_thumb(c)), track = ui_dev(ui, c->w) - thumb;
+        int thumb = ui_dev(ui, ui_slider_thumb(c)), track = ui_slider_span(ui, c) - thumb;
         b64 ratio = track > 0 ? ui_qdiv(ui_q(lx - thumb / 2), ui_q(track)) : 0;
 
         ratio = ratio < 0 ? 0 : ratio > UI_ONE ? UI_ONE : ratio;
         return ui_slider_snap(c, c->low + ui_qmul(ratio, c->high - c->low));
-}
-
-/*
-        A vertical slider (UI_SLIDER_VERTICAL), the mixer's: a track UI_VSLIDER_BAR wide (hovered 8, held 4) from the box's top to
-        its bottom, the value filling it from the bottom in the accent, the rest in the controls' off colour, and a knob that
-        rides the value (16 round, 18 hovered, 14 held) with the slider's halo round it while the pointer is on it. The knob's
-        centre travels the box less its own size, so the knob lies inside the box at both ends. c->on is a muted track: its fill
-        is the outline's grey, and it can still be moved. Keys ring the knob. The click's slide is the horizontal slider's.
-*/
-#define UI_VSLIDER_KNOB 16
-
-// The share of the track a value is, 0 at the bottom (the horizontal slider's ratio).
-static b64 ui_vslider_travel(const struct ui address_to ui, const struct ui_control address_to c)
-{
-        return (b64)ui_dev(ui, c->h) - ui_dev(ui, UI_VSLIDER_KNOB);
-}
-
-// The value a device y is: the knob's centre, clamped to the track and snapped to the step.
-static b64 ui_vslider_at(struct ui address_to ui, const struct ui_control address_to c, int y)
-{
-        b64 travel = ui_vslider_travel(ui, c), from = (b64)ui_dev(ui, c->y) + ui_dev(ui, c->h) - ui_dev(ui, UI_VSLIDER_KNOB) / 2 - y, ratio;
-
-        ratio = travel > 0 ? ui_qdiv(ui_q((int)from), ui_q((int)travel)) : 0;
-        ratio = ratio < 0 ? 0 : ratio > UI_ONE ? UI_ONE : ratio;
-        return ui_slider_snap(c, c->low + ui_qmul(ratio, c->high - c->low));
-}
-
-// The knob's centre (256ths of a device pixel) for a value.
-static b32 ui_vslider_knob_y(const struct ui address_to ui, const struct ui_control address_to c, b64 value)
-{
-        return ui_q8(ui, c->y + c->h) - ui_q8(ui, UI_VSLIDER_KNOB) / 2 - (b32)ui_qmul(ui_slider_ratio(c, value), ui_vslider_travel(ui, c) * 256);
-}
-
-static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to c)
-{
-        UI_CALL();
-        b32 live = 0, on_knob;
-        b64 value = c->value, halo;
-        int knob = c->down ? 14 : c->hover ? 18 : UI_VSLIDER_KNOB, bar = c->down ? 4 : c->hover ? 8 : 6;
-        b32 cx = ui_q8(ui, c->x) + ui_q8(ui, c->w) / 2, top = ui_q8(ui, c->y), bottom = ui_q8(ui, c->y + c->h), ky, r;
-        unsigned int accent = ui_role(UI_PRIMARY), fill_ink = c->on ? ui_role(UI_OUTLINE) : accent, off = ui_well(ui, UI_CONTROL_OFF, 30);
-        struct ui_box track, fill, dot;
-
-        if (c->sliding)
-        {
-                value = ui_slider_snap(c, ui_slide_value(&c->slide, &live));
-                c->value = value;
-                if (!live)
-                        c->sliding = 0;
-                ui_kit.busy |= live;
-        }
-        ky = ui_vslider_knob_y(ui, c, value);
-        track = (struct ui_box){cx - ui_q8(ui, bar) / 2, top, cx + ui_q8(ui, bar) / 2, bottom, ui_q8(ui, bar) / 2, ui_q8(ui, bar) / 2};
-        fill = track;
-        fill.y0 = ky;
-        ui_kit_fill(ui, &track, off, null);
-        if (fill.y0 < fill.y1)
-                ui_kit_fill(ui, &fill, fill_ink, &track);
-
-        // The halo: the pointer on the knob rings it at 8%, held at 12%, on the slider's own timing.
-        on_knob = (c->hover || c->down) && (b32)c->pointer_y * 256 >= ky - ui_q8(ui, knob) / 2 && (b32)c->pointer_y * 256 < ky + ui_q8(ui, knob) / 2;
-        ui_kit_number_to(&c->shadow, on_knob ? (c->down ? UI_Q2(12) : UI_Q2(8)) : 0, 200, &ui_ease);
-        ui_kit_number_to(&c->extent, on_knob ? ui_q(c->down ? 14 : 10) : 0, 200, &ui_ease);
-        halo = ui_kit_tween(&c->shadow);
-        if (halo > 0)
-        {
-                b32 ring = ui_q8(ui, knob) / 2 + (b32)((ui_kit_tween(&c->extent) * ui->scale / 100) >> 22);
-                struct ui_box h = {cx - ring, ky - ring, cx + ring, ky + ring, ring, ring};
-
-                ui_kit_fill(ui, &h, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null);
-        }
-        r = ui_q8(ui, knob) / 2;
-        dot = (struct ui_box){cx - r, ky - r, cx + r, ky + r, r, r};
-        ui_kit_fill(ui, &dot, c->on ? ui_role(UI_OUTLINE) : ui_text_colour(ui, UI_ON_SURFACE), null);
-        // The keys are on it: a ring in the accent, 3 out from the knob.
-        if (c->focused)
-        {
-                b32 out = ui_q8(ui, 3);
-                struct ui_box ring = {dot.x0 - out, dot.y0 - out, dot.x1 + out, dot.y1 + out, r + out, r + out};
-
-                ui_kit_ring(ui, &ring, ui_q8(ui, 2), accent);
-        }
 }
 
 // A slider's value said as a whole number into out (a sign, then the digits): its length.
@@ -4524,23 +4513,21 @@ static positive ui_slider_say(b64 value, char address_to out)
 static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
-        if (c->variant & UI_SLIDER_VERTICAL)
-        {
-                ui_vslider_draw(ui, c);
-                return;
-        }
         b64 sx, sy, value, ratio, squish = 0;
-        b32 tx, ty, live = 0;
+        b32 tx, ty, live = 0, vertical = (c->variant & UI_SLIDER_VERTICAL) != 0;
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
         b32 ox = rx + rw / 2, oy = ry + rh / 2, sum = 2 * rx + rw;
+        // Along the track: zero is its low end (the left, or the bottom of a stood one), far its high end and span its length. Across it, the
+        // bars' middle: a stood one's is its box's middle, a bare one's its box's, a flat one's 8 and 24 above the row's bottom.
+        b32 zero = vertical ? ry + rh : rx, far = vertical ? ry : rx + rw, span = vertical ? rh : rw;
         b32 line = c->variant & UI_SLIDER_LINE;
         int thumb = ui_slider_thumb(c);
         int bar = line ? (c->down ? 4 : c->hover ? 8 : 6) : thumb;
         b32 bare = (c->variant & UI_SLIDER_BARE) != 0;
-        b32 track_y = bare ? ry + rh / 2 : ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // the bars' middle: 48 tall, 8 above the row's bottom (a bare one's box is as tall as its thumb)
-        b32 stop, gap = ui_q8(ui, 2), origin;
+        b32 mid = vertical ? rx + rw / 2 : bare ? ry + rh / 2 : ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // 48 tall, 8 above the row's bottom (a bare one's box is as tall as its thumb)
+        b32 stop, gap = ui_q8(ui, 2), origin, half = ui_q8(ui, bar) / 2;
         struct ui_box fill, rest;
-        unsigned int accent = ui_role(UI_PRIMARY), off = ui_role(UI_CONTROL_OFF), ink;
+        unsigned int accent = ui_role(UI_PRIMARY), off = ui_role(UI_CONTROL_OFF), ink, fill_ink = c->on ? ui_role(UI_OUTLINE) : accent;
         char shown[24];
         int baseline;
 
@@ -4554,7 +4541,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         }
         value = c->value;
         ratio = ui_slider_ratio(c, value);
-        stop = (b32)ui_qmul(ratio, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
+        stop = (b32)ui_qmul(ratio, span - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
         // The bars' scaleX: the jello while dragged past an end, the spring that lets it go, or the landing.
         if (c->moved && c->down)
         {
@@ -4580,48 +4567,54 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit.busy |= live;
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
         // The squish's side is the hand's (left or right of the window); this works as if reading from the left, so it is turned like the rest.
-        origin = (ui_rtl() ? -c->squish_origin : c->squish_origin) > 0 ? rx : (ui_rtl() ? -c->squish_origin : c->squish_origin) < 0 ? rx + rw : rx + rw / 2;
+        // A stood one reads from its bottom whatever the window reads: its origin is its low end or its high one, as the hand's side says.
+        {
+                int turn = vertical ? c->squish_origin : ui_rtl() ? -c->squish_origin : c->squish_origin;
 
-        // The spot under the hand.
+                origin = turn > 0 ? zero : turn < 0 ? far : ui_slider_point(vertical, zero, span / 2);
+        }
+
+        // The spot under the hand: the press's place along the track, across the bars' middle (a flat one's is 24 above the row's bottom).
         {
                 b64 spot = ui_kit_tween(&c->spot);
 
                 if (spot > 0)
                 {
-                        // spot_x is the press's logical x in the control: scaled with the rest, not added in device pixels as it was.
-                        b32 spx = ui_q8(ui, c->x + c->spot_x), spy = bare ? track_y : ry + rh - ui_q8(ui, 24);
+                        // spot_x is the press's logical place along the slider: scaled with the rest, not added in device pixels as it was.
+                        b32 sa = vertical ? zero - ui_q8(ui, c->spot_x) : ui_q8(ui, c->x + c->spot_x), sc = vertical || bare ? mid : ry + rh - ui_q8(ui, 24);
 
-                        // A radial ellipse 180 by 80, the accent at its middle to nothing at 70%: rings of it, outermost first.
+                        // A radial ellipse 180 by 80 (stood on its end, 80 by 180), the accent at its middle to nothing at 70%: rings of it, outermost first.
                         for (int ring = 7; ring >= 0; ring--)
                         {
                                 b32 hw = ui_q8(ui, 90) * (ring + 1) / 8 * 7 / 10, hh = ui_q8(ui, 40) * (ring + 1) / 8 * 7 / 10;
-                                struct ui_box e = {spx - hw, spy - hh, spx + hw, spy + hh, hw, hh};
+                                struct ui_box e = ui_slider_box(vertical, sa - hw, sa + hw, sc - hh, sc + hh, hw, hh);
                                 unsigned int share = (unsigned int)((spot * 100 + UI_HALF) >> UI_Q) * 100 / 8 / 100;
 
                                 e = ui_box_transform(e, sx, sy, ox, oy, tx, ty);
-                                ui_kit_fill_in(ui, e, ui_mix(accent, share ? share : 1, 0), null, sum);
+                                ui_slider_fill(ui, c, e, ui_mix(accent, share ? share : 1, 0), null, sum);
                         }
                 }
         }
 
-        fill = (struct ui_box){rx, track_y - ui_q8(ui, bar) / 2, rx + stop - gap, track_y + ui_q8(ui, bar) / 2, ui_q8(ui, bar) / 2, ui_q8(ui, bar) / 2};
-        rest = (struct ui_box){rx + stop + gap, fill.y0, rx + rw, fill.y1, fill.rx, fill.ry};
-        if (ratio <= 0)
-                rest.x0 = rx;
-        if (ratio >= UI_ONE)
-                fill.x1 = rx + rw;
-        fill = ui_box_transform(ui_box_transform(fill, UI_ONE + squish, UI_ONE, origin, track_y, 0, 0), sx, sy, ox, oy, tx, ty);
-        rest = ui_box_transform(ui_box_transform(rest, UI_ONE + squish, UI_ONE, origin, track_y, 0, 0), sx, sy, ox, oy, tx, ty);
+        // The bars: the fill from the low end up to the thumb, the rest from the thumb to the high end, the thumb being the gap between them.
+        {
+                b32 fill_end = ratio >= UI_ONE ? span : stop - gap, rest_start = ratio <= 0 ? 0 : stop + gap;
+
+                fill = ui_slider_box(vertical, zero, ui_slider_point(vertical, zero, fill_end), mid - half, mid + half, half, half);
+                rest = ui_slider_box(vertical, ui_slider_point(vertical, zero, rest_start), ui_slider_point(vertical, zero, span), mid - half, mid + half, half, half);
+        }
+        fill = ui_box_transform(ui_slider_stretch(vertical, fill, squish, origin, mid), sx, sy, ox, oy, tx, ty);
+        rest = ui_box_transform(ui_slider_stretch(vertical, rest, squish, origin, mid), sx, sy, ox, oy, tx, ty);
         if (ratio < UI_ONE)
-                ui_kit_fill_in(ui, rest, off, null, sum);
+                ui_slider_fill(ui, c, rest, off, null, sum);
         if (ratio > 0)
-                ui_kit_fill_in(ui, fill, accent, null, sum);
+                ui_slider_fill(ui, c, fill, fill_ink, null, sum);
 
         // The thumb's halo: the pointer on the thumb (its box, 20 hovered), a ring of 10 at 8% round it; pressed, 14 at 12%.
         {
-                b32 thumb_x = rx + stop, hx = ui_point(c->pointer_x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 256;
-                b32 on_thumb = (c->hover || c->down) && hx >= thumb_x - ui_q8(ui, thumb) / 2 && hx < thumb_x + ui_q8(ui, thumb) / 2;
-                b64 halo;
+                b32 thumb_x = ui_slider_point(vertical, zero, stop);
+                b64 hp = (b64)ui_slider_along(ui, c, c->pointer_x, c->pointer_y) * 256, halo;
+                b32 on_thumb = (c->hover || c->down) && hp >= (b64)stop - ui_q8(ui, thumb) / 2 && hp < (b64)stop + ui_q8(ui, thumb) / 2;
 
                 ui_kit_number_to(&c->shadow, on_thumb ? (c->down ? UI_Q2(12) : UI_Q2(8)) : 0, 200, &ui_ease);
                 ui_kit_number_to(&c->extent, on_thumb ? ui_q(c->down ? 14 : 10) : 0, 200, &ui_ease);
@@ -4629,63 +4622,71 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 if (halo > 0)
                 {
                         b32 r = ui_q8(ui, thumb) / 2 + (b32)((ui_kit_tween(&c->extent) * ui->scale / 100) >> 22);
-                        struct ui_box ring = {thumb_x - r, track_y - r, thumb_x + r, track_y + r, r, r};
+                        struct ui_box ring = ui_slider_box(vertical, thumb_x - r, thumb_x + r, mid - r, mid + r, r, r);
 
                         ring = ui_box_transform(ring, sx, sy, ox, oy, tx, ty);
                         // The ring and the thumb's own background, both the accent at the halo's share.
-                        ui_kit_fill_in(ui, ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null, sum);
+                        ui_slider_fill(ui, c, ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null, sum);
                 }
+        }
+        // The keys ring a stood slider's thumb: a ring in the accent, 3 out from the thumb.
+        if (vertical && c->focused)
+        {
+                b32 r = ui_q8(ui, thumb) / 2 + ui_q8(ui, 3), at = ui_slider_point(vertical, zero, stop);
+                struct ui_box ring = ui_slider_box(vertical, at - r, at + r, mid - r, mid + r, r, r);
+
+                ui_kit_ring(ui, &ring, ui_q8(ui, 2), accent);
         }
 
         // The ghost: hovered and not dragged, from the value to where a press would land, in the accent at 40%.
         if (c->hover && !c->down && c->hover_x >= 0)
         {
                 // Where a press under the hand would land (ui_slider_of, the step it takes), and the thumb there: the ghost runs to it.
-                b64 land = ui_slider_ratio(c, ui_slider_of(ui, c, c->hover_x - ui_dev(ui, c->x)));
-                b32 hx = rx + (b32)ui_qmul(land, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
+                b64 land = ui_slider_ratio(c, ui_slider_of(ui, c, c->hover_x));
+                b32 along = (b32)ui_qmul(land, span - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2, hx = ui_slider_point(vertical, zero, along);
                 // Each end of the ghost is the track's end where its value is at the end of the range (the thumb's centre is half a
                 // thumb in from it), else the thumb's centre there; so a preview at the minimum or the maximum fills the whole first or last part.
-                b32 from = ratio <= 0 ? rx : ratio >= UI_ONE ? rx + rw : rx + stop;
-                b32 to = land <= 0 ? rx : land >= UI_ONE ? rx + rw : hx;
-                b32 left = from < to ? from : to, right = from < to ? to : from;
-                b32 under = hx - rx < stop;
+                b32 from = ui_slider_point(vertical, zero, ratio <= 0 ? 0 : ratio >= UI_ONE ? span : stop);
+                b32 to = ui_slider_point(vertical, zero, land <= 0 ? 0 : land >= UI_ONE ? span : along);
+                b32 low = from < to ? from : to, high = from < to ? to : from;
+                b32 under = along < stop;
                 unsigned int ghost = ui_mix(accent, 40, off);
-                b32 thumb_x = rx + stop;
+                b32 thumb_x = ui_slider_point(vertical, zero, stop);
 
                 // Over the thumb itself the ghost is the fill's colour (under) or none (past).
                 if (hx > thumb_x - ui_q8(ui, 11) && hx < thumb_x + ui_q8(ui, 11))
                         ghost = under ? accent : 0;
-                if (ghost && right > left)
+                if (ghost && high > low)
                 {
-                        struct ui_box g = {left, fill.y0, right, fill.y1, 0, 0};
+                        struct ui_box g = ui_slider_box(vertical, low, high, 0, 0, 0, 0);
                         struct ui_box bar_box = under ? fill : rest;
 
                         g = ui_box_transform(g, sx, sy, ox, oy, tx, ty);
-                        g.y0 = bar_box.y0, g.y1 = bar_box.y1;
-                        ui_kit_fill_in(ui, g, ghost, &bar_box, sum);
+                        ui_slider_bar_across(vertical, &g, &bar_box);
+                        ui_slider_fill(ui, c, g, ghost, &bar_box, sum);
                 }
         }
 
-        // A stepped slider's dots: a faint ink one on the rest, a paper knockout on the fill, none where the value is.
-        if (c->variant & UI_SLIDER_STEPS && c->step > 0)
+        // A stepped slider's dots: a faint ink one on the rest, a paper knockout on the fill, none where the value is. A stood one has none.
+        if (!vertical && c->variant & UI_SLIDER_STEPS && c->step > 0)
         {
                 // The range in steps, not rounded: the steps are the whole ones it holds, each at its own place along the track.
-                b64 span = ui_qdiv(c->high - c->low, c->step);
-                int steps = (int)(span >> UI_Q), here = (int)((ui_qmul(ratio, span) + UI_HALF) >> UI_Q);
+                b64 span_steps = ui_qdiv(c->high - c->low, c->step);
+                int steps = (int)(span_steps >> UI_Q), here = (int)((ui_qmul(ratio, span_steps) + UI_HALF) >> UI_Q);
 
                 for (int k = 0; k <= steps && steps > 0; k++)
                 {
-                        b64 along = ui_qdiv(ui_q(k), span);
-                        b32 dx = rx + (b32)ui_qmul(along, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
-                        b32 filled = along <= ratio + 107374;
+                        b64 along_k = ui_qdiv(ui_q(k), span_steps);
+                        b32 dx = rx + (b32)ui_qmul(along_k, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
+                        b32 filled = along_k <= ratio + 107374;
                         struct ui_box dot;
 
                         if (line)
-                                dot = (struct ui_box){dx - ui_q8(ui, 1), track_y + ui_q8(ui, 6) - ui_q8(ui, k == 0 || k == steps || 2 * k == steps ? 6 : 4),
-                                                      dx + ui_q8(ui, 1), track_y + ui_q8(ui, 6) + ui_q8(ui, k == 0 || k == steps || 2 * k == steps ? 6 : 4),
+                                dot = (struct ui_box){dx - ui_q8(ui, 1), mid + ui_q8(ui, 6) - ui_q8(ui, k == 0 || k == steps || 2 * k == steps ? 6 : 4),
+                                                      dx + ui_q8(ui, 1), mid + ui_q8(ui, 6) + ui_q8(ui, k == 0 || k == steps || 2 * k == steps ? 6 : 4),
                                                       ui_q8(ui, 1), ui_q8(ui, 1)};
                         else
-                                dot = (struct ui_box){dx - ui_q8(ui, 3), track_y - ui_q8(ui, 3), dx + ui_q8(ui, 3), track_y + ui_q8(ui, 3), ui_q8(ui, 3), ui_q8(ui, 3)};
+                                dot = (struct ui_box){dx - ui_q8(ui, 3), mid - ui_q8(ui, 3), dx + ui_q8(ui, 3), mid + ui_q8(ui, 3), ui_q8(ui, 3), ui_q8(ui, 3)};
                         if (!line && k == here && k != 0 && k != steps)
                                 continue;
                         dot = ui_box_transform(dot, sx, sy, ox, oy, tx, ty);
@@ -4693,8 +4694,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 }
         }
 
-        // The label and the value, which ride the squish too. A bare slider has neither: its row says them.
-        if (bare)
+        // The label and the value, which ride the squish too. A bare slider has neither: its row says them; a stood one has neither either, its strip says the volume.
+        if (bare || vertical)
                 return;
         ink = c->hover || c->down ? accent : ui_role(UI_ON_SURFACE);
         baseline = ui_kit_baseline(ui, (ry + ui_q8(ui, 8) + ty) / 256, UI_BODY_LARGE);
@@ -5594,12 +5595,10 @@ static b32 ui_control_live(const struct ui_control address_to c)
                                 c->kind == UI_SLIDER || c->kind == UI_TABS || c->kind == UI_INPUT);
 }
 
-// The slider's value under a device x (the hand's, as the window reads it), the thumb's travel and its step (ui_slider_of).
+// The slider's value under a device point (the hand's, as the window reads it): the thumb's travel and its step are ui_slider_of's.
 static b64 ui_slider_at(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
-        if (c->variant & UI_SLIDER_VERTICAL)
-                return ui_vslider_at(ui, c, y);
-        return ui_slider_of(ui, c, ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) - ui_dev(ui, c->x));
+        return ui_slider_of(ui, c, ui_slider_along(ui, c, x, y));
 }
 
 /*
@@ -5781,34 +5780,32 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         }
                         else if (c->kind == UI_SLIDER)
                         {
-                                b64 over = 0, f = ldy;
-                                int left = ui_dev(ui, c->x), right = left + ui_dev(ui, c->w);
+                                b32 vertical = (c->variant & UI_SLIDER_VERTICAL) != 0;
+                                int along = vertical ? dy : dx, lo = ui_dev(ui, vertical ? c->y : c->x), hi = lo + ui_slider_span(ui, c), pos = vertical ? y : x;
+                                b64 over = 0, f = vertical ? ldx : ldy;
 
-                                if (c->variant & UI_SLIDER_VERTICAL)
-                                {
-                                        // Stood on its end it follows the hand's y, and has no stretch.
-                                        if (!c->moved && dy < 4 * ui->scale / 100 && dy > -4 * ui->scale / 100)
-                                                return null;
-                                        c->moved = 1;
-                                        c->sliding = 0;
-                                        c->value = ui_slider_at(ui, c, x, y);
-                                        return c;
-                                }
-                                if (!c->moved && dx < 4 * ui->scale / 100 && dx > -4 * ui->scale / 100)
+                                // A drag begins once it is past 4 logical pixels along the track (a stood one's along is the hand's y).
+                                if (!c->moved && along < 4 * ui->scale / 100 && along > -4 * ui->scale / 100)
                                         return null;
                                 c->moved = 1;
                                 c->sliding = 0;
                                 c->value = ui_slider_at(ui, c, x, y);
-                                c->spot_x = ui_point(x, left, right - left) * 100 / ui->scale - c->x;
+                                c->spot_x = ui_slider_spot(ui, c, x, y);
                                 changed = c;
-                                over = x < left ? ui_q(left - x) : x > right ? ui_q(x - right) : 0;
-                                c->bend_target = over > 0 ? ui_qmul(ui_squash_curve(ui_qdiv(over, ui_q(right - left)) * 2), UI_Q2(130)) : 0;
+                                // Past an end the bars are stretched like a band, by how far past; the release springs them home.
+                                over = pos < lo ? ui_q(lo - pos) : pos > hi ? ui_q(pos - hi) : 0;
+                                c->bend_target = over > 0 ? ui_qmul(ui_squash_curve(ui_qdiv(over, ui_q(hi - lo)) * 2), UI_Q2(130)) : 0;
                                 if (over > 0)
-                                        c->squish_origin = x < left ? -1 : 1;
+                                        c->squish_origin = vertical ? (pos < lo ? 1 : -1) : (pos < lo ? -1 : 1);
                                 {
-                                        struct ui_squash s = {0, ui_squash_curve((f < 0 ? -f : f) / 400), 0, 0};
+                                        // The hand's movement across the track nudges the bars the same way (sideways for a flat one, aside for a stood one).
+                                        b64 k = ui_squash_curve((f < 0 ? -f : f) / 400), nudge = f > 0 ? k * 8 : f < 0 ? -k * 8 : 0;
+                                        struct ui_squash s = {0, 0, 0, 0};
 
-                                        s.ty = f > 0 ? s.sy * 8 : f < 0 ? -s.sy * 8 : 0;
+                                        if (vertical)
+                                                s.sx = k, s.tx = nudge;
+                                        else
+                                                s.sy = k, s.ty = nudge;
                                         ui_squish_move(&c->squish, s);
                                 }
                         }
@@ -5829,7 +5826,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         if (hit >= 0)
                                 ui_kit_shape_note(c);
                         if (c->kind == UI_SLIDER)
-                                c->hover_x = hit >= 0 ? ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
+                                c->hover_x = hit >= 0 ? ui_slider_along(ui, c, x, y) : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
                 }
                 return null;
         }
@@ -5915,7 +5912,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                         c->value = to;
                                 if (c->value != from || c->sliding)
                                         changed = c;
-                                c->spot_x = ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 100 / ui->scale - c->x; // logical, as the motion's is
+                                c->spot_x = ui_slider_spot(ui, c, x, y); // logical, as the motion's is
                                 ui_tween_put(&c->spot, UI_Q2(10), UI_TWEEN_NUMBER);
                                 c->hover_x = -1; // v(B): the hover preview is over till the pointer moves again
                         }
@@ -9012,7 +9009,7 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
 #define UI_STRIP_GAP 12       // extra after the first
 #define UI_STRIP_PAD 8        // before the first, and the window's edge
 #define UI_STRIP_FACE 36      // the disc
-#define UI_STRIP_SLIDER_W 28  // the slider's box: the knob and its halo
+#define UI_STRIP_SLIDER_W 28  // the slider's box: the thumb and its halo
 #define UI_STRIP_GROUP (UI_METER_WIDTH + 6 + UI_STRIP_SLIDER_W)
 #define UI_STRIP_MUTE_W 76
 #define UI_STRIP_MUTE_H 32
@@ -9841,7 +9838,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                 c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
                 c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y);
                 c->hover = c->item >= 0 && l->hover == id;
-                c->hover_x = c->hover ? ui_point(l->pointer_x, ui_dev(ui, c->x), ui_dev(ui, c->w)) : -1;
+                c->hover_x = c->hover ? ui_slider_along(ui, c, l->pointer_x, l->pointer_y) : -1;
                 c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
                 return c;
         }

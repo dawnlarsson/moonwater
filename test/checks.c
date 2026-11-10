@@ -153495,7 +153495,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer: with nothing playing there is the device's strip, and a line beside it", s->count == 1 && beside > 100 && inside > 20);
         }
 
-        // The picture of the device's strip at 80 percent: the slider's fill is the accent up to the knob, which is four fifths up its travel.
+        // The picture of the device's strip at 80 percent: the slider's fill is the accent up to the thumb, which is four fifths up its travel.
         mixer_fixture_streams();
         mixer_fixture_page.seq += 2;
         check_mixer_poll_at(mixer_t0 + 700000000ll);
@@ -153505,15 +153505,15 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         mixer_draw(pixels);
         {
                 struct ui_control address_to slider = &s->control[0];
-                int x = slider->x + slider->w / 2, knob = slider->y + slider->h - UI_VSLIDER_KNOB / 2 - (slider->h - UI_VSLIDER_KNOB) * 80 / 100;
+                int x = slider->x + slider->w / 2, knob = slider->y + slider->h - ui_slider_thumb(slider) / 2 - (slider->h - ui_slider_thumb(slider)) * 80 / 100;
 
-                if (!(strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_ON_SURFACE)))
+                if (!(strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_SURFACE)))
                         string_format(log, "  dump: mixer slider x %p knob %p below %p above %p at %p roles %p %p %p; box %p %p %p %p\n", (positive)x, (positive)knob, (positive)strips_pixel(x, knob + 30),
                                       (positive)strips_pixel(x, knob - 30), (positive)strips_pixel(x, knob), (positive)(ui_role(UI_PRIMARY) & 0xffffffu),
                                       (positive)(ui_role(UI_CONTROL_OFF) & 0xffffffu), (positive)(ui_role(UI_ON_SURFACE) & 0xffffffu), (positive)slider->x, (positive)slider->y,
                                       (positive)slider->w, (positive)slider->h);
-                check("mixer: the device's slider is filled up to its knob at 80 percent and empty above it",
-                      strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_ON_SURFACE));
+                check("mixer: the device's slider is filled up to its thumb at 80 percent, the thumb a gap, and empty above it",
+                      strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_SURFACE));
         }
         // The popup (-q): the device's strip alone, the Mixer row under it, the keys and the pointer, the mixer started by the row, the place
         // beside the cell, and the keys going elsewhere.
@@ -154005,7 +154005,7 @@ static fn check_kit_strips(void)
                       !(ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 20000000000ll), ui_level_moving(&l)) && (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4200000000ll + 100000000ll), ui_level_moving(&l)));
         }
 
-        // The vertical slider's value under a point: the knob's centre, in the box less the knob, held to the ends and to the step.
+        // The vertical slider's value under a point: the thumb's centre, in the box less the thumb, held to the ends and to the step.
         {
                 struct ui_control c;
                 b32 ends, middle, step, scaled;
@@ -154013,19 +154013,19 @@ static fn check_kit_strips(void)
                 memory_zero(&c, sizeof(c));
                 c.kind = UI_SLIDER, c.variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE, c.x = 0, c.y = 100, c.w = 28, c.h = 200;
                 c.low = 0, c.high = ui_q(100), c.step = ui_q(1);
-                ends = ui_vslider_at(&ui, &c, 292) == 0 && ui_vslider_at(&ui, &c, 108) == ui_q(100) && ui_vslider_at(&ui, &c, 1000) == 0 &&
-                       ui_vslider_at(&ui, &c, -20) == ui_q(100);
-                middle = ui_vslider_at(&ui, &c, 200) == ui_q(50);
-                step = ui_vslider_at(&ui, &c, 150) == ui_q(77) && ui_vslider_at(&ui, &c, 151) == ui_q(77);
+                ends = ui_slider_at(&ui, &c, 292) == 0 && ui_slider_at(&ui, &c, 108) == ui_q(100) && ui_slider_at(&ui, &c, 1000) == 0 &&
+                       ui_slider_at(&ui, &c, -20) == ui_q(100);
+                middle = ui_slider_at(&ui, &c, 200) == ui_q(50);
+                step = ui_slider_at(&ui, &c, 150) == ui_q(78) && ui_slider_at(&ui, &c, 151) == ui_q(77);
                 ui.scale = 200;
-                scaled = ui_vslider_at(&ui, &c, 400) == ui_q(50) && ui_vslider_at(&ui, &c, 584) == 0 && ui_vslider_at(&ui, &c, 216) == ui_q(100);
+                scaled = ui_slider_at(&ui, &c, 400) == ui_q(50) && ui_slider_at(&ui, &c, 584) == 0 && ui_slider_at(&ui, &c, 216) == ui_q(100);
                 ui.scale = 100;
-                check("kit strips: a point on the vertical slider is a value: the knob's centre, 0 at the bottom of its travel and 100 at the top, held past them",
+                check("kit strips: a point on the vertical slider is a value: the thumb's centre, 0 at the bottom of its travel and 100 at the top, held past them",
                       ends && middle && scaled);
                 check("kit strips: and snapped to the step", step);
         }
 
-        // The vertical slider drawn: the fill from the bottom in the accent, the rest in the off colour, the knob at the value; muted, the fill is grey.
+        // The vertical slider drawn: the fill from the bottom in the accent, the rest in the off colour, the thumb's gap at the value; muted, the fill is grey.
         {
                 struct ui_control c;
                 b32 parts, grey, up;
@@ -154038,7 +154038,7 @@ static fn check_kit_strips(void)
                 for (int k = 0; k < 640 * 400; k++)
                         strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 ui_control_draw(&ui, &c);
-                parts = strips_is(34, 260, UI_PRIMARY) && strips_is(34, 140, UI_CONTROL_OFF) && strips_is(34, 200, UI_ON_SURFACE) && strips_is(34, 290, UI_PRIMARY) &&
+                parts = strips_is(34, 260, UI_PRIMARY) && strips_is(34, 140, UI_CONTROL_OFF) && strips_is(34, 200, UI_SURFACE) && strips_is(34, 290, UI_PRIMARY) &&
                         strips_is(34, 110, UI_CONTROL_OFF) && strips_is(60, 200, UI_SURFACE) && strips_is(10, 260, UI_SURFACE);
                 if (!parts)
                         string_format(log, "  dump: fill %p off %p knob %p foot %p head %p aside %p left %p / roles %p %p %p %p\n", (positive)strips_pixel(34, 260), (positive)strips_pixel(34, 140),
@@ -154055,9 +154055,9 @@ static fn check_kit_strips(void)
                 for (int k = 0; k < 640 * 400; k++)
                         strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 ui_control_draw(&ui, &c);
-                up = strips_is(34, 200, UI_PRIMARY) && strips_is(34, 108, UI_ON_SURFACE) && strips_is(34, 290, UI_PRIMARY);
-                check("kit strips: the vertical slider is filled from its bottom to its knob, the rest in the off colour, the knob in the ink, and nothing round it", parts);
-                check("kit strips: muted, its fill is the outline's grey; full, the knob is at the top", grey && up);
+                up = strips_is(34, 200, UI_PRIMARY) && strips_is(34, 108, UI_PRIMARY) && strips_is(34, 290, UI_PRIMARY);
+                check("kit strips: the vertical slider is filled from its bottom to its thumb, the rest in the off colour, the thumb a gap, and nothing round it", parts);
+                check("kit strips: muted, its fill is the outline's grey; full, the fill runs to the top", grey && up);
         }
 
         // Strips listed: what the app says is what is there, in order, with the first the device; an id keeps its state through a new listing.
