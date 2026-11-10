@@ -115,6 +115,7 @@ settings_issue_unknown	e812	A problem this version does not name (code %1$d)
 settings_item_add	fbef	Enter keeps the name of a device; the radio goes on for what pairs
 settings_item_ask	6aad	Enter asks for its passphrase and joins it
 settings_item_cannot	e643	moonwater cannot join what this network asks for
+settings_item_drive	269a	shown, not held: no verb changes a drive
 settings_item_joined	0fb8	joined: Delete forgets it
 settings_item_kept	33d9	kept by its name: Delete forgets it
 settings_item_open	4429	Enter joins it, and saves it

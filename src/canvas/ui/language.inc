@@ -122,6 +122,7 @@ LANGUAGE_ID(settings_issue_unknown, "A problem this version does not name (code 
 LANGUAGE_ID(settings_item_add, "Enter keeps the name of a device; the radio goes on for what pairs")
 LANGUAGE_ID(settings_item_ask, "Enter asks for its passphrase and joins it")
 LANGUAGE_ID(settings_item_cannot, "moonwater cannot join what this network asks for")
+LANGUAGE_ID(settings_item_drive, "shown, not held: no verb changes a drive")
 LANGUAGE_ID(settings_item_joined, "joined: Delete forgets it")
 LANGUAGE_ID(settings_item_kept, "kept by its name: Delete forgets it")
 LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it")

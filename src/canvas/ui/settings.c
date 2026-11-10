@@ -1193,8 +1193,9 @@ static const char address_to settings_item_text(const struct settings_item addre
                        : item->flags & SETTINGS_ITEM_OPEN   ? WORDS(settings_item_open)
                        : item->flags & SETTINGS_ITEM_SAVED  ? WORDS(settings_item_saved)
                                                             : WORDS(settings_item_ask);
-        return item->kind == SETTINGS_DEVICE ? WORDS(settings_item_kept)
-               : item->kind == SETTINGS_ADD  ? WORDS(settings_item_add) : "";
+        return item->flags & SETTINGS_ITEM_DRIVE ? WORDS(settings_item_drive)
+               : item->kind == SETTINGS_DEVICE   ? WORDS(settings_item_kept)
+               : item->kind == SETTINGS_ADD      ? WORDS(settings_item_add) : "";
 }
 
 // What a command of All commands does, as help says; the any row's own words.
@@ -3942,7 +3943,10 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_edit_begin(row, "", false);
                 settings_say((string_address)WORDS(settings_type_device));
         }
-        else
+        // A drive runs no verb: the status says that it is shown and held by none. Any other note says what it says already.
+        else if (item->flags & SETTINGS_ITEM_DRIVE)
+                settings_say((string_address)WORDS(settings_item_drive));
+        else if (item->kind != SETTINGS_NOTE)
                 settings_say((string_address)settings_item_text(item));
         ui_page_redraw(&settings.page);
 }
