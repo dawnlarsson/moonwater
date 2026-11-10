@@ -18,7 +18,7 @@
         on, as `taskbar text` says.
 
         With `taskbar launcher on` the band also has a button at its leading end (the left of a bottom or top band, the top
-        of a side one): a tab-sized square with three bars on it, that opens the launcher. It is a slot of the band like the
+        of a side one): a tab-sized square with a grid of nine dots on it, that opens the launcher. It is a slot of the band like the
         tray, with a bit of its own in the redo mask, drawn as a tab is (lit while the launcher is up), and the tabs are laid
         out in what it leaves. Off, which is the default, the band is as it was.
 
@@ -878,29 +878,33 @@ static void taskbar_battery_refresh(void)
 }
 
 /*
-        The launcher button's mark: three bars ten logical pixels long and two thick, five apart from the top of one to the
-        top of the next, centred on the button. Whole device pixels at every scale (50 to 200 percent are bars of 5 to 20
-        by 1 to 4), drawn as a run of fill, so there is no icon file and no font in it.
+        The launcher button's mark: the apps mark, a grid of three by three round dots, centred on the button. The grid is a little
+        over half the button across (the dots' pitch 28 percent of the button, a dot 55 percent of the pitch), the dots whole device
+        pixels across and apart at every scale, each the kit's fill with a corner of half its width (as the notices dot is), so there is
+        no icon file and no font in it. It is recorded into the frame's scene when there is one, as the dot and the speaker are.
 */
 static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y,
                                    int width, int height, unsigned int ink)
 {
-        int bar = 10 * view->scale / 100, thick = 2 * view->scale / 100, step = 5 * view->scale / 100, left, top;
+        struct ui ui;
+        int side = width < height ? width : height, step = (side * 28 + 50) / 100, dot, span, left, top;
 
-        thick = thick < 1 ? 1 : thick;
-        bar = bar < 3 ? 3 : bar > width ? width : bar;
-        step = step <= thick ? thick + 1 : step;
-        left = x + (width - bar) / 2;
-        top = y + (height - (2 * step + thick)) / 2;
-        for (int at = 0; at < 3; at++)
-                for (int row = 0; row < thick; row++)
+        dot = (step * 55 + 50) / 100;
+        dot = dot < 1 ? 1 : dot;
+        step = step < dot + 1 ? dot + 1 : step;
+        span = 2 * step + dot;
+        left = x - lay->bx + (width - span) / 2;
+        top = y - lay->by + (height - span) / 2;
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.scene = view->scene;
+        for (int row = 0; row < 3; row++)
+                for (int column = 0; column < 3; column++)
                 {
-                        int line = top + at * step + row;
+                        int at_x = left + column * step, at_y = top + row * step;
 
-                        if (line >= y && line < y + height && view->scene)
-                                ui_scene_record(view->scene, left - lay->bx, line - lay->by, left - lay->bx + bar, line - lay->by + 1, ink, true);
-                        else if (line >= y && line < y + height)
-                                memory_fill_u32(view->pixels + (long)(line - lay->by) * lay->bw + (left - lay->bx), (positive)bar, ink);
+                        ui_kit_fill(&ui, &(struct ui_box){at_x * 256, at_y * 256, (at_x + dot) * 256, (at_y + dot) * 256, dot * 128, dot * 128},
+                                    ink | 0xff000000u, null);
                 }
 }
 
@@ -1041,7 +1045,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 }
         }
 
-        // The launcher button: a tab's glass, lit while the launcher is up, with its three bars in the tab's ink.
+        // The launcher button: a tab's glass, lit while the launcher is up, with its grid of dots in the tab's ink.
         if ((redo & taskbar_bit(TASKBAR_LAUNCHER)) && taskbar_slot(view, TASKBAR_LAUNCHER, &x, &y, &width, &height))
         {
                 unsigned int mark = view->launcher_lit ? COMPOSITOR_TAB_LIT : 0;

@@ -126530,7 +126530,7 @@ static void check_taskbar_fullscreen(void)
         The launcher button of the panel (`taskbar launcher on`). Off, which is the default, the band is what it was: the tabs and
         the tray are where the band's own formula puts them with nothing taken from its start, whatever the position and the scale.
         On, the button is a tab-sized square a gap in from the leading end of the band (the left of a bottom or top one, the top of
-        a side one), its own slot to hit and to damage, the tabs are laid out in what it leaves, and its three bars are drawn whole at
+        a side one), its own slot to hit and to damage, the tabs are laid out in what it leaves, and its grid of dots is drawn whole at
         every scale. The formula is written out here again, as it was before the button, so a layout that moves with the button off
         is a red row.
 */
@@ -126673,17 +126673,11 @@ static void check_taskbar_launcher(void)
                            taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(WINDOWS - 1);
             }
 
-            // Drawn: the glass, lit or not, and the three bars of whole device pixels in one ink, centred on the button.
+            // Drawn: the glass, lit or not, and nothing outside the slot.
             {
                 unsigned int shot[2] = {0, 0};
-                int rect[4], bar = 10 * scale / 100, bar_thick = 2 * scale / 100, step = 5 * scale / 100, left, top, count = 0, stray = 0;
-                unsigned int ink = 0;
+                int rect[4];
 
-                bar = bar < 3 ? 3 : bar > w ? w : bar;
-                bar_thick = bar_thick < 1 ? 1 : bar_thick;
-                step = step <= bar_thick ? bar_thick + 1 : step;
-                left = x + (w - bar) / 2;
-                top = y + (h - (2 * step + bar_thick)) / 2;
                 for (int lit = 0; lit < 2; lit++)
                 {
                     struct taskbar_view drawn = view;
@@ -126701,18 +126695,6 @@ static void check_taskbar_launcher(void)
                     shot[lit] = launcher_band_pixels[(unsigned long)(y - by + 1) * (unsigned long)bw + (unsigned long)(x - bx + 1)];
                     if (lit)
                         continue;
-                    // The ink is what the first bar's middle pixel is; every pixel of the three bars is it and no other pixel of the slot is.
-                    ink = launcher_band_pixels[(unsigned long)(top - by) * (unsigned long)bw + (unsigned long)(left + bar / 2 - bx)];
-                    for (int row = y; row < y + h; row++)
-                        for (int column = x; column < x + w; column++)
-                        {
-                            int in_bar = column >= left && column < left + bar && row >= top && (row - top) / step < 3 && (row - top) % step < bar_thick;
-                            unsigned int pixel = launcher_band_pixels[(unsigned long)(row - by) * (unsigned long)bw + (unsigned long)(column - bx)];
-
-                            count += in_bar;
-                            stray += in_bar != (pixel == ink);
-                        }
-                    glyphs &= count == 3 * bar * bar_thick && !stray && ink != 0;
                     // Nothing outside the slot is drawn: the rest of the band is the zeroes it was cleared to.
                     for (int row = 0; row < bh; row++)
                         for (int column = 0; column < bw; column++)
@@ -126721,8 +126703,59 @@ static void check_taskbar_launcher(void)
                                 outside = 0;
                 }
                 lit_differs &= shot[0] != shot[1];
-                // The bars are the same whole pixels at every scale: a bar is 5 to 20 long and 1 to 4 thick, centred to a pixel.
-                scale_ok &= bar >= 3 && bar_thick == (scale >= 100 ? scale / 50 : 1) && 2 * (left - x) + bar - w >= -1 && 2 * (left - x) + bar - w <= 0;
+            }
+
+            // The mark alone on a cleared band: a grid of three by three round dots, a whole number of device pixels across and apart,
+            // every pixel of it in the slot and in a dot's box, each box drawn, all nine the same pixels, the grid centred on the
+            // button to a pixel, and (from a dot of 3 pixels) the middle of each dot the ink whole.
+            {
+                struct taskbar_view alone = view;
+                struct taskbar_layout lay;
+                unsigned int ink = 0xffe0d0c0u;
+                int side = w < h ? w : h, pitch = (side * 28 + 50) / 100, dot, span, left, top, count[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, stray = 0, whole = 1;
+                int least_x = 1 << 30, least_y = 1 << 30, most_x = -1, most_y = -1;
+                unsigned long sum[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+                dot = (pitch * 55 + 50) / 100;
+                dot = dot < 1 ? 1 : dot;
+                pitch = pitch < dot + 1 ? dot + 1 : pitch;
+                span = 2 * pitch + dot;
+                left = x + (w - span) / 2;
+                top = y + (h - span) / 2;
+                memory_zero(launcher_band_pixels, sizeof(launcher_band_pixels));
+                alone.pixels = launcher_band_pixels;
+                alone.band_bytes = sizeof(launcher_band_pixels);
+                alone.scene = null;
+                taskbar_layout(&alone, &lay);
+                taskbar_launcher_glyph(&alone, &lay, x, y, w, h, ink);
+                for (int row = 0; row < bh; row++)
+                    for (int column = 0; column < bw; column++)
+                    {
+                        unsigned int pixel = launcher_band_pixels[(unsigned long)row * (unsigned long)bw + (unsigned long)column];
+                        int px = column + bx, py = row + by, cx = (px - left) / pitch, cy = (py - top) / pitch;
+                        int in_dot = px >= left && py >= top && cx < 3 && cy < 3 && (px - left) % pitch < dot && (py - top) % pitch < dot;
+
+                        if (!pixel)
+                            continue;
+                        stray += !in_dot;
+                        if (in_dot)
+                            count[cy * 3 + cx]++, sum[cy * 3 + cx] += pixel & 0xffffu;
+                        least_x = px < least_x ? px : least_x, most_x = px > most_x ? px : most_x;
+                        least_y = py < least_y ? py : least_y, most_y = py > most_y ? py : most_y;
+                    }
+                for (int cell = 0; cell < 9; cell++)
+                {
+                    int mx = left + cell % 3 * pitch + dot / 2, my = top + cell / 3 * pitch + dot / 2;
+
+                    whole &= count[cell] > 0 && count[cell] == count[0] && sum[cell] == sum[0];
+                    if (dot >= 3)
+                        whole &= launcher_band_pixels[(unsigned long)(my - by) * (unsigned long)bw + (unsigned long)(mx - bx)] == ink;
+                }
+                glyphs &= !stray && whole && span <= side && most_x >= 0 && (least_x - x) - (x + w - 1 - most_x) >= -1 &&
+                          (least_x - x) - (x + w - 1 - most_x) <= 1 && (least_y - y) - (y + h - 1 - most_y) >= -1 &&
+                          (least_y - y) - (y + h - 1 - most_y) <= 1;
+                // The grid is the same whole pixels at every scale: a dot is 1 to 7 pixels and the grid over half the button across.
+                scale_ok &= dot >= 1 && 2 * span >= side;
             }
         }
     check("launcher button: with it off the tabs and the tray are where the band's own formula puts them, at every position and scale, and no slot is the button's", off_same);
@@ -126731,7 +126764,7 @@ static void check_taskbar_launcher(void)
     check("launcher button: a point on it is the launcher button, a point on a tab or the tray is theirs, and the gap between is none", hits);
     check("launcher button: its anchor is its length along the edge and the band's whole thickness across it", anchored);
     check("launcher button: damage over it redoes its slot and not the tray's, on a bit of its own", damaged);
-    check("launcher button: its three bars are whole device pixels in one ink, centred on it, at every position and scale", glyphs && scale_ok);
+    check("launcher button: its mark is a grid of three by three round dots, whole device pixels, nine of the same pixels, centred on it, at every position and scale", glyphs && scale_ok);
     check("launcher button: lit while the launcher is up it is drawn as the tab with the keys is, and nothing outside it is drawn", lit_differs && outside);
     check("launcher button: in the shapes the panel draws with no font it is the lit tab's ink when lit and the shadow's when not",
           taskbar_tab_ink(TASKBAR_LAUNCHER, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) &&
@@ -228243,7 +228276,7 @@ static void dl_probes(void)
         ui_spinner_draw(&probe, &control);
         check("draw list: the spinner records its ring and arc, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
 
-        // The launcher's bars at four scales: the processor's paint and the replay of the recorded fills agree, and nothing was painted.
+        // The launcher's grid of dots at four scales: the processor's paint and the replay of the recorded fills agree, and nothing was painted.
         for (int k = 0; k < 4; k++)
         {
                 unsigned int s = scales[k];
@@ -228262,7 +228295,7 @@ static void dl_probes(void)
                 failed += dl_probe_writes() != 0 || dl_probe_scene.count == 0;
                 failed += memory_compare(dl_replay, cpu, sizeof(cpu)) != 0;
         }
-        check("draw list: the launcher's bars at 100, 150, 200 and 300 percent replay bit for bit and paint nothing", failed == 0);
+        check("draw list: the launcher's grid of dots at 100, 150, 200 and 300 percent replays bit for bit and paints nothing", failed == 0);
 
         // The speaker and the microphone cells: their rings and boxes are recorded (kit boxes, proven on the GPU by CHECK_gpu_kit).
         memory_zero(&view, sizeof(view));
