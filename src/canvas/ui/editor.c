@@ -191,6 +191,9 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 tab->owner = tab->group = (p32)-1;
                 if (handle == -2)
                         tab->folder = editor_folder(tab->path, null);
+                // Any other error (a directory not searchable, a path refused) opens nothing, and the status says so.
+                else
+                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_read_failed), sizeof(editor.status));
                 return handle == -2;
         }
         if (fstat((b32)handle, address_of facts) < 0 || (facts.st_mode & 0170000) != 0100000)
@@ -218,6 +221,7 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 if (tab->folder >= 0)
                         system_close(tab->folder);
                 tab->folder = -1;
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_read_failed), sizeof(editor.status));
                 return false;
         }
         /*
