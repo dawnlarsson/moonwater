@@ -17030,8 +17030,12 @@ static fn usb_recover(void)
         has from the GPT entry, PARTNAME in the partition's uevent, or free: the room no partition has, or
         unpartitioned for a disk with no partition table), and its name when the kernel has one. Free room
         is what the strip shows between the partitions and after the last. Start and size are sectors of
-        512 bytes in sysfs; the segments are printed in order, one line each, as "    part START BYTES ROLE NAME".
+        512 bytes in sysfs; the segments are printed in order, one line each, as "    part START BYTES ROLE NAME". A disk with more
+        partitions than the strip holds shows the first ones by start and ends its segments with "    more N", N being the
+        partitions not shown; the room after the last shown is then free only up to the first one not shown.
 */
+// Sixteen partitions and the free room before, between and after them are 33 segments: settings.c's SETTINGS_SEGMENTS. A drive with
+// more partitions keeps the sixteen that start first, and says how many it does not show (a "more" line after its parts).
 #define USB_SEGMENTS_MOST 16
 #define USB_ROLE_EFI 0
 #define USB_ROLE_LINUX 1
@@ -17053,6 +17057,9 @@ typedef struct
         string_address disk;
         usb_segment part[USB_SEGMENTS_MOST];
         positive count;
+        positive more;                 // partitions not shown
+        unsigned long long more_start; // the first start of those not shown: the room before it, after the kept ones, is free
+        b32 unknown;                   // a partition whose place could not be read: no room is free
 } usb_parts;
 
 static unsigned long long usb_decimal(p8 address_to text)
@@ -17069,10 +17076,46 @@ static fn usb_list_segment(unsigned long long start, unsigned long long bytes, u
         host_say(log, "    part %p %p %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-");
 }
 
+// A character as the line carries it: a blank or a control character (a newline would end the line) is an underscore.
+static unsigned char usb_plain(unsigned char c)
+{
+        return c <= ' ' || c == 0x7f ? '_' : c;
+}
+
+// A partition the strip does not show: its start is noted for the room after the kept ones, and it counts toward the note.
+static fn usb_part_skipped(usb_parts address_to parts, unsigned long long start)
+{
+        if (!parts->more || start < parts->more_start)
+                parts->more_start = start;
+        parts->more++;
+}
+
+// A partition for the strip: the USB_SEGMENTS_MOST that start first are kept, and of the rest the first start is noted.
+static fn usb_part_keep(usb_parts address_to parts, usb_segment address_to one)
+{
+        positive last = 0;
+
+        if (parts->count < USB_SEGMENTS_MOST)
+        {
+                parts->part[parts->count++] = *one;
+                return;
+        }
+        for (positive at = 1; at < parts->count; at++)
+                if (parts->part[at].start > parts->part[last].start)
+                        last = at;
+        if (one->start < parts->part[last].start)
+        {
+                usb_part_skipped(parts, parts->part[last].start);
+                parts->part[last] = *one;
+        }
+        else
+                usb_part_skipped(parts, one->start);
+}
+
 static bool usb_part_visit(string_address directory, string_address name, address_any context)
 {
         usb_parts address_to parts = (usb_parts address_to)context;
-        usb_segment address_to part;
+        usb_segment one;
         string_address rest;
         p8 path[HOST_PATH_ROOM], text[256];
         positive dlen = string_length(parts->disk);
@@ -17089,18 +17132,24 @@ static bool usb_part_visit(string_address directory, string_address name, addres
         for (string_address at = rest; *at; at++)
                 if (*at < '0' || *at > '9')
                         return true;
-        if (parts->count >= USB_SEGMENTS_MOST)
-                return true;
-        part = &parts->part[parts->count];
+        memory_zero(&one, sizeof(one));
+        // A partition whose start or size cannot be read is not shown, and where it is is not known: no room is free.
         if (!host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/start") ||
             host_read_kernel(path, text, sizeof(text)) <= 0)
+        {
+                parts->more++;
+                parts->unknown = 1;
                 return true;
-        part->start = usb_decimal(text) * 512ull;
+        }
+        one.start = usb_decimal(text) * 512ull;
         if (!host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/size") ||
             host_read_kernel(path, text, sizeof(text)) <= 0)
+        {
+                parts->more++;
+                parts->unknown = 1;
                 return true;
-        part->bytes = usb_decimal(text) * 512ull;
-        part->name[0] = 0;
+        }
+        one.bytes = usb_decimal(text) * 512ull;
         if (host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/uevent") &&
             host_read_kernel(path, text, sizeof(text)) > 0)
                 for (p8 address_to line = text; *line;)
@@ -17112,32 +17161,38 @@ static bool usb_part_visit(string_address directory, string_address name, addres
                                 stop++;
                         if (stop - line > 9 && !string_compare_max(line, "PARTNAME=", 9))
                         {
-                                for (p8 address_to at = line + 9; at < stop && room + 1 < sizeof(part->name); at++, room++)
-                                        part->name[room] = *at;
-                                part->name[room] = 0;
+                                for (p8 address_to at = line + 9; at < stop && room + 1 < sizeof(one.name); at++, room++)
+                                        one.name[room] = usb_plain((unsigned char)*at);
+                                one.name[room] = 0;
                         }
                         line = *stop ? stop + 1 : stop;
                 }
-        part->role = USB_ROLE_OTHER;
-        if (string_find((string_address)part->name, (string_address) "EFI"))
-                part->role = USB_ROLE_EFI;
-        else if (string_find((string_address)part->name, (string_address) "swap"))
-                part->role = USB_ROLE_SWAP;
-        else if (string_find((string_address)part->name, (string_address) "Linux"))
-                part->role = USB_ROLE_LINUX;
-        parts->count++;
+        one.role = USB_ROLE_OTHER;
+        if (string_find((string_address)one.name, (string_address) "EFI"))
+                one.role = USB_ROLE_EFI;
+        else if (string_find((string_address)one.name, (string_address) "swap"))
+                one.role = USB_ROLE_SWAP;
+        else if (string_find((string_address)one.name, (string_address) "Linux"))
+                one.role = USB_ROLE_LINUX;
+        usb_part_keep(parts, &one);
         return true;
 }
 
 // The segments of a disk of total bytes, in order, free room between and after its partitions included.
+static fn usb_list_more(positive count)
+{
+        host_say(log, "    more %p\n", count);
+}
+
 static fn usb_list_strip(string_address name, unsigned long long total, usb_parts address_to parts)
 {
-        unsigned long long cursor = 0;
+        unsigned long long cursor = 0, end = total;
 
         (void)name;
-        if (!parts->count)
+        if (!parts->count && !parts->more)
         {
-                usb_list_segment(0, total, USB_ROLE_UNPARTITIONED, null);
+                if (total)
+                        usb_list_segment(0, total, USB_ROLE_UNPARTITIONED, null);
                 return;
         }
         // Insertion by start: a disk's partitions are few, and sysfs lists them in no order.
@@ -17149,25 +17204,41 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
                         parts->part[back] = parts->part[back - 1];
                         parts->part[back - 1] = swap;
                 }
+        // Room is free between the partitions kept, and after the last one up to the first one not shown: none of those
+        // starts before the kept ones. Where a partition's place is not known, no room is free at all.
+        if (parts->more && parts->more_start < end)
+                end = parts->more_start;
         for (positive at = 0; at < parts->count; at++)
         {
                 usb_segment address_to part = &parts->part[at];
 
-                if (part->start > cursor)
+                if (!parts->unknown && part->start > cursor)
                         usb_list_segment(cursor, part->start - cursor, USB_ROLE_FREE, null);
                 usb_list_segment(part->start, part->bytes, part->role, part->name[0] ? (string_address)part->name : null);
                 if (part->start + part->bytes > cursor)
                         cursor = part->start + part->bytes;
         }
-        if (total > cursor)
-                usb_list_segment(cursor, total - cursor, USB_ROLE_FREE, null);
+        if (!parts->unknown && end > cursor)
+                usb_list_segment(cursor, end - cursor, USB_ROLE_FREE, null);
+        if (parts->more)
+                usb_list_more(parts->more);
+}
+
+// A name as one line carries it: the blanks and controls of the kernel's name are underscores.
+static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
+{
+        positive at = 0;
+
+        for (; from[at] && at + 1 < room; at++)
+                into[at] = (p8)usb_plain((unsigned char)from[at]);
+        into[at] = 0;
 }
 
 static bool usb_list_disk(string_address directory, string_address name, address_any context)
 {
         p8 sysfs[HOST_PATH_ROOM];
         p8 link[HOST_PATH_ROOM * 2];
-        p8 text[32];
+        p8 text[32], shown[64];
         unsigned long long sectors = 0;
         usb_parts parts;
 
@@ -17187,8 +17258,9 @@ static bool usb_list_disk(string_address directory, string_address name, address
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") &&
             host_read_kernel(sysfs, text, sizeof(text)) > 0)
                 sectors = usb_decimal(text);
-        // No verb holds a drive, so its row is shown and not pressed: it says what is true of it.
-        host_say(log, "  %s drive %p MB view only\n", name, (positive)(sectors * 512 / 1000000ull));
+        // No verb holds a drive, so its row is shown and not pressed: it says what is true of it. Its name is one word in the line.
+        usb_plain_copy(shown, sizeof(shown), name);
+        host_say(log, "  %s drive %p MB view only\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
         memory_zero(&parts, sizeof(parts));
         parts.disk = name;
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name))
