@@ -3272,7 +3272,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 // A program that asked for the pointer is owed the wheel as buttons 64 and 65, one a notch:
                 // a wheel that reports in fifteenths of a notch is the same notches as one that reports whole.
-                if (mouse_mode)
+                // Shift keeps the wheel for the scrollback of the primary screen, as it keeps a drag for the selection (the
+                // compositor adds the keys held to a wheel's flags); on the alternate screen the wheel stays the program's.
+                if (mouse_mode && !(!alternate && (event->flags & WINDOW_KEY_SHIFT)))
                 {
                         b32 sent = true;
 
