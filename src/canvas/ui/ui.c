@@ -10932,9 +10932,20 @@ static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page ad
         A slider row's drag (UI_ROW_SLIDER). A press on the row's slider is the slider's and not the row's click: the kit's slider takes the
         pointer (ui_kit_pointer) and every motion until the release moves it, the value following the hand, or sliding to a click. The value is
         the app's once, when the hand lets go: l->slid is the row (plus one) and l->slid_value the value, which the app takes and clears, so a
-        drag does not start a change at every step; a release the compositor took back, or a finger that took the page's drag instead (the
-        slider lets go of the other axis), leaves none. A press elsewhere on the row is the row's. True when the event was the slider's.
+        drag does not start a change at every step. A release the compositor takes back changes nothing, and neither does a slider the kit lets
+        go of (a finger that went along the other axis, or a control disabled mid-drag): it shows the app's value again (ui_list_slide_undo), and
+        the motion is the page's. A finger's press on a slider is the page's press too, with no target to click (ui_press_down), so the page
+        scrolls on a vertical drag from there. True when the event was the slider's.
 */
+static void ui_list_slide_undo(const struct ui address_to ui, struct ui_list address_to l, int id, struct ui_control address_to c)
+{
+        struct ui_row row;
+
+        ui_list_describe(l, id, &row);
+        c->value = ui_q(row.at), c->sliding = 0;
+        ui_list_damage(ui, l, id);
+}
+
 static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                           const struct window_event address_to event)
 {
@@ -10947,6 +10958,9 @@ static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_
                 c = ui_list_control(l, id, 1);
                 if (!c || c->kind != UI_SLIDER || ui_kit_held != c)
                 {
+                        // The row is gone or is no longer a slider, or its hold was let go: a hold left set would take every pointer event.
+                        if (ui_kit_held)
+                                ui_kit_let_go_held(ui_kit_held);
                         l->slide = 0;
                         return false;
                 }
@@ -10954,18 +10968,28 @@ static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_
                 {
                         if (ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags))
                                 l->slid_value = (int)((c->value + UI_HALF) >> UI_Q);
-                        if (ui_kit_held != c)
-                                l->slide = 0;
                         ui_list_damage(ui, l, id);
-                        return true;
+                        if (ui_kit_held == c)
+                                return true;
+                        // The kit let go of it: nothing changes, and this motion (and the rest of the drag) is the page's.
+                        l->slide = 0;
+                        ui_list_slide_undo(ui, l, id, c);
+                        return false;
                 }
                 if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_DOWN))
                 {
+                        b32 cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
+
                         ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false, event->flags);
-                        if (!(event->flags & WINDOW_KEY_CANCEL))
+                        if (cancelled)
+                                ui_list_slide_undo(ui, l, id, c);
+                        else
                                 l->slid = id + 1;
                         l->slide = 0;
+                        if (event->flags & WINDOW_KEY_TOUCH)
+                                (void)ui_press_lift(&p->press, cancelled); // the finger's press the slider began: its target is none, so no click
                         ui_list_damage(ui, l, id);
+                        ui_page_changed(p);
                         return true;
                 }
                 return false;
@@ -10991,6 +11015,8 @@ static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_
                 return false;
         l->slide = id + 1, l->slid = 0;
         l->slid_value = (int)((ui_slider_at((struct ui address_to)ui, c, x, y) + UI_HALF) >> UI_Q);
+        if (event->flags & WINDOW_KEY_TOUCH)
+                ui_press_down(&p->press, x, y, -1, ui_page_region(ui, p, x, y)); // a finger's press is the page's too: a drag it turns into scrolls
         ui_list_damage(ui, l, l->focus);
         l->focus = id, l->hover = id;
         ui_list_damage(ui, l, id);
