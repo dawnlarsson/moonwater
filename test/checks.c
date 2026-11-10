@@ -95502,7 +95502,7 @@ static fn wifi_keeper_checks(void)
 
                 system_write_all(ready[1], address_of one, 1);
                 for (;;)
-                        system_call(syscall(pause));
+                        system_call_4(syscall(ppoll), 0, 0, 0, 0);
         }
         got = system_read_once(ready[0], text, 1);
         check("a process takes the keeper's lock", got == 1 && text[0] == 'k');
