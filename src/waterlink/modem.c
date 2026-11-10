@@ -609,21 +609,21 @@ static int modem_refuse(modem_rx *rx)
 int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used)
 {
 	unsigned refused = 0;
-	size_t end = 0;
+	size_t frame_end = 0;
 	int r;
 
 	if (used)
 		*used = 0;
 	if (!rx || rx->closed)
 		return -1;
-	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last, &end);
+	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last, &frame_end);
 	if (r < 0)
 		return refused ? modem_refuse(rx) : -1;
 	if (!modem_fresh(rx->last, *seq))
 		return modem_refuse(rx);
 	rx->last = *seq;
 	if (used)
-		*used = end;
+		*used = frame_end;
 	return r;
 }
 
