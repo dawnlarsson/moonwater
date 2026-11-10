@@ -314,7 +314,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Taskbar display	042b	Bildschirm der Taskleiste
 =Taskbar hides for fullscreen	f2f8	Taskleiste blendet sich bei Vollbild aus
 =Taskbar launcher button	dd4d	Starter-Schaltfläche in der Taskleiste
-=Taskbar padding (pixels, or default)	8880	Abstand der Taskleiste (Pixel oder default)
+=Taskbar padding (pixels)	a3a0	Abstand der Taskleiste (Pixel)
 =Taskbar position	81b8	Position der Taskleiste
 =Taskbar scale (percent)	810b	Skalierung der Taskleiste (Prozent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskleisten-Infobereich (Text mit {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

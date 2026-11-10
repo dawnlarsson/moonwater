@@ -314,7 +314,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar display	042b	Écran de la barre des tâches
 =Taskbar hides for fullscreen	f2f8	La barre des tâches se cache en plein écran
 =Taskbar launcher button	dd4d	Bouton du lanceur dans la barre des tâches
-=Taskbar padding (pixels, or default)	8880	Espacement de la barre des tâches (pixels ou default)
+=Taskbar padding (pixels)	a3a0	Espacement de la barre des tâches (pixels)
 =Taskbar position	81b8	Position de la barre des tâches
 =Taskbar scale (percent)	810b	Échelle de la barre des tâches (pourcentage)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Zone d'état de la barre des tâches (texte avec {names} : {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

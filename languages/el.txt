@@ -314,7 +314,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar display	042b	Οθόνη της γραμμής εργασιών
 =Taskbar hides for fullscreen	f2f8	Η γραμμή εργασιών κρύβεται σε πλήρη οθόνη
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
-=Taskbar padding (pixels, or default)	8880	Διαστήματα της γραμμής εργασιών (εικονοστοιχεία ή default)
+=Taskbar padding (pixels)	a3a0	Διαστήματα της γραμμής εργασιών (εικονοστοιχεία)
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar scale (percent)	810b	Κλίμακα της γραμμής εργασιών (ποσοστό)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

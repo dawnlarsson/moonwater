@@ -314,7 +314,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar display	042b	Pantalla de la barra de tareas
 =Taskbar hides for fullscreen	f2f8	La barra de tareas se oculta en pantalla completa
 =Taskbar launcher button	dd4d	Botón del lanzador en la barra de tareas
-=Taskbar padding (pixels, or default)	8880	Espaciado de la barra de tareas (píxeles o default)
+=Taskbar padding (pixels)	a3a0	Espaciado de la barra de tareas (píxeles)
 =Taskbar position	81b8	Posición de la barra de tareas
 =Taskbar scale (percent)	810b	Escala de la barra de tareas (porcentaje)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja de la barra de tareas (texto con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

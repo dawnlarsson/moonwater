@@ -314,7 +314,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar display	042b	Taskbar display
 =Taskbar hides for fullscreen	f2f8	Taskbar hides for fullscreen
 =Taskbar launcher button	dd4d	Taskbar launcher button
-=Taskbar padding (pixels, or default)	8880	Taskbar padding (pixels, or default)
+=Taskbar padding (pixels)	a3a0	Taskbar padding (pixels)
 =Taskbar position	81b8	Taskbar position
 =Taskbar scale (percent)	810b	Taskbar scale (percent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

@@ -126538,7 +126538,7 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
                             int *start, int *wide, int *tray_at, int *tray_length)
 {
     int thick = COMPOSITOR_PANEL * scale / 100, gap = UI_GAP1 * scale / 100, high = thick - 3 * scale / 100;
-    int tray = (5 * high * 308 + high * 604) / 1000, room, most, windows = 0;
+    int pad = TASKBAR_PADDING_STANDARD * scale / 100, tray = 5 * high * 308 / 1000 + 2 * pad, room, most, windows = 0;
 
     tray = tray < high ? high : tray;
     room = length - lead - tray - (count + 2) * gap;
@@ -126546,7 +126546,7 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
     most = most > 8 * thick ? 8 * thick : most;
     for (int at = 0; at < count; at++)
     {
-        int width = (lengths[at] * high * 308 + high * 604) / 1000;
+        int width = lengths[at] * high * 308 / 1000 + 2 * pad;
 
         width = width < high ? high : width;
         wide[at] = width < most ? width : most;
@@ -126862,9 +126862,9 @@ static void check_taskbar_centre(void)
 /*
         `taskbar scale` and `taskbar padding`. The band is as thick as the screen's scale and the taskbar's own make it (24 logical pixels at
         the two together), on every edge, and the memory the compositor keeps for it (taskbar_bytes) holds it; the gap between the items and at
-        the band's ends is the padding at that scale (0 puts the tabs edge to edge), and what is outside the choices and the range is the
-        standard. The rows' words are what the compositor reads: the place of a scale among the row's choices, and a padding in its range.
-        A whole band drawn at the largest scale stays inside its memory.
+        the band's ends is fixed (4 logical pixels at that scale) and the padding is the room round the text inside each tab, either side of it
+        (0 puts the tab's edges at its text), and what is outside the ranges is the standard. The rows' words are what the compositor reads: a
+        whole number in each row's range. A whole band drawn at the largest scale stays inside its memory.
 */
 static void check_taskbar_scale(void)
 {
@@ -126872,7 +126872,7 @@ static void check_taskbar_scale(void)
     static const int screens[3] = {100, 150, 200}, scales[6] = {50, 75, 100, 125, 150, 200}, paddings[5] = {0, 1, 4, 10, 24};
     static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
     static const char *const words[4] = {"bottom", "top", "left", "right"};
-    b32 thick_ok = true, bytes_ok = true, gap_ok = true, ends_ok = true, standard_ok = true, drawn = true, rows_ok = true;
+    b32 thick_ok = true, bytes_ok = true, gap_ok = true, ends_ok = true, pad_ok = true, standard_ok = true, drawn = true, rows_ok = true;
     long number = -1;
 
     memory_zero(&compositor, sizeof(compositor));
@@ -126900,13 +126900,18 @@ static void check_taskbar_scale(void)
                 bytes_ok &= band >= (unsigned long)bw * (unsigned long)bh * 4 && glass >= (unsigned long)bw * (unsigned long)bh * 4;
             }
 
-    // The padding is the gap: between the tabs, from the band's start to the button and from the tray to the band's end.
+    // The gap is fixed, between the tabs, from the band's start to the button and from the tray to the band's end; the padding is the room round
+    // the text inside a tab: the first tab (a title of five characters) is the text's width and the padding either side, never under its height.
     for (int screen = 0; screen < 3; screen++)
         for (int each = 0; each < 6; each++)
             for (int pad = 0; pad < 5; pad++)
             {
                 struct taskbar_view view;
-                int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1, kx, ky, kw, kh, tx, ty, tw, th, gap = paddings[pad] * (screens[screen] * scales[each] / 100) / 100;
+                int bx, by, bw, bh, x0, y0, w0, h0, x1, y1, w1, h1, kx, ky, kw, kh, tx, ty, tw, th;
+                int eff = screens[screen] * scales[each] / 100, high = COMPOSITOR_PANEL * eff / 100 - 3 * eff / 100, gap = TASKBAR_GAP * eff / 100;
+                int wide = 5 * high * 308 / 1000 + 2 * (paddings[pad] * eff / 100);
+
+                wide = wide < high ? high : wide;
 
                 memory_zero(&view, sizeof(view));
                 view.width = BAND_W, view.height = BAND_H, view.scale = screens[screen], view.position = TASKBAR_BOTTOM;
@@ -126918,11 +126923,12 @@ static void check_taskbar_scale(void)
                 if (!taskbar_slot(&view, 0, &x0, &y0, &w0, &h0) || !taskbar_slot(&view, 1, &x1, &y1, &w1, &h1) ||
                     !taskbar_slot(&view, TASKBAR_LAUNCHER, &kx, &ky, &kw, &kh) || !taskbar_slot(&view, -2, &tx, &ty, &tw, &th))
                 {
-                    gap_ok = ends_ok = false;
+                    gap_ok = ends_ok = pad_ok = false;
                     continue;
                 }
                 gap_ok &= x1 - (x0 + w0) == gap;
                 ends_ok &= kx == bx + gap && tx + tw == bx + bw - gap;
+                pad_ok &= w0 == wide;
             }
 
     // What is outside the choices and the range is the standard.
@@ -126947,7 +126953,7 @@ static void check_taskbar_scale(void)
             taskbar_padding_set(bad_paddings[at]);
             taskbar_slot(&view, 0, &x0, &y0, &w0, &h0);
             taskbar_slot(&view, 1, &x1, &y1, &w1, &h1);
-            standard_ok &= x1 - (x0 + w0) == TASKBAR_PADDING_STANDARD;
+            standard_ok &= w0 == 5 * 21 * 308 / 1000 + 2 * TASKBAR_PADDING_STANDARD && x1 - (x0 + w0) == TASKBAR_GAP;
         }
     }
 
@@ -126998,8 +127004,9 @@ static void check_taskbar_scale(void)
     taskbar_settings_set("bottom", "primary", "battery none\n");
     check("taskbar scale: the band is as thick as the screen's scale and the taskbar's make it, on every edge, at 50 to 200 percent of each", thick_ok);
     check("taskbar scale: the memory kept for the band and its glass holds it at every scale", bytes_ok);
-    check("taskbar padding: the gap between the tabs is the padding at the scale, from 0 (edge to edge) to 24", gap_ok);
-    check("taskbar padding: the launcher button is a padding in from the band's start and the tray a padding from its end", ends_ok);
+    check("taskbar padding: the gap between the tabs is fixed whatever the padding, at the scale", gap_ok);
+    check("taskbar padding: the launcher button is a gap in from the band's start and the tray a gap from its end, whatever the padding", ends_ok);
+    check("taskbar padding: a tab is its text's width and the padding either side, from 0 to 24 pixels, at every scale", pad_ok);
     check("taskbar scale: a scale and a padding outside their ranges are the standard", standard_ok);
     check("taskbar scale: the rows' words are the numbers the compositor reads, any in range", rows_ok);
     check("taskbar scale: a whole band at 200 percent, the widest padding and every cell is drawn inside its memory", drawn);

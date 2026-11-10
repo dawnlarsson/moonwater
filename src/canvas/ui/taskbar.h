@@ -58,13 +58,14 @@
 // A window's tab: lit while it has the keys, dim while it is put away.
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
-// The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale): the
-// range of each, and what each is when nothing is kept. The padding's standard is the kit's gap between
-// pieces that go together (UI_GAP1, which taskbar.c holds it to).
+// The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale: the room
+// round the text inside each tab, either side of it): the range of each, and what each is when nothing is kept. The gap between the band's
+// items and at its ends is not set: it is the kit's gap between pieces that go together (UI_GAP1, which taskbar.c holds it to), at the scale.
 #define TASKBAR_SCALE_LEAST 50
 #define TASKBAR_SCALE_STANDARD 100
 #define TASKBAR_SCALE_MOST 200
-#define TASKBAR_PADDING_STANDARD 4
+#define TASKBAR_PADDING_STANDARD 6
+#define TASKBAR_GAP 4
 #define TASKBAR_PADDING_MOST 24
 // The blur under the tabs: the glass is halved this many times, a block of the output a side, and the small blur's reach
 // in blocks. Its reach is what a change of the band reaches through the blur and the rise, in device pixels.

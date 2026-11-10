@@ -58,10 +58,10 @@ static struct taskbar_state
         int notices_item;                       // the board holds a notice or an issue: the tray starts with a notices dot (at the leading end)
         unsigned int notices_severity;          // the worst of them: WINDOWS_ISSUE_ERROR (red) or WINDOWS_ISSUE_WARNING (amber)
         int scale;                              // `taskbar scale`: percent of its screen's scale the band is laid out and drawn at
-        int padding;                            // `taskbar padding`: logical pixels, at that scale, between its items and at its ends
+        int padding;                            // `taskbar padding`: logical pixels, at that scale, round the text inside each tab, either side
 } taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0, .scale = TASKBAR_SCALE_STANDARD, .padding = TASKBAR_PADDING_STANDARD};
 
-_Static_assert(TASKBAR_PADDING_STANDARD == UI_GAP1, "the standard padding is the kit's gap between pieces that go together");
+_Static_assert(TASKBAR_GAP == UI_GAP1, "the gap between the band's items is the kit's gap between pieces that go together");
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
 #define TASKBAR_TAB_CHUNK 256
@@ -83,7 +83,7 @@ struct taskbar_layout
         int bx, by, bw, bh;          // the band on the output
         int origin, length, thick;   // along the edge: where it starts, how long it is; across it: how thick
         int high;                    // a tab's thickness: the band's less the inset, and the text's height
-        int gap, inset;
+        int gap, inset, pad;         // the gap between items and at the ends, the band's inset, the room round a tab's text either side
         int count, most;             // the tabs, and the widest a tab may be
         const unsigned char *lengths; // each tab's title in characters, which its tab fits
         int start, windows;          // where the first tab is along the edge, and what the tabs take with their gaps
@@ -220,29 +220,29 @@ static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int 
 
 /*
         A run of characters' width at the text's height: a character a little
-        over half of it, and room either side as there is above and below a
-        capital, so the title sits in the tab with the same margin all round.
-        Never narrower than the text is high.
+        over half of it, and the padding (`taskbar padding`, at the band's
+        scale) either side of the run, which is the room round the text inside
+        the tab. Never narrower than the text is high.
 */
-static int taskbar_text(int high, int characters)
+static int taskbar_text(int high, int pad, int characters)
 {
-        int wanted = (characters * high * 308 + high * 604) / 1000;
+        int wanted = characters * high * 308 / 1000 + 2 * pad;
 
         return wanted < high ? high : wanted;
 }
 
 // The tray's length along the edge: the clock, and the battery before it, on a band of any side.
-static int taskbar_tray(int high)
+static int taskbar_tray(int high, int pad)
 {
         if (taskbar.tray_custom)
-                return taskbar_text(high, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
-        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) +
-                                        (taskbar.notices_item ? 1 : 0));
+                return taskbar_text(high, pad, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
+        return taskbar_text(high, pad, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) +
+                                             (taskbar.notices_item ? 1 : 0));
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
 {
-        int wanted = lay->lengths ? taskbar_text(lay->high, lay->lengths[which]) : lay->most;
+        int wanted = lay->lengths ? taskbar_text(lay->high, lay->pad, lay->lengths[which]) : lay->most;
 
         return wanted < lay->most ? wanted : lay->most;
 }
@@ -256,12 +256,13 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->thick = lay->vertical ? lay->bw : lay->bh;
         lay->length = lay->vertical ? lay->bh : lay->bw;
         lay->origin = lay->vertical ? lay->by : lay->bx;
-        lay->gap = taskbar.padding * taskbar_scaled(view->scale) / 100; // `taskbar padding`, the kit's gap between pieces that go together at its standard
+        lay->gap = TASKBAR_GAP * taskbar_scaled(view->scale) / 100; // fixed: the kit's gap between pieces that go together
+        lay->pad = taskbar.padding * taskbar_scaled(view->scale) / 100; // `taskbar padding`: the room round the text inside a tab
         lay->inset = 3 * taskbar_scaled(view->scale) / 100;
         lay->high = lay->thick - lay->inset;
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
-        lay->tray = taskbar_tray(lay->high);
+        lay->tray = taskbar_tray(lay->high, lay->pad);
         // A format of the person's may be long, but the tabs keep half of the band.
         if (taskbar.tray_custom && lay->tray > lay->length / 2)
                 lay->tray = lay->length / 2;
@@ -307,7 +308,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
-        int text = taskbar_text(lay->high, 5), at, notice = taskbar.notices_item ? text : 0;
+        int text = taskbar_text(lay->high, lay->pad, 5), at, notice = taskbar.notices_item ? text : 0;
 
         if (which >= 0)
         {
@@ -1323,8 +1324,8 @@ static void taskbar_scale_set(int percent)
         taskbar.stale = 1;
 }
 
-// `taskbar padding`: the space between the band's items and at its ends, in logical pixels at the taskbar's scale (0 to
-// TASKBAR_PADDING_MOST; anything else is the standard).
+// `taskbar padding`: the room round the text inside each tab, either side of it, in logical pixels at the taskbar's scale (0 to
+// TASKBAR_PADDING_MOST; anything else is the standard). The gap between the tabs and at the band's ends is fixed (TASKBAR_GAP).
 static void taskbar_padding_set(int pixels)
 {
         taskbar.padding = pixels >= 0 && pixels <= TASKBAR_PADDING_MOST ? pixels : TASKBAR_PADDING_STANDARD;

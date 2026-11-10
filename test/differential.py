@@ -49786,7 +49786,7 @@ while True:
             ("taskbar scale", "taskbar.scale", "75", "75", ["49", "201", "300", "1.5", "0", '""', "100,125", "-50"],
              "scale 75 percent", "scale 100 percent"),
             ("taskbar padding", "taskbar.padding", "12", "12", ["-1", "25", "x", "1.5", '""', "1000000000"],
-             "padding 12 px", "padding 4 px"),
+             "padding 12 px", "padding 6 px"),
             ("canvas touch", "canvas.touch", "off", "off", ["maybe", "OFF", "0", '""', "off,on"],
              "touch off", "touch on"),
         ]

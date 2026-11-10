@@ -314,7 +314,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar display	042b	Scherm van de taakbalk
 =Taskbar hides for fullscreen	f2f8	Taakbalk verbergt zich bij volledig scherm
 =Taskbar launcher button	dd4d	Starterknop op de taakbalk
-=Taskbar padding (pixels, or default)	8880	Tussenruimte van de taakbalk (pixels of default)
+=Taskbar padding (pixels)	a3a0	Tussenruimte van de taakbalk (pixels)
 =Taskbar position	81b8	Positie van de taakbalk
 =Taskbar scale (percent)	810b	Schaal van de taakbalk (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

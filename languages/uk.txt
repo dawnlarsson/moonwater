@@ -314,7 +314,7 @@ ui_field_full	fe02	більше не вміщається
 =Taskbar display	042b	Екран панелі завдань
 =Taskbar hides for fullscreen	f2f8	Панель завдань приховується в повноекранному режимі
 =Taskbar launcher button	dd4d	Кнопка запуску на панелі завдань
-=Taskbar padding (pixels, or default)	8880	Відступи панелі завдань (пікселі або default)
+=Taskbar padding (pixels)	a3a0	Відступи панелі завдань (пікселі)
 =Taskbar position	81b8	Розташування панелі завдань
 =Taskbar scale (percent)	810b	Масштаб панелі завдань (відсотки)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
