@@ -82,6 +82,11 @@ settings_asks_first	e9bd	frågar först
 settings_badge_error	9cf1	Fel
 settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
+settings_drive_state	0bb3	disk, 
+settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d till visas inte
 settings_role_efi	d41a	EFI-system
 settings_role_linux	2c8f	Linux-data
 settings_role_swap	874e	swap
@@ -351,6 +356,7 @@ ui_field_full	fe02	mer ryms inte
 =blue	f5cd	blå
 =bottom	6b2a	nederst
 =center	4484	mitten
+=copies	3e10	kopior
 =dark	6945	mörkt
 =dark-grey	bcb3	mörkgrå
 =default	5bde	standard
@@ -374,10 +380,13 @@ ui_field_full	fe02	mer ryms inte
 =midnight-blue	4008	midnattsblå
 =modem	67ed	modem
 =network	86c5	nätverk
+=none	afdb	Ingen
 =normal	9c52	normal
 =off	8a0a	av
 =on	2fd0	på
 =only	89f7	endast
+=per second	4f98	per sekund
+=percent	fa5a	procent
 =performance	8ca5	prestanda
 =plum	b06b	plommon
 =powersave	2283	strömsparläge

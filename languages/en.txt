@@ -82,6 +82,9 @@ settings_asks_first	e9bd	asks first
 settings_badge_error	9cf1	Error
 settings_badge_warning	fc8f	Warning
 settings_battery_charging	5116	, Charging
+settings_drive_state	0bb3	drive, 
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
 settings_role_efi	d41a	EFI system
 settings_role_linux	2c8f	Linux data
 settings_role_swap	874e	swap
@@ -353,6 +356,7 @@ ui_field_full	fe02	that is as much as it holds
 =blue	f5cd	blue
 =bottom	6b2a	bottom
 =center	4484	center
+=copies	3e10	copies
 =dark	6945	dark
 =dark-grey	bcb3	dark-grey
 =default	5bde	default
@@ -376,10 +380,13 @@ ui_field_full	fe02	that is as much as it holds
 =midnight-blue	4008	midnight-blue
 =modem	67ed	modem
 =network	86c5	network
+=none	afdb	none
 =normal	9c52	normal
 =off	8a0a	off
 =on	2fd0	on
 =only	89f7	only
+=per second	4f98	per second
+=percent	fa5a	percent
 =performance	8ca5	performance
 =plum	b06b	plum
 =powersave	2283	powersave

@@ -83,6 +83,11 @@ settings_asks_first	e9bd	ישאל קודם
 settings_badge_error	9cf1	שגיאה
 settings_badge_warning	fc8f	אזהרה
 settings_battery_charging	5116	, בטעינה
+settings_drive_state	0bb3	כונן, 
+settings_item_drive	269a	מוצג, לא מוחזק: אף פקודה לא משנה כונן
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	עוד %d שלא מוצגים
 settings_role_efi	d41a	מערכת EFI
 settings_role_linux	2c8f	נתוני Linux
 settings_role_swap	874e	החלפה
@@ -352,6 +357,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =blue	f5cd	כחול
 =bottom	6b2a	למטה
 =center	4484	מרכז
+=copies	3e10	עותקים
 =dark	6945	כהה
 =dark-grey	bcb3	אפור כהה
 =default	5bde	ברירת מחדל
@@ -375,10 +381,13 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =midnight-blue	4008	כחול חצות
 =modem	67ed	מודם
 =network	86c5	רשת
+=none	afdb	אין
 =normal	9c52	רגיל
 =off	8a0a	כבוי
 =on	2fd0	מופעל
 =only	89f7	בלבד
+=per second	4f98	בשנייה
+=percent	fa5a	אחוזים
 =performance	8ca5	ביצועים
 =plum	b06b	שזיף
 =powersave	2283	חיסכון באנרגיה

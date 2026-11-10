@@ -83,6 +83,11 @@ settings_asks_first	e9bd	پہلے پوچھتا ہے
 settings_badge_error	9cf1	خرابی
 settings_badge_warning	fc8f	انتباہ
 settings_battery_charging	5116	، چارج ہو رہی ہے
+settings_drive_state	0bb3	ڈرائیو، 
+settings_item_drive	269a	دکھایا گیا، روکا نہیں گیا: کوئی حکم ڈرائیو نہیں بدلتا
+settings_legend_comma	00f1	، 
+settings_legend_semicolon	0b8e	؛ 
+settings_not_shown	8efd	%d مزید نہیں دکھائے گئے
 settings_role_efi	d41a	EFI سسٹم
 settings_role_linux	2c8f	Linux ڈیٹا
 settings_role_swap	874e	سویپ
@@ -352,6 +357,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =blue	f5cd	نیلا
 =bottom	6b2a	نیچے
 =center	4484	درمیان
+=copies	3e10	کاپیاں
 =dark	6945	تاریک
 =dark-grey	bcb3	گہرا خاکستری
 =default	5bde	ڈیفالٹ
@@ -375,10 +381,13 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =midnight-blue	4008	رات کا نیلا
 =modem	67ed	موڈیم
 =network	86c5	نیٹ ورک
+=none	afdb	کوئی نہیں
 =normal	9c52	عام
 =off	8a0a	آف
 =on	2fd0	آن
 =only	89f7	صرف
+=per second	4f98	فی سیکنڈ
+=percent	fa5a	فیصد
 =performance	8ca5	کارکردگی
 =plum	b06b	آلو بخارا
 =powersave	2283	بجلی کی بچت

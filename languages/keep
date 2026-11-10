@@ -19,7 +19,6 @@ src/canvas/ui/terminal.c	px
 src/canvas/ui/terminal.c	klog pid
 src/canvas/ui/terminal.c	terminal pid
 src/canvas/ui/settings.c	[Moonwater]
-src/canvas/ui/settings.c	Run any moonwater command
 src/canvas/ui/settings.c	Normal
 src/canvas/ui/settings.c	Turned right
 src/canvas/ui/settings.c	Upside down
@@ -45,3 +44,9 @@ src/canvas/ui/settings.c	dBm
 src/canvas/ui/settings.c	and
 src/canvas/ui/settings.c	wifi
 src/canvas/ui/settings.c	system notices
+src/canvas/ui/settings.c	Devices
+src/canvas/ui/settings.c	Devices in this machine
+src/canvas/ui/settings.c	Waterlink
+src/canvas/ui/settings.c	Linked machines
+src/canvas/ui/settings.c	GB
+src/canvas/ui/settings.c	MB

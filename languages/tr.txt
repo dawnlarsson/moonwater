@@ -82,6 +82,11 @@ settings_asks_first	e9bd	önce sorar
 settings_badge_error	9cf1	Hata
 settings_badge_warning	fc8f	Uyarı
 settings_battery_charging	5116	, şarj oluyor
+settings_drive_state	0bb3	sürücü, 
+settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d tane daha gösterilmiyor
 settings_role_efi	d41a	EFI sistemi
 settings_role_linux	2c8f	Linux verisi
 settings_role_swap	874e	takas
@@ -351,6 +356,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =blue	f5cd	mavi
 =bottom	6b2a	altta
 =center	4484	orta
+=copies	3e10	kopya
 =dark	6945	koyu
 =dark-grey	bcb3	koyu gri
 =default	5bde	varsayılan
@@ -374,10 +380,13 @@ ui_field_full	fe02	daha fazlası sığmaz
 =midnight-blue	4008	gece mavisi
 =modem	67ed	modem
 =network	86c5	ağ
+=none	afdb	Yok
 =normal	9c52	normal
 =off	8a0a	kapalı
 =on	2fd0	açık
 =only	89f7	yalnızca
+=per second	4f98	saniyede
+=percent	fa5a	yüzde
 =performance	8ca5	performans
 =plum	b06b	erik
 =powersave	2283	güç tasarrufu

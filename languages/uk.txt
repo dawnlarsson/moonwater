@@ -82,6 +82,11 @@ settings_asks_first	e9bd	спершу запитає
 settings_badge_error	9cf1	Помилка
 settings_badge_warning	fc8f	Попередження
 settings_battery_charging	5116	, заряджається
+settings_drive_state	0bb3	диск, 
+settings_item_drive	269a	показано, не утримується: жодна команда не змінює диск
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	ще %d не показано
 settings_role_efi	d41a	Системний EFI
 settings_role_linux	2c8f	Дані Linux
 settings_role_swap	874e	підкачка
@@ -351,6 +356,7 @@ ui_field_full	fe02	більше не вміщається
 =blue	f5cd	синій
 =bottom	6b2a	внизу
 =center	4484	центр
+=copies	3e10	копій
 =dark	6945	темна
 =dark-grey	bcb3	темно-сірий
 =default	5bde	типовий
@@ -374,10 +380,13 @@ ui_field_full	fe02	більше не вміщається
 =midnight-blue	4008	опівнічно-синій
 =modem	67ed	модем
 =network	86c5	мережа
+=none	afdb	Немає
 =normal	9c52	нормально
 =off	8a0a	вимкнено
 =on	2fd0	увімкнено
 =only	89f7	лише
+=per second	4f98	за секунду
+=percent	fa5a	відсотки
 =performance	8ca5	продуктивність
 =plum	b06b	сливовий
 =powersave	2283	енергозбереження

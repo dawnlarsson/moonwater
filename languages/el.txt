@@ -82,6 +82,11 @@ settings_asks_first	e9bd	ρωτά πρώτα
 settings_badge_error	9cf1	Σφάλμα
 settings_badge_warning	fc8f	Προειδοποίηση
 settings_battery_charging	5116	, φορτίζει
+settings_drive_state	0bb3	δίσκος, 
+settings_item_drive	269a	εμφανίζεται, δεν κρατείται: καμία εντολή δεν αλλάζει δίσκο
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d ακόμα δεν εμφανίζονται
 settings_role_efi	d41a	Σύστημα EFI
 settings_role_linux	2c8f	Δεδομένα Linux
 settings_role_swap	874e	Ανταλλαγή
@@ -351,6 +356,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =blue	f5cd	μπλε
 =bottom	6b2a	κάτω
 =center	4484	κέντρο
+=copies	3e10	αντίγραφα
 =dark	6945	σκούρο
 =dark-grey	bcb3	σκούρο γκρι
 =default	5bde	προεπιλογή
@@ -374,10 +380,13 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =midnight-blue	4008	μεσονύχτιο μπλε
 =modem	67ed	μόντεμ
 =network	86c5	δίκτυο
+=none	afdb	Καμία
 =normal	9c52	κανονικά
 =off	8a0a	ανενεργό
 =on	2fd0	ενεργό
 =only	89f7	μόνο
+=per second	4f98	ανά δευτερόλεπτο
+=percent	fa5a	ποσοστό
 =performance	8ca5	απόδοση
 =plum	b06b	δαμάσκηνο
 =powersave	2283	εξοικονόμηση ενέργειας

@@ -83,6 +83,11 @@ settings_asks_first	e9bd	يسأل أولا
 settings_badge_error	9cf1	خطأ
 settings_badge_warning	fc8f	تحذير
 settings_battery_charging	5116	، قيد الشحن
+settings_drive_state	0bb3	محرك، 
+settings_item_drive	269a	معروض، غير محجوز: لا يغيّر أي أمر أي محرك
+settings_legend_comma	00f1	، 
+settings_legend_semicolon	0b8e	؛ 
+settings_not_shown	8efd	%d إضافية غير معروضة
 settings_role_efi	d41a	نظام EFI
 settings_role_linux	2c8f	بيانات Linux
 settings_role_swap	874e	التبديل
@@ -352,6 +357,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =blue	f5cd	أزرق
 =bottom	6b2a	أسفل
 =center	4484	الوسط
+=copies	3e10	نسخ
 =dark	6945	داكن
 =dark-grey	bcb3	رمادي داكن
 =default	5bde	افتراضي
@@ -375,10 +381,13 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =midnight-blue	4008	أزرق منتصف الليل
 =modem	67ed	مودم
 =network	86c5	الشبكة
+=none	afdb	لا شيء
 =normal	9c52	عادي
 =off	8a0a	إيقاف
 =on	2fd0	تشغيل
 =only	89f7	فقط
+=per second	4f98	في الثانية
+=percent	fa5a	نسبة مئوية
 =performance	8ca5	الأداء
 =plum	b06b	برقوقي
 =powersave	2283	توفير الطاقة

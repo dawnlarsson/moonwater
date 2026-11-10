@@ -82,6 +82,11 @@ settings_asks_first	e9bd	vraagt eerst
 settings_badge_error	9cf1	Fout
 settings_badge_warning	fc8f	Waarschuwing
 settings_battery_charging	5116	, laadt op
+settings_drive_state	0bb3	schijf, 
+settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d meer niet getoond
 settings_role_efi	d41a	EFI-systeem
 settings_role_linux	2c8f	Linux-gegevens
 settings_role_swap	874e	swap
@@ -351,6 +356,7 @@ ui_field_full	fe02	meer past er niet in
 =blue	f5cd	blauw
 =bottom	6b2a	onderaan
 =center	4484	midden
+=copies	3e10	kopieën
 =dark	6945	donker
 =dark-grey	bcb3	donkergrijs
 =default	5bde	standaard
@@ -374,10 +380,13 @@ ui_field_full	fe02	meer past er niet in
 =midnight-blue	4008	middernachtblauw
 =modem	67ed	modem
 =network	86c5	netwerk
+=none	afdb	Geen
 =normal	9c52	normaal
 =off	8a0a	uit
 =on	2fd0	aan
 =only	89f7	alleen
+=per second	4f98	per seconde
+=percent	fa5a	procent
 =performance	8ca5	prestaties
 =plum	b06b	pruim
 =powersave	2283	energiebesparing

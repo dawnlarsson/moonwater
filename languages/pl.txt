@@ -82,6 +82,11 @@ settings_asks_first	e9bd	pyta najpierw
 settings_badge_error	9cf1	Błąd
 settings_badge_warning	fc8f	Ostrzeżenie
 settings_battery_charging	5116	, ładowanie
+settings_drive_state	0bb3	dysk, 
+settings_item_drive	269a	pokazany, nie przytrzymany: żadne polecenie nie zmienia dysku
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d więcej nie pokazano
 settings_role_efi	d41a	System EFI
 settings_role_linux	2c8f	Dane Linux
 settings_role_swap	874e	wymiana
@@ -351,6 +356,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =blue	f5cd	niebieski
 =bottom	6b2a	na dole
 =center	4484	środek
+=copies	3e10	kopii
 =dark	6945	ciemny
 =dark-grey	bcb3	ciemnoszary
 =default	5bde	domyślny
@@ -374,10 +380,13 @@ ui_field_full	fe02	więcej się nie zmieści
 =midnight-blue	4008	granatowy
 =modem	67ed	modem
 =network	86c5	sieć
+=none	afdb	Brak
 =normal	9c52	normalnie
 =off	8a0a	wyłączone
 =on	2fd0	włączone
 =only	89f7	tylko
+=per second	4f98	na sekundę
+=percent	fa5a	procent
 =performance	8ca5	wydajność
 =plum	b06b	śliwkowy
 =powersave	2283	oszczędzanie energii

@@ -82,6 +82,11 @@ settings_asks_first	e9bd	сначала спросит
 settings_badge_error	9cf1	Ошибка
 settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
+settings_drive_state	0bb3	диск, 
+settings_item_drive	269a	показан, не удерживается: ни одна команда не меняет диск
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	ещё %d не показано
 settings_role_efi	d41a	Системный EFI
 settings_role_linux	2c8f	Данные Linux
 settings_role_swap	874e	подкачка
@@ -351,6 +356,7 @@ ui_field_full	fe02	больше не помещается
 =blue	f5cd	синий
 =bottom	6b2a	внизу
 =center	4484	центр
+=copies	3e10	копий
 =dark	6945	тёмная
 =dark-grey	bcb3	тёмно-серый
 =default	5bde	по умолчанию
@@ -374,10 +380,13 @@ ui_field_full	fe02	больше не помещается
 =midnight-blue	4008	полуночно-синий
 =modem	67ed	модем
 =network	86c5	сеть
+=none	afdb	Нет
 =normal	9c52	нормально
 =off	8a0a	выключено
 =on	2fd0	включено
 =only	89f7	только
+=per second	4f98	в секунду
+=percent	fa5a	проценты
 =performance	8ca5	производительность
 =plum	b06b	сливовый
 =powersave	2283	экономия энергии

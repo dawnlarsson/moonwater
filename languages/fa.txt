@@ -83,6 +83,11 @@ settings_asks_first	e9bd	ابتدا می‌پرسد
 settings_badge_error	9cf1	خطا
 settings_badge_warning	fc8f	هشدار
 settings_battery_charging	5116	، در حال شارژ
+settings_drive_state	0bb3	درایو، 
+settings_item_drive	269a	نمایش داده می‌شود، نگه‌داشته نمی‌شود: هیچ فرمانی درایوی را تغییر نمی‌دهد
+settings_legend_comma	00f1	، 
+settings_legend_semicolon	0b8e	؛ 
+settings_not_shown	8efd	%d مورد دیگر نشان داده نمی‌شود
 settings_role_efi	d41a	سیستم EFI
 settings_role_linux	2c8f	داده‌های Linux
 settings_role_swap	874e	مبادله
@@ -352,6 +357,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =blue	f5cd	آبی
 =bottom	6b2a	پایین
 =center	4484	مرکز
+=copies	3e10	کپی‌ها
 =dark	6945	تیره
 =dark-grey	bcb3	خاکستری تیره
 =default	5bde	پیش‌فرض
@@ -375,10 +381,13 @@ ui_field_full	fe02	بیش از این جا ندارد
 =midnight-blue	4008	آبی نیمه‌شب
 =modem	67ed	مودم
 =network	86c5	شبکه
+=none	afdb	هیچ‌کدام
 =normal	9c52	عادی
 =off	8a0a	خاموش
 =on	2fd0	روشن
 =only	89f7	فقط
+=per second	4f98	در ثانیه
+=percent	fa5a	درصد
 =performance	8ca5	عملکرد
 =plum	b06b	آلویی
 =powersave	2283	صرفه‌جویی در انرژی

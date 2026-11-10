@@ -82,6 +82,11 @@ settings_asks_first	e9bd	demande d'abord
 settings_badge_error	9cf1	Erreur
 settings_badge_warning	fc8f	Avertissement
 settings_battery_charging	5116	, en charge
+settings_drive_state	0bb3	disque, 
+settings_item_drive	269a	affiché, non retenu : aucune commande ne modifie un disque
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	 ; 
+settings_not_shown	8efd	%d autres non affichés
 settings_role_efi	d41a	Système EFI
 settings_role_linux	2c8f	Données Linux
 settings_role_swap	874e	échange
@@ -351,6 +356,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =blue	f5cd	bleu
 =bottom	6b2a	en bas
 =center	4484	centre
+=copies	3e10	copies
 =dark	6945	sombre
 =dark-grey	bcb3	gris foncé
 =default	5bde	par défaut
@@ -374,10 +380,13 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =midnight-blue	4008	bleu nuit
 =modem	67ed	modem
 =network	86c5	réseau
+=none	afdb	Aucune
 =normal	9c52	normal
 =off	8a0a	désactivé
 =on	2fd0	activé
 =only	89f7	seulement
+=per second	4f98	par seconde
+=percent	fa5a	pourcentage
 =performance	8ca5	performance
 =plum	b06b	prune
 =powersave	2283	économie d'énergie

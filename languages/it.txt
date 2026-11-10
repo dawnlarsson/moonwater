@@ -82,6 +82,11 @@ settings_asks_first	e9bd	chiede prima
 settings_badge_error	9cf1	Errore
 settings_badge_warning	fc8f	Avviso
 settings_battery_charging	5116	, in carica
+settings_drive_state	0bb3	unità, 
+settings_item_drive	269a	mostrato, non trattenuto: nessun comando cambia un'unità
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	altri %d non mostrati
 settings_role_efi	d41a	Sistema EFI
 settings_role_linux	2c8f	Dati Linux
 settings_role_swap	874e	swap
@@ -351,6 +356,7 @@ ui_field_full	fe02	non ce ne sta di più
 =blue	f5cd	blu
 =bottom	6b2a	in basso
 =center	4484	centro
+=copies	3e10	copie
 =dark	6945	scuro
 =dark-grey	bcb3	grigio scuro
 =default	5bde	predefinito
@@ -374,10 +380,13 @@ ui_field_full	fe02	non ce ne sta di più
 =midnight-blue	4008	blu notte
 =modem	67ed	modem
 =network	86c5	rete
+=none	afdb	Nessuna
 =normal	9c52	normale
 =off	8a0a	disattivato
 =on	2fd0	attivato
 =only	89f7	solo
+=per second	4f98	al secondo
+=percent	fa5a	percentuale
 =performance	8ca5	prestazioni
 =plum	b06b	prugna
 =powersave	2283	risparmio energetico

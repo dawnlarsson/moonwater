@@ -82,6 +82,11 @@ settings_asks_first	e9bd	fragt zuerst
 settings_badge_error	9cf1	Fehler
 settings_badge_warning	fc8f	Warnung
 settings_battery_charging	5116	, lädt
+settings_drive_state	0bb3	Laufwerk, 
+settings_item_drive	269a	angezeigt, nicht gehalten: kein Befehl ändert ein Laufwerk
+settings_legend_comma	00f1	, 
+settings_legend_semicolon	0b8e	; 
+settings_not_shown	8efd	%d weitere nicht angezeigt
 settings_role_efi	d41a	EFI-System
 settings_role_linux	2c8f	Linux-Daten
 settings_role_swap	874e	Swap
@@ -351,6 +356,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =blue	f5cd	Blau
 =bottom	6b2a	Unten
 =center	4484	Mitte
+=copies	3e10	Kopien
 =dark	6945	Dunkel
 =dark-grey	bcb3	Dunkelgrau
 =default	5bde	Standard
@@ -374,10 +380,13 @@ ui_field_full	fe02	mehr passt nicht hinein
 =midnight-blue	4008	Mitternachtsblau
 =modem	67ed	Modem
 =network	86c5	Netzwerk
+=none	afdb	Keine
 =normal	9c52	Normal
 =off	8a0a	Aus
 =on	2fd0	An
 =only	89f7	Nur
+=per second	4f98	pro Sekunde
+=percent	fa5a	Prozent
 =performance	8ca5	Leistung
 =plum	b06b	Pflaume
 =powersave	2283	Energiesparen
