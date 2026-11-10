@@ -19,6 +19,8 @@
 /* sha256 of the samples of the golden frame: payload "golden frame", seq 42, the test key. Pins the wire format. */
 #define MODEM_GOLDEN "ff1ba5d9ed62dca9930870adebbfe6837293996ab2811ece1092936635889287"
 
+#ifndef MODEM_FUZZ /* the self-test; the fuzz build below uses none of it */
+
 static int failures;
 
 static void check(int ok, const char *what)
@@ -282,7 +284,6 @@ static void test_bench(void)
 	free(pcm);
 }
 
-#ifndef MODEM_FUZZ
 int main(void)
 {
 	test_vectors();
