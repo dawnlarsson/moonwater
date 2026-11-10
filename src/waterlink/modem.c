@@ -389,6 +389,8 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 	static const uint8_t sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
 	uint8_t fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
 	size_t nb, at, total, body, bit, nbits;
+	int16_t tone[MODEM_TONES + 1][MODEM_SYM];
+	int c, k;
 
 	if (!modem_key_ok(key, klen) || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
 		return 0;
@@ -416,11 +418,15 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 	   padded with zero bits. */
 	nbits = nb * 8;
 	memset(pcm, 0, total * sizeof(int16_t));
+	/* One symbol per tone, computed once for this frame: a symbol is a copy of its tone's samples, so the frame's
+	   samples are written by one copy per symbol and no sample is computed twice. Tone c is c whole cycles. */
+	for (c = 1; c <= MODEM_TONES; c++)
+		for (k = 0; k < MODEM_SYM; k++)
+			tone[c][k] = (int16_t)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
 	at = MODEM_LEAD;
 	for (bit = 0; bit < nbits; bit += MODEM_SYM_BITS)
 	{
 		unsigned v = 0, j;
-		int c, k;
 
 		for (j = 0; j < MODEM_SYM_BITS; j++)
 		{
@@ -429,9 +435,8 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 			if (b < nbits && ((fb[b / 8] >> (b % 8)) & 1))
 				v |= 1u << j;
 		}
-		c = (int)v + 1; /* tone 1..MODEM_TONES: c whole cycles per symbol */
-		for (k = 0; k < MODEM_SYM; k++)
-			pcm[at++] = (int16_t)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
+		memcpy(pcm + at, tone[(int)v + 1], sizeof tone[0]);
+		at += MODEM_SYM;
 	}
 	return at + MODEM_LEAD;
 }
@@ -461,12 +466,51 @@ static void modem_cut(size_t *cut_bit, size_t bit)
 		*cut_bit = bit;
 }
 
+/* The frames one decode call has authenticated. The phases near the true one all decode the same frame, so it is found
+   at many phases with the same bytes, and its tag is the same test at each: a frame whose bytes (length, sequence, payload
+   and tag) are one already checked is taken from here, not by another HMAC. The key is the call's, so a verdict holds. */
+#define MODEM_MEMO 4
+typedef struct
+{
+	uint8_t frame[MODEM_MEMO][MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
+	size_t total[MODEM_MEMO];
+	unsigned count, next;
+} modem_memo;
+
+static int modem_memo_has(const modem_memo *m, const uint8_t *bytes, size_t total)
+{
+	unsigned i;
+	size_t t;
+
+	for (i = 0; i < m->count; i++) {
+		unsigned diff = 0;
+
+		if (m->total[i] != total)
+			continue;
+		for (t = 0; t < total; t++)
+			diff |= (unsigned)(m->frame[i][t] ^ bytes[t]);
+		if (!diff)
+			return 1;
+	}
+	return 0;
+}
+
+static void modem_memo_add(modem_memo *m, const uint8_t *bytes, size_t total)
+{
+	memcpy(m->frame[m->next], bytes, total);
+	m->total[m->next] = total;
+	m->next = (m->next + 1) % MODEM_MEMO;
+	if (m->count < MODEM_MEMO)
+		m->count++;
+}
+
 /* Looks for a frame in the bit array. The sync word is matched with a rolling 32-bit window, so the scan costs
    one shift per bit. Sets *refusal if a candidate had a valid sync and length but a bad tag, or, when gated, an
    authentic frame that is not fresh after last: such a frame is passed over, so a replay ahead of a fresh frame
    does not hide it. */
 static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, size_t klen,
-			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last, size_t *end_bit, size_t *cut_bit)
+			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last, size_t *end_bit, size_t *cut_bit,
+			    modem_memo *memo)
 {
 	uint32_t window = 0;
 	size_t i;
@@ -488,9 +532,15 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 			len = buf[0];
 			if (len <= MODEM_PAYLOAD_MAX && modem_read_bytes(bits, nb, p, buf, MODEM_HDR + len + MODEM_TAG))
 			{
-				modem_tag(key, klen, buf, MODEM_HDR + len, mac);
-				for (t = 0; t < MODEM_TAG; t++)
-					diff |= (unsigned)(mac[t] ^ buf[MODEM_HDR + len + t]);
+				if (modem_memo_has(memo, buf, MODEM_HDR + len + MODEM_TAG))
+					diff = 0;
+				else {
+					modem_tag(key, klen, buf, MODEM_HDR + len, mac);
+					for (t = 0; t < MODEM_TAG; t++)
+						diff |= (unsigned)(mac[t] ^ buf[MODEM_HDR + len + t]);
+					if (!diff)
+						modem_memo_add(memo, buf, MODEM_HDR + len + MODEM_TAG);
+				}
 				if (diff) {
 					*refusal = 1;
 					modem_cut(cut_bit, i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG));
@@ -523,76 +573,117 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 
 /* Symbol decisions for every start sample, computed once. A window that starts at s correlates with tone c as
    P*cos(c*s) + Q*sin(c*s), where P and Q are the sums of x[t]*cos and x[t]*sin over the window in absolute
-   sample positions t. P and Q slide one sample at a time, so each start costs about 4*MODEM_TONES multiplies,
+   sample positions t. P and Q slide one sample at a time, so each start costs about 7*MODEM_TONES multiplies,
    not the 2*MODEM_TONES*MODEM_SYM of a window computed afresh. The result is exact integer arithmetic. */
 static uint8_t modem_best[MODEM_MAX_SAMPLES];
+#define MODEM_BLOCK 128 /* starts per block of the sweep: the block's state stays in L1 while each tone runs over it */
+#define MODEM_TIE_BITS 5 /* the low bits of a block entry hold the tone, so one compare takes the energy and the tie rule */
+
+/* The energy of a tone at a start, from its sums P and Q and the table values cs and ss at its rotation c*s mod
+   MODEM_SYM: the squared magnitude of the two rounded products (P*cos + Q*sin) >> 24 and (Q*cos - P*sin) >> 24. The four
+   products are three multiplies, by the Gauss identity: k1 = cos*(P+Q), then P*cos + Q*sin = k1 - Q*(cos-sin) and
+   Q*cos - P*sin = k1 - P*(cos+sin). Exact, so the shifted values are the ones the four-multiply form gives. */
+static int64_t modem_tone_energy(int64_t P, int64_t Q, int64_t cs, int64_t ss)
+{
+	int64_t k1 = cs * (P + Q);
+	int64_t mc = (k1 - Q * (cs - ss)) >> 24;
+	int64_t ms = (k1 - P * (cs + ss)) >> 24;
+
+	return mc * mc + ms * ms;
+}
 
 static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
 			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last, size_t *used,
 			     size_t *cut)
 {
 	int64_t P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
-	size_t ia[MODEM_TONES + 1], ir[MODEM_TONES + 1], is[MODEM_TONES + 1];
-	size_t s, off, cut_samples = 0;
+	size_t ix[MODEM_TONES + 1];
+	int64_t blk_e[MODEM_BLOCK], blk_d[MODEM_BLOCK];
+	size_t s, s0, s1, off, cut_samples = 0;
 	int refusal = 0, c, k;
 	uint8_t pick[MODEM_PAYLOAD_MAX];
 	uint32_t pick_seq = 0;
 	size_t pick_end = 0, pick_len = 0;
 	int found = 0;
+	modem_memo memo;
 
 	if (!pcm || !out || !seq || !modem_key_ok(key, klen) || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
 		return -1;
+	memo.count = 0;
+	memo.next = 0;
 
-	/* The window for start 0 covers samples 0..MODEM_SYM-1. The tone indices (c*t) mod MODEM_SYM are kept per
-	   tone and stepped by c each sample, with one compare and subtract, not a modulo. */
+	/* The window for start 0 covers samples 0..MODEM_SYM-1: P and Q are the sums over absolute positions t, with the
+	   tone index (c*t) mod MODEM_SYM. Moving the window from s-1 to s takes out the sample at s-1 and puts in the one at
+	   s+N-1, and those two share a tone index, since they are MODEM_SYM apart: the update is one difference times one table
+	   entry. ix[c] holds c*(s-1) mod MODEM_SYM for that update, then steps by c to c*s, the rotation start s is read at. */
 	for (c = 1; c <= MODEM_TONES; c++) {
 		P[c] = 0;
 		Q[c] = 0;
+		ix[c] = 0;
 		for (k = 0; k < MODEM_SYM; k++) {
 			size_t idx = ((size_t)c * (size_t)k) % MODEM_SYM;
 
 			P[c] += (int64_t)pcm[k] * modem_cos_tab[idx];
 			Q[c] += (int64_t)pcm[k] * modem_sin_tab[idx];
 		}
-		ia[c] = ((size_t)c * (MODEM_SYM - 1)) % MODEM_SYM; /* the entering sample at s = 0, s+N-1; stepped before use */
-		ir[c] = 0;                                         /* the sample that leaves: the one at s-1, set at s = 1 */
-		is[c] = 0;
 	}
-	for (s = 0; s + MODEM_SYM <= n; s++) {
+	/* Start 0 is read at rotation 0, where ix already is. The starts after it go in blocks of MODEM_BLOCK. Within a block
+	   each tone runs through its starts with its sums in registers, and the table values carry from one start to the
+	   next: a start's update uses the values its predecessor was read at. The block keeps one packed entry per start,
+	   energy << MODEM_TIE_BITS | (the tone's index, complemented): a larger entry is a larger energy, and at a tie the
+	   lower tone has the larger low bits, so one strict compare in tone order gives the same tie rule as before. Each
+	   tone's state is carried from one block to the next in P, Q and ix. */
+	{
+		int64_t cs0 = modem_cos_tab[0], ss0 = modem_sin_tab[0];
 		int64_t best = -1;
 		unsigned bestv = 0;
 
-		if (s > 0) {
-			int64_t xa = pcm[s + MODEM_SYM - 1], xr = pcm[s - 1];
-
-			for (c = 1; c <= MODEM_TONES; c++) {
-				/* ia is for the entering sample s+N-1: step it onto that before use. ir is for the leaving sample
-				   s-1, which is used as it stands and stepped after. */
-				ia[c] += (size_t)c;
-				if (ia[c] >= MODEM_SYM)
-					ia[c] -= MODEM_SYM;
-				P[c] += xa * modem_cos_tab[ia[c]] - xr * modem_cos_tab[ir[c]];
-				Q[c] += xa * modem_sin_tab[ia[c]] - xr * modem_sin_tab[ir[c]];
-				ir[c] += (size_t)c;
-				if (ir[c] >= MODEM_SYM)
-					ir[c] -= MODEM_SYM;
-			}
-		}
 		for (c = 1; c <= MODEM_TONES; c++) {
-			int64_t cs = modem_cos_tab[is[c]], ss = modem_sin_tab[is[c]];
-			int64_t mc = (P[c] * cs + Q[c] * ss) >> 24;
-			int64_t ms = (Q[c] * cs - P[c] * ss) >> 24;
-			int64_t e = mc * mc + ms * ms;
+			int64_t e = modem_tone_energy(P[c], Q[c], cs0, ss0);
 
 			if (e > best) {
 				best = e;
 				bestv = (unsigned)(c - 1);
 			}
-			is[c] += (size_t)c;
-			if (is[c] >= MODEM_SYM)
-				is[c] -= MODEM_SYM;
 		}
-		modem_best[s] = (uint8_t)bestv;
+		modem_best[0] = (uint8_t)bestv;
+	}
+	for (s0 = 1; s0 + MODEM_SYM <= n; s0 = s1) {
+		size_t starts = n - MODEM_SYM + 1; /* the starts are 0 .. n - MODEM_SYM: this is one past the last */
+
+		s1 = s0 + MODEM_BLOCK < starts ? s0 + MODEM_BLOCK : starts;
+		for (s = s0; s < s1; s++) {
+			blk_d[s - s0] = (int64_t)pcm[s + MODEM_SYM - 1] - pcm[s - 1];
+			blk_e[s - s0] = -1;
+		}
+		for (c = 1; c <= MODEM_TONES; c++) {
+			int64_t Pc = P[c], Qc = Q[c];
+			size_t r = ix[c], t, len = s1 - s0;
+			int64_t cp = modem_cos_tab[r], sp = modem_sin_tab[r];
+			int64_t tie = (int64_t)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(c - 1));
+
+			for (t = 0; t < len; t++) {
+				int64_t d = blk_d[t], cs, ss, e;
+
+				Pc += d * cp;
+				Qc += d * sp;
+				r += (size_t)c;
+				if (r >= MODEM_SYM)
+					r -= MODEM_SYM;
+				cs = modem_cos_tab[r];
+				ss = modem_sin_tab[r];
+				cp = cs;
+				sp = ss;
+				e = (modem_tone_energy(Pc, Qc, cs, ss) << MODEM_TIE_BITS) | tie;
+				if (e > blk_e[t])
+					blk_e[t] = e;
+			}
+			P[c] = Pc;
+			Q[c] = Qc;
+			ix[c] = r;
+		}
+		for (s = s0; s < s1; s++)
+			modem_best[s] = (uint8_t)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(blk_e[s - s0] & ((1 << MODEM_TIE_BITS) - 1)));
 	}
 
 	/* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
@@ -612,7 +703,7 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
 
-		r = modem_find_frame(modem_bits, nb, key, klen, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit);
+		r = modem_find_frame(modem_bits, nb, key, klen, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
 		if (r < 0) {
 			if (cut_bit) {
 				size_t at_sample = off + ((cut_bit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;

@@ -381,6 +381,11 @@ static void test_bench(void)
 	       MODEM_SYM, MODEM_TONES, MODEM_SYM_BITS, MODEM_BAUD, MODEM_BAUD * MODEM_SYM_BITS);
 	printf("      full frame: %.3f s on air, %.0f payload bytes/s\n", air, MODEM_PAYLOAD_MAX / air);
 	printf("      decode CPU: %.2f ms per frame (%.2f%% of its air time)\n", ms, 100.0 * ms / (air * 1000.0));
+	t0 = clock();
+	for (i = 0; i < 40; i++)
+		n = modem_encode(KEY, KEYLEN, 1, payload, MODEM_PAYLOAD_MAX, pcm, cap);
+	t1 = clock();
+	printf("      encode CPU: %.3f ms per frame\n", 1000.0 * (double)(t1 - t0) / CLOCKS_PER_SEC / 40);
 	check(got == MODEM_PAYLOAD_MAX, "a full-size frame decodes in the benchmark");
 	free(pcm);
 }
