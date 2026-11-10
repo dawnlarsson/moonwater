@@ -126862,7 +126862,7 @@ static void check_taskbar_centre(void)
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
    the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
    its table at start. */
-#define BAND_UPRIGHT 0x48e6be0cc0b129e3ull
+#define BAND_UPRIGHT 0xdbaf09b8053b9ce0ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -129821,7 +129821,7 @@ static void check_compositor_volume(void)
         pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
         a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x3c4b523fu
+#define CHROME_SCENE_HASH 0xe9b189a7u
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -131359,10 +131359,13 @@ static void layout_setup(int side, int scale)
     compositor.held[0] = CK_HELD_LSUPER;
 }
 
-// A window shown at x, y by width and height, floating: its rectangle is the one a snap keeps for it to come back to.
+// A window shown at x, y by width and height, floating: its rectangle is the one a snap keeps for it to come back to. It has no tab: the
+// tabs of the band are centred on it, so on a screen this small one would sit in its middle, over the pixels and under the fingers these
+// checks read, and what they are about is where windows go.
 static void layout_show(int row, int x, int y, int width, int height)
 {
     compositor.showing[row] = 1;
+    compositor.asks[row] |= WINDOW_NO_TAB;
     compositor.table->pid[row] = (unsigned int)row;
     compositor.x[row] = compositor.table->x[row] = (unsigned int)x;
     compositor.y[row] = compositor.table->y[row] = (unsigned int)y;
@@ -135839,6 +135842,7 @@ static void check_compositor_edges(void)
     table = compositor.table;
     layout_show(1, 0, 40, 120, 160);
     layout_show(2, 130, 40, 120, 160);
+    compositor.asks[1] &= ~WINDOW_NO_TAB, compositor.asks[2] &= ~WINDOW_NO_TAB; /* the switcher steps through the windows that have a tab */
     compositor.side_left = COMPOSITOR_SIDE_WINDOWS;
     compositor.side_right = COMPOSITOR_SIDE_ACT;
     compositor.focus = 1;
