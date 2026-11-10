@@ -1,54 +1,50 @@
 /*
-	The audio modem: the link for getting data off a machine that cannot be
-	trusted, or a debugging link.
-	It assumes the other end is hostile:
-	  - every frame is authenticated (HMAC-SHA256 under the pairing key)
-	    before any byte of it is used;
-	  - a receiver accepts a frame only if its sequence number is newer
-	    than the last accepted one, so a recording replays to nothing;
-	  - a frame carries data, never code, and the receiver never runs it;
-	  - a receiver session closes after MODEM_REFUSE_LIMIT refused frames;
-	  - the transmitter sends only when the operator starts a session;
-	  - the cable is galvanically isolated at both ends.
+        The audio modem: the link for getting data off a machine that cannot be
+        trusted, or a debugging link.
+        It assumes the other end is hostile:
+          - every frame is authenticated (HMAC-SHA256 under the pairing key)
+            before any byte of it is used;
+          - a receiver accepts a frame only if its sequence number is newer
+            than the last accepted one, so a recording replays to nothing;
+          - a frame carries data, never code, and the receiver never runs it;
+          - a receiver session closes after MODEM_REFUSE_LIMIT refused frames;
+          - the transmitter sends only when the operator starts a session;
+          - the cable is galvanically isolated at both ends.
 
-	Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit. Each channel of the card is a mono stream of its own: the link
-	carries one on each (see the end of this file). A symbol
-	is MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
-	whole cycles in the symbol window, so the tones are orthogonal and the
-	receiver needs only the sample offset, not a clock. The default is 40
-	samples and 8 tones: 2400 baud, 3 bits a symbol, 7200 bit/s raw, with the
-	top tone at 19.2 kHz, which ordinary audio gear passes. The 16-tone
-	option (MODEM_TONES 16, at the same rate) carries 9600 bit/s, and its top
-	tone is 38.4 kHz: it needs a cable and a card that pass that.
+        Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit. Each channel of the card is a mono stream of its own: the link
+        carries one on each (see the end of this file). A symbol
+        is MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
+        whole cycles in the symbol window, so the tones are orthogonal and the
+        receiver needs only the sample offset, not a clock. The default is 40
+        samples and 8 tones: 2400 baud, 3 bits a symbol, 7200 bit/s raw, with the
+        top tone at 19.2 kHz, which ordinary audio gear passes. The 16-tone
+        option (MODEM_TONES 16, at the same rate) carries 9600 bit/s, and its top
+        tone is 38.4 kHz: it needs a cable and a card that pass that.
 
-	A frame: lead-in (MODEM_PRE bytes of 0x55), sync A7 3D 69 C5 (the wire
-	version: version 1 frames, with a 32-byte tag, had 5A C3 96 3C), LEN
-	(one byte, 0..255), SEQ (four bytes, big-endian), payload, then a
-	16-byte tag: the first 16 bytes of HMAC-SHA256 over LEN, SEQ and payload
-	(the HMAC truncated to 128 bits). The receiver uses nothing until the
-	tag checks. A receiver's session starts from 0, so its first frame is 1; a sender goes on from the last number it
-	sent under the same key (the send section keeps it), so one recording can hold any number of sends, and the receiver takes
-	each frame that follows the one before.
+        A frame: lead-in (MODEM_PRE bytes of 0x55), sync A7 3D 69 C5 (the wire
+        version: version 1 frames, with a 32-byte tag, had 5A C3 96 3C), LEN
+        (one byte, 0..255), SEQ (four bytes, big-endian), payload, then a
+        16-byte tag: the first 16 bytes of HMAC-SHA256 over LEN, SEQ and payload
+        (the HMAC truncated to 128 bits). The receiver uses nothing until the
+        tag checks. A receiver's session starts from 0, so its first frame is 1; a sender goes on from the last number it
+        sent under the same key (the send section keeps it), so one recording can hold any number of sends, and the receiver takes
+        each frame that follows the one before.
 
-	Integer arithmetic only: no floating point, no libm in the decoder.
-	The sine tables are fixed at build time. The tag is lib.c's: sha256_blocks
-	and hash_hmac_sha256_prepared, with each session's key made ready once, as
-	net.c makes its HMAC keys ready. Where this machine has no body for
-	hash_hmac_sha256_prepared, the tag is made from sha256_blocks here.
+        Integer arithmetic only: no floating point, no libm in the decoder.
+        The sine tables are fixed at build time. The tag is lib.c's: sha256_blocks
+        and hash_hmac_sha256_prepared, with each session's key made ready once, as
+        net.c makes its HMAC keys ready. Where this machine has no body for
+        hash_hmac_sha256_prepared, the tag is made from sha256_blocks here.
 
-	Not reentrant: the decoder keeps its bit buffer in a static array.
+        Not reentrant: the decoder keeps its bit buffer in a static array.
 
-	The tests are test/modem.c, run by the modem lane (sh test/run modem).
+        The tests are test/modem.c, run by the modem lane (sh test/run modem).
 */
 
-/* The box builds this freestanding (-ffreestanding -nostdlib): the compiler's own stddef.h and stdint.h are there, but
-   string.h is not, and memcpy and memset are the kernel library's, declared in lib.c ahead of any file that includes
-   this one. A hosted build (the test, the receiver in tools/) gets string.h as before. */
-#include <stddef.h>
-#include <stdint.h>
-#if __STDC_HOSTED__
-#include <string.h>
-#endif
+/* The box builds this freestanding (-ffreestanding -nostdlib): the house names (p8, p32, sized and the rest) and the
+   helpers (memory_copy, memory_zero, memory_fill) are declared in lib.c ahead of any file that includes this one, and
+   this file takes no libc header. A hosted build (the test, the receiver in tools/) gets the same names from
+   modem_host.h, which is included before this file. */
 
 /* ---- configuration ----------------------------------------------------- */
 
@@ -67,12 +63,12 @@
 #endif
 
 #define MODEM_SYM_BITS ((MODEM_TONES) == 2 ? 1 : (MODEM_TONES) == 4 ? 2 \
-					     : (MODEM_TONES) == 8   ? 3 \
-								    : 4)
+                                             : (MODEM_TONES) == 8   ? 3 \
+                                                                    : 4)
 #define MODEM_BAUD (MODEM_RATE / MODEM_SYM)
 #define MODEM_PRE 4
 #define MODEM_SYNC_BYTES 4
-#define MODEM_HDR 5	      /* LEN and SEQ */
+#define MODEM_HDR 5           /* LEN and SEQ */
 #define MODEM_PAYLOAD_MAX 255 /* the largest a one-byte LEN carries */
 #define MODEM_MAC 32 /* HMAC-SHA256's output */
 #define MODEM_TAG 16 /* a frame's tag: HMAC-SHA256 truncated to its first 16 bytes (a 128-bit tag), 16 bytes a frame less than 32 */
@@ -87,190 +83,190 @@
 
 /* Refuses a configuration the orthogonality or the tables cannot support: the build fails. */
 typedef char modem_config_ok[((MODEM_TONES) >= 2 && (MODEM_TONES) < (MODEM_SYM) / 2 &&
-			      ((MODEM_TONES) & ((MODEM_TONES)-1)) == 0 &&
-			      ((MODEM_SYM) == 10 || (MODEM_SYM) == 20 || (MODEM_SYM) == 40))
-				 ? 1
-				 : -1];
+                              ((MODEM_TONES) & ((MODEM_TONES)-1)) == 0 &&
+                              ((MODEM_SYM) == 10 || (MODEM_SYM) == 20 || (MODEM_SYM) == 40))
+                                 ? 1
+                                 : -1];
 
 /* 10000 * cos and sin of 2*pi*k/MODEM_SYM, rounded. Generated once; fixed in the file. */
 #if MODEM_SYM == 10
-static const int32_t modem_cos_tab[MODEM_SYM] = {10000, 8090, 3090, -3090, -8090, -10000, -8090, -3090, 3090, 8090};
-static const int32_t modem_sin_tab[MODEM_SYM] = {0, 5878, 9511, 9511, 5878, 0, -5878, -9511, -9511, -5878};
+static const b32 modem_cos_tab[MODEM_SYM] = {10000, 8090, 3090, -3090, -8090, -10000, -8090, -3090, 3090, 8090};
+static const b32 modem_sin_tab[MODEM_SYM] = {0, 5878, 9511, 9511, 5878, 0, -5878, -9511, -9511, -5878};
 #endif
 #if MODEM_SYM == 20
-static const int32_t modem_cos_tab[MODEM_SYM] = {10000, 9511, 8090, 5878, 3090, 0, -3090, -5878, -8090, -9511, -10000, -9511, -8090, -5878, -3090, 0, 3090, 5878, 8090, 9511};
-static const int32_t modem_sin_tab[MODEM_SYM] = {0, 3090, 5878, 8090, 9511, 10000, 9511, 8090, 5878, 3090, 0, -3090, -5878, -8090, -9511, -10000, -9511, -8090, -5878, -3090};
+static const b32 modem_cos_tab[MODEM_SYM] = {10000, 9511, 8090, 5878, 3090, 0, -3090, -5878, -8090, -9511, -10000, -9511, -8090, -5878, -3090, 0, 3090, 5878, 8090, 9511};
+static const b32 modem_sin_tab[MODEM_SYM] = {0, 3090, 5878, 8090, 9511, 10000, 9511, 8090, 5878, 3090, 0, -3090, -5878, -8090, -9511, -10000, -9511, -8090, -5878, -3090};
 #endif
 #if MODEM_SYM == 40
-static const int32_t modem_cos_tab[MODEM_SYM] = {10000, 9877, 9511, 8910, 8090, 7071, 5878, 4540, 3090, 1564, 0, -1564, -3090, -4540, -5878, -7071, -8090, -8910, -9511, -9877, -10000, -9877, -9511, -8910, -8090, -7071, -5878, -4540, -3090, -1564, 0, 1564, 3090, 4540, 5878, 7071, 8090, 8910, 9511, 9877};
-static const int32_t modem_sin_tab[MODEM_SYM] = {0, 1564, 3090, 4540, 5878, 7071, 8090, 8910, 9511, 9877, 10000, 9877, 9511, 8910, 8090, 7071, 5878, 4540, 3090, 1564, 0, -1564, -3090, -4540, -5878, -7071, -8090, -8910, -9511, -9877, -10000, -9877, -9511, -8910, -8090, -7071, -5878, -4540, -3090, -1564};
+static const b32 modem_cos_tab[MODEM_SYM] = {10000, 9877, 9511, 8910, 8090, 7071, 5878, 4540, 3090, 1564, 0, -1564, -3090, -4540, -5878, -7071, -8090, -8910, -9511, -9877, -10000, -9877, -9511, -8910, -8090, -7071, -5878, -4540, -3090, -1564, 0, 1564, 3090, 4540, 5878, 7071, 8090, 8910, 9511, 9877};
+static const b32 modem_sin_tab[MODEM_SYM] = {0, 1564, 3090, 4540, 5878, 7071, 8090, 8910, 9511, 9877, 10000, 9877, 9511, 8910, 8090, 7071, 5878, 4540, 3090, 1564, 0, -1564, -3090, -4540, -5878, -7071, -8090, -8910, -9511, -9877, -10000, -9877, -9511, -8910, -8090, -7071, -5878, -4540, -3090, -1564};
 #endif
 
 /* ---- HMAC-SHA256 under a key made ready once (FIPS 180-4, RFC 2104) ------ */
 
 /*
-	The block core is lib.c's sha256_blocks, which takes whole 64-byte blocks into eight words of state, and the tag is
-	lib.c's hash_hmac_sha256_prepared, which takes the two states of a key's pads and a message and answers whether it made
-	the tag. It has a body on x86_64 with the SHA extensions; elsewhere it answers false and the tag is made here from
-	sha256_blocks, as net.c's crypto_hmac_sha256_prepared makes it. A key is made ready once per session (modem_mac_open),
-	so a frame's tag costs the blocks of its message and the two that close it.
+        The block core is lib.c's sha256_blocks, which takes whole 64-byte blocks into eight words of state, and the tag is
+        lib.c's hash_hmac_sha256_prepared, which takes the two states of a key's pads and a message and answers whether it made
+        the tag. It has a body on x86_64 with the SHA extensions; elsewhere it answers false and the tag is made here from
+        sha256_blocks, as net.c's crypto_hmac_sha256_prepared makes it. A key is made ready once per session (modem_mac_open),
+        so a frame's tag costs the blocks of its message and the two that close it.
 */
 
 #define MODEM_SHA_BLOCK 64
 
 typedef struct
 {
-	uint32_t inner[8];
-	uint32_t outer[8];
-	int ok; /* the key is one the modem takes (MODEM_KEY_MIN bytes or more), and its pads are made */
+        p32 inner[8];
+        p32 outer[8];
+        int ok; /* the key is one the modem takes (MODEM_KEY_MIN bytes or more), and its pads are made */
 } modem_mac;
 
-static const uint32_t modem_sha_iv[8] = {
+static const p32 modem_sha_iv[8] = {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
 
 /* Digests len bytes of msg into h, which already holds the done bytes (a multiple of 64) that came before them, and
    pads the tail as FIPS 180-4 does: after this h holds the digest's words of the whole message. */
-static void modem_sha_run(uint32_t h[8], const uint8_t *msg, size_t len, uint64_t done)
+static void modem_sha_run(p32 h[8], const p8 *msg, sized len, p64 done)
 {
-	uint8_t block[2 * MODEM_SHA_BLOCK];
-	size_t whole = len / MODEM_SHA_BLOCK, rest = len % MODEM_SHA_BLOCK, blocks = rest < 56 ? 1 : 2, i;
-	uint64_t bits = (done + len) * 8;
+        p8 block[2 * MODEM_SHA_BLOCK];
+        sized whole = len / MODEM_SHA_BLOCK, rest = len % MODEM_SHA_BLOCK, blocks = rest < 56 ? 1 : 2, i;
+        p64 bits = (done + len) * 8;
 
-	sha256_blocks(h, msg, whole);
-	memset(block, 0, sizeof block);
-	if (rest)
-		memcpy(block, msg + whole * MODEM_SHA_BLOCK, rest);
-	block[rest] = 0x80;
-	for (i = 0; i < 8; i++)
-		block[blocks * MODEM_SHA_BLOCK - 1 - i] = (uint8_t)(bits >> (8 * i));
-	sha256_blocks(h, block, blocks);
+        sha256_blocks(h, msg, whole);
+        memory_zero(block, sizeof block);
+        if (rest)
+                memory_copy(block, msg + whole * MODEM_SHA_BLOCK, rest);
+        block[rest] = 0x80;
+        for (i = 0; i < 8; i++)
+                block[blocks * MODEM_SHA_BLOCK - 1 - i] = (p8)(bits >> (8 * i));
+        sha256_blocks(h, block, blocks);
 }
 
-static void modem_sha_bytes(const uint32_t h[8], uint8_t out[32])
+static void modem_sha_bytes(const p32 h[8], p8 out[32])
 {
-	size_t i;
+        sized i;
 
-	for (i = 0; i < 8; i++)
-	{
-		out[4 * i] = (uint8_t)(h[i] >> 24);
-		out[4 * i + 1] = (uint8_t)(h[i] >> 16);
-		out[4 * i + 2] = (uint8_t)(h[i] >> 8);
-		out[4 * i + 3] = (uint8_t)h[i];
-	}
+        for (i = 0; i < 8; i++)
+        {
+                out[4 * i] = (p8)(h[i] >> 24);
+                out[4 * i + 1] = (p8)(h[i] >> 16);
+                out[4 * i + 2] = (p8)(h[i] >> 8);
+                out[4 * i + 3] = (p8)h[i];
+        }
 }
 
 /* SHA-256 of len bytes in one call: how a key over a block is digested. */
-static void modem_sha256(const uint8_t *msg, size_t len, uint8_t out[32])
+static void modem_sha256(const p8 *msg, sized len, p8 out[32])
 {
-	uint32_t h[8];
+        p32 h[8];
 
-	memcpy(h, modem_sha_iv, sizeof h);
-	modem_sha_run(h, msg, len, 0);
-	modem_sha_bytes(h, out);
-	memset(h, 0, sizeof h);
+        memory_copy(h, modem_sha_iv, sizeof h);
+        modem_sha_run(h, msg, len, 0);
+        modem_sha_bytes(h, out);
+        memory_zero(h, sizeof h);
 }
 
 /* Makes a key ready: the chaining states of its two pads, which a message under the key starts from. A key over a
    block is digested first, as RFC 2104 has it. m->ok says whether the key is one the modem takes. */
-static void modem_mac_open(modem_mac *m, const uint8_t *key, size_t klen)
+static void modem_mac_open(modem_mac *m, const p8 *key, sized klen)
 {
-	uint8_t k[MODEM_SHA_BLOCK], pad[MODEM_SHA_BLOCK];
-	size_t i;
+        p8 k[MODEM_SHA_BLOCK], pad[MODEM_SHA_BLOCK];
+        sized i;
 
-	m->ok = key != 0 && klen >= MODEM_KEY_MIN;
-	if (!key)
-		klen = 0;
-	memset(k, 0, sizeof k);
-	if (klen > MODEM_SHA_BLOCK)
-		modem_sha256(key, klen, k);
-	else if (klen > 0)
-		memcpy(k, key, klen);
-	for (i = 0; i < MODEM_SHA_BLOCK; i++)
-		pad[i] = k[i] ^ 0x36;
-	memcpy(m->inner, modem_sha_iv, sizeof m->inner);
-	sha256_blocks(m->inner, pad, 1);
-	for (i = 0; i < MODEM_SHA_BLOCK; i++)
-		pad[i] = k[i] ^ 0x5c;
-	memcpy(m->outer, modem_sha_iv, sizeof m->outer);
-	sha256_blocks(m->outer, pad, 1);
-	memset(k, 0, sizeof k);
-	memset(pad, 0, sizeof pad);
+        m->ok = key != 0 && klen >= MODEM_KEY_MIN;
+        if (!key)
+                klen = 0;
+        memory_zero(k, sizeof k);
+        if (klen > MODEM_SHA_BLOCK)
+                modem_sha256(key, klen, k);
+        else if (klen > 0)
+                memory_copy(k, key, klen);
+        for (i = 0; i < MODEM_SHA_BLOCK; i++)
+                pad[i] = k[i] ^ 0x36;
+        memory_copy(m->inner, modem_sha_iv, sizeof m->inner);
+        sha256_blocks(m->inner, pad, 1);
+        for (i = 0; i < MODEM_SHA_BLOCK; i++)
+                pad[i] = k[i] ^ 0x5c;
+        memory_copy(m->outer, modem_sha_iv, sizeof m->outer);
+        sha256_blocks(m->outer, pad, 1);
+        memory_zero(k, sizeof k);
+        memory_zero(pad, sizeof pad);
 }
 
 /* The portable tag: the message under the inner state, then the inner digest under the outer state. */
-static void modem_hmac_portable(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[32])
+static void modem_hmac_portable(const modem_mac *m, const p8 *msg, sized mlen, p8 out[32])
 {
-	uint32_t h[8];
-	uint8_t inner[32];
+        p32 h[8];
+        p8 inner[32];
 
-	memcpy(h, m->inner, sizeof h);
-	modem_sha_run(h, msg, mlen, MODEM_SHA_BLOCK);
-	modem_sha_bytes(h, inner);
-	memcpy(h, m->outer, sizeof h);
-	modem_sha_run(h, inner, sizeof inner, MODEM_SHA_BLOCK);
-	modem_sha_bytes(h, out);
-	memset(h, 0, sizeof h);
-	memset(inner, 0, sizeof inner);
+        memory_copy(h, m->inner, sizeof h);
+        modem_sha_run(h, msg, mlen, MODEM_SHA_BLOCK);
+        modem_sha_bytes(h, inner);
+        memory_copy(h, m->outer, sizeof h);
+        modem_sha_run(h, inner, sizeof inner, MODEM_SHA_BLOCK);
+        modem_sha_bytes(h, out);
+        memory_zero(h, sizeof h);
+        memory_zero(inner, sizeof inner);
 }
 
 /* The tag of msg under a key made ready by modem_mac_open: lib.c's where this machine has its body, else the portable one. */
-static void modem_hmac(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[32])
+static void modem_hmac(const modem_mac *m, const p8 *msg, sized mlen, p8 out[32])
 {
-	if (!hash_hmac_sha256_prepared(m->inner, m->outer, msg, mlen, out))
-		modem_hmac_portable(m, msg, mlen, out);
+        if (!hash_hmac_sha256_prepared(m->inner, m->outer, msg, mlen, out))
+                modem_hmac_portable(m, msg, mlen, out);
 }
 
 /* The frame's tag: the HMAC under the key made ready, truncated to its first MODEM_TAG bytes (RFC 2104, FIPS 198-1 truncation
    to the left-most bits). The full MODEM_MAC bytes are made and the rest is dropped; the comparison is over MODEM_TAG bytes only. */
-static void modem_tag(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[MODEM_TAG])
+static void modem_tag(const modem_mac *m, const p8 *msg, sized mlen, p8 out[MODEM_TAG])
 {
-	uint8_t mac[MODEM_MAC];
+        p8 mac[MODEM_MAC];
 
-	modem_hmac(m, msg, mlen, mac);
-	memcpy(out, mac, MODEM_TAG);
-	memset(mac, 0, sizeof(mac));
+        modem_hmac(m, msg, mlen, mac);
+        memory_copy(out, mac, MODEM_TAG);
+        memory_zero(mac, sizeof(mac));
 }
 
 /* ---- the public interface ---------------------------------------------- */
 
 /* The samples a frame of len payload bytes takes, lead and tail included; 0 if len is too long. */
-size_t modem_encode_samples(size_t len);
+sized modem_encode_samples(sized len);
 
 /* Writes one frame into pcm (cap samples). Returns the sample count, or 0 if the key is too short, the payload
    too long, or the frame does not fit in cap. */
-size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t *payload, size_t len,
-		    int16_t *pcm, size_t cap);
+sized modem_encode(const p8 *key, sized klen, p32 seq, const p8 *payload, sized len,
+                    b16 *pcm, sized cap);
 
 /* Finds the first frame whose tag checks under key. Returns its payload length (0..255) and sets seq, or -1
    if there is none, the input is over MODEM_MAX_SAMPLES, or the key is too short. */
-int modem_decode(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
-		 uint8_t *out, size_t cap, uint32_t *seq);
+int modem_decode(const b16 *pcm, sized n, const p8 *key, sized klen,
+                 p8 *out, sized cap, p32 *seq);
 
 /* A frame is fresh only if its sequence number is newer than last and not more than MODEM_WINDOW ahead. */
-int modem_fresh(uint32_t last, uint32_t seq);
+int modem_fresh(p32 last, p32 seq);
 
 /* A receiver session: one key, one sequence counter, and a count of refused frames. It closes for good after
    MODEM_REFUSE_LIMIT refusals. A refusal is counted once per decode call, not once per sync candidate, so noise
    alone cannot close a good session. */
 typedef struct
 {
-	modem_mac mac;
-	uint32_t last;
-	unsigned refused;
-	int closed;
-	int consume; /* a consumer of the capture: a refusal moves *used past the frames refused */
+        modem_mac mac;
+        p32 last;
+        unsigned refused;
+        int closed;
+        int consume; /* a consumer of the capture: a refusal moves *used past the frames refused */
 } modem_rx;
 
-void modem_rx_open(modem_rx *rx, const uint8_t *key, size_t klen);
+void modem_rx_open(modem_rx *rx, const p8 *key, sized klen);
 
 /* Takes one frame from pcm. Returns the payload length for a fresh, authentic frame, or -1 for anything else. */
-int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq);
+int modem_rx_frame(modem_rx *rx, const b16 *pcm, sized n, p8 *out, sized cap, p32 *seq);
 
 /* As modem_rx_frame, and sets *used to the sample just past the frame taken (0 when none is taken), so a caller can
    take the frames of one capture one after another. The frame taken is the fresh one that ends first in pcm, whatever
    its symbol phase; a refused candidate is passed over and the rest of pcm is still searched. */
-int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used);
+int modem_rx_next(modem_rx *rx, const b16 *pcm, sized n, p8 *out, sized cap, p32 *seq, sized *used);
 
 /* ---- datagrams over the modem ------------------------------------------ */
 
@@ -286,37 +282,37 @@ int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size
 /* The sender: one per session, with its own datagram ids. */
 typedef struct
 {
-	modem_mac mac;
-	uint32_t seq;
-	uint16_t id;
+        modem_mac mac;
+        p32 seq;
+        p16 id;
 } modem_tx;
 
-void modem_tx_open(modem_tx *tx, const uint8_t *key, size_t klen);
+void modem_tx_open(modem_tx *tx, const p8 *key, sized klen);
 
 /* Writes every frame of one datagram (1 to MODEM_DATAGRAM_MAX bytes) into pcm, back to back. Returns the sample
    count, or 0 if the datagram is the wrong size or the frames do not all fit in cap; a 0 means the caller sends
    nothing from pcm. */
-size_t modem_tx_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *pcm, size_t cap);
+sized modem_tx_datagram(modem_tx *tx, const p8 *dg, sized len, b16 *pcm, sized cap);
 
 /* The receiver: one session, and at most one datagram being put together. A chunk that starts another datagram, or
    that does not fit the set's count, drops the partial set. A set that never completes is never delivered. */
 typedef struct
 {
-	modem_rx rx;
-	uint16_t id;
-	unsigned count;
-	unsigned have;
-	int building;
-	size_t total;
-	uint8_t part[MODEM_CHUNKS * MODEM_CHUNK_DATA];
+        modem_rx rx;
+        p16 id;
+        unsigned count;
+        unsigned have;
+        int building;
+        sized total;
+        p8 part[MODEM_CHUNKS * MODEM_CHUNK_DATA];
 } modem_chunk_rx;
 
-void modem_chunk_open(modem_chunk_rx *cr, const uint8_t *key, size_t klen);
+void modem_chunk_open(modem_chunk_rx *cr, const p8 *key, sized klen);
 
 /* Takes the fresh frames of pcm one by one until one completes a datagram, which is copied to out. Returns its length
    (with *used past the frame that completed it), or 0 when pcm holds no further complete datagram (*used is what was
    taken; call again with the rest), or -1 when the session is closed or the input is refused. */
-int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, size_t *used);
+int modem_chunk_take(modem_chunk_rx *cr, const b16 *pcm, sized n, p8 *out, sized cap, sized *used);
 
 /* ---- framing ----------------------------------------------------------- */
 
@@ -325,111 +321,111 @@ int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *
 #define MODEM_SYNC_WORD 0xC5693DA7u
 
 /* One scratch buffer for the demodulated bits, sized for the largest input the decoder takes. */
-static uint8_t modem_bits[(MODEM_MAX_SAMPLES / MODEM_SYM + 1) * MODEM_SYM_BITS];
+static p8 modem_bits[(MODEM_MAX_SAMPLES / MODEM_SYM + 1) * MODEM_SYM_BITS];
 
-size_t modem_encode_samples(size_t len)
+sized modem_encode_samples(sized len)
 {
-	size_t syms;
+        sized syms;
 
-	if (len > MODEM_PAYLOAD_MAX)
-		return 0;
-	syms = ((MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + len + MODEM_TAG) * 8 + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS;
-	return syms * MODEM_SYM + 2 * MODEM_LEAD;
+        if (len > MODEM_PAYLOAD_MAX)
+                return 0;
+        syms = ((MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + len + MODEM_TAG) * 8 + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS;
+        return syms * MODEM_SYM + 2 * MODEM_LEAD;
 }
 
-static size_t modem_encode_mac(const modem_mac *mac, uint32_t seq, const uint8_t *payload, size_t len,
-			       int16_t *pcm, size_t cap)
+static sized modem_encode_mac(const modem_mac *mac, p32 seq, const p8 *payload, sized len,
+                               b16 *pcm, sized cap)
 {
-	static const uint8_t sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
-	uint8_t fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
-	size_t nb, at, total, body, bit, nbits;
-	int16_t tone[MODEM_TONES + 1][MODEM_SYM];
-	int c, k;
+        static const p8 sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
+        p8 fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
+        sized nb, at, total, body, bit, nbits;
+        b16 tone[MODEM_TONES + 1][MODEM_SYM];
+        int c, k;
 
-	if (!mac->ok || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
-		return 0;
-	total = modem_encode_samples(len);
-	if (total > cap)
-		return 0;
+        if (!mac->ok || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
+                return 0;
+        total = modem_encode_samples(len);
+        if (total > cap)
+                return 0;
 
-	memset(fb, 0x55, MODEM_PRE);
-	nb = MODEM_PRE;
-	memcpy(fb + nb, sync, MODEM_SYNC_BYTES);
-	nb += MODEM_SYNC_BYTES;
-	body = nb;
-	fb[nb++] = (uint8_t)len;
-	fb[nb++] = (uint8_t)(seq >> 24);
-	fb[nb++] = (uint8_t)(seq >> 16);
-	fb[nb++] = (uint8_t)(seq >> 8);
-	fb[nb++] = (uint8_t)seq;
-	if (len > 0)
-		memcpy(fb + nb, payload, len);
-	nb += len;
-	modem_tag(mac, fb + body, MODEM_HDR + len, fb + nb);
-	nb += MODEM_TAG;
+        memory_fill(fb, 0x55, MODEM_PRE);
+        nb = MODEM_PRE;
+        memory_copy(fb + nb, sync, MODEM_SYNC_BYTES);
+        nb += MODEM_SYNC_BYTES;
+        body = nb;
+        fb[nb++] = (p8)len;
+        fb[nb++] = (p8)(seq >> 24);
+        fb[nb++] = (p8)(seq >> 16);
+        fb[nb++] = (p8)(seq >> 8);
+        fb[nb++] = (p8)seq;
+        if (len > 0)
+                memory_copy(fb + nb, payload, len);
+        nb += len;
+        modem_tag(mac, fb + body, MODEM_HDR + len, fb + nb);
+        nb += MODEM_TAG;
 
-	/* Symbols from the frame's bit stream (least significant bit of each byte first). A short last symbol is
-	   padded with zero bits. */
-	nbits = nb * 8;
-	memset(pcm, 0, total * sizeof(int16_t));
-	/* One symbol per tone, computed once for this frame: a symbol is a copy of its tone's samples, so the frame's
-	   samples are written by one copy per symbol and no sample is computed twice. Tone c is c whole cycles. */
-	for (c = 1; c <= MODEM_TONES; c++)
-		for (k = 0; k < MODEM_SYM; k++)
-			tone[c][k] = (int16_t)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
-	at = MODEM_LEAD;
-	for (bit = 0; bit < nbits; bit += MODEM_SYM_BITS)
-	{
-		unsigned v = 0, j;
+        /* Symbols from the frame's bit stream (least significant bit of each byte first). A short last symbol is
+           padded with zero bits. */
+        nbits = nb * 8;
+        memory_zero(pcm, total * sizeof(b16));
+        /* One symbol per tone, computed once for this frame: a symbol is a copy of its tone's samples, so the frame's
+           samples are written by one copy per symbol and no sample is computed twice. Tone c is c whole cycles. */
+        for (c = 1; c <= MODEM_TONES; c++)
+                for (k = 0; k < MODEM_SYM; k++)
+                        tone[c][k] = (b16)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
+        at = MODEM_LEAD;
+        for (bit = 0; bit < nbits; bit += MODEM_SYM_BITS)
+        {
+                unsigned v = 0, j;
 
-		for (j = 0; j < MODEM_SYM_BITS; j++)
-		{
-			size_t b = bit + j;
+                for (j = 0; j < MODEM_SYM_BITS; j++)
+                {
+                        sized b = bit + j;
 
-			if (b < nbits && ((fb[b / 8] >> (b % 8)) & 1))
-				v |= 1u << j;
-		}
-		memcpy(pcm + at, tone[(int)v + 1], sizeof tone[0]);
-		at += MODEM_SYM;
-	}
-	return at + MODEM_LEAD;
+                        if (b < nbits && ((fb[b / 8] >> (b % 8)) & 1))
+                                v |= 1u << j;
+                }
+                memory_copy(pcm + at, tone[(int)v + 1], sizeof tone[0]);
+                at += MODEM_SYM;
+        }
+        return at + MODEM_LEAD;
 }
 
-size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t *payload, size_t len,
-		    int16_t *pcm, size_t cap)
+sized modem_encode(const p8 *key, sized klen, p32 seq, const p8 *payload, sized len,
+                    b16 *pcm, sized cap)
 {
-	modem_mac mac;
-	size_t n;
+        modem_mac mac;
+        sized n;
 
-	modem_mac_open(&mac, key, klen);
-	n = modem_encode_mac(&mac, seq, payload, len, pcm, cap);
-	memset(&mac, 0, sizeof mac);
-	return n;
+        modem_mac_open(&mac, key, klen);
+        n = modem_encode_mac(&mac, seq, payload, len, pcm, cap);
+        memory_zero(&mac, sizeof mac);
+        return n;
 }
 
 /* Reads count bytes, least significant bit first, from the bit array at bit position p. */
-static int modem_read_bytes(const uint8_t *bits, size_t nb, size_t p, uint8_t *dst, size_t count)
+static int modem_read_bytes(const p8 *bits, sized nb, sized p, p8 *dst, sized count)
 {
-	size_t i, j;
+        sized i, j;
 
-	if (p > nb || count > (nb - p) / 8)
-		return 0;
-	for (i = 0; i < count; i++)
-	{
-		uint8_t v = 0;
+        if (p > nb || count > (nb - p) / 8)
+                return 0;
+        for (i = 0; i < count; i++)
+        {
+                p8 v = 0;
 
-		for (j = 0; j < 8; j++)
-			v |= (uint8_t)(bits[p + 8 * i + j] << j);
-		dst[i] = v;
-	}
-	return 1;
+                for (j = 0; j < 8; j++)
+                        v |= (p8)(bits[p + 8 * i + j] << j);
+                dst[i] = v;
+        }
+        return 1;
 }
 
 /* Notes that the bits before bit are a frame the search refused, so a consumer of the capture may move past it. */
-static void modem_cut(size_t *cut_bit, size_t bit)
+static void modem_cut(sized *cut_bit, sized bit)
 {
-	if (bit > *cut_bit)
-		*cut_bit = bit;
+        if (bit > *cut_bit)
+                *cut_bit = bit;
 }
 
 /* The frames one decode call has authenticated. The phases near the true one all decode the same frame, so it is found
@@ -438,110 +434,110 @@ static void modem_cut(size_t *cut_bit, size_t bit)
 #define MODEM_MEMO 4
 typedef struct
 {
-	uint8_t frame[MODEM_MEMO][MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
-	size_t total[MODEM_MEMO];
-	unsigned count, next;
+        p8 frame[MODEM_MEMO][MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
+        sized total[MODEM_MEMO];
+        unsigned count, next;
 } modem_memo;
 
-static int modem_memo_has(const modem_memo *m, const uint8_t *bytes, size_t total)
+static int modem_memo_has(const modem_memo *m, const p8 *bytes, sized total)
 {
-	unsigned i;
-	size_t t;
+        unsigned i;
+        sized t;
 
-	for (i = 0; i < m->count; i++) {
-		unsigned diff = 0;
+        for (i = 0; i < m->count; i++) {
+                unsigned diff = 0;
 
-		if (m->total[i] != total)
-			continue;
-		for (t = 0; t < total; t++)
-			diff |= (unsigned)(m->frame[i][t] ^ bytes[t]);
-		if (!diff)
-			return 1;
-	}
-	return 0;
+                if (m->total[i] != total)
+                        continue;
+                for (t = 0; t < total; t++)
+                        diff |= (unsigned)(m->frame[i][t] ^ bytes[t]);
+                if (!diff)
+                        return 1;
+        }
+        return 0;
 }
 
-static void modem_memo_add(modem_memo *m, const uint8_t *bytes, size_t total)
+static void modem_memo_add(modem_memo *m, const p8 *bytes, sized total)
 {
-	memcpy(m->frame[m->next], bytes, total);
-	m->total[m->next] = total;
-	m->next = (m->next + 1) % MODEM_MEMO;
-	if (m->count < MODEM_MEMO)
-		m->count++;
+        memory_copy(m->frame[m->next], bytes, total);
+        m->total[m->next] = total;
+        m->next = (m->next + 1) % MODEM_MEMO;
+        if (m->count < MODEM_MEMO)
+                m->count++;
 }
 
 /* Looks for a frame in the bit array. The sync word is matched with a rolling 32-bit window, so the scan costs
    one shift per bit. Sets *refusal if a candidate had a valid sync and length but a bad tag, or, when gated, an
    authentic frame that is not fresh after last: such a frame is passed over, so a replay ahead of a fresh frame
    does not hide it. */
-static int modem_find_frame(const uint8_t *bits, size_t nb, const modem_mac *mac,
-			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last, size_t *end_bit, size_t *cut_bit,
-			    modem_memo *memo)
+static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
+                            p8 *out, sized cap, p32 *seq, int *refusal, int gated, p32 last, sized *end_bit, sized *cut_bit,
+                            modem_memo *memo)
 {
-	uint32_t window = 0;
-	size_t i;
+        p32 window = 0;
+        sized i;
 
-	if (nb < 32)
-		return -1;
-	for (i = 0; i < 32; i++)
-		window |= (uint32_t)bits[i] << i;
+        if (nb < 32)
+                return -1;
+        for (i = 0; i < 32; i++)
+                window |= (p32)bits[i] << i;
 
-	for (i = 0;; i++)
-	{
-		uint8_t buf[MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
-		uint8_t tag[MODEM_TAG];
-		size_t len, p = i + 32, t;
-		unsigned diff = 0;
+        for (i = 0;; i++)
+        {
+                p8 buf[MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
+                p8 tag[MODEM_TAG];
+                sized len, p = i + 32, t;
+                unsigned diff = 0;
 
-		if (window == MODEM_SYNC_WORD && modem_read_bytes(bits, nb, p, buf, MODEM_HDR))
-		{
-			len = buf[0];
-			if (len <= MODEM_PAYLOAD_MAX && modem_read_bytes(bits, nb, p, buf, MODEM_HDR + len + MODEM_TAG))
-			{
-				if (modem_memo_has(memo, buf, MODEM_HDR + len + MODEM_TAG))
-					diff = 0;
-				else {
-					modem_tag(mac, buf, MODEM_HDR + len, tag);
-					for (t = 0; t < MODEM_TAG; t++)
-						diff |= (unsigned)(tag[t] ^ buf[MODEM_HDR + len + t]);
-					if (!diff)
-						modem_memo_add(memo, buf, MODEM_HDR + len + MODEM_TAG);
-				}
-				if (diff) {
-					*refusal = 1;
-					modem_cut(cut_bit, i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG));
-				}
-				else if (len <= cap)
-				{
-					uint32_t got = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16) |
-					       ((uint32_t)buf[3] << 8) | buf[4];
-					if (gated && !modem_fresh(last, got))
-					{
-						*refusal = 1;
-						modem_cut(cut_bit, i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG));
-					}
-					else
-						{
-							*seq = got;
-						memcpy(out, buf + MODEM_HDR, len);
-						*end_bit = i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG);
-						return (int)len;
-						}
-				}
-			}
-		}
-		if (p >= nb)
-			break;
-		window = (window >> 1) | ((uint32_t)bits[p] << 31);
-	}
-	return -1;
+                if (window == MODEM_SYNC_WORD && modem_read_bytes(bits, nb, p, buf, MODEM_HDR))
+                {
+                        len = buf[0];
+                        if (len <= MODEM_PAYLOAD_MAX && modem_read_bytes(bits, nb, p, buf, MODEM_HDR + len + MODEM_TAG))
+                        {
+                                if (modem_memo_has(memo, buf, MODEM_HDR + len + MODEM_TAG))
+                                        diff = 0;
+                                else {
+                                        modem_tag(mac, buf, MODEM_HDR + len, tag);
+                                        for (t = 0; t < MODEM_TAG; t++)
+                                                diff |= (unsigned)(tag[t] ^ buf[MODEM_HDR + len + t]);
+                                        if (!diff)
+                                                modem_memo_add(memo, buf, MODEM_HDR + len + MODEM_TAG);
+                                }
+                                if (diff) {
+                                        *refusal = 1;
+                                        modem_cut(cut_bit, i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG));
+                                }
+                                else if (len <= cap)
+                                {
+                                        p32 got = ((p32)buf[1] << 24) | ((p32)buf[2] << 16) |
+                                               ((p32)buf[3] << 8) | buf[4];
+                                        if (gated && !modem_fresh(last, got))
+                                        {
+                                                *refusal = 1;
+                                                modem_cut(cut_bit, i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG));
+                                        }
+                                        else
+                                                {
+                                                        *seq = got;
+                                                memory_copy(out, buf + MODEM_HDR, len);
+                                                *end_bit = i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG);
+                                                return (int)len;
+                                                }
+                                }
+                        }
+                }
+                if (p >= nb)
+                        break;
+                window = (window >> 1) | ((p32)bits[p] << 31);
+        }
+        return -1;
 }
 
 /* Symbol decisions for every start sample, computed once. A window that starts at s correlates with tone c as
    P*cos(c*s) + Q*sin(c*s), where P and Q are the sums of x[t]*cos and x[t]*sin over the window in absolute
    sample positions t. P and Q slide one sample at a time, so each start costs about 7*MODEM_TONES multiplies,
    not the 2*MODEM_TONES*MODEM_SYM of a window computed afresh. The result is exact integer arithmetic. */
-static uint8_t modem_best[MODEM_MAX_SAMPLES];
+static p8 modem_best[MODEM_MAX_SAMPLES];
 #define MODEM_BLOCK 128 /* starts per block of the sweep: the block's state stays in L1 while each tone runs over it */
 #define MODEM_TIE_BITS 5 /* the low bits of a block entry hold the tone, so one compare takes the energy and the tie rule */
 
@@ -549,340 +545,340 @@ static uint8_t modem_best[MODEM_MAX_SAMPLES];
    MODEM_SYM: the squared magnitude of the two rounded products (P*cos + Q*sin) >> 24 and (Q*cos - P*sin) >> 24. The four
    products are three multiplies, by the Gauss identity: k1 = cos*(P+Q), then P*cos + Q*sin = k1 - Q*(cos-sin) and
    Q*cos - P*sin = k1 - P*(cos+sin). Exact, so the shifted values are the ones the four-multiply form gives. */
-static int64_t modem_tone_energy(int64_t P, int64_t Q, int64_t cs, int64_t ss)
+static b64 modem_tone_energy(b64 P, b64 Q, b64 cs, b64 ss)
 {
-	int64_t k1 = cs * (P + Q);
-	int64_t mc = (k1 - Q * (cs - ss)) >> 24;
-	int64_t ms = (k1 - P * (cs + ss)) >> 24;
+        b64 k1 = cs * (P + Q);
+        b64 mc = (k1 - Q * (cs - ss)) >> 24;
+        b64 ms = (k1 - P * (cs + ss)) >> 24;
 
-	return mc * mc + ms * ms;
+        return mc * mc + ms * ms;
 }
 
-static int modem_decode_core(const int16_t *pcm, size_t n, const modem_mac *mac,
-			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last, size_t *used,
-			     size_t *cut)
+static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
+                             p8 *out, sized cap, p32 *seq, unsigned *refused, int gated, p32 last, sized *used,
+                             sized *cut)
 {
-	int64_t P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
-	size_t ix[MODEM_TONES + 1];
-	int64_t blk_e[MODEM_BLOCK], blk_d[MODEM_BLOCK];
-	size_t s, s0, s1, off, cut_samples = 0;
-	int refusal = 0, c, k;
-	uint8_t pick[MODEM_PAYLOAD_MAX];
-	uint32_t pick_seq = 0;
-	size_t pick_end = 0, pick_len = 0;
-	int found = 0;
-	modem_memo memo;
+        b64 P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
+        sized ix[MODEM_TONES + 1];
+        b64 blk_e[MODEM_BLOCK], blk_d[MODEM_BLOCK];
+        sized s, s0, s1, off, cut_samples = 0;
+        int refusal = 0, c, k;
+        p8 pick[MODEM_PAYLOAD_MAX];
+        p32 pick_seq = 0;
+        sized pick_end = 0, pick_len = 0;
+        int found = 0;
+        modem_memo memo;
 
-	if (!pcm || !out || !seq || !mac->ok || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
-		return -1;
-	memo.count = 0;
-	memo.next = 0;
+        if (!pcm || !out || !seq || !mac->ok || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
+                return -1;
+        memo.count = 0;
+        memo.next = 0;
 
-	/* The window for start 0 covers samples 0..MODEM_SYM-1: P and Q are the sums over absolute positions t, with the
-	   tone index (c*t) mod MODEM_SYM. Moving the window from s-1 to s takes out the sample at s-1 and puts in the one at
-	   s+N-1, and those two share a tone index, since they are MODEM_SYM apart: the update is one difference times one table
-	   entry. ix[c] holds c*(s-1) mod MODEM_SYM for that update, then steps by c to c*s, the rotation start s is read at. */
-	for (c = 1; c <= MODEM_TONES; c++) {
-		P[c] = 0;
-		Q[c] = 0;
-		ix[c] = 0;
-		for (k = 0; k < MODEM_SYM; k++) {
-			size_t idx = ((size_t)c * (size_t)k) % MODEM_SYM;
+        /* The window for start 0 covers samples 0..MODEM_SYM-1: P and Q are the sums over absolute positions t, with the
+           tone index (c*t) mod MODEM_SYM. Moving the window from s-1 to s takes out the sample at s-1 and puts in the one at
+           s+N-1, and those two share a tone index, since they are MODEM_SYM apart: the update is one difference times one table
+           entry. ix[c] holds c*(s-1) mod MODEM_SYM for that update, then steps by c to c*s, the rotation start s is read at. */
+        for (c = 1; c <= MODEM_TONES; c++) {
+                P[c] = 0;
+                Q[c] = 0;
+                ix[c] = 0;
+                for (k = 0; k < MODEM_SYM; k++) {
+                        sized idx = ((sized)c * (sized)k) % MODEM_SYM;
 
-			P[c] += (int64_t)pcm[k] * modem_cos_tab[idx];
-			Q[c] += (int64_t)pcm[k] * modem_sin_tab[idx];
-		}
-	}
-	/* Start 0 is read at rotation 0, where ix already is. The starts after it go in blocks of MODEM_BLOCK. Within a block
-	   each tone runs through its starts with its sums in registers, and the table values carry from one start to the
-	   next: a start's update uses the values its predecessor was read at. The block keeps one packed entry per start,
-	   energy << MODEM_TIE_BITS | (the tone's index, complemented): a larger entry is a larger energy, and at a tie the
-	   lower tone has the larger low bits, so one strict compare in tone order gives the same tie rule as before. Each
-	   tone's state is carried from one block to the next in P, Q and ix. */
-	{
-		int64_t cs0 = modem_cos_tab[0], ss0 = modem_sin_tab[0];
-		int64_t best = -1;
-		unsigned bestv = 0;
+                        P[c] += (b64)pcm[k] * modem_cos_tab[idx];
+                        Q[c] += (b64)pcm[k] * modem_sin_tab[idx];
+                }
+        }
+        /* Start 0 is read at rotation 0, where ix already is. The starts after it go in blocks of MODEM_BLOCK. Within a block
+           each tone runs through its starts with its sums in registers, and the table values carry from one start to the
+           next: a start's update uses the values its predecessor was read at. The block keeps one packed entry per start,
+           energy << MODEM_TIE_BITS | (the tone's index, complemented): a larger entry is a larger energy, and at a tie the
+           lower tone has the larger low bits, so one strict compare in tone order gives the same tie rule as before. Each
+           tone's state is carried from one block to the next in P, Q and ix. */
+        {
+                b64 cs0 = modem_cos_tab[0], ss0 = modem_sin_tab[0];
+                b64 best = -1;
+                unsigned bestv = 0;
 
-		for (c = 1; c <= MODEM_TONES; c++) {
-			int64_t e = modem_tone_energy(P[c], Q[c], cs0, ss0);
+                for (c = 1; c <= MODEM_TONES; c++) {
+                        b64 e = modem_tone_energy(P[c], Q[c], cs0, ss0);
 
-			if (e > best) {
-				best = e;
-				bestv = (unsigned)(c - 1);
-			}
-		}
-		modem_best[0] = (uint8_t)bestv;
-	}
-	for (s0 = 1; s0 + MODEM_SYM <= n; s0 = s1) {
-		size_t starts = n - MODEM_SYM + 1; /* the starts are 0 .. n - MODEM_SYM: this is one past the last */
+                        if (e > best) {
+                                best = e;
+                                bestv = (unsigned)(c - 1);
+                        }
+                }
+                modem_best[0] = (p8)bestv;
+        }
+        for (s0 = 1; s0 + MODEM_SYM <= n; s0 = s1) {
+                sized starts = n - MODEM_SYM + 1; /* the starts are 0 .. n - MODEM_SYM: this is one past the last */
 
-		s1 = s0 + MODEM_BLOCK < starts ? s0 + MODEM_BLOCK : starts;
-		for (s = s0; s < s1; s++) {
-			blk_d[s - s0] = (int64_t)pcm[s + MODEM_SYM - 1] - pcm[s - 1];
-			blk_e[s - s0] = -1;
-		}
-		for (c = 1; c <= MODEM_TONES; c++) {
-			int64_t Pc = P[c], Qc = Q[c];
-			size_t r = ix[c], t, len = s1 - s0;
-			int64_t cp = modem_cos_tab[r], sp = modem_sin_tab[r];
-			int64_t tie = (int64_t)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(c - 1));
+                s1 = s0 + MODEM_BLOCK < starts ? s0 + MODEM_BLOCK : starts;
+                for (s = s0; s < s1; s++) {
+                        blk_d[s - s0] = (b64)pcm[s + MODEM_SYM - 1] - pcm[s - 1];
+                        blk_e[s - s0] = -1;
+                }
+                for (c = 1; c <= MODEM_TONES; c++) {
+                        b64 Pc = P[c], Qc = Q[c];
+                        sized r = ix[c], t, len = s1 - s0;
+                        b64 cp = modem_cos_tab[r], sp = modem_sin_tab[r];
+                        b64 tie = (b64)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(c - 1));
 
-			for (t = 0; t < len; t++) {
-				int64_t d = blk_d[t], cs, ss, e;
+                        for (t = 0; t < len; t++) {
+                                b64 d = blk_d[t], cs, ss, e;
 
-				Pc += d * cp;
-				Qc += d * sp;
-				r += (size_t)c;
-				if (r >= MODEM_SYM)
-					r -= MODEM_SYM;
-				cs = modem_cos_tab[r];
-				ss = modem_sin_tab[r];
-				cp = cs;
-				sp = ss;
-				e = (modem_tone_energy(Pc, Qc, cs, ss) << MODEM_TIE_BITS) | tie;
-				if (e > blk_e[t])
-					blk_e[t] = e;
-			}
-			P[c] = Pc;
-			Q[c] = Qc;
-			ix[c] = r;
-		}
-		for (s = s0; s < s1; s++)
-			modem_best[s] = (uint8_t)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(blk_e[s - s0] & ((1 << MODEM_TIE_BITS) - 1)));
-	}
+                                Pc += d * cp;
+                                Qc += d * sp;
+                                r += (sized)c;
+                                if (r >= MODEM_SYM)
+                                        r -= MODEM_SYM;
+                                cs = modem_cos_tab[r];
+                                ss = modem_sin_tab[r];
+                                cp = cs;
+                                sp = ss;
+                                e = (modem_tone_energy(Pc, Qc, cs, ss) << MODEM_TIE_BITS) | tie;
+                                if (e > blk_e[t])
+                                        blk_e[t] = e;
+                        }
+                        P[c] = Pc;
+                        Q[c] = Qc;
+                        ix[c] = r;
+                }
+                for (s = s0; s < s1; s++)
+                        modem_best[s] = (p8)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(blk_e[s - s0] & ((1 << MODEM_TIE_BITS) - 1)));
+        }
 
-	/* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
-	   at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass
-	   over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
-	   the end of the search. */
-	for (off = 0; off < MODEM_SYM; off++) {
-		size_t nb = 0, at, endbit = 0, end, cut_bit = 0;
-		uint8_t cand[MODEM_PAYLOAD_MAX];
-		uint32_t cand_seq = 0;
-		int r;
+        /* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
+           at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass
+           over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
+           the end of the search. */
+        for (off = 0; off < MODEM_SYM; off++) {
+                sized nb = 0, at, endbit = 0, end, cut_bit = 0;
+                p8 cand[MODEM_PAYLOAD_MAX];
+                p32 cand_seq = 0;
+                int r;
 
-		for (at = off; at + MODEM_SYM <= n; at += MODEM_SYM) {
-			unsigned j, v = modem_best[at];
+                for (at = off; at + MODEM_SYM <= n; at += MODEM_SYM) {
+                        unsigned j, v = modem_best[at];
 
-			for (j = 0; j < MODEM_SYM_BITS; j++)
-				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
-		}
+                        for (j = 0; j < MODEM_SYM_BITS; j++)
+                                modem_bits[nb++] = (p8)((v >> j) & 1);
+                }
 
-		r = modem_find_frame(modem_bits, nb, mac, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
-		if (r < 0) {
-			if (cut_bit) {
-				size_t at_sample = off + ((cut_bit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
+                r = modem_find_frame(modem_bits, nb, mac, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
+                if (r < 0) {
+                        if (cut_bit) {
+                                sized at_sample = off + ((cut_bit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
 
-				if (at_sample > cut_samples)
-					cut_samples = at_sample;
-			}
-			continue;
-		}
-		end = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
-		if (!found || end < pick_end) {
-			found = 1;
-			pick_end = end;
-			pick_len = (size_t)r;
-			pick_seq = cand_seq;
-			memcpy(pick, cand, pick_len);
-		}
-	}
-	if (found) {
-		memcpy(out, pick, pick_len);
-		*seq = pick_seq;
-		if (used)
-			*used = pick_end;
-		return (int)pick_len;
-	}
-	if (cut)
-		*cut = cut_samples;
-	if (refused && refusal)
-		*refused = 1;
-	return -1;
+                                if (at_sample > cut_samples)
+                                        cut_samples = at_sample;
+                        }
+                        continue;
+                }
+                end = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
+                if (!found || end < pick_end) {
+                        found = 1;
+                        pick_end = end;
+                        pick_len = (sized)r;
+                        pick_seq = cand_seq;
+                        memory_copy(pick, cand, pick_len);
+                }
+        }
+        if (found) {
+                memory_copy(out, pick, pick_len);
+                *seq = pick_seq;
+                if (used)
+                        *used = pick_end;
+                return (int)pick_len;
+        }
+        if (cut)
+                *cut = cut_samples;
+        if (refused && refusal)
+                *refused = 1;
+        return -1;
 }
 
-int modem_decode(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
-		 uint8_t *out, size_t cap, uint32_t *seq)
+int modem_decode(const b16 *pcm, sized n, const p8 *key, sized klen,
+                 p8 *out, sized cap, p32 *seq)
 {
-	modem_mac mac;
-	int r;
+        modem_mac mac;
+        int r;
 
-	modem_mac_open(&mac, key, klen);
-	r = modem_decode_core(pcm, n, &mac, out, cap, seq, 0, 0, 0, 0, 0);
-	memset(&mac, 0, sizeof mac);
-	return r;
+        modem_mac_open(&mac, key, klen);
+        r = modem_decode_core(pcm, n, &mac, out, cap, seq, 0, 0, 0, 0, 0);
+        memory_zero(&mac, sizeof mac);
+        return r;
 }
 
-int modem_fresh(uint32_t last, uint32_t seq)
+int modem_fresh(p32 last, p32 seq)
 {
-	uint32_t step = seq - last;
+        p32 step = seq - last;
 
-	/* step is unsigned: 0 is a repeat, anything above the window is refused, and so is a wrap back. */
-	return step >= 1 && step <= MODEM_WINDOW;
+        /* step is unsigned: 0 is a repeat, anything above the window is refused, and so is a wrap back. */
+        return step >= 1 && step <= MODEM_WINDOW;
 }
 
-void modem_rx_open(modem_rx *rx, const uint8_t *key, size_t klen)
+void modem_rx_open(modem_rx *rx, const p8 *key, sized klen)
 {
-	modem_mac_open(&rx->mac, key, klen);
-	rx->last = 0;
-	rx->refused = 0;
-	rx->closed = 0;
-	rx->consume = 0;
+        modem_mac_open(&rx->mac, key, klen);
+        rx->last = 0;
+        rx->refused = 0;
+        rx->closed = 0;
+        rx->consume = 0;
 }
 
 static int modem_refuse(modem_rx *rx)
 {
-	rx->refused++;
-	if (rx->refused >= MODEM_REFUSE_LIMIT)
-		rx->closed = 1;
-	return -1;
+        rx->refused++;
+        if (rx->refused >= MODEM_REFUSE_LIMIT)
+                rx->closed = 1;
+        return -1;
 }
 
-int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used)
+int modem_rx_next(modem_rx *rx, const b16 *pcm, sized n, p8 *out, sized cap, p32 *seq, sized *used)
 {
-	unsigned refused = 0;
-	size_t frame_end = 0, cut = 0;
-	int r;
+        unsigned refused = 0;
+        sized frame_end = 0, cut = 0;
+        int r;
 
-	if (used)
-		*used = 0;
-	if (!rx || rx->closed)
-		return -1;
-	r = modem_decode_core(pcm, n, &rx->mac, out, cap, seq, &refused, 1, rx->last, &frame_end, &cut);
-	if (r < 0)
-	{
-		if (used && rx->consume)
-			*used = cut;
-		return refused ? modem_refuse(rx) : -1;
-	}
-	if (!modem_fresh(rx->last, *seq))
-		return modem_refuse(rx);
-	rx->last = *seq;
-	if (used)
-		*used = frame_end;
-	return r;
+        if (used)
+                *used = 0;
+        if (!rx || rx->closed)
+                return -1;
+        r = modem_decode_core(pcm, n, &rx->mac, out, cap, seq, &refused, 1, rx->last, &frame_end, &cut);
+        if (r < 0)
+        {
+                if (used && rx->consume)
+                        *used = cut;
+                return refused ? modem_refuse(rx) : -1;
+        }
+        if (!modem_fresh(rx->last, *seq))
+                return modem_refuse(rx);
+        rx->last = *seq;
+        if (used)
+                *used = frame_end;
+        return r;
 }
 
-int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq)
+int modem_rx_frame(modem_rx *rx, const b16 *pcm, sized n, p8 *out, sized cap, p32 *seq)
 {
-	return modem_rx_next(rx, pcm, n, out, cap, seq, 0);
+        return modem_rx_next(rx, pcm, n, out, cap, seq, 0);
 }
 
 /* ---- datagram chunks, the code ---------------------------------------- */
 
-void modem_tx_open(modem_tx *tx, const uint8_t *key, size_t klen)
+void modem_tx_open(modem_tx *tx, const p8 *key, sized klen)
 {
-	modem_mac_open(&tx->mac, key, klen);
-	tx->seq = 0;
-	tx->id = 0;
+        modem_mac_open(&tx->mac, key, klen);
+        tx->seq = 0;
+        tx->id = 0;
 }
 
-size_t modem_tx_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *pcm, size_t cap)
+sized modem_tx_datagram(modem_tx *tx, const p8 *dg, sized len, b16 *pcm, sized cap)
 {
-	uint8_t payload[MODEM_PAYLOAD_MAX];
-	size_t count, index, total = 0;
+        p8 payload[MODEM_PAYLOAD_MAX];
+        sized count, index, total = 0;
 
-	if (!tx || !dg || len == 0 || len > MODEM_DATAGRAM_MAX)
-		return 0;
-	count = (len + MODEM_CHUNK_DATA - 1) / MODEM_CHUNK_DATA;
-	for (index = 0; index < count; index++) {
-		size_t take = len - index * MODEM_CHUNK_DATA, got;
+        if (!tx || !dg || len == 0 || len > MODEM_DATAGRAM_MAX)
+                return 0;
+        count = (len + MODEM_CHUNK_DATA - 1) / MODEM_CHUNK_DATA;
+        for (index = 0; index < count; index++) {
+                sized take = len - index * MODEM_CHUNK_DATA, got;
 
-		if (take > MODEM_CHUNK_DATA)
-			take = MODEM_CHUNK_DATA;
-		payload[0] = (uint8_t)(tx->id >> 8);
-		payload[1] = (uint8_t)tx->id;
-		payload[2] = (uint8_t)index;
-		payload[3] = (uint8_t)count;
-		memcpy(payload + MODEM_CHUNK_HEAD, dg + index * MODEM_CHUNK_DATA, take);
-		got = modem_encode_mac(&tx->mac, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
-		if (got == 0)
-			return 0;
-		total += got;
-	}
-	tx->id++;
-	return total;
+                if (take > MODEM_CHUNK_DATA)
+                        take = MODEM_CHUNK_DATA;
+                payload[0] = (p8)(tx->id >> 8);
+                payload[1] = (p8)tx->id;
+                payload[2] = (p8)index;
+                payload[3] = (p8)count;
+                memory_copy(payload + MODEM_CHUNK_HEAD, dg + index * MODEM_CHUNK_DATA, take);
+                got = modem_encode_mac(&tx->mac, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
+                if (got == 0)
+                        return 0;
+                total += got;
+        }
+        tx->id++;
+        return total;
 }
 
-void modem_chunk_open(modem_chunk_rx *cr, const uint8_t *key, size_t klen)
+void modem_chunk_open(modem_chunk_rx *cr, const p8 *key, sized klen)
 {
-	modem_rx_open(&cr->rx, key, klen);
-	cr->id = 0;
-	cr->count = 0;
-	cr->have = 0;
-	cr->building = 0;
-	cr->total = 0;
+        modem_rx_open(&cr->rx, key, klen);
+        cr->id = 0;
+        cr->count = 0;
+        cr->have = 0;
+        cr->building = 0;
+        cr->total = 0;
 }
 
 /* Puts one chunk into its set. Returns the datagram's length when this chunk completes it, else 0. */
-static size_t modem_chunk_put(modem_chunk_rx *cr, const uint8_t *p, size_t len, uint8_t *out, size_t cap)
+static sized modem_chunk_put(modem_chunk_rx *cr, const p8 *p, sized len, p8 *out, sized cap)
 {
-	uint16_t id;
-	unsigned index, count, data;
+        p16 id;
+        unsigned index, count, data;
 
-	if (len < MODEM_CHUNK_HEAD) {
-		cr->building = 0;
-		return 0;
-	}
-	id = (uint16_t)(((unsigned)p[0] << 8) | p[1]);
-	index = p[2];
-	count = p[3];
-	data = (unsigned)(len - MODEM_CHUNK_HEAD);
-	if (count == 0 || count > MODEM_CHUNKS || index >= count || data == 0 || data > MODEM_CHUNK_DATA ||
-	    (index + 1 < count && data != MODEM_CHUNK_DATA)) {
-		cr->building = 0;
-		return 0;
-	}
-	if (!cr->building || id != cr->id || count != cr->count) {
-		cr->building = 1;
-		cr->id = id;
-		cr->count = count;
-		cr->have = 0;
-		cr->total = 0;
-	}
-	memcpy(cr->part + index * MODEM_CHUNK_DATA, p + MODEM_CHUNK_HEAD, data);
-	cr->have |= 1u << index;
-	if (index + 1 == count)
-		cr->total = (size_t)index * MODEM_CHUNK_DATA + data;
-	if (cr->total == 0 || cr->have != (1u << count) - 1)
-		return 0;
-	cr->building = 0;
-	if (cr->total > MODEM_DATAGRAM_MAX || cr->total > cap)
-		return 0;
-	memcpy(out, cr->part, cr->total);
-	return cr->total;
+        if (len < MODEM_CHUNK_HEAD) {
+                cr->building = 0;
+                return 0;
+        }
+        id = (p16)(((unsigned)p[0] << 8) | p[1]);
+        index = p[2];
+        count = p[3];
+        data = (unsigned)(len - MODEM_CHUNK_HEAD);
+        if (count == 0 || count > MODEM_CHUNKS || index >= count || data == 0 || data > MODEM_CHUNK_DATA ||
+            (index + 1 < count && data != MODEM_CHUNK_DATA)) {
+                cr->building = 0;
+                return 0;
+        }
+        if (!cr->building || id != cr->id || count != cr->count) {
+                cr->building = 1;
+                cr->id = id;
+                cr->count = count;
+                cr->have = 0;
+                cr->total = 0;
+        }
+        memory_copy(cr->part + index * MODEM_CHUNK_DATA, p + MODEM_CHUNK_HEAD, data);
+        cr->have |= 1u << index;
+        if (index + 1 == count)
+                cr->total = (sized)index * MODEM_CHUNK_DATA + data;
+        if (cr->total == 0 || cr->have != (1u << count) - 1)
+                return 0;
+        cr->building = 0;
+        if (cr->total > MODEM_DATAGRAM_MAX || cr->total > cap)
+                return 0;
+        memory_copy(out, cr->part, cr->total);
+        return cr->total;
 }
 
-int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, size_t *used)
+int modem_chunk_take(modem_chunk_rx *cr, const b16 *pcm, sized n, p8 *out, sized cap, sized *used)
 {
-	uint8_t payload[MODEM_PAYLOAD_MAX];
-	size_t at = 0;
+        p8 payload[MODEM_PAYLOAD_MAX];
+        sized at = 0;
 
-	if (used)
-		*used = 0;
-	if (!cr || !pcm || !out)
-		return -1;
-	for (;;) {
-		size_t took = 0;
-		uint32_t seq;
-		int len = modem_rx_next(&cr->rx, pcm + at, n - at, payload, sizeof payload, &seq, &took);
-		size_t whole;
+        if (used)
+                *used = 0;
+        if (!cr || !pcm || !out)
+                return -1;
+        for (;;) {
+                sized took = 0;
+                p32 seq;
+                int len = modem_rx_next(&cr->rx, pcm + at, n - at, payload, sizeof payload, &seq, &took);
+                sized whole;
 
-		if (len < 0) {
-			at += took;
-			if (used)
-				*used = at;
-			return cr->rx.closed ? -1 : 0;
-		}
-		at += took;
-		whole = modem_chunk_put(cr, payload, (size_t)len, out, cap);
-		if (whole) {
-			if (used)
-				*used = at;
-			return (int)whole;
-		}
-	}
+                if (len < 0) {
+                        at += took;
+                        if (used)
+                                *used = at;
+                        return cr->rx.closed ? -1 : 0;
+                }
+                at += took;
+                whole = modem_chunk_put(cr, payload, (sized)len, out, cap);
+                if (whole) {
+                        if (used)
+                                *used = at;
+                        return (int)whole;
+                }
+        }
 }
 
 /* ---- the send: a file over the sound card -------------------------- */
@@ -919,13 +915,13 @@ _Static_assert(MODEM_DATAGRAM_MAX == WATERLINK_DATAGRAM && MODEM_CHUNKS * MODEM_
    MODEM_CHUNKS of them. modem_tx_datagram refuses a datagram that does not fit, so a short buffer is a refusal, not a
    wrong sound. */
 #define MODEM_FRAME_SAMPLES_MAX ((((MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG) * 8 + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM + 2 * MODEM_LEAD)
-#define MODEM_SEND_SAMPLES ((size_t)MODEM_CHUNKS * MODEM_FRAME_SAMPLES_MAX)
+#define MODEM_SEND_SAMPLES ((sized)MODEM_CHUNKS * MODEM_FRAME_SAMPLES_MAX)
 #define MODEM_SEND_PER_SEND 16384u /* mono samples in one write: 16384 stereo frames of four bytes, 64 KB, as the tone sends */
 #define MODEM_SEND_TIMEOUT_MS 10000
 
 static struct ctl modem_ctl;
 static unsigned char modem_frame[20 + 65536];
-static int16_t modem_pcm[MODEM_SEND_SAMPLES];
+static b16 modem_pcm[MODEM_SEND_SAMPLES];
 
 /* Reads up to n bytes, or fewer only at the end of the file. Answers the count, or a negative error. */
 static bipolar modem_send_read(bipolar handle, p8 address_to into, positive n)
@@ -947,7 +943,7 @@ static bipolar modem_send_read(bipolar handle, p8 address_to into, positive n)
 
 /* Plays count samples through the open stream c: the left channel carries left, and the right carries right, or silence when
    right is null. Answers 0, or -1 when the connection failed. Each write is waited for within c's budget, which the call starts. */
-static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const int16_t address_to left, const int16_t address_to right, positive count)
+static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const b16 address_to left, const b16 address_to right, positive count)
 {
         positive at = 0;
 
@@ -974,7 +970,7 @@ static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const in
 
 /* Plays count samples through the file's stream on the left channel: the right is silent, so the file's stream is the left alone.
    Answers 0, or -1 when the connection failed. */
-static bipolar modem_send_pcm(unsigned long channel, const int16_t address_to pcm, positive count)
+static bipolar modem_send_pcm(unsigned long channel, const b16 address_to pcm, positive count)
 {
         return modem_play_samples(&modem_ctl, channel, pcm, 0, count);
 }
@@ -986,22 +982,22 @@ static bipolar modem_send_pcm(unsigned long channel, const int16_t address_to pc
 */
 #define MODEM_SEQ_RECORD (MODEM_MAC + 4 + 2) /* the fingerprint is the full HMAC: the records a version 1 box kept still read */
 
-static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_MAC])
+static void modem_seq_fingerprint(const p8 *key, p8 out[MODEM_MAC])
 {
-        static const uint8_t label[] = "waterlink modem sequence";
+        static const p8 label[] = "waterlink modem sequence";
 
         modem_mac mac;
 
         modem_mac_open(&mac, key, 32);
         modem_hmac(&mac, label, sizeof label - 1, out);
-        memset(&mac, 0, sizeof mac);
+        memory_zero(&mac, sizeof mac);
 }
 
 /* Reads the count for key into seq and id. Answers 0, or the negative error of a file that is there and is not a private
    record: that is refused rather than read as a count of 0, which would send numbers the receiver has already taken. */
-static bipolar modem_seq_load(string_address path, const uint8_t *key, uint32_t *seq, uint16_t *id)
+static bipolar modem_seq_load(string_address path, const p8 *key, p32 *seq, p16 *id)
 {
-        uint8_t record[MODEM_SEQ_RECORD], fingerprint[MODEM_MAC];
+        p8 record[MODEM_SEQ_RECORD], fingerprint[MODEM_MAC];
         positive got = 0;
         bipolar read;
         unsigned diff = 0;
@@ -1020,25 +1016,25 @@ static bipolar modem_seq_load(string_address path, const uint8_t *key, uint32_t 
                 diff |= (unsigned)(record[i] ^ fingerprint[i]);
         if (diff)
                 return 0;
-        *seq = ((uint32_t)record[MODEM_MAC] << 24) | ((uint32_t)record[MODEM_MAC + 1] << 16) |
-               ((uint32_t)record[MODEM_MAC + 2] << 8) | (uint32_t)record[MODEM_MAC + 3];
-        *id = (uint16_t)(((unsigned)record[MODEM_MAC + 4] << 8) | record[MODEM_MAC + 5]);
+        *seq = ((p32)record[MODEM_MAC] << 24) | ((p32)record[MODEM_MAC + 1] << 16) |
+               ((p32)record[MODEM_MAC + 2] << 8) | (p32)record[MODEM_MAC + 3];
+        *id = (p16)(((unsigned)record[MODEM_MAC + 4] << 8) | record[MODEM_MAC + 5]);
         return 0;
 }
 
 /* Writes the count for key, whole or not at all, before the frames that carry it are played. */
-static bipolar modem_seq_save(string_address path, const uint8_t *key, uint32_t seq, uint16_t id)
+static bipolar modem_seq_save(string_address path, const p8 *key, p32 seq, p16 id)
 {
-        uint8_t record[MODEM_SEQ_RECORD];
+        p8 record[MODEM_SEQ_RECORD];
 
         modem_seq_fingerprint(key, record);
-        record[MODEM_MAC] = (uint8_t)(seq >> 24);
-        record[MODEM_MAC + 1] = (uint8_t)(seq >> 16);
-        record[MODEM_MAC + 2] = (uint8_t)(seq >> 8);
-        record[MODEM_MAC + 3] = (uint8_t)seq;
-        record[MODEM_MAC + 4] = (uint8_t)(id >> 8);
-        record[MODEM_MAC + 5] = (uint8_t)id;
-        return link_file_replace(path, record, sizeof record, true);
+        record[MODEM_MAC] = (p8)(seq >> 24);
+        record[MODEM_MAC + 1] = (p8)(seq >> 16);
+        record[MODEM_MAC + 2] = (p8)(seq >> 8);
+        record[MODEM_MAC + 3] = (p8)seq;
+        record[MODEM_MAC + 4] = (p8)(id >> 8);
+        record[MODEM_MAC + 5] = (p8)id;
+        return link_file_replace(path, record, sizeof record, 1);
 }
 
 /*
@@ -1066,7 +1062,7 @@ static void modem_zip_drop(void)
         *stream its length, marker included (1 for an empty file, which the send refuses). Answers 0, or the negative error of a
         file that cannot be read, or cannot be compressed.
 */
-static bipolar modem_stream_choose(bipolar in, bipolar *src, uint8_t *mark, positive *stream)
+static bipolar modem_stream_choose(bipolar in, bipolar *src, p8 *mark, positive *stream)
 {
         bipolar raw, zipped;
 
@@ -1080,7 +1076,7 @@ static bipolar modem_stream_choose(bipolar in, bipolar *src, uint8_t *mark, posi
                                            FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (modem_zip_fd < 0)
                 return modem_zip_fd;
-        if (gzip_stream(in, modem_zip_fd, false, null) != 0)
+        if (gzip_stream(in, modem_zip_fd, 0, null) != 0)
                 return -EIO;
         zipped = system_seek(modem_zip_fd, 0, SEEK_END);
         if (zipped < 0 || system_seek(modem_zip_fd, 0, SEEK_SET) < 0)
@@ -1107,22 +1103,22 @@ static bipolar modem_stream_choose(bipolar in, bipolar *src, uint8_t *mark, posi
 */
 static b32 modem_send_file(string_address path)
 {
-        uint8_t key[32];
-        uint8_t datagram[MODEM_DATAGRAM_MAX];
+        p8 key[32];
+        p8 datagram[MODEM_DATAGRAM_MAX];
         modem_tx tx;
         unsigned long channel, sent_bytes = 0, sent_datagrams = 0;
-        size_t samples;
+        sized samples;
         struct ctl_w w;
         struct audio_state page;
-        uint32_t first_seq;
-        uint16_t first_id;
-        uint8_t mark = MODEM_MARK_RAW;
+        p32 first_seq;
+        p16 first_id;
+        p8 mark = MODEM_MARK_RAW;
         positive stream = 0;
         bipolar in, src, got;
 
         scope_exit(crypto_forget(key, sizeof key));
         scope_exit(modem_zip_drop());
-        if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)key, false) < 0)
+        if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)key, 0) < 0)
                 return host_refuse("there is no modem key: moonwater link modem key makes one, and the receiver needs the same\n");
         in = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         return_if(in < 0, host_fail(path, in));
@@ -1179,11 +1175,11 @@ static b32 modem_send_file(string_address path)
                 }
                 if (got == 0)
                         break;
-                datagram[0] = (uint8_t)(sent_bytes >> 24);
-                datagram[1] = (uint8_t)(sent_bytes >> 16);
-                datagram[2] = (uint8_t)(sent_bytes >> 8);
-                datagram[3] = (uint8_t)sent_bytes;
-                samples = modem_tx_datagram(&tx, datagram, 4 + (size_t)got, modem_pcm, MODEM_SEND_SAMPLES);
+                datagram[0] = (p8)(sent_bytes >> 24);
+                datagram[1] = (p8)(sent_bytes >> 16);
+                datagram[2] = (p8)(sent_bytes >> 8);
+                datagram[3] = (p8)sent_bytes;
+                samples = modem_tx_datagram(&tx, datagram, 4 + (sized)got, modem_pcm, MODEM_SEND_SAMPLES);
                 //      The count is written before this datagram's sound is played, so a later send cannot reuse a number
                 //      the receiver may already hold.
                 if (modem_seq_save(LINK_MODEM_SEQ_PATH, key, tx.seq, tx.id) < 0)
@@ -1299,17 +1295,17 @@ static p64 modem_wl_when; /* the send time of the first datagram of the pair bei
 
 static struct ctl modem_play, modem_record;
 static unsigned long modem_play_channel, modem_record_channel;
-static bool modem_open;
-static bool modem_warned;
+static p8 modem_open;
+static p8 modem_warned;
 static p64 modem_checked, modem_retry_at, modem_busy_until;
-static uint8_t modem_key[32];
-static uint8_t modem_lane_keys[MODEM_LANES][32];
-static uint32_t modem_wl_seq;
-static uint16_t modem_wl_id;
+static p8 modem_key[32];
+static p8 modem_lane_keys[MODEM_LANES][32];
+static p32 modem_wl_seq;
+static p16 modem_wl_id;
 static modem_chunk_rx modem_wl_rx[MODEM_LANES];
 static positive modem_wl_count, modem_wl_at;
-static int16_t modem_wl_pcm[MODEM_LANES][MODEM_SEND_SAMPLES];
-static int16_t modem_in[MODEM_LANES][MODEM_IN_SAMPLES];
+static b16 modem_wl_pcm[MODEM_LANES][MODEM_SEND_SAMPLES];
+static b16 modem_in[MODEM_LANES][MODEM_IN_SAMPLES];
 static positive modem_in_fill[MODEM_LANES], modem_in_seen[MODEM_LANES];
 static unsigned char modem_frame_in[MODEM_FRAME_IN];
 static int modem_streams = MODEM_STREAMS_OFF;
@@ -1319,9 +1315,9 @@ static positive modem_look_frames, modem_look_live, modem_look_right, modem_look
         The key of a lane: the left's is the modem key itself, so the left stream is the stream it always was; the right's is the
         modem key under a label, so a frame of one channel never passes the other channel's tag.
 */
-static void modem_lane_key(const uint8_t key[32], unsigned lane, uint8_t out[32])
+static void modem_lane_key(const p8 key[32], unsigned lane, p8 out[32])
 {
-        static const uint8_t label[] = "waterlink modem right channel";
+        static const p8 label[] = "waterlink modem right channel";
         modem_mac mac;
 
         if (lane == 0)
@@ -1330,7 +1326,7 @@ static void modem_lane_key(const uint8_t key[32], unsigned lane, uint8_t out[32]
         {
                 modem_mac_open(&mac, key, 32);
                 modem_hmac(&mac, label, sizeof label - 1, out);
-                memset(&mac, 0, sizeof mac);
+                memory_zero(&mac, sizeof mac);
         }
 }
 
@@ -1338,11 +1334,11 @@ static void modem_lane_key(const uint8_t key[32], unsigned lane, uint8_t out[32]
         Codes one datagram on a lane, under the lane's key, from the one count both lanes share (seq and id), which it moves on.
         Answers the samples, or 0 when the datagram does not fit cap.
 */
-static size_t modem_lane_encode(const uint8_t lane_key[32], uint32_t *seq, uint16_t *id, const uint8_t *dg, size_t len,
-                                int16_t *pcm, size_t cap)
+static sized modem_lane_encode(const p8 lane_key[32], p32 *seq, p16 *id, const p8 *dg, sized len,
+                                b16 *pcm, sized cap)
 {
         modem_tx tx;
-        size_t got;
+        sized got;
 
         modem_tx_open(&tx, lane_key, 32);
         tx.seq = *seq;
@@ -1358,18 +1354,18 @@ static size_t modem_lane_encode(const uint8_t lane_key[32], uint32_t *seq, uint1
         own datagrams are filled only while the queue has room (link_modem_free, service.c), so they never find it full; a
         keepalive or a handshake answer can, and is lost as a full socket loses one, to be sent again by its own timers.
 */
-static bool link_modem_put(p8 address_to bytes, positive length, p64 when)
+static p8 link_modem_put(p8 address_to bytes, positive length, p64 when)
 {
         positive slot;
 
         if (!length || length > WATERLINK_DATAGRAM || modem_queue_count == MODEM_QUEUE)
-                return false;
+                return 0;
         slot = (modem_queue_at + modem_queue_count) % MODEM_QUEUE;
         memory_copy(modem_queue[slot].bytes, bytes, length);
         modem_queue[slot].length = length;
         modem_queue[slot].when = when;
         modem_queue_count++;
-        return true;
+        return 1;
 }
 
 /* The retransmission floor over the modem, and the most the link's window may be: the queue's bytes. */
@@ -1403,7 +1399,7 @@ static positive link_modem_free(void)
 }
 
 /* Whether the link's datagrams go over the modem now: the transport is the modem and the modem is open. */
-static bool link_modem_carrying(void)
+static p8 link_modem_carrying(void)
 {
         return modem_open;
 }
@@ -1439,7 +1435,7 @@ static void modem_streams_set(int streams)
                 return;
         modem_streams = streams;
         host_say(log, host_label "%s", said[streams]);
-        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)ctl_length(word[streams]), false);
+        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)ctl_length(word[streams]), 0);
 }
 
 /*
@@ -1484,14 +1480,14 @@ static void modem_capture(const unsigned char *bytes, positive size)
 {
         for (positive at = 0; at + 4 <= size; at += 4)
         {
-                int l = (int16_t)((unsigned)bytes[at] | ((unsigned)bytes[at + 1] << 8));
-                int r = (int16_t)((unsigned)bytes[at + 2] | ((unsigned)bytes[at + 3] << 8));
+                int l = (b16)((unsigned)bytes[at] | ((unsigned)bytes[at + 1] << 8));
+                int r = (b16)((unsigned)bytes[at + 2] | ((unsigned)bytes[at + 3] << 8));
 
                 for (unsigned lane = 0; lane < MODEM_LANES; lane++)
                 {
                         if (modem_in_fill[lane] == MODEM_IN_SAMPLES)
                                 modem_in_drop(lane, MODEM_IN_SAMPLES / 2);
-                        modem_in[lane][modem_in_fill[lane]++] = (int16_t)(lane ? r : l);
+                        modem_in[lane][modem_in_fill[lane]++] = (b16)(lane ? r : l);
                 }
                 modem_look(l, r);
         }
@@ -1502,7 +1498,7 @@ static void modem_capture(const unsigned char *bytes, positive size)
         capture is set, every other frame (the server's commands, the data of another stream) is read past. False when the
         connection failed.
 */
-static bool modem_read_frames(struct ctl *c, unsigned long channel, bool capture)
+static p8 modem_read_frames(struct ctl *c, unsigned long channel, p8 capture)
 {
         unsigned char head[20];
 
@@ -1512,28 +1508,28 @@ static bool modem_read_frames(struct ctl *c, unsigned long channel, bool capture
                 long ready = ctl_wait(c->socket.fd, 1, 0);
 
                 if (ready < 0)
-                        return false;
+                        return 0;
                 if (!ready)
-                        return true;
+                        return 1;
                 if (c->transport.receive(c->transport.context, head, 20, MODEM_IO_MS) < 0)
-                        return false;
+                        return 0;
                 size = ctl_be(head);
                 got = ctl_be(head + 4);
                 if (size > MODEM_FRAME_IN)
-                        return false;
+                        return 0;
                 if (size && c->transport.receive(c->transport.context, modem_frame_in, (long)size, MODEM_IO_MS) < 0)
-                        return false;
+                        return 0;
                 if (capture && got == channel && size)
                         modem_capture(modem_frame_in, (positive)size);
         }
-        return true;
+        return 1;
 }
 
 /*
         A record stream for the default source, as a program of its own: 16 bits, two channels, at MODEM_RATE, as the playback stream
         is made. Answers true with the stream's channel in *channel.
 */
-static bool modem_record_create(struct ctl *c, unsigned long *channel)
+static p8 modem_record_create(struct ctl *c, unsigned long *channel)
 {
         struct ctl_w w;
         struct ctl_r r;
@@ -1578,14 +1574,14 @@ static bool modem_record_create(struct ctl *c, unsigned long *channel)
         for (int i = 0; i < 5; i++)
                 ctl_w_bool(&w, 0); // muted, volume set, mute set, relative, passthrough: all off
         if (w.bad)
-                return false;
+                return 0;
         ctl_budget(c);
         got = ctl_exchange(c, w.len);
         if (got < 15)
-                return false;
+                return 0;
         r = (struct ctl_r){c->frame + 20 + 10, got - 10, 0, 0};
         *channel = ctl_r_u32(&r);
-        return true;
+        return 1;
 }
 
 /*
@@ -1600,7 +1596,7 @@ static void link_modem_stop(void)
         crypto_forget(modem_lane_keys, sizeof modem_lane_keys);
         for (unsigned lane = 0; lane < MODEM_LANES; lane++)
                 crypto_forget(&modem_wl_rx[lane].rx.mac, sizeof modem_wl_rx[lane].rx.mac);
-        modem_open = false;
+        modem_open = 0;
         modem_queue_count = 0;
         modem_wl_count = 0;
         modem_wl_at = 0;
@@ -1620,18 +1616,18 @@ static void link_modem_stop(void)
         Opens the modem: its key, its two counts, a playback stream and a record stream on the sound server. False when any of it
         is not there, and then nothing is open. The card must run at MODEM_RATE, as the send's does.
 */
-static bool link_modem_start(p64 now)
+static p8 link_modem_start(p64 now)
 {
         struct audio_state page;
-        uint32_t seq = 0, rx_seq = 0;
-        uint16_t id = 0, rx_id = 0;
+        p32 seq = 0, rx_seq = 0;
+        p16 id = 0, rx_id = 0;
 
-        if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)modem_key, false) < 0)
+        if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)modem_key, 0) < 0)
         {
                 if (!modem_warned)
                         host_say(log, host_label "the audio modem has no key: moonwater link modem key makes one, and the far side needs the same\n");
-                modem_warned = true;
-                return false;
+                modem_warned = 1;
+                return 0;
         }
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, modem_key, &seq, &id) < 0 ||
             modem_seq_load(LINK_MODEM_RX_PATH, modem_key, &rx_seq, &rx_id) < 0)
@@ -1639,16 +1635,16 @@ static bool link_modem_start(p64 now)
                 if (!modem_warned)
                         host_say(log, host_label "the audio modem's counts cannot be read: %s or %s is not a private record, and the link stays on the network\n",
                                  LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH);
-                modem_warned = true;
+                modem_warned = 1;
                 link_modem_stop();
-                return false;
+                return 0;
         }
         modem_play.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         modem_record.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         if (ctl_connect(&modem_play, AUDIO_SOCKET) < 0 || !audio_stream_open(&modem_play, "Waterlink modem", "modem", MODEM_RATE, &modem_play_channel))
         {
                 link_modem_stop();
-                return false;
+                return 0;
         }
         //      The playback stream asked the card for MODEM_RATE when the output was idle. A card that runs at another rate
         //      would play every symbol out of time, so the link stays on the network.
@@ -1657,19 +1653,19 @@ static bool link_modem_start(p64 now)
                 if (!modem_warned)
                         host_say(log, host_label "the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: the link stays on the network\n",
                                  (positive)page.rate, (positive)MODEM_RATE);
-                modem_warned = true;
+                modem_warned = 1;
                 link_modem_stop();
-                return false;
+                return 0;
         }
         if (ctl_connect(&modem_record, AUDIO_SOCKET) < 0 || !modem_record_create(&modem_record, &modem_record_channel))
         {
                 if (!modem_warned)
                         host_say(log, host_label "the audio modem cannot listen: the sound server has no record stream for it (moonwater audio says which card is open)\n");
-                modem_warned = true;
+                modem_warned = 1;
                 link_modem_stop();
-                return false;
+                return 0;
         }
-        modem_warned = false;
+        modem_warned = 0;
         for (unsigned lane = 0; lane < MODEM_LANES; lane++)
         {
                 modem_lane_key(modem_key, lane, modem_lane_keys[lane]);
@@ -1690,10 +1686,10 @@ static bool link_modem_start(p64 now)
         modem_look_right = 0;
         modem_look_diff = 0;
         modem_busy_until = now;
-        modem_open = true;
+        modem_open = 1;
         modem_streams_set(MODEM_STREAMS_TWO);
         host_say(log, host_label "the Waterlink datagrams go over the audio modem\n");
-        return true;
+        return 1;
 }
 
 /*
@@ -1707,7 +1703,7 @@ static positive link_modem_pair(void)
 
         for (unsigned lane = 0; lane < MODEM_LANES && modem_queue_count; lane++)
         {
-                size_t got;
+                sized got;
 
                 if (lane == 0)
                         modem_wl_when = modem_queue[modem_queue_at].when;
@@ -1726,12 +1722,12 @@ static positive link_modem_pair(void)
         {
                 if (!modem_warned)
                         host_say(log, host_label "the audio modem's count could not be saved to %s: the datagrams are not played\n", LINK_MODEM_SEQ_PATH);
-                modem_warned = true;
+                modem_warned = 1;
                 return 0;
         }
-        modem_warned = false;
+        modem_warned = 0;
         for (unsigned lane = 0; lane < MODEM_LANES; lane++)
-                memory_zero(modem_wl_pcm[lane] + count[lane], (longest - count[lane]) * sizeof(int16_t));
+                memory_zero(modem_wl_pcm[lane] + count[lane], (longest - count[lane]) * sizeof(b16));
         return longest;
 }
 
@@ -1740,7 +1736,7 @@ static positive link_modem_pair(void)
         the sound server has room for half a second ahead: a poll every MODEM_IN_POLL_US keeps the lead near MODEM_LEAD_US. Answers
         false when the playback connection failed, and sets *next to the next poll.
 */
-static bool link_modem_play(p64 now, p64 *next)
+static p8 link_modem_play(p64 now, p64 *next)
 {
         *next = now + MODEM_IN_POLL_US;
         if (modem_busy_until < now)
@@ -1752,11 +1748,11 @@ static bool link_modem_play(p64 now, p64 *next)
                 while (!modem_wl_count && modem_queue_count)
                         modem_wl_count = link_modem_pair();
                 if (!modem_wl_count)
-                        return true;
+                        return 1;
                 if (modem_busy_until - now >= MODEM_LEAD_US)
                 {
                         *next = now + MODEM_IN_POLL_US;
-                        return true;
+                        return 1;
                 }
                 /* 48 samples in each millisecond of room */
                 room = (positive)((p64)(MODEM_LEAD_US - (modem_busy_until - now)) * 48 / 1000);
@@ -1765,13 +1761,13 @@ static bool link_modem_play(p64 now, p64 *next)
                         room = left;
                 if (room && modem_play_samples(&modem_play, modem_play_channel, modem_wl_pcm[0] + modem_wl_at,
                                                modem_wl_pcm[1] + modem_wl_at, room) < 0)
-                        return false;
+                        return 0;
                 modem_wl_at += room;
                 modem_busy_until += (p64)room * 1000 / 48;
                 if (modem_wl_at < modem_wl_count)
                 {
                         *next = now + MODEM_IN_POLL_US;
-                        return true;
+                        return 1;
                 }
                 modem_wl_count = 0;
                 modem_wl_at = 0;
@@ -1779,9 +1775,9 @@ static bool link_modem_play(p64 now, p64 *next)
 }
 
 /* The far side's count, as its record keeps it: the newer of the two channels' last frames. */
-static uint32_t link_modem_far(void)
+static p32 link_modem_far(void)
 {
-        uint32_t left = modem_wl_rx[0].rx.last, right = modem_wl_rx[1].rx.last;
+        p32 left = modem_wl_rx[0].rx.last, right = modem_wl_rx[1].rx.last;
 
         return right > left ? right : left;
 }
@@ -1792,12 +1788,12 @@ static uint32_t link_modem_far(void)
 */
 static int link_modem_lane(unsigned lane, p64 now)
 {
-        uint8_t datagram[WATERLINK_DATAGRAM];
+        p8 datagram[WATERLINK_DATAGRAM];
         int result = 0;
 
         for (;;)
         {
-                size_t used = 0;
+                sized used = 0;
                 int got = modem_chunk_take(&modem_wl_rx[lane], modem_in[lane], modem_in_fill[lane], datagram, sizeof datagram, &used);
 
                 modem_in_drop(lane, used < modem_in_fill[lane] ? (positive)used : modem_in_fill[lane]);
@@ -1821,7 +1817,7 @@ static int link_modem_lane(unsigned lane, p64 now)
 */
 static int link_modem_hear(p64 now)
 {
-        uint32_t before = link_modem_far();
+        p32 before = link_modem_far();
         int result = 0;
 
         for (unsigned lane = 0; lane < MODEM_LANES; lane++)
@@ -1896,8 +1892,8 @@ static p64 link_modem_turn(p64 now)
         }
         if (!modem_open)
                 return next;
-        if (!link_modem_play(now, &play) || !modem_read_frames(&modem_play, CTL_NONE, false) ||
-            !modem_read_frames(&modem_record, modem_record_channel, true))
+        if (!link_modem_play(now, &play) || !modem_read_frames(&modem_play, CTL_NONE, 0) ||
+            !modem_read_frames(&modem_record, modem_record_channel, 1))
                 return link_modem_fail(now, "the sound server's streams for the audio modem broke: the modem is off for now");
         if (link_modem_hear(now) < 0)
                 return link_modem_fail(now, "the audio modem's receiver is closed after too many refused frames: the modem is off for now");
