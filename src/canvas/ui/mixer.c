@@ -194,9 +194,12 @@ static fn mixer_list(b64 now)
         int groups = 0;
 
         ui_strips_begin(&big->strips);
-        // The Allow button has the keys when it appears: nothing else is on the page to have them.
+        // The Allow button has the keys when it appears: nothing else is on the page to have them. Once recording is on it lets them
+        // go (a press on it left them with it), or the strips never show their focus again.
         if (off && !mixer.capture_off)
                 mixer.allow.keys = 1;
+        else if (!off)
+                mixer.allow.keys = 0;
         mixer.capture_off = off;
         if (mixer.have && !mixer.recording)
         {
