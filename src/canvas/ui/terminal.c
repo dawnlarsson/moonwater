@@ -3169,6 +3169,17 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 terminal.modifiers = event->flags;
                 if (terminal_select_key(event, dirty))
                         return true;
+                // Shift+Page Up and Shift+Page Down turn the scrollback a screen, as the wheel and the bar do, and are not sent to the
+                // program: on the primary screen there is no other way to reach the scrollback from the keys. The alternate screen has
+                // none, so its keys are its own.
+                if ((event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_SHIFT) &&
+                    !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) && !alternate &&
+                    (event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN))
+                {
+                        if (terminal_view_scroll(event->a == UI_KEY_PAGE_UP ? (int)ROWS - 1 : 1 - (int)ROWS))
+                                address_to dirty = true;
+                        return true;
+                }
                 if (!terminal.modes_fresh)
                         terminal_modes_read(master, (positive)ui_kit.now);
                 terminal_key(event, &key);
