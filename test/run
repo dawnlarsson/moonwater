@@ -3799,7 +3799,7 @@ lane_modem()
 	#	noise margins are the default's, so only the sanitized run is asked here.
 	modem_configs=0
 	modem_configs_ok=0
-	for modem_pair in "10 2" "10 4" "20 2" "20 4" "20 8" "40 2" "40 4" "40 8"
+	for modem_pair in "10 2" "10 4" "20 2" "20 4" "20 8" "40 2" "40 4" "40 8" "40 16"
 	do
 		modem_sym=${modem_pair%% *}
 		modem_tones=${modem_pair#* }

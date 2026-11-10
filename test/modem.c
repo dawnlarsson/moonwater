@@ -23,6 +23,8 @@
    configuration that has a pin: the default (40 samples, 8 tones at 96 kHz) and the 16-tone option. */
 #if MODEM_SYM == 40 && MODEM_TONES == 8
 #define MODEM_GOLDEN "2535d90caec9a60f752370d789ad4eedc1986b07ad1512bfc26e6943b7809260"
+#elif MODEM_SYM == 40 && MODEM_TONES == 16
+#define MODEM_GOLDEN "ff1ba5d9ed62dca9930870adebbfe6837293996ab2811ece1092936635889287"
 #endif
 
 #ifndef MODEM_FUZZ /* the self-test; the fuzz build below uses none of it */
@@ -344,6 +346,10 @@ static void test_noise(void)
 	/* The default configuration's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 10 of 50. */
 	check(decoded[3] == 50, "at 0 dB every frame decodes");
 	check(decoded[4] >= 5, "at -3 dB at least 5 of 50 frames decode");
+#elif MODEM_SYM == 40 && MODEM_TONES == 16
+	/* The 16-tone option's margins, measured with the same seeds: 3 dB decodes every frame, 0 dB most. */
+	check(decoded[2] == 50, "at 3 dB every frame decodes");
+	check(decoded[3] >= 45, "at 0 dB at least 45 of 50 frames decode");
 #else
 	(void)decoded;
 #endif

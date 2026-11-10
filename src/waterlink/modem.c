@@ -54,8 +54,12 @@
 #ifndef MODEM_SYM
 #define MODEM_SYM 40 /* samples per symbol: the baud rate is MODEM_RATE / MODEM_SYM */
 #endif
+/* Tones per symbol: a power of two below MODEM_SYM / 2. The default, 8, puts the top tone at 19.2 kHz at 96 kHz, which ordinary
+   audio gear passes. The 16-tone option (-DMODEM_TONES=16, off by default) carries 9600 bit/s at the same rate, and its top
+   tone is 38.4 kHz: build it only for a cable and a card that pass 38.4 kHz. The top tone of any setting is
+   MODEM_TONES * MODEM_RATE / MODEM_SYM. */
 #ifndef MODEM_TONES
-#define MODEM_TONES 8 /* tones per symbol: a power of two below MODEM_SYM / 2. At 96 kHz the top tone is 19.2 kHz */
+#define MODEM_TONES 8
 #endif
 
 #define MODEM_SYM_BITS ((MODEM_TONES) == 2 ? 1 : (MODEM_TONES) == 4 ? 2 \
