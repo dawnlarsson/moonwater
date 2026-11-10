@@ -148245,7 +148245,7 @@ static fn check_kit_place(void)
         // is held is no click either.
         {
                 struct ui_control btn[2];
-                struct ui_control address_to got_out, got_off;
+                struct ui_control address_to got_out, address_to got_off;
                 b32 out_hover;
 
                 for (int k = 0; k < 2; k++)
