@@ -1903,9 +1903,11 @@ static fn settings_rebuild(void)
         int count = 0;
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
+        // Every id written is a place of the kit's list (UI_LIST_MOST): the lines under the rows take what the rows leave, and a row past
+        // that is not listed.
         settings_sub_count = 0;
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
+                if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
                         settings.list.id[count++] = (unsigned short)row;
                         count = settings_sub_rows((int)row, count);
@@ -1916,7 +1918,7 @@ static fn settings_rebuild(void)
                 {
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
-                        if (settings_filter_length() ? settings_matches(row) : settings_group_of(row) == settings.page.chosen)
+                        if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches(row) : settings_group_of(row) == settings.page.chosen))
                                 settings.list.id[count++] = (unsigned short)row;
                 }
         settings.list.count = count;
