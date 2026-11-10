@@ -974,6 +974,108 @@ static unsigned int osc_number(unsigned int address_to at)
         return value;
 }
 
+/*
+        The current rendition as SGR parameters: a 0, then what is on. It is
+        the answer to DECRQSS for "m", so a program that asks how it is drawn
+        gets back what it would have to send to draw the same.
+*/
+static fn sgr_colour_report(unsigned int colour, unsigned int base, unsigned int extended)
+{
+        emit(';');
+        if (colour < 8)
+                positive_to_string(emit_bytes, base + colour);
+        else if (colour < 16)
+                positive_to_string(emit_bytes, base + 60 + colour - 8);
+        else
+        {
+                positive_to_string(emit_bytes, extended);
+                emit_literal(";5;");
+                positive_to_string(emit_bytes, colour);
+        }
+}
+
+static fn sgr_report(void)
+{
+        static const struct { unsigned short flag; unsigned char code; } marks[] = {
+            {WINDOW_CELL_BOLD, 1}, {WINDOW_CELL_DIM, 2}, {WINDOW_CELL_ITALIC, 3},
+            {WINDOW_CELL_UNDERLINE, 4}, {WINDOW_CELL_BLINK, 5}, {WINDOW_CELL_HIDDEN, 8},
+            {WINDOW_CELL_STRIKE, 9},
+        };
+
+        emit('0');
+        for (positive i = 0; i < array_count(marks); i++)
+                if (style & marks[i].flag)
+                {
+                        emit(';');
+                        positive_to_string(emit_bytes, marks[i].code);
+                }
+        if (reverse)
+                emit_literal(";7");
+        if (style & WINDOW_CELL_INK_SET)
+                sgr_colour_report(ink, 30, 38);
+        if (style & WINDOW_CELL_PAPER_SET)
+                sgr_colour_report(paper, 40, 48);
+        emit('m');
+}
+
+/*
+        What a DCS asks for, read from its payload.
+
+        DECRQSS is "$q" and the setting's name: SGR ("m") and DECSTBM ("r")
+        are answered DCS 1 $ r with the setting, and any other setting DCS 0 $ r,
+        which is xterm's answer to one it does not have. XTGETTCAP is "+q" and
+        the names of capabilities in hex, separated by semicolons: this has
+        none to give, so each name is answered DCS 0 + r with the name itself.
+        An answer is given while there is room for it, as every answer is.
+*/
+static fn dcs_answer(void)
+{
+        unsigned int at = 2;
+
+        if (osc_length >= 2 && osc_bytes[0] == '$' && osc_bytes[1] == 'q')
+        {
+                if (!answering())
+                        return;
+
+                if (osc_length == 3 && osc_bytes[2] == 'm')
+                {
+                        emit_literal("\x1bP1$r");
+                        sgr_report();
+                        emit_literal("\x1b\\");
+                }
+                else if (osc_length == 3 && osc_bytes[2] == 'r')
+                {
+                        emit_literal("\x1bP1$r");
+                        positive_to_string(emit_bytes, region_top + 1);
+                        emit(';');
+                        positive_to_string(emit_bytes, region_bottom);
+                        emit_literal("r\x1b\\");
+                }
+                else
+                        emit_literal("\x1bP0$r\x1b\\");
+                return;
+        }
+
+        if (osc_length >= 2 && osc_bytes[0] == '+' && osc_bytes[1] == 'q')
+        {
+                while (at <= osc_length)
+                {
+                        unsigned int end = at;
+
+                        while (end < osc_length && osc_bytes[end] != ';')
+                                end++;
+
+                        if (!answering())
+                                return;
+
+                        emit_literal("\x1bP0+r");
+                        emit_bytes(osc_bytes + at, end - at);
+                        emit_literal("\x1b\\");
+                        at = end + 1;
+                }
+        }
+}
+
 // Counted up each time a program names the window, so the same name said again, or an empty one, is news too.
 static unsigned int title_said;
 
@@ -983,8 +1085,13 @@ static fn osc_finish(b32 bell)
         unsigned int command;
         unsigned int n;
 
-        // DCS, SOS, PM and APC are read the same way and say nothing here:
+        // A DCS asks for its answer here. SOS, PM and APC say nothing, and
         // only an OSC names the window or asks for a colour.
+        if (string_kind == 'P')
+        {
+                dcs_answer();
+                return;
+        }
         if (string_kind != ']')
                 return;
 
@@ -1706,6 +1813,7 @@ static b32 csi_known(unsigned int final)
                 return final == 'h' || final == 'l' || final == 'n' ||
                        final == 'J' || final == 'K';
         case '>':
+                return final == 'c' || final == 'q';
         case '=':
                 return final == 'c';
         default:
@@ -1972,6 +2080,10 @@ static fn csi_final(unsigned int final)
                 // the space it is DECLL, which has no lights here to set.
                 if (csi_intermediate == ' ' && a <= 6)
                         cursor_shape = a;
+                // XTVERSION, CSI > 0 q: the name of this terminal, which is
+                // the answer xterm gives in its own form.
+                else if (terminal_csi.marker == '>' && terminal_csi.value[0] == 0 && answering())
+                        emit_literal("\x1bP>|moonwater\x1b\\");
                 break;
         case 'p':
                 if (csi_intermediate == '!')
