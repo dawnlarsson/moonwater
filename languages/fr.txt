@@ -21,6 +21,7 @@ editor_open_none	63aa	ouvrir n'est pas ici : lancez l'éditeur avec le nom du fi
 editor_pattern_bad	5d57	le motif ne se compile pas
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	le fichier n'a pas pu être lu : il n'est pas ouvert
+editor_reload_unsaved	85da	relit le fichier et abandonne les modifications non enregistrées
 editor_replace_usage	c677	remplacer s'écrit RECHERCHE/REMPLACEMENT
 editor_replaced	1128	%d remplacés
 editor_save_as_none	0745	enregistrer sous n'est pas ici : Ctrl+S enregistre le fichier

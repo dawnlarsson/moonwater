@@ -21,6 +21,7 @@ editor_open_none	63aa	otwieranie nie jest tutaj: uruchom edytor z nazwą pliku
 editor_pattern_bad	5d57	wzorzec nie kompiluje się
 editor_position	3696	Wrs %1$d, Kol %2$d
 editor_read_failed	5f78	nie udało się odczytać pliku: nie zostaje otwarty
+editor_reload_unsaved	85da	wczytuje plik ponownie i odrzuca niezapisane zmiany
 editor_replace_usage	c677	zamiana to SZUKANE/ZAMIENNIK
 editor_replaced	1128	zamieniono: %d
 editor_save_as_none	0745	zapisz jako nie jest tutaj: Ctrl+S zapisuje plik

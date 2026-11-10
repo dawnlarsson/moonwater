@@ -22,6 +22,7 @@ editor_open_none	63aa	کھولنا یہاں نہیں ہے: ایڈیٹر کو ف�
 editor_pattern_bad	5d57	پیٹرن درست نہیں ہے
 editor_position	3696	لائن %1$d، کالم %2$d
 editor_read_failed	5f78	فائل پڑھی نہیں جا سکی: وہ کھولی نہیں گئی
+editor_reload_unsaved	85da	فائل دوبارہ پڑھتا ہے اور غیر محفوظ تبدیلیاں ختم کر دیتا ہے
 editor_replace_usage	c677	تبدیلی کی شکل: تلاش/متبادل
 editor_replaced	1128	%d تبدیل کیے گئے
 editor_save_as_none	0745	محفوظ کریں بطور یہاں نہیں ہے: Ctrl+S فائل محفوظ کرتا ہے

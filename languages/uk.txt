@@ -21,6 +21,7 @@ editor_open_none	63aa	відкриття тут немає: запустіть �
 editor_pattern_bad	5d57	шаблон не компілюється
 editor_position	3696	Рд %1$d, Стп %2$d
 editor_read_failed	5f78	не вдалося прочитати файл: його не відкрито
+editor_reload_unsaved	85da	перечитує файл і відкидає незбережені зміни
 editor_replace_usage	c677	заміна — ЗНАЙТИ/ЗАМІНА
 editor_replaced	1128	замінено: %d
 editor_save_as_none	0745	зберегти як тут немає: Ctrl+S зберігає файл

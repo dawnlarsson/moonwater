@@ -21,6 +21,7 @@ editor_open_none	63aa	Öffnen ist hier nicht: den Editor mit dem Dateinamen star
 editor_pattern_bad	5d57	das Muster lässt sich nicht übersetzen
 editor_position	3696	Z %1$d, Sp %2$d
 editor_read_failed	5f78	die Datei ließ sich nicht lesen: sie wird nicht geöffnet
+editor_reload_unsaved	85da	liest die Datei neu und verwirft die ungespeicherten Änderungen
 editor_replace_usage	c677	Ersetzen heißt SUCHEN/ERSATZ
 editor_replaced	1128	%d ersetzt
 editor_save_as_none	0745	Speichern unter ist hier nicht: Ctrl+S speichert die Datei

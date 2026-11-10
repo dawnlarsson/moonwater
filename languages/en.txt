@@ -21,6 +21,7 @@ editor_open_none	63aa	open is not here: start the editor with the file's name
 editor_pattern_bad	5d57	the pattern does not compile
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	the file could not be read: it is not opened
+editor_reload_unsaved	85da	reads the file again and drops the unsaved changes
 editor_replace_usage	c677	replace is FIND/REPLACEMENT
 editor_replaced	1128	%d replaced
 editor_save_as_none	0745	save as is not here: Ctrl+S saves the file

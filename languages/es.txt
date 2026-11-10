@@ -21,6 +21,7 @@ editor_open_none	63aa	abrir no está aquí: inicie el editor con el nombre del a
 editor_pattern_bad	5d57	el patrón no se compila
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	no se pudo leer el archivo: no se abre
+editor_reload_unsaved	85da	vuelve a leer el archivo y descarta los cambios sin guardar
 editor_replace_usage	c677	reemplazar es BUSCAR/REEMPLAZO
 editor_replaced	1128	%d reemplazados
 editor_save_as_none	0745	guardar como no está aquí: Ctrl+S guarda el archivo

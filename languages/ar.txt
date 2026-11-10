@@ -22,6 +22,7 @@ editor_open_none	63aa	الفتح غير متاح هنا: ابدأ المحرر �
 editor_pattern_bad	5d57	النمط غير صالح
 editor_position	3696	سطر %1$d، عمود %2$d
 editor_read_failed	5f78	تعذرت قراءة الملف: لم يُفتح
+editor_reload_unsaved	85da	يعيد قراءة الملف ويتجاهل التغييرات غير المحفوظة
 editor_replace_usage	c677	صيغة الاستبدال: البحث/البديل
 editor_replaced	1128	تم استبدال %d
 editor_save_as_none	0745	حفظ باسم غير متاح هنا: Ctrl+S يحفظ الملف

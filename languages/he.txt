@@ -22,6 +22,7 @@ editor_open_none	63aa	פתיחה אינה זמינה כאן: הפעילו את �
 editor_pattern_bad	5d57	התבנית אינה תקינה
 editor_position	3696	שורה %1$d, עמודה %2$d
 editor_read_failed	5f78	לא ניתן לקרוא את הקובץ: הוא אינו נפתח
+editor_reload_unsaved	85da	קורא את הקובץ מחדש ומשליך את השינויים שלא נשמרו
 editor_replace_usage	c677	תבנית ההחלפה: חיפוש/תחליף
 editor_replaced	1128	הוחלפו %d
 editor_save_as_none	0745	שמירה בשם אינה זמינה כאן: Ctrl+S שומר את הקובץ

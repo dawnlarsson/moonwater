@@ -21,6 +21,7 @@ editor_open_none	63aa	apri non è disponibile: avvia l'editor con il nome del fi
 editor_pattern_bad	5d57	il motivo non si compila
 editor_position	3696	Ri %1$d, Col %2$d
 editor_read_failed	5f78	impossibile leggere il file: non viene aperto
+editor_reload_unsaved	85da	rilegge il file e scarta le modifiche non salvate
 editor_replace_usage	c677	sostituire è TROVA/SOSTITUZIONE
 editor_replaced	1128	%d sostituiti
 editor_save_as_none	0745	salva con nome non è disponibile: Ctrl+S salva il file

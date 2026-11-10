@@ -21,6 +21,7 @@ editor_open_none	63aa	abrir não está aqui: inicie o editor com o nome do arqui
 editor_pattern_bad	5d57	o padrão não compila
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	não foi possível ler o arquivo: ele não é aberto
+editor_reload_unsaved	85da	lê o arquivo de novo e descarta as alterações não salvas
 editor_replace_usage	c677	substituir é PROCURAR/SUBSTITUIÇÃO
 editor_replaced	1128	%d substituídos
 editor_save_as_none	0745	salvar como não está aqui: Ctrl+S salva o arquivo

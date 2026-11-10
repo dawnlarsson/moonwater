@@ -756,6 +756,16 @@ static fn editor_command(p32 command)
                 editor.tab = (editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count;
 }
 
+/*
+        Ctrl+R, which reads a file changed on disk again. It is no key command, so the confirm names it past every command.
+*/
+#define EDITOR_RELOAD DOC_CMDS
+
+static b32 editor_reload_key(const struct window_event address_to event)
+{
+        return event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_CONTROL) && ((p32)event->b | 0x60) == 'r';
+}
+
 static b32 editor_event(const struct window_event address_to event)
 {
         struct editor_tab address_to tab = editor_now();
@@ -765,14 +775,20 @@ static b32 editor_event(const struct window_event address_to event)
         // no key of its own (Ctrl+W, let go, Ctrl+W again is the second press), so its press leaves the confirm armed.
         if ((event->flags & WINDOW_KEY_DOWN) &&
             (event->type == WINDOW_EVENT_BUTTON ||
-             (event->type == WINDOW_EVENT_KEY && !ui_key_modifier(event->a) && ui_key_command(event) != editor.confirm.what)))
+             (event->type == WINDOW_EVENT_KEY && !ui_key_modifier(event->a) &&
+              (editor_reload_key(event) ? EDITOR_RELOAD : ui_key_command(event)) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
         if (editor_tabs_event(event))
                 return true;
-        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_CONTROL) &&
-            ((p32)event->b | 0x60) == 'r' && tab->changed_on_disk)
+        // What was typed since the file was read goes with the read: over unsaved changes the first press says so and the second reads.
+        if (editor_reload_key(event) && (event->flags & WINDOW_KEY_DOWN) && tab->changed_on_disk)
         {
-                editor_reload();
+                char line[UI_CONFIRM_TEXT];
+
+                if (ui_confirm_gate(&editor.confirm, EDITOR_RELOAD, doc_dirty(&tab->view.doc), WORDS(editor_reload_unsaved), line, sizeof(line)))
+                        editor_reload();
+                else
+                        string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
                 editor.dirty = true;
                 return true;
         }

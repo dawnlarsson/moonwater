@@ -21,6 +21,7 @@ editor_open_none	63aa	açma burada yok: düzenleyiciyi dosya adıyla başlatın
 editor_pattern_bad	5d57	desen derlenmiyor
 editor_position	3696	Sat %1$d, Sütun %2$d
 editor_read_failed	5f78	dosya okunamadı: açılmadı
+editor_reload_unsaved	85da	dosyayı yeniden okur ve kaydedilmemiş değişiklikleri atar
 editor_replace_usage	c677	değiştirme ARANAN/YERİNE biçimindedir
 editor_replaced	1128	%d değiştirildi
 editor_save_as_none	0745	farklı kaydet burada yok: Ctrl+S dosyayı kaydeder

@@ -21,6 +21,7 @@ editor_open_none	63aa	openen is hier niet: start de editor met de bestandsnaam
 editor_pattern_bad	5d57	het patroon is ongeldig
 editor_position	3696	Rg %1$d, Kol %2$d
 editor_read_failed	5f78	het bestand kon niet worden gelezen: het wordt niet geopend
+editor_reload_unsaved	85da	leest het bestand opnieuw en verwerpt de niet-opgeslagen wijzigingen
 editor_replace_usage	c677	vervangen is ZOEK/VERVANGING
 editor_replaced	1128	%d vervangen
 editor_save_as_none	0745	opslaan als is hier niet: Ctrl+S slaat het bestand op

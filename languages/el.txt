@@ -21,6 +21,7 @@ editor_open_none	63aa	το άνοιγμα δεν υπάρχει εδώ: ξεκι
 editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
 editor_position	3696	Γρ %1$d, Στ %2$d
 editor_read_failed	5f78	το αρχείο δεν μπόρεσε να διαβαστεί: δεν ανοίγεται
+editor_reload_unsaved	85da	διαβάζει ξανά το αρχείο και πετά τις μη αποθηκευμένες αλλαγές
 editor_replace_usage	c677	η αντικατάσταση είναι ΑΝΑΖΗΤΗΣΗ/ΑΝΤΙΚΑΤΑΣΤΑΣΗ
 editor_replaced	1128	αντικαταστάθηκαν: %d
 editor_save_as_none	0745	η αποθήκευση ως δεν υπάρχει εδώ: το Ctrl+S αποθηκεύει το αρχείο
