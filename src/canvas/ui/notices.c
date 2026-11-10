@@ -189,6 +189,9 @@ static int notices_open(void)
         int room = (int)table->output_height - ui_px(&notices.ui, 2 * (24 + 24));
         int width, height;
 
+        // A second start finds the popup up and lifts it, and this one stops (the header's one window).
+        if (ui_lift_other(&notices.own, (string_address) "notices", false))
+                return 0;
         notices_board();
         ui_popmenu_size(&notices.ui, &notices.menu, room > 0 ? room : 0);
         width = notices.menu.width, height = notices.menu.height;
