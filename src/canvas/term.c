@@ -64,6 +64,8 @@ static b32 application_keys;
    immediately; only publication is held by terminal.c until the mode ends. */
 static b32 synchronized_output;
 static unsigned int mouse_mode;
+// The tracking modes set, one bit each: 1 for 1000, 2 for 1002, 4 for 1003.
+static unsigned int mouse_bits;
 static b32 mouse_sgr;
 static b32 focus_events;
 // DECSET 2004: the program wants a paste bracketed (ESC [ 200 ~ before it, ESC [ 201 ~ after), so it can tell typing from it.
@@ -548,6 +550,9 @@ static fn unpair(struct window_cell address_to cells, unsigned int length,
         }
 }
 
+static fn erase(unsigned int from_row, unsigned int from_column,
+                unsigned int to_row, unsigned int to_column);
+
 /*
         A character width columns wide that does not fit on what is left of
         the line wraps whole and leaves the last cell blank, as xterm does.
@@ -564,6 +569,10 @@ static inline INLINE fn wrap_for(unsigned int width)
                 column = COLUMNS - width;
         else
         {
+                // The cells left over on this line are blanked, which is what the comment says: the wrap leaves the
+                // last cell blank, and a letter that was there stayed on the screen beside the character on the next row.
+                if (column < COLUMNS)
+                        erase(row, column, row, COLUMNS - 1);
                 column = 0;
                 line_feed();
         }
@@ -1351,7 +1360,9 @@ static fn cursor_save(struct cursor_state address_to into)
 static fn cursor_restore(const struct cursor_state address_to from)
 {
         row = from->row < ROWS ? from->row : ROWS - 1;
-        column = from->column < COLUMNS ? from->column : COLUMNS - 1;
+        // Column COLUMNS is the wait for a wrap, which DECSC saves too (the wrap flag is part of its state): a
+        // restore that clamped it to the last column wrote the next character over that column instead of after it.
+        column = from->column <= COLUMNS ? from->column : COLUMNS - 1;
         ink = from->ink;
         paper = from->paper;
         style = from->style;
@@ -1533,13 +1544,20 @@ static unsigned int mode(unsigned int p, b32 change, b32 on)
         case 1000:
         case 1002:
         case 1003:
+                /*
+                        Each tracking mode is a bit of its own, so resetting one leaves the others set; the mode in
+                        force is the richest one still on. A reset of 1002 under 1003 used to turn tracking off.
+                */
                 if (change)
                 {
-                        mouse_mode = on ? p : 0;
+                        unsigned int bit = p == 1000 ? 1u : p == 1002 ? 2u : 4u;
+
+                        mouse_bits = on ? mouse_bits | bit : mouse_bits & ~bit;
+                        mouse_mode = mouse_bits & 4u ? 1003u : mouse_bits & 2u ? 1002u : mouse_bits & 1u ? 1000u : 0u;
                         if (window)
                                 window->want = mouse_mode ? WINDOW_WANT_POINTER : 0;
                 }
-                now = mouse_mode == p;
+                now = (mouse_bits & (p == 1000 ? 1u : p == 1002 ? 2u : 4u)) != 0;
                 break;
         default:
                 return 0;
@@ -1566,6 +1584,7 @@ static fn attributes_reset()
         application_keys = false;
         synchronized_output = false;
         mouse_mode = 0;
+        mouse_bits = 0;
         mouse_sgr = false;
         focus_events = false;
         bracketed_paste = false;
@@ -1867,10 +1886,17 @@ static fn csi_final(unsigned int final)
                         emit_literal("\x1b[");
                         if (terminal_csi.marker)
                                 emit('?');
-                        positive_to_string(emit_bytes, row + 1);
+                        // Under origin mode the row counts from the region's top, as CUP's does.
+                        positive_to_string(emit_bytes, (origin_mode && row >= region_top ? row - region_top : row) + 1);
                         emit(';');
                         positive_to_string(emit_bytes,
                                            column < COLUMNS ? column + 1 : COLUMNS);
+                        // DECXCPR's third field is the page, which is always the first.
+                        if (terminal_csi.marker)
+                        {
+                                emit(';');
+                                emit('1');
+                        }
                         emit('R');
                 }
                 else if (terminal_csi.count && terminal_csi.value[0] == 5 &&

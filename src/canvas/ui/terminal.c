@@ -160,6 +160,8 @@ static struct
 
         unsigned int modifiers; // from the keys, which are the only events that say
         b32 pressed;
+        // The button that is down, for the motion a drag reports: 0 left, 1 middle, 2 right.
+        unsigned int pressed_button;
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         /*
@@ -3194,7 +3196,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 if (!mouse_mode)
                         return true;
 
-                terminal_pointer_key(0, WINDOW_KEY_POINTER_MOVE | (terminal.pressed ? WINDOW_KEY_DOWN : 0), &key);
+                // A drag reports the button that is down; a motion with none down is no button at all (3), as xterm sends it.
+                terminal_pointer_key(terminal.pressed ? terminal.pressed_button : 3,
+                                     WINDOW_KEY_POINTER_MOVE | (terminal.pressed ? WINDOW_KEY_DOWN : 0), &key);
                 return term_input(master, &key);
 
         case WINDOW_EVENT_BUTTON:
@@ -3226,6 +3230,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         return true;
 
                 terminal.pressed = down;
+                if (down)
+                        terminal.pressed_button = button;
                 terminal_pointer_key(button, down ? WINDOW_KEY_DOWN : 0, &key);
                 return term_input(master, &key);
         }
