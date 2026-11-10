@@ -2654,6 +2654,10 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
                         stop = line == last_line ? last_column : stored;
                 }
                 finish = stop < stored ? stop : stored;
+                // A selection that begins on the right half of a double-width character takes the character: its left half
+                // is the one that carries it, and the right half is skipped below.
+                if (start && start < stored && (cells[start].flags & WINDOW_CELL_WIDE_RIGHT))
+                        start--;
                 while (finish > start && (cells[finish - 1].character == ' ' || !cells[finish - 1].character))
                         finish--;
                 if (terminal_line_kept(line) && array_store_reserve(*into, *room, length, length + (positive)(finish > start ? finish - start : 0) * 4 + 2, 4096))
@@ -3636,6 +3640,10 @@ static void terminal_leave(b32 show)
                 system_close(terminal.master);
 
         stays = !terminal.reading && term_finish(terminal.child, terminal.master, terminal.hung, terminal.oom_kills);
+        // term_finish closed the pty. A window that stays still calls the pty on a resize or a zoom, and a number that
+        // was closed may by then be another terminal's pty in this process: none is named, so every call fails.
+        if (!terminal.reading)
+                terminal.master = (b32)-1;
 
         // A program that was asked for ends in a window that waits for a key, unless the X sent the end.
         if (!terminal.reading && term_program_count && !terminal.hung)
