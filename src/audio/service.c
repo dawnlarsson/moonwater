@@ -731,7 +731,7 @@ static long audio_number_text(char *to, unsigned long value)
 }
 
 static void audio_inputs_choose(void);
-static void audio_inputs_levels(void);
+static void audio_inputs_levels(int bits);
 static void audio_inputs_pass(int first);
 
 // A settings file's stamp: its inode, size and times, as stat says them (the same offsets on x86_64 and arm64). Each save is a rename, a new
@@ -845,7 +845,7 @@ static void audio_settings_read(int first)
                 if (first || volume != audio_service.applied_in_volume)
                 {
                         audio_service.applied_in_volume = volume;
-                        audio_inputs_levels();
+                        audio_inputs_levels(1);
                         if (!first && audio_service.pulse.default_source >= 0)
                                 pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.pulse.default_source);
                 }
@@ -857,7 +857,7 @@ static void audio_settings_read(int first)
                 if (first || mute != audio_service.applied_in_mute)
                 {
                         audio_service.applied_in_mute = mute;
-                        audio_inputs_levels();
+                        audio_inputs_levels(2);
                         if (!first && audio_service.pulse.default_source >= 0)
                                 pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.pulse.default_source);
                 }
@@ -1659,15 +1659,18 @@ static void audio_input_close(int k)
         audio_service.input[k].pcm.fd = -1;
 }
 
-// The person's levels for the input (the files /root/audio.source.volume and .mute), put on the default source.
-static void audio_inputs_levels(void)
+// The person's levels for the input (the files /root/audio.source.volume and .mute), put on the default source: bits 1 the volume, 2 the
+// mute. A change of one file puts only its own value, so a level a program changed (not yet kept) is not put back by a change of the other.
+static void audio_inputs_levels(int bits)
 {
         struct pulse *p = &audio_service.pulse;
 
         if (p->default_source < 0)
                 return;
-        p->source[p->default_source].volume[0] = p->source[p->default_source].volume[1] = audio_service.applied_in_volume;
-        p->source[p->default_source].muted = audio_service.applied_in_mute;
+        if (bits & 1)
+                p->source[p->default_source].volume[0] = p->source[p->default_source].volume[1] = audio_service.applied_in_volume;
+        if (bits & 2)
+                p->source[p->default_source].muted = audio_service.applied_in_mute;
 }
 
 /*
@@ -1697,7 +1700,7 @@ static void audio_inputs_choose(void)
         if (pick >= 0 && pick != p->default_source)
         {
                 pulse_source_default(p, pick);
-                audio_inputs_levels();
+                audio_inputs_levels(3);
         }
         audio_service.input_internal--;
 }
