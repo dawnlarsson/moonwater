@@ -399,6 +399,42 @@ static void test_noise(void)
 	free(noisy);
 }
 
+#ifdef MODEM_TONE_ASM
+/* The kernel (modem_tone_scan, lib.c) against the C scan of modem.c, bit for bit, on random, full-range, full-scale,
+   quiet and tone-shaped input at the configured tone count. The C scan leaves its result in modem_best. */
+static void test_tone_kernel(void)
+{
+	static uint8_t got[MODEM_MAX_SAMPLES];
+	static int16_t pcm[MODEM_MAX_SAMPLES];
+	int trial, same = 1;
+
+	modem_rows_build();
+	for (trial = 0; trial < 300 && same; trial++) {
+		size_t n = MODEM_SYM + rnd() % (trial < 200 ? 2000 : 40), i;
+
+		for (i = 0; i < n; i++) {
+			uint32_t r = rnd();
+
+			switch (trial % 5) {
+			case 0: pcm[i] = (int16_t)(r & 0xffff); break;
+			case 1: pcm[i] = (r & 1) ? (int16_t)-32768 : (int16_t)32767; break;
+			case 2: pcm[i] = (int16_t)((int)(r % 201) - 100); break;
+			case 3: pcm[i] = (int16_t)(((int)(i % MODEM_SYM) - MODEM_SYM / 2) * 1500 + (int)(r % 64)); break;
+			default: pcm[i] = (r % 3 == 0) ? (int16_t)-32768 : (r % 3 == 1) ? (int16_t)32767 : (int16_t)(r >> 16); break;
+			}
+		}
+		modem_tone_scan_c(pcm, n);
+		modem_tone_scan(&modem_rows[0][0][0], MODEM_SYM, MODEM_TONES, pcm, n, got);
+		for (i = 0; i + MODEM_SYM <= n; i++)
+			if (modem_best[i] != got[i]) {
+				same = 0;
+				break;
+			}
+	}
+	check(same, "the tone kernel (lib.c) is bit-identical to the C scan, random and full-scale input");
+}
+#endif
+
 static void test_bench(void)
 {
 	static const uint8_t payload[MODEM_PAYLOAD_MAX] = {0};
@@ -556,6 +592,9 @@ int main(void)
 	test_length_limits();
 	test_truncation();
 	test_noise();
+#ifdef MODEM_TONE_ASM
+	test_tone_kernel();
+#endif
 	test_bench();
 	printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
 	return failures ? 1 : 0;

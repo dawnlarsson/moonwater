@@ -363,6 +363,10 @@ cover('folds_already', 'trans_b', 'gemm_f32',
 # (the fast path's contract, called with the rectangle's own sizes).
 cover('nothing_to_fold', None, 'positive_into_string_2_2 positive_into_string_9_12 memory_blend_u32_rect_baseline',
       'asm-only: no C declaration and the parameters are run-time sizes of their callers')
+# The modem's tone scan: sym is MODEM_SYM at its one call site, but the kernel's work is per sample and the table it reads
+# is run-time data, so folding sym would remove one compare per wrap and nothing else.
+cover('nothing_to_fold', None, 'modem_tone_scan',
+      'the phase table is run-time data and the sample count is the decoder\'s input')
 cover('nothing_to_fold', None, 'matrix_engine_f32',
       'a private core with no C declaration: it takes a job record gemm_f32 '
       'builds, so no call site can hand it a literal')

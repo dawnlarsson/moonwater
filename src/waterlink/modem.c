@@ -533,6 +533,42 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
         return -1;
 }
 
+/* The symbol decisions run through modem_tone_scan (lib.c) wherever lib.c is part of the build (MOONWATER_ASSEMBLY) or a
+   test links its object (MODEM_TONE_LINKED), for the tone counts the kernel is written for; otherwise through
+   modem_tone_scan_c. MODEM_NO_TONE_ASM keeps the C in any build. */
+#if (defined(MOONWATER_ASSEMBLY) || defined(MODEM_TONE_LINKED)) && !defined(MODEM_NO_TONE_ASM) && !defined(KERNEL_MODE) && \
+        ((MODEM_TONES) == 8 || (MODEM_TONES) == 16)
+#define MODEM_TONE_ASM 1
+void modem_tone_scan(const b32 *rows, sized sym, sized tones, const b16 *pcm, sized n, p8 *best);
+#endif
+
+#ifdef MODEM_TONE_ASM
+/* The phase table of the kernel, built once: rows[k][0][c] and [1][c] are the cosine and sine of tone c+1 at phase k,
+   the table index (c+1)*k mod MODEM_SYM; [2] and [3] are the same two times 2^17, which the kernel uses so that its
+   products are 32 by 32 bits. */
+static b32 modem_rows[MODEM_SYM][4][MODEM_TONES];
+static int modem_rows_ready;
+
+static void modem_rows_build(void)
+{
+        sized k;
+        int c;
+
+        if (modem_rows_ready)
+                return;
+        for (k = 0; k < MODEM_SYM; k++)
+                for (c = 0; c < MODEM_TONES; c++) {
+                        sized idx = ((sized)(c + 1) * k) % MODEM_SYM;
+
+                        modem_rows[k][0][c] = modem_cos_tab[idx];
+                        modem_rows[k][1][c] = modem_sin_tab[idx];
+                        modem_rows[k][2][c] = modem_cos_tab[idx] * (1 << 17);
+                        modem_rows[k][3][c] = modem_sin_tab[idx] * (1 << 17);
+                }
+        modem_rows_ready = 1;
+}
+#endif
+
 /* Symbol decisions for every start sample, computed once. A window that starts at s correlates with tone c as
    P*cos(c*s) + Q*sin(c*s), where P and Q are the sums of x[t]*cos and x[t]*sin over the window in absolute
    sample positions t. P and Q slide one sample at a time, so each start costs about 7*MODEM_TONES multiplies,
@@ -554,25 +590,15 @@ static b64 modem_tone_energy(b64 P, b64 Q, b64 cs, b64 ss)
         return mc * mc + ms * ms;
 }
 
-static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
-                             p8 *out, sized cap, p32 *seq, unsigned *refused, int gated, p32 last, sized *used,
-                             sized *cut)
+/* The C scan of the symbol decisions: the definition modem_tone_scan (lib.c) must match bit for bit, and the decoder's
+   path where that routine is not part of the build. */
+static void modem_tone_scan_c(const b16 *pcm, sized n)
 {
         b64 P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
         sized ix[MODEM_TONES + 1];
         b64 blk_e[MODEM_BLOCK], blk_d[MODEM_BLOCK];
-        sized s, s0, s1, off, cut_samples = 0;
-        int refusal = 0, c, k;
-        p8 pick[MODEM_PAYLOAD_MAX];
-        p32 pick_seq = 0;
-        sized pick_end = 0, pick_len = 0;
-        int found = 0;
-        modem_memo memo;
-
-        if (!pcm || !out || !seq || !mac->ok || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
-                return -1;
-        memo.count = 0;
-        memo.next = 0;
+        sized s, s0, s1;
+        int c, k;
 
         /* The window for start 0 covers samples 0..MODEM_SYM-1: P and Q are the sums over absolute positions t, with the
            tone index (c*t) mod MODEM_SYM. Moving the window from s-1 to s takes out the sample at s-1 and puts in the one at
@@ -647,6 +673,31 @@ static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
                 for (s = s0; s < s1; s++)
                         modem_best[s] = (p8)((1u << MODEM_TIE_BITS) - 1u - (unsigned)(blk_e[s - s0] & ((1 << MODEM_TIE_BITS) - 1)));
         }
+}
+
+static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
+                             p8 *out, sized cap, p32 *seq, unsigned *refused, int gated, p32 last, sized *used,
+                             sized *cut)
+{
+        sized off, cut_samples = 0;
+        int refusal = 0;
+        p8 pick[MODEM_PAYLOAD_MAX];
+        p32 pick_seq = 0;
+        sized pick_end = 0, pick_len = 0;
+        int found = 0;
+        modem_memo memo;
+
+        if (!pcm || !out || !seq || !mac->ok || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
+                return -1;
+        memo.count = 0;
+        memo.next = 0;
+
+#ifdef MODEM_TONE_ASM
+        modem_rows_build();
+        modem_tone_scan(&modem_rows[0][0][0], MODEM_SYM, MODEM_TONES, pcm, n, modem_best);
+#else
+        modem_tone_scan_c(pcm, n);
+#endif
 
         /* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
            at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass

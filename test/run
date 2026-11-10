@@ -3772,8 +3772,9 @@ lane_modem()
 	modem_work=$work/modem
 	mkdir -p "$modem_work" || exit 1
 	modem_flags="-std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all"
-	#	The modem calls two functions of lib.c. lib.c is compiled without its own _start, and only those two names stay
-	#	global: the rest (log, strlen, memcpy) would replace the C library's in this program. src/waterlink/modem_host.h
+	#	The modem calls three functions of lib.c: the SHA-256 pair, and the tone scan's kernel (modem_tone_scan), which the
+	#	self-test and the configurations link in (MODEM_TONE_LINKED). lib.c is compiled without its own _start, and only those
+	#	names stay global: the rest (log, strlen, memcpy) would replace the C library's in this program. src/waterlink/modem_host.h
 	#	says what else the codec names.
 	$compiler -O2 -w -DSTANDARD_NO_ENTRY -c src/lib.c -o "$modem_work/lib_full.o" 2> "$modem_work/lib.err" || {
 		note "modem: src/lib.c did not build with $compiler"
@@ -3781,15 +3782,15 @@ lane_modem()
 		exit 1
 	}
 	case $host_system in
-	Darwin) ld -r -exported_symbol _sha256_blocks -exported_symbol _hash_hmac_sha256_prepared \
+	Darwin) ld -r -exported_symbol _sha256_blocks -exported_symbol _hash_hmac_sha256_prepared -exported_symbol _modem_tone_scan \
 		-o "$modem_work/lib.o" "$modem_work/lib_full.o" ;;
 	*) objcopy --keep-global-symbol=sha256_blocks --keep-global-symbol=hash_hmac_sha256_prepared \
-		"$modem_work/lib_full.o" "$modem_work/lib.o" ;;
+		--keep-global-symbol=modem_tone_scan "$modem_work/lib_full.o" "$modem_work/lib.o" ;;
 	esac || {
 		note "modem: src/lib.c could not be cut down to the codec's two functions"
 		exit 1
 	}
-	$compiler $modem_flags -o "$modem_work/selftest" test/modem.c "$modem_work/lib.o" -lm 2> "$modem_work/build.err" || {
+	$compiler $modem_flags -DMODEM_TONE_LINKED=1 -o "$modem_work/selftest" test/modem.c "$modem_work/lib.o" -lm 2> "$modem_work/build.err" || {
 		note "modem: test/modem.c did not build with $compiler"
 		cat "$modem_work/build.err" >&2
 		exit 1
@@ -3822,7 +3823,7 @@ lane_modem()
 		modem_tones=${modem_pair#* }
 		modem_configs=$((modem_configs + 1))
 		modem_bin=$modem_work/config_${modem_sym}_$modem_tones
-		$compiler $modem_flags -DMODEM_SYM=$modem_sym -DMODEM_TONES=$modem_tones -o "$modem_bin" test/modem.c "$modem_work/lib.o" -lm 2> "$modem_bin.err" || {
+		$compiler $modem_flags -DMODEM_TONE_LINKED=1 -DMODEM_SYM=$modem_sym -DMODEM_TONES=$modem_tones -o "$modem_bin" test/modem.c "$modem_work/lib.o" -lm 2> "$modem_bin.err" || {
 			note "modem: test/modem.c did not build at $modem_sym samples and $modem_tones tones"
 			cat "$modem_bin.err" >&2
 			continue

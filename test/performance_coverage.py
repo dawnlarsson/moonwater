@@ -865,6 +865,14 @@ cover('correctness_only', 'test/checks.c#CHECK_codec',
       'agreement with the generic over every span of the test text, both limits; '
       'timed in the commit message and not yet a BENCH row')
 
+# The modem's tone scan (src/waterlink/modem.c calls it for every start of a capture). The kernel is checked bit for bit
+# against the C reference in the kernel build of test/modem.c; its timing is the whole decode, which test/modem.c times
+# (sh test/run modem), not the routine on its own, so this row claims no routine-level timing.
+cover('correctness_only', 'test/modem.c', 'modem_tone_scan',
+      'bit-identical to the C reference on random and full-scale input, and a frame decodes through it; '
+      'the decode is timed as a whole, arm64 only')
+
+
 def validate():
     errors = []
     manifest.reconcile(ROWS, errors)
