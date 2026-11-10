@@ -4012,6 +4012,21 @@ static b32 settings_edit_shown(void)
         return at >= 0 && top + ui_px(&settings.ui, UI_ROW) > settings.list.y && top < settings.list.y + settings.list.h;
 }
 
+// A port is allowed (allow) or denied (deny) by its name, the first word of its line that device allow and device deny take.
+static fn settings_port_set(const struct settings_item address_to item, b32 allow)
+{
+        char name[SETTINGS_ITEM_LABEL];
+        positive at = 0;
+
+        while (item->label[at] && item->label[at] != ' ' && at + 1 < sizeof(name))
+        {
+                name[at] = item->label[at];
+                at++;
+        }
+        name[at] = 0;
+        settings_act(allow ? 'v' : 'x', name, null);
+}
+
 // A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
 static fn settings_item_activate(int row, const struct settings_item address_to item)
 {
@@ -4035,20 +4050,9 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                         settings_say((string_address)WORDS(settings_type_passphrase));
                 }
         }
+        // A press on a port's row turns it: allowed, it is denied; else it is allowed.
         else if (item->kind == SETTINGS_PORT)
-        {
-                char name[SETTINGS_ITEM_LABEL];
-                positive at = 0;
-
-                // The first word of its line is the name device allow and device deny take; a press turns it.
-                while (item->label[at] && item->label[at] != ' ' && at + 1 < sizeof(name))
-                {
-                        name[at] = item->label[at];
-                        at++;
-                }
-                name[at] = 0;
-                settings_act((item->flags & SETTINGS_ITEM_JOINED) ? 'x' : 'v', name, null);
-        }
+                settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
         else if (item->kind == SETTINGS_ADD)
         {
                 settings_edit_begin(row, "", false);
@@ -4607,9 +4611,9 @@ static b32 settings_row_is(int at, const char address_to path)
 
 /*
         What a row shows, for the kit's list: its label, its section and the section's header, and its value as the kind
-        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), the theme and the
-        motion the kit's segmented tabs, the accent a swatch for each named accent, a choice opens a menu, a step moves
-        either way, and a field typed in is the kit's field. A network is its name, marked when it is the one joined,
+        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), the theme, the motion
+        and a port's allow or deny the kit's segmented tabs, the accent a swatch for each named accent, a choice opens a
+        menu, a step moves either way, and a field typed in is the kit's field. A network is its name, marked when it is the one joined,
         with what is said of it, what it asks for and the bars of its signal; a device kept, the row that keeps
         another, the line the verb said that is no row; a command, and whether it asks first. A value not read yet,
         not on this machine or not understood says so, quietly.
@@ -4639,6 +4643,25 @@ static const char address_to settings_tab_words(const struct settings_row addres
                 at += string_length((string_address)said);
         }
         return shown[slot];
+}
+
+// The two words a port's segments say, allow then deny, as the language says them, one blank between (the kit's tabs take them so).
+static const char address_to settings_port_words(void)
+{
+        static char shown[SETTINGS_VALUE];
+        const char address_to words[2] = {language_of("allow"), language_of("deny")};
+        positive at = 0;
+
+        for (positive k = 0; k < 2; k++)
+        {
+                if (at + string_length((string_address)words[k]) + 2 >= sizeof(shown))
+                        break;
+                if (at)
+                        shown[at++] = ' ';
+                string_copy_bounded((string_address)shown + at, (string_address)words[k], sizeof(shown) - at);
+                at += string_length((string_address)words[k]);
+        }
+        return shown;
 }
 
 static fn settings_describe(int id, struct ui_row address_to row)
@@ -4703,10 +4726,10 @@ static fn settings_describe(int id, struct ui_row address_to row)
                         row->value = WORDS(settings_kept);
                 else if (item->kind == SETTINGS_PORT)
                 {
-                        // The state is the note, and the value is what a press does: deny for an allowed port, else allow.
-                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
+                        // The state is the note; the kit's two tabs are allow and deny, the one the state is selected (a port not allowed is denied).
+                        row->kind = UI_ROW_TABS, row->words = settings_port_words();
+                        row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
                         row->note = item->state[0] ? item->state : null;
-                        row->value = language_of(row->mark ? "deny" : "allow");
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
@@ -5011,6 +5034,15 @@ static fn settings_press_at(void)
         }
         settings.page.pane = 1;
         ui_page_redraw(&settings.page);
+        // A port's segment: allow (the first) or deny (the second) that port; the segment the port is in is no change.
+        if (settings.list.part >= 0 && row < (int)SETTINGS_ALL && settings_item(row) && settings_item(row)->kind == SETTINGS_PORT)
+        {
+                const struct settings_item address_to item = settings_item(row);
+
+                if (((item->flags & SETTINGS_ITEM_JOINED) != 0) != (settings.list.part == 0))
+                        settings_port_set(item, settings.list.part == 0);
+                return;
+        }
         // A segment or a swatch is set where it is pressed.
         if (settings.list.part >= 0 && row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
         {

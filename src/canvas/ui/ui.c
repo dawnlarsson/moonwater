@@ -10082,6 +10082,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         number[length] = 0;
                 number_w = ui_kit_measure(ui, (string_address)number, UI_BODY_MEDIUM) + gap;
         }
+        // A tabs row's note (a port's state) is at the tabs' left, as a value is at a row's right: its room is taken from the label's.
+        else if (trailing && row.kind == UI_ROW_TABS && row.note)
+                number_w = ui_kit_measure(ui, (string_address)row.note, UI_LABEL_MEDIUM) + gap;
         // The badge: the row's own second control, at the right (left of a switch, which is at the very right). Its width comes out of the
         // room the label and the value have, and a row that is no switch has its right edge moved in by it.
         if (row.badge)
@@ -10137,6 +10140,13 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if (row.kind == UI_ROW_SLIDER && seen)
                         ui_kit_text_flipped(ui, trailing_right - ui_dev(ui, trailing->w) - number_w, baseline, (string_address)number, UI_BODY_MEDIUM,
                                             row.dim ? quiet : ui_text_colour(ui, UI_ON_SURFACE), 0, x, w);
+                else if (row.kind == UI_ROW_TABS && row.note && seen)
+                {
+                        int note_baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM);
+
+                        ui_kit_text_flipped(ui, trailing_right - ui_dev(ui, trailing->w) - number_w, note_baseline, (string_address)row.note,
+                                            UI_LABEL_MEDIUM, quiet, 0, x, w);
+                }
                 return;
         }
         if (row.kind == UI_ROW_FIELD)
