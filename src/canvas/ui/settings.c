@@ -4496,7 +4496,7 @@ static b32 settings_key(const struct window_event address_to event)
                 return true;
         }
         // Delete on a kernel notice's line dismisses its class (the feeder starts it again from nothing); a line is no row, so the keys stop there.
-        if (event->a == UI_KEY_DELETE && settings.list.focus >= (int)SETTINGS_ALL && settings.list.focus - (int)SETTINGS_ALL < settings_sub_count)
+        if (event->a == UI_KEY_DELETE && !settings_filter_typed() && settings.list.focus >= (int)SETTINGS_ALL && settings.list.focus - (int)SETTINGS_ALL < settings_sub_count)
         {
                 unsigned int code = settings_sub[settings.list.focus - (int)SETTINGS_ALL].code;
 
