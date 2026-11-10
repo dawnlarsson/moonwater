@@ -16,6 +16,7 @@
                 link group ...          machines on one network that link
                                         themselves
                 link on | off           the listener, kept across boots
+                link transport [network|modem]   how machines reach each other
 
         `key` and `serve` are not in the page: the key is in the status, and
         `serve` is how the listener starts itself.
@@ -1459,6 +1460,44 @@ static b32 link_port_verb(string_address word)
 }
 
 /*
+        moonwater link transport [network|modem]: how linked machines reach
+        each other, kept in /root/link.transport, network when nothing is kept.
+        The audio modem is a last-resort transport the machine does not have
+        yet: its word is refused, and the page and the window say it is not
+        available, until link_modem_ready says it is. The state is the one
+        place that says so, so a row that shows it is never wrong.
+*/
+static bool link_modem_ready(void)
+{
+        return false;
+}
+
+static b32 link_transport_verb(string_address word)
+{
+        p8 kept[16];
+        bipolar failed;
+
+        host_read_word(LINK_TRANSPORT_PATH, kept, sizeof kept);
+        if (!word)
+        {
+                host_say(log, host_label "transport %s\n",
+                         kept[0] ? (string_address)kept : (string_address)"network");
+                host_say(log, host_label "audio modem %s\n",
+                         link_modem_ready() ? "ready" : "not available yet");
+                return 0;
+        }
+        if (string_equals(word, "modem") && !link_modem_ready())
+                return host_refuse("the audio modem is not available yet: the "
+                                   "transport stays network\n");
+        if (!string_equals(word, "network") && !string_equals(word, "modem"))
+                return host_refuse("transport is network or modem, not %s\n", word);
+        failed = radio_write_word(LINK_TRANSPORT_PATH, word);
+        return_if(failed < 0, host_fail("link transport", failed));
+        host_say(log, host_label "transport %s\n", word);
+        return 0;
+}
+
+/*
         How many words each verb that takes a fixed number is run with, the
         two that name the program and the verb among them. A word of these
         with the wrong number is a usage page for anyone: root's refusal is
@@ -1472,7 +1511,7 @@ static const struct
         positive most;
 } link_shapes[] = {
     {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 4},
-    {"port", 3, 4},
+    {"port", 3, 4},  {"transport", 3, 4},
     {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
@@ -1538,6 +1577,8 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 return link_key_verb();
         if (string_equals(verb, "port"))
                 return link_port_verb(count == 4 ? arguments[3] : null);
+        if (string_equals(verb, "transport"))
+                return link_transport_verb(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "serve"))
                 return link_serve(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "pair"))

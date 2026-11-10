@@ -25372,6 +25372,7 @@ static const host_row host_rows[] = {
     {null, "link group leave NAME [forget]", "stop, and forget the key of the group", 'f'},
     {null, "link on|off", "the listener, kept across boots [off]", 'f'},
     {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},
+    {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, not available yet [network]", 'f'},
 };
 
 /* The column the words of a row start in. A command that would not leave two
@@ -25768,6 +25769,7 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(LINK_KEY_PATH),
     HOST_WIPE_KEEP(LINK_PEERS_PATH),
     HOST_WIPE_KEEP(LINK_PORT_PATH),
+    HOST_WIPE_KEEP(LINK_TRANSPORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
     //  Where the windows were last put, which the compositor writes and no plain row names.
