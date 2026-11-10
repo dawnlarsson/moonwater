@@ -16029,7 +16029,10 @@ static int compositor_asked_shape(int row)
 #endif
         if (!compositor.table || row < 0 || row >= WINDOWS)
                 return -1;
-        return (int)__atomic_load_n(&compositor.table->pointer_shape[row], __ATOMIC_ACQUIRE);
+        // A program's shape is one of the CP_ codes it knows; any other value is the arrow, so a program cannot make the -2 of no pointer.
+        unsigned int shape = __atomic_load_n(&compositor.table->pointer_shape[row], __ATOMIC_ACQUIRE);
+
+        return shape < CP_SHAPES ? (int)shape : CP_ARROW;
 }
 
 static void compositor_motion(void)
@@ -16602,7 +16605,9 @@ static void compositor_button(unsigned int code, int down)
                         compositor_close(under);
                         return;
                 }
-                top = band && compositor_asked_shape(under) <= WINDOW_POINTER_ARROW;
+                // The arrow, or none asked (-1) or no pointer (-2): a control's shape is positive. The comparison is signed, or -1 and -2
+                // would read as huge unsigned values and the titlebar would give way to nothing.
+                top = band && compositor_asked_shape(under) <= (int)WINDOW_POINTER_ARROW;
 
                 if (alt || top)
                 {
