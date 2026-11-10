@@ -9424,7 +9424,7 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
         row dirty and ui_list_draw paints it. An app gives its rows; the kit owns the press, the slide, the scroll and the damage.
 */
 
-#define UI_LIST_MOST 256 // the rows a list shows at once
+#define UI_LIST_MOST 320 // the rows a list shows at once (the settings window's every row and list, 3 lists of 24 and All commands)
 #define UI_LIST_STARTS 1 // a row is its section's first
 #define UI_LIST_HEADED 2 // and its section has a header over it
 

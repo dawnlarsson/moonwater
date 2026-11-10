@@ -214,6 +214,8 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Allow recording	f7e5	Kayda izin ver
 =Always off	48b1	Her zaman kapalı
 =Always on	fab5	Her zaman açık
+=Audio	1439	Ses
+=Audio modem (last resort)	8e7b	Ses modemi (son çare)
 =Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)
 =Automatic	6784	Otomatik
 =Background	0abd	Arka plan
@@ -233,6 +235,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Clipboard limit (MiB)	a505	Pano sınırı (MiB)
 =Clock (Enter sets it now)	575e	Saat (Enter şimdi ayarlar)
 =Clock format	70d0	Saat biçimi
+=Connect over	2789	Bağlantı yolu
 =Cursor look	34ce	İşaretçi görünümü
 =Cursor size	65d4	İşaretçi boyutu
 =Date format	7a44	Tarih biçimi
@@ -258,6 +261,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
 =Launcher	44b1	Başlatıcı
 =Left edge	9ce5	Sol kenar
+=Linked machines	0cc2	Bağlı makineler
 =Machine	be0e	Makine
 =Mixer	123a	Karıştırıcı
 =Momentum	cfef	Atalet
@@ -268,6 +272,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Mute	9f74	Sessiz
 =NTS servers (or default)	9fd7	NTS sunucuları (veya default)
 =Name	7306	Ad
+=Name and code of another machine	4e07	Başka bir makinenin adı ve kodu
 =Name servers (auto for the network)	695a	Ad sunucuları (ağ için auto)
 =Names over TLS	075a	TLS üzerinden adlar
 =Natural direction	d977	Doğal yön
@@ -278,6 +283,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =On-screen keyboard	97f8	Ekran klavyesi
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
+=Pair a machine	b39b	Bir makine eşleştir
 =Plain Text	2bbe	Düz Metin
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
@@ -314,6 +320,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Text size (percent, or default)	51d7	Metin boyutu (yüzde veya default)
 =The internet prefers	3dbe	İnternet şunu tercih eder
 =Theme	7c92	Tema
+=This machine	3790	Bu makine
 =Time	e404	Saat
 =Time server (auto for the pool)	67e5	Zaman sunucusu (havuz için auto)
 =Time zone	741a	Saat dilimi
@@ -322,6 +329,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Turned right	7a49	Sağa döndürülmüş
 =Upside down	9dc1	Baş aşağı
 =Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Kablolu
 =all	4bc4	tümü
@@ -354,6 +362,8 @@ ui_field_full	fe02	daha fazlası sığmaz
 =lock	7842	kilitle
 =mdy	3697	mdy
 =midnight-blue	4008	gece mavisi
+=modem	67ed	modem
+=network	86c5	ağ
 =normal	9c52	normal
 =off	8a0a	kapalı
 =on	2fd0	açık

@@ -215,6 +215,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Allow recording	f7e5	السماح بالتسجيل
 =Always off	48b1	دائماً إيقاف
 =Always on	fab5	دائماً تشغيل
+=Audio	1439	الصوت
+=Audio modem (last resort)	8e7b	مودم الصوت (الملاذ الأخير)
 =Authenticated time (NTS)	e533	الوقت الموثق (NTS)
 =Automatic	6784	تلقائي
 =Background	0abd	الخلفية
@@ -234,6 +236,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Clipboard limit (MiB)	a505	حد الحافظة (MiB)
 =Clock (Enter sets it now)	575e	الساعة (Enter يضبطها الآن)
 =Clock format	70d0	تنسيق الوقت
+=Connect over	2789	الاتصال عبر
 =Cursor look	34ce	شكل المؤشر
 =Cursor size	65d4	حجم المؤشر
 =Date format	7a44	تنسيق التاريخ
@@ -259,6 +262,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
 =Launcher	44b1	المشغل
 =Left edge	9ce5	الحافة اليسرى
+=Linked machines	0cc2	الحواسيب المرتبطة
 =Machine	be0e	الحاسوب
 =Mixer	123a	خلاط الصوت
 =Momentum	cfef	الزخم
@@ -269,6 +273,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Mute	9f74	كتم الصوت
 =NTS servers (or default)	9fd7	خوادم NTS (أو default)
 =Name	7306	الاسم
+=Name and code of another machine	4e07	اسم حاسوب آخر ورمزه
 =Name servers (auto for the network)	695a	خوادم الأسماء (auto للشبكة)
 =Names over TLS	075a	الأسماء عبر TLS
 =Natural direction	d977	الاتجاه الطبيعي
@@ -279,6 +284,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =On-screen keyboard	97f8	لوحة المفاتيح على الشاشة
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
+=Pair a machine	b39b	إقران حاسوب
 =Plain Text	2bbe	نص عادي
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
@@ -315,6 +321,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
 =The internet prefers	3dbe	يفضل الإنترنت
 =Theme	7c92	السمة
+=This machine	3790	هذا الحاسوب
 =Time	e404	الوقت
 =Time server (auto for the pool)	67e5	خادم الوقت (auto للمجموعة)
 =Time zone	741a	المنطقة الزمنية
@@ -323,6 +330,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Turned right	7a49	مدار لليمين
 =Upside down	9dc1	مقلوب
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	الشبكة السلكية
 =all	4bc4	الكل
@@ -355,6 +363,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =lock	7842	قفل
 =mdy	3697	mdy
 =midnight-blue	4008	أزرق منتصف الليل
+=modem	67ed	مودم
+=network	86c5	الشبكة
 =normal	9c52	عادي
 =off	8a0a	إيقاف
 =on	2fd0	تشغيل

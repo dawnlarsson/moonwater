@@ -215,6 +215,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Allow recording	f7e5	اجازهٔ ضبط
 =Always off	48b1	همیشه خاموش
 =Always on	fab5	همیشه روشن
+=Audio	1439	صدا
+=Audio modem (last resort)	8e7b	مودم صوتی (آخرین راه)
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس‌زمینه
@@ -234,6 +236,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Clipboard limit (MiB)	a505	حد کلیپ‌بورد (MiB)
 =Clock (Enter sets it now)	575e	ساعت (Enter همین حالا آن را تنظیم می‌کند)
 =Clock format	70d0	قالب زمان
+=Connect over	2789	اتصال از طریق
 =Cursor look	34ce	ظاهر نشانگر
 =Cursor size	65d4	اندازه نشانگر
 =Date format	7a44	قالب تاریخ
@@ -259,6 +262,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
 =Launcher	44b1	راه‌انداز
 =Left edge	9ce5	لبه چپ
+=Linked machines	0cc2	رایانه‌های متصل
 =Machine	be0e	رایانه
 =Mixer	123a	میکسر
 =Momentum	cfef	تکانه
@@ -269,6 +273,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Mute	9f74	بی‌صدا
 =NTS servers (or default)	9fd7	سرورهای NTS (یا default)
 =Name	7306	نام
+=Name and code of another machine	4e07	نام و کد یک رایانهٔ دیگر
 =Name servers (auto for the network)	695a	سرورهای نام (auto برای شبکه)
 =Names over TLS	075a	نام‌ها از طریق TLS
 =Natural direction	d977	جهت طبیعی
@@ -279,6 +284,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =On-screen keyboard	97f8	صفحه‌کلید روی صفحه
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
+=Pair a machine	b39b	جفت کردن یک رایانه
 =Plain Text	2bbe	متن ساده
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
@@ -315,6 +321,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
 =Theme	7c92	تم
+=This machine	3790	این رایانه
 =Time	e404	زمان
 =Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
 =Time zone	741a	منطقه زمانی
@@ -323,6 +330,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Turned right	7a49	چرخیده به راست
 =Upside down	9dc1	وارونه
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	شبکه سیمی
 =all	4bc4	همه
@@ -355,6 +363,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =lock	7842	قفل
 =mdy	3697	mdy
 =midnight-blue	4008	آبی نیمه‌شب
+=modem	67ed	مودم
+=network	86c5	شبکه
 =normal	9c52	عادی
 =off	8a0a	خاموش
 =on	2fd0	روشن

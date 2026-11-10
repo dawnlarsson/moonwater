@@ -141198,7 +141198,7 @@ static fn check_settings_device_strip(void)
 static fn check_settings_groups(void)
 {
         static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
-                                                "Network", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System"};
+                                                "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System"};
         static const struct
         {
                 const char address_to words[3];
@@ -141210,7 +141210,7 @@ static fn check_settings_groups(void)
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
-            {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
+            {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"link"}, "Waterlink"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"device"}, "Devices"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
             {{"cpu"}, "Power"}, {{"bind"}, "Boot"}};
         static const struct
@@ -141260,6 +141260,10 @@ static fn check_settings_groups(void)
                                 word++;
                         if (word == 0 || (word < 3 && families[of].words[word]))
                                 continue;
+                        // The machine's name is shown under Waterlink, beside the switch that links it: the one row of Machine's
+                        // family that is not Machine's.
+                        if (string_equals((string_address)row->label, (string_address) "This machine"))
+                                break;
                         if (!string_equals((string_address)group, (string_address)wanted))
                         {
                                 family = false;

@@ -3,7 +3,7 @@
 # Add a line before using a new term twice; change a line only with every text that uses it.
 #
 # Rules that hold for every text:
-#   - Never translated: Moonwater, Canvas, Wi-Fi, Bluetooth, USB, NTS, TLS, SMT, MiB, ms, Ctrl, Alt, Shift, Enter and Escape
+#   - Never translated: Moonwater, Canvas, Waterlink, Wi-Fi, Bluetooth, USB, NTS, TLS, SMT, MiB, ms, Ctrl, Alt, Shift, Enter and Escape
 #     where they name a key, rrggbb, and every {name} of a format. A word a person types (default, auto, off, reset, on)
 #     stays English inside a label that tells them to type it, and is translated where the window only shows it.
 #   - Placeholders (%s, %d, %1$s) and {names} are kept whole; a translation may put them in another order, naming them (%2$s).

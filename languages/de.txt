@@ -214,6 +214,8 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Allow recording	f7e5	Aufnahme erlauben
 =Always off	48b1	Immer aus
 =Always on	fab5	Immer an
+=Audio	1439	Audio
+=Audio modem (last resort)	8e7b	Audio-Modem (letzte Option)
 =Authenticated time (NTS)	e533	Authentifizierte Zeit (NTS)
 =Automatic	6784	Automatisch
 =Background	0abd	Hintergrund
@@ -233,6 +235,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Clipboard limit (MiB)	a505	Grenze der Zwischenablage (MiB)
 =Clock (Enter sets it now)	575e	Uhr (Enter stellt sie jetzt)
 =Clock format	70d0	Uhrzeitformat
+=Connect over	2789	Verbindung über
 =Cursor look	34ce	Aussehen des Mauszeigers
 =Cursor size	65d4	Größe des Mauszeigers
 =Date format	7a44	Datumsformat
@@ -258,6 +261,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Large pointer stays (ms, or default)	5626	Großer Zeiger bleibt (ms oder default)
 =Launcher	44b1	Starter
 =Left edge	9ce5	Linker Rand
+=Linked machines	0cc2	Verbundene Maschinen
 =Machine	be0e	Gerät
 =Mixer	123a	Mixer
 =Momentum	cfef	Schwung
@@ -268,6 +272,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Mute	9f74	Stummschalten
 =NTS servers (or default)	9fd7	NTS-Server (oder default)
 =Name	7306	Name
+=Name and code of another machine	4e07	Name und Code einer anderen Maschine
 =Name servers (auto for the network)	695a	Namensserver (auto für das Netzwerk)
 =Names over TLS	075a	Namen über TLS
 =Natural direction	d977	Natürliche Richtung
@@ -278,6 +283,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =On-screen keyboard	97f8	Bildschirmtastatur
 =Open windows where they were last put	8711	Fenster dort öffnen, wo sie zuletzt lagen
 =Output device (name, or default)	d73c	Ausgabegerät (Name oder default)
+=Pair a machine	b39b	Maschine koppeln
 =Plain Text	2bbe	Nur-Text
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
@@ -314,6 +320,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Text size (percent, or default)	51d7	Textgröße (Prozent oder default)
 =The internet prefers	3dbe	Internet bevorzugt
 =Theme	7c92	Design
+=This machine	3790	Diese Maschine
 =Time	e404	Zeit
 =Time server (auto for the pool)	67e5	Zeitserver (auto für den Pool)
 =Time zone	741a	Zeitzone
@@ -322,6 +329,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Turned right	7a49	Nach rechts gedreht
 =Upside down	9dc1	Auf dem Kopf
 =Volume (percent, or default)	f6e3	Lautstärke (Prozent oder default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Kabelgebunden
 =all	4bc4	Alle
@@ -354,6 +362,8 @@ ui_field_full	fe02	mehr passt nicht hinein
 =lock	7842	Sperren
 =mdy	3697	mdy
 =midnight-blue	4008	Mitternachtsblau
+=modem	67ed	Modem
+=network	86c5	Netzwerk
 =normal	9c52	Normal
 =off	8a0a	Aus
 =on	2fd0	An

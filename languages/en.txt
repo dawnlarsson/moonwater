@@ -214,6 +214,8 @@ ui_field_full	fe02	that is as much as it holds
 =Allow recording	f7e5	Allow recording
 =Always off	48b1	Always off
 =Always on	fab5	Always on
+=Audio	1439	Audio
+=Audio modem (last resort)	8e7b	Audio modem (last resort)
 =Authenticated time (NTS)	e533	Authenticated time (NTS)
 =Automatic	6784	Automatic
 =Background	0abd	Background
@@ -233,6 +235,7 @@ ui_field_full	fe02	that is as much as it holds
 =Clipboard limit (MiB)	a505	Clipboard limit (MiB)
 =Clock (Enter sets it now)	575e	Clock (Enter sets it now)
 =Clock format	70d0	Clock format
+=Connect over	2789	Connect over
 =Cursor look	34ce	Cursor look
 =Cursor size	65d4	Cursor size
 =Date format	7a44	Date format
@@ -258,6 +261,7 @@ ui_field_full	fe02	that is as much as it holds
 =Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
 =Launcher	44b1	Launcher
 =Left edge	9ce5	Left edge
+=Linked machines	0cc2	Linked machines
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Momentum	cfef	Momentum
@@ -268,6 +272,7 @@ ui_field_full	fe02	that is as much as it holds
 =Mute	9f74	Mute
 =NTS servers (or default)	9fd7	NTS servers (or default)
 =Name	7306	Name
+=Name and code of another machine	4e07	Name and code of another machine
 =Name servers (auto for the network)	695a	Name servers (auto for the network)
 =Names over TLS	075a	Names over TLS
 =Natural direction	d977	Natural direction
@@ -278,6 +283,7 @@ ui_field_full	fe02	that is as much as it holds
 =On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
 =Output device (name, or default)	d73c	Output device (name, or default)
+=Pair a machine	b39b	Pair a machine
 =Plain Text	2bbe	Plain Text
 =Power	a5e6	Power
 =Power profile	8def	Power profile
@@ -314,6 +320,7 @@ ui_field_full	fe02	that is as much as it holds
 =Text size (percent, or default)	51d7	Text size (percent, or default)
 =The internet prefers	3dbe	The internet prefers
 =Theme	7c92	Theme
+=This machine	3790	This machine
 =Time	e404	Time
 =Time server (auto for the pool)	67e5	Time server (auto for the pool)
 =Time zone	741a	Time zone
@@ -322,6 +329,7 @@ ui_field_full	fe02	that is as much as it holds
 =Turned right	7a49	Turned right
 =Upside down	9dc1	Upside down
 =Volume (percent, or default)	f6e3	Volume (percent, or default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Wired
 =all	4bc4	all
@@ -354,6 +362,8 @@ ui_field_full	fe02	that is as much as it holds
 =lock	7842	lock
 =mdy	3697	mdy
 =midnight-blue	4008	midnight-blue
+=modem	67ed	modem
+=network	86c5	network
 =normal	9c52	normal
 =off	8a0a	off
 =on	2fd0	on

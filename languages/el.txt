@@ -214,6 +214,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
 =Always off	48b1	Πάντα ανενεργό
 =Always on	fab5	Πάντα ενεργό
+=Audio	1439	Ήχος
+=Audio modem (last resort)	8e7b	Μόντεμ ήχου (έσχατη λύση)
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
 =Automatic	6784	Αυτόματο
 =Background	0abd	Φόντο
@@ -233,6 +235,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Clipboard limit (MiB)	a505	Όριο προχείρου (MiB)
 =Clock (Enter sets it now)	575e	Ρολόι (το Enter το ρυθμίζει τώρα)
 =Clock format	70d0	Μορφή ώρας
+=Connect over	2789	Σύνδεση μέσω
 =Cursor look	34ce	Εμφάνιση δείκτη
 =Cursor size	65d4	Μέγεθος δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
@@ -258,6 +261,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
 =Launcher	44b1	Εκκινητής
 =Left edge	9ce5	Αριστερό άκρο
+=Linked machines	0cc2	Συνδεδεμένα μηχανήματα
 =Machine	be0e	Μηχάνημα
 =Mixer	123a	Μίκτης
 =Momentum	cfef	Αδράνεια
@@ -268,6 +272,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Mute	9f74	Σίγαση
 =NTS servers (or default)	9fd7	Διακομιστές NTS (ή default)
 =Name	7306	Όνομα
+=Name and code of another machine	4e07	Όνομα και κωδικός άλλου μηχανήματος
 =Name servers (auto for the network)	695a	Διακομιστές ονομάτων (auto για το δίκτυο)
 =Names over TLS	075a	Ονόματα μέσω TLS
 =Natural direction	d977	Φυσική κατεύθυνση
@@ -278,6 +283,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
+=Pair a machine	b39b	Σύνδεση μηχανήματος
 =Plain Text	2bbe	Απλό κείμενο
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
@@ -314,6 +320,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =Theme	7c92	Θέμα
+=This machine	3790	Αυτό το μηχάνημα
 =Time	e404	Ώρα
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
@@ -322,6 +329,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Turned right	7a49	Στραμμένη δεξιά
 =Upside down	9dc1	Ανάποδα
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Ενσύρματο
 =all	4bc4	όλα
@@ -354,6 +362,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =lock	7842	κλείδωμα
 =mdy	3697	mdy
 =midnight-blue	4008	μεσονύχτιο μπλε
+=modem	67ed	μόντεμ
+=network	86c5	δίκτυο
 =normal	9c52	κανονικά
 =off	8a0a	ανενεργό
 =on	2fd0	ενεργό

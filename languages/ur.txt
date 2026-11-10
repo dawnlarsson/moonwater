@@ -215,6 +215,8 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
+=Audio	1439	آڈیو
+=Audio modem (last resort)	8e7b	آڈیو موڈیم (آخری راستہ)
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس منظر
@@ -234,6 +236,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Clipboard limit (MiB)	a505	کلپ بورڈ کی حد (MiB)
 =Clock (Enter sets it now)	575e	گھڑی (Enter اسے ابھی سیٹ کرتا ہے)
 =Clock format	70d0	وقت کی شکل
+=Connect over	2789	رابطے کا ذریعہ
 =Cursor look	34ce	پوائنٹر کی شکل
 =Cursor size	65d4	پوائنٹر کا سائز
 =Date format	7a44	تاریخ کی شکل
@@ -259,6 +262,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Large pointer stays (ms, or default)	5626	بڑا پوائنٹر کتنی دیر رہے (ms یا default)
 =Launcher	44b1	لانچر
 =Left edge	9ce5	بائیں کنارہ
+=Linked machines	0cc2	منسلک کمپیوٹر
 =Machine	be0e	کمپیوٹر
 =Mixer	123a	مکسر
 =Momentum	cfef	مومینٹم
@@ -269,6 +273,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Mute	9f74	خاموش
 =NTS servers (or default)	9fd7	NTS سرورز (یا default)
 =Name	7306	نام
+=Name and code of another machine	4e07	دوسرے کمپیوٹر کا نام اور کوڈ
 =Name servers (auto for the network)	695a	نام کے سرورز (auto نیٹ ورک کے لیے)
 =Names over TLS	075a	TLS پر نام
 =Natural direction	d977	قدرتی سمت
@@ -279,6 +284,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =On-screen keyboard	97f8	اسکرین کی بورڈ
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
+=Pair a machine	b39b	ایک کمپیوٹر جوڑیں
 =Plain Text	2bbe	سادہ متن
 =Power	a5e6	پاور
 =Power profile	8def	پاور پروفائل
@@ -315,6 +321,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
 =Theme	7c92	تھیم
+=This machine	3790	یہ کمپیوٹر
 =Time	e404	وقت
 =Time server (auto for the pool)	67e5	ٹائم سرور (auto پول کے لیے)
 =Time zone	741a	ٹائم زون
@@ -323,6 +330,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Turned right	7a49	دائیں گھمایا گیا
 =Upside down	9dc1	الٹا
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	وائرڈ نیٹ ورک
 =all	4bc4	سب
@@ -355,6 +363,8 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =lock	7842	لاک
 =mdy	3697	mdy
 =midnight-blue	4008	رات کا نیلا
+=modem	67ed	موڈیم
+=network	86c5	نیٹ ورک
 =normal	9c52	عام
 =off	8a0a	آف
 =on	2fd0	آن

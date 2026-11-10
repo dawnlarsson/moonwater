@@ -214,6 +214,8 @@ ui_field_full	fe02	non ce ne sta di più
 =Allow recording	f7e5	Consenti registrazione
 =Always off	48b1	Sempre disattivato
 =Always on	fab5	Sempre attivato
+=Audio	1439	Audio
+=Audio modem (last resort)	8e7b	Modem audio (ultima risorsa)
 =Authenticated time (NTS)	e533	Ora autenticata (NTS)
 =Automatic	6784	Automatico
 =Background	0abd	Sfondo
@@ -233,6 +235,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Clipboard limit (MiB)	a505	Limite degli appunti (MiB)
 =Clock (Enter sets it now)	575e	Orologio (Enter lo imposta ora)
 =Clock format	70d0	Formato dell'ora
+=Connect over	2789	Connetti tramite
 =Cursor look	34ce	Aspetto del puntatore
 =Cursor size	65d4	Dimensione del puntatore
 =Date format	7a44	Formato della data
@@ -258,6 +261,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Large pointer stays (ms, or default)	5626	Il puntatore grande resta (ms o default)
 =Launcher	44b1	Avviatore
 =Left edge	9ce5	Bordo sinistro
+=Linked machines	0cc2	Macchine collegate
 =Machine	be0e	Macchina
 =Mixer	123a	Mixer
 =Momentum	cfef	Inerzia
@@ -268,6 +272,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Mute	9f74	Disattiva audio
 =NTS servers (or default)	9fd7	Server NTS (o default)
 =Name	7306	Nome
+=Name and code of another machine	4e07	Nome e codice di un'altra macchina
 =Name servers (auto for the network)	695a	Server dei nomi (auto per la rete)
 =Names over TLS	075a	Nomi tramite TLS
 =Natural direction	d977	Direzione naturale
@@ -278,6 +283,7 @@ ui_field_full	fe02	non ce ne sta di più
 =On-screen keyboard	97f8	Tastiera a schermo
 =Open windows where they were last put	8711	Apri le finestre dove sono state lasciate
 =Output device (name, or default)	d73c	Dispositivo di uscita (nome o default)
+=Pair a machine	b39b	Abbina una macchina
 =Plain Text	2bbe	Testo semplice
 =Power	a5e6	Alimentazione
 =Power profile	8def	Profilo energetico
@@ -314,6 +320,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Text size (percent, or default)	51d7	Dimensione del testo (percentuale o default)
 =The internet prefers	3dbe	Internet preferisce
 =Theme	7c92	Tema
+=This machine	3790	Questa macchina
 =Time	e404	Ora
 =Time server (auto for the pool)	67e5	Server dell'ora (auto per il pool)
 =Time zone	741a	Fuso orario
@@ -322,6 +329,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Turned right	7a49	Ruotato a destra
 =Upside down	9dc1	Capovolto
 =Volume (percent, or default)	f6e3	Volume (percentuale o default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Cablata
 =all	4bc4	tutti
@@ -354,6 +362,8 @@ ui_field_full	fe02	non ce ne sta di più
 =lock	7842	blocca
 =mdy	3697	mdy
 =midnight-blue	4008	blu notte
+=modem	67ed	modem
+=network	86c5	rete
 =normal	9c52	normale
 =off	8a0a	disattivato
 =on	2fd0	attivato

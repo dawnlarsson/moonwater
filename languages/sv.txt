@@ -214,6 +214,8 @@ ui_field_full	fe02	mer ryms inte
 =Allow recording	f7e5	Tillåt inspelning
 =Always off	48b1	Alltid av
 =Always on	fab5	Alltid på
+=Audio	1439	Ljud
+=Audio modem (last resort)	8e7b	Ljudmodem (sista utväg)
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
 =Automatic	6784	Automatiskt
 =Background	0abd	Bakgrund
@@ -233,6 +235,7 @@ ui_field_full	fe02	mer ryms inte
 =Clipboard limit (MiB)	a505	Urklippsgräns (MiB)
 =Clock (Enter sets it now)	575e	Klocka (Enter ställer den nu)
 =Clock format	70d0	Tidsformat
+=Connect over	2789	Anslut via
 =Cursor look	34ce	Pekarens utseende
 =Cursor size	65d4	Pekarens storlek
 =Date format	7a44	Datumformat
@@ -258,6 +261,7 @@ ui_field_full	fe02	mer ryms inte
 =Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
 =Launcher	44b1	Startare
 =Left edge	9ce5	Vänster kant
+=Linked machines	0cc2	Länkade maskiner
 =Machine	be0e	Maskin
 =Mixer	123a	Mixer
 =Momentum	cfef	Rörelsemängd
@@ -268,6 +272,7 @@ ui_field_full	fe02	mer ryms inte
 =Mute	9f74	Ljud av
 =NTS servers (or default)	9fd7	NTS-servrar (eller default)
 =Name	7306	Namn
+=Name and code of another machine	4e07	Namn och kod för en annan maskin
 =Name servers (auto for the network)	695a	Namnservrar (auto för nätverket)
 =Names over TLS	075a	Namn över TLS
 =Natural direction	d977	Naturlig riktning
@@ -278,6 +283,7 @@ ui_field_full	fe02	mer ryms inte
 =On-screen keyboard	97f8	Skärmtangentbord
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
+=Pair a machine	b39b	Para ihop en maskin
 =Plain Text	2bbe	Oformaterad text
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
@@ -314,6 +320,7 @@ ui_field_full	fe02	mer ryms inte
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
 =The internet prefers	3dbe	Internet föredrar
 =Theme	7c92	Tema
+=This machine	3790	Den här maskinen
 =Time	e404	Tid
 =Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
 =Time zone	741a	Tidszon
@@ -322,6 +329,7 @@ ui_field_full	fe02	mer ryms inte
 =Turned right	7a49	Vriden åt höger
 =Upside down	9dc1	Upp och ned
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Trådbundet
 =all	4bc4	alla
@@ -354,6 +362,8 @@ ui_field_full	fe02	mer ryms inte
 =lock	7842	lås
 =mdy	3697	mdy
 =midnight-blue	4008	midnattsblå
+=modem	67ed	modem
+=network	86c5	nätverk
 =normal	9c52	normal
 =off	8a0a	av
 =on	2fd0	på

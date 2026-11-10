@@ -215,6 +215,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Allow recording	f7e5	אפשר הקלטה
 =Always off	48b1	תמיד כבוי
 =Always on	fab5	תמיד מופעל
+=Audio	1439	שמע
+=Audio modem (last resort)	8e7b	מודם שמע (מוצא אחרון)
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
 =Automatic	6784	אוטומטי
 =Background	0abd	רקע
@@ -234,6 +236,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Clipboard limit (MiB)	a505	מגבלת לוח הגזירים (MiB)
 =Clock (Enter sets it now)	575e	שעון (Enter קובע אותו עכשיו)
 =Clock format	70d0	תבנית שעה
+=Connect over	2789	חיבור דרך
 =Cursor look	34ce	מראה המצביע
 =Cursor size	65d4	גודל המצביע
 =Date format	7a44	תבנית תאריך
@@ -259,6 +262,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
 =Launcher	44b1	משגר
 =Left edge	9ce5	קצה שמאלי
+=Linked machines	0cc2	מחשבים מקושרים
 =Machine	be0e	מחשב
 =Mixer	123a	מערבל
 =Momentum	cfef	תנע
@@ -269,6 +273,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Mute	9f74	השתקה
 =NTS servers (or default)	9fd7	שרתי NTS (או default)
 =Name	7306	שם
+=Name and code of another machine	4e07	שם וקוד של מחשב אחר
 =Name servers (auto for the network)	695a	שרתי שמות (auto עבור הרשת)
 =Names over TLS	075a	שמות דרך TLS
 =Natural direction	d977	כיוון טבעי
@@ -279,6 +284,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =On-screen keyboard	97f8	מקלדת על המסך
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
+=Pair a machine	b39b	צימוד מחשב
 =Plain Text	2bbe	טקסט פשוט
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
@@ -315,6 +321,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
 =The internet prefers	3dbe	האינטרנט מעדיף
 =Theme	7c92	ערכת נושא
+=This machine	3790	המחשב הזה
 =Time	e404	זמן
 =Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
 =Time zone	741a	אזור זמן
@@ -323,6 +330,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Turned right	7a49	מסובב ימינה
 =Upside down	9dc1	הפוך
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	רשת קווית
 =all	4bc4	הכול
@@ -355,6 +363,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =lock	7842	נעל
 =mdy	3697	mdy
 =midnight-blue	4008	כחול חצות
+=modem	67ed	מודם
+=network	86c5	רשת
 =normal	9c52	רגיל
 =off	8a0a	כבוי
 =on	2fd0	מופעל

@@ -46,6 +46,7 @@
 #define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
 #define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
 #define SETTINGS_PORT 12u   // a device the system sees, in the Devices list: a press allows or blocks it
+#define SETTINGS_LINK 13u // a machine linked, as moonwater link says it: its name and what it was last heard as (not pressed)
 
 // How a row's value is taken from the line it is on.
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
@@ -54,6 +55,7 @@
 #define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
 #define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
 #define SETTINGS_LANGUAGE 32u  // a choice of the languages: the verb says the code and the menu shows the language's own name (ui/language.c)
+#define SETTINGS_WAITS 64u     // a verb that waits for another machine (a pairing, up to five minutes): its first line is shown while it waits, its last when it ends
 
 // The Display rows of a screen (settings.c draws the map above them): the screen chosen, its rotation and refresh (the
 // window table says what each is, and the verb sets it), and a note of who turns it.
@@ -518,6 +520,22 @@ static const struct settings_row settings_rows[] = {
      .usage = "dns tls [on|off|only]", .help = "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]"},
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(', null,
      .usage = "dns [ADDRESS...|auto]", .help = "up to three servers names are asked of, or the network gives them [auto]"},
+    //  Waterlink, the machines linked to this one (moonwater link, src/waterlink): this machine's name, the one switch of the
+    //  listener, a code shown for another machine to type, the other machine's name and code typed here, and how the machines
+    //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status).
+    {"Waterlink", "This machine", SETTINGS_INFO, 0, SETTINGS_LINE, {"name"}, "", null, {null}, null, 0, null,
+     .help = "the name the other machines know this one by: moonwater name NEW changes it"},
+    {"Waterlink", "Waterlink", SETTINGS_SWITCH, 0, 0, {"link"}, "link ", null, {"link"}, null, 0, null,
+     .help = "the listener: linked machines reach this one, and it them, while it is on [off]"},
+    {"Waterlink", "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0, null,
+     .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name"},
+    {"Waterlink", "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
+     {"link"}, null, 0, null,
+     .help = "the other machine's name and the code it shows, which pair the two of them"},
+    {"Waterlink", "Connect over", SETTINGS_CHOICE, 0, 0, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network modem", 0, null,
+     .help = "network: over the network, as linked machines always have [network]; modem: the audio modem, a last resort through the sound card"},
+    {null, "Audio modem (last resort)", SETTINGS_INFO, 0, SETTINGS_LINE, {"link", "transport"}, "audio modem ", null, {null}, null, 0, null,
+     .help = "the sound card as the link of last resort, for when no network reaches the other machine: not available yet"},
     {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null,
      .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range [off]"},
     {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,

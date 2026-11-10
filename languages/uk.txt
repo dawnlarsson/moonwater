@@ -214,6 +214,8 @@ ui_field_full	fe02	більше не вміщається
 =Allow recording	f7e5	Дозволити запис
 =Always off	48b1	Завжди вимкнено
 =Always on	fab5	Завжди увімкнено
+=Audio	1439	Звук
+=Audio modem (last resort)	8e7b	Аудіомодем (крайній випадок)
 =Authenticated time (NTS)	e533	Автентифікований час (NTS)
 =Automatic	6784	Автоматично
 =Background	0abd	Тло
@@ -233,6 +235,7 @@ ui_field_full	fe02	більше не вміщається
 =Clipboard limit (MiB)	a505	Ліміт буфера обміну (MiB)
 =Clock (Enter sets it now)	575e	Годинник (Enter встановлює зараз)
 =Clock format	70d0	Формат часу
+=Connect over	2789	З'єднання через
 =Cursor look	34ce	Вигляд вказівника
 =Cursor size	65d4	Розмір вказівника
 =Date format	7a44	Формат дати
@@ -258,6 +261,7 @@ ui_field_full	fe02	більше не вміщається
 =Large pointer stays (ms, or default)	5626	Великий вказівник залишається (мс або default)
 =Launcher	44b1	Запуск
 =Left edge	9ce5	Лівий край
+=Linked machines	0cc2	Пов'язані комп'ютери
 =Machine	be0e	Комп'ютер
 =Mixer	123a	Мікшер
 =Momentum	cfef	Інерція
@@ -268,6 +272,7 @@ ui_field_full	fe02	більше не вміщається
 =Mute	9f74	Без звуку
 =NTS servers (or default)	9fd7	Сервери NTS (або default)
 =Name	7306	Ім'я
+=Name and code of another machine	4e07	Ім'я та код іншого комп'ютера
 =Name servers (auto for the network)	695a	Сервери імен (auto для мережі)
 =Names over TLS	075a	Імена через TLS
 =Natural direction	d977	Природний напрямок
@@ -278,6 +283,7 @@ ui_field_full	fe02	більше не вміщається
 =On-screen keyboard	97f8	Екранна клавіатура
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
+=Pair a machine	b39b	Зв'язати комп'ютер
 =Plain Text	2bbe	Звичайний текст
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
@@ -314,6 +320,7 @@ ui_field_full	fe02	більше не вміщається
 =Text size (percent, or default)	51d7	Розмір тексту (відсотки або default)
 =The internet prefers	3dbe	Інтернет надає перевагу
 =Theme	7c92	Тема
+=This machine	3790	Цей комп'ютер
 =Time	e404	Час
 =Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
 =Time zone	741a	Часовий пояс
@@ -322,6 +329,7 @@ ui_field_full	fe02	більше не вміщається
 =Turned right	7a49	Повернуто праворуч
 =Upside down	9dc1	Догори дриґом
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Дротова мережа
 =all	4bc4	усі
@@ -354,6 +362,8 @@ ui_field_full	fe02	більше не вміщається
 =lock	7842	заблокувати
 =mdy	3697	mdy
 =midnight-blue	4008	опівнічно-синій
+=modem	67ed	модем
+=network	86c5	мережа
 =normal	9c52	нормально
 =off	8a0a	вимкнено
 =on	2fd0	увімкнено

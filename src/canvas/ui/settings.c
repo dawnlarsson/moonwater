@@ -194,11 +194,13 @@ struct settings_change
 #define SETTINGS_FEED_WIFI 2u
 #define SETTINGS_FEED_DEVICES 3u
 #define SETTINGS_FEED_HARDWARE 4u // the devices the system sees, allowed or blocked by a press (device list)
-#define SETTINGS_LISTS 3 // the list feeds, which come first in the table
+#define SETTINGS_FEED_LINKS 5u    // the machines linked, as moonwater link says them
+#define SETTINGS_LISTS 4 // the list feeds, which come first in the table: the Wi-Fi, Bluetooth, Devices and Waterlink lists
 #define SETTINGS_LIST_ROWS 24
 #define SETTINGS_ITEM_LABEL 96
 #define SETTINGS_FEED_WAIT_NS 8000000000ll
 #define SETTINGS_ACT_WAIT_NS 60000000000ll // a join waits for its handshake
+#define SETTINGS_WAIT_PAIR_NS 330000000000ll // a pairing waits as long as its code lasts (five minutes), and the verb two seconds more
 
 struct settings_feed
 {
@@ -214,6 +216,7 @@ static const struct settings_feed settings_feeds[] = {
     {"Wi-Fi", "Wi-Fi", {"wifi"}, "In range and saved", 2000, SETTINGS_FEED_WIFI},
     {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
     {"Devices", null, {"device", "list"}, "Devices in this machine", 3000, SETTINGS_FEED_HARDWARE},
+    {"Waterlink", "Waterlink", {"link"}, "Linked machines", 2000, SETTINGS_FEED_LINKS},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
 };
@@ -2852,6 +2855,46 @@ static fn settings_feed_hardware(void)
         settings.item_count[2] = (unsigned short)count;
 }
 
+        What moonwater link said, as the machines linked: a machine's line is its name, two blanks, its key and what it may do
+        (so the name is what comes before the first two blanks, and the line has "...  may " in it); the lines under it, six
+        blanks in, say what the listener last heard of it, and are added to its name's label. A line that says nobody is
+        linked is the list's note. The key is never shown: a person knows a machine by its name.
+*/
+static fn settings_feed_links(void)
+{
+        struct settings_item address_to items = settings_large->item[3];
+        char line[SETTINGS_PROBE];
+        char address_to text;
+        positive at, size, count = 0;
+
+        memory_zero(items, sizeof(settings_large->item[3]));
+        for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
+                if (size > 6 && !memory_compare(text, "      ", 6) && text[6] != ' ')
+                {
+                        if (count && items[count - 1].kind == SETTINGS_LINK)
+                        {
+                                string_append_bounded((string_address)items[count - 1].label, (string_address) "  ", sizeof(items[0].label));
+                                string_append_bounded((string_address)items[count - 1].label, (string_address)(text + 6), sizeof(items[0].label));
+                        }
+                }
+                else if (size > 4 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS &&
+                         settings_find_last(text, size, "...  may ") < size)
+                {
+                        positive cut = 2;
+
+                        while (cut + 1 < size && (text[cut] != ' ' || text[cut + 1] != ' '))
+                                cut++;
+                        items[count].kind = SETTINGS_LINK;
+                        settings_item_label(&items[count++], text + 2, cut - 2);
+                }
+                else if (size > 2 && text[0] == ' ' && text[1] == ' ' && settings_starts(text + 2, "nobody") && count + 1 < SETTINGS_LIST_ROWS)
+                {
+                        items[count].kind = SETTINGS_NOTE;
+                        settings_item_label(&items[count++], text + 2, size - 2);
+                }
+        settings.item_count[3] = (unsigned short)count;
+}
+
 // A sum of a list as it stands, to tell whether a reading changed what is shown.
 static positive settings_list_sum(int list)
 {
@@ -2919,6 +2962,8 @@ static fn settings_feed_read(b32 killed, b32 failed)
                 settings_feed_wifi();
         else if (settings_feeds[feed].kind == SETTINGS_FEED_HARDWARE)
                 settings_feed_hardware();
+        else if (settings_feeds[feed].kind == SETTINGS_FEED_LINKS)
+                settings_feed_links();
         else
                 settings_feed_devices();
         if (settings_list_sum(list) == before && !changed)
@@ -3004,6 +3049,42 @@ static fn settings_reading_changed(int row)
                 ui_list_damage(&settings.ui, &settings.list, row);
 }
 
+// Whether a row's verb waits for another machine (a pairing): its job has the pairing's time, and what it says while it waits is shown.
+static b32 settings_waits(int row)
+{
+        return row >= 0 && row < SETTINGS_ANY && (settings_rows[row].flags & SETTINGS_WAITS) != 0;
+}
+
+// The first non-blank line of what the verb has said so far, or its last when last is set: its size, and 0 when there is none.
+static positive settings_said_line(char address_to line, positive room, b32 last)
+{
+        positive at = 0, size = 0;
+
+        while (at < settings.said_length)
+        {
+                char got[SETTINGS_STATUS];
+                positive made = settings_line(settings_large->said, settings.said_length, &at, got, sizeof(got));
+
+                if (made)
+                {
+                        string_copy_bounded((string_address)line, (string_address)got, room);
+                        size = made;
+                        if (!last)
+                                break;
+                }
+        }
+        return size;
+}
+
+// A pairing shows its code while it waits, not when it ends: the first line the verb said is the status until then.
+static fn settings_waiting_say(void)
+{
+        char line[SETTINGS_STATUS];
+
+        if (settings.child > 0 && settings.job_sets && settings_waits(settings.job) && settings_said_line(line, sizeof(line), false))
+                settings_say((string_address)line);
+}
+
 // The verb running has finished, or taken too long: what it said, put where it belongs.
 static fn settings_finished(b32 killed)
 {
@@ -3020,15 +3101,15 @@ static fn settings_finished(b32 killed)
         if (settings.job_sets)
         {
                 char line[SETTINGS_STATUS];
-                positive at = 0, size = 0;
+                positive size = 0;
 
                 if (row >= SETTINGS_ANY)
                         settings_report(killed, status);
                 else
                 {
-                        // The verb's own first words, which say what it did or why it would not.
-                        while (at < settings.said_length && !size)
-                                size = settings_line(settings_large->said, settings.said_length, &at, line, sizeof(line));
+                        // The verb's own first words, which say what it did or why it would not; a verb that waits for another
+                        // machine says its last, which is the result of the pairing.
+                        size = settings_said_line(line, sizeof(line), settings_waits(row));
                         if (killed)
                                 settings_say((string_address)WORDS(settings_too_long));
                         else if (size)
@@ -3125,6 +3206,7 @@ static fn settings_drain(void)
                 if (got > 0)
                 {
                         settings.said_length += settings.said_length < sizeof(settings_large->said) ? (positive)got : 0;
+                        settings_waiting_say();
                         budget = budget > (positive)got ? budget - (positive)got : 0;
                         if (!budget)
                                 return;
@@ -4818,6 +4900,7 @@ static long settings_tick(long timeout, long address_to other)
                 positive now = (positive)ui_kit.now, left;
                 positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
                                 : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
+                                : settings_waits(settings.job)     ? (positive)SETTINGS_WAIT_PAIR_NS
                                                                    : (positive)SETTINGS_WAIT_NS;
 
                 if (now - settings.began >= most)

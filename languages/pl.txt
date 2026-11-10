@@ -214,6 +214,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =Allow recording	f7e5	Zezwalaj na nagrywanie
 =Always off	48b1	Zawsze wyłączona
 =Always on	fab5	Zawsze włączona
+=Audio	1439	Dźwięk
+=Audio modem (last resort)	8e7b	Modem audio (ostateczność)
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
 =Automatic	6784	Automatycznie
 =Background	0abd	Tło
@@ -233,6 +235,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Clipboard limit (MiB)	a505	Limit schowka (MiB)
 =Clock (Enter sets it now)	575e	Zegar (Enter ustawia go teraz)
 =Clock format	70d0	Format czasu
+=Connect over	2789	Połącz przez
 =Cursor look	34ce	Wygląd wskaźnika
 =Cursor size	65d4	Rozmiar wskaźnika
 =Date format	7a44	Format daty
@@ -258,6 +261,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Large pointer stays (ms, or default)	5626	Duży wskaźnik pozostaje (ms lub default)
 =Launcher	44b1	Uruchamianie
 =Left edge	9ce5	Lewa krawędź
+=Linked machines	0cc2	Połączone maszyny
 =Machine	be0e	Maszyna
 =Mixer	123a	Mikser
 =Momentum	cfef	Pęd
@@ -268,6 +272,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Mute	9f74	Wycisz
 =NTS servers (or default)	9fd7	Serwery NTS (lub default)
 =Name	7306	Nazwa
+=Name and code of another machine	4e07	Nazwa i kod innej maszyny
 =Name servers (auto for the network)	695a	Serwery nazw (auto dla sieci)
 =Names over TLS	075a	Nazwy przez TLS
 =Natural direction	d977	Naturalny kierunek
@@ -278,6 +283,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =On-screen keyboard	97f8	Klawiatura ekranowa
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
+=Pair a machine	b39b	Sparuj maszynę
 =Plain Text	2bbe	Zwykły tekst
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
@@ -314,6 +320,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
 =The internet prefers	3dbe	Internet preferuje
 =Theme	7c92	Motyw
+=This machine	3790	Ta maszyna
 =Time	e404	Czas
 =Time server (auto for the pool)	67e5	Serwer czasu (auto dla puli)
 =Time zone	741a	Strefa czasowa
@@ -322,6 +329,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Turned right	7a49	Obrócony w prawo
 =Upside down	9dc1	Do góry nogami
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Przewodowa
 =all	4bc4	wszystkie
@@ -354,6 +362,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =lock	7842	zablokuj
 =mdy	3697	mdy
 =midnight-blue	4008	granatowy
+=modem	67ed	modem
+=network	86c5	sieć
 =normal	9c52	normalnie
 =off	8a0a	wyłączone
 =on	2fd0	włączone

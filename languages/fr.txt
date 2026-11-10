@@ -214,6 +214,8 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Allow recording	f7e5	Autoriser l'enregistrement
 =Always off	48b1	Toujours désactivé
 =Always on	fab5	Toujours activé
+=Audio	1439	Audio
+=Audio modem (last resort)	8e7b	Modem audio (dernier recours)
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)
 =Automatic	6784	Automatique
 =Background	0abd	Arrière-plan
@@ -233,6 +235,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Clipboard limit (MiB)	a505	Limite du presse-papiers (MiB)
 =Clock (Enter sets it now)	575e	Horloge (Enter la règle maintenant)
 =Clock format	70d0	Format de l'heure
+=Connect over	2789	Connexion par
 =Cursor look	34ce	Apparence du pointeur
 =Cursor size	65d4	Taille du pointeur
 =Date format	7a44	Format de la date
@@ -258,6 +261,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Large pointer stays (ms, or default)	5626	Le grand pointeur reste (ms ou default)
 =Launcher	44b1	Lanceur
 =Left edge	9ce5	Bord gauche
+=Linked machines	0cc2	Machines liées
 =Machine	be0e	Machine
 =Mixer	123a	Mélangeur
 =Momentum	cfef	Inertie
@@ -268,6 +272,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Mute	9f74	Couper le son
 =NTS servers (or default)	9fd7	Serveurs NTS (ou default)
 =Name	7306	Nom
+=Name and code of another machine	4e07	Nom et code d'une autre machine
 =Name servers (auto for the network)	695a	Serveurs de noms (auto pour le réseau)
 =Names over TLS	075a	Noms par TLS
 =Natural direction	d977	Sens naturel
@@ -278,6 +283,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =On-screen keyboard	97f8	Clavier à l'écran
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
+=Pair a machine	b39b	Associer une machine
 =Plain Text	2bbe	Texte brut
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
@@ -314,6 +320,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Text size (percent, or default)	51d7	Taille du texte (pourcentage ou default)
 =The internet prefers	3dbe	Internet préfère
 =Theme	7c92	Thème
+=This machine	3790	Cette machine
 =Time	e404	Heure
 =Time server (auto for the pool)	67e5	Serveur de temps (auto pour le pool)
 =Time zone	741a	Fuseau horaire
@@ -322,6 +329,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Turned right	7a49	Pivoté à droite
 =Upside down	9dc1	À l'envers
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Filaire
 =all	4bc4	tous
@@ -354,6 +362,8 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =lock	7842	verrouiller
 =mdy	3697	mdy
 =midnight-blue	4008	bleu nuit
+=modem	67ed	modem
+=network	86c5	réseau
 =normal	9c52	normal
 =off	8a0a	désactivé
 =on	2fd0	activé

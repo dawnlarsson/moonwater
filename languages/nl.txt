@@ -214,6 +214,8 @@ ui_field_full	fe02	meer past er niet in
 =Allow recording	f7e5	Opnemen toestaan
 =Always off	48b1	Altijd uit
 =Always on	fab5	Altijd aan
+=Audio	1439	Audio
+=Audio modem (last resort)	8e7b	Audiomodem (laatste redmiddel)
 =Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
 =Automatic	6784	Automatisch
 =Background	0abd	Achtergrond
@@ -233,6 +235,7 @@ ui_field_full	fe02	meer past er niet in
 =Clipboard limit (MiB)	a505	Klembordlimiet (MiB)
 =Clock (Enter sets it now)	575e	Klok (Enter stelt hem nu in)
 =Clock format	70d0	Tijdnotatie
+=Connect over	2789	Verbinden via
 =Cursor look	34ce	Uiterlijk van de aanwijzer
 =Cursor size	65d4	Grootte van de aanwijzer
 =Date format	7a44	Datumnotatie
@@ -258,6 +261,7 @@ ui_field_full	fe02	meer past er niet in
 =Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
 =Launcher	44b1	Starter
 =Left edge	9ce5	Linkerrand
+=Linked machines	0cc2	Gekoppelde machines
 =Machine	be0e	Machine
 =Mixer	123a	Mixer
 =Momentum	cfef	Momentum
@@ -268,6 +272,7 @@ ui_field_full	fe02	meer past er niet in
 =Mute	9f74	Dempen
 =NTS servers (or default)	9fd7	NTS-servers (of default)
 =Name	7306	Naam
+=Name and code of another machine	4e07	Naam en code van een andere machine
 =Name servers (auto for the network)	695a	Naamservers (auto voor het netwerk)
 =Names over TLS	075a	Namen via TLS
 =Natural direction	d977	Natuurlijke richting
@@ -278,6 +283,7 @@ ui_field_full	fe02	meer past er niet in
 =On-screen keyboard	97f8	Toetsenbord op het scherm
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
+=Pair a machine	b39b	Een machine koppelen
 =Plain Text	2bbe	Platte tekst
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
@@ -314,6 +320,7 @@ ui_field_full	fe02	meer past er niet in
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
 =The internet prefers	3dbe	Internet verkiest
 =Theme	7c92	Thema
+=This machine	3790	Deze machine
 =Time	e404	Tijd
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
@@ -322,6 +329,7 @@ ui_field_full	fe02	meer past er niet in
 =Turned right	7a49	Naar rechts gedraaid
 =Upside down	9dc1	Ondersteboven
 =Volume (percent, or default)	f6e3	Volume (procent of default)
+=Waterlink	6560	Waterlink
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Bekabeld
 =all	4bc4	alle
@@ -354,6 +362,8 @@ ui_field_full	fe02	meer past er niet in
 =lock	7842	vergrendelen
 =mdy	3697	mdy
 =midnight-blue	4008	middernachtblauw
+=modem	67ed	modem
+=network	86c5	netwerk
 =normal	9c52	normaal
 =off	8a0a	uit
 =on	2fd0	aan
