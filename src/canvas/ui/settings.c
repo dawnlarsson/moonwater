@@ -3302,6 +3302,10 @@ static b32 settings_reap(void)
 */
 static fn settings_finished(b32 killed)
 {
+        // No child, nothing to end: an ending with no child to reap would be a state no verb starts from (settings_start clears it), and
+        // a kill of pid 0 would reach the whole process group.
+        if (settings.child <= 0)
+                return;
         if (killed)
         {
                 system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
@@ -3369,6 +3373,10 @@ static fn settings_drain(void)
 {
         positive budget = SETTINGS_DRAIN_BUDGET;
 
+        // The kit calls this after a wait that the output was in, and an event of that wait may have reaped the child and closed its output:
+        // then there is nothing to read, and a read of the closed descriptor would end a verb that is no longer running.
+        if (settings.child <= 0 || settings.output < 0)
+                return;
         for (;;)
         {
                 bipolar got;
