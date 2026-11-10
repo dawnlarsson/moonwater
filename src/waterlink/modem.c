@@ -22,7 +22,9 @@
 	A frame: lead-in (MODEM_PRE bytes of 0x55), sync 5A C3 96 3C, LEN (one
 	byte, 0..255), SEQ (four bytes, big-endian), payload, then a 32-byte
 	HMAC-SHA256 over LEN, SEQ and payload. The receiver uses nothing until
-	the tag checks. Sequence numbers start at 1 in a session.
+	the tag checks. A receiver's session starts from 0, so its first frame is 1; a sender goes on from the last number it
+	sent under the same key (the send section keeps it), so one recording can hold any number of sends, and the receiver takes
+	each frame that follows the one before.
 
 	Integer arithmetic only: no floating point, no libm in the decoder.
 	The sine tables are fixed at build time. SHA-256 is inline here so the
@@ -128,7 +130,8 @@ void modem_rx_open(modem_rx *rx, const uint8_t *key, size_t klen);
 int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq);
 
 /* As modem_rx_frame, and sets *used to the sample just past the frame taken (0 when none is taken), so a caller can
-   take the frames of one capture one after another. */
+   take the frames of one capture one after another. The frame taken is the fresh one that ends first in pcm, whatever
+   its symbol phase; a refused candidate is passed over and the rest of pcm is still searched. */
 int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used);
 
 /* ---- datagrams over the modem ------------------------------------------ */
@@ -495,6 +498,10 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 	size_t ia[MODEM_TONES + 1], ir[MODEM_TONES + 1], is[MODEM_TONES + 1];
 	size_t s, off;
 	int refusal = 0, c, k;
+	uint8_t pick[MODEM_PAYLOAD_MAX];
+	uint32_t pick_seq = 0;
+	size_t pick_end = 0, pick_len = 0;
+	int found = 0;
 
 	if (!pcm || !out || !seq || !modem_key_ok(key, klen) || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
 		return -1;
@@ -551,8 +558,14 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 		modem_best[s] = (uint8_t)bestv;
 	}
 
+	/* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
+	   at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass
+	   over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
+	   the end of the search. */
 	for (off = 0; off < MODEM_SYM; off++) {
-		size_t nb = 0, at;
+		size_t nb = 0, at, endbit = 0, end;
+		uint8_t cand[MODEM_PAYLOAD_MAX];
+		uint32_t cand_seq = 0;
 		int r;
 
 		for (at = off; at + MODEM_SYM <= n; at += MODEM_SYM) {
@@ -561,14 +574,25 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 			for (j = 0; j < MODEM_SYM_BITS; j++)
 				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
-		size_t endbit = 0;
 
-		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &refusal, gated, last, &endbit);
-		if (r >= 0) {
-			if (used)
-				*used = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
-			return r;
+		r = modem_find_frame(modem_bits, nb, key, klen, cand, cap, &cand_seq, &refusal, gated, last, &endbit);
+		if (r < 0)
+			continue;
+		end = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
+		if (!found || end < pick_end) {
+			found = 1;
+			pick_end = end;
+			pick_len = (size_t)r;
+			pick_seq = cand_seq;
+			memcpy(pick, cand, pick_len);
 		}
+	}
+	if (found) {
+		memcpy(out, pick, pick_len);
+		*seq = pick_seq;
+		if (used)
+			*used = pick_end;
+		return (int)pick_len;
 	}
 	if (refused && refusal)
 		*refused = 1;
@@ -761,6 +785,10 @@ int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *
 
         Nothing here reads what comes back: the modem has no way back, so the box never runs a byte of anything it receives.
 
+        A send goes on from the last one made with the same key: the sequence number and the datagram id of the last frame are
+        kept in LINK_MODEM_SEQ_PATH (modem_seq_load, modem_seq_save), so one recording can hold any number of sends. The card
+        must run at MODEM_RATE: the symbols are timed for it, and a card at another rate is refused rather than sent to.
+
         The shell includes this section after the sound server's client (src/audio/service.c, and control.c beside it),
         which it uses. The self-test and the receiver include modem.c with MODEM_NO_SEND defined, and get the codec alone.
 */
@@ -825,6 +853,64 @@ static bipolar modem_send_pcm(unsigned long channel, const int16_t address_to pc
 }
 
 /*
+        The count a send goes on from, kept in one record of LINK_MODEM_SEQ_PATH: the key's fingerprint (an HMAC of a fixed
+        label under the key, so the record counts for that key and no other), the last frame's sequence number, and the
+        datagram id after it, both big endian. A record for another key, or none, counts from 0.
+*/
+#define MODEM_SEQ_RECORD (MODEM_TAG + 4 + 2)
+
+static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_TAG])
+{
+        static const uint8_t label[] = "waterlink modem sequence";
+
+        modem_hmac(key, 32, label, sizeof label - 1, out);
+}
+
+/* Reads the count for key into seq and id. Answers 0, or the negative error of a file that is there and is not a private
+   record: that is refused rather than read as a count of 0, which would send numbers the receiver has already taken. */
+static bipolar modem_seq_load(const uint8_t *key, uint32_t *seq, uint16_t *id)
+{
+        uint8_t record[MODEM_SEQ_RECORD], fingerprint[MODEM_TAG];
+        positive got = 0;
+        bipolar read;
+        unsigned diff = 0;
+
+        *seq = 0;
+        *id = 0;
+        modem_seq_fingerprint(key, fingerprint);
+        read = link_read_private_records(LINK_MODEM_SEQ_PATH, record, sizeof record, sizeof record, &got);
+        if (read == -ENOENT)
+                return 0;
+        if (read < 0)
+                return read;
+        if (got != sizeof record)
+                return -EIO;
+        for (positive i = 0; i < MODEM_TAG; i++)
+                diff |= (unsigned)(record[i] ^ fingerprint[i]);
+        if (diff)
+                return 0;
+        *seq = ((uint32_t)record[MODEM_TAG] << 24) | ((uint32_t)record[MODEM_TAG + 1] << 16) |
+               ((uint32_t)record[MODEM_TAG + 2] << 8) | (uint32_t)record[MODEM_TAG + 3];
+        *id = (uint16_t)(((unsigned)record[MODEM_TAG + 4] << 8) | record[MODEM_TAG + 5]);
+        return 0;
+}
+
+/* Writes the count for key, whole or not at all, before the frames that carry it are played. */
+static bipolar modem_seq_save(const uint8_t *key, uint32_t seq, uint16_t id)
+{
+        uint8_t record[MODEM_SEQ_RECORD];
+
+        modem_seq_fingerprint(key, record);
+        record[MODEM_TAG] = (uint8_t)(seq >> 24);
+        record[MODEM_TAG + 1] = (uint8_t)(seq >> 16);
+        record[MODEM_TAG + 2] = (uint8_t)(seq >> 8);
+        record[MODEM_TAG + 3] = (uint8_t)seq;
+        record[MODEM_TAG + 4] = (uint8_t)(id >> 8);
+        record[MODEM_TAG + 5] = (uint8_t)id;
+        return link_file_replace(LINK_MODEM_SEQ_PATH, record, sizeof record, true);
+}
+
+/*
         Sends FILE over the audio modem to the Mac's receiver. Answers 0 when every datagram was played, else what the verb
         should say: no key, no file, no sound server, or a connection that broke part of the way (the datagrams before it were
         played, and the receiver will say which bytes it did not get).
@@ -837,6 +923,9 @@ static b32 modem_send_file(string_address path)
         unsigned long channel, sent_bytes = 0, sent_datagrams = 0;
         size_t samples;
         struct ctl_w w;
+        struct audio_state page;
+        uint32_t first_seq;
+        uint16_t first_id;
         bipolar in, got;
 
         scope_exit(crypto_forget(key, sizeof key));
@@ -845,6 +934,14 @@ static b32 modem_send_file(string_address path)
         in = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         return_if(in < 0, host_fail(path, in));
         scope_exit(system_close(in));
+        //      The symbols are timed for MODEM_RATE. The server plays a stream at the card's rate, so a card at another rate
+        //      plays every symbol out of time: nothing is sent to it.
+        if (audio_test_page(&page) && page.rate != MODEM_RATE)
+                return host_refuse("the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: nothing is sent on a card at another rate\n",
+                                   (positive)page.rate, (positive)MODEM_RATE);
+        if (modem_seq_load(key, &first_seq, &first_id) < 0)
+                return host_refuse("%s is not a private record, so the modem's count cannot be read and nothing is sent (remove it to count from 0 again)\n",
+                                   LINK_MODEM_SEQ_PATH);
 
         modem_ctl.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         if (ctl_connect(&modem_ctl, AUDIO_SOCKET) < 0)
@@ -855,6 +952,8 @@ static b32 modem_send_file(string_address path)
                 return 1;
         }
         modem_tx_open(&tx, key, sizeof key);
+        tx.seq = first_seq;
+        tx.id = first_id;
 
         for (;;)
         {
@@ -871,6 +970,13 @@ static b32 modem_send_file(string_address path)
                 datagram[2] = (uint8_t)(sent_bytes >> 8);
                 datagram[3] = (uint8_t)sent_bytes;
                 samples = modem_tx_datagram(&tx, datagram, 4 + (size_t)got, modem_pcm, MODEM_SEND_SAMPLES);
+                //      The count is written before this datagram's sound is played, so a later send cannot reuse a number
+                //      the receiver may already hold.
+                if (modem_seq_save(key, tx.seq, tx.id) < 0)
+                {
+                        ctl_disconnect(&modem_ctl);
+                        return host_refuse("the count could not be saved to %s: the send is stopped before this datagram is played\n", LINK_MODEM_SEQ_PATH);
+                }
                 if (!samples)
                 {
                         ctl_disconnect(&modem_ctl);
@@ -900,8 +1006,8 @@ static b32 modem_send_file(string_address path)
         ctl_w_u32(&w, channel);
         ctl_exchange(&modem_ctl, w.len);
         ctl_disconnect(&modem_ctl);
-        host_say(log, host_label "sent %p bytes in %p datagrams over the audio modem; nothing is acknowledged\n",
-                 (positive)sent_bytes, (positive)sent_datagrams);
+        host_say(log, host_label "sent %p bytes in %p datagrams over the audio modem; nothing is acknowledged; the last frame is %p (a receiver for a later recording takes --after %p)\n",
+                 (positive)sent_bytes, (positive)sent_datagrams, (positive)tx.seq, (positive)tx.seq);
         return 0;
 }
 

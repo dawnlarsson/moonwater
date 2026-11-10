@@ -13,12 +13,20 @@
 		modem_rx --key modem.key -o received.bin capture.raw
 		modem_rx --key modem.key -o received.bin -        (PCM on stdin)
 
-	modem.key is the 64 hex digits `moonwater link modem key` prints on the box, in a file of their own. Each capture
-	holds one `link modem send`: the receiver's frame sequence starts at 1, as the sender's does, so a capture of two
-	sends is refused after the first.
+	modem.key is the 64 hex digits `moonwater link modem key` prints on the box, in a file of their own. A capture may hold
+	any number of `link modem send`s: the sender's frame numbers go on from one send to the next, and each frame must follow
+	the one before it. A capture that begins after an earlier one takes --after N, where N is the frame number the earlier
+	send ended on (the box prints it), so the receiver starts from there.
+
+	The first send's data goes to -o, and each send after it goes to -o.2, -o.3 and so on: a send starts at byte 0 of its
+	own file, and a datagram at byte 0 after data is the start of the next send.
 
 	Each datagram is four bytes of offset (big endian) and then its data. A gap in the offsets is reported on stderr and
-	left as zeros in the output, since nothing is acknowledged and nothing is sent again.
+	left as zeros in the output, since nothing is acknowledged and nothing is sent again. A send whose first datagram was
+	lost is written into the file before it, and its gap is reported there.
+
+	The capture is 48000 Hz, 16-bit, mono: the symbols are timed for that rate, and the box refuses to send on a card at
+	another rate.
 */
 
 #include <stdio.h>
@@ -75,7 +83,17 @@ static int rx_key_read(const char *path, uint8_t key[32])
 
 static uint32_t rx_be32(const uint8_t *p)
 {
-	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/* The output for send number send: the -o name for the first, and that name with .2, .3 ... after it for the rest. */
+static FILE *rx_send_output(const char *base, unsigned send, char *name, size_t size)
+{
+	if (send == 1)
+		snprintf(name, size, "%s", base);
+	else
+		snprintf(name, size, "%s.%u", base, send);
+	return fopen(name, "wb");
 }
 
 int main(int argc, char **argv)
@@ -85,10 +103,12 @@ int main(int argc, char **argv)
 	static uint8_t datagram[MODEM_DATAGRAM_MAX];
 	static modem_chunk_rx cr;
 	uint8_t key[32];
-	const char *key_path = NULL, *out_path = NULL, *in_path = "-";
+	const char *key_path = NULL, *out_path = NULL, *in_path = "-", *after_text = NULL;
+	char name[4200];
 	FILE *in = stdin, *out;
 	size_t fill = 0, keep, datagrams = 0, bytes = 0, expected = 0;
-	unsigned gaps = 0;
+	unsigned gaps = 0, sends = 1;
+	uint32_t after = 0;
 	int closed = 0, eof = 0;
 	size_t skipped = 0;
 
@@ -97,16 +117,28 @@ int main(int argc, char **argv)
 			key_path = argv[++a];
 		else if (!strcmp(argv[a], "-o") && a + 1 < argc)
 			out_path = argv[++a];
+		else if (!strcmp(argv[a], "--after") && a + 1 < argc)
+			after_text = argv[++a];
 		else
 			in_path = argv[a];
 	}
 	if (!key_path || !out_path) {
-		fprintf(stderr, "usage: modem_rx --key KEYFILE -o OUTFILE [PCM|-]\n");
+		fprintf(stderr, "usage: modem_rx --key KEYFILE -o OUTFILE [--after N] [PCM|-]\n");
 		return 2;
 	}
 	if (!rx_key_read(key_path, key)) {
 		fprintf(stderr, "modem_rx: %s is not a 32-byte key in hex\n", key_path);
 		return 2;
+	}
+	if (after_text) {
+		char *end = NULL;
+		unsigned long v = strtoul(after_text, &end, 10);
+
+		if (end == after_text || *end || v > 0xffffffffUL) {
+			fprintf(stderr, "modem_rx: --after takes a frame number, 0 to 4294967295\n");
+			return 2;
+		}
+		after = (uint32_t)v;
 	}
 	if (strcmp(in_path, "-") != 0) {
 		in = fopen(in_path, "rb");
@@ -115,12 +147,13 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	out = fopen(out_path, "wb");
+	out = rx_send_output(out_path, sends, name, sizeof name);
 	if (!out) {
-		fprintf(stderr, "modem_rx: cannot write %s\n", out_path);
+		fprintf(stderr, "modem_rx: cannot write %s\n", name);
 		return 2;
 	}
 	modem_chunk_open(&cr, key, sizeof key);
+	cr.rx.last = after;
 
 	while (!eof) {
 		size_t want = RX_WINDOW - fill, got, at = 0;
@@ -158,13 +191,28 @@ int main(int argc, char **argv)
 				uint32_t offset = rx_be32(datagram);
 				size_t length = (size_t)r - 4;
 
+				/* A send starts at byte 0 of its own file: after data, a datagram at 0 begins the next send. */
+				if (offset == 0 && expected > 0) {
+					if (fclose(out) != 0) {
+						fprintf(stderr, "modem_rx: cannot write %s\n", name);
+						return 1;
+					}
+					sends++;
+					out = rx_send_output(out_path, sends, name, sizeof name);
+					if (!out) {
+						fprintf(stderr, "modem_rx: cannot write %s\n", name);
+						return 1;
+					}
+					fprintf(stderr, "modem_rx: a new send begins: writing %s\n", name);
+					expected = 0;
+				}
 				if (offset != expected) {
 					gaps++;
 					fprintf(stderr, "modem_rx: gap: bytes %lu to %lu were not received\n",
 						(unsigned long)expected, (unsigned long)offset);
 				}
 				if (fseek(out, (long)offset, SEEK_SET) != 0 || fwrite(datagram + 4, 1, length, out) != length) {
-					fprintf(stderr, "modem_rx: cannot write %s\n", out_path);
+					fprintf(stderr, "modem_rx: cannot write %s\n", name);
 					return 1;
 				}
 				expected = offset + length;
@@ -182,14 +230,14 @@ int main(int argc, char **argv)
 	}
 
 	if (fclose(out) != 0) {
-		fprintf(stderr, "modem_rx: cannot write %s\n", out_path);
+		fprintf(stderr, "modem_rx: cannot write %s\n", name);
 		return 1;
 	}
 	if (in != stdin)
 		fclose(in);
-	fprintf(stderr, "modem_rx: %lu datagrams, %lu bytes to %s; %u gaps; %u refused frames%s\n",
-		(unsigned long)datagrams, (unsigned long)bytes, out_path, gaps, cr.rx.refused,
-		cr.rx.closed ? "; the session closed after too many refusals" : "");
+	fprintf(stderr, "modem_rx: %lu datagrams, %lu bytes in %u send(s), the last to %s; %u gaps; %u refused frames%s; the last frame is %lu\n",
+		(unsigned long)datagrams, (unsigned long)bytes, sends, name, gaps, cr.rx.refused,
+		cr.rx.closed ? "; the session closed after too many refusals" : "", (unsigned long)cr.rx.last);
 	if (skipped)
 		fprintf(stderr, "modem_rx: %lu samples after the session closed were read and not decoded\n",
 			(unsigned long)skipped);

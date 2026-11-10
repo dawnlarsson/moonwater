@@ -60,6 +60,7 @@
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_TRANSPORT_PATH "/root/link.transport"
 #define LINK_MODEM_PATH "/root/link.modem"
+#define LINK_MODEM_SEQ_PATH "/root/link.modem.seq"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STAMPS_PATH "/root/link.stamps"
@@ -3203,7 +3204,7 @@ static p64 link_rekey_after(void)
 }
 
 //      The transport's two halves, made in command.c: whether /root/link.transport says modem and the modem is ready, and the
-//      modem's send of a file (modem_send.c).
+//      modem's send of a file (modem.c).
 static bool link_modem_in_use(void);
 static b32 modem_send_file(string_address path);
 
