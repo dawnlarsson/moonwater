@@ -3695,17 +3695,6 @@ static void settings_describe_output(int id, struct ui_row address_to row)
         row->value = settings_row_text(id, chosen);
 }
 
-// How many choices a row has.
-static positive settings_options(const struct settings_row address_to row)
-{
-        char word[SETTINGS_VALUE];
-        positive count = 0;
-
-        while (settings_choice(row, count, word, sizeof(word)))
-                count++;
-        return count;
-}
-
 // A Display dropdown's choice, made: the screen the rows are for, or a turn or a refresh rate the verb is run with for the
 // chosen screen by its name (canvas display NAME rotation|refresh ...). A choice the screen has already is sent nothing.
 static fn settings_output_apply(int row, const char address_to label)
