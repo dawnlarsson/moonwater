@@ -10809,6 +10809,9 @@ static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page addre
                         current_at = k;
                 ui_popmenu_add(m, p->menu_mark[k], null, UI_MENU_RADIO | (current_at == k ? UI_MENU_ON : 0), k);
         }
+        // The row is revealed before its place is read: the reveal scrolls the list, and the row's top is where it is then.
+        if (!p->card)
+                ui_list_reveal(ui, l);
         {
                 struct ui measure = *ui;
 
@@ -10819,13 +10822,15 @@ static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page addre
                 y = top + ui_px(ui, UI_ROW) - ui_px(ui, UI_GAP1);
         }
         menu->field = null;
+        // A menu that did not open (its row could not be taken) is no menu of the page's: no row has one open.
+        if (!ui_popmenu_open(menu, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
+        {
+                p->menu_row = -1;
+                return false;
+        }
         p->menu_row = row, p->menu_x = x, p->menu_y = y;
-        if (!p->card)
-                ui_list_reveal(ui, l);
-        ui_popmenu_open(menu, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch);
         m->hot = current_at >= 0 ? current_at : 0;
-        if (menu->open)
-                ui_popmenu_present(menu);
+        ui_popmenu_present(menu);
         return true;
 }
 
