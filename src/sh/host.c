@@ -16295,6 +16295,12 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
                 usb_tell_text(false, "rule added: allow ", (string_address)rule);
         }
         usb_tell_text(false, "mode lock", "");
+        //      The mode is said before what the apply says of each device: settings reads the first line that has
+        //      "device " in it as the New devices row's value, and a device held or allowed by this lock said it first.
+        if (say && error >= 0)
+                host_say(log, host_label "device lock: %p devices plugged in now are kept as rules; "
+                                         "a new one waits for device allow\n",
+                         kept);
         usb_apply_all(address_of policy, null, null, say);
         if (error < 0 && run < 0)
         {
@@ -16313,10 +16319,6 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
                              : host_refuse(USB_POLICY " cannot be read (%s) and is not written over: the lock is in "
                                                       "force until the machine restarts\n",
                                            file_reason(error));
-        if (say)
-                host_say(log, host_label "device lock: %p devices plugged in now are kept as rules; "
-                                         "a new one waits for device allow\n",
-                         kept);
         return 0;
 }
 
@@ -16355,6 +16357,8 @@ static b32 usb_unlock_now(void)
         if (!failed)
         {
                 usb_tell_text(false, "mode off", "");
+                //      Said before the apply's lines, which begin "device allowed" and "device held": the New devices row reads the first.
+                host_say(log, host_label "device unlock: every device is let in but those a deny rule holds\n");
                 usb_apply_all(address_of policy, null, null, true);
         }
         radio_unlock(lock);
@@ -16363,7 +16367,6 @@ static b32 usb_unlock_now(void)
                 return failed;
         if (!usb_watched(address_of policy))
                 usb_watch_stop();
-        host_say(log, host_label "device unlock: every device is let in but those a deny rule holds\n");
         return 0;
 }
 
