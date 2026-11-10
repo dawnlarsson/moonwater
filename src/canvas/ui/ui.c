@@ -5678,6 +5678,8 @@ static void ui_kit_let_go_held(struct ui_control address_to c)
         ui_squish_release(&c->squish);
         if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
                 ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
+        if (c->kind == UI_SLIDER)
+                ui_kit_number_to(&c->spot, 0, 300, &ui_ease); // the press's ring goes out, as a release's does
         if (c->bend > UI_REST_SCALE && !ui_kit.motion)
                 ui_spring_go(&c->held_squish, c->bend, 0);
         c->bend = c->bend_target = 0;
@@ -5717,6 +5719,12 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
         {
                 struct ui_control address_to c = ui_kit_held;
 
+                // A control disabled while it is held lets go: it changes nothing more, and its hold must not outlive it.
+                if (c && !ui_control_live(c))
+                {
+                        ui_kit_let_go_held(c);
+                        return null;
+                }
                 if (c)
                 {
                         int dx = x - c->press_x, dy = y - c->press_y;
