@@ -222,7 +222,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Always off	48b1	Toujours désactivé
 =Always on	fab5	Toujours activé
 =Audio	1439	Audio
-=Audio modem (last resort)	8e7b	Modem audio (dernier recours)
+=Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Heure authentifiée (NTS)
 =Automatic	6784	Automatique
 =Background	0abd	Arrière-plan

@@ -223,7 +223,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
 =Audio	1439	آڈیو
-=Audio modem (last resort)	8e7b	آڈیو موڈیم (آخری راستہ)
+=Audio modem	0ccb	آڈیو موڈیم
 =Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس منظر

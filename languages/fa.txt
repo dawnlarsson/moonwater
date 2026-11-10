@@ -223,7 +223,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Always off	48b1	همیشه خاموش
 =Always on	fab5	همیشه روشن
 =Audio	1439	صدا
-=Audio modem (last resort)	8e7b	مودم صوتی (آخرین راه)
+=Audio modem	0ccb	مودم صوتی
 =Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
 =Automatic	6784	خودکار
 =Background	0abd	پس‌زمینه

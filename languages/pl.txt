@@ -222,7 +222,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Always off	48b1	Zawsze wyłączona
 =Always on	fab5	Zawsze włączona
 =Audio	1439	Dźwięk
-=Audio modem (last resort)	8e7b	Modem audio (ostateczność)
+=Audio modem	0ccb	Modem audio
 =Authenticated time (NTS)	e533	Uwierzytelniony czas (NTS)
 =Automatic	6784	Automatycznie
 =Background	0abd	Tło

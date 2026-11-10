@@ -196,7 +196,7 @@ describe()
         fold)     echo "the constant-size fold we put in the kernel string header" ;;
         allocator) echo "malloc, free, calloc and realloc against glibc's" ;;
         reserve) echo "movable mappings, growth failures, relocation and sparse-page residency" ;;
-        modem) echo "the audio modem (src/waterlink/modem.c) as a last-resort physical layer: SHA-256 and HMAC vectors, round trips at random lengths and offsets, the pinned wire format, input bounds, wrong keys, replay, the receiver session, a noise sweep, a benchmark; MODEM_FUZZ_SECONDS adds the libFuzzer target" ;;
+        modem) echo "the audio modem (src/waterlink/modem.c) as a physical layer: SHA-256 and HMAC vectors, round trips at random lengths and offsets, the pinned wire format, input bounds, wrong keys, replay, the receiver session, a noise sweep, a benchmark; MODEM_FUZZ_SECONDS adds the libFuzzer target" ;;
         link) echo "moonwater link end to end between two network namespaces: run, shell over a pty, netem loss, refusals, rekeys, on and off" ;;
         netem) echo "the DHCP and SNTP clients against a hostile server over a veth pair with netem loss, duplication, reordering and delay (NOT RUN without unprivileged namespaces, veth and netem)" ;;
         waterlink) echo "the waterlink core as a pure transform: supersession, reliable per-key delivery and congestion over a generated lossy network, the seal, the Noise IK handshake against a reference, and the replay window" ;;

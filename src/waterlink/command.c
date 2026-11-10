@@ -1502,10 +1502,10 @@ static b32 link_port_verb(string_address word)
 /*
         moonwater link transport [network|modem]: how linked machines reach
         each other, kept in /root/link.transport, network when nothing is kept.
-        The audio modem is a last-resort transport the machine does not have
-        yet: its word is refused, and the page and the window say it is not
-        available, until link_modem_ready says it is. The state is the one
-        place that says so, so a row that shows it is never wrong.
+        The audio modem is one of the transports: the sound card carries the
+        link when it is ready, and a word that asks for it is refused while it
+        is not, with the reason. The state is the one place that says so, so a
+        row that shows it is never wrong.
 */
 //      The forward declarations of the two things this part calls that are
 //      made later in the one unit: the sound server's page, and the send
@@ -1514,17 +1514,28 @@ static b32 modem_send_file(string_address path);
 static int audio_test_page(struct audio_state *copy);
 
 /*
-        The audio modem is ready when the sound server has a sound card open
-        for it to play on: its page is there, the output is a card and not a
-        clock (a clock is where the sound goes to nothing), and the card has
-        a device. A server that is not running leaves no page to read.
+        The reason the audio modem is not ready, in words, or null when it is.
+        It is ready when the sound server has a sound card open for it to play
+        on: its page is there, the output is a card and not a clock (a clock is
+        where the sound goes to nothing), and the card has a device. A server
+        that is not running leaves no page to read.
 */
-static bool link_modem_ready(void)
+static string_address link_modem_why(void)
 {
         struct audio_state page;
 
-        return audio_test_page(&page) && (page.output_state & AUDIO_STATE_OUT_CARD) &&
-               page.device[0] != 0;
+        if (!audio_test_page(&page))
+                return (string_address) "the sound server is not running";
+        if (!(page.output_state & AUDIO_STATE_OUT_CARD))
+                return (string_address) "no sound card is open on the sound server";
+        if (page.device[0] == 0)
+                return (string_address) "the sound card has no device";
+        return null;
+}
+
+static bool link_modem_ready(void)
+{
+        return !link_modem_why();
 }
 
 /*
@@ -1567,10 +1578,11 @@ static b32 link_modem_key_verb(void)
 
 static b32 link_modem_send(string_address path)
 {
-        if (!link_modem_ready())
-                return host_refuse("the audio modem is not available: no sound "
-                                   "card is open on the sound server (moonwater "
-                                   "audio says which)\n");
+        string_address why = link_modem_why();
+
+        if (why)
+                return host_refuse("the audio modem is not ready: %s (moonwater "
+                                   "audio says which)\n", why);
         return modem_send_file(path);
 }
 
@@ -1582,18 +1594,26 @@ static b32 link_transport_verb(string_address word)
         host_read_word(LINK_TRANSPORT_PATH, kept, sizeof kept);
         if (!word)
         {
+                string_address why = link_modem_why();
+
                 //      What is said is what is used: a file written by hand as
                 //      modem, when the modem is not there, is network.
                 host_say(log, host_label "transport %s\n",
                          link_modem_in_use() ? "modem" : "network");
-                host_say(log, host_label "audio modem %s\n",
-                         link_modem_ready() ? "ready" : "not available yet");
+                if (why)
+                        host_say(log, host_label "audio modem not ready: %s\n", why);
+                else
+                        host_say(log, host_label "audio modem ready\n");
                 return 0;
         }
-        if (string_equals(word, "modem") && !link_modem_ready())
-                return host_refuse("the audio modem is not available: no sound "
-                                   "card is open on the sound server, so the "
-                                   "transport stays network\n");
+        if (string_equals(word, "modem"))
+        {
+                string_address why = link_modem_why();
+
+                if (why)
+                        return host_refuse("the audio modem is not ready: %s, so "
+                                           "the transport stays network\n", why);
+        }
         if (!string_equals(word, "network") && !string_equals(word, "modem"))
                 return host_refuse("transport is network or modem, not %s\n", word);
         failed = radio_write_word(LINK_TRANSPORT_PATH, word);

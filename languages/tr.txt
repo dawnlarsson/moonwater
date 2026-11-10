@@ -222,7 +222,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Always off	48b1	Her zaman kapalı
 =Always on	fab5	Her zaman açık
 =Audio	1439	Ses
-=Audio modem (last resort)	8e7b	Ses modemi (son çare)
+=Audio modem	0ccb	Ses modemi
 =Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)
 =Automatic	6784	Otomatik
 =Background	0abd	Arka plan

@@ -222,7 +222,7 @@ ui_field_full	fe02	mer ryms inte
 =Always off	48b1	Alltid av
 =Always on	fab5	Alltid på
 =Audio	1439	Ljud
-=Audio modem (last resort)	8e7b	Ljudmodem (sista utväg)
+=Audio modem	0ccb	Ljudmodem
 =Authenticated time (NTS)	e533	Autentiserad tid (NTS)
 =Automatic	6784	Automatiskt
 =Background	0abd	Bakgrund

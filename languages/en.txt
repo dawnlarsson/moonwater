@@ -224,7 +224,7 @@ ui_field_full	fe02	that is as much as it holds
 =Always off	48b1	Always off
 =Always on	fab5	Always on
 =Audio	1439	Audio
-=Audio modem (last resort)	8e7b	Audio modem (last resort)
+=Audio modem	0ccb	Audio modem
 =Authenticated time (NTS)	e533	Authenticated time (NTS)
 =Automatic	6784	Automatic
 =Background	0abd	Background

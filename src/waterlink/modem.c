@@ -1,6 +1,6 @@
 /*
-	LAST RESORT. The audio modem: the link for getting data off a machine
-	that cannot be trusted, when no other path is safe, or a debugging link.
+	The audio modem: the link for getting data off a machine that cannot be
+	trusted, or a debugging link.
 	It assumes the other end is hostile:
 	  - every frame is authenticated (HMAC-SHA256 under the pairing key)
 	    before any byte of it is used;

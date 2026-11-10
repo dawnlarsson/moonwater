@@ -222,7 +222,7 @@ ui_field_full	fe02	больше не помещается
 =Always off	48b1	Всегда выключена
 =Always on	fab5	Всегда включена
 =Audio	1439	Звук
-=Audio modem (last resort)	8e7b	Аудиомодем (крайний случай)
+=Audio modem	0ccb	Аудиомодем
 =Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
 =Automatic	6784	Автоматически
 =Background	0abd	Фон

@@ -222,7 +222,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Always off	48b1	Πάντα ανενεργό
 =Always on	fab5	Πάντα ενεργό
 =Audio	1439	Ήχος
-=Audio modem (last resort)	8e7b	Μόντεμ ήχου (έσχατη λύση)
+=Audio modem	0ccb	Μόντεμ ήχου
 =Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
 =Automatic	6784	Αυτόματο
 =Background	0abd	Φόντο

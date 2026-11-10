@@ -223,7 +223,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Always off	48b1	תמיד כבוי
 =Always on	fab5	תמיד מופעל
 =Audio	1439	שמע
-=Audio modem (last resort)	8e7b	מודם שמע (מוצא אחרון)
+=Audio modem	0ccb	מודם שמע
 =Authenticated time (NTS)	e533	זמן מאומת (NTS)
 =Automatic	6784	אוטומטי
 =Background	0abd	רקע
