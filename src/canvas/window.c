@@ -3232,6 +3232,10 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
                 table->title[row][at] = 0;
         table->glass[row] = 0;
+        // The scale the window is drawn at and its text fields with the keys are the compositor's and the program's for the window
+        // that had the row: the program reads the scale at its start, and the keyboard shows for any field count above 0.
+        __atomic_store_n(&table->window_scale[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->field[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->pointer_shape[row], WINDOW_POINTER_ARROW, __ATOMIC_RELEASE);
         table->asked[row] = 0;
         table->ground[row] = 0;
@@ -3242,6 +3246,10 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
         table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
+        // The key requests the last keyboard left unread are not the next one's to send on: its ring starts empty, as the events' does.
+        __atomic_store_n(&table->osk_tail[row], __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+        table->body_state[row] = 0;
+        table->body_raw[row] = table->body_drawn[row] = table->body_speed[row] = 0;
         // A placement and a name are the program that asked's, and not the next one's to open in the row.
         table->place[row] = table->place_screen[row] = 0;
         table->place_x[row] = table->place_y[row] = 0;
