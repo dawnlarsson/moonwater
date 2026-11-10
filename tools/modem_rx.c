@@ -3,9 +3,12 @@
 	each frame's tag under the modem key, and writes the datagrams' data to a file. It never runs anything it receives:
 	the payload is bytes written at the offset the sender named, and nothing else.
 
-	Build (on a Mac, from the repository root):
+	Build (on a Mac, from the repository root). The modem calls two functions of lib.c, so lib.c is compiled without its
+	_start and only those two names are kept global (the rest would replace the C library's):
 
-		cc -O2 -Wall -o modem_rx tools/modem_rx.c -lz
+		cc -O2 -w -DSTANDARD_NO_ENTRY -c src/lib.c -o lib_full.o
+		ld -r -exported_symbol _sha256_blocks -exported_symbol _hash_hmac_sha256_prepared -o lib.o lib_full.o
+		cc -O2 -Wall -o modem_rx tools/modem_rx.c lib.o -lz
 
 	(-lz: the system's zlib, which inflates a send that was compressed on the box.)
 
@@ -44,8 +47,10 @@
 #include <string.h>
 #include <zlib.h>
 
-/* The receiver builds the codec alone: the send section of modem.c needs the shell's sound server and host. */
+/* The receiver builds the codec alone: the send section of modem.c needs the shell's sound server and host. The two
+   functions of lib.c that the codec calls, and the platform writes they name, are in modem_host.h. */
 #define MODEM_NO_SEND 1
+#include "../src/waterlink/modem_host.h"
 #include "../src/waterlink/modem.c"
 
 /* The window the decoder is given: one call scans it all, so it is a few frames long, not the whole capture. A frame

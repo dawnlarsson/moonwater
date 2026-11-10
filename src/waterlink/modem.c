@@ -30,9 +30,10 @@
 	each frame that follows the one before.
 
 	Integer arithmetic only: no floating point, no libm in the decoder.
-	The sine tables are fixed at build time. SHA-256 is inline here so the
-	file stands alone; in the moonwater tree the HMAC should be lib.c's
-	hash_hmac_sha256_prepared, keyed once per session as net.c does.
+	The sine tables are fixed at build time. The tag is lib.c's: sha256_blocks
+	and hash_hmac_sha256_prepared, with each session's key made ready once, as
+	net.c makes its HMAC keys ready. Where this machine has no body for
+	hash_hmac_sha256_prepared, the tag is made from sha256_blocks here.
 
 	Not reentrant: the decoder keeps its bit buffer in a static array.
 
@@ -104,6 +105,132 @@ static const int32_t modem_cos_tab[MODEM_SYM] = {10000, 9877, 9511, 8910, 8090, 
 static const int32_t modem_sin_tab[MODEM_SYM] = {0, 1564, 3090, 4540, 5878, 7071, 8090, 8910, 9511, 9877, 10000, 9877, 9511, 8910, 8090, 7071, 5878, 4540, 3090, 1564, 0, -1564, -3090, -4540, -5878, -7071, -8090, -8910, -9511, -9877, -10000, -9877, -9511, -8910, -8090, -7071, -5878, -4540, -3090, -1564};
 #endif
 
+/* ---- HMAC-SHA256 under a key made ready once (FIPS 180-4, RFC 2104) ------ */
+
+/*
+	The block core is lib.c's sha256_blocks, which takes whole 64-byte blocks into eight words of state, and the tag is
+	lib.c's hash_hmac_sha256_prepared, which takes the two states of a key's pads and a message and answers whether it made
+	the tag. It has a body on x86_64 with the SHA extensions; elsewhere it answers false and the tag is made here from
+	sha256_blocks, as net.c's crypto_hmac_sha256_prepared makes it. A key is made ready once per session (modem_mac_open),
+	so a frame's tag costs the blocks of its message and the two that close it.
+*/
+
+#define MODEM_SHA_BLOCK 64
+
+typedef struct
+{
+	uint32_t inner[8];
+	uint32_t outer[8];
+	int ok; /* the key is one the modem takes (MODEM_KEY_MIN bytes or more), and its pads are made */
+} modem_mac;
+
+static const uint32_t modem_sha_iv[8] = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+/* Digests len bytes of msg into h, which already holds the done bytes (a multiple of 64) that came before them, and
+   pads the tail as FIPS 180-4 does: after this h holds the digest's words of the whole message. */
+static void modem_sha_run(uint32_t h[8], const uint8_t *msg, size_t len, uint64_t done)
+{
+	uint8_t block[2 * MODEM_SHA_BLOCK];
+	size_t whole = len / MODEM_SHA_BLOCK, rest = len % MODEM_SHA_BLOCK, blocks = rest < 56 ? 1 : 2, i;
+	uint64_t bits = (done + len) * 8;
+
+	sha256_blocks(h, msg, whole);
+	memset(block, 0, sizeof block);
+	if (rest)
+		memcpy(block, msg + whole * MODEM_SHA_BLOCK, rest);
+	block[rest] = 0x80;
+	for (i = 0; i < 8; i++)
+		block[blocks * MODEM_SHA_BLOCK - 1 - i] = (uint8_t)(bits >> (8 * i));
+	sha256_blocks(h, block, blocks);
+}
+
+static void modem_sha_bytes(const uint32_t h[8], uint8_t out[32])
+{
+	size_t i;
+
+	for (i = 0; i < 8; i++)
+	{
+		out[4 * i] = (uint8_t)(h[i] >> 24);
+		out[4 * i + 1] = (uint8_t)(h[i] >> 16);
+		out[4 * i + 2] = (uint8_t)(h[i] >> 8);
+		out[4 * i + 3] = (uint8_t)h[i];
+	}
+}
+
+/* SHA-256 of len bytes in one call: how a key over a block is digested. */
+static void modem_sha256(const uint8_t *msg, size_t len, uint8_t out[32])
+{
+	uint32_t h[8];
+
+	memcpy(h, modem_sha_iv, sizeof h);
+	modem_sha_run(h, msg, len, 0);
+	modem_sha_bytes(h, out);
+	memset(h, 0, sizeof h);
+}
+
+/* Makes a key ready: the chaining states of its two pads, which a message under the key starts from. A key over a
+   block is digested first, as RFC 2104 has it. m->ok says whether the key is one the modem takes. */
+static void modem_mac_open(modem_mac *m, const uint8_t *key, size_t klen)
+{
+	uint8_t k[MODEM_SHA_BLOCK], pad[MODEM_SHA_BLOCK];
+	size_t i;
+
+	m->ok = key != 0 && klen >= MODEM_KEY_MIN;
+	if (!key)
+		klen = 0;
+	memset(k, 0, sizeof k);
+	if (klen > MODEM_SHA_BLOCK)
+		modem_sha256(key, klen, k);
+	else if (klen > 0)
+		memcpy(k, key, klen);
+	for (i = 0; i < MODEM_SHA_BLOCK; i++)
+		pad[i] = k[i] ^ 0x36;
+	memcpy(m->inner, modem_sha_iv, sizeof m->inner);
+	sha256_blocks(m->inner, pad, 1);
+	for (i = 0; i < MODEM_SHA_BLOCK; i++)
+		pad[i] = k[i] ^ 0x5c;
+	memcpy(m->outer, modem_sha_iv, sizeof m->outer);
+	sha256_blocks(m->outer, pad, 1);
+	memset(k, 0, sizeof k);
+	memset(pad, 0, sizeof pad);
+}
+
+/* The portable tag: the message under the inner state, then the inner digest under the outer state. */
+static void modem_hmac_portable(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[32])
+{
+	uint32_t h[8];
+	uint8_t inner[32];
+
+	memcpy(h, m->inner, sizeof h);
+	modem_sha_run(h, msg, mlen, MODEM_SHA_BLOCK);
+	modem_sha_bytes(h, inner);
+	memcpy(h, m->outer, sizeof h);
+	modem_sha_run(h, inner, sizeof inner, MODEM_SHA_BLOCK);
+	modem_sha_bytes(h, out);
+	memset(h, 0, sizeof h);
+	memset(inner, 0, sizeof inner);
+}
+
+/* The tag of msg under a key made ready by modem_mac_open: lib.c's where this machine has its body, else the portable one. */
+static void modem_hmac(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[32])
+{
+	if (!hash_hmac_sha256_prepared(m->inner, m->outer, msg, mlen, out))
+		modem_hmac_portable(m, msg, mlen, out);
+}
+
+/* The frame's tag: the HMAC under the key made ready, truncated to its first MODEM_TAG bytes (RFC 2104, FIPS 198-1 truncation
+   to the left-most bits). The full MODEM_MAC bytes are made and the rest is dropped; the comparison is over MODEM_TAG bytes only. */
+static void modem_tag(const modem_mac *m, const uint8_t *msg, size_t mlen, uint8_t out[MODEM_TAG])
+{
+	uint8_t mac[MODEM_MAC];
+
+	modem_hmac(m, msg, mlen, mac);
+	memcpy(out, mac, MODEM_TAG);
+	memset(mac, 0, sizeof(mac));
+}
+
 /* ---- the public interface ---------------------------------------------- */
 
 /* The samples a frame of len payload bytes takes, lead and tail included; 0 if len is too long. */
@@ -127,8 +254,7 @@ int modem_fresh(uint32_t last, uint32_t seq);
    alone cannot close a good session. */
 typedef struct
 {
-	const uint8_t *key;
-	size_t klen;
+	modem_mac mac;
 	uint32_t last;
 	unsigned refused;
 	int closed;
@@ -159,8 +285,7 @@ int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size
 /* The sender: one per session, with its own datagram ids. */
 typedef struct
 {
-	const uint8_t *key;
-	size_t klen;
+	modem_mac mac;
 	uint32_t seq;
 	uint16_t id;
 } modem_tx;
@@ -192,174 +317,7 @@ void modem_chunk_open(modem_chunk_rx *cr, const uint8_t *key, size_t klen);
    taken; call again with the rest), or -1 when the session is closed or the input is refused. */
 int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, size_t *used);
 
-/* ---- SHA-256 and HMAC-SHA256 (FIPS 180-4, RFC 2104) ---------------------- */
-
-typedef struct
-{
-	uint32_t h[8];
-	uint64_t bits;
-	uint8_t buf[64];
-	size_t fill;
-} modem_sha256;
-
-static const uint32_t modem_sha_k[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-
-#define MODEM_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
-
-static void modem_sha_compress(uint32_t h[8], const uint8_t *p)
-{
-	uint32_t w[64], a, b, c, d, e, f, g, hh;
-	size_t i;
-
-	for (i = 0; i < 16; i++)
-		w[i] = ((uint32_t)p[4 * i] << 24) | ((uint32_t)p[4 * i + 1] << 16) |
-		       ((uint32_t)p[4 * i + 2] << 8) | (uint32_t)p[4 * i + 3];
-	for (i = 16; i < 64; i++)
-	{
-		uint32_t s0 = MODEM_ROR(w[i - 15], 7) ^ MODEM_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
-		uint32_t s1 = MODEM_ROR(w[i - 2], 17) ^ MODEM_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
-		w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-	}
-	a = h[0];
-	b = h[1];
-	c = h[2];
-	d = h[3];
-	e = h[4];
-	f = h[5];
-	g = h[6];
-	hh = h[7];
-	for (i = 0; i < 64; i++)
-	{
-		uint32_t S1 = MODEM_ROR(e, 6) ^ MODEM_ROR(e, 11) ^ MODEM_ROR(e, 25);
-		uint32_t ch = (e & f) ^ (~e & g);
-		uint32_t t1 = hh + S1 + ch + modem_sha_k[i] + w[i];
-		uint32_t S0 = MODEM_ROR(a, 2) ^ MODEM_ROR(a, 13) ^ MODEM_ROR(a, 22);
-		uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-		uint32_t t2 = S0 + maj;
-		hh = g;
-		g = f;
-		f = e;
-		e = d + t1;
-		d = c;
-		c = b;
-		b = a;
-		a = t1 + t2;
-	}
-	h[0] += a;
-	h[1] += b;
-	h[2] += c;
-	h[3] += d;
-	h[4] += e;
-	h[5] += f;
-	h[6] += g;
-	h[7] += hh;
-}
-
-static void modem_sha_init(modem_sha256 *c)
-{
-	static const uint32_t iv[8] = {
-	    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-	    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-	memcpy(c->h, iv, sizeof(iv));
-	c->bits = 0;
-	c->fill = 0;
-}
-
-static void modem_sha_update(modem_sha256 *c, const uint8_t *p, size_t n)
-{
-	c->bits += (uint64_t)n * 8;
-	while (n > 0)
-	{
-		size_t take = 64 - c->fill;
-
-		if (take > n)
-			take = n;
-		memcpy(c->buf + c->fill, p, take);
-		c->fill += take;
-		p += take;
-		n -= take;
-		if (c->fill == 64)
-		{
-			modem_sha_compress(c->h, c->buf);
-			c->fill = 0;
-		}
-	}
-}
-
-static void modem_sha_final(modem_sha256 *c, uint8_t out[32])
-{
-	uint8_t pad[72];
-	uint64_t bits = c->bits;
-	size_t padlen = (c->fill < 56) ? (56 - c->fill) : (120 - c->fill);
-	size_t i;
-
-	memset(pad, 0, sizeof(pad));
-	pad[0] = 0x80;
-	for (i = 0; i < 8; i++)
-		pad[padlen + i] = (uint8_t)(bits >> (56 - 8 * i));
-	modem_sha_update(c, pad, padlen + 8);
-	for (i = 0; i < 8; i++)
-	{
-		out[4 * i] = (uint8_t)(c->h[i] >> 24);
-		out[4 * i + 1] = (uint8_t)(c->h[i] >> 16);
-		out[4 * i + 2] = (uint8_t)(c->h[i] >> 8);
-		out[4 * i + 3] = (uint8_t)c->h[i];
-	}
-}
-
-static void modem_hmac(const uint8_t *key, size_t klen, const uint8_t *msg, size_t mlen, uint8_t out[32])
-{
-	uint8_t k[64], inner[32];
-	modem_sha256 c;
-	size_t i;
-
-	memset(k, 0, sizeof(k));
-	if (klen > 64)
-	{
-		modem_sha_init(&c);
-		modem_sha_update(&c, key, klen);
-		modem_sha_final(&c, k);
-	}
-	else if (klen > 0)
-	{
-		memcpy(k, key, klen);
-	}
-	for (i = 0; i < 64; i++)
-		k[i] ^= 0x36;
-	modem_sha_init(&c);
-	modem_sha_update(&c, k, 64);
-	modem_sha_update(&c, msg, mlen);
-	modem_sha_final(&c, inner);
-	for (i = 0; i < 64; i++)
-		k[i] ^= 0x36 ^ 0x5c;
-	modem_sha_init(&c);
-	modem_sha_update(&c, k, 64);
-	modem_sha_update(&c, inner, 32);
-	modem_sha_final(&c, out);
-	memset(k, 0, sizeof(k));
-	memset(inner, 0, sizeof(inner));
-}
-
 /* ---- framing ----------------------------------------------------------- */
-
-/* The frame's tag: HMAC-SHA256 under key over data, truncated to its first MODEM_TAG bytes (RFC 2104, FIPS 198-1 truncation
-   to the left-most bits). The full 32 bytes are made and the rest is dropped; the comparison is over MODEM_TAG bytes only. */
-static void modem_tag(const uint8_t *key, size_t klen, const uint8_t *msg, size_t mlen, uint8_t out[MODEM_TAG])
-{
-	uint8_t mac[MODEM_MAC];
-
-	modem_hmac(key, klen, msg, mlen, mac);
-	memcpy(out, mac, MODEM_TAG);
-	memset(mac, 0, sizeof(mac));
-}
 
 /* The sync word is the wire version: a frame with a 16-byte tag carries A7 3D 69 C5, read least significant bit first. Version 1
    (a 32-byte tag) carried 5A C3 96 3C, so a receiver of one version never reads frames of the other as its own. */
@@ -367,11 +325,6 @@ static void modem_tag(const uint8_t *key, size_t klen, const uint8_t *msg, size_
 
 /* One scratch buffer for the demodulated bits, sized for the largest input the decoder takes. */
 static uint8_t modem_bits[(MODEM_MAX_SAMPLES / MODEM_SYM + 1) * MODEM_SYM_BITS];
-
-static int modem_key_ok(const uint8_t *key, size_t klen)
-{
-	return key != 0 && klen >= MODEM_KEY_MIN;
-}
 
 size_t modem_encode_samples(size_t len)
 {
@@ -383,8 +336,8 @@ size_t modem_encode_samples(size_t len)
 	return syms * MODEM_SYM + 2 * MODEM_LEAD;
 }
 
-size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t *payload, size_t len,
-		    int16_t *pcm, size_t cap)
+static size_t modem_encode_mac(const modem_mac *mac, uint32_t seq, const uint8_t *payload, size_t len,
+			       int16_t *pcm, size_t cap)
 {
 	static const uint8_t sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
 	uint8_t fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
@@ -392,7 +345,7 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 	int16_t tone[MODEM_TONES + 1][MODEM_SYM];
 	int c, k;
 
-	if (!modem_key_ok(key, klen) || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
+	if (!mac->ok || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
 		return 0;
 	total = modem_encode_samples(len);
 	if (total > cap)
@@ -411,7 +364,7 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 	if (len > 0)
 		memcpy(fb + nb, payload, len);
 	nb += len;
-	modem_tag(key, klen, fb + body, MODEM_HDR + len, fb + nb);
+	modem_tag(mac, fb + body, MODEM_HDR + len, fb + nb);
 	nb += MODEM_TAG;
 
 	/* Symbols from the frame's bit stream (least significant bit of each byte first). A short last symbol is
@@ -439,6 +392,18 @@ size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t
 		at += MODEM_SYM;
 	}
 	return at + MODEM_LEAD;
+}
+
+size_t modem_encode(const uint8_t *key, size_t klen, uint32_t seq, const uint8_t *payload, size_t len,
+		    int16_t *pcm, size_t cap)
+{
+	modem_mac mac;
+	size_t n;
+
+	modem_mac_open(&mac, key, klen);
+	n = modem_encode_mac(&mac, seq, payload, len, pcm, cap);
+	memset(&mac, 0, sizeof mac);
+	return n;
 }
 
 /* Reads count bytes, least significant bit first, from the bit array at bit position p. */
@@ -508,7 +473,7 @@ static void modem_memo_add(modem_memo *m, const uint8_t *bytes, size_t total)
    one shift per bit. Sets *refusal if a candidate had a valid sync and length but a bad tag, or, when gated, an
    authentic frame that is not fresh after last: such a frame is passed over, so a replay ahead of a fresh frame
    does not hide it. */
-static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, size_t klen,
+static int modem_find_frame(const uint8_t *bits, size_t nb, const modem_mac *mac,
 			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last, size_t *end_bit, size_t *cut_bit,
 			    modem_memo *memo)
 {
@@ -523,7 +488,7 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 	for (i = 0;; i++)
 	{
 		uint8_t buf[MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
-		uint8_t mac[MODEM_TAG];
+		uint8_t tag[MODEM_TAG];
 		size_t len, p = i + 32, t;
 		unsigned diff = 0;
 
@@ -535,9 +500,9 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 				if (modem_memo_has(memo, buf, MODEM_HDR + len + MODEM_TAG))
 					diff = 0;
 				else {
-					modem_tag(key, klen, buf, MODEM_HDR + len, mac);
+					modem_tag(mac, buf, MODEM_HDR + len, tag);
 					for (t = 0; t < MODEM_TAG; t++)
-						diff |= (unsigned)(mac[t] ^ buf[MODEM_HDR + len + t]);
+						diff |= (unsigned)(tag[t] ^ buf[MODEM_HDR + len + t]);
 					if (!diff)
 						modem_memo_add(memo, buf, MODEM_HDR + len + MODEM_TAG);
 				}
@@ -592,7 +557,7 @@ static int64_t modem_tone_energy(int64_t P, int64_t Q, int64_t cs, int64_t ss)
 	return mc * mc + ms * ms;
 }
 
-static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
+static int modem_decode_core(const int16_t *pcm, size_t n, const modem_mac *mac,
 			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last, size_t *used,
 			     size_t *cut)
 {
@@ -607,7 +572,7 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 	int found = 0;
 	modem_memo memo;
 
-	if (!pcm || !out || !seq || !modem_key_ok(key, klen) || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
+	if (!pcm || !out || !seq || !mac->ok || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
 		return -1;
 	memo.count = 0;
 	memo.next = 0;
@@ -703,7 +668,7 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
 
-		r = modem_find_frame(modem_bits, nb, key, klen, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
+		r = modem_find_frame(modem_bits, nb, mac, cand, cap, &cand_seq, &refusal, gated, last, &endbit, &cut_bit, &memo);
 		if (r < 0) {
 			if (cut_bit) {
 				size_t at_sample = off + ((cut_bit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
@@ -739,7 +704,13 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 int modem_decode(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
 		 uint8_t *out, size_t cap, uint32_t *seq)
 {
-	return modem_decode_core(pcm, n, key, klen, out, cap, seq, 0, 0, 0, 0, 0);
+	modem_mac mac;
+	int r;
+
+	modem_mac_open(&mac, key, klen);
+	r = modem_decode_core(pcm, n, &mac, out, cap, seq, 0, 0, 0, 0, 0);
+	memset(&mac, 0, sizeof mac);
+	return r;
 }
 
 int modem_fresh(uint32_t last, uint32_t seq)
@@ -752,8 +723,7 @@ int modem_fresh(uint32_t last, uint32_t seq)
 
 void modem_rx_open(modem_rx *rx, const uint8_t *key, size_t klen)
 {
-	rx->key = key;
-	rx->klen = klen;
+	modem_mac_open(&rx->mac, key, klen);
 	rx->last = 0;
 	rx->refused = 0;
 	rx->closed = 0;
@@ -778,7 +748,7 @@ int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size
 		*used = 0;
 	if (!rx || rx->closed)
 		return -1;
-	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last, &frame_end, &cut);
+	r = modem_decode_core(pcm, n, &rx->mac, out, cap, seq, &refused, 1, rx->last, &frame_end, &cut);
 	if (r < 0)
 	{
 		if (used && rx->consume)
@@ -802,8 +772,7 @@ int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, siz
 
 void modem_tx_open(modem_tx *tx, const uint8_t *key, size_t klen)
 {
-	tx->key = key;
-	tx->klen = klen;
+	modem_mac_open(&tx->mac, key, klen);
 	tx->seq = 0;
 	tx->id = 0;
 }
@@ -826,7 +795,7 @@ size_t modem_tx_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *p
 		payload[2] = (uint8_t)index;
 		payload[3] = (uint8_t)count;
 		memcpy(payload + MODEM_CHUNK_HEAD, dg + index * MODEM_CHUNK_DATA, take);
-		got = modem_encode(tx->key, tx->klen, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
+		got = modem_encode_mac(&tx->mac, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
 		if (got == 0)
 			return 0;
 		total += got;
@@ -1019,7 +988,11 @@ static void modem_seq_fingerprint(const uint8_t *key, uint8_t out[MODEM_MAC])
 {
         static const uint8_t label[] = "waterlink modem sequence";
 
-        modem_hmac(key, 32, label, sizeof label - 1, out);
+        modem_mac mac;
+
+        modem_mac_open(&mac, key, 32);
+        modem_hmac(&mac, label, sizeof label - 1, out);
+        memset(&mac, 0, sizeof mac);
 }
 
 /* Reads the count for key into seq and id. Answers 0, or the negative error of a file that is there and is not a private
@@ -1444,6 +1417,8 @@ static void link_modem_stop(void)
         ctl_disconnect(&modem_play);
         ctl_disconnect(&modem_record);
         crypto_forget(modem_key, sizeof modem_key);
+        crypto_forget(&modem_wl_tx.mac, sizeof modem_wl_tx.mac);
+        crypto_forget(&modem_wl_rx.rx.mac, sizeof modem_wl_rx.rx.mac);
         modem_open = false;
         modem_queue_count = 0;
         modem_wl_count = 0;

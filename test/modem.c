@@ -12,6 +12,7 @@
 /* The send section of modem.c (a file over the sound card) needs the shell's sound server and host: the self-test has
    neither, so it builds the codec alone. */
 #define MODEM_NO_SEND 1
+#include "../src/waterlink/modem_host.h"
 #include "../src/waterlink/modem.c"
 
 #include <math.h>
@@ -76,31 +77,75 @@ static void test_vectors(void)
 {
 	uint8_t d[32], mac[32];
 	char got[65];
-	modem_sha256 c;
+	modem_mac m;
 	uint8_t key20[20];
 
-	modem_sha_init(&c);
-	modem_sha_final(&c, d);
+	modem_sha256((const uint8_t *)"", 0, d);
 	hexout(d, 32, got);
 	check(strcmp(got, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0, "sha256 of empty input");
 
-	modem_sha_init(&c);
-	modem_sha_update(&c, (const uint8_t *)"abc", 3);
-	modem_sha_final(&c, d);
+	modem_sha256((const uint8_t *)"abc", 3, d);
 	hexout(d, 32, got);
 	check(strcmp(got, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0, "sha256 of abc");
 
-	modem_sha_init(&c);
-	modem_sha_update(&c, (const uint8_t *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56);
-	modem_sha_final(&c, d);
+	modem_sha256((const uint8_t *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, d);
 	hexout(d, 32, got);
 	check(strcmp(got, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0, "sha256 of 56-byte message");
 
 	memset(key20, 0x0b, sizeof(key20));
-	modem_hmac(key20, sizeof(key20), (const uint8_t *)"Hi There", 8, mac);
+	modem_mac_open(&m, key20, sizeof(key20));
+	modem_hmac(&m, (const uint8_t *)"Hi There", 8, mac);
 	hexout(mac, 32, got);
 	check(strcmp(got, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7") == 0,
 	      "hmac-sha256, RFC 4231 test case 1");
+}
+
+/* The tag of every length to 300 under six key sizes, from the portable path and from the tag the machine makes (lib.c's
+   body where it has one): the two must agree, so the portable path is what a machine without the body checks. */
+static void test_tag_paths(void)
+{
+	static const size_t sizes[] = {16, 20, 32, 64, 65, 131};
+	uint32_t state = 0x2545f491u; /* its own stream, so the other tests' random frames are the same as before */
+	uint8_t key[131], msg[300], a[32], b[32], c[32];
+	size_t k, len, i, bad = 0, answered = 0, tried = 0;
+
+	for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++)
+	{
+		modem_mac m;
+
+		for (i = 0; i < sizeof key; i++)
+		{
+			state ^= state << 13;
+			state ^= state >> 17;
+			state ^= state << 5;
+			key[i] = (uint8_t)state;
+		}
+		modem_mac_open(&m, key, sizes[k]);
+		for (len = 0; len <= sizeof msg; len++)
+		{
+			for (i = 0; i < len; i++)
+			{
+				state ^= state << 13;
+				state ^= state >> 17;
+				state ^= state << 5;
+				msg[i] = (uint8_t)state;
+			}
+			modem_hmac(&m, msg, len, a);
+			modem_hmac_portable(&m, msg, len, b);
+			tried++;
+			if (memcmp(a, b, 32) != 0)
+				bad++;
+			if (hash_hmac_sha256_prepared(m.inner, m.outer, msg, len, c))
+			{
+				answered++;
+				if (memcmp(c, b, 32) != 0)
+					bad++;
+			}
+		}
+		memset(&m, 0, sizeof m);
+	}
+	printf("      lib.c's HMAC body answered for %zu of %zu tags on this machine\n", answered, tried);
+	check(bad == 0, "the tag is the same from lib.c's body and the portable path, lengths 0..300, six key sizes");
 }
 
 static void test_roundtrip(void)
@@ -142,13 +187,10 @@ static void test_golden(void)
 	int16_t *pcm = malloc(sizeof(int16_t) * modem_encode_samples(sizeof(payload) - 1));
 	uint8_t digest[32];
 	char got[65];
-	modem_sha256 c;
 	size_t n;
 
 	n = modem_encode(KEY, KEYLEN, 42, payload, sizeof(payload) - 1, pcm, modem_encode_samples(sizeof(payload) - 1));
-	modem_sha_init(&c);
-	modem_sha_update(&c, (const uint8_t *)pcm, n * sizeof(int16_t));
-	modem_sha_final(&c, digest);
+	modem_sha256((const uint8_t *)pcm, n * sizeof(int16_t), digest);
 	hexout(digest, 32, got);
 	printf("      golden sample digest: %s\n", got);
 	check(strcmp(got, MODEM_GOLDEN) == 0, "frame samples match the pinned wire format");
@@ -499,6 +541,7 @@ static void test_datagram_session(void)
 int main(void)
 {
 	test_vectors();
+	test_tag_paths();
 	test_roundtrip();
 #ifdef MODEM_GOLDEN
 	test_golden(); /* the wire format is pinned for the configurations that define MODEM_GOLDEN */
