@@ -5,7 +5,9 @@
 
 	Build (on a Mac, from the repository root):
 
-		cc -O2 -Wall -o modem_rx tools/modem_rx.c
+		cc -O2 -Wall -o modem_rx tools/modem_rx.c -lz
+
+	(-lz: the system's zlib, which inflates a send that was compressed on the box.)
 
 	Use: record the box's output as MODEM_RATE Hz (96000), 16-bit, mono, little-endian PCM (any tool that writes raw PCM; on macOS,
 	sox or ffmpeg with -f s16le -ar 96000 -ac 1), then
@@ -28,6 +30,11 @@
 	left as zeros in the output, since nothing is acknowledged and nothing is sent again. A send whose first datagram was
 	lost is written into the file before it, and its gap is reported there.
 
+	A send's first byte is its marker: 0 means the rest is the file as it was, and 1 means the rest is a gzip member (RFC 1952),
+	which the box made of the file because it was smaller. When a send arrives whole, with no gap and its first datagram, the
+	receiver takes the marker off and writes the file as it was (a gzip member is inflated). A send with a gap is left as it
+	was received, marker first, and says so.
+
 	The capture is MODEM_RATE Hz, 16-bit, mono: the symbols are timed for that rate, and the box refuses to send on a card at
 	another rate.
 */
@@ -35,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zlib.h>
 
 /* The receiver builds the codec alone: the send section of modem.c needs the shell's sound server and host. */
 #define MODEM_NO_SEND 1
@@ -99,6 +107,108 @@ static FILE *rx_send_output(const char *base, unsigned send, char *name, size_t 
 	return fopen(name, "wb");
 }
 
+/* Inflates a gzip member from src to dst. Answers 1 when the whole member came through, 0 for a damaged or short one. */
+static int rx_gunzip(FILE *src, FILE *dst)
+{
+	static unsigned char in_buf[65536], out_buf[65536];
+	z_stream strm;
+	int ret = Z_OK, ok = 0;
+
+	memset(&strm, 0, sizeof strm);
+	if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK)
+		return 0;
+	do {
+		strm.avail_in = (uInt)fread(in_buf, 1, sizeof in_buf, src);
+		if (ferror(src) || strm.avail_in == 0)
+			break;
+		strm.next_in = in_buf;
+		do {
+			size_t have;
+
+			strm.avail_out = sizeof out_buf;
+			strm.next_out = out_buf;
+			ret = inflate(&strm, Z_NO_FLUSH);
+			if (ret == Z_STREAM_ERROR || ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
+				goto done;
+			have = sizeof out_buf - strm.avail_out;
+			if (fwrite(out_buf, 1, have, dst) != have)
+				goto done;
+		} while (strm.avail_out == 0);
+	} while (ret != Z_STREAM_END);
+	ok = ret == Z_STREAM_END;
+done:
+	inflateEnd(&strm);
+	return ok;
+}
+
+/* Unwraps a finished send by its marker byte, the stream's first: 0 is the file as it was, 1 is gzip, which is inflated. A send
+   is unwrapped only when its first datagram came and no datagram of it is missing: a gap in a gzip stream cannot be inflated,
+   and a gap in either leaves zeros the marker cannot be trusted past. Anything else is left as it was received. */
+static void rx_finish_send(const char *path, int first, unsigned gaps)
+{
+	FILE *src, *dst;
+	char temp[4300];
+	int marker, ok = 1;
+
+	if (!first) {
+		fprintf(stderr, "modem_rx: %s: the send's first frame was not received, so its marker is unknown: left as received\n", path);
+		return;
+	}
+	if (gaps) {
+		fprintf(stderr, "modem_rx: %s: the send has gaps, so it is not unwrapped: left as received, its first byte the marker\n", path);
+		return;
+	}
+	src = fopen(path, "rb");
+	if (!src) {
+		fprintf(stderr, "modem_rx: cannot read %s\n", path);
+		return;
+	}
+	marker = fgetc(src);
+	if (marker == EOF) {
+		fclose(src);
+		return;
+	}
+	if (marker != 0 && marker != 1) {
+		fprintf(stderr, "modem_rx: %s: marker %d is not one this receiver knows: left as received\n", path, marker);
+		fclose(src);
+		return;
+	}
+	snprintf(temp, sizeof temp, "%s.unwrap", path);
+	dst = fopen(temp, "wb");
+	if (!dst) {
+		fprintf(stderr, "modem_rx: cannot write %s\n", temp);
+		fclose(src);
+		return;
+	}
+	if (marker == 1) {
+		ok = rx_gunzip(src, dst);
+	} else {
+		static unsigned char buf[65536];
+		size_t n;
+
+		while ((n = fread(buf, 1, sizeof buf, src)) > 0)
+			if (fwrite(buf, 1, n, dst) != n) {
+				ok = 0;
+				break;
+			}
+		ok = ok && !ferror(src);
+	}
+	fclose(src);
+	if (fclose(dst) != 0)
+		ok = 0;
+	if (!ok) {
+		fprintf(stderr, "modem_rx: %s: the send could not be unwrapped (a gzip stream that is damaged or ends early): left as received\n", path);
+		remove(temp);
+		return;
+	}
+	if (rename(temp, path) != 0) {
+		fprintf(stderr, "modem_rx: cannot write %s\n", path);
+		remove(temp);
+		return;
+	}
+	fprintf(stderr, "modem_rx: %s: unwrapped from %s\n", path, marker == 1 ? "gzip" : "raw");
+}
+
 int main(int argc, char **argv)
 {
 	static int16_t window[RX_WINDOW];
@@ -110,7 +220,8 @@ int main(int argc, char **argv)
 	char name[4200];
 	FILE *in = stdin, *out;
 	size_t fill = 0, keep, datagrams = 0, bytes = 0, expected = 0;
-	unsigned gaps = 0, sends = 1;
+	unsigned gaps = 0, sends = 1, send_gaps = 0;
+	int send_first = 0;
 	uint32_t after = 0;
 	int closed = 0, eof = 0;
 	size_t skipped = 0;
@@ -214,6 +325,7 @@ int main(int argc, char **argv)
 						fprintf(stderr, "modem_rx: cannot write %s\n", name);
 						return 1;
 					}
+					rx_finish_send(name, send_first, send_gaps);
 					sends++;
 					out = rx_send_output(out_path, sends, name, sizeof name);
 					if (!out) {
@@ -222,9 +334,12 @@ int main(int argc, char **argv)
 					}
 					fprintf(stderr, "modem_rx: a new send begins: writing %s\n", name);
 					expected = 0;
+					send_first = 0;
+					send_gaps = 0;
 				}
 				if (offset != expected) {
 					gaps++;
+					send_gaps++;
 					fprintf(stderr, "modem_rx: gap: bytes %lu to %lu were not received\n",
 						(unsigned long)expected, (unsigned long)offset);
 				}
@@ -233,6 +348,8 @@ int main(int argc, char **argv)
 					return 1;
 				}
 				expected = offset + length;
+				if (offset == 0)
+					send_first = 1;
 				bytes += length;
 				datagrams++;
 			}
@@ -250,6 +367,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "modem_rx: cannot write %s\n", name);
 		return 1;
 	}
+	if (datagrams > 0)
+		rx_finish_send(name, send_first, send_gaps);
 	if (in != stdin)
 		fclose(in);
 	fprintf(stderr, "modem_rx: %lu datagrams, %lu bytes in %u send(s), the last to %s; %u gaps; %u refused frames%s; the last frame is %lu\n",

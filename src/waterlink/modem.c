@@ -976,9 +976,68 @@ static bipolar modem_seq_save(string_address path, const uint8_t *key, uint32_t 
 }
 
 /*
-        Sends FILE over the audio modem to the Mac's receiver. Answers 0 when every datagram was played, else what the verb
-        should say: no key, no file, no sound server, or a connection that broke part of the way (the datagrams before it were
-        played, and the receiver will say which bytes it did not get).
+        What is sent is a stream: a marker byte, then the file's bytes. The marker is MODEM_MARK_GZIP (1) when the bytes are a gzip
+        member (RFC 1952), made by the shell's own gzip into LINK_MODEM_ZIP_PATH, and MODEM_MARK_RAW (0) when they are the file as
+        it is. The gzip copy is sent only when it is smaller. The marker is the stream's first byte, so it is the first datagram's
+        first byte, and the receiver reads it before anything else. The copy is removed when the send is over, however it ended.
+*/
+#define LINK_MODEM_ZIP_PATH "/root/link.modem.gz"
+#define MODEM_MARK_RAW 0
+#define MODEM_MARK_GZIP 1
+
+static bipolar modem_zip_fd = -1;
+
+static void modem_zip_drop(void)
+{
+        if (modem_zip_fd >= 0)
+                (void)system_close(modem_zip_fd);
+        modem_zip_fd = -1;
+        (void)system_remove_at(AT_FDCWD, LINK_MODEM_ZIP_PATH, 0);
+}
+
+/*
+        Chooses what is sent from in, the file: *src is the descriptor the stream is read from, rewound, *mark is its marker and
+        *stream its length, marker included (1 for an empty file, which the send refuses). Answers 0, or the negative error of a
+        file that cannot be read, or cannot be compressed.
+*/
+static bipolar modem_stream_choose(bipolar in, bipolar *src, uint8_t *mark, positive *stream)
+{
+        bipolar raw, zipped;
+
+        raw = system_seek(in, 0, SEEK_END);
+        if (raw < 0)
+                return raw;
+        if (system_seek(in, 0, SEEK_SET) < 0)
+                return -EIO;
+        (void)system_remove_at(AT_FDCWD, LINK_MODEM_ZIP_PATH, 0);
+        modem_zip_fd = system_open_at_mode(AT_FDCWD, LINK_MODEM_ZIP_PATH,
+                                           FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (modem_zip_fd < 0)
+                return modem_zip_fd;
+        if (gzip_stream(in, modem_zip_fd, false, null) != 0)
+                return -EIO;
+        zipped = system_seek(modem_zip_fd, 0, SEEK_END);
+        if (zipped < 0 || system_seek(modem_zip_fd, 0, SEEK_SET) < 0)
+                return -EIO;
+        if (zipped < raw)
+        {
+                *src = modem_zip_fd;
+                *mark = MODEM_MARK_GZIP;
+                *stream = (positive)zipped + 1;
+                return 0;
+        }
+        if (system_seek(in, 0, SEEK_SET) < 0)
+                return -EIO;
+        *src = in;
+        *mark = MODEM_MARK_RAW;
+        *stream = (positive)raw + 1;
+        return 0;
+}
+
+/*
+        Sends FILE over the audio modem to the Mac's receiver, as the stream modem_stream_choose makes of it. Answers 0 when every
+        datagram was played, else what the verb should say: no key, no file, no sound server, or a connection that broke part of
+        the way (the datagrams before it were played, and the receiver will say which bytes it did not get).
 */
 static b32 modem_send_file(string_address path)
 {
@@ -991,14 +1050,22 @@ static b32 modem_send_file(string_address path)
         struct audio_state page;
         uint32_t first_seq;
         uint16_t first_id;
-        bipolar in, got;
+        uint8_t mark = MODEM_MARK_RAW;
+        positive stream = 0;
+        bipolar in, src, got;
 
         scope_exit(crypto_forget(key, sizeof key));
+        scope_exit(modem_zip_drop());
         if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)key, false) < 0)
                 return host_refuse("there is no modem key: moonwater link modem key makes one, and the receiver needs the same\n");
         in = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         return_if(in < 0, host_fail(path, in));
         scope_exit(system_close(in));
+        got = modem_stream_choose(in, &src, &mark, &stream);
+        if (got < 0)
+                return host_refuse("%s could not be read for the modem (%p): nothing is sent\n", path, (positive)(-got));
+        if (stream <= 1)
+                return host_refuse("%s is empty: nothing to send\n", path);
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, key, &first_seq, &first_id) < 0)
                 return host_refuse("%s is not a private record, so the modem's count cannot be read and nothing is sent (remove it to count from 0 again)\n",
                                    LINK_MODEM_SEQ_PATH);
@@ -1029,7 +1096,16 @@ static b32 modem_send_file(string_address path)
 
         for (;;)
         {
-                got = modem_send_read(in, (p8 address_to)(datagram + 4), MODEM_SEND_PORTION);
+                if (!sent_datagrams)
+                {
+                        //      The first datagram begins with the marker, the stream's first byte.
+                        datagram[4] = mark;
+                        got = modem_send_read(src, (p8 address_to)(datagram + 5), MODEM_SEND_PORTION - 1);
+                        if (got >= 0)
+                                got++;
+                }
+                else
+                        got = modem_send_read(src, (p8 address_to)(datagram + 4), MODEM_SEND_PORTION);
                 if (got < 0)
                 {
                         ctl_disconnect(&modem_ctl);
@@ -1078,8 +1154,8 @@ static b32 modem_send_file(string_address path)
         ctl_w_u32(&w, channel);
         ctl_exchange(&modem_ctl, w.len);
         ctl_disconnect(&modem_ctl);
-        host_say(log, host_label "sent %p bytes in %p datagrams over the audio modem; nothing is acknowledged; the last frame is %p (a receiver for a later recording takes --after %p)\n",
-                 (positive)sent_bytes, (positive)sent_datagrams, (positive)tx.seq, (positive)tx.seq);
+        host_say(log, host_label "sent %p bytes in %p datagrams over the audio modem, the file as %s (the receiver writes it back as it was); nothing is acknowledged; the last frame is %p (a receiver for a later recording takes --after %p)\n",
+                 (positive)sent_bytes, (positive)sent_datagrams, mark == MODEM_MARK_GZIP ? "gzip" : "raw", (positive)tx.seq, (positive)tx.seq);
         return 0;
 }
 
