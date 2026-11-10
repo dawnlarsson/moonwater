@@ -11,13 +11,14 @@
 	  - the transmitter sends only when the operator starts a session;
 	  - the cable is galvanically isolated at both ends.
 
-	Modulation: multi-tone FSK at 48 kHz, 16-bit mono. A symbol is
-	MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
+	Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit mono. A symbol
+	is MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
 	whole cycles in the symbol window, so the tones are orthogonal and the
 	receiver needs only the sample offset, not a clock. The default is 40
-	samples and 16 tones: 1200 baud, 4 bits a symbol, 4800 bit/s raw. It
-	tolerates the most noise and clock drift of the configurations swept,
-	at the same payload rate as the 2400 baud, 4-tone one.
+	samples and 8 tones: 2400 baud, 3 bits a symbol, 7200 bit/s raw, with the
+	top tone at 19.2 kHz, which ordinary audio gear passes. The 16-tone
+	option (MODEM_TONES 16, at the same rate) carries 9600 bit/s, and its top
+	tone is 38.4 kHz: it needs a cable and a card that pass that.
 
 	A frame: lead-in (MODEM_PRE bytes of 0x55), sync 5A C3 96 3C, LEN (one
 	byte, 0..255), SEQ (four bytes, big-endian), payload, then a 32-byte
@@ -47,17 +48,19 @@
 
 /* ---- configuration ----------------------------------------------------- */
 
+#ifndef MODEM_RATE
+#define MODEM_RATE 96000 /* the card's rate, both ways: the card must run at it, and a card at another rate is refused */
+#endif
 #ifndef MODEM_SYM
-#define MODEM_SYM 40 /* samples per symbol: the baud rate is 48000 / MODEM_SYM */
+#define MODEM_SYM 40 /* samples per symbol: the baud rate is MODEM_RATE / MODEM_SYM */
 #endif
 #ifndef MODEM_TONES
-#define MODEM_TONES 16 /* tones per symbol: a power of two below MODEM_SYM / 2 */
+#define MODEM_TONES 8 /* tones per symbol: a power of two below MODEM_SYM / 2. At 96 kHz the top tone is 19.2 kHz */
 #endif
 
 #define MODEM_SYM_BITS ((MODEM_TONES) == 2 ? 1 : (MODEM_TONES) == 4 ? 2 \
 					     : (MODEM_TONES) == 8   ? 3 \
 								    : 4)
-#define MODEM_RATE 48000
 #define MODEM_BAUD (MODEM_RATE / MODEM_SYM)
 #define MODEM_PRE 4
 #define MODEM_SYNC_BYTES 4
@@ -65,7 +68,7 @@
 #define MODEM_PAYLOAD_MAX 255 /* the largest a one-byte LEN carries */
 #define MODEM_TAG 32
 #define MODEM_KEY_MIN 16
-#define MODEM_MAX_SAMPLES (1u << 20) /* about 21.8 seconds: the most one decode call reads */
+#define MODEM_MAX_SAMPLES (1u << 20) /* about 10.9 seconds at 96 kHz: the most one decode call reads */
 #define MODEM_WINDOW 1024u
 #define MODEM_REFUSE_LIMIT 8u
 #define MODEM_LEAD 400 /* silence before and after a frame, in samples */
@@ -831,10 +834,11 @@ _Static_assert(MODEM_DATAGRAM_MAX == WATERLINK_DATAGRAM && MODEM_CHUNKS * MODEM_
                "the modem's datagrams must be the size of a Waterlink datagram");
 
 #define MODEM_SEND_PORTION (MODEM_DATAGRAM_MAX - 4) /* file bytes in a datagram: the other four are its offset */
-/* The most samples one datagram takes: MODEM_CHUNKS frames, of at most 24800 samples each (a 255 byte payload), and 124000
-   is what five of them take. modem_tx_datagram refuses a datagram that does not fit, so a short buffer is a refusal, not
-   a wrong sound. */
-#define MODEM_SEND_SAMPLES 131072u
+/* The most samples one frame takes: a full 255-byte payload, lead and tail included. The most one datagram takes is
+   MODEM_CHUNKS of them. modem_tx_datagram refuses a datagram that does not fit, so a short buffer is a refusal, not a
+   wrong sound. */
+#define MODEM_FRAME_SAMPLES_MAX ((((MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG) * 8 + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM + 2 * MODEM_LEAD)
+#define MODEM_SEND_SAMPLES ((size_t)MODEM_CHUNKS * MODEM_FRAME_SAMPLES_MAX)
 #define MODEM_SEND_PER_SEND 16384u /* mono samples in one write: 16384 stereo frames of four bytes, 64 KB, as the tone sends */
 #define MODEM_SEND_TIMEOUT_MS 10000
 
@@ -975,11 +979,6 @@ static b32 modem_send_file(string_address path)
         in = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         return_if(in < 0, host_fail(path, in));
         scope_exit(system_close(in));
-        //      The symbols are timed for MODEM_RATE. The server plays a stream at the card's rate, so a card at another rate
-        //      plays every symbol out of time: nothing is sent to it.
-        if (audio_test_page(&page) && page.rate != MODEM_RATE)
-                return host_refuse("the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: nothing is sent on a card at another rate\n",
-                                   (positive)page.rate, (positive)MODEM_RATE);
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, key, &first_seq, &first_id) < 0)
                 return host_refuse("%s is not a private record, so the modem's count cannot be read and nothing is sent (remove it to count from 0 again)\n",
                                    LINK_MODEM_SEQ_PATH);
@@ -987,10 +986,22 @@ static b32 modem_send_file(string_address path)
         modem_ctl.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         if (ctl_connect(&modem_ctl, AUDIO_SOCKET) < 0)
                 return host_refuse("no sound server answers on %s: the modem has no sound card to play on (moonwater audio)\n", AUDIO_SOCKET);
-        if (!audio_stream_open(&modem_ctl, "Waterlink modem", "modem", &channel))
+        if (!audio_stream_open(&modem_ctl, "Waterlink modem", "modem", MODEM_RATE, &channel))
         {
                 ctl_disconnect(&modem_ctl);
                 return 1;
+        }
+        //      The stream asked the card for MODEM_RATE when the output was idle, and the server plays it at the card's rate. A card
+        //      that runs at another rate (busy at it, or one that does not offer it) would play every symbol out of time: the stream
+        //      is deleted, and nothing is sent to it.
+        if (audio_test_page(&page) && page.rate != MODEM_RATE)
+        {
+                ctl_begin(&modem_ctl, &w, 4);
+                ctl_w_u32(&w, channel);
+                ctl_exchange(&modem_ctl, w.len);
+                ctl_disconnect(&modem_ctl);
+                return host_refuse("the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: nothing is sent on a card at another rate\n",
+                                   (positive)page.rate, (positive)MODEM_RATE);
         }
         modem_tx_open(&tx, key, sizeof key);
         tx.seq = first_seq;
@@ -1073,7 +1084,7 @@ static b32 modem_send_file(string_address path)
 
 #define MODEM_QUEUE 8          /* datagrams waiting to be played: about twenty seconds of the modem's time */
 #define MODEM_LEAD_US 500000   /* the most sound queued ahead of the sound server's clock: half a second */
-#define MODEM_IN_SAMPLES 65536 /* captured samples held: 1.4 seconds, more than a frame takes */
+#define MODEM_IN_SAMPLES 65536 /* captured samples held: 0.68 seconds at 96 kHz, twice the longest frame */
 #define MODEM_IN_STEP 8192     /* new captured samples that bring the window to a search */
 #define MODEM_IN_POLL_US 20000 /* how often a listening modem looks at its capture, when nothing else wakes it */
 #define MODEM_CHECK_US 1000000 /* how often the transport setting is read */
@@ -1179,7 +1190,7 @@ static bool modem_read_frames(struct ctl *c, unsigned long channel, bool capture
 }
 
 /*
-        A record stream for the default source, as a program of its own: 16 bits, two channels, 48000 Hz, as the playback stream
+        A record stream for the default source, as a program of its own: 16 bits, two channels, at MODEM_RATE, as the playback stream
         is made. Answers true with the stream's channel in *channel.
 */
 static bool modem_record_create(struct ctl *c, unsigned long *channel)
@@ -1194,7 +1205,7 @@ static bool modem_record_create(struct ctl *c, unsigned long *channel)
         ctl_w_byte(&w, 'a');
         ctl_w_byte(&w, 3);
         ctl_w_byte(&w, 2);
-        ctl_w_be32(&w, 48000);
+        ctl_w_be32(&w, MODEM_RATE);
         ctl_w_byte(&w, 'm');
         ctl_w_byte(&w, 2);
         ctl_w_byte(&w, 1);
@@ -1271,15 +1282,6 @@ static bool link_modem_start(p64 now)
                 modem_warned = true;
                 return false;
         }
-        if (audio_test_page(&page) && page.rate != MODEM_RATE)
-        {
-                if (!modem_warned)
-                        host_say(log, host_label "the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: the link stays on the network\n",
-                                 (positive)page.rate, (positive)MODEM_RATE);
-                modem_warned = true;
-                link_modem_stop();
-                return false;
-        }
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, modem_key, &seq, &id) < 0 ||
             modem_seq_load(LINK_MODEM_RX_PATH, modem_key, &rx_seq, &rx_id) < 0)
         {
@@ -1292,8 +1294,19 @@ static bool link_modem_start(p64 now)
         }
         modem_play.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         modem_record.timeout_ms = MODEM_SEND_TIMEOUT_MS;
-        if (ctl_connect(&modem_play, AUDIO_SOCKET) < 0 || !audio_stream_open(&modem_play, "Waterlink modem", "modem", &modem_play_channel))
+        if (ctl_connect(&modem_play, AUDIO_SOCKET) < 0 || !audio_stream_open(&modem_play, "Waterlink modem", "modem", MODEM_RATE, &modem_play_channel))
         {
+                link_modem_stop();
+                return false;
+        }
+        //      The playback stream asked the card for MODEM_RATE when the output was idle. A card that runs at another rate
+        //      would play every symbol out of time, so the link stays on the network.
+        if (audio_test_page(&page) && page.rate != MODEM_RATE)
+        {
+                if (!modem_warned)
+                        host_say(log, host_label "the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: the link stays on the network\n",
+                                 (positive)page.rate, (positive)MODEM_RATE);
+                modem_warned = true;
                 link_modem_stop();
                 return false;
         }

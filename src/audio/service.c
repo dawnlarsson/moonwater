@@ -2029,22 +2029,23 @@ static int audio_test_page(struct audio_state *copy)
 }
 
 /*
-        A playback stream on the server c is connected to: 16 bits, two channels, 48000 Hz, a second of buffer which starts when it
+        A playback stream on the server c is connected to: 16 bits, two channels, at rate Hz, a second of buffer which starts when it
         is full, and the properties name it for the mixer. Answers 1 with its channel in *channel, or 0 when the server refused it,
-        and says so in words. The tone and the modem (src/waterlink/modem.c) both play as programs of their own this way.
+        and says so in words. The tone plays at 48000 Hz; the modem (src/waterlink/modem.c) plays at MODEM_RATE, its symbols being
+        timed for that rate, so a stream at any other would play them out of time.
 */
-static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, unsigned long *channel)
+static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, long rate, unsigned long *channel)
 {
         struct ctl_w w;
         struct ctl_r r;
-        long got, total = 48000 * 4;
+        long got, total = rate * 4;
         static const unsigned long both[2] = {0x10000, 0x10000};
 
         ctl_begin(c, &w, 3);
         ctl_w_byte(&w, 'a');
         ctl_w_byte(&w, 3);
         ctl_w_byte(&w, 2);
-        ctl_w_be32(&w, 48000);
+        ctl_w_be32(&w, (unsigned long)rate);
         ctl_w_byte(&w, 'm');
         ctl_w_byte(&w, 2);
         ctl_w_byte(&w, 1);
@@ -2114,7 +2115,7 @@ static b32 audio_test(void)
                 log_flush();
                 return 1;
         }
-        if (!audio_stream_open(&c, "Test", "test", &channel))
+        if (!audio_stream_open(&c, "Test", "test", 48000, &channel))
         {
                 ctl_disconnect(&c);
                 return 1;

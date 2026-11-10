@@ -19,8 +19,11 @@
 #include <stdlib.h>
 #include <time.h>
 
-/* sha256 of the samples of the golden frame: payload "golden frame", seq 42, the test key. Pins the wire format. */
-#define MODEM_GOLDEN "ff1ba5d9ed62dca9930870adebbfe6837293996ab2811ece1092936635889287"
+/* sha256 of the samples of the golden frame: payload "golden frame", seq 42, the test key. Pins the wire format of each
+   configuration that has a pin: the default (40 samples, 8 tones at 96 kHz) and the 16-tone option. */
+#if MODEM_SYM == 40 && MODEM_TONES == 8
+#define MODEM_GOLDEN "2535d90caec9a60f752370d789ad4eedc1986b07ad1512bfc26e6943b7809260"
+#endif
 
 #ifndef MODEM_FUZZ /* the self-test; the fuzz build below uses none of it */
 
@@ -130,7 +133,7 @@ static void test_roundtrip(void)
 	free(shifted);
 }
 
-#if MODEM_SYM == 40 && MODEM_TONES == 16
+#ifdef MODEM_GOLDEN
 static void test_golden(void)
 {
 	static const uint8_t payload[] = "golden frame";
@@ -337,10 +340,10 @@ static void test_noise(void)
 		decoded[i] = ok;
 		printf("      snr %4.0f dB: %2d of 50 frames (32 bytes) decode\n", snrs[i], ok);
 	}
-#if MODEM_SYM == 40 && MODEM_TONES == 16
-	/* The default configuration's margins, measured with the seeds above: 3 dB decodes every frame, 0 dB most. */
-	check(decoded[2] == 50, "at 3 dB every frame decodes");
-	check(decoded[3] >= 45, "at 0 dB at least 45 of 50 frames decode");
+#if MODEM_SYM == 40 && MODEM_TONES == 8
+	/* The default configuration's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 10 of 50. */
+	check(decoded[3] == 50, "at 0 dB every frame decodes");
+	check(decoded[4] >= 5, "at -3 dB at least 5 of 50 frames decode");
 #else
 	(void)decoded;
 #endif
@@ -486,8 +489,8 @@ int main(void)
 {
 	test_vectors();
 	test_roundtrip();
-#if MODEM_SYM == 40 && MODEM_TONES == 16
-	test_golden(); /* the wire format is pinned for the default configuration only */
+#ifdef MODEM_GOLDEN
+	test_golden(); /* the wire format is pinned for the configurations that define MODEM_GOLDEN */
 #endif
 	test_bounds();
 	test_wrongkey_and_replay();

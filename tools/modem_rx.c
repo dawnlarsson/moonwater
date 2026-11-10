@@ -7,11 +7,14 @@
 
 		cc -O2 -Wall -o modem_rx tools/modem_rx.c
 
-	Use: record the box's output as 48000 Hz, 16-bit, mono, little-endian PCM (any tool that writes raw PCM; on macOS,
-	sox or ffmpeg with -f s16le -ar 48000 -ac 1), then
+	Use: record the box's output as MODEM_RATE Hz (96000), 16-bit, mono, little-endian PCM (any tool that writes raw PCM; on macOS,
+	sox or ffmpeg with -f s16le -ar 96000 -ac 1), then
 
 		modem_rx --key modem.key -o received.bin capture.raw
 		modem_rx --key modem.key -o received.bin -        (PCM on stdin)
+
+	--rate HZ says what rate the capture was recorded at (default MODEM_RATE); any other rate is refused, with the rate
+	named, since the symbols are timed for MODEM_RATE and a capture at another rate cannot be read.
 
 	modem.key is the 64 hex digits `moonwater link modem key` prints on the box, in a file of their own. A capture may hold
 	any number of `link modem send`s: the sender's frame numbers go on from one send to the next, and each frame must follow
@@ -25,7 +28,7 @@
 	left as zeros in the output, since nothing is acknowledged and nothing is sent again. A send whose first datagram was
 	lost is written into the file before it, and its gap is reported there.
 
-	The capture is 48000 Hz, 16-bit, mono: the symbols are timed for that rate, and the box refuses to send on a card at
+	The capture is MODEM_RATE Hz, 16-bit, mono: the symbols are timed for that rate, and the box refuses to send on a card at
 	another rate.
 */
 
@@ -111,6 +114,7 @@ int main(int argc, char **argv)
 	uint32_t after = 0;
 	int closed = 0, eof = 0;
 	size_t skipped = 0;
+	unsigned long rate = MODEM_RATE;
 
 	for (int a = 1; a < argc; a++) {
 		if (!strcmp(argv[a], "--key") && a + 1 < argc)
@@ -119,11 +123,24 @@ int main(int argc, char **argv)
 			out_path = argv[++a];
 		else if (!strcmp(argv[a], "--after") && a + 1 < argc)
 			after_text = argv[++a];
-		else
+		else if (!strcmp(argv[a], "--rate") && a + 1 < argc) {
+			char *end = NULL;
+
+			rate = strtoul(argv[++a], &end, 10);
+			if (end == argv[a] || *end) {
+				fprintf(stderr, "modem_rx: --rate takes a rate in Hz\n");
+				return 2;
+			}
+		} else
 			in_path = argv[a];
 	}
 	if (!key_path || !out_path) {
-		fprintf(stderr, "usage: modem_rx --key KEYFILE -o OUTFILE [--after N] [PCM|-]\n");
+		fprintf(stderr, "usage: modem_rx --key KEYFILE -o OUTFILE [--after N] [--rate HZ] [PCM|-]\n");
+		return 2;
+	}
+	if (rate != MODEM_RATE) {
+		fprintf(stderr, "modem_rx: the capture is at %lu Hz, and the modem's symbols are timed for %d Hz: nothing is read from a capture at another rate\n",
+			rate, (int)MODEM_RATE);
 		return 2;
 	}
 	if (!rx_key_read(key_path, key)) {
