@@ -61,6 +61,7 @@
 #define LINK_TRANSPORT_PATH "/root/link.transport"
 #define LINK_MODEM_PATH "/root/link.modem"
 #define LINK_MODEM_SEQ_PATH "/root/link.modem.seq"
+#define LINK_MODEM_RX_PATH "/root/link.modem.rx"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STAMPS_PATH "/root/link.stamps"
@@ -727,6 +728,7 @@ typedef struct
         p64 granted;       // when the sessions were last held to the peers
         bool server;
         bool gso;
+        bool heard_modem; // the datagram being taken came off the modem: it has no place
         bool v4; // no IPv6 here: the socket is AF_INET
         struct waterlink_identity me;
         struct waterlink_admission admission;
@@ -1023,6 +1025,15 @@ static fn link_keys_install(struct link_keys address_to keys,
         family: an IPv4 address is mapped on a dual-stack socket and plain on
         an IPv4 one.
 */
+/*
+        The modem carries the link's datagrams while the transport is the modem: these are its parts this file calls before they
+        are made. They are in the send section of modem.c, after the sound server's client.
+*/
+static bool link_modem_carrying(void);
+static bool link_modem_put(p8 address_to bytes, positive length);
+static p64 link_modem_turn(p64 now);
+static void link_modem_stop(void);
+
 static positive link_destination(socket_address_internet6 address_to into,
                                  p8 address_to address, p16 port)
 {
@@ -1038,8 +1049,8 @@ static positive link_destination(socket_address_internet6 address_to into,
         return sizeof(address_to into);
 }
 
-static bipolar link_send_to(p8 address_to bytes, positive length,
-                            p8 address_to address, p16 port)
+static bipolar link_udp_send_to(p8 address_to bytes, positive length,
+                                p8 address_to address, p16 port)
 {
         socket_address_internet6 to;
         positive size = link_destination(address_of to, address, port);
@@ -1050,6 +1061,19 @@ static bipolar link_send_to(p8 address_to bytes, positive length,
         sent = socket_send((b32)link_self.socket, bytes, length, MSG_NOSIGNAL,
                            address_of to, size);
         return sent;
+}
+
+/*
+        A datagram of the link's, to one place: onto the socket, or, while the transport is the modem, into the modem's queue
+        (modem.c), which plays it at the modem's rate. The place means nothing over the modem. Answers the length sent, or a
+        negative error; a full queue loses the datagram, as a full socket does, and the link sends it again.
+*/
+static bipolar link_send_to(p8 address_to bytes, positive length,
+                            p8 address_to address, p16 port)
+{
+        if (link_modem_carrying())
+                return link_modem_put(bytes, length) ? (bipolar)length : -EAGAIN;
+        return link_udp_send_to(bytes, length, address, port);
 }
 
 /*
@@ -1136,7 +1160,7 @@ static fn link_batch_flush(void)
         if (!count)
                 return;
 
-        if (count > 1 && link_self.gso)
+        if (count > 1 && link_self.gso && !link_modem_carrying())
         {
                 socket_address_internet6 to;
                 link_iovec part = {link_self.batch, count * WATERLINK_DATAGRAM};
@@ -2503,10 +2527,14 @@ static bool link_carried(p8 address_to datagram, positive length,
                 s->next.live = false;
         }
 
-        moved = memory_compare(s->address, address, 16) || s->port != port;
+        moved = !link_self.heard_modem &&
+                (memory_compare(s->address, address, 16) || s->port != port);
         link_self.state_dirty |= moved;
-        memory_copy(s->address, address, 16);
-        s->port = port;
+        if (!link_self.heard_modem)
+        {
+                memory_copy(s->address, address, 16);
+                s->port = port;
+        }
         s->heard = now;
         //      Seen, to the second and from where: once a second a session,
         //      or when it moves, and not every datagram -- a walk of every
@@ -2956,6 +2984,20 @@ static fn link_receive_all(p64 now)
 }
 
 /*
+        A datagram the modem's receiver completed (modem.c): it enters the link as one from nowhere in particular, so the session
+        keeps the place it had, and the answers go out over the modem as well.
+*/
+static fn link_modem_heard(p8 address_to datagram, positive length, p64 now)
+{
+        p8 nowhere[16];
+
+        memory_zero(nowhere, sizeof nowhere);
+        link_self.heard_modem = true;
+        link_datagram(datagram, length, nowhere, 0, now);
+        link_self.heard_modem = false;
+}
+
+/*
         `moonwater link serve`: the listener in the foreground. `link on` and
         the machine process start exactly this, detached.
 */
@@ -3012,6 +3054,7 @@ static b32 link_serve(string_address ready_text)
                 p64 now = link_self.now = link_now();
                 p64 wake;
                 p64 due;
+                p64 modem_due;
 
                 if (signals >= 0 && !signals_quiet)
                 {
@@ -3025,6 +3068,9 @@ static b32 link_serve(string_address ready_text)
                 link_reap();
                 link_state_write(now);
                 due = link_nearby_tick(now);
+                modem_due = link_modem_turn(now);
+                if (modem_due < due)
+                        due = modem_due;
                 link_wait(watch, quiet,
                           link_sessions_watch(watch, quiet, signals,
                                               address_of signals_quiet),
@@ -3037,6 +3083,7 @@ static b32 link_serve(string_address ready_text)
                 link_stamps_save();
         }
 
+        link_modem_stop();
         link_nearby_stop();
         //      Off: every session is told, and every command hung up on.
         for (positive at = 0; at < LINK_SESSIONS; at++)

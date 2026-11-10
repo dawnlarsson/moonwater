@@ -866,7 +866,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                 struct link_greeted address_to next =
                         link_nearby.greeted + link_nearby.greeted_next;
 
-                (void)link_send_to(datagram, WATERLINK_DATAGRAM, address, port);
+                (void)link_udp_send_to(datagram, WATERLINK_DATAGRAM, address, port);
                 link_nearby.greeted_next =
                         (link_nearby.greeted_next + 1) % LINK_GREETED;
                 memory_copy(next->address, address, 16);
