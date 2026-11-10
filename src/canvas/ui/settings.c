@@ -4615,37 +4615,67 @@ static b32 settings_row_is(int at, const char address_to path)
 
 /*
         What a row shows, for the kit's list: its label, its section and the section's header, and its value as the kind
-        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), the theme, the motion
-        and a port's allow or deny the kit's segmented tabs, the accent a swatch for each named accent, a choice opens a
-        menu, a step moves either way, and a field typed in is the kit's field. A network is its name, marked when it is the one joined,
+        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), a choice of three words or
+        fewer the kit's segmented tabs (settings_is_tabs), a port's allow or deny the same tabs, the accent a swatch for each
+        named accent, any other choice opens a menu, a step moves either way, and a field typed in is the kit's field. A network
+        is its name, marked when it is the one joined,
         with what is said of it, what it asks for and the bars of its signal; a device kept, the row that keeps
         another, the line the verb said that is no row; a command, and whether it asks first. A value not read yet,
         not on this machine or not understood says so, quietly.
 */
-// The words of a row of tabs (the theme's, the motion's) as the language says them, one word each with a blank between, which
-// a check holds the translations to; English is the row's own list.
-static const char address_to settings_tab_words(int row, const struct settings_row address_to which, int slot)
+/*
+        A choice is drawn as the kit's segmented tabs (the theme's and the motion's, and every choice of three words or fewer
+        whose words the language says as one word each) and not as a menu. The kit's tabs split their words on a blank, so a
+        choice that is more than one word stays a menu: Screen modes and the on-screen keyboard say so, and so does a row
+        whose choices are a set the machine makes (the batteries, the modem while it is ready), a language or a colour.
+*/
+static b32 settings_is_tabs(int row)
 {
-        static char shown[2][SETTINGS_VALUE];
+        const struct settings_row address_to which = &settings_rows[row];
+        char each[SETTINGS_VALUE];
+        positive count = 0;
+
+        if (which->kind != SETTINGS_CHOICE || which->output != SETTINGS_OUT_NONE)
+                return false;
+        if (which->flags & (SETTINGS_LANGUAGE | SETTINGS_INK | SETTINGS_BATTERIES | SETTINGS_TRANSPORT))
+                return false;
+        for (; settings_word(which->choices, count, each, sizeof(each)); count++)
+        {
+                const char address_to said = settings_label_of(row, each);
+
+                if (count == 3)
+                        return false;
+                for (const char address_to letter = said; *letter; letter++)
+                        if (*letter == ' ')
+                                return false;
+        }
+        return count > 0;
+}
+
+// The words of a row of tabs as the language says them, one word each with a blank between (settings_is_tabs holds each to one
+// word). The kit copies them into its control as it lists the row, so one buffer serves every row.
+static const char address_to settings_tab_words(int row)
+{
+        static char shown[SETTINGS_VALUE];
         positive at = 0;
 
-        // Each tab is the label its menu item has (settings_choice_said), English when no language is taken.
-        for (positive k = 0; k < 8; k++)
+        shown[0] = 0;
+        for (positive k = 0; ; k++)
         {
                 char each[SETTINGS_VALUE];
                 const char address_to said;
 
-                if (!settings_word(which->choices, k, each, sizeof(each)))
+                if (!settings_word(settings_rows[row].choices, k, each, sizeof(each)))
                         break;
-                said = language_of(settings_choice_said(row, each));
-                if (at + string_length((string_address)said) + 2 >= sizeof(shown[slot]))
+                said = settings_label_of(row, each);
+                if (at + string_length((string_address)said) + 2 >= sizeof(shown))
                         break;
                 if (at)
-                        shown[slot][at++] = ' ';
-                string_copy_bounded((string_address)shown[slot] + at, (string_address)said, sizeof(shown[slot]) - at);
+                        shown[at++] = ' ';
+                string_copy_bounded((string_address)shown + at, (string_address)said, sizeof(shown) - at);
                 at += string_length((string_address)said);
         }
-        return shown[slot];
+        return shown;
 }
 
 // The two words a port's segments say, allow then deny, as the language says them, one blank between (the kit's tabs take them so).
@@ -4798,8 +4828,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 return;
         if (which->kind == SETTINGS_SWITCH)
                 row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on");
-        else if (settings_row_is(id, SETTING_THEME_PATH) || settings_row_is(id, SETTING_MOTION_PATH))
-                row->kind = UI_ROW_TABS, row->words = settings_tab_words(id, which, settings_row_is(id, SETTING_THEME_PATH) ? 0 : 1),
+        else if (which->kind == SETTINGS_CHOICE && settings_is_tabs(id) && setting_place(which->choices, (string_address)shown) >= 0)
+                row->kind = UI_ROW_TABS, row->words = settings_tab_words(id),
                 row->at = (int)setting_place(which->choices, (string_address)shown);
         else if (settings_row_is(id, SETTING_ACCENT_PATH) && which->kind == SETTINGS_CHOICE)
         {
@@ -5080,7 +5110,13 @@ static fn settings_press_at(void)
                 if (settings_row_is(row, SETTING_ACCENT_PATH) && settings.list.part < (int)(sizeof(settings_accents) / sizeof(settings_accents[0])))
                         settings_change(row, settings_accents[settings.list.part].name);
                 else if (settings_word(settings_rows[row].choices, (positive)settings.list.part, word, sizeof(word)))
-                        settings_change(row, word);
+                {
+                        // The segment the row already shows sends nothing, as the menu's word does, and says so.
+                        if (string_equals((string_address)word, (string_address)settings.value[row]))
+                                settings_say((string_address)WORDS(settings_already_set));
+                        else
+                                settings_change(row, word);
+                }
                 return;
         }
         if (settings_editing() != row && !(row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SLIDER))

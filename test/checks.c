@@ -159792,7 +159792,7 @@ static fn settings_words_check(void)
         }
         for (int group = 0; group < settings_groups(); group++)
                 english_wrong += settings_group_text(group) != settings_group_name(group);
-        english_wrong += theme < 0 || motion < 0 || !string_equals((string_address)settings_tab_words(theme, &settings_rows[theme], 0), (string_address) "light dark Automatic");
+        english_wrong += theme < 0 || motion < 0 || !string_equals((string_address)settings_tab_words(theme), (string_address) "light dark Automatic");
         check("settings words: in English a row's label, a group's name, a choice's word and the tabs' words are the registry's own",
               !english_wrong && theme >= 0 && motion >= 0 && name >= 0 && language_row >= 0);
         for (positive l = 0; l < sizeof(lcheck_codes) / sizeof(lcheck_codes[0]); l++)
@@ -159817,11 +159817,11 @@ static fn settings_words_check(void)
                 {
                         positive blanks = 0;
 
-                        tabs_said = settings_tab_words(theme, &settings_rows[theme], 0);
+                        tabs_said = settings_tab_words(theme);
                         for (positive each = 0; tabs_said[each]; each++)
                                 blanks += tabs_said[each] == ' ';
                         tabs += blanks != 2 || tabs_said[0] == ' ';
-                        blanks = 0, tabs_said = settings_tab_words(motion, &settings_rows[motion], 1);
+                        blanks = 0, tabs_said = settings_tab_words(motion);
                         for (positive each = 0; tabs_said[each]; each++)
                                 blanks += tabs_said[each] == ' ';
                         tabs += blanks != 1 || tabs_said[0] == ' ';
@@ -159836,7 +159836,7 @@ static fn settings_words_check(void)
               !string_compare_max((string_address)settings_group_text(0), (string_address) "Ger\xc3\xa4t", 8) &&
                   !string_compare_max((string_address)settings_label_shown(language_row), (string_address) "Sprache", 8) &&
                   !string_compare_max((string_address)settings_label_of(theme, "dark"), (string_address) "Dunkel", 7) && !string_compare_max((string_address)back, (string_address) "dark", 5) &&
-                  !string_compare_max((string_address)settings_tab_words(theme, &settings_rows[theme], 0), (string_address) "Hell Dunkel Automatisch", 24));
+                  !string_compare_max((string_address)settings_tab_words(theme), (string_address) "Hell Dunkel Automatisch", 24));
         check("settings words: the filter finds the Name row by its group's word in German and by the English one",
               settings_matches_word(name, "ger\xc3\xa4t", 5) && settings_matches_word(name, "machine", 7) && !settings_matches_word(name, "xyzzy", 5));
         language_take(0);
