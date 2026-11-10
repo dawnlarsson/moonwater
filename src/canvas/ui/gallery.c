@@ -309,12 +309,14 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
                         }
                         // The controls are drawn with the scroll taken off; the pointer is put on the page. A press off
                         // the fields takes their keys away.
+                        // gallery_draw turns the page over its width when the window reads from the right, so the controls are
+                        // hit where they are drawn: mirrored, the same as the draw's, and back again after.
                         for (int at = 0; at < gallery.count; at++)
-                                gallery.control[at].y -= offset;
+                                gallery.control[at].y -= offset, gallery.control[at].x = ui_mirror(gallery.control[at].x, gallery.control[at].w, 0, GALLERY_W);
                         ui_kit_pointer(ui, gallery.control, gallery.count, (int)event->type, x, y,
                                        (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
                         for (int at = 0; at < gallery.count; at++)
-                                gallery.control[at].y += offset;
+                                gallery.control[at].y += offset, gallery.control[at].x = ui_mirror(gallery.control[at].x, gallery.control[at].w, 0, GALLERY_W);
                         for (int at = 0; at < gallery.count; at++)
                                 if (gallery.control[at].edit)
                                         ui_field_focus(gallery.control[at].edit, gallery.control[at].focused);
