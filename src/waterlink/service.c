@@ -315,10 +315,10 @@ static bipolar link_file_replace(string_address path, address_any bytes,
         /root/link.key -- a link to somewhere, or a file somebody could read
         -- is refused rather than written through or trusted.
 */
-static bipolar link_secret(p8 address_to secret, bool make)
+static bipolar link_secret_at(string_address path, p8 address_to secret, bool make)
 {
         positive got = 0;
-        bipolar read = link_read_private_records(LINK_KEY_PATH, secret, 32, 32,
+        bipolar read = link_read_private_records(path, secret, 32, 32,
                                                  address_of got);
 
         if (read == -ENOENT && make)
@@ -331,12 +331,12 @@ static bipolar link_secret(p8 address_to secret, bool make)
                         return -EIO;
                 //      A name that is there already is a first use that got
                 //      here first, and is read.
-                made = file_publish_with(LINK_KEY_PATH, fresh, 32, 0600, true,
+                made = file_publish_with(path, fresh, 32, 0600, true,
                                           FILE_STAGED_NO_REPLACE);
                 if (made < 0 && made != -ERROR_EXISTS)
                         return made;
 
-                read = link_read_private_records(LINK_KEY_PATH, secret, 32, 32,
+                read = link_read_private_records(path, secret, 32, 32,
                                                  address_of got);
         }
 
@@ -344,6 +344,14 @@ static bipolar link_secret(p8 address_to secret, bool make)
                 return read;
         //      An empty file is no key: a key is exactly 32 bytes.
         return got == 32 ? 0 : -EPERM;
+}
+
+/*
+        The machine's own key, at LINK_KEY_PATH: see link_secret_at.
+*/
+static bipolar link_secret(p8 address_to secret, bool make)
+{
+        return link_secret_at(LINK_KEY_PATH, secret, make);
 }
 
 static bipolar link_identity(struct waterlink_identity address_to me, bool make)

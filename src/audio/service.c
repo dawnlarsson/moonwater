@@ -2025,29 +2025,19 @@ static int audio_test_page(struct audio_state *copy)
         return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy) && !(copy->seq & 1u);
 }
 
-static b32 audio_test(void)
+/*
+        A playback stream on the server c is connected to: 16 bits, two channels, 48000 Hz, a second of buffer which starts when it
+        is full, and the properties name it for the mixer. Answers 1 with its channel in *channel, or 0 when the server refused it,
+        and says so in words. The tone and the modem (src/waterlink/modem_send.c) both play as programs of their own this way.
+*/
+static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, unsigned long *channel)
 {
-        static struct ctl c;
-        static struct audio_state page;
-        static unsigned char frame[20 + 65536];
-        static short samples[48000 * 2];
         struct ctl_w w;
         struct ctl_r r;
-        unsigned long channel;
-        long got, sent = 0, total = 48000 * 4;
-        short *tone = (short *)(frame + 20);
-        int have_page;
+        long got, total = 48000 * 4;
         static const unsigned long both[2] = {0x10000, 0x10000};
 
-        c.timeout_ms = 4000;
-        if (ctl_connect(&c, audio_service.socket_path) < 0)
-        {
-                string_format(log, "audio: no sound server answers on %s: nothing can be heard. Start it with the desktop, or `moonwater audio server on`.\n", audio_service.socket_path);
-                log_flush();
-                return 1;
-        }
-        // The stream: 16 bits, two channels, 48000 Hz, a second of buffer which starts when it is full; the properties name it for the mixer.
-        ctl_begin(&c, &w, 3);
+        ctl_begin(c, &w, 3);
         ctl_w_byte(&w, 'a');
         ctl_w_byte(&w, 3);
         ctl_w_byte(&w, 2);
@@ -2071,15 +2061,15 @@ static b32 audio_test(void)
         ctl_w_bool(&w, 0);
         ctl_w_byte(&w, 'P');
         ctl_w_string(&w, "media.name");
-        ctl_w_u32(&w, 5);
+        ctl_w_u32(&w, (unsigned long)ctl_length(name));
         ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, 5);
-        ctl_w_raw(&w, "Test", 5);
+        ctl_w_be32(&w, (unsigned long)ctl_length(name));
+        ctl_w_raw(&w, name, ctl_length(name));
         ctl_w_string(&w, "media.role");
-        ctl_w_u32(&w, 5);
+        ctl_w_u32(&w, (unsigned long)ctl_length(role));
         ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, 5);
-        ctl_w_raw(&w, "test", 5);
+        ctl_w_be32(&w, (unsigned long)ctl_length(role));
+        ctl_w_raw(&w, role, ctl_length(role));
         ctl_w_byte(&w, 'N');
         ctl_w_bool(&w, 1);
         ctl_w_bool(&w, 0);
@@ -2090,16 +2080,42 @@ static b32 audio_test(void)
         ctl_w_bool(&w, 0);
         ctl_w_byte(&w, 'B');
         ctl_w_byte(&w, 0);
-        got = w.bad ? CTL_FAILED : ctl_exchange(&c, w.len);
+        got = w.bad ? CTL_FAILED : ctl_exchange(c, w.len);
         if (got < 10)
         {
                 string_format(log, "audio: the sound server refused a stream (%s): nothing can be heard.\n", got == CTL_ACCESS ? "access denied" : got == CTL_INVALID ? "not understood" : "no answer");
                 log_flush();
+                return 0;
+        }
+        r = (struct ctl_r){c->frame + 20 + 10, got - 10, 0, 0};
+        *channel = ctl_r_u32(&r);
+        return 1;
+}
+
+static b32 audio_test(void)
+{
+        static struct ctl c;
+        static struct audio_state page;
+        static unsigned char frame[20 + 65536];
+        static short samples[48000 * 2];
+        struct ctl_w w;
+        unsigned long channel;
+        long got, sent = 0, total = 48000 * 4;
+        short *tone = (short *)(frame + 20);
+        int have_page;
+
+        c.timeout_ms = 4000;
+        if (ctl_connect(&c, audio_service.socket_path) < 0)
+        {
+                string_format(log, "audio: no sound server answers on %s: nothing can be heard. Start it with the desktop, or `moonwater audio server on`.\n", audio_service.socket_path);
+                log_flush();
+                return 1;
+        }
+        if (!audio_stream_open(&c, "Test", "test", &channel))
+        {
                 ctl_disconnect(&c);
                 return 1;
         }
-        r = (struct ctl_r){c.frame + 20 + 10, got - 10, 0, 0};
-        channel = ctl_r_u32(&r);
         // The tone: a quarter of full scale, with a short rise and fall so that it begins and ends without a click.
         for (long i = 0; i < 48000; i++)
         {
