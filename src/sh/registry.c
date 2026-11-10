@@ -46,7 +46,7 @@
 #define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
 #define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
 #define SETTINGS_SLIDER 12u // a whole number from the row's low to its high on a slider (the kit's UI_SLIDER); the verb sets any number in range
-#define SETTINGS_PORT 12u   // a device the system sees, in the Devices list: a press allows or blocks it
+#define SETTINGS_PORT 14u   // a device the system sees, in the Devices list: a press allows or blocks it
 #define SETTINGS_LINK 13u // a machine linked, as moonwater link says it: its name and what it was last heard as (not pressed)
 
 // How a row's value is taken from the line it is on.
@@ -269,7 +269,7 @@ static const struct settings_row settings_rows[] = {
                       .help = "how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]"),
     //  The text of every window Canvas draws (ui.c's ui_em): its size as a percent of what each role says. A list's rows grow
     //  with it above 100, and a label wider than before makes its button wider; the terminal keeps the size of its own.
-    SETTING_PLAIN_ROW(null, "Text size (percent, or default)", SETTINGS_FIELD, 0, ("canvas", "text", "scale"), "scale ", null,
+    SETTING_PLAIN_ROW(null, "Text size (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "text", "scale"), "scale ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TEXT_SCALE_PATH, .standard = "100",
                       .unit = "percent", .low = 50, .high = 300, .need = "how Canvas draws",
                       .usage = "canvas text scale [PERCENT|default]",
@@ -294,12 +294,12 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas gpu [on|off]",
                       .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]"),
 #endif
-    SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "history"), "history ", null,
+    SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "history"), "history ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_HISTORY_PATH,
                       .standard = "0", .unit = "copies", .low = 0, .high = 32, .need = "how Canvas draws",
                       .usage = "canvas clipboard history [N|default]",
                       .help = "copies the compositor keeps in memory, never on a disk, 0 to 32 [0]"),
-    SETTING_PLAIN_ROW(null, "Clipboard limit (MiB)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "limit"), "limit ", null,
+    SETTING_PLAIN_ROW(null, "Clipboard limit (MiB)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "limit"), "limit ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_LIMIT_PATH,
                       .standard = "16", .unit = "MiB", .low = 1, .high = 16, .need = "how Canvas draws",
                       .usage = "canvas clipboard limit [MIB|default]",
@@ -331,7 +331,7 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "the on-screen keyboard is auto, off or on, not %s\n",
                       .usage = "keyboard onscreen [auto|off|on]",
                       .help = "a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]"),
-    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
+    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_SLIDER, 0, ("keyboard", "repeat", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,
                       .usage = "keyboard repeat delay [MS|default]",
@@ -341,7 +341,7 @@ static const struct settings_row settings_rows[] = {
                       .standard = "30", .unit = "per second", .low = 1, .high = 100,
                       .usage = "keyboard repeat rate [PER-SECOND|off|default]",
                       .help = "repeats a second of a held key, 1 to 100, or none [30]"),
-    SETTING_PLAIN_ROW(null, "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
+    SETTING_PLAIN_ROW(null, "Mouse sensitivity (percent, or default)", SETTINGS_SLIDER, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,
                       .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]"),
@@ -364,7 +364,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
-    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_FIELD, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
+    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_DELAY_PATH,
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
                       .usage = "canvas cursor shake delay [MS|default]",
@@ -421,7 +421,7 @@ static const struct settings_row settings_rows[] = {
     //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume
     //  back to 100 (a file that said default would be read by the server as no word at all). The card is a name from the page the
     //  server gives it or default for the automatic choice, so its verb is written by hand (host.c).
-    SETTING_PLAIN_ROW("Sound", "Volume (percent, or default)", SETTINGS_FIELD, 0, ("audio", "volume"), "volume ", null,
+    SETTING_PLAIN_ROW("Sound", "Volume (percent, or default)", SETTINGS_SLIDER, 0, ("audio", "volume"), "volume ", null,
                       .type = SETTING_NUMBER, .path = SETTING_AUDIO_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
                       .low = 0, .high = 100, .usage = "audio volume [PERCENT|default]",
                       .help = "the volume of everything that plays, 0 to 100 percent [100]"),
@@ -444,7 +444,7 @@ static const struct settings_row settings_rows[] = {
     {null, "Input device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "source"}, "source ", null, {"audio", "source"}, null, 0, null,
      .usage = "audio source [NAME|default]",
      .help = "the microphone programs record from, by the name bare audio lists; default picks the first [default]"},
-    SETTING_PLAIN_ROW(null, "Input volume (percent, or default)", SETTINGS_FIELD, 0, ("audio", "input", "volume"), "volume ", null,
+    SETTING_PLAIN_ROW(null, "Input volume (percent, or default)", SETTINGS_SLIDER, 0, ("audio", "input", "volume"), "volume ", null,
                       .type = SETTING_NUMBER, .path = SETTING_AUDIO_SOURCE_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
                       .low = 0, .high = 100, .usage = "audio input volume [PERCENT|default]",
                       .help = "the volume of the microphone, 0 to 100 percent [100]"),
