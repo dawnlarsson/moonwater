@@ -127478,6 +127478,54 @@ static void check_compositor_dismiss(void)
 }
 
 /*
+        The close button is the compositor's, drawn over the window's top right corner: a press on it closes the window even
+        where the window's own kit shows a control (a hand over a button, an I-beam over a field) under it, as the minimise
+        button does. The top of a window is its titlebar only where the kit shows no control there.
+*/
+static void check_compositor_close_over_control(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct compositor_frame frame;
+    int bx, by, side;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("close over a control: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[2] = 50;
+    table->y[2] = 30;
+    table->width[2] = 120;
+    table->height[2] = 80;
+    glass_paint(2, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+    compositor_focus(2);
+    compositor_frame_of(2, &frame);
+    if (!compositor_close_box(&frame, &bx, &by, &side))
+    {
+        check("close over a control: the window has a close button", false);
+        return;
+    }
+    table->pointer_shape[2] = WINDOW_POINTER_HAND;
+    compositor.pointer_x = bx + side / 2;
+    compositor.pointer_y = by + side / 2;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("close over a control: a press on the X closes the window, though the kit shows a hand under it", (table->state[2] & WINDOW_CLOSING) != 0);
+}
+
+/*
         A popup's keys. While it is open, the topmost popup of the window with the keys has them. Once a press has asked
         it to go it has none, and the window has them; and a popup whose window went is nobody's, so the window that
         takes its row has the keys and not the popup still on the screen.
@@ -163679,6 +163727,7 @@ b32 main()
         check_ui_press();
 #endif
         check_compositor_dismiss();
+        check_compositor_close_over_control();
         check_compositor_popup();
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);

@@ -16433,7 +16433,7 @@ static void compositor_cancel_holds(unsigned int roots)
 
 static void compositor_button(unsigned int code, int down)
 {
-        int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top, up;
+        int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top, band, up;
         unsigned int roots;
         positive now;
 
@@ -16589,20 +16589,22 @@ static void compositor_button(unsigned int code, int down)
                         is the window's press, not the titlebar's: its pressing
                         is what the window's controls are for.
                 */
-                top = !alt && code == COMPOSITOR_BTN_LEFT && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
-                      compositor.pointer_x >= compositor.x[under] &&
-                      compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
-                      compositor.pointer_y >= compositor.y[under] &&
-                      compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100 &&
-                      compositor_asked_shape(under) <= WINDOW_POINTER_ARROW;
+                band = !alt && code == COMPOSITOR_BTN_LEFT && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
+                       compositor.pointer_x >= compositor.x[under] &&
+                       compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
+                       compositor.pointer_y >= compositor.y[under] &&
+                       compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
 
-                if (top && compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
+                // The close button is the compositor's, drawn over the band, so it takes its press whatever pointer the window's
+                // kit shows under it (a control's hand or I-beam): only the rest of the band gives way to a control.
+                if (band && compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
                 {
                         // Not one of a pair, or a second click would fill the screen on its way out.
                         compositor.press = COMPOSITOR_NONE;
                         compositor_close(under);
                         return;
                 }
+                top = band && compositor_asked_shape(under) <= WINDOW_POINTER_ARROW;
 
                 if (alt || top)
                 {
