@@ -18,6 +18,7 @@ editor_lock_stale	f9d8	%s נשאר משמירה קודמת: מחקו אותו, �
 editor_no_file_name	c863	אין שם קובץ: הפעל את העורך עם שם קובץ
 editor_no_match	7de7	אין התאמה
 editor_not_regular	5955	לא קובץ רגיל: נדחה
+editor_open_none	63aa	פתיחה אינה זמינה כאן: הפעילו את העורך עם שם הקובץ
 editor_pattern_bad	5d57	התבנית אינה תקינה
 editor_position	3696	שורה %1$d, עמודה %2$d
 editor_read_failed	5f78	לא ניתן לקרוא את הקובץ: הוא אינו נפתח
@@ -28,6 +29,7 @@ editor_save_failed	069d	השמירה נכשלה: הקובץ נשאר כפי שה
 editor_saved	9f44	נשמר
 editor_selected	a686	(%d נבחרו)
 editor_selected_carets	7e02	(%d נבחרו, סמנים)
+editor_tabs_full	8ed9	כל %d הכרטיסיות פתוחות: סגרו קודם אחת
 editor_unsaved	c014	שינויים שלא נשמרו: שמור אותם, או סגור כל קובץ באמצעות Ctrl+W פעמיים
 editor_untitled	8b58	ללא שם
 editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ

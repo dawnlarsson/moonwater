@@ -18,6 +18,7 @@ editor_lock_stale	f9d8	%s از یک ذخیره‌سازی قبلی مانده ا
 editor_no_file_name	c863	نام پرونده وجود ندارد: ویرایشگر را با نام پرونده اجرا کنید
 editor_no_match	7de7	موردی یافت نشد
 editor_not_regular	5955	پرونده عادی نیست: رد شد
+editor_open_none	63aa	باز کردن اینجا نیست: ویرایشگر را با نام پرونده اجرا کنید
 editor_pattern_bad	5d57	الگو معتبر نیست
 editor_position	3696	سطر %1$d، ستون %2$d
 editor_read_failed	5f78	پرونده خوانده نشد: باز نمی‌شود
@@ -28,6 +29,7 @@ editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که �
 editor_saved	9f44	ذخیره شد
 editor_selected	a686	(%d انتخاب‌شده)
 editor_selected_carets	7e02	(%d انتخاب‌شده، مکان‌نما)
+editor_tabs_full	8ed9	هر %d زبانه باز است: ابتدا یکی را ببندید
 editor_unsaved	c014	تغییرات ذخیره‌نشده: آن‌ها را ذخیره کنید، یا هر پرونده را با دو بار فشردن Ctrl+W ببندید
 editor_untitled	8b58	بدون عنوان
 editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد

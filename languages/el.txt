@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	το %s έμεινε από μια προηγούμενη
 editor_no_file_name	c863	χωρίς όνομα αρχείου: ξεκινήστε τον επεξεργαστή με ένα
 editor_no_match	7de7	καμία αντιστοιχία
 editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
+editor_open_none	63aa	το άνοιγμα δεν υπάρχει εδώ: ξεκινήστε τον επεξεργαστή με το όνομα του αρχείου
 editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
 editor_position	3696	Γρ %1$d, Στ %2$d
 editor_read_failed	5f78	το αρχείο δεν μπόρεσε να διαβαστεί: δεν ανοίγεται
@@ -27,6 +28,7 @@ editor_save_failed	069d	η αποθήκευση απέτυχε: το αρχεί�
 editor_saved	9f44	αποθηκεύτηκε
 editor_selected	a686	(επιλέχθηκαν %d)
 editor_selected_carets	7e02	(επιλέχθηκαν %d, δρομείς)
+editor_tabs_full	8ed9	και οι %d καρτέλες είναι ανοιχτές: κλείστε πρώτα μία
 editor_unsaved	c014	μη αποθηκευμένες αλλαγές: αποθηκεύστε τις ή κλείστε κάθε αρχείο με Ctrl+W δύο φορές
 editor_untitled	8b58	χωρίς τίτλο
 editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλα στο αρχείο

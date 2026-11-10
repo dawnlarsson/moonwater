@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s reste d'un enregistrement précédent : supprimez-le, 
 editor_no_file_name	c863	pas de nom de fichier : lancez l'éditeur avec l'un d'eux
 editor_no_match	7de7	aucune correspondance
 editor_not_regular	5955	pas un fichier ordinaire : refusé
+editor_open_none	63aa	ouvrir n'est pas ici : lancez l'éditeur avec le nom du fichier
 editor_pattern_bad	5d57	le motif ne se compile pas
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	le fichier n'a pas pu être lu : il n'est pas ouvert
@@ -27,6 +28,7 @@ editor_save_failed	069d	l'enregistrement a échoué : le fichier est inchangé
 editor_saved	9f44	enregistré
 editor_selected	a686	(%d sélectionnés)
 editor_selected_carets	7e02	(%d sélectionnés, curseurs)
+editor_tabs_full	8ed9	les %d onglets sont ouverts : fermez-en un d'abord
 editor_unsaved	c014	modifications non enregistrées : enregistrez-les, ou fermez chacun avec Ctrl+W deux fois
 editor_untitled	8b58	sans titre
 editor_write_beside	ec75	impossible d'écrire à côté du fichier

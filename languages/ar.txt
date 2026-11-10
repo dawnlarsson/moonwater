@@ -18,6 +18,7 @@ editor_lock_stale	f9d8	%s بقي من حفظ سابق: احذفه ثم احفظ
 editor_no_file_name	c863	لا يوجد اسم ملف: ابدأ المحرر باسم ملف
 editor_no_match	7de7	لا يوجد تطابق
 editor_not_regular	5955	ليس ملفا عاديا: تم الرفض
+editor_open_none	63aa	الفتح غير متاح هنا: ابدأ المحرر باسم الملف
 editor_pattern_bad	5d57	النمط غير صالح
 editor_position	3696	سطر %1$d، عمود %2$d
 editor_read_failed	5f78	تعذرت قراءة الملف: لم يُفتح
@@ -28,6 +29,7 @@ editor_save_failed	069d	فشل الحفظ: الملف كما كان
 editor_saved	9f44	تم الحفظ
 editor_selected	a686	(%d محدد)
 editor_selected_carets	7e02	(%d محدد، مؤشرات)
+editor_tabs_full	8ed9	كل التبويبات الـ%d مفتوحة: أغلق واحدا أولا
 editor_unsaved	c014	تغييرات غير محفوظة: احفظها، أو أغلق كل ملف بالضغط على Ctrl+W مرتين
 editor_untitled	8b58	بدون عنوان
 editor_write_beside	ec75	تعذرت الكتابة بجوار الملف

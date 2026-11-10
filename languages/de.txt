@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s stammt von einem früheren Speichern: entfernen, dann 
 editor_no_file_name	c863	kein Dateiname: den Editor mit einem starten
 editor_no_match	7de7	kein Treffer
 editor_not_regular	5955	keine normale Datei: abgelehnt
+editor_open_none	63aa	Öffnen ist hier nicht: den Editor mit dem Dateinamen starten
 editor_pattern_bad	5d57	das Muster lässt sich nicht übersetzen
 editor_position	3696	Z %1$d, Sp %2$d
 editor_read_failed	5f78	die Datei ließ sich nicht lesen: sie wird nicht geöffnet
@@ -27,6 +28,7 @@ editor_save_failed	069d	Speichern fehlgeschlagen: die Datei ist unverändert
 editor_saved	9f44	gespeichert
 editor_selected	a686	(%d ausgewählt)
 editor_selected_carets	7e02	(%d ausgewählt, Textcursor)
+editor_tabs_full	8ed9	alle %d Reiter sind offen: schließen Sie zuerst einen
 editor_unsaved	c014	ungespeicherte Änderungen: speichern, oder jede mit zweimal Ctrl+W schließen
 editor_untitled	8b58	unbenannt
 editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden

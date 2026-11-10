@@ -280,7 +280,10 @@ static b32 editor_open(string_address path)
         string_address name = path;
 
         if (editor.count == EDITOR_TABS)
+        {
+                language_format((char address_to)editor.status, sizeof(editor.status), WORDS(editor_tabs_full), (long)EDITOR_TABS);
                 return false;
+        }
         tab = &editor.tabs[editor.count];
         memory_zero(tab, sizeof(*tab));
         tab->folder = -1;
@@ -728,6 +731,9 @@ static fn editor_command(p32 command)
                 editor_bar(command);
         else if (command == DOC_CMD_NEW)
                 editor_open(null);
+        // Opening a file is by the command line only (editor FILE): there is no chooser yet, so the key says so.
+        else if (command == DOC_CMD_OPEN)
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_open_none), sizeof(editor.status));
         else if (command == DOC_CMD_CLOSE)
                 editor_close_tab_asked();
         else if (command == DOC_CMD_NEXT_TAB || command == DOC_CMD_PREVIOUS_TAB)

@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s blev kvar från en tidigare sparning: ta bort den och 
 editor_no_file_name	c863	inget filnamn: starta redigeraren med ett
 editor_no_match	7de7	ingen träff
 editor_not_regular	5955	ingen vanlig fil: avvisad
+editor_open_none	63aa	öppna finns inte här: starta redigeraren med filnamnet
 editor_pattern_bad	5d57	mönstret går inte att kompilera
 editor_position	3696	Rad %1$d, Kol %2$d
 editor_read_failed	5f78	filen kunde inte läsas: den öppnas inte
@@ -27,6 +28,7 @@ editor_save_failed	069d	sparandet misslyckades: filen är som den var
 editor_saved	9f44	sparad
 editor_selected	a686	(%d markerade)
 editor_selected_carets	7e02	(%d markerade, markörer)
+editor_tabs_full	8ed9	alla %d flikar är öppna: stäng en först
 editor_unsaved	c014	osparade ändringar: spara dem, eller stäng var och en med Ctrl+W två gånger
 editor_untitled	8b58	namnlös
 editor_write_beside	ec75	kunde inte skriva bredvid filen

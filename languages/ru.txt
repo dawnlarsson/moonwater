@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s остался от прошлого сохранен�
 editor_no_file_name	c863	нет имени файла: запустите редактор с именем
 editor_no_match	7de7	нет совпадений
 editor_not_regular	5955	не обычный файл: отказано
+editor_open_none	63aa	открытия здесь нет: запустите редактор с именем файла
 editor_pattern_bad	5d57	шаблон не компилируется
 editor_position	3696	Стр %1$d, Стлб %2$d
 editor_read_failed	5f78	не удалось прочитать файл: он не открыт
@@ -27,6 +28,7 @@ editor_save_failed	069d	не удалось сохранить: файл не и
 editor_saved	9f44	сохранено
 editor_selected	a686	(выделено: %d)
 editor_selected_carets	7e02	(выделено: %d, курсоры)
+editor_tabs_full	8ed9	все %d вкладок открыты: сначала закройте одну
 editor_unsaved	c014	несохранённые изменения: сохраните их или закройте каждую, дважды нажав Ctrl+W
 editor_untitled	8b58	без имени
 editor_write_beside	ec75	не удалось записать рядом с файлом

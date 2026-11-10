@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s è rimasto da un salvataggio precedente: eliminarlo, p
 editor_no_file_name	c863	nessun nome di file: avviare l'editor con uno
 editor_no_match	7de7	nessuna corrispondenza
 editor_not_regular	5955	non è un file normale: rifiutato
+editor_open_none	63aa	apri non è disponibile: avvia l'editor con il nome del file
 editor_pattern_bad	5d57	il motivo non si compila
 editor_position	3696	Ri %1$d, Col %2$d
 editor_read_failed	5f78	impossibile leggere il file: non viene aperto
@@ -27,6 +28,7 @@ editor_save_failed	069d	salvataggio non riuscito: il file è com'era
 editor_saved	9f44	salvato
 editor_selected	a686	(%d selezionati)
 editor_selected_carets	7e02	(%d selezionati, cursori)
+editor_tabs_full	8ed9	tutte le %d schede sono aperte: chiudine prima una
 editor_unsaved	c014	modifiche non salvate: salvarle, oppure chiudere ognuna con Ctrl+W due volte
 editor_untitled	8b58	senza titolo
 editor_write_beside	ec75	impossibile scrivere accanto al file

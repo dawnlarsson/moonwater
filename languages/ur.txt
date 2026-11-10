@@ -18,6 +18,7 @@ editor_lock_stale	f9d8	%s پچھلی محفوظ کاری سے رہ گیا ہے: 
 editor_no_file_name	c863	فائل کا نام نہیں ہے: ایڈیٹر کو فائل کے نام کے ساتھ شروع کریں
 editor_no_match	7de7	کوئی مطابقت نہیں
 editor_not_regular	5955	عام فائل نہیں ہے: مسترد
+editor_open_none	63aa	کھولنا یہاں نہیں ہے: ایڈیٹر کو فائل کے نام کے ساتھ شروع کریں
 editor_pattern_bad	5d57	پیٹرن درست نہیں ہے
 editor_position	3696	لائن %1$d، کالم %2$d
 editor_read_failed	5f78	فائل پڑھی نہیں جا سکی: وہ کھولی نہیں گئی
@@ -28,6 +29,7 @@ editor_save_failed	069d	محفوظ کرنا ناکام رہا: فائل جیسی
 editor_saved	9f44	محفوظ ہو گیا
 editor_selected	a686	(%d منتخب)
 editor_selected_carets	7e02	(%d منتخب، کرسر)
+editor_tabs_full	8ed9	تمام %d ٹیبیں کھلی ہیں: پہلے ایک بند کریں
 editor_unsaved	c014	غیر محفوظ شدہ تبدیلیاں: انہیں محفوظ کریں، یا ہر فائل کو Ctrl+W دو بار دبا کر بند کریں
 editor_untitled	8b58	بلا عنوان
 editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا

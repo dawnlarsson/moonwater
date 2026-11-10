@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s önceki kaydetmeden kalmış: silin, sonra kaydedin
 editor_no_file_name	c863	dosya adı yok: düzenleyiciyi bir adla başlatın
 editor_no_match	7de7	eşleşme yok
 editor_not_regular	5955	normal bir dosya değil: reddedildi
+editor_open_none	63aa	açma burada yok: düzenleyiciyi dosya adıyla başlatın
 editor_pattern_bad	5d57	desen derlenmiyor
 editor_position	3696	Sat %1$d, Sütun %2$d
 editor_read_failed	5f78	dosya okunamadı: açılmadı
@@ -27,6 +28,7 @@ editor_save_failed	069d	kaydedilemedi: dosya eskisi gibi
 editor_saved	9f44	kaydedildi
 editor_selected	a686	(%d seçili)
 editor_selected_carets	7e02	(%d seçili, imleçler)
+editor_tabs_full	8ed9	%d sekmenin tümü açık: önce birini kapatın
 editor_unsaved	c014	kaydedilmemiş değişiklikler: kaydedin veya her birini iki kez Ctrl+W ile kapatın
 editor_untitled	8b58	adsız
 editor_write_beside	ec75	dosyanın yanına yazılamadı

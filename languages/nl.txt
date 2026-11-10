@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s is overgebleven van een eerder opslaan: verwijder het,
 editor_no_file_name	c863	geen bestandsnaam: start de editor met een naam
 editor_no_match	7de7	geen overeenkomst
 editor_not_regular	5955	geen gewoon bestand: geweigerd
+editor_open_none	63aa	openen is hier niet: start de editor met de bestandsnaam
 editor_pattern_bad	5d57	het patroon is ongeldig
 editor_position	3696	Rg %1$d, Kol %2$d
 editor_read_failed	5f78	het bestand kon niet worden gelezen: het wordt niet geopend
@@ -27,6 +28,7 @@ editor_save_failed	069d	opslaan mislukt: het bestand is ongewijzigd
 editor_saved	9f44	opgeslagen
 editor_selected	a686	(%d geselecteerd)
 editor_selected_carets	7e02	(%d geselecteerd, cursors)
+editor_tabs_full	8ed9	alle %d tabbladen zijn open: sluit eerst er een
 editor_unsaved	c014	niet-opgeslagen wijzigingen: sla ze op, of sluit elk met tweemaal Ctrl+W
 editor_untitled	8b58	naamloos
 editor_write_beside	ec75	kon niet naast het bestand schrijven

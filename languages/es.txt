@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s quedó de un guardado anterior: bórrelo y guarde de n
 editor_no_file_name	c863	sin nombre de archivo: inicie el editor con uno
 editor_no_match	7de7	sin coincidencias
 editor_not_regular	5955	no es un archivo normal: rechazado
+editor_open_none	63aa	abrir no está aquí: inicie el editor con el nombre del archivo
 editor_pattern_bad	5d57	el patrón no se compila
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	no se pudo leer el archivo: no se abre
@@ -27,6 +28,7 @@ editor_save_failed	069d	no se pudo guardar: el archivo sigue como estaba
 editor_saved	9f44	guardado
 editor_selected	a686	(%d seleccionados)
 editor_selected_carets	7e02	(%d seleccionados, cursores)
+editor_tabs_full	8ed9	las %d pestañas están abiertas: cierre primero una
 editor_unsaved	c014	cambios sin guardar: guardarlos, o cerrar cada uno con Ctrl+W dos veces
 editor_untitled	8b58	sin título
 editor_write_beside	ec75	no se pudo escribir junto al archivo

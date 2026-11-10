@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s ficou de um salvamento anterior: remova-o e depois sal
 editor_no_file_name	c863	sem nome de arquivo: inicie o editor com um
 editor_no_match	7de7	nenhuma correspondência
 editor_not_regular	5955	não é um arquivo normal: recusado
+editor_open_none	63aa	abrir não está aqui: inicie o editor com o nome do arquivo
 editor_pattern_bad	5d57	o padrão não compila
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	não foi possível ler o arquivo: ele não é aberto
@@ -27,6 +28,7 @@ editor_save_failed	069d	falha ao salvar: o arquivo está como estava
 editor_saved	9f44	salvo
 editor_selected	a686	(%d selecionados)
 editor_selected_carets	7e02	(%d selecionados, cursores)
+editor_tabs_full	8ed9	todas as %d abas estão abertas: feche uma primeiro
 editor_unsaved	c014	alterações não salvas: salve-as, ou feche cada uma com Ctrl+W duas vezes
 editor_untitled	8b58	sem título
 editor_write_beside	ec75	não foi possível gravar ao lado do arquivo

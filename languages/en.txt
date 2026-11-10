@@ -17,6 +17,7 @@ editor_lock_stale	f9d8	%s is left by an earlier save: remove it, then save
 editor_no_file_name	c863	no file name: start the editor with one
 editor_no_match	7de7	no match
 editor_not_regular	5955	not a regular file: refused
+editor_open_none	63aa	open is not here: start the editor with the file's name
 editor_pattern_bad	5d57	the pattern does not compile
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	the file could not be read: it is not opened
@@ -27,6 +28,7 @@ editor_save_failed	069d	the save failed: the file is as it was
 editor_saved	9f44	saved
 editor_selected	a686	(%d selected)
 editor_selected_carets	7e02	(%d selected, carets)
+editor_tabs_full	8ed9	all %d tabs are open: close one first
 editor_unsaved	c014	unsaved changes: save them, or close each with Ctrl+W twice
 editor_untitled	8b58	untitled
 editor_write_beside	ec75	could not write beside the file
