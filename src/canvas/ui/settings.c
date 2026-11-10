@@ -3538,10 +3538,39 @@ static b32 settings_stop(void)
 */
 static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
 
+// The row that says whether the audio modem is ready: the Audio modem row, which reads what moonwater link transport says; or -1.
+static int settings_modem_row(void)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].kind == SETTINGS_INFO && settings_rows[at].key &&
+                    string_equals((string_address)settings_rows[at].key, (string_address) "audio modem "))
+                        return (int)at;
+        return -1;
+}
+
+// Whether the audio modem is ready, as its row was last read: the sound server has a sound card open for it.
+static b32 settings_modem_ready(void)
+{
+        int row = settings_modem_row();
+
+        return row >= 0 && settings.state[row] == SETTINGS_READ &&
+               string_equals((string_address)settings.value[row], (string_address) "ready");
+}
+
 static b32 settings_choice(const struct settings_row address_to row, positive index, char address_to into, positive room)
 {
         if (row->output != SETTINGS_OUT_NONE)
                 return settings_output_choice(row, index, into, room);
+        //      Connect over offers network always, and modem only while the audio modem is ready: a modem that is not there is not
+        //      a choice, and one chosen anyway is refused by the verb, which says why in the status line.
+        if (row->flags & SETTINGS_TRANSPORT)
+        {
+                if (index == 0)
+                        return settings_word(row->choices, 0, into, room);
+                if (index == 1 && settings_modem_ready())
+                        return settings_word(row->choices, 1, into, room);
+                return false;
+        }
         positive names = settings.battery_menu_count < BATTERY_LIST ? settings.battery_menu_count : BATTERY_LIST;
 
         if (!(row->flags & SETTINGS_BATTERIES))

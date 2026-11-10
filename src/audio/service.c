@@ -2013,7 +2013,10 @@ static void audio_inputs_run(positive now)
 static int audio_test_page(struct audio_state *copy)
 {
         static unsigned char raw[AUDIO_STATE_BYTES];
-        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x80000, 0, 0, 0), got;
+        //      The server sets its page's path when it starts; a program that only reads the page (the link asks whether the
+        //      modem's card is open) has none set, and reads the page the server writes.
+        const char *path = audio_service.page_path ? audio_service.page_path : AUDIO_STATE_PATH;
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80000, 0, 0, 0), got;
 
         if (fd < 0)
                 return 0;

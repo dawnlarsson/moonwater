@@ -1729,17 +1729,6 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                         return link_modem_send(arguments[4]);
                 return host_usage();
         }
-        //      With the transport on the modem a push goes over the sound
-        //      card instead: the file reaches the receiver, which writes it
-        //      where it chooses, so the machine and the path are not used.
-        if (string_equals(verb, "push") && link_modem_in_use())
-        {
-                host_say(log, host_label "the transport is the audio modem: %s "
-                                          "goes over the sound card, not to %s, "
-                                          "and %s is not used\n",
-                         arguments[4], arguments[3], arguments[5]);
-                return modem_send_file(arguments[4]);
-        }
         if (string_equals(verb, "serve"))
                 return link_serve(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "pair"))

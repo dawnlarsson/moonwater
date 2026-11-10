@@ -3202,6 +3202,11 @@ static p64 link_rekey_after(void)
         return (p64)WATERLINK_REKEY_SECONDS * 1000000;
 }
 
+//      The transport's two halves, made in command.c: whether /root/link.transport says modem and the modem is ready, and the
+//      modem's send of a file (modem_send.c).
+static bool link_modem_in_use(void);
+static b32 modem_send_file(string_address path);
+
 static b32 link_client_run(string_address name, p8 kind,
                            string_address address_to words, positive count)
 {
@@ -3220,6 +3225,23 @@ static b32 link_client_run(string_address name, p8 kind,
         bipolar signals;
         b32 stopped = 0;
         b32 answer = LINK_FAILED;
+
+        //      Every send reads the transport once, here. The audio modem takes a push, a file over the sound card to the
+        //      receiver, which writes it where it chooses, so the machine and the path are not used; it sends nothing back, so
+        //      the other kinds, which wait for an answer, are refused while it is the transport.
+        if (link_modem_in_use())
+        {
+                if (kind != LINK_KIND_PUSH)
+                        return host_refuse("the transport is the audio modem, "
+                                           "which only carries a push: moonwater "
+                                           "link transport network makes the "
+                                           "network the transport\n");
+                host_say(log, host_label "the transport is the audio modem: %s "
+                                          "goes over the sound card, not to %s, "
+                                          "and %s is not used\n",
+                         words[0], name, words[1]);
+                return modem_send_file(words[0]);
+        }
 
         if (link_identity(address_of link_self.me, false) < 0)
                 return host_refuse("this machine has no link key; "
