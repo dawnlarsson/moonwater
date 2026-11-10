@@ -1480,8 +1480,12 @@ static b32 link_transport_verb(string_address word)
         host_read_word(LINK_TRANSPORT_PATH, kept, sizeof kept);
         if (!word)
         {
+                //      What is said is what is used: a file written by hand as
+                //      modem, when the modem is not there, is network.
                 host_say(log, host_label "transport %s\n",
-                         kept[0] ? (string_address)kept : (string_address)"network");
+                         string_equals((string_address)kept, "modem") && link_modem_ready()
+                                 ? "modem"
+                                 : "network");
                 host_say(log, host_label "audio modem %s\n",
                          link_modem_ready() ? "ready" : "not available yet");
                 return 0;
