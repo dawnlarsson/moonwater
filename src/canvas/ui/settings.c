@@ -1333,7 +1333,8 @@ static b32 settings_matches_word(int row, const char address_to word, positive s
                 for (positive at = 0; at < SETTING_WORDS; at++)
                         if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
                                 return true;
-                return settings_matches_name(which->label, settings_section(row), word, size);
+                // Its value is what the row holds: the filter finds a row by it too, as its comment says.
+                return settings_has(settings.value[row], word, size) || settings_matches_name(which->label, settings_section(row), word, size);
         }
         return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
                (row == SETTINGS_ANY && settings_has("anything", word, size));
