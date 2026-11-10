@@ -236,7 +236,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Date format	7a44	قالب تاریخ
 =Display	d9b5	نمایشگر
 =Editor	bf98	ویرایشگر
-=GPU rendering	d4d5	رندر با GPU
+=GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =Gallery	4cdd	گالری
 =Hubs	456d	هاب‌ها
 =Identify	033d	شناسایی

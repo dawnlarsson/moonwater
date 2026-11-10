@@ -235,7 +235,7 @@ ui_field_full	fe02	mer ryms inte
 =Date format	7a44	Datumformat
 =Display	d9b5	Skärm
 =Editor	bf98	Redigerare
-=GPU rendering	d4d5	GPU-rendering
+=GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =Gallery	4cdd	Galleri
 =Hubs	456d	Hubbar
 =Identify	033d	Identifiera

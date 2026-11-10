@@ -235,7 +235,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Date format	7a44	Tarih biçimi
 =Display	d9b5	Ekran
 =Editor	bf98	Düzenleyici
-=GPU rendering	d4d5	GPU ile oluşturma
+=GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
 =Gallery	4cdd	Galeri
 =Hubs	456d	Hub'lar
 =Identify	033d	Tanımla

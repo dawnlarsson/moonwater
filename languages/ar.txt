@@ -236,7 +236,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Date format	7a44	تنسيق التاريخ
 =Display	d9b5	الشاشة
 =Editor	bf98	المحرر
-=GPU rendering	d4d5	التصيير على GPU
+=GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض
 =Hubs	456d	المحاور
 =Identify	033d	تعريف

@@ -281,12 +281,12 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
 #ifndef SHELL_NO_GPU
     //  Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
-    //  has none, so on is safe on any machine; off keeps every pixel on the processor. Not in the image when the build
-    //  says CONFIG_MOONWATER_GPU=n.
-    SETTING_PLAIN_ROW(null, "GPU rendering", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_GPU_PATH, .standard = "on", .need = "how Canvas draws",
+    //  has none. Alpha: off by default, so every pixel stays on the processor until the user turns it on. Not in the image
+    //  when the build says CONFIG_MOONWATER_GPU=n.
+    SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_GPU_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "canvas gpu [on|off]",
-                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere [on]"),
+                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]"),
 #endif
     SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "history"), "history ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_HISTORY_PATH,

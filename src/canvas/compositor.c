@@ -14479,8 +14479,8 @@ static void compositor_clip_wipe(void)
 
 // The settings: on or off, how many copies the history keeps (none by default), the limit in MiB (16 by default).
 #ifndef SHELL_NO_GPU
-// GPU rendering as the setting has it (on unless the file says off): what the compose path asks before it uses src/canvas/gpu.c.
-static int compositor_gpu = 1;
+// GPU rendering as the setting has it (alpha: off unless the file says on): what the compose path asks before it uses src/canvas/gpu.c.
+static int compositor_gpu = 0;
 
 static void compositor_gpu_settings(void)
 {
@@ -14490,7 +14490,7 @@ static void compositor_gpu_settings(void)
 #endif
 
         compositor_word(SETTING_GPU_PATH, word, sizeof(word));
-        compositor_gpu = !string_equals((string_address)word, (string_address) "off");
+        compositor_gpu = string_equals((string_address)word, (string_address) "on");
 #ifdef MOONWATER_GPU_C
         // Turned on again: a GPU given up on after three hangs is tried again (one that never started, a card that is not one the kernels are for or that
         // drew its self-test wrong, stays given up).

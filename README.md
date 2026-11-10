@@ -93,7 +93,7 @@ moonwater canvas windows remember [on|off]  a window opens where the hand last p
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
 moonwater canvas touch left [off|windows|launcher]  a swipe in from the left edge runs the window switcher, or opens the launcher [off]
 moonwater canvas touch right [off|windows|volume]  a swipe in from the right edge runs the window switcher, or opens the volume popup [off]
-moonwater canvas gpu [on|off]    draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere [on]
+moonwater canvas gpu [on|off]    draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
 moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
 moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 16 MiB [16]

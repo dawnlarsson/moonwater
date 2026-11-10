@@ -235,7 +235,7 @@ ui_field_full	fe02	больше не помещается
 =Date format	7a44	Формат даты
 =Display	d9b5	Экран
 =Editor	bf98	Редактор
-=GPU rendering	d4d5	Отрисовка на GPU
+=GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =Gallery	4cdd	Галерея
 =Hubs	456d	Хабы
 =Identify	033d	Определить

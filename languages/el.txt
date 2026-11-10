@@ -235,7 +235,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Date format	7a44	Μορφή ημερομηνίας
 =Display	d9b5	Οθόνη
 =Editor	bf98	Επεξεργαστής
-=GPU rendering	d4d5	Απόδοση με GPU
+=GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =Gallery	4cdd	Συλλογή
 =Hubs	456d	Διανομείς
 =Identify	033d	Αναγνώριση

@@ -235,7 +235,7 @@ ui_field_full	fe02	meer past er niet in
 =Date format	7a44	Datumnotatie
 =Display	d9b5	Scherm
 =Editor	bf98	Editor
-=GPU rendering	d4d5	GPU-rendering
+=GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij
 =Hubs	456d	Hubs
 =Identify	033d	Identificeren

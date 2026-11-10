@@ -37,8 +37,8 @@ menu "Moonwater Canvas"
         help
           Let Canvas draw and compose on the GPU where it has a driver for
           it (src/canvas/gpu.c, userspace, the card's render node), and on the
-          processor everywhere else. The Canvas setting "GPU rendering"
-          (moonwater canvas gpu [on|off]) switches it at run time; this
+          processor everywhere else. The Canvas setting "GPU rendering (alpha)"
+          (moonwater canvas gpu [on|off]), off by default, switches it at run time; this
           option takes the code out of the image altogether, and with it
           the setting.
 

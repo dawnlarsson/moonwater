@@ -236,7 +236,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Date format	7a44	תבנית תאריך
 =Display	d9b5	מסך
 =Editor	bf98	עורך
-=GPU rendering	d4d5	רינדור ב-GPU
+=GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה
 =Hubs	456d	רכזות
 =Identify	033d	זיהוי

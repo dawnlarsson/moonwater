@@ -141105,7 +141105,7 @@ static fn check_settings_groups(void)
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},
-            {"Clipboard", "Canvas"}, {"GPU rendering", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
+            {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
             {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
         const int count = (int)(sizeof(names) / sizeof(names[0]));
         b32 order = settings_groups() == count + 1, family = true, by_name = true, listed = true, apart = true, found = true,
@@ -141274,7 +141274,7 @@ static fn check_settings_clicks(void)
         struct ui_list address_to list = &settings.list;
         static struct windows click_table;
         int before = settings.page.chosen, scroll_before = list->scroll.scroll, seen = 0, wrong = 0, strips = 0;
-        int gpu = settings_row_named("GPU rendering"), keyboard = settings_row_named("Keyboard");
+        int gpu = settings_row_named("GPU rendering (alpha)"), keyboard = settings_row_named("Keyboard");
         unsigned char gpu_fold = gpu >= 0 ? settings_expanded[gpu] : 0;
         positive queued = settings.queued;
         b32 gpu_pressed = false, gpu_ok = false, arrow_ok = false, value_ok = false, hover_ok = false;

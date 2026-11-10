@@ -235,7 +235,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Date format	7a44	Format de la date
 =Display	d9b5	Écran
 =Editor	bf98	Éditeur
-=GPU rendering	d4d5	Rendu par GPU
+=GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =Gallery	4cdd	Galerie
 =Hubs	456d	Concentrateurs
 =Identify	033d	Identifier

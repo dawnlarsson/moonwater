@@ -235,7 +235,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Date format	7a44	Format daty
 =Display	d9b5	Ekran
 =Editor	bf98	Edytor
-=GPU rendering	d4d5	Renderowanie przez GPU
+=GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
 =Gallery	4cdd	Galeria
 =Hubs	456d	Huby
 =Identify	033d	Identyfikuj

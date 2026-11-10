@@ -235,7 +235,7 @@ ui_field_full	fe02	that is as much as it holds
 =Date format	7a44	Date format
 =Display	d9b5	Display
 =Editor	bf98	Editor
-=GPU rendering	d4d5	GPU rendering
+=GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =Gallery	4cdd	Gallery
 =Hubs	456d	Hubs
 =Identify	033d	Identify

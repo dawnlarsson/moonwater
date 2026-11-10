@@ -235,7 +235,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Date format	7a44	Formato della data
 =Display	d9b5	Schermo
 =Editor	bf98	Editor
-=GPU rendering	d4d5	Rendering con GPU
+=GPU rendering (alpha)	e5e6	Rendering con GPU (alpha)
 =Gallery	4cdd	Galleria
 =Hubs	456d	Hub
 =Identify	033d	Identifica

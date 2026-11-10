@@ -236,7 +236,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Date format	7a44	تاریخ کی شکل
 =Display	d9b5	اسکرین
 =Editor	bf98	ایڈیٹر
-=GPU rendering	d4d5	GPU رینڈرنگ
+=GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
 =Gallery	4cdd	گیلری
 =Hubs	456d	ہبز
 =Identify	033d	شناخت
