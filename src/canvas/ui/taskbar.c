@@ -942,7 +942,7 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
         memory_zero(&ui, sizeof(ui));
         ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
         ui.scene = view->scene;
-        ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, ui_role(UI_ERROR) | 0xff000000u);
+        ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, compositor_ink_role(UI_ERROR) | 0xff000000u);
 }
 
 /*
@@ -952,7 +952,7 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
 static void taskbar_notices_cell(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height)
 {
         struct ui ui;
-        unsigned int colour = taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? ui_role(UI_ERROR) : ui_role(UI_WARNING);
+        unsigned int colour = compositor_ink_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);
         int size;
 
         memory_zero(&ui, sizeof(ui));

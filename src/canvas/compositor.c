@@ -181,6 +181,7 @@ static unsigned int compositor_ink_selection(void); // the chrome's selection, 0
 static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at its percent, read on the wallpaper
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
 static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
+static unsigned int compositor_ink_role(int role); // a role of the chrome's colours, 0xaarrggbb: the tray's cells (the notices dot, the microphone) are drawn in it
 
 struct compositor_target
 {
@@ -10875,6 +10876,14 @@ static unsigned int compositor_snap_ink(void)
 static unsigned int compositor_tab_target(b32 lit)
 {
         return compositor_chrome_now()->roles.role[lit ? UI_PRIMARY : UI_SURFACE] & 0xffffffu;
+}
+
+// A role of the theme the chrome is drawn in (ui_theme_make, for the table's theme and accent), 0xaarrggbb. The compositor's tray draws
+// its status cells in these: the kit's own roles (ui_role) are the windows' and are only made in a window's process, so in this one they
+// are all zero, which drew the notices dot and the microphone black on either theme.
+static unsigned int compositor_ink_role(int role)
+{
+        return compositor_chrome_now()->roles.role[role];
 }
 
 static bool compositor_setting_kept(const char *path, const char *word, long *value);

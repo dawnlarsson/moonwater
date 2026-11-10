@@ -129189,6 +129189,41 @@ static void check_notices_dot(void)
             taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
             notices_shot_write("/tmp/notices-band-1920x24.raw", band_pixels, BAND_W, COMPOSITOR_PANEL, BAND_W);
         }
+        /*
+                The dot is drawn in the chrome's roles, which follow the table's theme, and not in the kit's (ui_role): the kit makes its roles in
+                a window's own process and the compositor never does, so there they were all zero and the dot (and the microphone) was black on
+                either theme. The kit's roles are zeroed here as the compositor has them, and the middle of the dot is the theme's error or
+                warning colour, light and dark, and the two themes' are not the same colour.
+        */
+        {
+            struct ui_theme kept = ui_kit.shown;
+            unsigned int middle[2][2] = {{0, 0}, {0, 0}}, want[2][2] = {{0, 0}, {0, 0}};
+            b32 right = true;
+
+            memory_zero(&ui_kit.shown, sizeof(ui_kit.shown));
+            for (unsigned int dark = 0; dark < 2; dark++)
+                for (unsigned int severity = 0; severity < 2; severity++)
+                {
+                    struct taskbar_view drawn = band_view(TASKBAR_BOTTOM, null);
+                    int rect[4], bx, by, bw, bh, dx, dy, dw, dh;
+
+                    table->theme = dark ? UI_THEME_DARK : UI_THEME_LIGHT, table->accent = 0xffffffu;
+                    __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+                    taskbar_notices_set(1, severity ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING);
+                    taskbar_band(&drawn, &bx, &by, &bw, &bh);
+                    taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                    right &= taskbar_slot(&drawn, TASKBAR_NOTICES, &dx, &dy, &dw, &dh) != 0;
+                    middle[dark][severity] = band_pixels[(unsigned long)(dy + dh / 2 - by) * BAND_W + (unsigned long)(dx + dw / 2 - bx)] & 0xffffffu;
+                    want[dark][severity] = compositor_ink_role(severity ? UI_ERROR : UI_WARNING) & 0xffffffu;
+                }
+            ui_kit.shown = kept;
+            taskbar_notices_set(1, WINDOWS_ISSUE_ERROR);
+            check("notices: the dot is the theme's warning colour and error colour, light and dark, with the kit's roles unmade as in the compositor",
+                  right && middle[0][0] == want[0][0] && middle[0][1] == want[0][1] && middle[1][0] == want[1][0] && middle[1][1] == want[1][1] &&
+                      want[0][0] && want[0][1] && want[1][0] && want[1][1]);
+            check("notices: the light theme's dot is not the dark theme's, for a warning and for an error",
+                  middle[0][0] != middle[1][0] && middle[0][1] != middle[1][1] && middle[0][0] != middle[0][1]);
+        }
         check("notices: the popup lists the error first, then the warning, then a rule and the two rows",
               notices.menu.count == 5 && string_equals((string_address)notices.menu.items[0].keys, (string_address)"Error") &&
                   string_equals((string_address)notices.menu.items[1].keys, (string_address)"Warning") &&
