@@ -17068,8 +17068,10 @@ static b32 usb_list_show(void)
 
                 if (device->root)
                         continue;
+                // The kernel's authorized file is what is true: allowed when it lets the device in. Otherwise a deny rule
+                // holds it, and what the policy would let in at the next apply is waiting for its allow.
                 why = usb_judge(address_of policy, device);
-                state = usb_let(why) ? (string_address)"allowed" : why == USB_WHY_DENY ? (string_address)"blocked" : (string_address)"waiting";
+                state = device->authorized ? (string_address)"allowed" : why == USB_WHY_DENY ? (string_address)"blocked" : (string_address)"waiting";
                 usb_shown(shown, sizeof(shown), device->product, device->product_length);
                 host_say(log, "  %s usb %s %s %s\n", (string_address)device->port, (string_address)device->id, (string_address)shown, state);
         }
