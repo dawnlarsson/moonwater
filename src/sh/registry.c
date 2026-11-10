@@ -559,7 +559,8 @@ static const struct settings_row settings_rows[] = {
      .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices [off]"},
     // The Devices group: the devices the system sees are a list under this row (the feed device list, settings.c), and a press
     // on one allows or blocks it. The row says what device lock says: whether a new device waits for its allow.
-    {"Devices", "New devices", SETTINGS_INFO, 0, SETTINGS_LINE, {"device"}, "device ", null, {null}, null, ';', null},
+    {"Devices", "New devices", SETTINGS_CHOICE, 0, 0, {"device"}, "device ", null, {"device"}, "unlock lock", 0, null,
+     .usage = "device [lock|unlock]", .help = "unlock lets a new device in; lock holds it until it is allowed [unlock]"},
     {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
     {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0, null,
      .usage = "battery [NAME|auto|none]", .help = "which battery the Battery row reads: auto is the first present one, none is no battery [auto]"},
