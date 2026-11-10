@@ -4505,7 +4505,9 @@ static b32 settings_key(const struct window_event address_to event)
                 return true;
         }
         // Right opens the lines under the row the keys are on, and Left shuts them (an expander's keys); any other key is the row's.
-        if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings.list.focus < SETTINGS_ANY && settings_editing() < 0)
+        // While the filter holds something its field has the arrows first (the caret), so they open and shut nothing then.
+        if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings.list.focus < SETTINGS_ANY && settings_editing() < 0 &&
+            !settings_filter_typed())
         {
                 int expander = settings_expander(settings.list.focus);
 
