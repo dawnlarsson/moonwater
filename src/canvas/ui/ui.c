@@ -7665,12 +7665,19 @@ static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 
         at += step * by;
         at = at < 0 ? 0 : at >= m->count ? m->count - 1 : at;
-        while (at > 0 && at < m->count - 1 && !ui_popmenu_choosable(m, at))
-                at -= step > 0 ? 1 : -1;
-        if (ui_popmenu_choosable(m, at))
-                m->hot = at;
+        // The nearest that can be chosen on from the landing, in the page's direction; else back from it; none leaves the hot item.
+        int dir = step > 0 ? 1 : -1, found = -1;
+
+        for (int k = at; found < 0 && k >= 0 && k < m->count; k += dir)
+                if (ui_popmenu_choosable(m, k))
+                        found = k;
+        for (int k = at; found < 0 && k >= 0 && k < m->count; k -= dir)
+                if (ui_popmenu_choosable(m, k))
+                        found = k;
+        if (found >= 0)
+                m->hot = found;
         if (m->hot < m->top)
-                m->top = m->hot;
+                m->top = m->hot < 0 ? 0 : m->hot;
         if (m->rows_shown > 0 && m->hot >= m->top + m->rows_shown)
                 m->top = m->hot - m->rows_shown + 1;
 }
