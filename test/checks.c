@@ -228093,8 +228093,8 @@ static void dl_rows(void)
 /*
         The painters that record (R2 and step 2): each probe paints with a scene set and counts the pixels it wrote, which must be none, and
         whether the frame was given up to the processor (scene->lost, R3 and R4: those painters write the picture and say so, and their rows are
-        printed as named known diffs, not failures, until the kernel records them). The launcher's bars are also replayed bit for bit against
-        the processor's paint at four scales.
+        printed as named known diffs, not failures, until the kernel records them). The launcher's grid of dots is also recorded at four scales,
+        as nine kit boxes.
 */
 static font_face dl_face;
 static font_engine dl_engine;
@@ -228425,10 +228425,12 @@ static void dl_probes(void)
         ui_spinner_draw(&probe, &control);
         check("draw list: the spinner records its ring and arc, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
 
-        // The launcher's grid of dots at four scales: the processor's paint and the replay of the recorded fills agree, and nothing was painted.
+        // The launcher's grid of dots at four scales: nine kit boxes (round corners, in 256ths: the replay above reads plain pixel rectangles, which these
+        // are not; the GPU's kit boxes are proven by CHECK_gpu_kit) are recorded and nothing is painted, and the same call with no scene paints the nine
+        // dots on the processor.
         for (int k = 0; k < 4; k++)
         {
-                unsigned int s = scales[k];
+                unsigned int s = scales[k], painted = 0;
                 int x = (int)(s / 10), y = (int)(s / 10), w = (int)(6 * s / 10), h = (int)(4 * s / 10);
 
                 memory_zero(&view, sizeof(view));
@@ -228436,15 +228438,14 @@ static void dl_probes(void)
                 view.scale = (int)s, view.pixels = cpu, lay.bx = 0, lay.by = 0, lay.bw = DL_W, lay.bh = DL_H;
                 memory_zero(cpu, sizeof(cpu));
                 taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
+                for (unsigned long i = 0; i < DL_W * DL_H; i++)
+                        painted += cpu[i] != 0;
                 dl_probe_reset();
                 view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene;
                 taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
-                memory_zero(dl_replay, sizeof(dl_replay));
-                dl_replay_ops(&dl_probe_scene, dl_replay);
-                failed += dl_probe_writes() != 0 || dl_probe_scene.count == 0;
-                failed += memory_compare(dl_replay, cpu, sizeof(cpu)) != 0;
+                failed += dl_probe_writes() != 0 || dl_probe_scene.lost || dl_probe_scene.count != 9 || painted == 0;
         }
-        check("draw list: the launcher's grid of dots at 100, 150, 200 and 300 percent replays bit for bit and paints nothing", failed == 0);
+        check("draw list: the launcher's grid of dots records its nine dots at 100, 150, 200 and 300 percent and paints nothing, and paints them with no scene", failed == 0);
 
         // The speaker and the microphone cells: their rings and boxes are recorded (kit boxes, proven on the GPU by CHECK_gpu_kit).
         memory_zero(&view, sizeof(view));
