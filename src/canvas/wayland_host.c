@@ -1168,6 +1168,8 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 // The shape the window's client asked for over the pointer: its CP_ shape, stored +1 (0 for none).
                 compositor_wl.cursor_asked[row] = (unsigned char)(a == WAYLAND_CURSOR_HIDDEN ? COMPOSITOR_WL_HIDDEN
                                                                   : a < 0 || a > WAYLAND_CURSOR_NOTALLOWED ? 0 : compositor_wl_cursor_of[a] + 1);
+                // A client sets its cursor after the motion that brought the pointer to it, with the pointer resting: shown now.
+                compositor_shape_sync();
                 break;
         case WAYLAND_DO_MOVE:
                 // Only while the person holds the left button on this window: a client cannot take the pointer.

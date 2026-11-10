@@ -4202,6 +4202,8 @@ static struct
                 int client_hidden;   // a window's client asked for no pointer (wl_pointer.set_cursor with no surface), over that window
                 int drawn_scale;
                 unsigned int shape;     // what the pointer wears now
+                int asked_row;          // the window whose shape the pointer took at the last motion (COMPOSITOR_NONE for none), and the shape it had
+                int asked_seen;
                 int magnified;          // it is shaken: found
                 positive magnified_until;
                 int magnify;            // the hand shook it since the last motion
@@ -13991,6 +13993,8 @@ static void compositor_take(int row)
         }
 }
 
+static void compositor_motion(void);
+
 /*
         A row whose door has closed: its program is gone. The window goes
         from the screen, its pixels are given back, and the row is free.
@@ -13998,6 +14002,9 @@ static void compositor_take(int row)
 static void compositor_leave(int row)
 {
         struct windows *table = compositor.table;
+        // The window the pointer was over, or whose shape it wore, goes: the pointer is read again over what is under it, which
+        // no motion does while it rests (the hover, the cursor's shape and whether a client hid it).
+        int pointed = compositor.hover == row || compositor.cursor.asked_row == row;
 
         if (compositor.showing[row])
         {
@@ -14114,6 +14121,8 @@ static void compositor_leave(int row)
         compositor.woken &= ~(1u << row);
         __atomic_store_n(&table->pid[row], 0, __ATOMIC_RELEASE);
         compositor_osk_sync();
+        if (pointed)
+                compositor_motion();
 }
 
 /*
@@ -16047,7 +16056,8 @@ static void compositor_motion(void)
         {
                 unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 ? 0
                                     : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
-                int asked = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? compositor_asked_shape(under) : -1;
+                int of = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? under : COMPOSITOR_NONE;
+                int asked = of >= 0 ? compositor_asked_shape(of) : -1;
 
                 compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
                                           : compositor.drag >= 0 || under < 0 ? CP_ARROW
@@ -16056,6 +16066,8 @@ static void compositor_motion(void)
                                           : CP_ARROW;
                 // A client that asked for no pointer over its window has none there (-2 is that answer).
                 compositor.cursor.client_hidden = asked == -2;
+                compositor.cursor.asked_row = of;
+                compositor.cursor.asked_seen = asked;
         }
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());
@@ -16121,6 +16133,20 @@ static void compositor_motion(void)
                 compositor_pointer_to(compositor.touch.hold_row);
         else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
                 compositor_pointer_to(under);
+}
+
+/*
+        A window answers a motion after the compositor has read its shape (the kit publishes the control under the pointer when it
+        has handled the motion), so the shape it publishes while the pointer rests is read again here: when it is not the one the
+        last motion read, the pointer is moved over the window as a motion would move it. The Wayland host calls it when a client's
+        cursor request arrives (wayland_host.c, WAYLAND_DO_CURSOR), and the loop calls it on each wake.
+*/
+static void compositor_shape_sync(void)
+{
+        int of = compositor.cursor.asked_row;
+
+        if (of >= 0 && of < WINDOWS && compositor_asked_shape(of) != compositor.cursor.asked_seen)
+                compositor_motion();
 }
 
 /*
@@ -19491,6 +19517,7 @@ static b32 compositor_main()
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = compositor.preview_row = COMPOSITOR_NONE;
         compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
         compositor.touch.closing = COMPOSITOR_NONE;
+        compositor.cursor.asked_row = COMPOSITOR_NONE;
 
         for (positive at = 1; at < program_argument_count(); at++)
         {
@@ -19828,6 +19855,9 @@ static b32 compositor_main()
                         compositor.cursor.magnified = 0;
                         compositor_cursor_move();
                 }
+
+                // The shape the window under a resting pointer publishes is shown (compositor_shape_sync).
+                compositor_shape_sync();
 
                 if (compositor_predict_due())
                         compositor_predict_expire(clock_monotonic_nanoseconds());
