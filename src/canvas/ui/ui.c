@@ -14641,6 +14641,7 @@ static void ui_text_op_extend(void address_to self, p64 anchor, p64 active)
 
         primary->anchor = anchor, primary->active = active;
         doc_normalize(&t->doc);
+        doc_seal(&t->doc);
 }
 
 static b32 ui_text_op_any(void address_to self)

@@ -4475,6 +4475,16 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
         }
+        // A row typed in that has scrolled out of view ends its typing as a press outside does (a value kept, a command cancelled):
+        // its field is not drawn, so it must not keep the keys.
+        if (settings_editing() >= 0 && !settings_edit_shown())
+        {
+                if (settings.edit.cancels)
+                        settings_edit_end();
+                else
+                        settings_edit_commit();
+                ui_page_redraw(&settings.page);
+        }
         if (settings_editing() >= 0)
         {
                 settings_type(event);
