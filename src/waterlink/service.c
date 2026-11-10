@@ -48,6 +48,15 @@
 #include "seal.c"
 #include "handshake.c"
 
+/*      `link push` packs a file with zstd's core (the in-memory encoder and
+        decoder and the dictionary loader; its command line is not compiled
+        here), with the dictionary both ends hold. */
+#ifndef ZSTD_CORE_ONLY
+#define ZSTD_CORE_ONLY
+#endif
+#include "../sh/zstd.c"
+#include "push_dictionary.h"
+
 /*      "WL", two letters as sixteen bits: 0x574c. Unassigned, above the
         registered ranges people firewall by habit, and easy to remember from
         the name. */
@@ -70,6 +79,17 @@
 #define LINK_SESSIONS 16
 #define LINK_SESSIONS_A_PEER 8
 #define LINK_REQUEST_MAX 1024
+
+/*      A push's request before its path: the ask, the file's mode, the format
+        the file is sent in and, for the dictionary format, the dictionary's
+        id, big endian. A raw file is sent as it is; a dictionary file is
+        packed by push_pack (below), in blocks of PUSH_BLOCK bytes, each one
+        zstd frame of at most PUSH_FRAME_MAX bytes behind its length. */
+#define LINK_PUSH_HEAD 10
+#define PUSH_FORMAT_RAW 0
+#define PUSH_FORMAT_DICTIONARY 1
+#define PUSH_BLOCK 131072u
+#define PUSH_FRAME_MAX (PUSH_BLOCK + PUSH_BLOCK / 64 + 4096)
 
 #define LINK_KEEPALIVE 10000000ull   // microseconds of silence, then a datagram
 #define LINK_DEAD 45000000ull        // of hearing nothing, then the session is gone
@@ -670,6 +690,7 @@ struct link_session {
         bool refused;
         p8 refusal[128];
         p32 mode; // what a pulled file is made with: the far file's, when it said
+        bool packed; // a pushed file's staging file holds dictionary frames, to unpack at the end
         p8 part[LINK_REQUEST_MAX + 32]; // a transfer's staging file
         p8 whole[LINK_REQUEST_MAX + 1]; // and the name it becomes
 };
@@ -1464,6 +1485,8 @@ static fn link_exited(struct link_session address_to s, b32 status, p64 now)
         s->reads[0].quiet = s->reads[1].quiet = false;
 }
 
+static bool link_push_unpack(struct link_session address_to s);
+
 static fn link_push_done(struct link_session address_to s, p64 now)
 {
         //      The part file becomes the name only whole, and is removed when
@@ -1473,8 +1496,13 @@ static fn link_push_done(struct link_session address_to s, p64 now)
         //      left beside the target by every push that failed.
         if (!s->failed)
                 s->failed = system_call_1(syscall(fsync),
-                                          (positive)s->writes[0].fd) < 0 ||
-                            !link_part_publish(s->writes[0].fd, s->part,
+                                          (positive)s->writes[0].fd) < 0;
+        //      A dictionary file is unpacked into a part file of its own
+        //      first, which then is the one published.
+        if (!s->failed && s->packed)
+                s->failed = !link_push_unpack(s);
+        if (!s->failed)
+                s->failed = !link_part_publish(s->writes[0].fd, s->part,
                                                s->whole);
         if (s->failed)
                 link_part_discard(s->writes[0].fd, s->part);
@@ -1700,6 +1728,186 @@ static bipolar link_part_open(string_address target, positive length,
         return -ERROR_EXISTS;
 }
 
+/*
+        The dictionary format of a pushed file. The sender packs the file
+        block by block, each block one zstd frame made with the dictionary
+        both ends hold, and each frame behind its length in four big-endian
+        bytes. The receiver writes the packed bytes as they come, as a raw
+        file is written, and unpacks them when the file has ended; the
+        sealed Waterlink datagrams carry the packed bytes like any others,
+        and nothing below the file is compressed. A frame is never longer
+        than PUSH_FRAME_MAX and decodes to at most PUSH_BLOCK bytes, so what
+        is written is bounded, and a frame that does not decode with this
+        dictionary is a failed push, never a misread one.
+*/
+static p8 push_block[PUSH_BLOCK];
+static p8 push_frame[PUSH_FRAME_MAX];
+
+static bool push_dictionary_load(void)
+{
+        return zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE);
+}
+
+/* Reads n bytes, or fewer only at the end of the file: what it read, or a negative error. */
+static bipolar push_fill(bipolar handle, p8 address_to into, positive n)
+{
+        positive got = 0;
+
+        while (got < n)
+        {
+                bipolar took = system_read_retry((positive)handle, into + got,
+                                                 n - got);
+
+                if (took < 0)
+                        return took;
+                if (took == 0)
+                        break;
+                got += (positive)took;
+        }
+        return (bipolar)got;
+}
+
+static bool push_put(bipolar handle, p8 address_to from, positive n)
+{
+        return (bipolar)system_write_all((positive)handle, from, n) ==
+               (bipolar)n;
+}
+
+/* Packs input into output from its present offset to its end. False when a read, the encoder or a write fails. */
+static bool push_pack(bipolar input, bipolar output)
+{
+        if (!push_dictionary_load())
+                return false;
+        for (;;)
+        {
+                bipolar took = push_fill(input, push_block, PUSH_BLOCK);
+                bipolar frame;
+                p8 head[4];
+
+                if (took < 0)
+                        return false;
+                if (took == 0)
+                        return true;
+                frame = zstd_deflate_mem(push_block, (positive)took, push_frame,
+                                         PUSH_FRAME_MAX);
+                if (frame <= 0 || (positive)frame > PUSH_FRAME_MAX)
+                        return false;
+                head[0] = (p8)((frame >> 24) & 0xff);
+                head[1] = (p8)((frame >> 16) & 0xff);
+                head[2] = (p8)((frame >> 8) & 0xff);
+                head[3] = (p8)(frame & 0xff);
+                if (!push_put(output, head, 4) ||
+                    !push_put(output, push_frame, (positive)frame))
+                        return false;
+                if ((positive)took < PUSH_BLOCK)
+                        return true;
+        }
+}
+
+/* Unpacks input into output from its present offset to its end. False when the input ends inside a frame, or a frame does not decode with this dictionary. */
+static bool push_unpack(bipolar input, bipolar output)
+{
+        if (!push_dictionary_load())
+                return false;
+        for (;;)
+        {
+                p8 head[4];
+                bipolar took = push_fill(input, head, 4);
+                positive frame;
+                bipolar plain;
+
+                if (took < 0)
+                        return false;
+                if (took == 0)
+                        return true;
+                if (took != 4)
+                        return false;
+                frame = ((positive)(head[0] & 0xff) << 24) |
+                        ((positive)(head[1] & 0xff) << 16) |
+                        ((positive)(head[2] & 0xff) << 8) |
+                        (positive)(head[3] & 0xff);
+                if (!frame || frame > PUSH_FRAME_MAX)
+                        return false;
+                if (push_fill(input, push_frame, frame) != (bipolar)frame)
+                        return false;
+                plain = zstd_inflate(push_frame, frame, push_block, PUSH_BLOCK);
+                if (plain < 0 || !push_put(output, push_block, (positive)plain))
+                        return false;
+        }
+}
+
+/*
+        The file a push sends, packed into a file that is unlinked as soon as
+        it exists, so only this process holds it. It is staged beside the
+        source, as a push is staged beside its target, and rewound to its
+        start. Answers the descriptor, or -1 when the file cannot be packed,
+        which sends the source as it is; the source is rewound either way.
+*/
+static bipolar push_pack_stage(string_address path, bipolar input)
+{
+        p8 part[LINK_REQUEST_MAX + 32];
+        bipolar output = link_part_open(path, string_length(path), part,
+                                        sizeof part, 0600);
+        bool packed = false;
+
+        if (output >= 0)
+        {
+                system_remove_at(AT_FDCWD, part, 0);
+                packed = push_pack(input, output) &&
+                         (bipolar)system_seek(output, 0, 0) >= 0;
+                if (!packed)
+                {
+                        system_close(output);
+                        output = -1;
+                }
+        }
+        (void)system_seek(input, 0, 0);
+        return packed ? output : -1;
+}
+
+/*
+        A dictionary file's staging file is unpacked into a part file of its
+        own, beside the name and with the file's mode, which then is the staging
+        file the publish takes; the packed one is removed. On failure the packed
+        file is still the staging file, and the caller removes it as it does any
+        failed push.
+*/
+static bool link_push_unpack(struct link_session address_to s)
+{
+        p8 part[LINK_REQUEST_MAX + 32];
+        bipolar packed, plain;
+        bool ok;
+
+        if (!link_part_owned(s->writes[0].fd, s->part))
+                return false;
+        packed = system_open_at(AT_FDCWD, s->part,
+                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        if (packed < 0)
+                return false;
+        plain = link_part_open((string_address)s->whole,
+                               string_length(s->whole), part, sizeof part, 0600);
+        if (plain < 0)
+        {
+                system_close(packed);
+                return false;
+        }
+        (void)system_call_2(syscall(fchmod), (positive)plain, s->mode);
+        ok = push_unpack(packed, plain) &&
+             system_call_1(syscall(fsync), (positive)plain) >= 0;
+        system_close(packed);
+        if (!ok)
+        {
+                link_part_discard(plain, part);
+                system_close(plain);
+                return false;
+        }
+        link_part_discard(s->writes[0].fd, s->part);
+        system_close(s->writes[0].fd);
+        s->writes[0].fd = plain;
+        string_copy((string_address)s->part, (string_address)part);
+        return true;
+}
+
 static bool link_start_push(struct link_session address_to s, p8 address_to path,
                             positive length, p32 mode)
 {
@@ -1739,7 +1947,7 @@ static fn link_refuse(struct link_session address_to s, string_address why)
 static bool link_request_well_formed(p8 kind, p8 address_to payload,
                                      positive length)
 {
-        positive skip = kind == LINK_KIND_PUSH ? 5 : 1;
+        positive skip = kind == LINK_KIND_PUSH ? LINK_PUSH_HEAD : 1;
 
         if (kind == LINK_KIND_SHELL)
                 return length >= 5 && length <= 5 + 31;
@@ -1795,11 +2003,38 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
 
         //      A command or a path is one string with no NUL in it, behind a
         //      push's mode; a terminal's request is its size and TERM.
-        skip = s->kind == LINK_KIND_PUSH ? 5 : 1;
+        skip = s->kind == LINK_KIND_PUSH ? LINK_PUSH_HEAD : 1;
         if (!link_request_well_formed(s->kind, payload, length))
         {
                 link_refuse(s, "that request is malformed");
                 return;
+        }
+        s->packed = false;
+        if (s->kind == LINK_KIND_PUSH)
+        {
+                p32 dictionary = ((p32)(payload[6] & 0xff) << 24) |
+                                 ((p32)(payload[7] & 0xff) << 16) |
+                                 ((p32)(payload[8] & 0xff) << 8) |
+                                 (p32)(payload[9] & 0xff);
+
+                //      The format and the dictionary are the far side's word,
+                //      checked before anything is staged: a file packed another
+                //      way, or with a dictionary this machine does not hold, is
+                //      refused, not decoded wrongly.
+                if (payload[5] == PUSH_FORMAT_DICTIONARY)
+                {
+                        if (dictionary != PUSH_DICTIONARY_ID)
+                        {
+                                link_refuse(s, "the far side packs with another dictionary: both ends must run the same moonwater");
+                                return;
+                        }
+                        s->packed = true;
+                }
+                else if (payload[5] != PUSH_FORMAT_RAW)
+                {
+                        link_refuse(s, "that file is packed in a format this machine does not know");
+                        return;
+                }
         }
         if (s->kind != LINK_KIND_SHELL)
         {
@@ -1807,7 +2042,10 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 text[length - skip] = 0;
         }
         if (s->kind == LINK_KIND_PUSH)
+        {
                 memory_copy(address_of mode, payload + 1, 4);
+                s->mode = mode & 07777;
+        }
         if ((s->kind == LINK_KIND_PUSH || s->kind == LINK_KIND_PULL) &&
             link_path_is_own((string_address)text))
         {
@@ -1839,7 +2077,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 started = link_start_command(s, log, 2);
                 break;
         case LINK_KIND_PUSH:
-                started = text[0] && link_start_push(s, text, length - 5,
+                started = text[0] && link_start_push(s, text, length - skip,
                                                      mode & 07777);
                 break;
         default:
@@ -3359,6 +3597,7 @@ static b32 link_client_run(string_address name, p8 kind,
                 {
                         file_facts facts;
                         p32 mode;
+                        bipolar packed;
 
                         input = system_open_at(AT_FDCWD, words[0],
                                                FILE_READ | O_CLOEXEC);
@@ -3369,6 +3608,21 @@ static b32 link_client_run(string_address name, p8 kind,
                                        : 0644;
                         memory_copy(request + request_length, address_of mode, 4);
                         request_length += 4;
+                        //      The file goes packed with the dictionary when it can be packed, and
+                        //      raw when it cannot: the request says which, and the id of the
+                        //      dictionary it was packed with, which the far side checks.
+                        packed = push_pack_stage(words[0], input);
+                        if (packed >= 0)
+                        {
+                                system_close(input);
+                                input = packed;
+                        }
+                        request[request_length++] = packed >= 0 ? PUSH_FORMAT_DICTIONARY
+                                                                : PUSH_FORMAT_RAW;
+                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 24) & 0xff);
+                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 16) & 0xff);
+                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 8) & 0xff);
+                        request[request_length++] = (p8)(PUSH_DICTIONARY_ID & 0xff);
                 }
                 else if (string_length(words[1]) >= sizeof s->whole ||
                          string_length(words[1]) + 28 > sizeof s->part)

@@ -90201,8 +90201,9 @@ static bool wls_file_over(struct link_session address_to s, p8 ask,
         request[0] = ask;
         if (ask == LINK_ASK_PUSH)
         {
-                memory_zero(request + 1, 4);
-                at += 4;
+                //      The mode, then the format (raw) and the dictionary's id.
+                memory_zero(request + 1, LINK_PUSH_HEAD - 1);
+                at += LINK_PUSH_HEAD - 1;
         }
         memory_copy(request + at, path, length);
         link_request(s, request, at + length);
