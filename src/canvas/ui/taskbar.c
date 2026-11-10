@@ -894,9 +894,9 @@ static void taskbar_battery_refresh(void)
 }
 
 /*
-        The launcher button's mark: the apps mark, a grid of three by three round dots, centred on the button. The grid is a little
-        over half the button across (the dots' pitch 28 percent of the button, a dot 55 percent of the pitch), the dots whole device
-        pixels across and apart at every scale, each the kit's fill with a corner of half its width (as the notices dot is), so there is
+        The launcher button's mark: the apps mark, a grid of three by three round dots, centred on the button. The grid is about
+        three quarters of the button across (the dots' pitch 28 percent of the button, a dot 65 percent of the pitch), the dots whole
+        device pixels across and apart at every scale, each the kit's fill with a corner of half its width (as the notices dot is), so there is
         no icon file and no font in it. It is recorded into the frame's scene when there is one, as the dot and the speaker are.
 */
 static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y,
@@ -905,7 +905,7 @@ static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct
         struct ui ui;
         int side = width < height ? width : height, step = (side * 28 + 50) / 100, dot, span, left, top;
 
-        dot = (step * 55 + 50) / 100;
+        dot = (step * 65 + 50) / 100;
         dot = dot < 1 ? 1 : dot;
         step = step < dot + 1 ? dot + 1 : step;
         span = 2 * step + dot;

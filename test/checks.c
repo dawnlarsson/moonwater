@@ -126716,7 +126716,7 @@ static void check_taskbar_launcher(void)
                 int least_x = 1 << 30, least_y = 1 << 30, most_x = -1, most_y = -1;
                 unsigned long sum[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-                dot = (pitch * 55 + 50) / 100;
+                dot = (pitch * 65 + 50) / 100;
                 dot = dot < 1 ? 1 : dot;
                 pitch = pitch < dot + 1 ? dot + 1 : pitch;
                 span = 2 * pitch + dot;
@@ -126754,7 +126754,7 @@ static void check_taskbar_launcher(void)
                 glyphs &= !stray && whole && span <= side && most_x >= 0 && (least_x - x) - (x + w - 1 - most_x) >= -1 &&
                           (least_x - x) - (x + w - 1 - most_x) <= 1 && (least_y - y) - (y + h - 1 - most_y) >= -1 &&
                           (least_y - y) - (y + h - 1 - most_y) <= 1;
-                // The grid is the same whole pixels at every scale: a dot is 1 to 7 pixels and the grid over half the button across.
+                // The grid is the same whole pixels at every scale: a dot is 1 to 9 pixels and the grid over half the button across.
                 scale_ok &= dot >= 1 && 2 * span >= side;
             }
         }
