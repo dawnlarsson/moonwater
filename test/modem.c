@@ -216,6 +216,30 @@ static void test_session(void)
 	free(bad);
 }
 
+/* A replayed frame ahead of a fresh one in the same capture must not hide the fresh one: the receiver takes it. */
+static void test_stale_frame_does_not_hide_fresh(void)
+{
+	static const uint8_t one[] = "one.", two[] = "two.";
+	size_t cap = modem_encode_samples(4);
+	int16_t *a = malloc(sizeof(int16_t) * cap), *b = malloc(sizeof(int16_t) * cap), *both = malloc(sizeof(int16_t) * 2 * cap);
+	size_t na = modem_encode(KEY, KEYLEN, 1, one, 4, a, cap), nb = modem_encode(KEY, KEYLEN, 2, two, 4, b, cap);
+	uint8_t out[8];
+	uint32_t seq = 0;
+	modem_rx rx;
+	int got;
+
+	memcpy(both, a, na * sizeof(int16_t));
+	memcpy(both + na, b, nb * sizeof(int16_t));
+	modem_rx_open(&rx, KEY, KEYLEN);
+	check(modem_rx_frame(&rx, a, na, out, sizeof(out), &seq) == 4 && rx.last == 1, "session takes the first frame");
+	got = modem_rx_frame(&rx, both, na + nb, out, sizeof(out), &seq);
+	check(got == 4 && seq == 2 && memcmp(out, two, 4) == 0 && !rx.closed,
+	      "a replay ahead of a fresh frame in the same capture does not hide the fresh frame");
+	free(a);
+	free(b);
+	free(both);
+}
+
 static void test_noise(void)
 {
 	static const double snrs[] = {10, 6, 3, 0, -3};
@@ -292,6 +316,7 @@ int main(void)
 	test_bounds();
 	test_wrongkey_and_replay();
 	test_session();
+	test_stale_frame_does_not_hide_fresh();
 	test_noise();
 	test_bench();
 	printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);

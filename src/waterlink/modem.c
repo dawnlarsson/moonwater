@@ -372,9 +372,11 @@ static int modem_read_bytes(const uint8_t *bits, size_t nb, size_t p, uint8_t *d
 }
 
 /* Looks for a frame in the bit array. The sync word is matched with a rolling 32-bit window, so the scan costs
-   one shift per bit. Sets *tagfail if a candidate had a valid sync and length but a bad tag. */
+   one shift per bit. Sets *refusal if a candidate had a valid sync and length but a bad tag, or, when gated, an
+   authentic frame that is not fresh after last: such a frame is passed over, so a replay ahead of a fresh frame
+   does not hide it. */
 static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, size_t klen,
-			    uint8_t *out, size_t cap, uint32_t *seq, int *tagfail)
+			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last)
 {
 	uint32_t window = 0;
 	size_t i;
@@ -400,13 +402,19 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 				for (t = 0; t < MODEM_TAG; t++)
 					diff |= (unsigned)(mac[t] ^ buf[MODEM_HDR + len + t]);
 				if (diff)
-					*tagfail = 1;
+					*refusal = 1;
 				else if (len <= cap)
 				{
-					*seq = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16) |
+					uint32_t got = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16) |
 					       ((uint32_t)buf[3] << 8) | buf[4];
-					memcpy(out, buf + MODEM_HDR, len);
+					if (gated && !modem_fresh(last, got))
+							*refusal = 1;
+						else
+						{
+							*seq = got;
+							memcpy(out, buf + MODEM_HDR, len);
 					return (int)len;
+						}
 				}
 			}
 		}
@@ -424,12 +432,12 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 static uint8_t modem_best[MODEM_MAX_SAMPLES];
 
 static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
-			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused)
+			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last)
 {
 	int64_t P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
 	size_t ia[MODEM_TONES + 1], ir[MODEM_TONES + 1], is[MODEM_TONES + 1];
 	size_t s, off;
-	int tagfail = 0, c, k;
+	int refusal = 0, c, k;
 
 	if (!pcm || !out || !seq || !modem_key_ok(key, klen) || n < MODEM_SYM || n > MODEM_MAX_SAMPLES)
 		return -1;
@@ -496,11 +504,11 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 			for (j = 0; j < MODEM_SYM_BITS; j++)
 				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
-		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &tagfail);
+		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &refusal, gated, last);
 		if (r >= 0)
 			return r;
 	}
-	if (refused && tagfail)
+	if (refused && refusal)
 		*refused = 1;
 	return -1;
 }
@@ -508,7 +516,7 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 int modem_decode(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
 		 uint8_t *out, size_t cap, uint32_t *seq)
 {
-	return modem_decode_core(pcm, n, key, klen, out, cap, seq, 0);
+	return modem_decode_core(pcm, n, key, klen, out, cap, seq, 0, 0, 0);
 }
 
 int modem_fresh(uint32_t last, uint32_t seq)
@@ -543,7 +551,7 @@ int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, siz
 
 	if (!rx || rx->closed)
 		return -1;
-	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused);
+	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last);
 	if (r < 0)
 		return refused ? modem_refuse(rx) : -1;
 	if (!modem_fresh(rx->last, *seq))
