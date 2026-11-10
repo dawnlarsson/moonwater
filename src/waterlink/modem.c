@@ -702,7 +702,7 @@ static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
         /* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
            at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass
            over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
-           the frame_end of the search. */
+           the end of the search. */
         for (off = 0; off < MODEM_SYM; off++) {
                 sized nb = 0, at, endbit = 0, frame_end, cut_bit = 0;
                 p8 cand[MODEM_PAYLOAD_MAX];
