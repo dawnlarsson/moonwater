@@ -50863,7 +50863,7 @@ while True:
                    f"mount --rbind /proc {sandbox}/proc && "
                    f"exec chroot {sandbox} /usr/bin/sh -c 'cd / && . /tmp/script'")
         child = subprocess.Popen(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper], stdin=subprocess.DEVNULL,
-                                 stdout=slave, stderr=slave, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+                                 stdout=slave, stderr=slave, env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"})
         os.close(slave)
         shown = b""
         try:
@@ -52942,7 +52942,7 @@ def harness_moonwater_cli_fuzz(argv):
             try:
                 ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c", wrapper],
                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=3000,
-                                     env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+                                     env={"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"})
             except subprocess.TimeoutExpired:
                 return [], "ran past 3000 s"
             results = []
@@ -77693,7 +77693,7 @@ def harness_state_cuts(argv):
                        f"mount --rbind /proc {sandbox}/proc && "
                        f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
                        f"--harness state_cuts --inside --shell /tmp/moonwater")
-            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C",
+            environment = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C",
                            "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", ""),
                            "MOONWATER_CUTS_ONLY": os.environ.get("MOONWATER_CUTS_ONLY", "")}
             try:
@@ -78043,7 +78043,7 @@ def harness_moonwater_state_fuzz(argv):
                        f"mount --rbind /proc {sandbox}/proc && "
                        f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
                        f"--harness moonwater_state_fuzz --inside --shell /tmp/moonwater")
-            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+            environment = {"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C"}
             for name in ("MOONWATER_FUZZ_RUNS", "MOONWATER_FUZZ_SECONDS", "MOONWATER_FUZZ_SEED",
                          "MOONWATER_FUZZ_ONLY", "MOONWATER_FUZZ_SHOW", "MOONWATER_FUZZ_ALL"):
                 if name in os.environ:
