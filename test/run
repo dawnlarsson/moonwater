@@ -10729,8 +10729,8 @@ b32 main()
                         positive wrong = 0;
                         memory_fill(tab_stop, 0xa5, sizeof(tab_stop));
                         tabs_reset();
-                        for (positive at = 0; at < sizeof(tab_stop); at++)
-                                wrong += tab_stop[at] != (at % 8 == 0);
+                        for (positive at = 0; at < TAB_COLUMNS; at++)
+                                wrong += tab_is(at) != (at % 8 == 0);
                         say_number(wrong);
                         say_byte('\n');
                 }

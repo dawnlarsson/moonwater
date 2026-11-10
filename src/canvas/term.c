@@ -117,10 +117,13 @@ struct cursor_state
 static struct cursor_state cursor_saved = {0, 0, 7, 0, 0, false};
 static struct cursor_state cursor_primary = {0, 0, 7, 0, 0, false};
 
-// Tab stops, one byte a column, which is what makes HTS and TBC mean
-// anything. Wide enough for a column of pixels on any screen this runs on.
-#define TAB_STOPS 1024
-static p8 tab_stop[TAB_STOPS] __attribute__((aligned(8)));
+// Tab stops, one bit a column, which is what makes HTS and TBC mean anything.
+// The table is cut for the widest grid there is: grid_take holds COLUMNS to
+// TAB_COLUMNS, and a ring of eight byte cells holding the 512 lines the
+// terminal starts with leaves room for 2^20 of them.
+#define TAB_COLUMNS (1u << 20)
+#define TAB_WORD (8 * sizeof(unsigned long))
+static unsigned long tab_stop[TAB_COLUMNS / TAB_WORD] __attribute__((aligned(8)));
 
 static fn touch(unsigned int at)
 {
@@ -1116,9 +1119,26 @@ static fn erase(unsigned int from_row, unsigned int from_column,
         }
 }
 
+static fn tab_set(unsigned int c, b32 on)
+{
+        if (c >= TAB_COLUMNS)
+                return;
+
+        if (on)
+                tab_stop[c / TAB_WORD] |= 1ul << (c % TAB_WORD);
+        else
+                tab_stop[c / TAB_WORD] &= ~(1ul << (c % TAB_WORD));
+}
+
+static b32 tab_is(unsigned int c)
+{
+        return c < TAB_COLUMNS && (tab_stop[c / TAB_WORD] >> (c % TAB_WORD) & 1);
+}
+
+// A stop at every eighth column, which is bit 0 of each byte.
 static fn tabs_reset()
 {
-        memory_fill_u64_aligned(tab_stop, TAB_STOPS / 8, 1);
+        memory_fill_u64_aligned(tab_stop, sizeof(tab_stop) / 8, 0x0101010101010101ul);
 }
 
 static fn tab_forward()
@@ -1126,7 +1146,7 @@ static fn tab_forward()
         unsigned int c = column;
 
         while (++c < COLUMNS)
-                if (c >= TAB_STOPS || tab_stop[c])
+                if (tab_is(c))
                         break;
 
         column = c < COLUMNS ? c : COLUMNS - 1;
@@ -1142,7 +1162,7 @@ static fn tab_backward()
         while (c)
         {
                 c--;
-                if (c < TAB_STOPS && tab_stop[c])
+                if (tab_is(c))
                         break;
         }
 
@@ -1864,8 +1884,8 @@ static fn csi_final(unsigned int final)
                 }
                 // TBC 0 (or none) clears the stop under the cursor; any other
                 // number is no TBC at all, as xterm and tmux read it.
-                else if (column < TAB_STOPS && terminal_csi.value[0] == 0)
-                        tab_stop[column] = 0;
+                else if (terminal_csi.value[0] == 0)
+                        tab_set(column, false);
                 break;
         case 'h':
                 mode_set(true);
@@ -2347,8 +2367,7 @@ static fn consume(unsigned int c)
                                 row--;
                         break;
                 case 'H':
-                        if (column < TAB_STOPS)
-                                tab_stop[column] = 1;
+                        tab_set(column, true);
                         break;
                 case 'c':
                         full_reset();
@@ -4140,6 +4159,10 @@ static fn grid_take()
 
         if (COLUMNS > window->stride)
                 COLUMNS = window->stride;
+
+        // The tab stops are cut for this many columns and no more.
+        if (COLUMNS > TAB_COLUMNS)
+                COLUMNS = TAB_COLUMNS;
 }
 
 // The pty is told the grid, so a program that asks has the size it is drawn
