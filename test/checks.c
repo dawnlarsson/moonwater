@@ -148184,6 +148184,31 @@ static fn check_kit_place(void)
                       ltr_right && !ltr_left && rtl_left && !rtl_right);
         }
 
+        // A press dragged out of a button and let go outside is no click, and leaves no hover behind; a button disabled while it
+        // is held is no click either.
+        {
+                struct ui_control btn[2];
+                struct ui_control address_to got_out, got_off;
+                b32 out_hover;
+
+                for (int k = 0; k < 2; k++)
+                {
+                        memory_zero(&btn[k], sizeof(btn[k]));
+                        btn[k].kind = UI_BUTTON, btn[k].label = "";
+                        btn[k].x = 100, btn[k].y = 220, btn[k].w = 120, btn[k].h = 36;
+                        ui_control_start(&btn[k]);
+                }
+                ui_kit_pointer(&ui, &btn[0], 1, WINDOW_EVENT_BUTTON, 150, 238, true, 0);
+                ui_kit_pointer(&ui, &btn[0], 1, WINDOW_EVENT_MOTION, 400, 238, false, 0);
+                got_out = ui_kit_pointer(&ui, &btn[0], 1, WINDOW_EVENT_BUTTON, 400, 238, false, 0);
+                out_hover = btn[0].hover;
+                ui_kit_pointer(&ui, &btn[1], 1, WINDOW_EVENT_BUTTON, 150, 238, true, 0);
+                btn[1].disabled = 1;
+                got_off = ui_kit_pointer(&ui, &btn[1], 1, WINDOW_EVENT_BUTTON, 150, 238, false, 0);
+                check("kit button: a press dragged out and let go outside is no click and leaves no hover, and one disabled while held is none",
+                      !got_out && !out_hover && !got_off);
+        }
+
         // A press on a row ripples across the whole row, edge to edge, and not past it: a switch whose box is its pill
         // alone, in a row 580 wide (a settings row across its pane), pressed near the pill.
         {

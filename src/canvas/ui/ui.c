@@ -5911,7 +5911,10 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 if (c->kind == UI_BUTTON)
                 {
                         ui_squish_release(&c->squish);
-                        if (!c->moved && ui_control_hit(ui, c, x, y) >= 0)
+                        // The hover is where the pointer is now: the held motion did not keep it, so a press dragged out and let go
+                        // outside leaves none. A button disabled while it was held is not clicked (a disabled one takes no press).
+                        c->hover = ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0;
+                        if (!c->moved && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
                                 changed = c;
                 }
                 else if (c->kind == UI_TABS)
