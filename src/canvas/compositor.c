@@ -13996,6 +13996,27 @@ static void compositor_take(int row)
 static void compositor_motion(void);
 
 /*
+        The window the pointer is held to (compositor.grab): the one a button still down was pressed in, kept while it is
+        the window of one (the first's when more are down), or none. A button let go, or the window of one going, moves
+        the hold to the window of another button still down, so the motion and the wheel stay with the press that holds them.
+*/
+static void compositor_grab_settle(void)
+{
+        int held = COMPOSITOR_NONE;
+
+        for (unsigned int index = 0; index < 8; index++)
+        {
+                if (!(compositor.button_down >> index & 1))
+                        continue;
+                if (compositor.button_row[index] == compositor.grab)
+                        return;
+                if (held < 0)
+                        held = compositor.button_row[index];
+        }
+        compositor.grab = held;
+}
+
+/*
         A row whose door has closed: its program is gone. The window goes
         from the screen, its pixels are given back, and the row is free.
 */
@@ -14025,7 +14046,6 @@ static void compositor_leave(int row)
         }
         compositor.hover = compositor.hover == row ? COMPOSITOR_NONE : compositor.hover;
         compositor.told_row = compositor.told_row == row ? COMPOSITOR_NONE : compositor.told_row;
-        compositor.grab = compositor.grab == row ? COMPOSITOR_NONE : compositor.grab;
         if (compositor.preview_row == row)
                 compositor_preview(COMPOSITOR_NONE);
         // What is drawn of its preview goes with it, and nothing of it is held to be put back.
@@ -14058,6 +14078,7 @@ static void compositor_leave(int row)
         for (unsigned int index = 0; index < 8; index++)
                 if (compositor.button_row[index] == row)
                         compositor.button_down &= (unsigned char)~(1u << index);
+        compositor_grab_settle();
         // The stack is one shorter, so an Alt-Tab under way ends here, on the window it stopped on, as letting go of
         // Alt would have ended it: that window is brought back if it was put away, and has the keys.
         if (compositor.cycle)
@@ -16282,7 +16303,7 @@ static void compositor_drag_begin(int under)
 // A release with flags: WINDOW_KEY_CANCEL is one that is no click (a finger that became two, or was held).
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
-        int grab = compositor.grab, dragged = compositor.drag, to = grab, resized = compositor.resize;
+        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize;
         unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING;
         int drop_screen = 0, drop_box[4];
         unsigned int drop_touch = 0;
@@ -16296,7 +16317,6 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         // The preview goes with the drag; where the window lands is the target read above, from its rectangle.
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = COMPOSITOR_NONE;
-        compositor.grab = COMPOSITOR_NONE;
         compositor.resize = COMPOSITOR_NONE;
         // What the hand held is let go: its line is no longer lit.
         if (dragged >= 0 || resized >= 0)
@@ -16308,11 +16328,15 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         if (resized >= 0 && compositor.shared_row >= 0)
                 compositor.shared_row = COMPOSITOR_NONE;
         // A button is let go in the window it was pressed in: a second button pressed over another window while the
-        // first is held is that window's, and the first's release is the one that window held the grab for.
+        // first is held is that window's, and the first's release is the one that window held the grab for. A button
+        // that was never recorded as pressed in a window (its press was taken by a popup, a minimise or a hold's cancel)
+        // goes to none: the window the grab holds is not its window, and it never had the press. The grab is kept while
+        // another button still down holds it.
         if (index < 8 && (compositor.button_down >> index & 1))
         {
                 to = compositor.button_row[index];
                 compositor.button_down &= (unsigned char)~(1u << index);
+                compositor_grab_settle();
         }
         compositor_post(to, WINDOW_EVENT_BUTTON, flags, (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
