@@ -25,160 +25,220 @@ tiers (`sec_default`, `sec_hardened`, `sec_locked`; see
 ## The `moonwater` command
 
 `moonwater` manages the system itself: where it lives, what runs at boot, and
-what the events of the machine do. A selection:
+what the events of the machine do. Its commands are grouped as the Settings window groups its
+rows, and the ones no row has are under All commands:
 
 ```sh
-moonwater status                       this session as one page
-moonwater help [VERB]                  these commands, or the page of one
-moonwater setup                        where this session runs, and the installs found
-moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it
-                                       removable takes a disk that says it is; yes
-                                       is for a script, which cannot be asked
-moonwater setup update [DISK]          write this build over an install, keeping its data
-moonwater setup use [DISK]             run this build with the data of an install
-moonwater setup live                   leave the disks alone this session
-moonwater wipe [yes]                   forget /home and /root, keep the machine; yes
-                                       is for a script, which cannot be asked
-moonwater bind                         the events of the machine, and what each runs
-moonwater bind EVENT [COMMAND]         one event; empty puts the default back
-moonwater bind init                    what runs at every boot, with ids
-moonwater bind init add "command"      run a command at boot, once disks settle
-moonwater bind init remove ID|"command"  stop running one at boot
-moonwater canvas                       whether Canvas is on, and the screens it draws on
-moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
-moonwater desktop start|stop           begin the chosen desktop now, or end its session
-moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, every control of the UI kit
-moonwater window                       the windows on the desktop: name, pid, place, size, title
-moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says:
-                                       center, at X,Y, maximized, fullscreen, screen N,
-                                       size WxH, name NAME (what it is remembered by)
-moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
-moonwater clipboard [primary]          what the clipboard holds and who copied it, never the text (root)
-moonwater clipboard get [primary]      the copied text: exact to a file or a pipe, escaped to a terminal (root)
-moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
-moonwater clipboard clear              empty both selections and the history (root)
-moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
-moonwater latency [reset]              what the input handlers cost a report, and who has the display
-moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
-moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them
-moonwater sensors                      the processor use, clocks, GPU load, heat, fans and power of this machine, read now
-moonwater name [NEW|random]            what this machine is called, like space-wizard
+# Machine
 moonwater language [CODE|default]      the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]
-moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it ar il ir [us]
-moonwater keyboard onscreen [auto|off|on]  a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]
-moonwater keyboard start               exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard
-moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
-moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
-moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
-moonwater timezone auto                from the network, one Cloudflare request per network joined [auto]
-moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
+moonwater name [NEW|random]            what this machine is called, like space-wizard
+
+
+# Canvas
+moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater canvas arrange [NAME[@X,Y|@off]...|default]  where each screen is: names left to right, the first the primary [default]
 moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
-moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
-moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]
-moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
-moonwater canvas wheel smooth [on|off]  a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]
-moonwater canvas trackpad speed [slow|normal|fast]  how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]
-moonwater canvas scroll natural [on|off]  a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]
-moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]
-moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
+moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
+moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
+moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 16 MiB [16]
+moonwater canvas gpu [on|off]          draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]
+moonwater canvas identify              show the number of each screen for three seconds
+moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
+moonwater canvas record [SECONDS]      record the presents of the compositor for SECONDS (1 to 10, 3 by default)
+moonwater canvas record report         the report of the presents: the paths, flips, late and held presents
 moonwater canvas text scale [PERCENT|default]  how large the text of the windows Canvas draws is, 50 to 300 percent [100]
+moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]
+moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]
+moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
+moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
+
+
+# Display
+moonwater brightness [N%|+N|-N]        the screen backlight
+moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
+
+
+# Input
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
 moonwater canvas predict touch [on|off]  a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]
-moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
 moonwater canvas touch left [off|windows|launcher]  a swipe in from the left edge runs the window switcher, or opens the launcher [off]
 moonwater canvas touch right [off|windows|volume]  a swipe in from the right edge runs the window switcher, or opens the volume popup [off]
-moonwater canvas gpu [on|off]    draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]
-moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
-moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
-moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 16 MiB [16]
-moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
-moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
+moonwater canvas wheel smooth [on|off]  a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]
+moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it ar il ir [us]
+moonwater keyboard onscreen [auto|off|on]  a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]
+moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
+moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
+moonwater keyboard start               exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
+moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
+
+
+# Scrolling
+moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]
+moonwater canvas scroll natural [on|off]  a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]
+moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
+moonwater canvas trackpad speed [slow|normal|fast]  how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]
+
+
+# Sound
 moonwater audio                        the volume and the mute, the sound card and the cards there are, the programs that play, the microphone and the programs that record, and whether the sound server starts
-moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0 to 100 percent [100]
-moonwater audio mute [on|off]          silence everything that plays, and keep the volume [off]
-moonwater audio device [NAME|default]  the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]
-moonwater audio server [on|off]        the server programs play their sound through; off keeps it from starting with the desktop [on]
 moonwater audio capture [on|off]       let programs record from the microphone; off ends every recording and refuses new ones [on]
-moonwater audio source [NAME|default]  the microphone programs record from, by the name bare audio lists; default picks the first [default]
-moonwater audio input volume [PERCENT|default]  the volume of the microphone, 0 to 100 percent [100]
+moonwater audio device [NAME|default]  the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]
 moonwater audio input mute [on|off]    silence the microphone, and keep its volume [off]
+moonwater audio input volume [PERCENT|default]  the volume of the microphone, 0 to 100 percent [100]
+moonwater audio mute [on|off]          silence everything that plays, and keep the volume [off]
+moonwater audio server [on|off]        the server programs play their sound through; off keeps it from starting with the desktop [on]
+moonwater audio source [NAME|default]  the microphone programs record from, by the name bare audio lists; default picks the first [default]
 moonwater audio test                   play a second of 440 Hz through the sound server and say what became of it: no server, no card, a mixer that is off, muted, or played on this card
-moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
+moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0 to 100 percent [100]
+
+
+# Taskbar
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
-moonwater taskbar scale [PERCENT|default]  how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]
-moonwater taskbar padding [PX|default]  the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]
-moonwater taskbar launcher [on|off]    a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again [off]
 moonwater taskbar fullscreen [on|off]  the taskbar slides away while a window is fullscreen, and comes back when none is [on]
+moonwater taskbar launcher [on|off]    a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again [off]
+moonwater taskbar padding [PX|default]  the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]
+moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
+moonwater taskbar scale [PERCENT|default]  how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
 moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
+
+
+# Time
 moonwater ntp [on|off]                 set the clock from the network [on]
-moonwater time [sync]                  the clock; sync sets it and the zone now
-moonwater time format [24h|12h]        the hours the clock is read in, on the tray and in GNOME programs [24h]
-moonwater time date [off|ymd|dmy|mdy]  the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]
-moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
-moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]
 moonwater ntp nts servers [NAME[:PORT]...|default]  who is asked for it, up to four
-moonwater wired [on|off]               the wired links; off keeps them down
+moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
+moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
+moonwater time [sync]                  the clock; sync sets it and the zone now
+moonwater time date [off|ymd|dmy|mdy]  the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]
+moonwater time format [24h|12h]        the hours the clock is read in, on the tray and in GNOME programs [24h]
+moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
+moonwater timezone auto                from the network, one Cloudflare request per network joined [auto]
+
+
+# Network
 moonwater airplane [on|off]            every radio at once
-moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
-moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
-moonwater security                     the built-in trust, and what was added to it or taken from it
-moonwater security trust               every anchor, built in and added, by the SHA-256 of its key
-moonwater security trust add FILE      trust a CA certificate, PEM or DER, as the built-in anchors are
-moonwater security trust remove SHA256  stop trusting an anchor that was added
-moonwater security block               every key refused, built in and added
-moonwater security block add SHA256|FILE  refuse a key wherever it is: an anchor, a CA, a leaf, a CT log
-moonwater security block remove SHA256  stop refusing a key that was added; a built-in one stays
-moonwater security tls12 [on|off]      TLS 1.2 where a server offers nothing newer; off asks for 1.3 alone [on]
-moonwater security aia [on|off]        fetch a CA a server left out, from where its certificate says [on]
-moonwater security revocation [soft|hard]  hard refuses a certificate whose revocation cannot be told [soft]
-moonwater security ct [on|off]         ask Certificate Transparency of every chain, not only at the tight tier [off]
-moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
-moonwater security packages [on|off]   programs of a bowl may run the package manager of its distribution [on]
-moonwater security sudo [on|off]       moonwater through sudo or su in a bowl; on trusts root in a bowl as root
-                                       of the machine, for single-user machines [off]
+moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
+moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
+moonwater wired [on|off]               the wired links; off keeps them down
+
+
+# Waterlink
+moonwater link                         who this machine is linked with, and what each may do
+moonwater link add NAME KEY [HOST[:PORT]]  link by key, with no code
+moonwater link allow|deny NAME GRANT...  shell run log files (any file but the link state)
+moonwater link group [NAME [SECRET|-] [allow GRANT...]]  machines on one network that link themselves
+moonwater link group leave NAME [forget]  stop, and forget the key of the group
+moonwater link key                     the public key of this machine, which link add takes
+moonwater link log NAME                follow the kernel log of NAME
+moonwater link modem key               the audio modem's key, in hex, made on first use: the receiver needs the same
+moonwater link modem send FILE         FILE over the sound card to the Mac's receiver (tools/modem_rx.c); nothing is acknowledged
+moonwater link NAME [COMMAND...]       a terminal on NAME, or one command with its status
+moonwater link NAME CODE               link to the machine called NAME, which waits
+moonwater link on|off                  the listener, kept across boots [off]
+moonwater link pair [NAME]             a code, and wait for the other machine to use it
+moonwater link port [N|auto]           the udp port it takes, and `link add` assumes [22348]
+moonwater link pull NAME PATH FILE     PATH there to a file here
+moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all
+moonwater link remove NAME             stop knowing it
+moonwater link transport [network|modem]  how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]
+
+
+# Wi-Fi
 moonwater wifi [on|off]                the radio, saved networks and those in range [off]
+moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network, joined once wifi is on; asks for the password, - reads it from stdin; wpa2 lets a tight tier join it without WPA3
+moonwater wifi remove SSID             forget a saved network, and leave it
+
+
+# Bluetooth
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
 moonwater bluetooth add NAME           keep the name of a device, found once the radio is on
 moonwater bluetooth remove NAME        forget a bluetooth device
+moonwater bluetooth share [on|off]     the machine's internet, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]
+moonwater bluetooth share [on|off]     the machine's internet over Bluetooth to the devices that pair with it; off until on (root)
+
+
+# Devices
+moonwater device [lock|unlock]         unlock lets a new device in; lock holds it until it is allowed [unlock]
 moonwater device [lock|unlock]         lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
-moonwater device class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
-moonwater device list                  the devices the system sees, each allowed, blocked or waiting
-moonwater device allow|deny ID|PORT    let one device in, or hold it, now and at every plug;
-                                       ID is VID:PID, or VID:PID/SERIAL as device shows it
-moonwater device forget ID|PORT        drop the rule of one device
-moonwater device log [N]               the last decisions, the newest last [20]
+moonwater device allow|deny ID|PORT    let one device in, or hold it, now and at every plug; ID is VID:PID, or VID:PID/SERIAL as device shows it
 moonwater device apply                 judge every device again now, as boot does
-moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
-moonwater brightness [N%|+N|-N]        the screen backlight
+moonwater device class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
+moonwater device forget ID|PORT        drop the rule of one device
+moonwater device list                  the devices the system sees, each allowed, blocked or waiting
+moonwater device log [N]               the last decisions, the newest last [20]
+
+
+# Power
+moonwater battery [NAME|auto|none]     which battery the Battery row reads: auto is the first present one, none is no battery [auto]
+moonwater charge [limit N|limit off]   where the battery stops charging, 20 to 100
 moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
 moonwater cpu online|offline N         hotplug one processor
-moonwater charge [limit N|limit off]   where the battery stops charging, 20 to 100
-moonwater battery [NAME|auto|none]     which battery the Battery row reads:
-                                       auto is the first present one, none is no battery [auto]
+moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
+
+
+# Boot
+moonwater bind                         the events of the machine, and what each runs
+moonwater bind canvas on|off [COMMAND]  when the desktop starts or stops
+moonwater bind EVENT [COMMAND]         one event; empty puts the default back
+moonwater bind exit                    what runs at poweroff or reboot
+moonwater bind exit add "command"      run a command before the disks go read-only
+moonwater bind exit remove ID|"command"  stop running one at the stop
+moonwater bind init                    what runs at every boot, with ids
+moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init canvas [on|off]    start Canvas at boot [on]
 moonwater bind init mount [on|off]     mount kept disks at boot [on]
-moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater bind init remove ID|"command"  stop running one at boot
+moonwater bind poweroff [COMMAND]      the power button [poweroff]
+
+
+# All commands
 moonwater bios [reboot]                whether firmware setup is on offer; reboot goes
-moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network, joined once wifi is on; asks for
-                                       the password, - reads it from stdin; wpa2 lets a tight
-                                       tier join it without WPA3
-moonwater wifi remove SSID             forget a saved network, and leave it
-moonwater link                         who this machine is linked with, and what each may do
-moonwater link pair [NAME]             a code, and wait for the other machine to use it
-moonwater link NAME CODE               link to the machine called NAME, which waits
-moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all
-moonwater link on|off                  the listener, kept across boots [off]
-moonwater link transport [network|modem]   how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]
+moonwater clipboard [primary]          what the clipboard holds and who copied it, never the text (root)
+moonwater clipboard clear              empty both selections and the history (root)
+moonwater clipboard get [primary]      the copied text: exact to a file or a pipe, escaped to a terminal (root)
+moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
+moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
+moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
+moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
+moonwater desktop start|stop           begin the chosen desktop now, or end its session
+moonwater help [VERB]                  these commands, or the page of one
+moonwater latency [reset]              what the input handlers cost a report, and who has the display
+moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them
+moonwater security                     the built-in trust, and what was added to it or taken from it
+moonwater security aia [on|off]        fetch a CA a server left out, from where its certificate says [on]
+moonwater security block               every key refused, built in and added
+moonwater security block add SHA256|FILE  refuse a key wherever it is: an anchor, a CA, a leaf, a CT log
+moonwater security block remove SHA256  stop refusing a key that was added; a built-in one stays
+moonwater security ct [on|off]         ask Certificate Transparency of every chain, not only at the tight tier [off]
+moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
+moonwater security packages [on|off]   programs of a bowl may run the package manager of its distribution [on]
+moonwater security revocation [soft|hard]  hard refuses a certificate whose revocation cannot be told [soft]
+moonwater security sudo [on|off]       moonwater through sudo or su in a bowl; on trusts root in a bowl as root of the machine, for single-user machines [off]
+moonwater security tls12 [on|off]      TLS 1.2 where a server offers nothing newer; off asks for 1.3 alone [on]
+moonwater security trust               every anchor, built in and added, by the SHA-256 of its key
+moonwater security trust add FILE      trust a CA certificate, PEM or DER, as the built-in anchors are
+moonwater security trust remove SHA256  stop trusting an anchor that was added
+moonwater sensors                      the processor use, clocks, GPU load, heat, fans and power of this machine, read now
+moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, every control of the UI kit
+moonwater setup                        where this session runs, and the installs found
+moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it removable takes a disk that says it is; yes is for a script, which cannot be asked
+moonwater setup live                   leave the disks alone this session
+moonwater setup update [DISK]          write this build over an install, keeping its data
+moonwater setup use [DISK]             run this build with the data of an install
+moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater status                       this session as one page
+moonwater window                       the windows on the desktop: name, pid, place, size, title
+moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
+moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says: center, at X,Y, maximized, fullscreen, screen N, size WxH, name NAME (what it is remembered by)
+moonwater wipe [yes]                   forget /home and /root, keep the machine; yes is for a script, which cannot be asked
 ```
 
 `moonwater` alone prints the main page, and `moonwater help VERB` every row of one: the
