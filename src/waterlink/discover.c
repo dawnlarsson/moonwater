@@ -278,7 +278,7 @@ static positive waterlink_dns_name(const p8 address_to packet, positive length,
 
 /* The one name that fills a record's data from where data stands to the
    record's end, flattened into into; false for anything else. */
-static bool waterlink_rdata_name(const p8 address_to packet, positive length,
+static p8 waterlink_rdata_name(const p8 address_to packet, positive length,
                                  positive stop,
                                  const byte_reader address_to data,
                                  p8 address_to into,
@@ -291,20 +291,20 @@ static bool waterlink_rdata_name(const p8 address_to packet, positive length,
 }
 
 // Internet class; the top bit is QU in a question and cache-flush in a record.
-static bool waterlink_internet(p16 class)
+static p8 waterlink_internet(p16 class)
 {
         return (class & 0x7fff) == DNS_CLASS_IN;
 }
 
 // Whether a flattened name is the service's, letter case aside.
-static bool waterlink_is_service(const p8 address_to name, positive length)
+static p8 waterlink_is_service(const p8 address_to name, positive length)
 {
         return length == WATERLINK_SERVICE_BYTES &&
                !memory_compare_ascii_case(name, waterlink_service_name, length);
 }
 
 // An instance of the service: one label and then the service's name.
-static bool waterlink_instance_of(const p8 address_to name, positive length,
+static p8 waterlink_instance_of(const p8 address_to name, positive length,
                                   p8 address_to label, positive address_to label_length)
 {
         positive first = name[0];
@@ -323,14 +323,14 @@ struct waterlink_found_instance {
         p8 label[63];
         positive label_length;
         p16 port;
-        bool advertised;
-        bool has_port;
+        p8 advertised;
+        p8 has_port;
 };
 
 struct waterlink_found {
         p16 id;
-        bool response;
-        bool asked; // a question for the service
+        p8 response;
+        p8 asked; // a question for the service
         p8 question[WATERLINK_NAME_BYTES + 4];
         positive question_length;
         positive count;
@@ -367,7 +367,7 @@ waterlink_found_at(struct waterlink_found address_to found,
         naming the end of one long chain cost 45 us without it. Ordinary
         labels consume packet bytes and do not spend this second budget.
 */
-bool waterlink_mdns_read(const p8 address_to packet, positive length,
+p8 waterlink_mdns_read(const p8 address_to packet, positive length,
                          struct waterlink_found address_to found)
 {
         p8 name[WATERLINK_NAME_BYTES];

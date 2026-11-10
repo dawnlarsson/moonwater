@@ -833,7 +833,7 @@ typedef struct
          (sequence)->value[0] = 0, (sequence)->colon = 0,                   \
          (sequence)->full = 0)
 
-static inline INLINE bool terminal_parameters_take(
+static inline INLINE p8 terminal_parameters_take(
     terminal_parameters address_to sequence, unsigned int byte)
 {
         if (byte_is_digit((b32)byte))

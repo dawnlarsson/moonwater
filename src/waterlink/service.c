@@ -216,9 +216,9 @@ static fn link_key_text(p8 address_to key, p8 address_to text)
 
 //      The last character carries two bits the key does not use; a text with
 //      them set is some other text.
-static bool link_key_parse(string_address text, p8 address_to key)
+static p8 link_key_parse(string_address text, p8 address_to key)
 {
-        bool loose;
+        p8 loose;
 
         return memory_from_base64(key, text, string_length(text), 32,
                                   address_of loose) &&
@@ -243,7 +243,7 @@ static const string_address link_words[] = {
 #define LINK_NAME_CHARACTERS                                                  \
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"
 
-static bool link_name_good(string_address name)
+static p8 link_name_good(string_address name)
 {
         positive length = string_length(name);
 
@@ -324,7 +324,7 @@ static bipolar link_read_private_records(string_address path,
    before a forget, a pair or a leave; the state and the stamps, which only
    say what this session is doing, are not. */
 static bipolar link_file_replace(string_address path, address_any bytes,
-                                 positive length, bool sync)
+                                 positive length, p8 sync)
 {
         return file_publish_bytes(path, bytes, length, 0600, sync);
 }
@@ -338,7 +338,7 @@ static bipolar link_file_replace(string_address path, address_any bytes,
         /root/link.key -- a link to somewhere, or a file somebody could read
         -- is refused rather than written through or trusted.
 */
-static bipolar link_secret_at(string_address path, p8 address_to secret, bool make)
+static bipolar link_secret_at(string_address path, p8 address_to secret, p8 make)
 {
         positive got = 0;
         bipolar read = link_read_private_records(path, secret, 32, 32,
@@ -372,12 +372,12 @@ static bipolar link_secret_at(string_address path, p8 address_to secret, bool ma
 /*
         The machine's own key, at LINK_KEY_PATH: see link_secret_at.
 */
-static bipolar link_secret(p8 address_to secret, bool make)
+static bipolar link_secret(p8 address_to secret, p8 make)
 {
         return link_secret_at(LINK_KEY_PATH, secret, make);
 }
 
-static bipolar link_identity(struct waterlink_identity address_to me, bool make)
+static bipolar link_identity(struct waterlink_identity address_to me, p8 make)
 {
         p8 secret[32];
 
@@ -431,7 +431,7 @@ static fn link_peers_load(link_peers address_to peers)
    be read -- refused for what it is, cut short, a failed read -- is not an
    empty list, and saving over it would forget every record in it. The peers
    and the groups both change their files by this. */
-static bool link_peers_for_change(link_peers address_to peers)
+static p8 link_peers_for_change(link_peers address_to peers)
 {
         bipolar read = link_peers_read(peers);
 
@@ -487,7 +487,7 @@ static fn link_address_v4(p8 address_to into, p32 host)
         network_store_32(into + 12, host);
 }
 
-static bool link_address_mapped(p8 address_to address)
+static p8 link_address_mapped(p8 address_to address)
 {
         static const p8 prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
 
@@ -500,7 +500,7 @@ static bool link_address_mapped(p8 address_to address)
         limited broadcast (240/4). A peer recorded at one of them is a
         datagram to nobody, or to everybody, for as long as the record lives.
 */
-static bool link_address_unicast(p8 address_to address)
+static p8 link_address_unicast(p8 address_to address)
 {
         if (link_address_mapped(address))
         {
@@ -518,7 +518,7 @@ static bool link_address_unicast(p8 address_to address)
         address, and not the address of none or of many. A host with no port
         is on the one `moonwater link port` kept, the default where none is.
 */
-static bool link_parse_place(string_address text, p8 address_to address,
+static p8 link_parse_place(string_address text, p8 address_to address,
                              p16 address_to port)
 {
         p8 host[256];
@@ -550,7 +550,7 @@ static bool link_parse_place(string_address text, p8 address_to address,
         else
         {
                 string_address first = string_first_of(text, ':');
-                bool bare = first && string_first_of(first + 1, ':');
+                p8 bare = first && string_first_of(first + 1, ':');
 
                 //      A name or an IPv4 address and a port, or an IPv6
                 //      address and none.
@@ -639,7 +639,7 @@ struct link_keys {
         p64 made;
         p32 ours;
         p32 theirs;
-        bool live;
+        p8 live;
 };
 
 struct link_stream {
@@ -647,17 +647,17 @@ struct link_stream {
         positive skip; // bytes of the frame in hand already written
         p8 key;
         p8 flags;
-        bool done;
-        bool quiet;  // it said "not now", and no wait has heard it since
-        bool socket; // asked with MSG_DONTWAIT, since it is not opened again
+        p8 done;
+        p8 quiet;  // it said "not now", and no wait has heard it since
+        p8 socket; // asked with MSG_DONTWAIT, since it is not opened again
         bipolar error; // why a read or write failed, as a negative number; 0 while it did not
         p64 written;   // bytes of a transfer's file written
         p64 started;   // and how many of them the disk was asked to begin on
 };
 
 struct link_session {
-        bool used;
-        bool finished;
+        p8 used;
+        p8 finished;
         p8 kind;
         p8 name[WATERLINK_NAME_MAX];
         p8 peer[32];
@@ -679,18 +679,18 @@ struct link_session {
         struct link_stream writes[2]; // a key written to a descriptor
         bipolar pid;
         bipolar pidfd;
-        bool pid_quiet; // still running when last asked
+        p8 pid_quiet; // still running when last asked
         bipolar terminal; // a shell's, both a read and a write
-        bool exited;
+        p8 exited;
         b32 status;
         p64 exited_at;
-        bool exit_sent;
-        bool failed;
-        bool answered;
-        bool refused;
+        p8 exit_sent;
+        p8 failed;
+        p8 answered;
+        p8 refused;
         p8 refusal[128];
         p32 mode; // what a pulled file is made with: the far file's, when it said
-        bool packed; // a pushed file's staging file holds dictionary frames, to unpack at the end
+        p8 packed; // a pushed file's staging file holds dictionary frames, to unpack at the end
         p8 part[LINK_REQUEST_MAX + 32]; // a transfer's staging file
         p8 whole[LINK_REQUEST_MAX + 1]; // and the name it becomes
 };
@@ -742,24 +742,24 @@ static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL, LINK_ASK_RUN,
 typedef struct
 {
         bipolar socket;
-        bool socket_quiet; // read to its end, and no wait has heard it since
+        p8 socket_quiet; // read to its end, and no wait has heard it since
         p64 now;           // the turn's clock, which a frame posted in it carries
         p64 wall;          // this machine's clock in seconds, read at
         p64 wall_read;     // this turn's clock
         p64 granted;       // when the sessions were last held to the peers
-        bool server;
-        bool gso;
-        bool heard_modem; // the datagram being taken came off the modem: it has no place
-        bool v4; // no IPv6 here: the socket is AF_INET
+        p8 server;
+        p8 gso;
+        p8 heard_modem; // the datagram being taken came off the modem: it has no place
+        p8 v4; // no IPv6 here: the socket is AF_INET
         struct waterlink_identity me;
         struct waterlink_admission admission;
         struct link_session session[LINK_SESSIONS];
         link_stamp_entry stamp[LINK_PEERS_MAX];
         positive stamps;
-        bool stamps_dirty; // changed since /root/link.stamps was written
+        p8 stamps_dirty; // changed since /root/link.stamps was written
         link_state state;
         p64 state_written;
-        bool state_dirty;
+        p8 state_dirty;
         //      A run of full datagrams for one place, sent as segments.
         p8 batch[LINK_SEGMENTS * WATERLINK_DATAGRAM];
         positive batched;
@@ -775,7 +775,7 @@ static p32 link_index_new(void)
         for (positive attempt = 0; attempt < 128; attempt++)
         {
                 p32 index = 0;
-                bool taken = false;
+                p8 taken = false;
 
                 if (system_random_fill(address_of index, sizeof index, 0) < 0)
                         return 0;
@@ -796,7 +796,7 @@ static p32 link_index_new(void)
         return 0;
 }
 
-static bool link_session_open(struct link_session address_to s)
+static p8 link_session_open(struct link_session address_to s)
 {
         bipolar mapped = system_call_6(syscall(mmap), 0,
                                        sizeof(struct waterlink_link), 3, 0x22,
@@ -820,7 +820,7 @@ static bool link_session_open(struct link_session address_to s)
         return true;
 }
 
-static bool link_part_owned(bipolar handle, p8 address_to path)
+static p8 link_part_owned(bipolar handle, p8 address_to path)
 {
         file_facts opened;
         file_facts named;
@@ -845,13 +845,13 @@ static bool link_part_owned(bipolar handle, p8 address_to path)
         path spelled round one is the same file. Reserved names remain
         protected before their files exist, by the parent directory's inode.
 */
-static bool link_path_is_own(string_address path)
+static p8 link_path_is_own(string_address path)
 {
         static const string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         file_facts target;
-        bool exists = file_look_at(path, address_of target);
+        p8 exists = file_look_at(path, address_of target);
         positive leaf_at = memory_after_last(path, '/', string_length(path));
 
         for (positive at = 0; at < array_count(own); at++)
@@ -871,7 +871,7 @@ static bool link_path_is_own(string_address path)
                         bipolar reserved = system_open_parent_pinned(
                             AT_FDCWD, own[at], leaf, sizeof leaf);
                         file_facts here, there;
-                        bool protected = parent < 0 || reserved < 0 ||
+                        p8 protected = parent < 0 || reserved < 0 ||
                             !file_look(parent, "", AT_EMPTY_PATH, address_of here) ||
                             !file_look(reserved, "", AT_EMPTY_PATH, address_of there) ||
                             file_same_identity(address_of here, address_of there);
@@ -898,7 +898,7 @@ static fn link_part_discard(bipolar handle, p8 address_to part)
                 system_remove_at(AT_FDCWD, part, 0);
 }
 
-static bool link_part_publish(bipolar handle, p8 address_to part,
+static p8 link_part_publish(bipolar handle, p8 address_to part,
                               p8 address_to whole)
 {
         if (!link_part_owned(handle, part))
@@ -914,7 +914,7 @@ static bool link_part_publish(bipolar handle, p8 address_to part,
         kernel's table when it has, with the status a shell would give it. A
         command that cannot be waited for is as ended as it will be known.
 */
-static bool link_command_ended(bipolar pidfd, b32 address_to status)
+static p8 link_command_ended(bipolar pidfd, b32 address_to status)
 {
         p8 information[128];
         bipolar waited;
@@ -1051,8 +1051,8 @@ static fn link_keys_install(struct link_keys address_to keys,
         The modem carries the link's datagrams while the transport is the modem: these are its parts this file calls before they
         are made. They are in the send section of modem.c, after the sound server's client.
 */
-static bool link_modem_carrying(void);
-static bool link_modem_put(p8 address_to bytes, positive length, p64 when);
+static p8 link_modem_carrying(void);
+static p8 link_modem_put(p8 address_to bytes, positive length, p64 when);
 static p64 link_modem_turn(p64 now);
 static void link_modem_stop(void);
 static p64 link_modem_floor(void);
@@ -1149,7 +1149,7 @@ typedef struct
         a message that claims more than was filled ends the walk. True with
         data a reader on the message's bytes.
 */
-static bool link_control_find(p8 address_to control, positive length,
+static p8 link_control_find(p8 address_to control, positive length,
                               positive room, b32 level, b32 type,
                               byte_reader address_to data)
 {
@@ -1265,7 +1265,7 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
         {
                 p8 address_to datagram;
                 struct waterlink_datagram head;
-                bool alone = false;
+                p8 alone = false;
                 positive used;
                 positive length;
 
@@ -1334,14 +1334,14 @@ static fn link_session_say(struct link_session address_to s, p32 kind)
 /*      A frame whose payload is made already, its type byte first: the link
         copies it into its slot, and that is the only copy a read's bytes
         make. */
-static bool link_post_framed(struct link_session address_to s, p8 key,
+static p8 link_post_framed(struct link_session address_to s, p8 key,
                              p8 flags, p8 address_to payload, positive length)
 {
         return waterlink_post(s->link, key, flags, payload, (p16)length,
                               link_self.now);
 }
 
-static bool link_post(struct link_session address_to s, p8 key, p8 flags,
+static p8 link_post(struct link_session address_to s, p8 key, p8 flags,
                       p8 type, p8 address_to data, positive length)
 {
         p8 payload[WATERLINK_FRAME_MAX];
@@ -1380,10 +1380,10 @@ static positive link_room(struct link_session address_to s)
         A terminal's size on the wire: rows then columns, each little endian.
         Packing answers whether the size is known; 24 by 80 when it is not.
 */
-static bool link_size_pack(p8 address_to packed)
+static p8 link_size_pack(p8 address_to packed)
 {
         winsize size = {24, 80, 0, 0};
-        bool known = system_control(0, TIOCGWINSZ, address_of size) >= 0;
+        p8 known = system_control(0, TIOCGWINSZ, address_of size) >= 0;
 
         memory_store_unaligned(p16, packed, size.rows);
         memory_store_unaligned(p16, packed + 2, size.columns);
@@ -1485,7 +1485,7 @@ static fn link_exited(struct link_session address_to s, b32 status, p64 now)
         s->reads[0].quiet = s->reads[1].quiet = false;
 }
 
-static bool link_push_unpack(struct link_session address_to s);
+static p8 link_push_unpack(struct link_session address_to s);
 
 static fn link_push_done(struct link_session address_to s, p64 now)
 {
@@ -1522,7 +1522,7 @@ static fn link_state_write(p64 now);
 static fn link_term_word(p8 address_to from, positive length,
                          p8 address_to into)
 {
-        bool good = length && length < 32;
+        p8 good = length && length < 32;
 
         //      The bytes are a frame's, with no end of their own: copied
         //      first, and an end inside them ends the span short.
@@ -1584,13 +1584,13 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         unreachable_here();
 }
 
-static bool link_nonblocking(bipolar handle)
+static p8 link_nonblocking(bipolar handle)
 {
         return system_call_3(syscall(fcntl), (positive)handle, 4,
                              O_NONBLOCK | FILE_READ_WRITE) >= 0;
 }
 
-static bool link_start_shell(struct link_session address_to s,
+static p8 link_start_shell(struct link_session address_to s,
                              p8 address_to request, positive length)
 {
         b32 master = -1;
@@ -1633,7 +1633,7 @@ static bool link_start_shell(struct link_session address_to s,
         return true;
 }
 
-static bool link_start_command(struct link_session address_to s,
+static p8 link_start_command(struct link_session address_to s,
                                string_address address_to words, positive count)
 {
         b32 in[2], out[2], err[2];
@@ -1743,7 +1743,7 @@ static bipolar link_part_open(string_address target, positive length,
 static p8 push_block[PUSH_BLOCK];
 static p8 push_frame[PUSH_FRAME_MAX];
 
-static bool push_dictionary_load(void)
+static p8 push_dictionary_load(void)
 {
         return zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE);
 }
@@ -1767,14 +1767,14 @@ static bipolar push_fill(bipolar handle, p8 address_to into, positive n)
         return (bipolar)got;
 }
 
-static bool push_put(bipolar handle, p8 address_to from, positive n)
+static p8 push_put(bipolar handle, p8 address_to from, positive n)
 {
         return (bipolar)system_write_all((positive)handle, from, n) ==
                (bipolar)n;
 }
 
 /* Packs input into output from its present offset to its end. False when a read, the encoder or a write fails. */
-static bool push_pack(bipolar input, bipolar output)
+static p8 push_pack(bipolar input, bipolar output)
 {
         if (!push_dictionary_load())
                 return false;
@@ -1805,7 +1805,7 @@ static bool push_pack(bipolar input, bipolar output)
 }
 
 /* Unpacks input into output from its present offset to its end. False when the input ends inside a frame, or a frame does not decode with this dictionary. */
-static bool push_unpack(bipolar input, bipolar output)
+static p8 push_unpack(bipolar input, bipolar output)
 {
         if (!push_dictionary_load())
                 return false;
@@ -1848,7 +1848,7 @@ static bipolar push_pack_stage(string_address path, bipolar input)
         p8 part[LINK_REQUEST_MAX + 32];
         bipolar output = link_part_open(path, string_length(path), part,
                                         sizeof part, 0600);
-        bool packed = false;
+        p8 packed = false;
 
         if (output >= 0)
         {
@@ -1872,11 +1872,11 @@ static bipolar push_pack_stage(string_address path, bipolar input)
         file is still the staging file, and the caller removes it as it does any
         failed push.
 */
-static bool link_push_unpack(struct link_session address_to s)
+static p8 link_push_unpack(struct link_session address_to s)
 {
         p8 part[LINK_REQUEST_MAX + 32];
         bipolar packed, plain;
-        bool ok;
+        p8 ok;
 
         if (!link_part_owned(s->writes[0].fd, s->part))
                 return false;
@@ -1908,7 +1908,7 @@ static bool link_push_unpack(struct link_session address_to s)
         return true;
 }
 
-static bool link_start_push(struct link_session address_to s, p8 address_to path,
+static p8 link_start_push(struct link_session address_to s, p8 address_to path,
                             positive length, p32 mode)
 {
         p8 part[LINK_REQUEST_MAX + 32];
@@ -1944,7 +1944,7 @@ static fn link_refuse(struct link_session address_to s, string_address why)
    request always carries its four-byte window size; in particular, do not
    let a short authenticated request make link_start_shell or the mode reader
    look beyond the frame payload. */
-static bool link_request_well_formed(p8 kind, p8 address_to payload,
+static p8 link_request_well_formed(p8 kind, p8 address_to payload,
                                      positive length)
 {
         positive skip = kind == LINK_KIND_PUSH ? LINK_PUSH_HEAD : 1;
@@ -1961,7 +1961,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         link_peers peers;
         struct waterlink_peer address_to peer;
         p32 may = 0;
-        bool started;
+        p8 started;
         p8 why[96];
         p8 text[LINK_REQUEST_MAX + 1];
         p32 mode = 0;
@@ -2106,8 +2106,8 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         wake costs the calls for what woke it and not one for everything.
 */
 static fn link_watch(system_poll_descriptor address_to watch,
-                     bool address_to address_to quiet, positive address_to count,
-                     bipolar handle, p16 events, bool address_to flag)
+                     p8 address_to address_to quiet, positive address_to count,
+                     bipolar handle, p16 events, p8 address_to flag)
 {
         if (handle < 0 || !events)
                 return;
@@ -2123,7 +2123,7 @@ static fn link_watch(system_poll_descriptor address_to watch,
         not add its processing time to an already absolute timer.
 */
 static fn link_wait(system_poll_descriptor address_to watch,
-                    bool address_to address_to quiet, positive count, p64 wake,
+                    p8 address_to address_to quiet, positive count, p64 wake,
                     p64 now)
 {
         timespec limit;
@@ -2246,7 +2246,7 @@ static fn link_stream_flush(struct link_session address_to s,
         over again at waterlink_resume -- which is all the flow control there
         is. The end of the stream is the end of what it feeds.
 */
-static bool link_stream_take(struct link_session address_to s,
+static p8 link_stream_take(struct link_session address_to s,
                              struct link_stream address_to stream,
                              p8 address_to payload, positive length)
 {
@@ -2320,7 +2320,7 @@ static bool link_stream_take(struct link_session address_to s,
         A frame arrives, at either end. The key says which stream or which
         question; the payload's first byte says what it is.
 */
-static bool link_hear(address_any context, struct waterlink_frame address_to head,
+static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                       p8 address_to payload)
 {
         struct link_session address_to s = (struct link_session address_to)context;
@@ -2456,10 +2456,10 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
 // What a session waits on: descriptors with something to read or room to take.
 static fn link_session_watch(struct link_session address_to s,
                              system_poll_descriptor address_to watch,
-                             bool address_to address_to quiet,
+                             p8 address_to address_to quiet,
                              positive address_to count)
 {
-        bool room = link_room(s) != 0;
+        p8 room = link_room(s) != 0;
 
         for (positive at = 0; at < 2; at++)
         {
@@ -2517,7 +2517,7 @@ static fn link_stamps_prune(void)
         }
 }
 
-static bool link_stamp_new(p8 address_to key, p8 address_to stamp)
+static p8 link_stamp_new(p8 address_to key, p8 address_to stamp)
 {
         positive at = link_stamp_at(key);
 
@@ -2715,7 +2715,7 @@ static struct link_keys address_to link_keys_for(p32 index,
         return null;
 }
 
-static fn link_session_end(struct link_session address_to s, bool tell)
+static fn link_session_end(struct link_session address_to s, p8 tell)
 {
         if (tell && s->now.live)
         {
@@ -2747,7 +2747,7 @@ static p64 link_wall(p64 now)
         return link_self.wall;
 }
 
-static bool link_carried(p8 address_to datagram, positive length,
+static p8 link_carried(p8 address_to datagram, positive length,
                          p8 address_to address, p16 port, p64 now,
                          waterlink_sink sink)
 {
@@ -2756,7 +2756,7 @@ static bool link_carried(p8 address_to datagram, positive length,
         struct link_keys address_to keys;
         struct waterlink_part parts[WATERLINK_PARTS];
         bipolar count = 0;
-        bool moved;
+        p8 moved;
 
         //      The header is read before the tag is, so a datagram too short
         //      to be one is refused before that read, whoever calls.
@@ -3015,7 +3015,7 @@ static fn link_stamps_load(void)
 
 // The listener ------------------------------------------------------------------
 
-static bipolar link_socket_open(p16 port, bool any)
+static bipolar link_socket_open(p16 port, p8 any)
 {
         p8 anywhere[16] = {0};
         b32 zero = 0;
@@ -3056,7 +3056,7 @@ static bipolar link_socket_open(p16 port, bool any)
         else a resize is no reason to stop: a terminal's `link serve` or
         `link pair` was ended by it, and SIGWINCH's own default is to be
         ignored, which is what it is left to be. */
-static bipolar link_signals_open(bool resize)
+static bipolar link_signals_open(p8 resize)
 {
         positive blocked = 1ul << (1 - 1) | 1ul << (2 - 1) | 1ul << (15 - 1) |
                            1ul << (17 - 1) | 1ul << (13 - 1) |
@@ -3188,8 +3188,8 @@ static p64 link_sessions_turn(p64 now)
 }
 
 static positive link_sessions_watch(system_poll_descriptor address_to watch,
-                                    bool address_to address_to quiet,
-                                    bipolar signals, bool address_to signalled)
+                                    p8 address_to address_to quiet,
+                                    bipolar signals, p8 address_to signalled)
 {
         positive count = 0;
 
@@ -3280,8 +3280,8 @@ static fn link_modem_heard(p8 address_to datagram, positive length, p64 now)
 static b32 link_serve(string_address ready_text)
 {
         system_poll_descriptor watch[3 + LINK_SESSIONS * 5];
-        bool address_to quiet[3 + LINK_SESSIONS * 5];
-        bool signals_quiet = false;
+        p8 address_to quiet[3 + LINK_SESSIONS * 5];
+        p8 signals_quiet = false;
         bipolar lock;
         bipolar signals;
         b32 stop = 0;
@@ -3308,7 +3308,7 @@ static b32 link_serve(string_address ready_text)
         //      what a listener that could not start does. Written once, then closed.
         if (ready_text && byte_is_digit(ready_text[0]))
         {
-                bool over = false;
+                p8 over = false;
                 string_address at = ready_text;
                 p8 mark = '1';
 
@@ -3388,7 +3388,7 @@ typedef struct
         p64 initiated; // when it went
         positive attempts;
         p8 mac1[16];   // its mac1, which a cookie reply to it is sealed to
-        bool cookied;  // it carried a cookie
+        p8 cookied;  // it carried a cookie
         p8 cookie[16]; // what the machine last handed out, under load
         p64 cookie_at; // when; 0 for never
 } link_client_state;
@@ -3397,17 +3397,17 @@ static link_client_state link_client;
 
 /*      The client's terminal goes raw as the line editor's does, and back:
         edit.c's pair, which the shell includes after this. */
-static bool edit_terminal_raw();
+static p8 edit_terminal_raw();
 static fn edit_terminal_restore();
 
 // The initiator's half of the handshake, for a new session or a rekey.
-static bool link_client_initiate(struct link_session address_to s, p64 now)
+static p8 link_client_initiate(struct link_session address_to s, p64 now)
 {
         p8 datagram[WATERLINK_DATAGRAM];
         p8 hello[WATERLINK_HELLO_BYTES];
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
-        bool sent;
+        p8 sent;
 
         /* A failed index or entropy draw leaves no initiation.  Do not retain
            an earlier MAC, and do not read the still-uninitialized datagram in
@@ -3450,7 +3450,7 @@ static bool link_client_initiate(struct link_session address_to s, p64 now)
         return sent;
 }
 
-static bool link_client_answer(struct link_session address_to s,
+static p8 link_client_answer(struct link_session address_to s,
                                struct waterlink_noise address_to noise,
                                p32 ours, p8 address_to datagram,
                                positive length)
@@ -3528,15 +3528,15 @@ static p64 link_rekey_after(void)
 
 //      The transport's two halves, made in command.c: whether /root/link.transport says modem and the modem is ready, and the
 //      modem's send of a file (modem.c).
-static bool link_modem_in_use(void);
+static p8 link_modem_in_use(void);
 static b32 modem_send_file(string_address path);
 
 static b32 link_client_run(string_address name, p8 kind,
                            string_address address_to words, positive count)
 {
         system_poll_descriptor watch[3 + 5];
-        bool address_to quiet[3 + 5];
-        bool signals_quiet = false;
+        p8 address_to quiet[3 + 5];
+        p8 signals_quiet = false;
         link_peers peers;
         struct waterlink_peer address_to peer;
         struct link_session address_to s = link_self.session;
@@ -3544,8 +3544,8 @@ static b32 link_client_run(string_address name, p8 kind,
         positive request_length = 0;
         bipolar input = kind == LINK_KIND_PULL || kind == LINK_KIND_LOG ? -1 : 0;
         p64 rekey_after = link_rekey_after();
-        bool asked = false;
-        bool input_waiting = true;
+        p8 asked = false;
+        p8 input_waiting = true;
         bipolar signals;
         b32 stopped = 0;
         b32 answer = LINK_FAILED;

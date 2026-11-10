@@ -552,7 +552,7 @@ static _Bool output_describe(struct output *output)
         canvas lane boots with it too, because QEMU's screendump holds the
         primary plane only.
 */
-static bool canvas_cursor_plane = true;
+static p8 canvas_cursor_plane = true;
 
 module_param_named(cursor_plane, canvas_cursor_plane, bool, 0444);
 
@@ -792,9 +792,9 @@ static const struct kernel_param_ops canvas_modes_ops = {
 
 #define MODULE_PARAM_PREFIX "canvas."
 
-module_param_cb(scale, &canvas_scale_ops, NULL, 0444);
+module_param_cb(scale, &canvas_scale_ops, null, 0444);
 
-module_param_cb(modes, &canvas_modes_ops, NULL, 0444);
+module_param_cb(modes, &canvas_modes_ops, null, 0444);
 
 #undef MODULE_PARAM_PREFIX
 
@@ -829,7 +829,7 @@ static struct drm_display_mode *output_pick_mode(struct drm_connector *connector
                                                  int height, _Bool exact,
                                                  int prefer_refresh)
 {
-        struct drm_display_mode *mode, *best = NULL;
+        struct drm_display_mode *mode, *best = null;
         int best_score = 0, best_refresh = 0;
         _Bool best_preferred = false;
 
@@ -893,13 +893,13 @@ static const struct canvas_saved_mode *canvas_mode_saved(const char *name)
         unsigned int i;
 
         if (!name)
-                return NULL;
+                return null;
 
         for (i = 0; i < canvas_saved_modes; i++)
-                if (!strcmp(canvas_saved_mode[i].name, name))
+                if (string_equals((string_address)canvas_saved_mode[i].name, (string_address)name))
                         return &canvas_saved_mode[i];
 
-        return NULL;
+        return null;
 }
 
 static void canvas_mode_keep(const char *name, const struct drm_display_mode *mode)
@@ -910,7 +910,7 @@ static void canvas_mode_keep(const char *name, const struct drm_display_mode *mo
                 return;
 
         for (i = 0; i < canvas_saved_modes; i++)
-                if (!strcmp(canvas_saved_mode[i].name, name))
+                if (string_equals((string_address)canvas_saved_mode[i].name, (string_address)name))
                 {
                         canvas_saved_mode[i].hdisplay = mode->hdisplay;
                         canvas_saved_mode[i].vdisplay = mode->vdisplay;
@@ -972,17 +972,17 @@ static struct drm_display_mode *output_mode_take(struct drm_device *dev,
         struct drm_display_mode *taken;
 
         if (!src || src->clock <= 0)
-                return NULL;
+                return null;
 
         taken = drm_mode_duplicate(dev, src);
         if (!taken)
-                return NULL;
+                return null;
 
         drm_mode_set_crtcinfo(taken, CRTC_INTERLACE_HALVE_V);
         if (taken->crtc_clock <= 0)
         {
                 drm_mode_destroy(dev, taken);
-                return NULL;
+                return null;
         }
 
         return taken;
@@ -1012,7 +1012,7 @@ static struct drm_display_mode *output_guest_mode(struct drm_device *dev,
 
         screen = output_screen_mode(connector);
         if (!screen)
-                return NULL;
+                return null;
 
         w = screen->hdisplay * 7 / 10;
         h = screen->vdisplay * 7 / 10;
@@ -1067,7 +1067,7 @@ static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
                 connector = mode_set->connectors[0];
                 saved = keep_saved && connector->name
                                 ? canvas_mode_saved(connector->name)
-                                : NULL;
+                                : null;
                 /*
                         A guest stays a window even when the first modeset is
                         refused. The retry used to take the probe's preferred
@@ -1152,7 +1152,7 @@ static struct output *output_for_modeset(struct canvas *canvas,
                 if (output->canvas == canvas && output->mode_set == mode_set)
                         return output;
 
-        return NULL;
+        return null;
 }
 
 /*
@@ -1187,7 +1187,7 @@ static void output_attach(struct output *output)
         dev = output->canvas->client.dev;
         connector = (mode_set->connectors && mode_set->num_connectors)
                         ? mode_set->connectors[0]
-                        : NULL;
+                        : null;
         if (!connector)
                 return;
 
@@ -1275,7 +1275,7 @@ static void output_disable_modeset(struct drm_device *dev,
 static _Bool output_bring_up(struct canvas *canvas, struct drm_mode_set *mode_set)
 {
         struct drm_connector *connector =
-            mode_set->num_connectors ? mode_set->connectors[0] : NULL;
+            mode_set->num_connectors ? mode_set->connectors[0] : null;
         struct output *output;
 
         pr_info("[moonwater canvas] " "screen %s %ux%u at %u Hz, drawn %ux, %u mode(s) offered\n", connector && connector->name ? connector->name : "?", mode_set->mode->hdisplay, mode_set->mode->vdisplay, drm_mode_vrefresh(mode_set->mode), desktop.scale, connector ? output_mode_count(connector) : 0);
@@ -1427,19 +1427,19 @@ static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mod
         if (format == DRM_FORMAT_INVALID)
         {
                 pr_err("[moonwater canvas] " "no 32 bit format on this plane, skipping output\n");
-                return NULL;
+                return null;
         }
 
         output = kzalloc(sizeof(*output), GFP_KERNEL);
         if (!output)
-                return NULL;
+                return null;
 
         output->buffer = drm_client_buffer_create_dumb(&canvas->client, width, height, format);
         if (IS_ERR(output->buffer))
         {
                 pr_err("[moonwater canvas] " "could not create a %ux%u scanout buffer\n", width, height);
                 kfree(output);
-                return NULL;
+                return null;
         }
 
         output->canvas = canvas;
@@ -1452,9 +1452,9 @@ static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mod
         if (!output_describe(output))
         {
                 drm_client_buffer_delete(output->buffer);
-                mode_set->fb = NULL;
+                mode_set->fb = null;
                 kfree(output);
-                return NULL;
+                return null;
         }
 
         return output;
@@ -1480,15 +1480,15 @@ static void output_disable_modeset(struct drm_device *dev,
         if (mode_set->mode)
         {
                 drm_mode_destroy(dev, mode_set->mode);
-                mode_set->mode = NULL;
+                mode_set->mode = null;
         }
 
-        mode_set->fb = NULL;
+        mode_set->fb = null;
 
         for (i = 0; mode_set->connectors && i < (unsigned int)mode_set->num_connectors; i++)
         {
                 drm_connector_put(mode_set->connectors[i]);
-                mode_set->connectors[i] = NULL;
+                mode_set->connectors[i] = null;
         }
 
         mode_set->num_connectors = 0;
@@ -1553,7 +1553,7 @@ static void desktop_attach_buffers(void)
 */
 static _Bool desktop_commit_known(struct canvas *known, int known_set)
 {
-        struct canvas *committed = NULL;
+        struct canvas *committed = null;
         struct output *output;
         _Bool complete = true;
 
@@ -1578,7 +1578,7 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
                                 if (grown->canvas == committed && grown->replaced)
                                 {
                                         drm_client_buffer_delete(grown->replaced);
-                                        grown->replaced = NULL;
+                                        grown->replaced = null;
                                 }
                 }
 
@@ -1611,7 +1611,7 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
 
 static _Bool desktop_commit(void)
 {
-        return desktop_commit_known(NULL, 0);
+        return desktop_commit_known(null, 0);
 }
 
 /*
@@ -1641,7 +1641,7 @@ static void output_ground(struct output *output)
                          output->width, output->height,
                          CANVAS_GROUND | output->opaque);
         drm_client_buffer_vunmap_local(output->buffer);
-        drm_client_buffer_flush(output->buffer, NULL);
+        drm_client_buffer_flush(output->buffer, null);
 }
 
 static void desktop_recompose(void)
@@ -1681,7 +1681,7 @@ static _Bool canvas_scale_refresh(void)
         unsigned int dpi;
 
         return !canvas_scale_setting &&
-               desktop_rescale(canvas_scale_auto(NULL, &dpi));
+               desktop_rescale(canvas_scale_auto(null, &dpi));
 }
 
 /*
@@ -1696,7 +1696,7 @@ static _Bool canvas_scale_refresh(void)
 */
 static _Bool desktop_taken(void)
 {
-        struct drm_device *checked = NULL;
+        struct drm_device *checked = null;
         struct output *output;
         _Bool taken = false;
 
@@ -1713,7 +1713,7 @@ static _Bool desktop_taken(void)
 
                 checked = dev;
                 mutex_lock(&dev->master_mutex);
-                taken = dev->master != NULL;
+                taken = dev->master != null;
                 mutex_unlock(&dev->master_mutex);
 
                 if (taken)
@@ -1755,8 +1755,8 @@ static void desktop_resume(void)
 */
 static _Bool output_lit_locked(struct output *output)
 {
-        struct drm_crtc *crtc = output->mode_set ? output->mode_set->crtc : NULL;
-        struct drm_plane *primary = crtc ? crtc->primary : NULL;
+        struct drm_crtc *crtc = output->mode_set ? output->mode_set->crtc : null;
+        struct drm_plane *primary = crtc ? crtc->primary : null;
 
         return crtc && primary && crtc->state && primary->state &&
                crtc->state->active && crtc->state->enable &&
@@ -1791,7 +1791,7 @@ static void desktop_report(const char *tag)
                 struct drm_crtc *crtc = output->mode_set->crtc;
                 struct drm_connector *connector = output->mode_set->num_connectors
                                                       ? output->mode_set->connectors[0]
-                                                      : NULL;
+                                                      : null;
                 struct iosys_map map;
                 _Bool mapped = output_map(output, &map);
                 int active, enable, lit;
@@ -1823,7 +1823,7 @@ static void desktop_report(const char *tag)
 */
 static void desktop_dpms(int mode)
 {
-        struct canvas *done = NULL;
+        struct canvas *done = null;
         struct output *output;
 
         desktop_attach_buffers();
@@ -2265,18 +2265,18 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
         _Bool first;
 
         if (!drm_core_check_feature(dev, DRIVER_MODESET) || canvas_holds(dev))
-                return NULL;
+                return null;
 
         canvas = kzalloc(sizeof(*canvas), GFP_KERNEL);
         if (!canvas)
-                return NULL;
+                return null;
 
         canvas->set_result = 1;
 
         if (drm_client_init(dev, &canvas->client, "moonwater", &client_funcs))
         {
                 kfree(canvas);
-                return NULL;
+                return null;
         }
 
         canvas_plug_ensure();
@@ -2331,7 +2331,7 @@ static void canvas_clients_clear(struct drm_device *dev)
 }
 
 /* Which program is master of a card, for a refusal to say. */
-static int canvas_master_holder(struct drm_device *dev, char *command, size_t room)
+static int canvas_master_holder(struct drm_device *dev, char *command, positive room)
 {
         struct drm_file *file;
         int holder = 0;
@@ -2601,7 +2601,7 @@ static COLD void canvas_probe(struct work_struct *work)
         // A kernel worker's root is the empty nullfs, where /dev/dri is
         // not; the cards are looked up from the root /init sees.
         scoped_with_init_fs()
-                canvas_claim_all(NULL, NULL);
+                canvas_claim_all(null, null);
         if (!was_on && canvas_is_on())
                 moonwater_bind_fire(SPARK_BIND_CANVAS_ON);
         canvas_attempts++;
@@ -2685,7 +2685,7 @@ static void canvas_firmware_yield(void)
         for (;;)
         {
                 struct canvas *canvas;
-                struct drm_device *dev = NULL;
+                struct drm_device *dev = null;
 
                 mutex_lock(&canvas_list_lock);
                 list_for_each_entry(canvas, &canvas_list, link)
@@ -2741,7 +2741,7 @@ static long canvas_turn_off(void)
         for (;;)
         {
                 struct canvas *canvas;
-                struct drm_device *dev = NULL;
+                struct drm_device *dev = null;
 
                 mutex_lock(&canvas_list_lock);
                 canvas = list_first_entry_or_null(&canvas_list, struct canvas, link);
@@ -2770,7 +2770,7 @@ static long canvas_turn_off(void)
         {
 #ifndef MODULE
                 if (released[i]->registered && !released[i]->fb_helper)
-                        drm_fbdev_client_setup(released[i], NULL);
+                        drm_fbdev_client_setup(released[i], null);
 #endif
                 drm_dev_put(released[i]);
         }
@@ -2836,7 +2836,7 @@ static void canvas_state(struct canvas_control *answer)
         answer->scale = desktop.scale;
         answer->scale_setting = canvas_scale_setting;
         answer->scale_origin = canvas_scale_origin;
-        (void)canvas_scale_auto(NULL, &answer->scale_dpi);
+        (void)canvas_scale_auto(null, &answer->scale_dpi);
         answer->modes = READ_ONCE(canvas_modes_largest)
                             ? SPARK_CANVAS_MODES_LARGEST
                             : SPARK_CANVAS_MODES_PREFERRED;
@@ -2888,7 +2888,7 @@ static long canvas_scale_set(unsigned int setting)
         canvas_scale_origin = SPARK_CANVAS_ORIGIN_SET;
 
         if (!list_empty(&desktop.outputs))
-                desktop_rescale(setting ? setting : canvas_scale_auto(NULL, &dpi));
+                desktop_rescale(setting ? setting : canvas_scale_auto(null, &dpi));
 
         return 0;
 }
@@ -3411,7 +3411,7 @@ static void canvas_thread_stop(void)
 
         if (!thread)
                 return;
-        RCU_INIT_POINTER(canvas_thread, NULL);
+        RCU_INIT_POINTER(canvas_thread, null);
 
         if (canvas_pm_registered)
         {
@@ -3440,7 +3440,7 @@ static void canvas_thread_stop(void)
         if (canvas_plug_wq)
         {
                 destroy_workqueue(canvas_plug_wq);
-                canvas_plug_wq = NULL;
+                canvas_plug_wq = null;
         }
 }
 
@@ -3496,7 +3496,7 @@ static void canvas_session_end(struct pid *process, struct pid *session)
 
         rcu_read_lock();
         init = find_task_by_pid_ns(1, &init_pid_ns);
-        shared = init ? task_session(init) : NULL;
+        shared = init ? task_session(init) : null;
 
         if (session && session != shared)
                 do_each_pid_task(session, PIDTYPE_SID, task)
@@ -3514,8 +3514,8 @@ static void canvas_session_end(struct pid *process, struct pid *session)
 static void canvas_master_end(struct drm_device *dev)
 {
         struct drm_file *file;
-        struct pid *process = NULL;
-        struct pid *session = NULL;
+        struct pid *process = null;
+        struct pid *session = null;
         char command[TASK_COMM_LEN] = "";
         int number = 0;
 
@@ -3730,7 +3730,7 @@ static void canvas_thread_start(void)
         struct task_struct *thread;
 
         WRITE_ONCE(canvas_yielded, false);
-        thread = kthread_run(canvas_loop, NULL, "moonwater/canvas");
+        thread = kthread_run(canvas_loop, null, "moonwater/canvas");
 
         if (IS_ERR(thread))
         {
@@ -3814,7 +3814,7 @@ static long report_canvas(struct canvas_control __user *out)
         if (request != SPARK_CANVAS_STATUS && !capable(CAP_SYS_ADMIN))
                 return -EPERM;
 
-        memset(&control, 0, sizeof(control));
+        memory_zero(&control, sizeof(control));
         control.request = request;
 
         if (request == SPARK_CANVAS_ON)
@@ -3850,7 +3850,7 @@ static struct file *windows_table, *windows_table_giver;
 
 static long windows_table_set(struct file *giver, unsigned long arg)
 {
-        struct file *table = NULL, *old;
+        struct file *table = null, *old;
 
         if (!capable(CAP_SYS_ADMIN))
                 return -EPERM;
@@ -3868,7 +3868,7 @@ static long windows_table_set(struct file *giver, unsigned long arg)
         spin_lock(&windows_table_lock);
         old = windows_table;
         windows_table = table;
-        windows_table_giver = table ? giver : NULL;
+        windows_table_giver = table ? giver : null;
         spin_unlock(&windows_table_lock);
         if (old)
                 fput(old);
@@ -3894,7 +3894,7 @@ static long windows_table_get(void)
                 return -EPERM;
 
         spin_lock(&windows_table_lock);
-        table = windows_table ? get_file(windows_table) : NULL;
+        table = windows_table ? get_file(windows_table) : null;
         spin_unlock(&windows_table_lock);
         if (!table)
                 return -ENOENT;
@@ -3910,13 +3910,13 @@ static long windows_table_get(void)
 
 static void windows_table_release(struct file *giver)
 {
-        struct file *old = NULL;
+        struct file *old = null;
 
         spin_lock(&windows_table_lock);
         if (windows_table_giver == giver)
         {
                 old = windows_table;
-                windows_table = windows_table_giver = NULL;
+                windows_table = windows_table_giver = null;
         }
         spin_unlock(&windows_table_lock);
         if (old)

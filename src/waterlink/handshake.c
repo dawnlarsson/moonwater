@@ -140,7 +140,7 @@ static fn waterlink_mix_hash(struct waterlink_noise address_to noise,
         or with hash MixKeyAndHash's three, the middle one into the hash.
 */
 static fn waterlink_mix_key(struct waterlink_noise address_to noise,
-                            p8 address_to material, positive length, bool hash)
+                            p8 address_to material, positive length, p8 hash)
 {
         p8 prk[32];
         p8 out[96];
@@ -156,11 +156,11 @@ static fn waterlink_mix_key(struct waterlink_noise address_to noise,
         crypto_forget(out, sizeof out);
 }
 
-static bool waterlink_mix_dh(struct waterlink_noise address_to noise,
+static p8 waterlink_mix_dh(struct waterlink_noise address_to noise,
                              p8 address_to secret, p8 address_to public)
 {
         p8 shared[32];
-        bool good = crypto_x25519(shared, secret, public);
+        p8 good = crypto_x25519(shared, secret, public);
 
         if (good)
                 waterlink_mix_key(noise, shared, 32, false);
@@ -189,14 +189,14 @@ static fn waterlink_seal_hash(struct waterlink_noise address_to noise,
         crypto_forget(address_of key, sizeof key);
 }
 
-static bool waterlink_open_hash(struct waterlink_noise address_to noise,
+static p8 waterlink_open_hash(struct waterlink_noise address_to noise,
                                 p8 address_to text, positive length,
                                 p8 address_to plain)
 {
         crypto_aesgcm_key key;
         p8 iv[12];
         p8 sealed[64];
-        bool good;
+        p8 good;
 
         /* Subtract before comparing so a hostile or corrupted span cannot
            wrap the tag addition and reach the copy as an enormous length. */
@@ -217,7 +217,7 @@ static bool waterlink_open_hash(struct waterlink_noise address_to noise,
 
 //      A name longer than a hash is hashed, as Noise says.
 static fn waterlink_noise_start(struct waterlink_noise address_to noise,
-                                p8 address_to responder_public, bool group)
+                                p8 address_to responder_public, p8 group)
 {
         memory_zero(noise, sizeof(address_to noise));
         if (group)
@@ -286,7 +286,7 @@ static fn waterlink_mac1(p8 address_to gate, p8 address_to message,
         and the padding after it -- after an initiation's mac2 -- is zero. The
         cheap question, asked first.
 */
-bool waterlink_gate_passes(struct waterlink_identity address_to me,
+p8 waterlink_gate_passes(struct waterlink_identity address_to me,
                            p8 address_to datagram, positive length)
 {
         struct waterlink_datagram head;
@@ -340,7 +340,7 @@ static fn waterlink_ephemeral(struct waterlink_noise address_to noise,
         group's handshake. The datagram is written whole, padded to its full
         size.
 */
-bool waterlink_initiate(struct waterlink_noise address_to noise,
+p8 waterlink_initiate(struct waterlink_noise address_to noise,
                         struct waterlink_identity address_to me,
                         p8 address_to responder_public, p8 address_to psk,
                         p8 address_to ephemeral, p8 address_to hello,
@@ -390,7 +390,7 @@ bool waterlink_initiate(struct waterlink_noise address_to noise,
         hello. False when any step does not verify -- a wrong static key on
         either side fails here, at the sealed static or the sealed hello.
 */
-bool waterlink_accept(struct waterlink_noise address_to noise,
+p8 waterlink_accept(struct waterlink_noise address_to noise,
                       struct waterlink_identity address_to me, p8 address_to psk,
                       p8 address_to datagram, p8 address_to initiator_public,
                       p8 address_to hello)
@@ -432,7 +432,7 @@ bool waterlink_accept(struct waterlink_noise address_to noise,
         Write the answer: the responder's ephemeral and its own index,
         addressed to the initiator's index.
 */
-bool waterlink_respond(struct waterlink_noise address_to noise,
+p8 waterlink_respond(struct waterlink_noise address_to noise,
                        p8 address_to ephemeral, p32 their_index, p32 our_index,
                        p8 address_to datagram)
 {
@@ -462,7 +462,7 @@ bool waterlink_respond(struct waterlink_noise address_to noise,
 }
 
 // Read the answer to our first message; the responder's index comes back.
-bool waterlink_answered(struct waterlink_noise address_to noise,
+p8 waterlink_answered(struct waterlink_noise address_to noise,
                         struct waterlink_identity address_to me,
                         p8 address_to datagram, p32 address_to their_index)
 {
@@ -487,7 +487,7 @@ bool waterlink_answered(struct waterlink_noise address_to noise,
         the first and the responder with the second, both cut to AES-128's
         sixteen bytes. The handshake state is forgotten after.
 */
-fn waterlink_split(struct waterlink_noise address_to noise, bool initiator,
+fn waterlink_split(struct waterlink_noise address_to noise, p8 initiator,
                    p8 address_to sending, p8 address_to receiving)
 {
         waterlink_mix_key(noise, (p8 address_to) "", 0, false);
@@ -509,7 +509,7 @@ fn waterlink_stamp(p8 address_to stamp, p64 seconds, p32 nanoseconds)
         network_store_32(stamp + 8, nanoseconds);
 }
 
-bool waterlink_stamp_newer(p8 address_to stamp, p8 address_to last)
+p8 waterlink_stamp_newer(p8 address_to stamp, p8 address_to last)
 {
         return memory_compare(stamp, last, WATERLINK_STAMP_BYTES) > 0;
 }
@@ -554,7 +554,7 @@ struct waterlink_admission {
         p64 cookies;
 };
 
-static bool waterlink_bucket_take(struct waterlink_bucket address_to bucket,
+static p8 waterlink_bucket_take(struct waterlink_bucket address_to bucket,
                                   p32 burst, p32 rate, p64 now)
 {
         if (!bucket->at)
@@ -597,7 +597,7 @@ static bool waterlink_bucket_take(struct waterlink_bucket address_to bucket,
         minutes ago. One too old is not stretched while a new one cannot be
         made -- the caller makes them, and a machine with no randomness has
         no handshake to protect either. */
-bool waterlink_cookie_fresh(struct waterlink_admission address_to table,
+p8 waterlink_cookie_fresh(struct waterlink_admission address_to table,
                             p64 now)
 {
         return table->secret_made && now >= table->secret_made &&
@@ -623,11 +623,11 @@ static fn waterlink_cookie_of(struct waterlink_admission address_to table,
 /*      mac2: sixteen bytes of HMAC-SHA256 by a cookie over everything of an
         initiation up to and with mac1, written where it goes or checked
         there. */
-static bool waterlink_mac2_at(p8 address_to cookie, p8 address_to datagram,
-                              bool write)
+static p8 waterlink_mac2_at(p8 address_to cookie, p8 address_to datagram,
+                              p8 write)
 {
         p8 full[32];
-        bool same;
+        p8 same;
 
         crypto_hmac_sha256(cookie, 16, datagram, 16 + WATERLINK_INITIATE_BYTES,
                            full);
@@ -647,14 +647,14 @@ fn waterlink_mac2(p8 address_to cookie, p8 address_to datagram)
         a key for this reply alone from the sealer and the nonce, a zero
         nonce under it, and mac1 of the initiation it answers as the
         associated data. */
-static bool waterlink_cookie_box(p8 address_to sealer, p8 address_to nonce,
+static p8 waterlink_cookie_box(p8 address_to sealer, p8 address_to nonce,
                                  p8 address_to mac1, p8 address_to text,
-                                 bool seal)
+                                 p8 seal)
 {
         crypto_aesgcm_key key;
         p8 once[32];
         p8 iv[12];
-        bool good = true;
+        p8 good = true;
 
         crypto_hmac_sha256(sealer, 32, nonce, 24, once);
         crypto_aesgcm_prepare(address_of key, once);
@@ -681,14 +681,14 @@ bipolar waterlink_admit(struct waterlink_admission address_to table,
 {
         positive at = 0;
         positive stalest = 0;
-        bool source_proven = false;
+        p8 source_proven = false;
 
         if (!waterlink_bucket_take(address_of table->arrivals,
                                    WATERLINK_ADMIT_LOADED,
                                    WATERLINK_ADMIT_LOADED, now))
         {
                 p8 cookie[16];
-                bool proven = false;
+                p8 proven = false;
 
                 if (!waterlink_cookie_fresh(table, now))
                 {
@@ -759,14 +759,14 @@ fn waterlink_cookie_reply(struct waterlink_identity address_to me,
         A cookie reply to an initiation this end sent to responder_public,
         whose mac1 was mac1: the cookie, or false when it is not one.
 */
-bool waterlink_cookie_take(p8 address_to responder_public, p8 address_to mac1,
+p8 waterlink_cookie_take(p8 address_to responder_public, p8 address_to mac1,
                            p8 address_to reply, positive length,
                            p8 address_to cookie)
 {
         struct waterlink_datagram head;
         p8 sealer[32];
         p8 box[32];
-        bool good;
+        p8 good;
 
         if (length != WATERLINK_COOKIE_DATAGRAM)
                 return false;
@@ -791,7 +791,7 @@ bool waterlink_cookie_take(p8 address_to responder_public, p8 address_to mac1,
         datagrams a second to reach in that time, and the one past which a
         session is refused is checked here all the same.
 */
-bool waterlink_session_spent(p64 age, p64 sent)
+p8 waterlink_session_spent(p64 age, p64 sent)
 {
         return age >= (p64)WATERLINK_REJECT_SECONDS * 1000000 ||
                sent >= WATERLINK_REKEY_MESSAGES + (1ull << 20);

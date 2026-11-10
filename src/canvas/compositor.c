@@ -10890,7 +10890,7 @@ static unsigned int compositor_ink_role(int role)
         return compositor_chrome_now()->roles.role[role];
 }
 
-static bool compositor_setting_kept(const char *path, const char *word, long *value);
+static p8 compositor_setting_kept(const char *path, const char *word, long *value);
 
 // The wheel's glide (ui_wheel_turn), as the table keeps it: a change knocks every window, as a theme change does.
 static void compositor_wheel_publish(unsigned int off)
@@ -10955,7 +10955,7 @@ static void compositor_scroll_publish(unsigned int off, unsigned int speed)
 // value is the place of its word in "on off" (registry.c: setting_words_of), so on is 0 and off is 1, as every other reader of a switch has it
 // (touch, predict touch, shake, acceleration). This was read as if on were 1: momentum and the rubber band, whose standard is on, were off in a
 // desktop that had never set them (and, set on, off), and a release threw nothing and an end stopped dead.
-static bool compositor_switch_on(const char *path, const char *word)
+static p8 compositor_switch_on(const char *path, const char *word)
 {
         long value = 0;
 
@@ -11035,7 +11035,7 @@ static void compositor_theme_tick(void)
         row, as the row says it. A value is the row's standard when nothing is kept, and kept says that
         something is.
 */
-static bool compositor_setting_kept(const char *path, const char *word, long *value)
+static p8 compositor_setting_kept(const char *path, const char *word, long *value)
 {
         const struct settings_row *row = setting_by_path((string_address)path);
 
@@ -11049,7 +11049,7 @@ static void compositor_gpu_settings(void);
 #endif
 
 // Whether a name in /root is the file of a row the compositor takes at once.
-static bool compositor_setting_file(const char *name)
+static p8 compositor_setting_file(const char *name)
 {
         for (unsigned int at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].live == SETTING_LIVE_COMPOSITOR && settings_rows[at].path &&
@@ -16941,10 +16941,10 @@ static void compositor_predict_sample(unsigned int cls, long long x, long long y
                 return;
         if (track->count == COMPOSITOR_PREDICT_HISTORY)
         {
-                memmove(track->x, track->x + 1, sizeof(track->x[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
-                memmove(track->y, track->y + 1, sizeof(track->y[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
-                memmove(track->when, track->when + 1, sizeof(track->when[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
-                memmove(track->arrived, track->arrived + 1, sizeof(track->arrived[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memory_copy(track->x, track->x + 1, sizeof(track->x[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memory_copy(track->y, track->y + 1, sizeof(track->y[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memory_copy(track->when, track->when + 1, sizeof(track->when[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memory_copy(track->arrived, track->arrived + 1, sizeof(track->arrived[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
                 track->count--;
         }
         track->x[track->count] = x, track->y[track->count] = y, track->when[track->count] = when, track->arrived[track->count] = now;

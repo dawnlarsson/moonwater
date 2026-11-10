@@ -301,10 +301,10 @@ static p64 waterlink_bytes(struct waterlink_slot address_to slot)
         answer to "may this be dropped", and no bit it does not know. The
         acknowledgement flag is the link's own and no caller may set it.
 */
-static bool waterlink_frame_sane(p8 flags)
+static p8 waterlink_frame_sane(p8 flags)
 {
-        bool replaceable = (flags & WATERLINK_FRAME_REPLACEABLE) != 0;
-        bool durable = (flags & WATERLINK_FRAME_DURABLE) != 0;
+        p8 replaceable = (flags & WATERLINK_FRAME_REPLACEABLE) != 0;
+        p8 durable = (flags & WATERLINK_FRAME_DURABLE) != 0;
 
         return replaceable != durable && !(flags & ~WATERLINK_FRAME_WIRE);
 }
@@ -360,7 +360,7 @@ static fn waterlink_band_left(struct waterlink_link address_to link, p32 band,
 
 //      Whether a walk that found these streams blocked is over: no other
 //      key has a frame left in the normal band.
-static bool waterlink_band_done(struct waterlink_link address_to link,
+static p8 waterlink_band_done(struct waterlink_link address_to link,
                                 p64 blocked)
 {
         for (p64 left = link->banded & ~blocked; left; left &= left - 1)
@@ -527,13 +527,13 @@ static KEEP fn waterlink_slot_free(struct waterlink_link address_to link, p32 at
         frame was already posted. A full queue is the caller's signal to stop
         producing, not this file's to start choosing.
 */
-bool waterlink_post(struct waterlink_link address_to link, p8 key, p8 flags,
+p8 waterlink_post(struct waterlink_link address_to link, p8 key, p8 flags,
                     address_any payload, p16 length, p64 now)
 {
         struct waterlink_sending address_to live;
         p8 class = flags & (WATERLINK_FRAME_REPLACEABLE | WATERLINK_FRAME_DURABLE);
         struct waterlink_slot address_to slot;
-        bool queued;
+        p8 queued;
         p32 at;
 
         /*      Form no pointer from an application key until its bound is
@@ -765,7 +765,7 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
         application that is not reading keeps held is how it slows the
         sender: the acknowledgement is the credit.
 */
-static bool waterlink_key_blocked(struct waterlink_link address_to link,
+static p8 waterlink_key_blocked(struct waterlink_link address_to link,
                                   struct waterlink_slot address_to slot)
 {
         p32 first = link->sending[slot->key].first;
@@ -793,7 +793,7 @@ static fn waterlink_ack_owe(struct waterlink_link address_to link, p8 key)
         link->acking |= 1ull << key;
 }
 
-static bool waterlink_ack_due(struct waterlink_link address_to link, p64 now)
+static p8 waterlink_ack_due(struct waterlink_link address_to link, p64 now)
 {
         return link->acking &&
                (link->owed_now || link->owed_count >= WATERLINK_ACK_EVERY ||
@@ -827,7 +827,7 @@ static bool waterlink_ack_due(struct waterlink_link address_to link, p64 now)
         Nothing is written past the bytes returned.
 */
 positive waterlink_fill(struct waterlink_link address_to link,
-                        address_any out, p64 now, bool address_to alone);
+                        address_any out, p64 now, p8 address_to alone);
 
 _Static_assert(sizeof(struct waterlink_slot) == 1200 &&
                        offset_of(struct waterlink_slot, serial) == 8 &&
@@ -1567,7 +1567,7 @@ static p64 waterlink_held_probes(struct waterlink_link address_to link,
         walk ends at the first, or when every key left in the band is a
         stream it found blocked.
 */
-static bool waterlink_sendable(struct waterlink_link address_to link)
+static p8 waterlink_sendable(struct waterlink_link address_to link)
 {
         p64 blocked = 0;
 
@@ -1637,7 +1637,7 @@ p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
         far side holds for a reader that is behind is not delivered yet, and
         closing then would drop it there.
 */
-bool waterlink_idle(struct waterlink_link address_to link)
+p8 waterlink_idle(struct waterlink_link address_to link)
 {
         return link->free_count == WATERLINK_SLOTS && !link->acking;
 }
@@ -1660,7 +1660,7 @@ static KEEP fn waterlink_hold(struct waterlink_link address_to link,
 {
         p8 key = head->key;
         p64 bit = 1ull << (head->sequence & 63);
-        bool durable = (head->flags & WATERLINK_FRAME_DURABLE) != 0;
+        p8 durable = (head->flags & WATERLINK_FRAME_DURABLE) != 0;
         p32 prior = WATERLINK_NONE;
         p32 look = live->first;
         p32 at;
@@ -1720,12 +1720,12 @@ static KEEP fn waterlink_hold(struct waterlink_link address_to link,
         link->kept++;
 }
 
-typedef bool (address_to waterlink_sink)(address_any context,
+typedef p8 (address_to waterlink_sink)(address_any context,
                                          struct waterlink_frame address_to head,
                                          p8 address_to payload);
 
 // Hand one frame to the application; false when it would not take it.
-static bool waterlink_hand(struct waterlink_link address_to link,
+static p8 waterlink_hand(struct waterlink_link address_to link,
                            struct waterlink_receiving address_to live,
                            struct waterlink_frame address_to head,
                            p8 address_to payload, waterlink_sink sink,
@@ -1767,7 +1767,7 @@ static KEEP fn waterlink_release(struct waterlink_link address_to link, p8 key,
         while (live->first != WATERLINK_NONE && !live->over)
         {
                 struct waterlink_held address_to held = link->held + live->first;
-                bool newer = held->next != WATERLINK_NONE;
+                p8 newer = held->next != WATERLINK_NONE;
 
                 if (held->head.sequence <= live->delivered ||
                     ((held->head.flags & WATERLINK_FRAME_REPLACEABLE) && newer))
@@ -1817,7 +1817,7 @@ fn waterlink_resume(struct waterlink_link address_to link, p8 key,
         }
 }
 
-bool waterlink_paused(struct waterlink_link address_to link, p8 key)
+p8 waterlink_paused(struct waterlink_link address_to link, p8 key)
 {
         return key < WATERLINK_KEYS && link->receiving[key].paused;
 }
@@ -2550,7 +2550,7 @@ __asm__(
 #endif
 
 // A body judged and then applied: what every caller without a judge wants.
-bool waterlink_deliver(struct waterlink_link address_to link,
+p8 waterlink_deliver(struct waterlink_link address_to link,
                           address_any body, positive length, p64 now,
                           waterlink_sink sink, address_any context)
 {
@@ -2583,7 +2583,7 @@ bool waterlink_deliver(struct waterlink_link address_to link,
 _Static_assert(WATERLINK_REPLAY_WINDOW % 64 == 0,
                "the replay window is whole blocks");
 
-bool waterlink_replay_new(struct waterlink_replay address_to window, p64 counter)
+p8 waterlink_replay_new(struct waterlink_replay address_to window, p64 counter)
 {
         p64 block = counter >> 6;
         p64 bit = 1ull << (counter & 63);

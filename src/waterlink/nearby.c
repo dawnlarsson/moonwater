@@ -86,7 +86,7 @@ typedef struct
         positive count;
 } link_groups;
 
-static bool link_groups_scrub(positive records);
+static p8 link_groups_scrub(positive records);
 
 static bipolar link_groups_read(link_groups address_to groups,
                                 positive address_to old);
@@ -96,7 +96,7 @@ static bipolar link_groups_read(link_groups address_to groups,
    durably. The groups stay loaded, because a command that goes on to save them
    rewrites the file whole and that is the scrub; only the listener, which
    keeps them in memory, refuses to act on them. */
-bool link_groups_load(link_groups address_to groups)
+p8 link_groups_load(link_groups address_to groups)
 {
         positive old;
 
@@ -107,7 +107,7 @@ bool link_groups_load(link_groups address_to groups)
 /* The groups, to change them: a file that is there and cannot be read is not
    an empty list, and saving over it would forget every group in it. False
    then, with the file as it was; only a file never written is empty. */
-static bool link_groups_for_change(link_groups address_to groups)
+static p8 link_groups_for_change(link_groups address_to groups)
 {
         positive old;
         bipolar read = link_groups_read(groups, address_of old);
@@ -165,14 +165,14 @@ static bipolar link_groups_read(link_groups address_to groups,
         reads the field and a file written now has nothing in it, so a record
         that was replaced since it was read loses nothing but old bytes.
 */
-static bool link_groups_scrub(positive records)
+static p8 link_groups_scrub(positive records)
 {
         static const p8 zeros[32];
         file_facts facts;
         bipolar handle = system_open_at(AT_FDCWD, LINK_GROUPS_PATH,
                                         FILE_READ_WRITE | O_NOFOLLOW |
                                                 O_CLOEXEC);
-        bool scrubbed = false;
+        p8 scrubbed = false;
 
         if (handle < 0)
                 return false;
@@ -224,7 +224,7 @@ static p32 link_name_check(string_address name, positive room)
 
 //      A one-use group that has run out, or has taken its machine and been
 //      kept its half minute.
-static bool link_group_spent(struct link_group_record address_to record,
+static p8 link_group_spent(struct link_group_record address_to record,
                              p64 now)
 {
         return (record->flags & LINK_GROUP_ONCE) && record->expires <= now;
@@ -336,7 +336,7 @@ typedef struct
         p64 last_answer;
         p64 last_reply;
         p64 interfaces_looked;
-        bool labels_ready;
+        p8 labels_ready;
         struct link_greeted greeted[LINK_GREETED];
         positive greeted_next;
         p8 name[WATERLINK_NAME_MAX];
@@ -345,7 +345,7 @@ typedef struct
 
 static link_nearby_state link_nearby;
 
-static bool link_nearby_labels(void)
+static p8 link_nearby_labels(void)
 {
         link_nearby.labels_ready =
                 system_random_fill(link_nearby.host, sizeof link_nearby.host,
@@ -395,7 +395,7 @@ static fn link_groups_expire(void)
 {
         link_groups groups;
         p64 now = link_boot_seconds();
-        bool spent = false;
+        p8 spent = false;
         bipolar lock;
 
         for (positive at = 0; at < link_nearby.groups.count; at++)
@@ -430,14 +430,14 @@ static fn link_groups_expire(void)
         which keys a greeting may open; what it may become is the file's.
         False when the file cannot be read or no longer holds the group.
 */
-static bool link_group_held(positive group,
+static p8 link_group_held(positive group,
                             struct link_group_record address_to held)
 {
         struct link_group_record address_to copy =
                 link_nearby.groups.record + group;
         link_groups groups;
         positive old;
-        bool found = false;
+        p8 found = false;
 
         if (link_groups_read(address_of groups, address_of old) >= 0)
                 for (positive at = 0; at < groups.count && !found; at++)
@@ -463,23 +463,23 @@ static bool link_group_held(positive group,
         are gone after a restart, and a greeting recorded on the link, played
         back from anywhere, would otherwise move the member there for good.
 */
-static bool link_pair_keep(positive group, p8 address_to key,
+static p8 link_pair_keep(positive group, p8 address_to key,
                            p8 address_to offered, p32 stamped,
                            p8 address_to address, p16 port,
-                           bool address_to accepted)
+                           p8 address_to accepted)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         link_peers peers;
         struct waterlink_peer address_to peer;
         struct link_group_record held;
         bipolar lock = link_peers_lock();
-        bool changed = false;
-        bool new = false;
+        p8 changed = false;
+        p8 new = false;
 
         struct link_group_record address_to record =
                 link_nearby.groups.record + group;
-        bool once;
-        bool open;
+        p8 once;
+        p8 open;
 
         address_to accepted = false;
 
@@ -530,7 +530,7 @@ static bool link_pair_keep(positive group, p8 address_to key,
         }
         if (changed)
         {
-                bool saved = link_peers_save(address_of peers) >= 0;
+                p8 saved = link_peers_save(address_of peers) >= 0;
 
                 new = saved && new;
                 if (!saved)
@@ -559,7 +559,7 @@ typedef struct
         has no default route, so joining on "any" would fail there; one by
         one, by index, works everywhere.
 */
-static bool link_nearby_address(netlink_header address_to header,
+static p8 link_nearby_address(netlink_header address_to header,
                                 address_any context)
 {
         netlink_address address_to body =
@@ -654,7 +654,7 @@ static fn link_nearby_open(void)
         root's, private and whole, or a link), which are no groups, but a
         read that failed for itself -- the disk, no descriptor, no memory.
 */
-static bool link_groups_unknown(bipolar read)
+static p8 link_groups_unknown(bipolar read)
 {
         return read < 0 && read != -ENOENT && read != -EPERM && read != -ELOOP;
 }
@@ -737,7 +737,7 @@ static fn link_nearby_reload(p64 now)
         link_nearby.next_ask = now;
 }
 
-static bool link_nearby_send(p8 address_to packet, positive length,
+static p8 link_nearby_send(p8 address_to packet, positive length,
                              positive interface_at)
 {
         link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
@@ -756,10 +756,10 @@ static bool link_nearby_send(p8 address_to packet, positive length,
                (bipolar)length;
 }
 
-static bool link_nearby_announce(p32 ttl)
+static p8 link_nearby_announce(p32 ttl)
 {
         p8 packet[WATERLINK_MDNS_MAX];
-        bool sent = false;
+        p8 sent = false;
 
         for (positive at = 0; at < link_nearby.interfaces; at++)
         {
@@ -798,7 +798,7 @@ static fn link_nearby_stop(void)
 /* How many greetings of this address are still inside LINK_GREET_AGAIN; with
    exact, only those to this group and port. */
 static positive link_greeted_recent(p8 address_to address, p32 group, p16 port,
-                                    bool exact, p64 now)
+                                    p8 exact, p64 now)
 {
         positive recent = 0;
 
@@ -821,7 +821,7 @@ static positive link_greeted_recent(p8 address_to address, p32 group, p16 port,
    keeps enough private capacity to greet one machine in every possible group
    and leaves half the ring for another source. Raw address rotation still
    meets the global bound. */
-static bool link_greet_allowed(p8 address_to address, p64 now)
+static p8 link_greet_allowed(p8 address_to address, p64 now)
 {
         p64 oldest = link_nearby.greeted[link_nearby.greeted_next].at;
 
@@ -840,7 +840,7 @@ static bool link_greet_allowed(p8 address_to address, p64 now)
         answers was told.
 */
 static fn link_pair_begin(positive group, p8 address_to address, p16 port,
-                          p64 now, bool answer)
+                          p64 now, p8 answer)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         struct waterlink_noise noise;
@@ -894,7 +894,7 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
 #define LINK_CLOCK_FLOOR 1767225600ull // 2026-01-01
 #define LINK_GREET_FRESH 3600
 
-static bool link_greeting_fresh(positive group, p8 address_to hello)
+static p8 link_greeting_fresh(positive group, p8 address_to hello)
 {
         p64 wall = system_clock_ns(0) / 1000000000ull;
         p64 sent = network_load_64(hello) - (1ull << 62);
@@ -906,11 +906,11 @@ static bool link_greeting_fresh(positive group, p8 address_to hello)
 }
 
 //      A greeting that opened: the member is kept, and greeted back if new.
-static bool link_pair_greeted(positive group, p8 address_to key,
+static p8 link_pair_greeted(positive group, p8 address_to key,
                               p8 address_to hello, p8 address_to address,
                               p16 port, p64 now)
 {
-        bool accepted;
+        p8 accepted;
 
         if (!link_greeting_fresh(group, hello))
                 return false;
@@ -952,7 +952,7 @@ static struct
 {
         b32 channel;
         bipolar pid;
-        bool refused;
+        p8 refused;
 } link_mdns = {-1, -1, false};
 
 static COLD fn link_mdns_filter_build(net_filter address_to filter)
@@ -1031,7 +1031,7 @@ static COLD fn link_mdns_end(void)
         link_mdns.pid = -1;
 }
 
-static COLD bool link_mdns_start(void)
+static COLD p8 link_mdns_start(void)
 {
         b32 ends[2];
         bipolar parent = system_call(syscall(getpid));
@@ -1057,7 +1057,7 @@ static COLD bool link_mdns_start(void)
         return true;
 }
 
-static PURE COLD bool link_mdns_believed(const struct waterlink_found address_to found)
+static PURE COLD p8 link_mdns_believed(const struct waterlink_found address_to found)
 {
         if (found->count > WATERLINK_FOUND_MAX ||
             found->question_length > sizeof(found->question))
@@ -1069,7 +1069,7 @@ static PURE COLD bool link_mdns_believed(const struct waterlink_found address_to
 }
 
 /* waterlink_mdns_read, apart: the reading the reader made, or false. */
-static COLD bool link_mdns_read_apart(const p8 address_to packet, positive length,
+static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
                                       struct waterlink_found address_to found)
 {
         struct link_mdns_said said;
@@ -1205,7 +1205,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
 
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
-                        bool known = false;
+                        p8 known = false;
                         p32 once = link_nearby.groups.record[group].flags;
 
                         //      A code that is used up greets nobody, and one that
@@ -1283,7 +1283,7 @@ static p64 link_nearby_tick(p64 now)
         {
                 p32 before[LINK_INTERFACES];
                 positive had = link_nearby.interfaces;
-                bool changed;
+                p8 changed;
 
                 memory_copy(before, link_nearby.interface_address,
                             sizeof before);

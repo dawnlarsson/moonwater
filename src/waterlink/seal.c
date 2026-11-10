@@ -78,7 +78,7 @@ _Static_assert(offset_of(crypto_aesgcm_key, table) == 192,
 
 fn waterlink_seal_box(crypto_aesgcm_key address_to key, p8 address_to datagram,
                       positive used, positive box);
-bool waterlink_open_box(crypto_aesgcm_key address_to key,
+p8 waterlink_open_box(crypto_aesgcm_key address_to key,
                         p8 address_to datagram, positive box);
 
 #if X64
@@ -1076,7 +1076,7 @@ positive waterlink_seal(crypto_aesgcm_key address_to key, p8 address_to datagram
         a datagram's. The counter is only trustworthy after this returns true,
         which is why the replay window is asked afterwards and never before.
 */
-bool waterlink_open(crypto_aesgcm_key address_to key, p8 address_to datagram,
+p8 waterlink_open(crypto_aesgcm_key address_to key, p8 address_to datagram,
                     positive length)
 {
         if (length < 48 || length > WATERLINK_DATAGRAM || length % 16)

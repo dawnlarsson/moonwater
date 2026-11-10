@@ -367,7 +367,7 @@ static b32 test_report(string_address label)
 #include "checks.c"
 #undef SHARED_counted
 
-#define test(test_name) bool test_##test_name(void)
+#define test(test_name) p8 test_##test_name(void)
 #define case(test_name)                        \
         {                                      \
                 (string_address)#test_name,    \
@@ -377,13 +377,13 @@ static b32 test_report(string_address label)
         if (!(condition)) \
         return false
 
-typedef bool(address_to test_function)(void);
+typedef p8(address_to test_function)(void);
 
 typedef struct
 {
         string_address name;
         test_function function;
-        bool result;
+        p8 result;
 } test_case;
 
 /*
@@ -7166,7 +7166,7 @@ static fn x25519_reference_load(x25519_reference_fe out, p8 address_to in)
         the carry out of the top is the answer to the conditional
         subtraction, and dropping it is what performs the subtraction.
 */
-static fn x25519_reference_carry(x25519_reference_wide address_to t, bool wrap)
+static fn x25519_reference_carry(x25519_reference_wide address_to t, p8 wrap)
 {
         for (positive i = 0; i < 4; i++)
         {
@@ -10234,7 +10234,7 @@ test(atomic_operations) {
         fail_not_equals(old, 3);
         fail_not_equals(value, 10);
 
-        bool success = atomic_compare_exchange(&value, 10, 20);
+        p8 success = atomic_compare_exchange(&value, 10, 20);
         fail(success);
         fail_not_equals(value, 20);
 
@@ -11057,7 +11057,7 @@ static string_address reference_first_of_set(string_address source, string_addre
 
 // All three at once, because they are one loop with one bit different and a
 // disagreement in any of them is the same mistake.
-static bool set_scans_agree(string_address source, string_address set)
+static p8 set_scans_agree(string_address source, string_address set)
 {
         if (string_span_of_set(source, set) != reference_span_of_set(source, set))
                 return false;
@@ -11398,7 +11398,7 @@ test(string_compare_folded_direction)
 static p8 fold_tier_one[8192] __attribute__((aligned(4096)));
 static p8 fold_tier_two[8192] __attribute__((aligned(4096)));
 
-static bool folded_tier_pass(void)
+static p8 folded_tier_pass(void)
 {
         static const p8 edges[4] = { 0, 'Z', 'a', 0x80 };
         static const p8 letters[8] = { 'a', 'B', 'c', 'Z', 'A', 'z', 'm', 'N' };
@@ -11457,7 +11457,7 @@ static bool folded_tier_pass(void)
 
 test(string_compare_folded_tiers)
 {
-        bool fine = true;
+        p8 fine = true;
 #if X64
         p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
 
@@ -12032,16 +12032,16 @@ const string_address parse_edges[] = {
 
 p8 parse_scratch[96];
 
-bool parse_reference_hexadecimal(p32 byte)
+p8 parse_reference_hexadecimal(p32 byte)
 {
         return (p32)(byte - '0') < 10 || (p32)((byte | 32) - 'a') < 6;
 }
 
 positive parse_reference(string_address input, string_address address_to stopped,
-                         b32 base, bool unsigned_contract)
+                         b32 base, p8 unsigned_contract)
 {
         string_address at = input;
-        bool negative = false, any = false, overflowed = false;
+        p8 negative = false, any = false, overflowed = false;
         positive value = 0, cutoff, limit;
         p32 cutoff_digit;
 
@@ -12131,7 +12131,7 @@ positive parse_reference(string_address input, string_address address_to stopped
         return negative ? (positive)0 - value : value;
 }
 
-bool parse_agrees(string_address input, b32 base)
+p8 parse_agrees(string_address input, b32 base)
 {
         string_address ours = null, reference = null;
         bipolar signed_reference, signed_ours;
@@ -12171,7 +12171,7 @@ bool parse_agrees(string_address input, b32 base)
         return true;
 }
 
-bool parse_agrees_every_base(string_address input)
+p8 parse_agrees_every_base(string_address input)
 {
         for (positive at = 0; at < sizeof(parse_bases) / sizeof(*parse_bases); at++)
                 if (!parse_agrees(input, parse_bases[at]))
@@ -12466,7 +12466,7 @@ b32 bit_test_first(positive value)
 
 //      Every routine against every reference, including the narrow ffs
 //      against the low half of the same word.
-bool bit_test_all(positive value)
+p8 bit_test_all(positive value)
 {
         fail(bits_counted(value) == bit_test_counted(value));
         fail(bits_trailing_zeros(value) == bit_test_trailing(value));
@@ -12616,7 +12616,7 @@ static decimal decimal_from_bits(p64 bits)
 #define all_but_the_sign 0x7fffffffffffffffULL
 #define only_the_fraction 0x000fffffffffffffULL
 
-static bool ref_not_a_number(decimal value)
+static p8 ref_not_a_number(decimal value)
 {
         return (bits_of_decimal(value) & all_but_the_sign) > 0x7ff0000000000000ULL;
 }
@@ -12624,7 +12624,7 @@ static bool ref_not_a_number(decimal value)
 // A not-a-number is allowed to differ in its payload and in its quiet bit:
 // x86 and arm64 quiet a signalling one on the way through the rounding
 // instruction and riscv hands back the argument untouched.
-static bool decimal_same(decimal ours, decimal wanted)
+static p8 decimal_same(decimal ours, decimal wanted)
 {
         if (bits_of_decimal(ours) == bits_of_decimal(wanted)) return true;
         return ref_not_a_number(ours) && ref_not_a_number(wanted);
@@ -12701,7 +12701,7 @@ static decimal ref_with_sign(decimal magnitude, decimal sign)
 //      and returns that instead, which is what IEEE minNum specifies and what
 //      gcc and glibc do on that architecture.
 //
-static bool ref_signalling(decimal value)
+static p8 ref_signalling(decimal value)
 {
         p64 u = bits_of_decimal(value);
         return (u & all_but_the_sign) > 0x7ff0000000000000ULL &&
@@ -13259,7 +13259,7 @@ test(decimal_multiply_add_matches_exact_products)
 //      have no second body, so there is nothing here for them to run.
 //
 #if X64 && !defined(KERNEL_MODE)
-static bool decimal_multiply_add_paths_agree(decimal x, decimal y, decimal z)
+static p8 decimal_multiply_add_paths_agree(decimal x, decimal y, decimal z)
 {
         p8 saved = cpu_has_fma;
         decimal wide = decimal_multiply_add(x, y, z);
@@ -13376,7 +13376,7 @@ static f32 narrow_valued(p32 bits)
         return shape.value;
 }
 
-static bool narrow_pattern_is_nan(p32 bits)
+static p8 narrow_pattern_is_nan(p32 bits)
 {
         return (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0;
 }
@@ -13429,7 +13429,7 @@ static f32 narrow_reference(f32 value, b32 mode)
         return whole;
 }
 
-static bool narrow_agrees(p32 bits)
+static p8 narrow_agrees(p32 bits)
 {
         f32 value = narrow_valued(bits);
         p32 got[4];
@@ -13721,7 +13721,7 @@ test(byte_classes) {
 //      refuses, against every byte. The definitions are written out here,
 //      not read back from the table, so a wrong table entry cannot agree
 //      with itself.
-static bool class_definition(b32 which, p8 value)
+static p8 class_definition(b32 which, p8 value)
 {
         b32 digit = value >= '0' && value <= '9';
         b32 upper = value >= 'A' && value <= 'Z';
@@ -13780,7 +13780,7 @@ test(byte_case) {
 
 //      Bulk case conversion is exact and bounded even when a span straddles
 //      a page boundary. The sentinels on both sides catch widened tails.
-static bool ascii_case_pass(void) {
+static p8 ascii_case_pass(void) {
         p8 original[4128];
         p8 expected[4128];
         p8 actual[4128];
@@ -13839,7 +13839,7 @@ static bool ascii_case_pass(void) {
 //      Once for each body the machine has -- the zmm one, the ymm one, and
 //      the sixteen byte one under them -- the flags put back from a copy.
 test(memory_ascii_case) {
-        bool fine = true;
+        p8 fine = true;
 #if X64
         p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
 
@@ -13857,7 +13857,7 @@ test(memory_ascii_case) {
         return fine;
 }
 
-static bool hash_33_pass(void) {
+static p8 hash_33_pass(void) {
         p8 bytes[4128];
         positive offsets[] = {0, 1, 3, 7, 15, 4093, 4095};
 
@@ -13901,7 +13901,7 @@ static bool hash_33_pass(void) {
 //      with DQ, the four byte loop where there is not, which is told by
 //      writing the two flags down and putting them back.
 test(memory_hash_33) {
-        bool fine = hash_33_pass();
+        p8 fine = hash_33_pass();
 #if X64
         p8 dq = cpu_has_avx512_dq, wide = cpu_has_avx512;
 
@@ -14246,7 +14246,7 @@ test(system_write_all_partial_then_fault) {
         b32 ends[2];
         p8 readback[4096];
         positive seen = 0;
-        bool correct = true;
+        p8 correct = true;
 
         fail_not_equals(system_call_2(syscall(pipe2), (positive)ends, O_NONBLOCK), 0);
 
@@ -14625,12 +14625,12 @@ fn same(string_address name, string_address detail, positive got, positive want)
 static p8 address_to guard_pages(string_address routine)
 {
         p8 address_to pages = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 mapped = (bipolar)(positive)pages > 0;
 
         same(routine, "guard mapping", mapped, 1);
         if (!mapped)
                 return null;
-        bool protected =
+        p8 protected =
             system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0;
         same(routine, "guard pages protected", protected, 1);
@@ -15296,7 +15296,7 @@ fn check_translate()
         static p8 want[4096], palette[256];
         p8 address_to pages = memory(3 * 4096);
         p8 address_to tables = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0 &&
+        p8 mapped = (bipolar)(positive)pages > 0 &&
                       (bipolar)(positive)tables > 0;
 
         same("memory_translate", "guard mappings", mapped, 1);
@@ -15306,7 +15306,7 @@ fn check_translate()
                 if ((bipolar)(positive)tables > 0) memory_free(tables, 3 * 4096);
                 return;
         }
-        bool protected =
+        p8 protected =
             system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)tables, 4096, 0) == 0 &&
@@ -15535,7 +15535,7 @@ fn check_cells_from_ascii()
         p64 attribute = (p64)0x0203 << 32 | (p64)0x05 << 48;
         p8 address_to pages = memory(3 * 4096);
         p8 address_to rows = memory(3 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0 &&
+        p8 mapped = (bipolar)(positive)pages > 0 &&
                       (bipolar)(positive)rows > 0;
 
         same("cells_from_ascii", "guard mappings", mapped, 1);
@@ -15545,7 +15545,7 @@ fn check_cells_from_ascii()
                 if ((bipolar)(positive)rows > 0) memory_free(rows, 3 * 4096);
                 return;
         }
-        bool protected =
+        p8 protected =
             system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)rows, 4096, 0) == 0 &&
@@ -15723,7 +15723,7 @@ fn check_delete_bytes()
                                                 XORSHIFT64(seed);
                                                 // Any nonzero byte, 0x80 (no low bit set) a quarter of the time.
                                                 p8 mark = i % 4 == 0 || !(p8)(seed >> 24) ? 0x80 : (p8)(seed >> 24);
-                                                bool marked = density == 3 ? (seed & 15) != 0
+                                                p8 marked = density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
                                                               : density == 1 ? i == 'a' || i >= 0xf0
                                                               : density == 4 ? i == alphabet[0]
@@ -16008,7 +16008,7 @@ fn check_squeeze_bytes()
                                                 // apart from 256 bytes: three runs, four runs from byte
                                                 // 0 to byte 255 (the last of them sixteen long, past
                                                 // 0xf1), and one run of every byte.
-                                                bool marked = density == 6 ? true
+                                                p8 marked = density == 6 ? true
                                                               : density == 5 ? i == 0 || i == ' ' || i == 'a' || i == 'b' || i >= 0xf0
                                                               : density == 4 ? i == ' ' || (i >= 'a' && i <= 'b') || (i >= 0xf0 && i <= 0xf2)
                                                               : density == 3 ? (seed & 15) != 0
@@ -16159,7 +16159,7 @@ fn check_offsets_of_either()
                                                         // The bodies that write offsets eight or sixteen at a go write
                                                         // past the last hit, and must stay inside the limit they were
                                                         // given: whatever lies beyond it is the caller's.
-                                                        bool fenced = limit + 80 <= array_count(got);
+                                                        p8 fenced = limit + 80 <= array_count(got);
                                                         if (fenced)
                                                                 for (positive i = 0; i < 80; i++)
                                                                         got[limit + i] = 0xdeadbeefu;
@@ -16691,7 +16691,7 @@ static fn dirty_plane(fn (*one)(positive size, positive residue,
 }
 
 //      A byte that is neither value nor, for a letter, its other case.
-static p8 dirty_other(p8 value, bool nonzero)
+static p8 dirty_other(p8 value, p8 nonzero)
 {
         for (;;)
         {
@@ -17151,7 +17151,7 @@ static positive2 dirty_utf8_reference(const p8 address_to at, positive size)
                         break;
                 p8 low = lead == 0xe0 ? 0xa0 : lead == 0xf0 ? 0x90 : 0x80;
                 p8 high = lead == 0xed ? 0x9f : lead == 0xf4 ? 0x8f : 0xbf;
-                bool good = true;
+                p8 good = true;
                 for (positive i = 1; i < need; i++)
                 {
                         p8 byte = at[answer.x + i];
@@ -18403,7 +18403,7 @@ fn check_record_scans()
                                         const p8 address_to at = block + residue;
                                         positive count = record_fields_reference(want, at, size, table);
                                         positive answer = (memory_offsets_fields)(got, at, size, table, 5000);
-                                        bool ok = answer == count;
+                                        p8 ok = answer == count;
 
                                         for (positive i = 0; ok && i < 2 * count; i++)
                                                 ok = got[i] == want[i];
@@ -18575,7 +18575,7 @@ fn check_offsets_in_set_pages()
                                         
                                                 for (;;)
                                                 {
-                                                        bool fenced = limit + 80 <= array_count(got);
+                                                        p8 fenced = limit + 80 <= array_count(got);
                                                         if (fenced)
                                                                 for (positive i = 0; i < 80; i++)
                                                                         got[limit + i] = 0xdeadbeefu;
@@ -18683,7 +18683,7 @@ fn check_offsets_range_pages()
                                                 
                                                         for (;;)
                                                         {
-                                                                bool fenced = limit + 80 <= array_count(got);
+                                                                p8 fenced = limit + 80 <= array_count(got);
                                                                 if (fenced)
                                                                         for (positive i = 0; i < 80; i++)
                                                                                 got[limit + i] = 0xdeadbeefu;
@@ -19007,7 +19007,7 @@ static p64 reference_limbs_subtract(p64 address_to a, positive n,
 }
 
 static p64 reference_limbs_multiply(p64 address_to r, const p64 address_to a,
-                                    positive n, p64 w, p64 carry, bool add)
+                                    positive n, p64 w, p64 carry, p8 add)
 {
         for (positive j = 0; j < n; j++)
         {
@@ -19067,12 +19067,12 @@ static fn limbs_divide_one(p64 high, p64 low, p64 divisor)
 static fn check_limbs_body()
 {
         p8 address_to pages = memory(4 * 4096);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 mapped = (bipolar)(positive)pages > 0;
 
         same("limbs", "guard mapping", mapped, 1);
         if (!mapped)
                 return;
-        bool protected =
+        p8 protected =
             system_call_3(syscall(mprotect), (positive)pages, 4096, 0) == 0 &&
             system_call_3(syscall(mprotect), (positive)(pages + 3 * 4096), 4096, 0) == 0;
         same("limbs", "guard pages protected", protected, 1);
@@ -20976,12 +20976,12 @@ static b32 reference_byte_class_index(string_address name, positive length)
         return -1;
 }
 
-static bool reference_byte_class_holds(b32 which, p8 value)
+static p8 reference_byte_class_holds(b32 which, p8 value)
 {
-        bool upper = value >= 'A' && value <= 'Z';
-        bool lower = value >= 'a' && value <= 'z';
-        bool digit = value >= '0' && value <= '9';
-        bool printing = value >= ' ' && value < 127;
+        p8 upper = value >= 'A' && value <= 'Z';
+        p8 lower = value >= 'a' && value <= 'z';
+        p8 digit = value >= '0' && value <= '9';
+        p8 printing = value >= ' ' && value < 127;
 
         switch (which)
         {
@@ -22005,7 +22005,7 @@ static bipolar reference_bipolar(string_address source, positive address_to used
         positive at = 0;
         positive digits = 0;
         positive value = 0;
-        bool negative = false;
+        p8 negative = false;
 
         if (source)
         {
@@ -22073,7 +22073,7 @@ positive reference_digits_base_max(string_address source, positive bound,
         return value;
 }
 
-bool reference_digits_exact(string_address source, positive address_to value)
+p8 reference_digits_exact(string_address source, positive address_to value)
 {
         positive used;
 
@@ -22535,7 +22535,7 @@ fn check_signed_digits_and_width()
         that reaches unsigned wrap even in base two and proves wrapping and
         the strict pre-load fence together.
 */
-static p8 base_digit_character(positive digit, bool upper)
+static p8 base_digit_character(positive digit, p8 upper)
 {
         if (digit < 10)
                 return (p8)('0' + digit);
@@ -23061,7 +23061,7 @@ positive reference_into_human_1024(p8 address_to into, positive value)
 }
 
 positive reference_into_base(p8 address_to into, positive value, positive base,
-                             bool upper)
+                             p8 upper)
 {
         p8 scratch[64];
         positive have = 0;
@@ -23285,7 +23285,7 @@ static positive human_used;
 static positive human_calls;
 static positive human_call_lengths[4];
 static p8 human_call_first[4];
-static bool human_overflow;
+static p8 human_overflow;
 
 fn human_writer(address_any data, positive length)
 {
@@ -23344,8 +23344,8 @@ fn check_human_one(positive value, positive offset, p8 guard)
         same_bytes("positive_to_human_1024", "the bytes",
                    human_capture, want, want_length);
 
-        bool fractional = want_length == 4 && want[1] == '.';
-        bool scaled = want[want_length - 1] > '9';
+        p8 fractional = want_length == 4 && want[1] == '.';
+        p8 scaled = want[want_length - 1] > '9';
         positive expected_calls = fractional ? 4 : (scaled ? 2 : 1);
 
         same("positive_to_human_1024", "how many writer calls",
@@ -23471,13 +23471,13 @@ fn check_human_1024()
 #define HUMAN_NEAREST_HEAD 16
 
 static positive reference_human_nearest(p8 address_to into, positive n,
-                                        bool binary)
+                                        p8 binary)
 {
         positive base = binary ? 1024 : 1000;
         positive amount = n, tenths = 0, rounding = 0, exponent = 0;
         static p8 letters[] = {0, 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y', 'R', 'Q'};
         positive used = 0, fraction = 0;
-        bool point = false;
+        p8 point = false;
 
         if (base <= amount)
         {
@@ -23552,7 +23552,7 @@ static positive reference_human_nearest(p8 address_to into, positive n,
         return used;
 }
 
-static fn check_human_nearest_one(positive value, bool binary,
+static fn check_human_nearest_one(positive value, p8 binary,
                                   positive offset, p8 guard)
 {
         p8 got_room[HUMAN_NEAREST_ROOM];
@@ -23591,7 +23591,7 @@ fn check_human_nearest()
         // residues and every poison without multiplying identical cases.
         for (positive binary = 0; binary < 2; binary++)
                 for (positive value = 0; value <= 65535; value++)
-                        check_human_nearest_one(value, (bool)binary,
+                        check_human_nearest_one(value, (p8)binary,
                                                 value & 15,
                                                 guards[(value >> 4) %
                                                        sizeof(guards)]);
@@ -23603,7 +23603,7 @@ fn check_human_nearest()
                                 for (positive i = 0;
                                      i < sizeof(fixed) / sizeof(fixed[0]); i++)
                                         check_human_nearest_one(fixed[i],
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 offset,
                                                                 guards[g]);
 
@@ -23626,13 +23626,13 @@ fn check_human_nearest()
                         {
                                 if (power >= delta)
                                         check_human_nearest_one(power - delta,
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 serial++ & 15,
                                                                 guards[serial %
                                                                        sizeof(guards)]);
                                 if (power <= (positive)-1 - delta)
                                         check_human_nearest_one(power + delta,
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 serial++ & 15,
                                                                 guards[serial %
                                                                        sizeof(guards)]);
@@ -23646,17 +23646,17 @@ fn check_human_nearest()
                                 {
                                         positive tie = q * power + half;
                                         check_human_nearest_one(tie - 1,
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 serial++ & 15,
                                                                 guards[serial %
                                                                        sizeof(guards)]);
                                         check_human_nearest_one(tie,
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 serial++ & 15,
                                                                 guards[serial %
                                                                        sizeof(guards)]);
                                         check_human_nearest_one(tie + 1,
-                                                                (bool)binary,
+                                                                (p8)binary,
                                                                 serial++ & 15,
                                                                 guards[serial %
                                                                        sizeof(guards)]);
@@ -23668,7 +23668,7 @@ fn check_human_nearest()
                 for (positive i = 0; i < 65536; i++)
                 {
                         positive value = next();
-                        check_human_nearest_one(value, (bool)binary, i & 15,
+                        check_human_nearest_one(value, (p8)binary, i & 15,
                                                 guards[(i >> 4) % sizeof(guards)]);
                 }
 }
@@ -23776,7 +23776,7 @@ static positive padded_used;
 static positive padded_calls;
 static positive padded_call_lengths[PADDED_CALL_MAX];
 static p8 padded_call_first[PADDED_CALL_MAX];
-static bool padded_overflow;
+static p8 padded_overflow;
 
 fn padded_writer(address_any data, positive length)
 {
@@ -23823,7 +23823,7 @@ static positive field_calls;
 static positive field_call_lengths[FIELD_CALL_MAX];
 static p8 field_call_first[FIELD_CALL_MAX];
 static address_any field_call_data[FIELD_CALL_MAX];
-static bool field_overflow;
+static p8 field_overflow;
 
 __attribute__((noinline, noclone, used))
 fn field_capture(address_any data, positive length)
@@ -23891,8 +23891,8 @@ __asm__(
 #endif
 
 fn check_field_case(string_address name, address_any data, positive length,
-                    positive width, p8 pad, bool left, positive output_residue,
-                    bool string_form)
+                    positive width, p8 pad, p8 left, positive output_residue,
+                    p8 string_form)
 {
         positive padding = width > length ? width - length : 0;
         positive total = length + padding;
@@ -23930,7 +23930,7 @@ fn check_field_case(string_address name, address_any data, positive length,
 
         for (positive at = 0; at < total; at++)
         {
-                bool in_body = left ? at < length : at >= padding;
+                p8 in_body = left ? at < length : at >= padding;
                 positive body_at = left ? at : at - padding;
                 p8 want = in_body ? field_body_before[body_at] : pad;
 
@@ -23940,7 +23940,7 @@ fn check_field_case(string_address name, address_any data, positive length,
         for (positive call = 0; call < field_calls && call < FIELD_CALL_MAX;
              call++)
         {
-                bool is_body = length && call == body_call;
+                p8 is_body = length && call == body_call;
 
                 same(name, "callback length", field_call_lengths[call],
                      is_body ? length : 1);
@@ -23984,7 +23984,7 @@ fn check_writer_fields()
                                         check_field_case(
                                             "writer_field", length ? data :
                                                 (address_any)(positive)1,
-                                            length, width, pad, (bool)left,
+                                            length, width, pad, (p8)left,
                                             (length * 5 + width * 3 + residue) & 15,
                                             false);
                                 }
@@ -24000,7 +24000,7 @@ fn check_writer_fields()
                 data[2] = 0xff;
                 data[3] = 0x7e;
                 check_field_case("writer_field pad byte", data, 3, 9,
-                                 (p8)pad, (bool)(pad >> 7), pad & 15, false);
+                                 (p8)pad, (p8)(pad >> 7), pad & 15, false);
         }
 
         // The string wrapper crosses the complete small length/width plane;
@@ -24024,7 +24024,7 @@ fn check_writer_fields()
                                 text[length] = end;
 
                                 check_field_case("string_to_field", text, length,
-                                                 width, pad, (bool)left,
+                                                 width, pad, (p8)left,
                                                  (residue * 9 + width) & 15, true);
                         }
 
@@ -24476,7 +24476,7 @@ fn check_into_pair()
 static p8 base_got_room[128];
 static p8 base_want_room[128];
 
-fn check_into_base_one(positive value, positive base, bool upper,
+fn check_into_base_one(positive value, positive base, p8 upper,
                        positive offset, p8 guard)
 {
         reference_fill(base_got_room, guard, sizeof(base_got_room));
@@ -24502,7 +24502,7 @@ fn check_into_base()
 
         for (positive b = 0;
              b < sizeof(invalid_bases) / sizeof(invalid_bases[0]); b++)
-                for (bool upper = false; upper <= true; upper++)
+                for (p8 upper = false; upper <= true; upper++)
                         for (positive value = 0; value <= 1; value++)
                                 for (positive offset = 0; offset < 8; offset++)
                                 {
@@ -24527,7 +24527,7 @@ fn check_into_base()
 
         // Complete small-integer domain for every in-tree base and alphabet.
         for (positive b = 0; b < sizeof(tree_bases) / sizeof(tree_bases[0]); b++)
-                for (bool upper = false; upper <= true; upper++)
+                for (p8 upper = false; upper <= true; upper++)
                         for (positive value = 0; value <= 65535; value++)
                                 check_into_base_one(
                                     value, tree_bases[b], upper,
@@ -24536,7 +24536,7 @@ fn check_into_base()
 
         // Full alignment/guard cross at every length transition and UINT64.
         for (positive b = 0; b < sizeof(tree_bases) / sizeof(tree_bases[0]); b++)
-                for (bool upper = false; upper <= true; upper++)
+                for (p8 upper = false; upper <= true; upper++)
                         for (positive offset = 0; offset < 8; offset++)
                                 for (positive g = 0; g < sizeof(guards); g++)
                                 {
@@ -24566,7 +24566,7 @@ fn check_into_base()
 
         // The reusable surface, not only its current consumers.
         for (positive base = 2; base <= 36; base++)
-                for (bool upper = false; upper <= true; upper++)
+                for (p8 upper = false; upper <= true; upper++)
                 {
                         check_into_base_one(maximum, base, upper,
                                             base & 7, guards[base % sizeof(guards)]);
@@ -28392,7 +28392,7 @@ static positive blocks_next(positive length)
         return length + (length < 336 ? 1 : 13);
 }
 
-fn blocks_plant(string_address text, positive where, bool or_end_too)
+fn blocks_plant(string_address text, positive where, p8 or_end_too)
 {
         text[where] = 'z';
 
@@ -28694,14 +28694,14 @@ static p8 address_to block_mapped(void)
         return block_pages;
 }
 
-static positive2 reference_words(p8 address_to bytes, positive size, bool inside)
+static positive2 reference_words(p8 address_to bytes, positive size, p8 inside)
 {
         positive2 result = {.x = 0, .y = inside ? 1 : 0};
 
         for (positive at = 0; at < size; at++)
         {
                 p8 byte = bytes[at];
-                bool next = !(byte == 32 || (byte >= 9 && byte <= 13));
+                p8 next = !(byte == 32 || (byte >= 9 && byte <= 13));
                 if (next && !result.y)
                         result.x++;
                 result.y = next;
@@ -28710,9 +28710,9 @@ static positive2 reference_words(p8 address_to bytes, positive size, bool inside
 }
 
 // Every call the first in a process, on riscv64's first sweep.
-static bool words_first;
+static p8 words_first;
 
-static fn words_case(p8 address_to bytes, positive size, bool inside)
+static fn words_case(p8 address_to bytes, positive size, p8 inside)
 {
         positive2 want = reference_words(bytes, size, inside);
         VECTOR_FIRST_CALL(words_first);
@@ -28725,7 +28725,7 @@ static fn words_case(p8 address_to bytes, positive size, bool inside)
         positive2 first = memory_count_words(bytes, split, inside);
         VECTOR_FIRST_CALL(words_first);
         positive2 rest = memory_count_words(bytes + split, size - split,
-                                            (bool)first.y);
+                                            (p8)(first.y != 0));
         same("memory_count_words", "split count", first.x + rest.x, want.x);
         same("memory_count_words", "split state", rest.y, want.y);
 }
@@ -31047,7 +31047,7 @@ static void running_sizes(void)
         for (positive size = 0; size < 256; size++)
         {
                 positive n = size + running_zero;
-                bool okay = true;
+                p8 okay = true;
 
                 for (positive i = 0; i < sizeof(source); i++)
                         source[i] = (p8)(i * 37 + size + 1);
@@ -31191,7 +31191,7 @@ static void prepare(void)
         for (positive i = 0; i < sizeof(arena); i++) arena[i] = guard_byte(i);
 }
 
-static bool guards_intact(void)
+static p8 guards_intact(void)
 {
         for (positive i = 0; i < GUARD; i++)
                 if (arena[i] != guard_byte(i)) return false;
@@ -31205,7 +31205,7 @@ static bool guards_intact(void)
 //      The three answers, worked out the long way. A member is looked for by
 //      walking the whole set for every byte, which is the definition and
 //      nothing else.
-static bool member_of(string_address set, p8 value)
+static p8 member_of(string_address set, p8 value)
 {
         if (value == end) return false;
 
@@ -31271,7 +31271,7 @@ static p8 shaped(string_address set, positive shape, positive at, positive lengt
 
 //      The source, and behind its terminator either members or strangers.
 static string_address lay(string_address set, positive shape, positive length,
-                          bool members_behind)
+                          p8 members_behind)
 {
         p8 behind = members_behind ? a_member(set) : a_stranger(set);
 
@@ -31338,7 +31338,7 @@ static positive lengths[] = {
         expanded. The table the macro reads has to answer 1 at the byte it
         is asked about, whenever the set leaves one out.
 */
-static void witness(string_address set, bool asked, b8 answer)
+static void witness(string_address set, p8 asked, b8 answer)
 {
         checks++;
 
@@ -32327,7 +32327,7 @@ static fn length_guard_edge(void)
                         string_address twin = twin_edge - suffix;             \
                         p8 address_to into;                                   \
                         p8 address_to endp;                                   \
-                        bool padded = true;                                   \
+                        p8 padded = true;                                   \
                                                                                 \
                         for (positive i = 0; i + 1 < suffix; i++)             \
                                 source[i] = twin[i] =                         \
@@ -33605,7 +33605,7 @@ static positive checks, failures;
 
 static p8 text_asm_extra;
 
-static bool text_asm_blank(p8 byte) { return byte == ' ' || byte == '\t' || byte == text_asm_extra; }
+static p8 text_asm_blank(p8 byte) { return byte == ' ' || byte == '\t' || byte == text_asm_extra; }
 
 static positive2 text_asm_former(const p8 address_to bytes, positive length, positive at)
 {
@@ -33690,23 +33690,23 @@ b32 main(void)
 #include "../src/lib.util.c"
 #include "shell_asm.h"
 
-bool floodlight_status_clear(const p8 address_to text, positive length);
+p8 floodlight_status_clear(const p8 address_to text, positive length);
 
 static positive checks, failures;
 
 /* The walk as it stood, whole file in one chunk: each line copied into 32
    bytes, the long ones marked, the two names judged at their newline. */
-static bool shell_asm_former(const p8 address_to text, positive length)
+static p8 shell_asm_former(const p8 address_to text, positive length)
 {
         p8 line[32];
         positive used = 0;
-        bool long_line = false, ended = true, mode = false, count = false;
+        p8 long_line = false, ended = true, mode = false, count = false;
 
         for (positive at = 0; at < length; at++)
         {
                 p8 byte = text[at];
                 positive name = 0, value;
-                bool address_to seen = null;
+                p8 address_to seen = null;
 
                 if (byte != '\n')
                 {
@@ -33749,8 +33749,8 @@ static p64 shell_asm_next(void)
 
 static fn shell_asm_one(const p8 address_to text, positive length, positive what)
 {
-        bool want = shell_asm_former(text, length);
-        bool got = floodlight_status_clear(text, length);
+        p8 want = shell_asm_former(text, length);
+        p8 got = floodlight_status_clear(text, length);
 
         checks++;
         if (want != got)
@@ -33792,7 +33792,7 @@ static const char address_to shell_asm_count[] = {
         "Seccomp_filters:\t10",
 };
 
-static positive shell_asm_put(p8 address_to into, positive used, const char address_to line, bool newline)
+static positive shell_asm_put(p8 address_to into, positive used, const char address_to line, p8 newline)
 {
         positive length = string_length((string_address)line);
 
@@ -34054,7 +34054,7 @@ typedef struct
 {
         string_address text;
         positive hash, name_length, value_length;
-        bool owned, permanent, declared;
+        p8 owned, permanent, declared;
         p8 attributes;
         b32 array;
 } shell_asm_variable;
@@ -34078,7 +34078,7 @@ positive env_index_slots;
 positive env_find_hashed_span_probe(const_string name, positive length, positive hash);
 
 /* The check of the name found last, which stays C in the shell. */
-static bool shell_asm_found_last(shell_asm_lookup address_to lookup, const_string name,
+static p8 shell_asm_found_last(shell_asm_lookup address_to lookup, const_string name,
                                  positive length, positive hash)
 {
         if (lookup->hit_generation && lookup->hit_generation == lookup->generation &&
@@ -34157,7 +34157,7 @@ static fn shell_asm_find_one(const p8 address_to name, positive length, positive
         for (positive whole = 0; whole < 2; whole++)
         {
                 shell_asm_lookup former = env_lookup, held = env_lookup;
-                bool last = whole && shell_asm_found_last(address_of former, (const_string)name, length, hash);
+                p8 last = whole && shell_asm_found_last(address_of former, (const_string)name, length, hash);
                 positive want = last ? former.hit_index
                                      : shell_asm_find_former(address_of former, (const_string)name, length, hash);
                 positive got = last ? env_lookup.hit_index
@@ -34310,10 +34310,10 @@ typedef struct
         positive name_room, name_hash, name_length;
         b32 body;
         positive active;
-        bool readonly, exported;
+        p8 readonly, exported;
         p8 address_to environment;
         positive environment_room;
-        bool environment_valid;
+        p8 environment_valid;
         p8 special_kind;
 } shell_asm_function;
 
@@ -34499,7 +34499,7 @@ static p8 shell_asm_assignment_former(string_address word, positive address_to n
 b8 expand_literal_set[STRING_SET_BYTES];
 p8 parse_word_kind(string_address text, positive length, positive address_to name_length);
 
-static bool shell_asm_literal_former(string_address word, positive length)
+static p8 shell_asm_literal_former(string_address word, positive length)
 {
         return string_span_max(word, length, expand_literal_set) == length ||
                (length == 1 && string_is(word, '['));
@@ -34603,7 +34603,7 @@ static fn shell_asm_assignments(p8 address_to pages)
         compared after every call.
 */
 static b32 shell_asm_take_former(argument_cursor address_to cursor,
-                                 const argument_option address_to options, bool prefix,
+                                 const argument_option address_to options, p8 prefix,
                                  argument_match address_to match)
 {
         b32 token = argument_next(cursor);
@@ -34623,7 +34623,7 @@ static b32 shell_asm_take_former(argument_cursor address_to cursor,
         match->selection = option->selection;
         match->optional = (option->mode & ARGUMENT_OPTIONAL) ||
             (cursor->long_option && (option->mode & ARGUMENT_LONG_OPTIONAL));
-        bool required = (option->mode & ARGUMENT_REQUIRED) && !match->optional;
+        p8 required = (option->mode & ARGUMENT_REQUIRED) && !match->optional;
         if (cursor->attached && !match->optional && !required)
                 return ARGUMENT_UNEXPECTED;
         if (required || match->optional)
@@ -34636,7 +34636,7 @@ static b32 shell_asm_take_former(argument_cursor address_to cursor,
 }
 
 static fn shell_asm_take_run(string_address address_to argv, positive argc,
-                             const argument_option address_to options, bool prefix)
+                             const argument_option address_to options, p8 prefix)
 {
         argument_cursor want = {.argc = argc, .argv = argv, .at = shell_asm_next() % 2};
         argument_cursor got = want;
@@ -35037,26 +35037,26 @@ static fn shell_asm_binaries(p8 address_to pages)
         write; or, for one it does not take, that env_write_whole was reached
         with all eight arguments as they were and nothing was touched.
 */
-KEEP bool shell_restricted, shell_bash_compat;
-KEEP bool shell_envp_dirty;
+KEEP p8 shell_restricted, shell_bash_compat;
+KEEP p8 shell_envp_dirty;
 KEEP positive shell_options;
 
-bool env_write_destination(const_string name, positive name_len, positive hash, positive idx,
-                           const_string value, bool assignment,
-                           shell_asm_variable address_to destination, bool protect);
+p8 env_write_destination(const_string name, positive name_len, positive hash, positive idx,
+                           const_string value, p8 assignment,
+                           shell_asm_variable address_to destination, p8 protect);
 
 static struct
 {
-        bool called;
+        p8 called;
         const_string name, value;
         positive name_len, hash, idx;
-        bool assignment, protect;
+        p8 assignment, protect;
         shell_asm_variable address_to destination;
 } shell_asm_whole;
 
-KEEP bool env_write_whole(const_string name, positive name_len, positive hash, positive idx,
-                     const_string value, bool assignment,
-                     shell_asm_variable address_to destination, bool protect)
+KEEP p8 env_write_whole(const_string name, positive name_len, positive hash, positive idx,
+                     const_string value, p8 assignment,
+                     shell_asm_variable address_to destination, p8 protect)
 {
         shell_asm_whole.called = true;
         shell_asm_whole.name = name;
@@ -35096,15 +35096,15 @@ static fn shell_asm_writes(p8 address_to pages)
                                                       : 64 + shell_asm_next() % 200;
                 positive where = shell_asm_next() % 16;
                 positive value_len = shell_asm_next() % 3 ? shell_asm_next() % 16 : shell_asm_next() % 60;
-                bool use_destination = shell_asm_next() % 4 == 0;
+                p8 use_destination = shell_asm_next() % 4 == 0;
                 positive idx = shell_asm_next() % 10;
                 shell_asm_variable address_to held;
                 p8 address_to text;
                 p8 address_to value;
                 const p8 address_to name;
                 positive hash = shell_asm_next();
-                bool assignment = shell_asm_next() % 2, protect = shell_asm_next() % 2;
-                bool answer;
+                p8 assignment = shell_asm_next() % 2, protect = shell_asm_next() % 2;
+                p8 answer;
 
                 if (room < name_len + 1)
                         room = name_len + 1;
@@ -35163,7 +35163,7 @@ static fn shell_asm_writes(p8 address_to pages)
                 /* The rule. */
                 shell_asm_variable address_to variable = use_destination ? &spare
                     : idx < shell_var_count ? variables + idx : null;
-                bool fast = variable && !variable->attributes && variable->owned && name && value &&
+                p8 fast = variable && !variable->attributes && variable->owned && name && value &&
                             !shell_restricted && !shell_bash_compat &&
                             !(name_len <= 8 && ((0x150u >> name_len) & 1));
                 positive length = 0;
@@ -35186,7 +35186,7 @@ static fn shell_asm_writes(p8 address_to pages)
                 checks++;
                 if (fast)
                 {
-                        bool permanent = kept.permanent || (assignment && (shell_options & 1));
+                        p8 permanent = kept.permanent || (assignment && (shell_options & 1));
                         /* Up to sixteen bytes past the = may be stored whatever the length. */
                         positive stored = length + 1 > 16 ? length + 1 : 16;
 
@@ -35455,7 +35455,7 @@ static fn shell_asm_keys(p8 address_to pages)
 */
 positive2 arith_plain_natural(string_address at);
 
-static bool shell_asm_natural_former(string_address address_to at,
+static p8 shell_asm_natural_former(string_address address_to at,
                                      bipolar address_to value)
 {
         string_address step = address_to at;
@@ -35504,9 +35504,9 @@ static fn shell_asm_natural_one(const p8 address_to text)
 {
         string_address want_at = (string_address)text;
         bipolar want_value = 0;
-        bool want = shell_asm_natural_former(address_of want_at, address_of want_value);
+        p8 want = shell_asm_natural_former(address_of want_at, address_of want_value);
         positive2 answer = arith_plain_natural((string_address)text);
-        bool got = answer.y != 0;
+        p8 got = answer.y != 0;
         string_address got_at = got ? (string_address)answer.y : (string_address)text;
         bipolar got_value = (bipolar)answer.x;
 
@@ -35616,10 +35616,10 @@ static fn shell_asm_naturals(p8 address_to pages)
 */
 positive2 arith_plain_scalar(string_address text);
 
-static bool shell_asm_scalar_former(string_address text, bipolar address_to value)
+static p8 shell_asm_scalar_former(string_address text, bipolar address_to value)
 {
         string_address step;
-        bool negative = false;
+        p8 negative = false;
         bipolar magnitude;
 
         if (!text)
@@ -35652,7 +35652,7 @@ static bool shell_asm_scalar_former(string_address text, bipolar address_to valu
 static fn shell_asm_scalar_one(const p8 address_to text)
 {
         bipolar want_value = 0;
-        bool want = shell_asm_scalar_former((string_address)text, address_of want_value);
+        p8 want = shell_asm_scalar_former((string_address)text, address_of want_value);
         positive2 answer = arith_plain_scalar((string_address)text);
 
         checks++;
@@ -36018,7 +36018,7 @@ static fn guards_held(const p8 address_to what, positive base)
 
 //      One conversion, both ways, with the length, every written byte and
 //      both guards compared.
-static fn agree_into(positive value, positive base, bool upper, positive known)
+static fn agree_into(positive value, positive base, p8 upper, positive known)
 {
         positive was;
 
@@ -36058,7 +36058,7 @@ static fn agree_into(positive value, positive base, bool upper, positive known)
                                               upper));                        \
         } while (0)
 
-static fn into_sweep(positive value, bool upper)
+static fn into_sweep(positive value, p8 upper)
 {
         INTO(2);  INTO(3);  INTO(4);  INTO(5);  INTO(6);  INTO(7);
         INTO(8);  INTO(9);  INTO(10); INTO(11); INTO(12); INTO(13);
@@ -36177,7 +36177,7 @@ b32 main(void)
         for (positive which = 0; which < SWEEP; which++)
         {
                 seed = seed * 6364136223846793005UL + 1442695040888963407UL;
-                into_sweep(seed >> (which & 63), (bool)(which & 1));
+                into_sweep(seed >> (which & 63), (p8)(which & 1));
         }
 
         return test_report(null);
@@ -36444,7 +36444,7 @@ static fn prepare(void)
 /*      The arena outside [from, until) still holds the pattern prepare left.
         This is the whole of the tail check as well as the guard check: past
         the length a routine promised to write, every byte is somebody else's. */
-static bool untouched(const p8 address_to what, positive size,
+static p8 untouched(const p8 address_to what, positive size,
                       positive from, positive until)
 {
         for (positive i = 0; i < sizeof(arena); i++) {
@@ -37035,7 +37035,7 @@ static fn check_fill(address_any block, positive size, positive tag)
         }
 }
 
-static bool check_holds(address_any block, positive size, positive tag)
+static p8 check_holds(address_any block, positive size, positive tag)
 {
         p8 address_to bytes = (p8 address_to)block;
         positive index = 0;
@@ -37051,7 +37051,7 @@ static bool check_holds(address_any block, positive size, positive tag)
         return 1;
 }
 
-static fn check_true(bool condition)
+static fn check_true(p8 condition)
 {
         check_checks++;
 
@@ -37281,7 +37281,7 @@ static fn check_corners(void)
         {
                 address_any clean = calloc(600, 1);
                 positive index = 0;
-                bool zero = 1;
+                p8 zero = 1;
 
                 check_true(clean != null);
 
@@ -37303,7 +37303,7 @@ static fn check_corners(void)
         //      the store loop entirely and must still read back as zero.
         address_any wide = calloc(400000, 1);
         positive index = 0;
-        bool zero = 1;
+        p8 zero = 1;
 
         check_true(wide != null);
 
@@ -37705,7 +37705,7 @@ static fn reserve_boundaries(void)
         check("release resets owner", !held && !have && !used);
 }
 
-static fn reserve_mapping(bool split)
+static fn reserve_mapping(p8 split)
 {
         positive half = RESERVE_QUANTUM;
         address_any allocation = memory(half * 2);
@@ -37731,7 +37731,7 @@ static fn reserve_mapping(bool split)
            its copy fallback instead. Both must preserve the owned bytes. */
         positive have = split ? half * 2 : half;
         positive used = have;
-        bool grew = memory_reserve(address_of allocation, address_of have,
+        p8 grew = memory_reserve(address_of allocation, address_of have,
                                    used, have + 1, 1, half);
         check("split mapping grows", grew);
         check("blocked mapping moved", !grew || allocation != bytes);
@@ -37771,7 +37771,7 @@ static fn reserve_sparse(void)
               (positive)held + RESERVE_QUANTUM, RESERVE_QUANTUM,
               (positive)residency);
         check("initial sparse residency query", queried == 0);
-        bool sparse = queried == 0 && !(residency[0] & 1);
+        p8 sparse = queried == 0 && !(residency[0] & 1);
         check("sparse reserve grows", memory_reserve(address_of held,
               address_of have, used, used + 1, 1, 64));
         queried = system_call_3(syscall(mincore),
@@ -37811,7 +37811,7 @@ static fn reserve_refused(void)
                 if (!answer)
                 {
                         address_any before = held;
-                        bool grew = memory_reserve(address_of held,
+                        p8 grew = memory_reserve(address_of held,
                                 address_of have, used, 64 * 1024 * 1024, 1, 64);
                         answer = system_call_4(syscall(prlimit64), 0, 9,
                                                 (positive)limits, 0);
@@ -37923,7 +37923,7 @@ static positive utf8_reference_width(p8 address_to data, positive size)
 }
 
 // Every call the first in a process, in riscv64's walks against the guards.
-static bool utf8_first;
+static p8 utf8_first;
 
 static fn utf8_span_check(p8 address_to bytes, positive size, positive count)
 {
@@ -38323,7 +38323,7 @@ static fn utf8_encode_check(p8 address_to out, positive room, positive scalar)
                 size = 0;
         memory_fill(out, 0xa5, room);
         positive got = memory_utf8_encode(out, room, scalar);
-        bool exact = got == size;
+        p8 exact = got == size;
         for (positive at = 0; at < room; at++)
                 if (out[at] != (at < size ? expected[at] : 0xa5))
                         exact = false;
@@ -38345,7 +38345,7 @@ static fn utf8_stream_checks()
                 if (!width)
                         continue;
                 memory_utf8_state state = {0};
-                bool valid = true;
+                p8 valid = true;
                 for (positive at = 0; at < width; at++)
                         if (memory_utf8_feed(address_of state, bytes[at]) !=
                             (at + 1 == width ? 1 : 0))
@@ -38365,7 +38365,7 @@ static fn utf8_stream_checks()
                                 b32 result = 0;
                                 for (positive at = 0; at < width && result >= 0; at++)
                                         result = memory_utf8_feed(address_of state, bytes[at]);
-                                bool valid = utf8_reference_width(bytes, width) == width;
+                                p8 valid = utf8_reference_width(bytes, width) == width;
                                 check("stream malformed scalar boundaries", result == (valid ? 1 : -1) && !state.left);
                                 check("stream recovers after rejection", memory_utf8_feed(address_of state, 'Q') == 1 && state.value == 'Q');
                         }
@@ -38481,7 +38481,7 @@ b32 main()
 
 static p8 escape_output[2048];
 static positive escape_used, escape_calls;
-static bool escape_overflow;
+static p8 escape_overflow;
 
 static fn escape_capture(address_any data, positive length)
 {
@@ -38497,7 +38497,7 @@ static fn escape_capture(address_any data, positive length)
 
 static positive escape_oracle(p8 address_to into, p8 byte, positive policy)
 {
-        bool selected = policy == 64 ? byte < 32 || byte == '"' || byte == '\\' :
+        p8 selected = policy == 64 ? byte < 32 || byte == '"' || byte == '\\' :
             (byte < 32 && byte != 9 && (policy & 1)) ||
             (byte == 127 && (policy & 1)) || (byte == 9 && (policy & 2)) ||
             (byte == 32 && (policy & 4)) || (byte == 34 && (policy & 8)) ||
@@ -38693,7 +38693,7 @@ static fn escape_check(p8 address_to input, positive length)
                 for (positive at = 0; at < length; at++)
                 {
                         p8 byte = input[at];
-                        bool escaped = (byte < 32 && byte != '\t' && (policy & HEX_CONTROL)) ||
+                        p8 escaped = (byte < 32 && byte != '\t' && (policy & HEX_CONTROL)) ||
                             (byte == 127 && (policy & HEX_CONTROL)) ||
                             (byte == '\t' && (policy & HEX_TAB)) ||
                             (byte == ' ' && (policy & HEX_SPACE)) ||
@@ -38725,7 +38725,7 @@ static fn escape_check(p8 address_to input, positive length)
 static fn hex_check(p8 address_to out, p8 address_to input, positive size)
 {
         check("hex returned length", memory_into_hex(out, input, size) == size * 2);
-        bool correct = true;
+        p8 correct = true;
         for (positive i = 0; i < size * 2; i++)
         {
                 // Arithmetic oracle, independent of the assembly lookup table.
@@ -38741,7 +38741,7 @@ static fn hex_check(p8 address_to out, p8 address_to input, positive size)
    from nothing to seventy, valid and mixed text, a bad character or a NUL
    planted at a random offset, and a sentinel past the stop. Both the result
    and every byte written must agree. */
-static inline bool hex_decode_reference(address_any into, string_address text,
+static inline p8 hex_decode_reference(address_any into, string_address text,
                                         positive bytes)
 {
         p8 *out = (p8 *)into;
@@ -38785,8 +38785,8 @@ static fn hex_decode_suite(void)
                                                 (char)"\0\x20\xff"[trial % 3];
                                 for (positive i = 0; i < 80; i++)
                                         got[i] = want[i] = 0xA5;
-                                bool a = hex_decode_reference(want, (string_address)text, bytes);
-                                bool b = memory_from_hex(got, (string_address)text, bytes);
+                                p8 a = hex_decode_reference(want, (string_address)text, bytes);
+                                p8 b = memory_from_hex(got, (string_address)text, bytes);
                                 if (a != b || memory_compare(got, want, 80))
                                         bad++;
                         }
@@ -38820,7 +38820,7 @@ static fn hex_suite(void)
                                         source[at] = (p8)(at * 197 + size);
                                 memory_fill(output, 0xa5, sizeof(output));
                                 hex_check(output + output_at, source + source_at, size);
-                                bool untouched = true;
+                                p8 untouched = true;
                                 for (positive at = 0; at < sizeof(output); at++)
                                         if ((at < output_at || at >= output_at + size * 2) &&
                                             output[at] != 0xa5)
@@ -38833,7 +38833,7 @@ static fn hex_suite(void)
 
         const positive quantum = 65536;
         p8 address_to guarded[2] = {memory(quantum * 3), memory(quantum * 3)};
-        bool mapped = guarded[0] && guarded[1] &&
+        p8 mapped = guarded[0] && guarded[1] &&
                       (positive)guarded[0] < positive_max - 4095 &&
                       (positive)guarded[1] < positive_max - 4095;
         check("hex guard mappings", mapped);
@@ -38984,9 +38984,9 @@ static fn spelled_input(p8 address_to in, positive size, positive shape)
 }
 
 // Every call the first in a process, on riscv64's first suite.
-static bool spelled_first;
+static p8 spelled_first;
 
-static bool spelled_one(p8 address_to in, positive size, positive capacity,
+static p8 spelled_one(p8 address_to in, positive size, positive capacity,
                         p64 address_to table, positive shift)
 {
         p8 address_to out = spelled_out + 16 + shift;
@@ -38997,7 +38997,7 @@ static bool spelled_one(p8 address_to in, positive size, positive capacity,
         positive2 want = spelled_oracle(spelled_expected, in, size, capacity, table);
         VECTOR_FIRST_CALL(spelled_first);
         positive2 got = memory_into_spelled(out, in, size, capacity, table);
-        bool right = got.x == want.x && got.y == want.y &&
+        p8 right = got.x == want.x && got.y == want.y &&
                      !memory_compare(out, spelled_expected, want.y);
         for (positive at = 0; at < 16 + shift; at++)
                 right = right && spelled_out[at] == 0xa5;
@@ -39036,12 +39036,12 @@ static fn spelled_caret_check(void)
         for (positive flags = 0; flags < 16; flags++)
         {
                 p64 address_to table = spelling_caret(flags);
-                bool right = table == spelling_caret(flags);
+                p8 right = table == spelling_caret(flags);
                 for (positive byte = 0; byte < 256; byte++)
                 {
                         p8 text[8];
                         positive length = 0, value = byte;
-                        bool show = flags & SPELL_SHOW;
+                        p8 show = flags & SPELL_SHOW;
                         if (byte == 9 && (flags & SPELL_TABS))
                                 text[0] = '^', text[1] = 'I', length = 2;
                         else if (byte == 10 && (flags & SPELL_ENDS))
@@ -39113,7 +39113,7 @@ static fn spelled_c_check(void)
         for (positive high = 0; high < 2; high++)
         {
                 p64 address_to table = spelling_ansi(high);
-                bool right = table == spelling_ansi(high);
+                p8 right = table == spelling_ansi(high);
                 for (positive byte = 0; byte < 256; byte++)
                 {
                         static const p8 names[256] = {
@@ -39144,10 +39144,10 @@ static fn spelled_c_check(void)
         for (positive high = 0; high < 2; high++)
         {
                 p64 address_to table = spelling_hidden(high);
-                bool right = table == spelling_hidden(high);
+                p8 right = table == spelling_hidden(high);
                 for (positive byte = 0; byte < 256; byte++)
                 {
-                        bool hide = byte < 32 || byte == 127 || (high && byte >= 128);
+                        p8 hide = byte < 32 || byte == 127 || (high && byte >= 128);
                         right = right && table[byte] == ((p64)(hide ? '?' : byte) << 8 | 1);
                 }
                 check("spelling_hidden: every byte, with and without the high half", right);
@@ -39155,12 +39155,12 @@ static fn spelled_c_check(void)
         for (positive extra = 0; extra < 128; extra++)
         {
                 p64 address_to table = spelling_c(extra);
-                bool right = table == spelling_c(extra);
+                p8 right = table == spelling_c(extra);
                 for (positive byte = 0; byte < 256; byte++)
                 {
                         p8 text[4];
                         positive length;
-                        bool slashed = (byte == '\\' && !(extra & SPELL_C_BACKSLASH_BARE)) ||
+                        p8 slashed = (byte == '\\' && !(extra & SPELL_C_BACKSLASH_BARE)) ||
                                        (byte == '\'' && (extra & SPELL_C_APOSTROPHE)) ||
                                        (byte == '"' && (extra & SPELL_C_QUOTE)) ||
                                        (byte == ' ' && (extra & SPELL_C_SPACE)) ||
@@ -39224,7 +39224,7 @@ static fn spelled_suite(void)
 
         const positive quantum = 65536;
         p8 address_to guarded[2] = {memory(quantum * 3), memory(quantum * 3)};
-        bool mapped = guarded[0] && guarded[1] &&
+        p8 mapped = guarded[0] && guarded[1] &&
                       (positive)guarded[0] < positive_max - 4095 &&
                       (positive)guarded[1] < positive_max - 4095;
         check("spelled guard mappings", mapped);
@@ -39331,7 +39331,7 @@ static const char *alphabets[] = {
 static const p8 widths[] = {6, 6, 5, 5, 4, 1, 9, 4, 9, 6};
 
 // Every decode the first in a process, on riscv64's first tier.
-static bool codec_first;
+static p8 codec_first;
 
 static fn codec_check(p8 address_to source, p8 address_to output,
                       p8 address_to decoded, positive groups, positive kind)
@@ -39345,7 +39345,7 @@ static fn codec_check(p8 address_to source, p8 address_to output,
                 values[(p8)alphabets[kind][at]] = (p8)at;
         check("codec encoded groups", memory_encode_power2(output, source,
               groups, (string_address)alphabets[kind], widths[kind]) == groups);
-        bool valid = true;
+        p8 valid = true;
         for (positive group = 0; group < groups; group++)
                 for (positive at = 0; at < symbols; at++)
                 {
@@ -39374,7 +39374,7 @@ static fn codec_check(p8 address_to source, p8 address_to output,
                 {
                         check("hex case exact length", memory_into_hex_case(output,
                               source, groups, cases[at]) == groups * 2);
-                        bool correct = true;
+                        p8 correct = true;
                         for (positive byte = 0; byte < groups * 2; byte++)
                         {
                                 p8 nibble = (source[byte / 2] >> ((byte & 1) ? 0 : 4)) & 15;
@@ -39437,7 +39437,7 @@ static p64 vli_random(void)
 
 //      Every cut of one input, length and most from 0 to 12, against the
 //      model; a refusal must leave the value where it was.
-static bool vli_cuts_agree(const p8 address_to bytes)
+static p8 vli_cuts_agree(const p8 address_to bytes)
 {
         for (positive length = 0; length <= 12; length++)
                 for (positive most = 0; most <= 12; most++)
@@ -39457,7 +39457,7 @@ static bool vli_cuts_agree(const p8 address_to bytes)
 static fn vli_checks(void)
 {
         p8 bytes[16];
-        bool agree = true;
+        p8 agree = true;
 
         for (positive first = 0; first < 256; first++)
                 for (positive second = 0; second < 256; second++)
@@ -39518,7 +39518,7 @@ static fn vli_checks(void)
         }
         check("vli random continuation-heavy bytes, under every cut", agree);
 
-        bool written = true, read = true;
+        p8 written = true, read = true;
         for (positive bit = 0; bit <= 64 + 20000; bit++)
                 for (positive edge = 0; edge < 4; edge++)
                 {
@@ -39557,13 +39557,13 @@ static fn vli_checks(void)
 
         const positive quantum = 65536;
         p8 address_to guarded = memory(quantum * 2);
-        bool mapped = guarded && (positive)guarded < positive_max - 4095;
+        p8 mapped = guarded && (positive)guarded < positive_max - 4095;
         check("vli guard mapping", mapped);
         if (mapped)
         {
                 check("vli guard", system_call_3(syscall(mprotect),
                       (positive)(guarded + quantum), quantum, 0) == 0);
-                bool edge = true;
+                p8 edge = true;
                 for (positive run = 0; run <= 10; run++)
                         for (positive last = 0; last < 256; last += 3)
                                 for (positive length = 0; length <= 12; length++)
@@ -39647,7 +39647,7 @@ static fn span_checks(void)
 
         {
                 /* the 16_40 variants against the generic: every span length of the text, both limits */
-                bool agree = true;
+                p8 agree = true;
 
                 for (positive length = 0; length <= sizeof text - 1; length++)
                         for (int lim = 0; lim < 2; lim++)
@@ -39656,8 +39656,8 @@ static fn span_checks(void)
                                 positive mine = 7, theirs = 7;
                                 positive want = memory_digits_checked(text, length, limit, address_of theirs);
                                 positive got = memory_digits_checked_16_40(text, length, limit, address_of mine);
-                                bool whole_want = memory_digits_whole(text, length, limit, address_of theirs);
-                                bool whole = memory_digits_whole_16_40(text, length, limit, address_of mine);
+                                p8 whole_want = memory_digits_whole(text, length, limit, address_of theirs);
+                                p8 whole = memory_digits_whole_16_40(text, length, limit, address_of mine);
 
                                 if (got != want || mine != theirs || whole != whole_want)
                                         agree = false;
@@ -39759,7 +39759,7 @@ static positive control_scoped(positive way)
         return 0;
 }
 
-static positive control_kept(bool kept)
+static positive control_kept(p8 kept)
 {
         positive undone = 0;
         positive lost = 0;
@@ -39904,7 +39904,7 @@ b32 main(void)
                                 memory_fill(decoded, 0xa5, sizeof(decoded));
                                 codec_check(source + offset, output + offset,
                                             decoded + offset, groups, kind);
-                                bool valid = true;
+                                p8 valid = true;
                                 for (positive at = 0; at < sizeof(output); at++)
                                         if ((at < offset || at >= offset + groups * symbols) &&
                                             output[at] != 0xa5) valid = false;
@@ -39932,7 +39932,7 @@ b32 main(void)
                                         positive done = memory_decode_power2(decoded,
                                             output, 40, values, widths[kind]);
                                         check("codec first malformed quantum", done == at / symbols);
-                                        bool valid = true;
+                                        p8 valid = true;
                                         for (positive byte = done * bytes; byte < sizeof(decoded); byte++)
                                                 if (decoded[byte] != 0xa5) valid = false;
                                         check("codec malformed quantum untouched", valid);
@@ -39950,7 +39950,7 @@ b32 main(void)
         const positive quantum = 65536;
         p8 address_to guarded[4] = {memory(quantum * 3), memory(quantum * 3),
                                    memory(quantum * 3), memory(quantum * 3)};
-        bool mapped = true;
+        p8 mapped = true;
         for (positive at = 0; at < 4; at++)
                 mapped &= guarded[at] && (positive)guarded[at] < positive_max - 4095;
         check("codec guard mappings", mapped);
@@ -40015,7 +40015,7 @@ b32 main(void)
 #undef SHARED_counted
 
 static positive fixed_oracle(p8 address_to out, positive magnitude,
-                              positive scale, bool minus, positive width,
+                              positive scale, p8 minus, positive width,
                               positive precision, positive flags)
 {
         positive divisor = 1;
@@ -40095,7 +40095,7 @@ b32 main(void)
                                 for (positive flags = 0; flags < 32; flags++)
                                 {
                                         positive width = (v * 13 + scale * 7 + flags) % 80;
-                                        bool minus = (v + scale + precision) & 1;
+                                        p8 minus = (v + scale + precision) & 1;
                                         fixed_decimal field = fixed_decimal_prepare(values[v], scale,
                                             minus, width, precision, flags);
                                         positive wanted = fixed_oracle(expected, values[v], scale,
@@ -40125,7 +40125,7 @@ b32 main(void)
                                 positive got = memory_decimal_series(actual, room, length, first, finish, steps[s]);
                                 check("decimal series exact carry and boundary", got == wanted &&
                                       !memory_compare(actual, expected, got));
-                                bool intact = true;
+                                p8 intact = true;
                                 for (positive at = max(room, length); at < sizeof(actual); at++)
                                         if (actual[at] != 0xa5) intact = false;
                                 check("decimal series bounded writes", intact);
@@ -40160,14 +40160,14 @@ b32 main(void)
                                                             length, first, finish, 1);
                                                         check("decimal cached carry positions", got == wanted &&
                                                               !memory_compare(actual, expected, got));
-                                                        bool intact = true;
+                                                        p8 intact = true;
                                                         for (positive at = room; at < sizeof(actual); at++)
                                                                 if (actual[at] != 0xa5) intact = false;
                                                         check("decimal cached partial reservation", intact);
                                                 }
         const positive quantum = 65536;
         p8 address_to guarded = memory(quantum * 3);
-        bool mapped = guarded && (positive)guarded < positive_max - 4095;
+        p8 mapped = guarded && (positive)guarded < positive_max - 4095;
         check("decimal guard mapping", mapped);
         if (mapped)
         {
@@ -40211,7 +40211,7 @@ b32 main(void)
 
 static p8 table_output[16384];
 static positive table_used, table_calls;
-static bool table_overflow;
+static p8 table_overflow;
 
 static fn table_capture(address_any bytes, positive length)
 {
@@ -40687,7 +40687,7 @@ static fn table_projection_check(string_address name, address_any row,
         {
                 memory_fill(scratch, 0xa5, sizeof(scratch));
                 selected[i] = expected[i].column;
-                bool same = string_equals(field(row, selected[i], scratch),
+                p8 same = string_equals(field(row, selected[i], scratch),
                                            expected[i].expected);
                 if (!same)
                         string_format(log, "projection %s column=%p\n", name, (positive)selected[i]);
@@ -40920,7 +40920,7 @@ static fn table_limit_checks(void)
                         selected[field] = (p8)((field * (shape % 5) + shape) % 5);
                 for (positive mode = 0; mode < 4; mode++)
                 {
-                        bool headings = mode & 1, raw = mode & 2;
+                        p8 headings = mode & 1, raw = mode & 2;
                         positive widths[5] = {0}, used = 0;
                         for (positive field = 0; field < 5; field++)
                         {
@@ -40932,7 +40932,7 @@ static fn table_limit_checks(void)
                         }
                         for (positive row = 0; count && row < count + headings; row++)
                         {
-                                bool heading = headings && !row;
+                                p8 heading = headings && !row;
                                 for (positive field = 0; field < 5; field++)
                                 {
                                         p8 column = selected[field];
@@ -40940,7 +40940,7 @@ static fn table_limit_checks(void)
                                             ? ul_limit_definitions[column].heading
                                             : ul_limit_field(rows + row - headings, column, scratch);
                                         positive length = string_length(value);
-                                        bool number = column == UL_LIMIT_SOFT || column == UL_LIMIT_HARD;
+                                        p8 number = column == UL_LIMIT_SOFT || column == UL_LIMIT_HARD;
                                         positive pad = raw || (field == 4 && !number) ? 0
                                             : widths[column] - length;
                                         if (field) expected[used++] = ' ';
@@ -41122,7 +41122,7 @@ static fn table_fixed_callers(void)
                         }
                 for (positive mode = 0; mode < 4; mode++)
                 {
-                        bool signed_value = mode & 1, negative = mode & 2;
+                        p8 signed_value = mode & 1, negative = mode & 2;
                         expected[0] = '[';
                         positive length = 1 + table_fixed_expected(expected + 1,
                             values[i], 6, signed_value ? 11 : 12,
@@ -41157,7 +41157,7 @@ static fn table_fixed_callers(void)
 static ul_lsblk_row table_tree_expected[65];
 static positive table_tree_count;
 static fn table_tree_scan(ul_lsblk_device address_to device,
-                           positive depth, bool last, bool dependencies)
+                           positive depth, p8 last, p8 dependencies)
 {
         if (table_tree_count == ul_lsblk.capacity)
                 return;
@@ -41206,11 +41206,11 @@ static fn table_tree_checks(void)
                 for (positive i = 0; i < count; i++)
                         if (!order[i]->parent)
                         {
-                                bool dependencies = (round & 2) != 0;
+                                p8 dependencies = (round & 2) != 0;
                                 table_tree_scan(order[i], 0, false, dependencies);
                                 ul_lsblk_append(order[i], 0, false, dependencies);
                         }
-                bool same = ul_lsblk.row_count == table_tree_count;
+                p8 same = ul_lsblk.row_count == table_tree_count;
                 for (positive i = 0; i < table_tree_count; i++)
                         same &= rows[i].device == table_tree_expected[i].device &&
                                 rows[i].depth == table_tree_expected[i].depth &&
@@ -41232,7 +41232,7 @@ static fn table_tree_checks(void)
         ul_lsblk_link_children();
         table_tree_scan(devices, 0, false, true);
         ul_lsblk_append(devices, 0, false, true);
-        bool same = ul_lsblk.row_count == table_tree_count;
+        p8 same = ul_lsblk.row_count == table_tree_count;
         for (positive i = 0; i < table_tree_count; i++)
                 same &= rows[i].device == table_tree_expected[i].device &&
                         rows[i].depth == table_tree_expected[i].depth &&
@@ -41262,12 +41262,12 @@ typedef struct
         positive minimum[TABLE_GENERATED_COLUMNS];
         p8 flags[TABLE_GENERATED_COLUMNS], escape[TABLE_GENERATED_COLUMNS], json[TABLE_GENERATED_COLUMNS];
         positive rows, columns;
-        bool scratch;
+        p8 scratch;
 } table_generated;
 
 static p8 table_generated_output[1 << 20], table_oracle_output[1 << 20];
 static positive table_generated_used, table_oracle_used;
-static bool table_generated_overflow, table_oracle_overflow;
+static p8 table_generated_overflow, table_oracle_overflow;
 
 static fn table_generated_capture(address_any bytes, positive length)
 {
@@ -41300,7 +41300,7 @@ static table_cell table_generated_cell(address_any context, positive row,
                                        positive column, p8 address_to scratch)
 {
         table_generated address_to table = context;
-        bool heading = row == TABLE_HEADING, name = row == TABLE_NAME;
+        p8 heading = row == TABLE_HEADING, name = row == TABLE_NAME;
         positive at = heading || name ? 0 : row * TABLE_GENERATED_COLUMNS + column;
         p8 address_to text = heading ? table->heading[column] : name ? table->name[column]
                                                            : table->text[at];
@@ -41328,7 +41328,7 @@ static positive table_generated_write(writer output, address_any context,
         return cell.text.length;
 }
 
-static bool table_oracle_escapes(p8 byte, p8 policy)
+static p8 table_oracle_escapes(p8 byte, p8 policy)
 {
         if (policy & 64)
                 return byte < ' ' || byte == '"' || byte == '\\';
@@ -41368,7 +41368,7 @@ static fn table_oracle_hex(p8 address_to bytes, positive length, p8 policy, posi
         }
 }
 
-static fn table_oracle_json(p8 address_to bytes, positive length, bool lower, bool short_escapes)
+static fn table_oracle_json(p8 address_to bytes, positive length, p8 lower, p8 short_escapes)
 {
         table_oracle_put("\"", 1);
         for (positive at = 0; at < length; at++)
@@ -41451,7 +41451,7 @@ static positive table_oracle_cell_width(table_cell cell)
 }
 
 static fn table_oracle_measure(const table_view address_to view, positive rows,
-    bool headings, bool declared, bool free_widths, positive all_columns,
+    p8 headings, p8 declared, p8 free_widths, positive all_columns,
     positive address_to widths, positive address_to second)
 {
         positive fields = all_columns ? all_columns : view->count;
@@ -41506,8 +41506,8 @@ static fn table_oracle_row(const table_view address_to view, positive row,
                 for (positive shown = 0; shown < view->count; shown++)
                 {
                         positive col = table_oracle_index(view, shown);
-                        bool last = shown + 1 == view->count;
-                        bool measured = widths || view->fixed_widths;
+                        p8 last = shown + 1 == view->count;
+                        p8 measured = widths || view->fixed_widths;
                         p8 scratch[96];
                         table_cell cell = table_generated_cell(view->context, row, col, scratch);
                         positive width = widths ? widths[col] : view->fixed_widths ? cell.minimum : 0;
@@ -41567,7 +41567,7 @@ static fn table_oracle_row(const table_view address_to view, positive row,
 }
 
 static fn table_oracle_json_table(const table_view address_to view, positive rows,
-                                  bool column_style)
+                                  p8 column_style)
 {
         table_oracle_put("{\n   ", 5);
         table_oracle_json((p8 address_to)"generated", 9, false, column_style);
@@ -41592,7 +41592,7 @@ static fn table_oracle_json_table(const table_view address_to view, positive row
                                 table_oracle_put("null", 4);
                         else if (cell.json == TABLE_BOOLEAN)
                         {
-                                bool no = (length == 1 && value[0] == '0') ||
+                                p8 no = (length == 1 && value[0] == '0') ||
                                           (length == 2 && value[0] == 'n' && value[1] == 'o');
                                 table_oracle_put(no ? "false" : "true", no ? 5 : 4);
                         }
@@ -41649,7 +41649,7 @@ static fn table_generated_checks(void)
         static const string_address separators[] = {" ", "  ", "|", " | ", ""};
         for (positive round = 0; round < 3000; round++)
         {
-                bool wide = !(table_generated_next() % 5);
+                p8 wide = !(table_generated_next() % 5);
                 positive longest = wide ? 32 : 95;
                 table.rows = table_generated_next() % (wide ? 3 : TABLE_GENERATED_ROWS + 1);
                 table.columns = 1 + table_generated_next() % TABLE_GENERATED_COLUMNS;
@@ -41687,8 +41687,8 @@ static fn table_generated_checks(void)
                 positive order64[TABLE_GENERATED_SHOWN];
                 for (positive at = 0; at < shown; at++)
                         order8[at] = (p8)(order64[at] = table_generated_next() % table.columns);
-                bool wide_order = table_generated_next() & 1;
-                bool identity = !wide && !(table_generated_next() % 4);
+                p8 wide_order = table_generated_next() & 1;
+                p8 identity = !wide && !(table_generated_next() % 4);
                 table_view view = {.output = table_generated_capture, .context = &table,
                     .cell = table_generated_cell,
                     .order = identity ? null : wide_order ? (address_any)order64 : (address_any)order8,
@@ -41703,7 +41703,7 @@ static fn table_generated_checks(void)
                 if (!(table_generated_next() % 6))
                         view.write = table_generated_write;
                 positive mode = table_generated_next() & 255;
-                bool headings = mode & 1, same_widths = true;
+                p8 headings = mode & 1, same_widths = true;
                 table_generated_used = table_oracle_used = 0;
                 table_generated_overflow = table_oracle_overflow = false;
                 if (mode & 32)
@@ -41759,7 +41759,7 @@ static fn table_generated_checks(void)
                                 table_oracle_row(&view, row, wanted);
                         }
                 }
-                bool same = same_widths && !table_generated_overflow && !table_oracle_overflow &&
+                p8 same = same_widths && !table_generated_overflow && !table_oracle_overflow &&
                     table_generated_used == table_oracle_used &&
                     !memory_compare(table_generated_output, table_oracle_output, table_oracle_used);
                 if (!same)
@@ -41788,11 +41788,11 @@ static fn table_generated_checks(void)
                 check("generated hex spans match the byte-at-a-time spelling",
                       table_generated_used == table_oracle_used &&
                       !memory_compare(table_generated_output, table_oracle_output, table_oracle_used));
-                bool lower = table_generated_next() & 1, short_escapes = table_generated_next() & 1;
+                p8 lower = table_generated_next() & 1, short_escapes = table_generated_next() & 1;
                 table_generated_used = table_oracle_used = 0;
                 writer_json_span(table_generated_capture, text, lower, short_escapes);
                 table_oracle_json(span, length, lower, short_escapes);
-                bool same = table_generated_used == table_oracle_used &&
+                p8 same = table_generated_used == table_oracle_used &&
                     !memory_compare(table_generated_output, table_oracle_output, table_oracle_used);
                 if (!same)
                         string_format(log, "generated JSON round=%p lower=%p short=%p got=%p wanted=%p\n",
@@ -41971,7 +41971,7 @@ static fn error_test_contract(void)
         for (positive i = 0; i < array_count(raw); i++)
         {
                 errno = EPIPE;
-                bool failed = raw[i] >= -4095 && raw[i] < 0;
+                p8 failed = raw[i] >= -4095 && raw[i] < 0;
                 check("error conversion preserves wide successful results",
                       error_result(raw[i]) == (failed ? -1 : raw[i]));
                 check("only the kernel error window changes errno",
@@ -43692,13 +43692,13 @@ static fn leaving_append(leaving_text address_to into, address_any bytes,
 //      stream sends everything once a step stages a newline, and a buffer
 //      that went from empty to holding something and still holds it belongs
 //      to whoever ran the step.
-static fn leaving_model_step(b32 step, bool line, leaving_text address_to disk,
+static fn leaving_model_step(b32 step, p8 line, leaving_text address_to disk,
                              leaving_text address_to pending,
                              b32 address_to owner, b32 me)
 {
         string_address text = (string_address)leaving_step_bytes[step];
         positive length = string_length(text);
-        bool was_empty = pending->length == 0;
+        p8 was_empty = pending->length == 0;
 
         if (step == LEAVING_STEP_FLUSH)
         {
@@ -43724,7 +43724,7 @@ static fn leaving_model_step(b32 step, bool line, leaving_text address_to disk,
 //      with whatever it inherited, the child's exit, then the parent's exit.
 static fn leaving_matrix_expect(b32 which, leaving_text address_to out)
 {
-        bool line = (which >> 12) & 1;
+        p8 line = (which >> 12) & 1;
         leaving_text pending;
         leaving_text inherited;
         b32 owner = 0;
@@ -43977,7 +43977,7 @@ static b32 leaving_run(b32 which, p8 address_to seen, positive room,
 
 //      Every check in the first half is the same two questions asked of a
 //      different way of leaving, so they are asked once, here.
-static bool leaving_says(b32 which, string_address expected)
+static p8 leaving_says(b32 which, string_address expected)
 {
         p8 seen[256];
         positive filled = 0;
@@ -44336,7 +44336,7 @@ test(environ_follows_setenv_through_a_growth)
                 p8 name[32];
                 p8 value[32];
                 string_address address_to walk;
-                bool found = false;
+                p8 found = false;
 
                 leaving_name(name, value, index);
 
@@ -44413,7 +44413,7 @@ static p8 leaving_entry[32] = "LEAVING_HELD=before";
 test(environ_shows_what_putenv_installed)
 {
         string_address address_to walk;
-        bool found = false;
+        p8 found = false;
 
         fail(putenv(leaving_entry) == 0);
 
@@ -44544,13 +44544,13 @@ static int number_widest_limbs;
         the compiler's own conversion of the same number.
 */
 
-#define number_case(name) bool number_test_##name(void)
+#define number_case(name) p8 number_test_##name(void)
 
 static positive number_checks = 0;
 static positive number_failures = 0;
 static positive number_reported = 0;
 
-static fn number_note(bool held, string_address what, positive got, positive wanted)
+static fn number_note(p8 held, string_address what, positive got, positive wanted)
 {
         number_checks++;
 
@@ -44566,7 +44566,7 @@ static fn number_note(bool held, string_address what, positive got, positive wan
         }
 }
 
-static fn number_say(bool held, string_address what)
+static fn number_say(p8 held, string_address what)
 {
         number_checks++;
 
@@ -44960,7 +44960,7 @@ number_case(integers)
         to the eighty bits that exist. Comparing all sixteen bytes was the
         first version of this and it failed on every line, including on zero.
 */
-static bool number_extended_same(p128 left, p128 right)
+static p8 number_extended_same(p128 left, p128 right)
 {
 #if __LDBL_MANT_DIG__ == 64
         return (p64)left == (p64)right &&
@@ -45094,7 +45094,7 @@ number_case(page_edge_names)
         if (system_failed(pages) || !pages)
                 return false;
 
-        bool guarded =
+        p8 guarded =
             !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
             !system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
         number_say(guarded, text("floating-name guard protection"));
@@ -45142,7 +45142,7 @@ number_case(page_edge_names)
                         }
                         else
                         {
-                                bool extended_nan;
+                                p8 extended_nan;
 #if __LDBL_MANT_DIG__ == 64
                                 extended_nan =
                                     ((p64)(number_extended_bits(extended) >> 64) & 0x7fff) ==
@@ -45281,7 +45281,7 @@ static string_address number_compose(b32 digits, b32 exponent)
         return number_text;
 }
 
-static bool number_register_answer(string_address input, p64 address_to bits)
+static p8 number_register_answer(string_address input, p64 address_to bits)
 {
         numbers_scan scan;
         b32 condition = 0;
@@ -45298,7 +45298,7 @@ static bool number_register_answer(string_address input, p64 address_to bits)
         return true;
 }
 
-static bool number_register_narrow(string_address input, p32 address_to bits)
+static p8 number_register_narrow(string_address input, p32 address_to bits)
 {
         numbers_scan scan;
         b32 condition = 0;
@@ -45497,7 +45497,7 @@ number_case(short_agrees)
                         string_address general_stop = null;
                         number_wide_shape quick;
                         number_wide_shape general;
-                        bool took;
+                        p8 took;
 
                         ns_case();
                         input = (string_address)ns_text;
@@ -45611,7 +45611,7 @@ number_case(compared_agrees)
 typedef struct
 {
         const char address_to name;
-        bool(address_to run)(void);
+        p8(address_to run)(void);
 } number_entry;
 
 static const number_entry number_entries[] = {
@@ -45871,7 +45871,7 @@ static fn same_text(string_address name, string_address got, string_address want
                       is_null(got) ? (string_address) "(null)" : got, want);
 }
 
-static fn good(string_address name, bool held)
+static fn good(string_address name, p8 held)
 {
         checks++;
 
@@ -45981,7 +45981,7 @@ static const b32 clock_test_seconds[] = {-61, -1, 0, 30, 59, 60, 61, 3700};
 
 static positive clock_test_one_normalise(positive state, b32 year, b32 month,
                                          b32 day, b32 hour, b32 minute,
-                                         b32 second, bool through_mktime)
+                                         b32 second, p8 through_mktime)
 {
         struct tm broken;
         time_t got;
@@ -47278,9 +47278,9 @@ static fn check_live(void)
                 //      every rule one this parser reads. A row out of order
                 //      is a zone that silently stops being found.
                 {
-                        bool sorted = true;
-                        bool parsed = true;
-                        bool spoken = true;
+                        p8 sorted = true;
+                        p8 parsed = true;
+                        p8 spoken = true;
 
                         for (positive at = 1; at < array_count(clock_zones); at++)
                                 if (string_compare_folded((string_address)clock_zones[at - 1].name,
@@ -47355,7 +47355,7 @@ static fn check_live(void)
                                 {"Pacific/Chatham", 1768478400, 49500},
                                 {"Asia/Gaza", 1784116800, 10800},
                         };
-                        bool all = true;
+                        p8 all = true;
 
                         for (positive at = 0; at < array_count(rules); at++)
                         {
@@ -47384,7 +47384,7 @@ static fn check_live(void)
                                 {"+5:30", 19800},  {"-9:30", -34200},
                                 {"+14", 50400},    {"GMT+0", 0},
                         };
-                        bool all = true;
+                        p8 all = true;
 
                         for (positive at = 0; at < array_count(offsets); at++)
                         {
@@ -47464,8 +47464,8 @@ static fn check_live(void)
                         static const struct
                         {
                                 char text[56];
-                                bool read;  //  tzset's parse takes it
-                                bool whole; //  and it is all of the text
+                                p8 read;  //  tzset's parse takes it
+                                p8 whole; //  and it is all of the text
                         } strings[] = {
                                 {"CET-1", true, true},
                                 {"CET-1CEST", true, true},
@@ -47514,8 +47514,8 @@ static fn check_live(void)
                                 {"CET-1CEST,M3.5.0,M10.5.0,", false, false},
                                 {"CET-1CEST,M3.5.0,M10.5.0x", false, false},
                         };
-                        bool all = true;
-                        bool whole = true;
+                        p8 all = true;
+                        p8 whole = true;
 
                         for (positive at = 0; at < array_count(strings); at++)
                         {
@@ -47577,7 +47577,7 @@ static fn check_vdso_clock(void)
         string_address address_to walk = program_environment_list();
         positive named = 0;
         positive entry;
-        bool ordered = true;
+        p8 ordered = true;
 
         good((string_address) "_start marked an auxiliary vector",
              program_vdso_clock != 0);
@@ -47707,8 +47707,8 @@ static fn fast_civil(bipolar days)
 static fn fast_break(bipolar seconds)
 {
         tm one, two;
-        bool first = clock_break_down(seconds, address_of one);
-        bool second = clock_break_down_far(seconds, address_of two);
+        p8 first = clock_break_down(seconds, address_of one);
+        p8 second = clock_break_down_far(seconds, address_of two);
 
         checks++;
         if (first != second ||
@@ -47794,7 +47794,7 @@ static fn check_fast_forms(void)
                 p8 plain[512], machine[512];
                 positive at = 0;
                 positive picks = 1 + fast_random() % 8;
-                bool extensions = fast_random() & 1;
+                p8 extensions = fast_random() & 1;
                 positive room = fast_random() % 3 ? 512 : fast_random() % 100;
 
                 if (!clock_break_down((bipolar)fast_random() >> (fast_random() % 20 + 16), address_of broken))
@@ -47826,7 +47826,7 @@ static fn check_fast_forms(void)
                 positive got = clock_format(plain, room, (const char address_to)format, address_of broken, extensions, fraction);
                 positive want = clock_format_machine(machine, room, (const char address_to)format, address_of broken,
                                                      extensions, fraction);
-                bool same_bytes = got == want && (!got || memory_compare(plain, machine, got + 1) == 0);
+                p8 same_bytes = got == want && (!got || memory_compare(plain, machine, got + 1) == 0);
 
                 for (positive past = room; past < room + 8 && past < sizeof(plain); past++)
                         same_bytes = same_bytes && plain[past] == 0xa5;
@@ -47972,8 +47972,8 @@ static decimal md_call(positive routine, decimal x, decimal y)
 //      patterns are in numeric order; two NaNs are the same answer.
 static positive md_distance(positive mine, positive theirs)
 {
-        bool mine_nan = (mine >> 52 & 0x7ff) == 0x7ff && (mine & ((1ull << 52) - 1));
-        bool theirs_nan = (theirs >> 52 & 0x7ff) == 0x7ff && (theirs & ((1ull << 52) - 1));
+        p8 mine_nan = (mine >> 52 & 0x7ff) == 0x7ff && (mine & ((1ull << 52) - 1));
+        p8 theirs_nan = (theirs >> 52 & 0x7ff) == 0x7ff && (theirs & ((1ull << 52) - 1));
 
         if (mine_nan || theirs_nan)
                 return mine_nan && theirs_nan ? 0 : ~(positive)0;
@@ -48229,7 +48229,7 @@ test(classification)
 
         // Extended values must retain their own range, subnormal boundary,
         // NaN/sign encoding and single-evaluation macro contract.
-        static const struct { f128 value; b32 kind; bool minus; } extended[] = {
+        static const struct { f128 value; b32 kind; p8 minus; } extended[] = {
                 {0.0L, FP_ZERO, false}, {-0.0L, FP_ZERO, true},
                 {1.0L, FP_NORMAL, false}, {-1.0L, FP_NORMAL, true},
                 {__LDBL_MAX__, FP_NORMAL, false}, {-__LDBL_MAX__, FP_NORMAL, true},
@@ -49061,7 +49061,7 @@ static void matrix_narrow(matrix_call *routine, matrix_wide_call *wide, matrix_f
 #endif
 
 // Every call the first in a process, on riscv64's short pass.
-static bool matrix_first;
+static p8 matrix_first;
 
 static void matrix_gemm(float *C, const float *A, const float *B, unsigned long long M, unsigned long long N,
                         unsigned long long K, unsigned trans, float beta)
@@ -49458,7 +49458,7 @@ static fn modulo_pair(positive index, p64 address_to x, p64 address_to y)
         }
 }
 
-static bool modulo_is_nan(p64 bits)
+static p8 modulo_is_nan(p64 bits)
 {
         return (bits & MODULO_MAGNITUDE) > MODULO_INFINITY;
 }
@@ -49474,7 +49474,7 @@ static p64 modulo_mix(p64 digest, p64 value)
 }
 
 //      What each answer must be without anything to compare it with.
-static bool modulo_sound(p64 x, p64 y, p64 kept, p64 near)
+static p8 modulo_sound(p64 x, p64 y, p64 kept, p64 near)
 {
         p64 x_size = x & MODULO_MAGNITUDE;
         p64 y_size = y & MODULO_MAGNITUDE;
@@ -50088,7 +50088,7 @@ static float *train_x_end, *train_h_end, *train_front;
 
 //      Two runs of TRAIN_MOST floats and room for the gaps, each followed by
 //      a page that faults.
-static bool train_guard(void)
+static p8 train_guard(void)
 {
         positive span = ((TRAIN_MOST + 64) * 4 + 4095) / 4096 * 4096;
         float *ends[2];
@@ -50116,7 +50116,7 @@ static bool train_guard(void)
 }
 
 // Every call the first in a process, on riscv64's first tier.
-static bool train_first;
+static p8 train_first;
 
 static fn train_call_residual(float *x, const float *h, unsigned long long count, float alpha)
 {
@@ -50160,7 +50160,7 @@ static unsigned short train_bf16_instruction(unsigned x)
 #define TRAIN_BF16 2
 #define TRAIN_ARGMAX 4
 
-static fn train_tier(string_address tier, bool fused, p32 walks)
+static fn train_tier(string_address tier, p8 fused, p32 walks)
 {
         train_faults faults = {0, 0, 0, 0, 0, 0};
         train_bf16_faults bf16 = {0, 0, 0, 0, 0, 0};
@@ -51376,7 +51376,7 @@ static unsigned long long ranged_first_of_cases(p8 address_to page_end, p8 addre
                 for (positive where = 0; where < 2; where++)
                 {
                         p8 address_to span = where ? page_front : page_end - n;
-                        bool front = where;
+                        p8 front = where;
 
                         if (front && n > 16384 - 64)
                                 continue;
@@ -51556,7 +51556,7 @@ static fn ranged_tier(string_address tier)
         comes back spoiled, which is what makes a caller that kept something
         there give a wrong answer in a lane.
 */
-static bool ranged_spoiled(const p8 address_to room)
+static p8 ranged_spoiled(const p8 address_to room)
 {
         for (positive i = 0; i < 64; i++)
                 if (room[i] != 0xa5)
@@ -51575,7 +51575,7 @@ static bool ranged_spoiled(const p8 address_to room)
 static fn ranged_macros(void)
 {
         p8 address_to d = ranged_d_end - 64 - 300, address_to s = ranged_s_end - 64 - 300;
-        bool fine = true;
+        p8 fine = true;
 
         RANGED_LITERAL(0);
         RANGED_LITERAL(1);
@@ -51610,7 +51610,7 @@ static fn ranged_spans(void)
 {
         static b8 table[256];
         static p8 text[80];
-        bool fine = true;
+        p8 fine = true;
 
         for (positive density = 0; density <= 256; density += 16)
                 for (positive round = 0; round < 64; round++)
@@ -52140,7 +52140,7 @@ static positive environment_key_length(const char address_to entry)
 }
 
 //      Whether an entry's key, length bytes long, is this name.
-static bool environment_key_is_name(const char address_to entry, positive length,
+static p8 environment_key_is_name(const char address_to entry, positive length,
                                     const char address_to name)
 {
         for (positive at = 0; at < length; at++)
@@ -52556,7 +52556,7 @@ static fn bounded(void)
         p8 poison[64];
         positive index;
         bipolar answered;
-        bool untouched;
+        p8 untouched;
 
         for (index = 0; index < sizeof(poison); index++)
                 poison[index] = 0xa5;
@@ -52936,7 +52936,7 @@ static fn lexical_fields(void)
                 positive flags = byte == '-' ? CONVERSION_FLAG_LEFT :
                     byte == '+' ? CONVERSION_FLAG_PLUS : byte == ' ' ? CONVERSION_FLAG_SPACE :
                     byte == '#' ? CONVERSION_FLAG_ALTERNATE : byte == '0' ? CONVERSION_FLAG_ZERO : 0;
-                bool digit = byte >= '1' && byte <= '9';
+                p8 digit = byte >= '1' && byte <= '9';
                 at = text;
                 got = conversion_spec_take_max(&at, 1);
                 check("bounded field grammar classifies every byte", got.flags == flags &&
@@ -53778,13 +53778,13 @@ static fn scan_set_ranges(void)
                                 p8 low = edges[first], high = edges[last];
                                 p8 format[] = {'^', low, '-', high, ']', 'X', 0};
                                 b8 table[258];
-                                bool negated = !inverse, intact = true;
+                                p8 negated = !inverse, intact = true;
                                 memory_fill(table, 0x5a, sizeof table);
                                 string_address after = scan_build_set(
                                         format + !inverse, table + 1, &negated);
                                 for (positive byte = 0; byte < 256; byte++)
                                 {
-                                        bool member = low <= high
+                                        p8 member = low <= high
                                                 ? byte >= low && byte <= high
                                                 : byte == low || byte == high || byte == '-';
                                         intact &= table[byte + 1] == (member != inverse);
@@ -53898,12 +53898,12 @@ static fn stream_walk_invariants(stream address_to handle)
         flush comes straight after the write so that no later general call
         can give the byte back on the resident path's behalf.
 */
-static bool write_after_pushback_through(b32 entry)
+static p8 write_after_pushback_through(b32 entry)
 {
         b32 descriptor = (b32)system_call_2(syscall(memfd_create),
                                             (positive)"pushback-write", 1);
         p8 seen[16];
-        bool okay;
+        p8 okay;
 
         if (descriptor < 0) return false;
         FILE *file = fdopen(descriptor, "w+");
@@ -53935,14 +53935,14 @@ static bool write_after_pushback_through(b32 entry)
         return okay;
 }
 
-static bool write_after_pushback(void)
+static p8 write_after_pushback(void)
 {
         return write_after_pushback_through(0) &&
                write_after_pushback_through(1) &&
                write_after_pushback_through(2);
 }
 
-static bool dynamic_buffer_fits_one_shelf(void)
+static p8 dynamic_buffer_fits_one_shelf(void)
 {
         stream address_to handle =
                 stream_open((string_address)"/dev/null", (string_address)"w");
@@ -53951,7 +53951,7 @@ static bool dynamic_buffer_fits_one_shelf(void)
                 return false;
 
         stream_ready(handle);
-        bool fits = handle->buffer_size == STREAM_DYNAMIC_BUFFER &&
+        p8 fits = handle->buffer_size == STREAM_DYNAMIC_BUFFER &&
                     memory_usable_size(handle->buffer) ==
                             STREAM_DYNAMIC_BUFFER;
 
@@ -53959,7 +53959,7 @@ static bool dynamic_buffer_fits_one_shelf(void)
         return fits;
 }
 
-static bool empty_mode_stays_bounded(void)
+static p8 empty_mode_stays_bounded(void)
 {
         // 64 KiB is a multiple of every supported Linux base page size.
         positive page = 64 * 1024;
@@ -53976,7 +53976,7 @@ static bool empty_mode_stays_bounded(void)
         *mode = end;
         errno = 0;
         stream address_to opened = fopen("/dev/null", mode);
-        bool bounded = !opened && errno == EINVAL;
+        p8 bounded = !opened && errno == EINVAL;
         if (opened)
                 fclose(opened);
         memory_free(bytes, page * 2);
@@ -53985,7 +53985,7 @@ static bool empty_mode_stays_bounded(void)
 
 static fn interrupt_write(b32 number) { (void)number; }
 
-static bool bounded_line_reads(void)
+static p8 bounded_line_reads(void)
 {
         p8 bytes[257], copied[260];
         static const positive limits[] = {0, 1, 2, 3, 7, 16, 63, 127, 256, 257, 259};
@@ -53999,7 +53999,7 @@ static bool bounded_line_reads(void)
                                 memory_fill(copied, 0xa5, sizeof(copied));
                                 stream handle = {.descriptor = -1, .buffer = bytes,
                                     .read_tail = sizeof(bytes)};
-                                bool found = true, ended = true;
+                                p8 found = true, ended = true;
                                 positive want = stop < sizeof(bytes) ? stop + 1 : stop;
                                 if (want > limit) want = limit;
                                 positive got = stream_take_line(&handle, copied, limit,
@@ -54012,7 +54012,7 @@ static bool bounded_line_reads(void)
         return true;
 }
 
-static bool checked_write_errors(void)
+static p8 checked_write_errors(void)
 {
         system_write_result result = system_write_all_checked(-1, address_bad, 0);
         if (result.bytes || result.error) return false;
@@ -54022,7 +54022,7 @@ static bool checked_write_errors(void)
         if (sink < 0) return false;
         errno = EDOM;
         result = system_write_all_checked(sink, "x", 1);
-        bool correct = result.bytes == 1 && !result.error && errno == EDOM;
+        p8 correct = result.bytes == 1 && !result.error && errno == EDOM;
         FILE *closed = fdopen(sink, "w");
         if (!closed || setvbuf(closed, 0, _IONBF, 0)) return false;
         close(sink);
@@ -54126,7 +54126,7 @@ static b32 injected_write_stop(b32 expected)
         if (sink < 0) return 1;
         if (write_stop_install(expected) < 0) return 2;
         system_write_result result = system_write_all_checked(sink, "x", 1);
-        bool correct = !result.bytes && result.error == -expected &&
+        p8 correct = !result.bytes && result.error == -expected &&
                        system_write_all(sink, "x", 1) == 0;
         errno = 0;
         correct &= stream_trap_write(sink, "x", 1) == 0 &&
@@ -54144,14 +54144,14 @@ static b32 injected_write_stop(b32 expected)
         return correct ? 0 : 1;
 }
 
-static bool bounded_stream_positions(void)
+static p8 bounded_stream_positions(void)
 {
         b32 descriptor = (b32)system_call_2(syscall(memfd_create),
                                             (positive)"stream-positions", 1);
         if (descriptor < 0) return false;
         FILE *file = fdopen(descriptor, "w+");
         if (!file) { close(descriptor); return false; }
-        bool okay = fputs("ab", file) >= 0 && fseek(file, 0, SEEK_SET) == 0 &&
+        p8 okay = fputs("ab", file) >= 0 && fseek(file, 0, SEEK_SET) == 0 &&
                     fgetc(file) == 'a';
         errno = 0;
         okay &= fseek(file, bipolar_min, SEEK_CUR) == -1 && errno == EINVAL;
@@ -54174,7 +54174,7 @@ b32 main(void)
             !write_after_pushback())
                 return 1;
         trace_body();
-        bool fits = dynamic_buffer_fits_one_shelf();
+        p8 fits = dynamic_buffer_fits_one_shelf();
 
         log_flush();
         return fits ? 0 : 1;
@@ -54420,7 +54420,7 @@ static long body_file_mode(const char *path)
 #include "checks.c"
 #undef SHARED_spool_body
 
-static bool line_buffer_fits_one_shelf(void)
+static p8 line_buffer_fits_one_shelf(void)
 {
         stream address_to handle =
                 stream_open((string_address)"/dev/null", (string_address)"w");
@@ -54429,7 +54429,7 @@ static bool line_buffer_fits_one_shelf(void)
                 return false;
 
         spool_set_line_buffered(handle);
-        bool fits = handle->buffer_size == STREAM_DYNAMIC_BUFFER &&
+        p8 fits = handle->buffer_size == STREAM_DYNAMIC_BUFFER &&
                     memory_usable_size(handle->buffer) ==
                             STREAM_DYNAMIC_BUFFER;
 
@@ -54439,9 +54439,9 @@ static bool line_buffer_fits_one_shelf(void)
 
 // A pipe may already occupy the child's destination descriptor. Its `e`
 // flag belongs to the parent's end; exec must still inherit the child's end.
-static bool process_pipe_closed_standard(void)
+static p8 process_pipe_closed_standard(void)
 {
-        bool okay = true;
+        p8 okay = true;
         for (b32 reading = 0; reading < 2; reading++)
         {
                 log_flush();
@@ -54485,7 +54485,7 @@ b32 main(void)
         if (update || errno != EINVAL)
                 return 1;
         trace_body();
-        bool fits = line_buffer_fits_one_shelf();
+        p8 fits = line_buffer_fits_one_shelf();
 
         log_flush();
         return fits && process_pipe_closed_standard() ? 0 : 1;
@@ -54615,7 +54615,7 @@ static fn same_text(string_address name, string_address got,
                       is_null(want) ? (string_address) "(null)" : want);
 }
 
-static fn true_is(string_address name, bool got)
+static fn true_is(string_address name, p8 got)
 {
         same(name, got ? 1 : 0, 1);
 }
@@ -55243,7 +55243,7 @@ static fn test_realpath(void)
 //      -- exec ----------------------------------------------------------------
 
 //      The raw wait status, decoded through the macros this family adds.
-static b32 test_run(string_address address_to words, bool by_path)
+static b32 test_run(string_address address_to words, p8 by_path)
 {
         b32 status = 0;
         b32 child;
@@ -55482,8 +55482,8 @@ static fn test_close_three_case(string_address name, p32 from, p32 first,
 
                 for (positive at = 0; at < 16; at++)
                 {
-                        bool open = system_call_3(syscall(fcntl), at, 1, 0) >= 0;
-                        bool wanted = at < from || at == first || at == second ||
+                        p8 open = system_call_3(syscall(fcntl), at, 1, 0) >= 0;
+                        p8 wanted = at < from || at == first || at == second ||
                                       at == third;
 
                         wrong += open != wanted;
@@ -56502,10 +56502,10 @@ static fn lock_runtime(void)
         positive main_mask_after[1] = {0};
         positive started = 0;
         positive i;
-        bool distinct = true;
-        bool own = true;
-        bool kept = true;
-        bool blocked = true;
+        p8 distinct = true;
+        p8 own = true;
+        p8 kept = true;
+        p8 blocked = true;
 
         check("a process that started no thread counts none", threads_live == 0);
         check("the first thread's register is thread_main",
@@ -56588,7 +56588,7 @@ static fn lock_storm(void)
         positive round;
         positive i;
         positive wanted = 0;
-        bool all = true;
+        p8 all = true;
 
         //      Warm: the first round maps allocator chunks the rest reuse.
         for (i = 0; i < LOCK_THREADS; i++)
@@ -56825,7 +56825,7 @@ static p8 lock_churn_byte(positive size)
         return (p8)(size * 31 + (size >> 7));
 }
 
-static bool lock_churn_intact(address_any block, positive size)
+static p8 lock_churn_intact(address_any block, positive size)
 {
         p8 address_to bytes = block;
         p8 want = lock_churn_byte(size);
@@ -56925,7 +56925,7 @@ static fn lock_allocator(void)
         address_any again[256];
         positive i;
         positive started = 0;
-        bool fine = true;
+        p8 fine = true;
 
         atomic_exchange(address_of lock_go, 0);
 
@@ -57043,9 +57043,9 @@ static fn lock_depot(void)
         positive taken = 0;
         positive who, at, i, j;
         address_any chain;
-        bool on_chains = true;
-        bool came_back = true;
-        bool once = true;
+        p8 on_chains = true;
+        p8 came_back = true;
+        p8 once = true;
 
         //      Whatever the first thread already holds of the class goes
         //      aside first, so that what malloc hands back below can only
@@ -57084,7 +57084,7 @@ static fn lock_depot(void)
         for (who = 0; who < started; who++)
                 for (at = 0; at < 1 + who % LOCK_DEPOT_MOST; at++)
                 {
-                        bool found = false;
+                        p8 found = false;
 
                         for (chain = allocator_depot[class]; chain && !found;
                              chain = lock_depot_below(chain))
@@ -57108,7 +57108,7 @@ static fn lock_depot(void)
         for (who = 0; who < started; who++)
                 for (at = 0; at < 1 + who % LOCK_DEPOT_MOST; at++)
                 {
-                        bool found = false;
+                        p8 found = false;
 
                         for (i = 0; i < taken && !found; i++)
                                 found = lock_depot_taken[i] == lock_depot_blocks[who][at];
@@ -57349,7 +57349,7 @@ typedef struct
         positive refuse_at;
 } pool_stream;
 
-static bool pool_sink(address_any context, positive index, address_any data,
+static p8 pool_sink(address_any context, positive index, address_any data,
                       positive length)
 {
         pool_stream address_to stream = context;
@@ -57448,17 +57448,17 @@ static fn pool_beside_inside_job(address_any context, positive index)
                 atomic_add(address_of pool_beside_refused_inside, 1);
 }
 
-static fn lock_pool(bool emulated)
+static fn lock_pool(p8 emulated)
 {
         static const positive widths[] = {1, 2, 3, 8};
         pool_stream reference;
         pool_stream stream;
         positive round;
         positive at;
-        bool every_once = true;
-        bool same = true;
-        bool bounded = true;
-        bool ordered = true;
+        p8 every_once = true;
+        p8 same = true;
+        p8 bounded = true;
+        p8 ordered = true;
         b32 child;
         b32 raw = 0;
 
@@ -57563,7 +57563,7 @@ static fn lock_pool(bool emulated)
         {
                 static const positive stress_counts[] = {2, 3, 4, 5, 8, 9, 16, 33, 64};
                 positive stress_round;
-                bool stress_exact = true;
+                p8 stress_exact = true;
 
                 parallel_reset(8);
 
@@ -57755,7 +57755,7 @@ static volatile positive tree_probe_live = 0;
 static volatile positive tree_bad = 0;
 static volatile positive tree_stop_at_depth = positive_max;
 static volatile positive tree_leaves_run = 0;
-static bool tree_use_leaves = false;
+static p8 tree_use_leaves = false;
 
 static fn tree_number(p8 address_to into, positive address_to at, positive value)
 {
@@ -57949,8 +57949,8 @@ static fn tree_hash(tree_stream address_to stream, p8 address_to bytes, positive
         stream->bytes += length;
 }
 
-static bool tree_probe_sink(address_any context, address_any node, address_any data,
-                            positive length, bool finished)
+static p8 tree_probe_sink(address_any context, address_any node, address_any data,
+                            positive length, p8 finished)
 {
         tree_stream address_to stream = context;
 
@@ -57981,7 +57981,7 @@ static fn tree_reference_write(tree_stream address_to stream, p8 address_to line
 }
 
 static positive tree_reference(tree_stream address_to stream, bipolar directory,
-                               bool leaves)
+                               p8 leaves)
 {
         p8 address_to records = malloc(8192);
         positive own = 0;
@@ -58286,8 +58286,8 @@ static fn tree_remove_leave(address_any context, address_any node, bipolar direc
         }
 }
 
-static bool tree_quiet_sink(address_any context, address_any node, address_any data,
-                            positive length, bool finished)
+static p8 tree_quiet_sink(address_any context, address_any node, address_any data,
+                            positive length, p8 finished)
 {
         (void)context;
         (void)node;
@@ -58333,11 +58333,11 @@ static fn lock_tree(void)
         tree_stream reference = {0xcbf29ce484222325ull, 0, 0, 0, 0};
         tree_stream leaf_reference = {0xcbf29ce484222325ull, 0, 0, 0, 0};
         positive round;
-        bool same = true;
-        bool leaves_same = true;
-        bool within = true;
-        bool evicted = true;
-        bool alone = true;
+        p8 same = true;
+        p8 leaves_same = true;
+        p8 within = true;
+        p8 evicted = true;
+        p8 alone = true;
         positive handles_before;
         positive limits[2] = {0, 0};
 
@@ -58385,7 +58385,7 @@ static fn lock_tree(void)
                 tree_stream stream = {0xcbf29ce484222325ull, 0, 0, 0, 0};
                 tree_probe address_to root;
                 bipolar top;
-                bool answered;
+                p8 answered;
 
                 parallel_reset(widths[round]);
                 top = system_open_at(base, (string_address)".",
@@ -58449,7 +58449,7 @@ static fn lock_tree(void)
                 bipolar top = system_open_at(base, (string_address)"chain",
                                              FILE_READ | O_DIRECTORY | O_CLOEXEC);
                 tree_probe address_to root = tree_probe_new(null);
-                bool answered;
+                p8 answered;
 
                 parallel_reset(1);
                 answered = parallel_tree(tree_probe_enter, tree_probe_leave, tree_probe_sink,
@@ -58635,7 +58635,7 @@ static positive lines_fnv(positive hash, const p8 address_to bytes, positive len
 //      Lines of every length up to a few hundred, empty ones among them, and
 //      where long is set, one of more than the bound of a piece and one of
 //      a few kilobytes; ended is whether the last of them ends.
-static positive lines_make(bool long_line, bool ended)
+static positive lines_make(p8 long_line, p8 ended)
 {
         positive at = 0;
         positive seed = 0x9e3779b97f4a7c15ull;
@@ -58670,7 +58670,7 @@ static positive lines_make(bool long_line, bool ended)
         return at;
 }
 
-static bool lines_kernel(address_any context, positive index, p8 address_to lines,
+static p8 lines_kernel(address_any context, positive index, p8 address_to lines,
                          positive length, positive offset)
 {
         (void)context;
@@ -58689,7 +58689,7 @@ static bool lines_kernel(address_any context, positive index, p8 address_to line
         return true;
 }
 
-static bool lines_emit(address_any context, positive index, p8 address_to lines,
+static p8 lines_emit(address_any context, positive index, p8 address_to lines,
                        positive length, positive offset,
                        parallel_output address_to output)
 {
@@ -58699,7 +58699,7 @@ static bool lines_emit(address_any context, positive index, p8 address_to lines,
         return parallel_write(output, lines, length);
 }
 
-static bool lines_sink(address_any context, positive index, address_any data,
+static p8 lines_sink(address_any context, positive index, address_any data,
                        positive length)
 {
         (void)context;
@@ -58713,7 +58713,7 @@ static bool lines_sink(address_any context, positive index, address_any data,
 }
 
 static fn lock_lines_one(string_address name, positive size, positive start, positive chunk,
-                         bool address_to whole, bool address_to prefix)
+                         p8 address_to whole, p8 address_to prefix)
 {
         static const positive widths[] = {2, 3, 8};
         bipolar handle = system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
@@ -58820,9 +58820,9 @@ static fn lock_lines(void)
         p8 path[256];
         positive at = 0;
         string_address place = (string_address)getenv("TMPDIR");
-        bool whole = true;
-        bool prefix = true;
-        bool long_stops = true;
+        p8 whole = true;
+        p8 prefix = true;
+        p8 long_stops = true;
         bipolar handle;
         positive size;
         positive variant;
@@ -59894,10 +59894,10 @@ b32 main(void)
         short prefix, without needing /dev/full or a peer.
 */
 static positive http_writev_short_limit;
-static bool http_writev_short_hit;
+static p8 http_writev_short_hit;
 static bipolar http_writev_error;
-static bool http_writev_error_hit;
-static bool http_writev_error_sticky;
+static p8 http_writev_error_hit;
+static p8 http_writev_error_sticky;
 static positive http_writev_calls;
 
 /* A deterministic advancing clock for fault paths, not wall-time sleeps.
@@ -59924,12 +59924,12 @@ static positive net_test_monotonic_nanoseconds(void)
         takes a datagram.
 */
 static bipolar net_send_error;
-static bool net_send_error_hit;
-static bool net_send_eintr_once;
-static bool net_send_eintr_hit;
+static p8 net_send_error_hit;
+static p8 net_send_eintr_once;
+static p8 net_send_eintr_hit;
 static positive net_send_short_limit;
-static bool net_send_short_hit;
-static bool net_send_error_sticky;
+static p8 net_send_short_hit;
+static p8 net_send_error_sticky;
 static positive net_send_arm_after;
 static positive net_send_calls;
 static positive net_send_blocking_calls;
@@ -59938,16 +59938,16 @@ static positive net_send_capture_room;
 static positive net_send_capture_length;
 
 static bipolar net_recv_error;
-static bool net_recv_error_hit;
-static bool net_recv_eintr_once;
-static bool net_recv_eintr_hit;
+static p8 net_recv_error_hit;
+static p8 net_recv_eintr_once;
+static p8 net_recv_eintr_hit;
 static positive net_recv_short_limit;
-static bool net_recv_short_hit;
-static bool net_recv_eintr_sticky;
+static p8 net_recv_short_hit;
+static p8 net_recv_eintr_sticky;
 static positive net_recv_interruptions;
 static positive net_recv_calls;
 static positive net_recv_eagain_count;
-static bool net_recv_require_nonblocking;
+static p8 net_recv_require_nonblocking;
 static positive net_recv_blocking_calls;
 static positive net_recv_arm_after;
 static positive net_recv_fill_length;
@@ -59960,10 +59960,10 @@ static p8 net_recv_fill[64];
         refuses closed on every architecture — native Lima aarch64 still proves
         the real AS path separately (see net_as_emulated).
 */
-static bool net_memory_reserve_fail;
-static bool net_memory_reserve_fail_hit;
+static p8 net_memory_reserve_fail;
+static p8 net_memory_reserve_fail_hit;
 
-static bool net_test_memory_reserve(address_any address_to held,
+static p8 net_test_memory_reserve(address_any address_to held,
                                     positive address_to have, positive used,
                                     positive want, positive unit,
                                     positive first)
@@ -59984,12 +59984,12 @@ typedef struct
 } http_test_span;
 
 //      The next writev answers that it wrote nothing.
-static bool http_writev_zero;
+static p8 http_writev_zero;
 
 /* Syscalls by number that answer as set instead of being made: the ids a
    confined child gives up, the seccomp it installs. */
 #define NET_FAKE_CALLS 512
-static bool net_faked[NET_FAKE_CALLS];
+static p8 net_faked[NET_FAKE_CALLS];
 static bipolar net_fake[NET_FAKE_CALLS];
 
 static fn net_fake_set(positive number, bipolar result)
@@ -60073,7 +60073,7 @@ static bipolar http_net_call3(positive number, positive one, positive two,
 }
 
 //      The next send answers that it moved nothing.
-static bool net_send_zero;
+static p8 net_send_zero;
 
 static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
@@ -60133,7 +60133,7 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
 
 /* The next receive answers this length and reads nothing, as a datagram's
    MSG_TRUNC peek of that length or a fill that came back empty would. */
-static bool net_recv_report;
+static p8 net_recv_report;
 static positive net_recv_report_length;
 
 static bipolar net_test_socket_receive(b32 handle, address_any data,
@@ -60244,7 +60244,7 @@ static positive net_name_calls;
 //      getsockname refused, or answered as a netlink socket on that port, so a
 //      datagram pair stands for a routing socket that hears only the kernel.
 static bipolar net_name_error;
-static bool net_name_short;
+static p8 net_name_short;
 static p32 net_name_netlink_port;
 static positive net_text_span_calls;
 static fn net_io_faults_clear(void);
@@ -60280,7 +60280,7 @@ static bipolar net_test_socket_name(b32 handle, address_any address,
 }
 
 /* The wall clock, read as this when it is set. */
-static bool net_time_set;
+static p8 net_time_set;
 static time_t net_time_stamp;
 
 static time_t net_test_time(time_t address_to into)
@@ -60297,7 +60297,7 @@ static string_address net_slurp_text;
 
 /* connect: done, then answered as this status; bind: counted; randomness:
    refused this many times, as a pool that is not ready refuses. */
-static bool net_connect_report;
+static p8 net_connect_report;
 static bipolar net_connect_report_status;
 static positive net_bind_calls;
 static positive net_random_refuse;
@@ -60415,7 +60415,7 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef system_call_2
 
 /* qemu-user arches get --emulated from test/run; native host arch does not. */
-static bool net_as_emulated(void)
+static p8 net_as_emulated(void)
 {
         return program_argument_count() > 1 &&
                !string_compare(program_argument(1),
@@ -60855,7 +60855,7 @@ static fn userspace_source_progress(void)
         socket_close(pair[1]);
 }
 
-static bool net_test_enter_namespaces(positive uid, positive gid);
+static p8 net_test_enter_namespaces(positive uid, positive gid);
 
 /* A body that needs root over a network namespace of its own, run where
    anyone can have one: in a child that enters a user and a network namespace
@@ -60960,7 +60960,7 @@ static fn userspace_route_source_in_namespace(void)
         check("an isolated userspace route datagram cannot strand receive", said == 0);
 }
 
-static bool netlink_stop_after_first(netlink_header address_to header,
+static p8 netlink_stop_after_first(netlink_header address_to header,
                                       address_any context)
 {
         (void)header;
@@ -60985,7 +60985,7 @@ static fn netlink_multipart_identity(void)
                 check("multipart identity socket fixture opens", opened == 0);
                 if (opened)
                         continue;
-                bool queued = true;
+                p8 queued = true;
                 for (positive at = 0; at < packets[row]; at++)
                         queued &= socket_send(pair[1], address_of frame,
                             sizeof frame, 0, null, 0) == sizeof frame;
@@ -60993,7 +60993,7 @@ static fn netlink_multipart_identity(void)
                 queued &= socket_send(pair[1], address_of frame, sizeof frame,
                                       0, null, 0) == sizeof frame;
                 check("multipart identity replies queue", queued);
-                bool ready = netlink_begin(address_of request, RTM_GETLINK,
+                p8 ready = netlink_begin(address_of request, RTM_GETLINK,
                                             NLM_REQUEST, 77, 0);
 
                 net_name_calls = 0;
@@ -61042,7 +61042,7 @@ static fn netlink_nonblocking_retries(void)
                         check("nonblocking netlink retry reply queues",
                               socket_send(pair[1], address_of done, sizeof done,
                                           0, null, 0) == sizeof done);
-                        bool built = netlink_begin(address_of request,
+                        p8 built = netlink_begin(address_of request,
                             RTM_GETLINK, NLM_REQUEST, 89, 0);
 
                         net_recv_require_nonblocking = true;
@@ -61275,7 +61275,7 @@ static fn tls_decision_edges(void)
                 //      comes next, and happens to be a BOOLEAN's tag.
                 p8 bytes[] = {0x30, 0x01, 0x01, 0xff};
                 positive at = 1;
-                bool value = false;
+                p8 value = false;
 
                 check("a BOOLEAN reader at the end of its container reads nothing past it",
                       tls_asn1_true(bytes, 1, address_of at, address_of value) == TLS_OK &&
@@ -61619,7 +61619,7 @@ static fn netlink_decision_edges(void)
                 bipolar handle;
                 socket_address_netlink self = {0};
                 p32 length = sizeof self;
-                bool bound;
+                p8 bound;
 
                 if (saved >= 0)
                         system_close(0);
@@ -61699,7 +61699,7 @@ static fn netlink_reply_matching(void)
                     .type = NLMSG_IS_DONE, .sequence = 55};
                 netlink_header other = {.length = NETLINK_HEADER,
                     .type = RTM_NEWLINK, .sequence = 56};
-                bool queued = true;
+                p8 queued = true;
                 bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
                                                 SOCK_DGRAM, 0, (positive)pair);
 
@@ -61777,7 +61777,7 @@ static fn netlink_reply_matching(void)
 
 /* netlink_each: a visitor that says stop ends the walk without failing it, a
    cut or short message fails it, and what came before the cut was visited. */
-static bool netlink_count_all(netlink_header address_to header,
+static p8 netlink_count_all(netlink_header address_to header,
                               address_any context)
 {
         (void)header;
@@ -62038,7 +62038,7 @@ static fn link_candidates(void)
 
         for (positive step = 0; step < 3; step++)
         {
-                bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                p8 built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
                                             sizeof(netlink_link)) &&
                              netlink_attribute_add(&message, IFLA_IFNAME,
                                                     "eth0", step == 2 ? 4 : 5);
@@ -62071,7 +62071,7 @@ static fn link_candidates(void)
         static const struct
         {
                 p16 kind;
-                bool skipped;
+                p8 skipped;
         } kinds[] = {{NETLINK_LINK_ETHER, false}, {803, true}, {801, true},
                      {65534, true}, {NETLINK_LINK_ETHER, true}};
 
@@ -62079,7 +62079,7 @@ static fn link_candidates(void)
         {
                 netlink_search look = {.skip_loopback = true, .skip_count = 1,
                                        .skip = {40}};
-                bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                p8 built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
                                            sizeof(netlink_link)) &&
                              netlink_attribute_add(&message, IFLA_IFNAME, "eth0", 5) &&
                              netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
@@ -62119,17 +62119,17 @@ typedef struct
         positive downs_width;
 } link_spec;
 
-static bool link_feed(netlink_visitor visit, address_any context,
+static p8 link_feed(netlink_visitor visit, address_any context,
                       const link_spec address_to spec)
 {
         netlink_buffer message = {0};
         p8 hardware[8] = {1, 2, 3, 4, 5, 6, 7, 8};
         p32 downs = 9;
-        bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+        p8 built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
                                    sizeof(netlink_link)) &&
                      netlink_attribute_add(&message, IFLA_IFNAME, spec->name,
                                            string_length(spec->name) + 1);
-        bool wanted;
+        p8 wanted;
 
         if (spec->hardware_width)
                 built &= netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
@@ -62166,7 +62166,7 @@ static bool link_feed(netlink_visitor visit, address_any context,
         return wanted;
 }
 
-static bool link_see(netlink_search address_to search,
+static p8 link_see(netlink_search address_to search,
                      const link_spec address_to spec)
 {
         return link_feed(netlink_link_seen, search, spec);
@@ -62278,7 +62278,7 @@ static fn link_choice(void)
 
         /* What the message says of its link. */
         {
-                static const struct { positive hardware, downs; bool has, counted; } widths[] = {
+                static const struct { positive hardware, downs; p8 has, counted; } widths[] = {
                     {6, 4, true, true}, {4, 8, false, false}, {8, 2, false, false},
                     {0, 0, false, false}, {6, 0, true, false}, {0, 4, false, true}};
 
@@ -62300,7 +62300,7 @@ static fn link_choice(void)
                 }
         }
         {
-                static const struct { string_address name; p8 how; bool wireless; } kinds[] = {
+                static const struct { string_address name; p8 how; p8 wireless; } kinds[] = {
                     {"eth0", 0, false}, {"eth0", 1, true}, {"eth0", 2, false},
                     {"eth0", 3, true}, {"eth0", 4, false}, {"wl0", 0, true},
                     {"wlan0", 0, true}, {"wifi0", 0, true}, {"w0", 0, false},
@@ -62379,7 +62379,7 @@ static fn lease_stamps(void)
 {
         netlink_lease_search search;
         netlink_buffer message = {0};
-        bool built = true;
+        p8 built = true;
 
         static const struct
         {
@@ -62390,7 +62390,7 @@ static fn lease_stamps(void)
                 positive proto_size;
                 p32 host;
                 positive local_size; /* 0 no attribute */
-                bool leased;
+                p8 leased;
                 positive others;
         } rows[] = {
             {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, true, 0},
@@ -62786,9 +62786,9 @@ static fn resolving_edges(void)
                 {
                         memory_fill(written, 0x5a, sizeof written);
                         bipolar got = dns_write_name(written + 4, room, name);
-                        bool valid = length ? length <= 63 && wire <= 255 && room >= wire
+                        p8 valid = length ? length <= 63 && wire <= 255 && room >= wire
                                            : labels == 1 && !trailing && room > 0;
-                        bool intact = true;
+                        p8 intact = true;
                         for (positive at = 0; at < sizeof written; at++)
                                 if (at < 4 || at >= room + 4)
                                         intact &= written[at] == 0x5a;
@@ -63504,7 +63504,7 @@ static DEAD_END fn dns_answer_server(bipolar datagram, bipolar listening, positi
 /* The case asked of a server on a loopback port, over UDP by dns_query_once
    or over TCP by dns_retry_tcp, with standard input closed for the asking
    when stdin_closed is, so the asking socket is numbered 0. */
-static bipolar dns_answer_case(positive which, bool edns, bool stdin_closed,
+static bipolar dns_answer_case(positive which, p8 edns, p8 stdin_closed,
                                p32 address_to found)
 {
         socket_address_internet where = {
@@ -63543,7 +63543,7 @@ static bipolar dns_answer_case(positive which, bool edns, bool stdin_closed,
                 {
                         p8 request[DNS_MAX_MESSAGE];
                         positive question_length, request_length;
-                        bool mixed = false;
+                        p8 mixed = false;
 
                         if (dns_build_request(request, sizeof request,
                                               (string_address)"answer.example", 0x5150,
@@ -63713,7 +63713,7 @@ static fn resolving_decision_edges(void)
         }
         {
                 p8 low[63], high[63];
-                bool upper = false, lower = false;
+                p8 upper = false, lower = false;
 
                 memory_fill(low, 'a', sizeof low);
                 memory_fill(high, 'z', sizeof high);
@@ -63820,7 +63820,7 @@ static bipolar net_test_index(string_address name)
 
 //      The caller's own user and network namespaces, with root mapped to the
 //      caller: what a test needs to bind port 53 or make a veth pair.
-static bool net_test_enter_namespaces(positive uid, positive gid)
+static p8 net_test_enter_namespaces(positive uid, positive gid)
 {
         p8 line[32];
 
@@ -64004,7 +64004,7 @@ static fn net_test_dns_walk(positive uid, positive gid)
                 p32 found = 0;
                 bipolar status;
                 p8 heard[3];
-                bool second_asked;
+                p8 second_asked;
 
                 for (positive at = 0; at < 2; at++)
                 {
@@ -64262,12 +64262,12 @@ enum
 
 /* Freestanding twin of the hosted extract: same wires, production
    http_response_framing / http_unchunk already linked into CHECK_net. */
-static bool http_response_framing_harness_case(
-        bool must_accept, positive mode, p8 address_to wire,
+static p8 http_response_framing_harness_case(
+        p8 must_accept, positive mode, p8 address_to wire,
         positive wire_length, p8 address_to expected_body,
         positive expected_body_length)
 {
-        bool accepted = false;
+        p8 accepted = false;
         p8 address_to body = null;
         positive body_length = 0;
         p8 scratch[256];
@@ -64378,7 +64378,7 @@ static bool http_response_framing_harness_case(
 //      The URL, the headers and the chunk framing -- all of it pure.
 //      The grammar of a head and nothing else: what http_response_fields
 //      makes of it under a 200, which keeps no Location.
-static bool http_header_block_valid(p8 address_to bytes, positive size)
+static p8 http_header_block_valid(p8 address_to bytes, positive size)
 {
         http_response response = {.code = 200};
         http_framing_fields fields;
@@ -64392,7 +64392,7 @@ static fn fetching(void)
         p8 name[64];
         string_address path;
         p16 port;
-        bool tls;
+        p8 tls;
 
         check("a plain url splits",
               http_split_into((string_address) "http://dawning.dev/index.html", name,
@@ -64482,7 +64482,7 @@ static fn fetching(void)
                 static const struct
                 {
                         const char *host;
-                        bool spelling;
+                        p8 spelling;
                         p32 address;
                 } spellings[] = {
                     {"127.1", true, 0x7f000001}, {"0x7f.1", true, 0x7f000001},
@@ -64502,7 +64502,7 @@ static fn fetching(void)
                 for (positive at = 0; at < array_count(spellings); at++)
                 {
                         p32 address = 0xdeadbeef;
-                        bool spelled = http_ipv4_spelling(
+                        p8 spelled = http_ipv4_spelling(
                             (const p8 address_to)spellings[at].host,
                             string_length((string_address)spellings[at].host),
                             address_of address);
@@ -64711,11 +64711,11 @@ static fn fetching(void)
                                 string_copy(input + length, tails[ending]);
                                 memory_fill(name, 0x5a, sizeof name);
                                 bipolar result = http_split_into(input, name, capacity, &port, &path, &tls);
-                                bool fits = (length & 1) && length + 1 < capacity;
-                                bool scheme = (length & 1) && ending == 2 &&
+                                p8 fits = (length & 1) && length + 1 < capacity;
+                                p8 scheme = (length & 1) && ending == 2 &&
                                               MOONWATER_STRICT >= STRICT_TIGHT;
-                                bool accepted = fits && !scheme;
-                                bool intact = true;
+                                p8 accepted = fits && !scheme;
+                                p8 intact = true;
                                 for (positive at = 0; at < sizeof name; at++)
                                         intact &= name[at] == (accepted && at <= length
                                                 ? at == length ? 0 : byte : 0x5a);
@@ -64842,7 +64842,7 @@ static fn fetching(void)
                         p8 request[HTTP_HEAD_MAX];
                         string_address hop_path;
                         p16 hop_port;
-                        bool hop_tls;
+                        p8 hop_tls;
                         positive used = 0;
                         p8 placed[16];
 
@@ -64964,11 +64964,11 @@ static fn fetching(void)
                 p8 name[] = "HTTP/1.1 200 OK\r\nXxY: value\r\n\r\n";
                 p8 value[] = "HTTP/1.1 200 OK\r\nX: x\r\n\r\n";
                 p8 status[] = "HTTP/1.1 200 x\r\nX: value\r\n\r\n";
-                bool text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
+                p8 text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
                 /* The default takes any byte in the reason phrase but NUL,
                    CR and LF, as wget and curl do (only the code is read);
                    the tight tier holds it to text. */
-                bool reason = text || (MOONWATER_STRICT_NET < STRICT_TIGHT &&
+                p8 reason = text || (MOONWATER_STRICT_NET < STRICT_TIGHT &&
                                        byte && byte != '\r' && byte != '\n');
 
                 name[19] = (p8)byte;
@@ -64986,7 +64986,7 @@ static fn fetching(void)
 
         for (b32 status = 299; status <= 309; status++)
         {
-                bool expected = status == 300 || status == 301 ||
+                p8 expected = status == 300 || status == 301 ||
                                 status == 302 || status == 303 ||
                                 status == 307 || status == 308;
 
@@ -65317,7 +65317,7 @@ static fn fetching(void)
                 for (positive byte = 1; byte <= 255; byte++)
                 {
                         p8 candidate[] = {'a', (p8)byte, 'z', 0};
-                        bool host_byte = byte_is_alnum((p8)byte) || byte == '-' ||
+                        p8 host_byte = byte_is_alnum((p8)byte) || byte == '-' ||
                                          byte == '.' || byte == '_';
 
                         check("request Host serialization has one complete byte grammar",
@@ -65540,7 +65540,7 @@ static fn fetching(void)
                 memory_fill(body + 4, 'x', length);
                 body[3 + length] = byte;
                 memory_copy(body + 4 + length, "\r\na\r\n0\r\n\r\n", 10);
-                bool valid = http_token_byte((p8)byte);
+                p8 valid = http_token_byte((p8)byte);
                 bipolar got = http_unchunk(body, 14 + length);
                 check("HTTP extension byte classes and bounded SIMD tails",
                       valid ? got == 1 && body[0] == 'a' : got == HTTP_MALFORMED);
@@ -65559,14 +65559,14 @@ static fn streaming_chunk_boundaries(void)
         static string_address framed[] = {"1\nA\n0\n\n",
                                           "1\r\nA\r\n0\r\n\r\n"};
         p8 address_to pages = memory(3 * 4096);
-        bool socket_send_denied = false;
+        p8 socket_send_denied = false;
 
         check("chunk stash guard allocation",
               !system_failed(pages) && pages != null);
         if (system_failed(pages) || !pages)
                 return;
 
-        bool guarded =
+        p8 guarded =
             !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
             !system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
         check("chunk stash guard protection", guarded);
@@ -65773,7 +65773,7 @@ static fn streaming_chunk_boundaries(void)
                 for (positive at = 0; at < 20000; at++) wire[6 + at] = (p8)at;
                 memory_copy(wire + 20006, "\r\n0\r\n\r\n", 7);
                 check("in-place chunk crosses copy blocks", http_unchunk(wire, 20013) == 20000);
-                bool same = true;
+                p8 same = true;
                 for (positive at = 0; at < 20000; at++) same &= wire[at] == (p8)at;
                 check("overlapping chunk compaction preserves binary payload", same);
                 memory_free(wire, 20032);
@@ -66003,7 +66003,7 @@ static fn network_stream_send_timeout(void)
         b32 pair[2];
         b32 send_room = 4096;
         p8 address_to payload = memory(payload_size);
-        bool allocated = (bipolar)(positive)payload > 0;
+        p8 allocated = (bipolar)(positive)payload > 0;
         bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
                                         SOCK_STREAM, 0, (positive)pair);
 
@@ -66035,7 +66035,7 @@ static fn network_stream_send_timeout(void)
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
-                bool sent = network_stream_send_all_for(
+                p8 sent = network_stream_send_all_for(
                     pair[0], payload, payload_size, 0, 100000000);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
@@ -66077,7 +66077,7 @@ static fn network_trickle_and_exit(b32 handle, p8 address_to bytes,
         system_call_1(syscall(exit_group), 0);
 }
 
-static bool net_token_reference(p8 byte)
+static p8 net_token_reference(p8 byte)
 {
         return (byte >= '0' && byte <= '9') ||
                (byte >= 'A' && byte <= 'Z') ||
@@ -66123,7 +66123,7 @@ static fn network_text_spans(void)
                 for (positive where = 0; where < array_count(positions); where++)
                 {
                         positive at = positions[where];
-                        bool text = byte == 9 || (byte >= 32 && byte != 127);
+                        p8 text = byte == 9 || (byte >= 32 && byte != 127);
 
                         span[at] = (p8)byte;
                         check("text spans locate every control, tab, DEL and high byte",
@@ -66138,7 +66138,7 @@ static fn network_text_spans(void)
         check("text-span guard pages allocate", !system_failed(pages) && pages);
         if (system_failed(pages) || !pages)
                 return;
-        bool guarded =
+        p8 guarded =
             !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
             !system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
 
@@ -66275,7 +66275,7 @@ static fn http_header_fragment_scanning(void)
                 {
                         positive resume = 0, searched = 0, reference_resume = 0;
                         positive used = 0, searched_bytes = 0;
-                        bool agreed = true;
+                        p8 agreed = true;
 
                         while (used < length)
                         {
@@ -66494,7 +66494,7 @@ static fn http_tcp_latency_policy(void)
         p32 size = sizeof where;
         bipolar listener = socket_new(AF_INET,
             SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-        bool ready = listener >= 0 &&
+        p8 ready = listener >= 0 &&
             socket_bind((b32)listener, address_of where, sizeof where) == 0 &&
             socket_listen((b32)listener, 8) == 0 &&
             socket_name((b32)listener, address_of where, address_of size) == 0;
@@ -66546,7 +66546,7 @@ static fn http_tcp_latency_policy(void)
                                                SOCK_CLOEXEC | SOCK_NONBLOCK);
                 p8 bytes[2];
                 network_deadline deadline;
-                bool sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
+                p8 sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
                             network_stream_send_all_for(handle, (p8 address_to)"R", 1, 5, 0);
 
                 check("consecutive small TCP writes retain exact stream bytes",
@@ -66864,7 +66864,7 @@ static fn dns_dhcp_netlink_resource_exhaustion(void)
                 {
                         netlink_buffer buffer = {0};
                         positive constrained[2];
-                        bool reserved = true;
+                        p8 reserved = true;
 
                         constrained[0] = 0;
                         constrained[1] = as_limit[1];
@@ -67516,7 +67516,7 @@ static fn tls_lending_and_fatal_states(void)
                             .deadline = {1000000, expired ? 1 : 5000000}};
                         bipolar sink = system_open_at(AT_FDCWD,
                             (string_address)"/dev/null", O_WRONLY | O_CLOEXEC);
-                        bool opened = system_call_4(syscall(socketpair), AF_UNIX,
+                        p8 opened = system_call_4(syscall(socketpair), AF_UNIX,
                             SOCK_STREAM, 0, (positive)pair) == 0;
 
                         check("TLS lending deadline fixtures open", opened && sink >= 0);
@@ -67564,7 +67564,7 @@ static fn tls_lending_and_fatal_states(void)
                     .encrypted = true, .application = true}};
                 http_body body = {.link = address_of link,
                     .stash = (p8 address_to)"a", .stash_used = 1};
-                bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                p8 opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
                                             (positive)pair) == 0 &&
                               system_call_2(syscall(pipe2), (positive)ends,
                                             O_CLOEXEC | O_NONBLOCK) == 0;
@@ -67919,7 +67919,7 @@ static fn network_datagram_queued_progress(void)
         for (positive size = 0; size < array_count(sizes); size++)
         for (positive signal = 0; signal < array_count(interruptions); signal++)
         {
-                bool queued = true;
+                p8 queued = true;
 
                 net_io_faults_clear();
                 for (positive at = 0; at < packets[count]; at++)
@@ -67932,7 +67932,7 @@ static fn network_datagram_queued_progress(void)
                 net_recv_interruptions = interruptions[signal];
                 net_recv_require_nonblocking = true;
                 net_poll_calls = 0;
-                bool read = network_deadline_begin(address_of deadline, 1, 0);
+                p8 read = network_deadline_begin(address_of deadline, 1, 0);
 
                 for (positive at = 0; at < packets[count]; at++)
                 {
@@ -68441,7 +68441,7 @@ static fn http_write_spans_partial(void)
         positive filled;
         positive raw;
         bipolar child;
-        bool intact;
+        p8 intact;
         positive at;
 
         for (at = 0; at < SPAN_COUNT; at++)
@@ -68520,7 +68520,7 @@ static fn http_write_spans_partial(void)
                 if (!child)
                 {
                         positive got = 0;
-                        bool match = true;
+                        p8 match = true;
 
                         system_call_1(syscall(close), ends[1]);
                         while (got < SPAN_TOTAL)
@@ -68581,7 +68581,7 @@ static fn http_write_spans_partial(void)
         if (!child)
         {
                 positive got = 0;
-                bool match = true;
+                p8 match = true;
 
                 system_call_1(syscall(close), ends[1]);
                 while (got < SPAN_TOTAL)
@@ -68641,7 +68641,7 @@ static fn network_stream_sigpipe(void)
                 positive default_action[4] = {0, 0, 0, 0};
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
-                bool sent = network_stream_send_all_for(
+                p8 sent = network_stream_send_all_for(
                     pair[0], (p8 address_to)"x", 1, 5, 0);
 
                 socket_close(pair[0]);
@@ -68666,11 +68666,11 @@ static bipolar tls_read(tls_conn address_to tls, p8 address_to into,
 static tls_conn tls_post_handshake_conn;
 
 /* A post-handshake stream, whole: every message complete and allowed. */
-static bool tls_post_handshake_valid(p8 address_to messages,
+static p8 tls_post_handshake_valid(p8 address_to messages,
                                      positive length)
 {
         tls_conn address_to tls = address_of tls_post_handshake_conn;
-        bool valid;
+        p8 valid;
 
         memory_fill(tls, 0, TLS_CONN_HEAD);
         tls->handle = -1;
@@ -68946,7 +68946,7 @@ static fn tls_closure_boundaries(void)
                         p8 alert[] = {1, 0};
                         p8 byte = 0;
                         positive got = 99;
-                        bool queued = true;
+                        p8 queued = true;
 
                         sender.handle = pair[1];
                         receiver.handle = pair[0];
@@ -68995,7 +68995,7 @@ static fn tls_closure_boundaries(void)
                                 tls_conn sender = {0};
                                 p8 record[16384];
                                 p8 alert[] = {1, 0};
-                                bool sent = true;
+                                p8 sent = true;
 
                                 socket_close(pair[0]);
                                 sender.handle = pair[1];
@@ -69032,7 +69032,7 @@ static fn tls_closure_boundaries(void)
                                 positive got = 0;
                                 positive raw = 0;
                                 bipolar status = TLS_OK;
-                                bool intact = true;
+                                p8 intact = true;
 
                                 receiver.handle = pair[0];
                                 receiver.encrypted = true;
@@ -69102,7 +69102,7 @@ static fn tls_closure_boundaries(void)
                                 tls_conn sender = {0};
                                 p8 record[16384];
                                 p8 alert[] = {1, 0};
-                                bool sent = true;
+                                p8 sent = true;
 
                                 socket_close(pair[0]);
                                 sender.handle = pair[1];
@@ -69147,7 +69147,7 @@ static fn tls_closure_boundaries(void)
                                 positive raw = 0;
                                 p8 byte = 0;
                                 bipolar count;
-                                bool intact = true;
+                                p8 intact = true;
 
                                 for (positive at = 0; at < TLS_BATCH_RECORDS;
                                      at++)
@@ -69219,7 +69219,7 @@ static fn tls_closure_boundaries(void)
                                 tls_conn sender = {0};
                                 p8 record[HTTP_SPAN_FLUSH_LENGTH];
                                 p8 alert[] = {1, 0};
-                                bool sent = true;
+                                p8 sent = true;
 
                                 socket_close(pair[0]);
                                 sender.handle = pair[1];
@@ -69267,7 +69267,7 @@ static fn tls_closure_boundaries(void)
                                 positive raw = 0;
                                 p8 byte = 0;
                                 bipolar count;
-                                bool intact = true;
+                                p8 intact = true;
 
                                 check("an exact HTTP body past one writev gather is written",
                                       http_copy(address_of body, file, total,
@@ -69356,7 +69356,7 @@ static fn tls_nonce_byte_states(void)
         p8 source[14];
         p8 got[14];
         p8 expected[12];
-        bool same = true;
+        p8 same = true;
 
         /* XOR has no carry between bytes. Exhausting every value in every
            sequence lane therefore covers the full per-byte state space; the
@@ -69473,7 +69473,7 @@ static fn tls_receive_whole_room(void)
         static p8 queued[65536];
         tls_conn address_to tls = address_of tls_receive_conn;
         b32 pair[2];
-        bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM,
+        p8 opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM,
                                     0, (positive)pair) == 0;
 
         check("TLS receive-room socket pair opens", opened);
@@ -69611,7 +69611,7 @@ static fn tls_sensitive_state_erasure(void)
         {
                 tls_conn connection;
                 p8 address_to bytes = (p8 address_to)address_of connection;
-                bool erased = true;
+                p8 erased = true;
 
                 //      Every byte up to the end of the receive buffer; past
                 //      it is the struct's padding out to the GCM keys'
@@ -69713,7 +69713,7 @@ static fn tls_sensitive_state_erasure(void)
         {
                 http_link link;
                 p8 address_to bytes = (p8 address_to)address_of link.session;
-                bool erased = true;
+                p8 erased = true;
 
                 memory_fill(address_of link, 0xa5, sizeof link);
                 link.handle = -1;
@@ -69973,7 +69973,7 @@ static fn tls_certificate_identity_rules(void)
         static p8 san_registered_empty[] = {0x30, 0x02, 0x88, 0x00};
         tls_cert cert = {0};
         p8 too_many[593];
-        bool matched = false;
+        p8 matched = false;
 
         check("canonical digitalSignature KeyUsage is accepted",
               tls_parse_key_usage(usage_digital, sizeof usage_digital,
@@ -70090,7 +70090,7 @@ static fn tls_certificate_identity_rules(void)
                 {
                         string_address host;
                         string_address name;
-                        bool match;
+                        p8 match;
                 } names[] = {
                     {"example.com", "example.com", true},
                     {"Example.COM", "example.com", true},
@@ -70145,7 +70145,7 @@ static fn tls_certificate_identity_rules(void)
                 static const struct
                 {
                         string_address text;
-                        bool parsed;
+                        p8 parsed;
                         p8 address[16];
                 } literals[] = {
                     {"::1", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}},
@@ -70186,7 +70186,7 @@ static fn tls_certificate_identity_rules(void)
                         p8 text[64];
                         p8 address[16];
                         positive length = string_length(literals[i].text);
-                        bool parsed;
+                        p8 parsed;
 
                         memory_copy(text, literals[i].text, length + 1);
                         parsed = net_ipv6_literal(text, length, address);
@@ -70920,7 +70920,7 @@ static fn tls_client_hello_bounds(void)
                                address_of used, null, 0) == TLS_FAIL);
         check("a refused ClientHello leaves its result length alone", used == 99);
         {
-                bool bounded = true;
+                p8 bounded = true;
 
                 for (positive at = 50; at < sizeof hello; at++)
                         bounded &= hello[at] == 0xa5;
@@ -70949,7 +70949,7 @@ static fn tls_client_hello_bounds(void)
         are asked once here; false is a hello that is malformed anywhere
         before the answer, or one that does not carry the extension at all.
 */
-static bool tls_hello_extension(p8 address_to hello, positive length,
+static p8 tls_hello_extension(p8 address_to hello, positive length,
                                 positive id, positive address_to body,
                                 positive address_to body_length)
 {
@@ -71013,7 +71013,7 @@ static bool tls_hello_extension(p8 address_to hello, positive length,
         return false;
 }
 
-static bool tls_hello_offers_group(p8 address_to hello, positive length,
+static p8 tls_hello_offers_group(p8 address_to hello, positive length,
                                    positive group)
 {
         positive at;
@@ -71040,7 +71040,7 @@ static bool tls_hello_offers_group(p8 address_to hello, positive length,
         return false;
 }
 
-static bool tls_hello_offers_share(p8 address_to hello, positive length,
+static p8 tls_hello_offers_share(p8 address_to hello, positive length,
                                    positive group, positive key_length)
 {
         positive at;
@@ -71074,7 +71074,7 @@ static bool tls_hello_offers_share(p8 address_to hello, positive length,
         return false;
 }
 
-static bool tls_hello_offers_cipher(p8 address_to hello, positive length,
+static p8 tls_hello_offers_cipher(p8 address_to hello, positive length,
                                     positive cipher)
 {
         positive at;
@@ -71132,7 +71132,7 @@ static fn tls_client_hello_groups(void)
                     {"fe80::1%eth0", null},
                     {".", null},
                 };
-                bool all = true;
+                p8 all = true;
 
                 for (positive row = 0; row < array_count(names); row++)
                 {
@@ -71141,7 +71141,7 @@ static fn tls_client_hello_groups(void)
                         positive length = 0;
                         positive at = 0;
                         positive size = 0;
-                        bool has;
+                        p8 has;
 
                         if (tls_client_hello(address_of named, out, sizeof out,
                                              address_of length, null, 0))
@@ -71205,7 +71205,7 @@ static fn tls_client_hello_groups(void)
 */
 static tls_conn tls_walk_conn;
 static p8 tls_walk_hs[TLS_HS_MAX];
-static bool tls_walk_ccs;
+static p8 tls_walk_ccs;
 
 static positive tls_walk_record(p8 address_to out, p8 type,
                                 const p8 address_to bytes, positive length)
@@ -71363,7 +71363,7 @@ static fn tls_hello_retry_rows(void)
         static const struct
         {
                 string_address name;
-                bool retry;
+                p8 retry;
                 p16 offered;
                 p8 length;
                 p8 bytes[48];
@@ -71418,7 +71418,7 @@ static fn tls_hello_retry_rows(void)
             0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c,
             0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb,
             0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
-        bool all = true;
+        p8 all = true;
 
         for (positive row = 0; row < array_count(rows); row++)
         {
@@ -71556,7 +71556,7 @@ static fn tls_server_flight_validation(void)
                 check("TLS compatibility CCS is forbidden after Finished",
                       !tls_compatibility_ccs_valid(address_of one, 1, true));
                 {
-                        bool seen = false;
+                        p8 seen = false;
 
                         check("one TLS compatibility CCS may be consumed",
                               tls_compatibility_ccs_take(address_of seen));
@@ -71695,7 +71695,7 @@ static fn tls_encrypted_flight_hs_reassembly(void)
 #undef CV
 #undef FIN
 #undef CR
-        bool all = true;
+        p8 all = true;
 
         for (positive row = 0; row < array_count(rows); row++)
         {
@@ -71879,7 +71879,7 @@ static fn tls_post_handshake_framing(void)
                         positive got = 99;
                         positive began;
                         positive elapsed;
-                        bool queued = true;
+                        p8 queued = true;
 
                         for (positive at = 0; at < 32; at++)
                                 queued &= tls_send_enc(
@@ -71926,7 +71926,7 @@ static fn tls_key_update_rounds(void)
         b32 pair[2];
         p8 got_bytes[8];
         positive got = 0;
-        bool opened;
+        p8 opened;
 
         opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
                                (positive)pair) == 0;
@@ -72026,7 +72026,7 @@ static fn tls_hkdf_expand_ceiling(void)
         p8 last[32];
         p8 counter = 255;
         crypto_mac mac;
-        bool zeros = true;
+        p8 zeros = true;
 
         memory_fill(prk, 0x0b, sizeof prk);
         check("HKDF-Expand gives 255 blocks",
@@ -72066,10 +72066,10 @@ static fn byte_reader_rows(void)
 {
         p8 address_to base = (p8 address_to)memory(2 * 4096);
         p64 random = 0x9e3779b97f4a7c15ull;
-        bool values = true;
-        bool remains = true;
-        bool windows = true;
-        bool sticky = true;
+        p8 values = true;
+        p8 remains = true;
+        p8 windows = true;
+        p8 sticky = true;
 
         system_call_3(syscall(mprotect), (positive)(address_any)(base + 4096),
                       4096, FILE_PROTECT_NONE);
@@ -72079,7 +72079,7 @@ static fn byte_reader_rows(void)
                         p8 address_to bytes = base + 4096 - length;
                         byte_reader reader;
                         positive at = 0;
-                        bool dead = false;
+                        p8 dead = false;
 
                         for (positive i = 0; i < length; i++)
                         {
@@ -72095,7 +72095,7 @@ static fn byte_reader_rows(void)
                                 positive width;
                                 p64 want = 0;
                                 p64 got = 0;
-                                bool fits;
+                                p8 fits;
 
                                 XORSHIFT64(random);
                                 operation = random % 12;
@@ -72364,7 +72364,7 @@ static fn tls_certificate_framing(void)
         }
 }
 
-static bool crypto_bytes_are(p8 address_to got, positive length, string_address hex)
+static p8 crypto_bytes_are(p8 address_to got, positive length, string_address hex)
 {
         p8 expect[128];
         positive n = string_length(hex);
@@ -72397,7 +72397,7 @@ static bool crypto_bytes_are(p8 address_to got, positive length, string_address 
 static fn crypto_private_scalar_probe(
     positive limbs, const crypto_field address_to field,
     const p8 address_to gx, const p8 address_to gy,
-    bool address_to differential, bool address_to fixed_schedule)
+    p8 address_to differential, p8 address_to fixed_schedule)
 {
         p64 x[CRYPTO_FE_MAX];
         p64 y[CRYPTO_FE_MAX];
@@ -72410,7 +72410,7 @@ static fn crypto_private_scalar_probe(
         crypto_point private_result;
         crypto_scalar_schedule first;
         crypto_scalar_schedule second;
-        bool same = true;
+        p8 same = true;
 
         memory_fill(x, 0, sizeof x);
         memory_fill(y, 0, sizeof y);
@@ -72485,8 +72485,8 @@ static fn crypto_comb_probe(positive limbs, const crypto_field address_to field,
                             const crypto_field address_to order,
                             const p8 address_to gx, const p8 address_to gy,
                             const p64 address_to table,
-                            bool (*public_key)(p8 address_to, p8 address_to),
-                            bool address_to entries, bool address_to keys)
+                            p8 (*public_key)(p8 address_to, p8 address_to),
+                            p8 address_to entries, p8 address_to keys)
 {
         positive d = (limbs * 64 + CRYPTO_COMB_TEETH - 1) / CRYPTO_COMB_TEETH;
         p64 x[CRYPTO_FE_MAX];
@@ -72500,7 +72500,7 @@ static fn crypto_comb_probe(positive limbs, const crypto_field address_to field,
         p8 want[97];
         crypto_point base;
         crypto_point result;
-        bool same = true;
+        p8 same = true;
 
         memory_fill(x, 0, sizeof x);
         memory_fill(y, 0, sizeof y);
@@ -72593,13 +72593,13 @@ static fn checks_aesgcm_encrypt(p8 address_to raw, p8 address_to iv,
         crypto_forget(address_of key, sizeof key);
 }
 
-static bool checks_aesgcm_decrypt(p8 address_to raw, p8 address_to iv,
+static p8 checks_aesgcm_decrypt(p8 address_to raw, p8 address_to iv,
                                   p8 address_to aad, positive aad_length,
                                   p8 address_to text, positive text_length,
                                   p8 address_to tag)
 {
         static crypto_aesgcm_key key;
-        bool valid;
+        p8 valid;
 
         crypto_aesgcm_prepare(address_of key, raw);
         valid = crypto_aesgcm_open(address_of key, iv, aad, aad_length, text,
@@ -73004,7 +73004,7 @@ static fn x25519_check_product(p64 address_to out, const p64 address_to a,
 
 //      a + b or a - b mod p, below p.
 static fn x25519_check_sum(p64 address_to out, const p64 address_to a,
-                           const p64 address_to b, bool subtract)
+                           const p64 address_to b, p8 subtract)
 {
         p64 x[4], y[4], v[4];
         crypto_wide carry = 0;
@@ -73033,7 +73033,7 @@ static fn x25519_check_sum(p64 address_to out, const p64 address_to a,
         x25519_check_canonical(out, v);
 }
 
-static bool x25519_check_same(const p64 address_to got, const p64 address_to want)
+static p8 x25519_check_same(const p64 address_to got, const p64 address_to want)
 {
         p64 canonical[4];
 
@@ -74430,8 +74430,8 @@ static fn crypto_floor_wnaf(void)
                                 b8 digits[CRYPTO_FE_MAX * 64 + 1];
                                 positive count;
                                 positive last = 0;
-                                bool seen = false;
-                                bool bad = false;
+                                p8 seen = false;
+                                p8 bad = false;
 
                                 memory_fill(k, 0, sizeof k);
                                 for (positive i = 0; i < limbs; i++)
@@ -74831,12 +74831,12 @@ static fn crypto_floor_aes(void)
                           sizeof signature, mod, base, address_of limbs));
         }
 
-        bool alice_valid =
+        p8 alice_valid =
             crypto_x25519(alice_pub, (p8 address_to)alice, (p8 address_to)nine);
-        bool bob_valid =
+        p8 bob_valid =
             crypto_x25519(bob_pub, (p8 address_to)bob, (p8 address_to)nine);
-        bool ab_valid = crypto_x25519(ab, (p8 address_to)alice, bob_pub);
-        bool ba_valid = crypto_x25519(ba, (p8 address_to)bob, alice_pub);
+        p8 ab_valid = crypto_x25519(ab, (p8 address_to)alice, bob_pub);
+        p8 ba_valid = crypto_x25519(ba, (p8 address_to)bob, alice_pub);
         check("X25519 RFC 7748 public",
               alice_valid && bob_valid && crypto_bytes_are(
                   alice_pub, 32,
@@ -74871,10 +74871,10 @@ static fn crypto_floor_aes(void)
                 p8 ba384[48];
                 p8 shared256[32];
                 p8 shared384[48];
-                bool differential256 = false;
-                bool differential384 = false;
-                bool schedule256 = false;
-                bool schedule384 = false;
+                p8 differential256 = false;
+                p8 differential384 = false;
+                p8 schedule256 = false;
+                p8 schedule384 = false;
 
                 memory_fill(one256, 0, sizeof one256);
                 memory_fill(two256, 0, sizeof two256);
@@ -74913,8 +74913,8 @@ static fn crypto_floor_aes(void)
                 check("complementary P-384 scalars have one fixed operation schedule",
                       schedule384);
                 {
-                        bool entries = false;
-                        bool keys = false;
+                        p8 entries = false;
+                        p8 keys = false;
 
                         crypto_comb_probe(4, address_of crypto_p256_field,
                                           address_of crypto_p256_order,
@@ -75164,7 +75164,7 @@ static fn tls_name_constraint_rules(void)
                 string_address constraints;
                 p8 tag;
                 string_address name;
-                bool allowed;
+                p8 allowed;
         } rows[] = {
             {"dNSName equal to a permitted base",
              "3011a00f300d820b6578616d706c652e636f6d",
@@ -75361,7 +75361,7 @@ static fn tls_name_constraint_rules(void)
         {
                 positive length;
                 positive name_length = 0;
-                bool allowed;
+                p8 allowed;
 
                 memory_fill(constraints, 0, sizeof constraints);
                 memory_fill(name, 0, sizeof name);
@@ -75436,7 +75436,7 @@ static fn tls_ca_issuers_rules(void)
         static const struct
         {
                 p8 address[4];
-                bool reachable;
+                p8 reachable;
         } addresses[] = {
             {{8, 8, 8, 8}, true},          {{1, 1, 1, 1}, true},
             {{0, 0, 0, 0}, false},         {{0, 1, 2, 3}, false},
@@ -75543,7 +75543,7 @@ static positive overlay_entry(p8 address_to at, p8 kind, p16 id, const p8 addres
    last of the three zero bytes after it (the one a reader that stops at the
    first nonzero byte still lines the rest up behind), its exponent, and a key of key_length bytes, the first of
    them key_first and the rest 0x11. Whether it reads, into into. */
-static bool overlay_anchor_reads(tls_overlay address_to into, p8 curve, p8 pad,
+static p8 overlay_anchor_reads(tls_overlay address_to into, p8 curve, p8 pad,
                                  p32 exponent, positive key_length, p8 key_first)
 {
         static p8 file[TLS_OVERLAY_HEAD + 8 + 40 + 520];
@@ -75804,7 +75804,7 @@ static fn tls_trust_anchor_chains(void)
         tls_cert gts_cert;
         tls_cert r36_cert;
         positive bad_anchors = 0;
-        bool parsed;
+        p8 parsed;
 
         memory_fill(address_of atlas_cert, 0, sizeof atlas_cert);
         memory_fill(address_of wr2_cert, 0, sizeof wr2_cert);
@@ -75897,7 +75897,7 @@ static fn tls_trust_anchor_chains(void)
                                 p8 point[97];
                                 tls_cert cert;
                                 positive coord = curve == 1 ? 32 : 48;
-                                bool made;
+                                p8 made;
 
                                 scalar[coord - 2] = (p8)(scalars[s] >> 8);
                                 scalar[coord - 1] = (p8)scalars[s];
@@ -75954,7 +75954,7 @@ static fn tls_trust_anchor_chains(void)
                 bipolar network = -1;
                 positive used;
                 positive refused = 0;
-                bool all = true;
+                p8 all = true;
 
                 //      The signature bit the check above flipped, back for these.
                 certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
@@ -76150,7 +76150,7 @@ static fn tls_trust_anchor_chains(void)
                                 p32 exponent;
                                 positive length;
                                 p8 first;
-                                bool reads;
+                                p8 reads;
                         } shapes[] = {
                             {1, 0, 0, 64, 0x11, true},       {1, 0, 0, 63, 0x11, false},
                             {1, 0, 0, 65, 0x11, false},      {1, 0, 1, 64, 0x11, false},
@@ -76322,7 +76322,7 @@ static fn nts_ke_pieces(void)
         {
                 string_address name;
                 p8 parts[8];
-                bool accept;
+                p8 accept;
         } rows[] = {
             /* 'n' NPN, 'N' NPN of 1, 'e' NPN empty, 'a' AEAD 15, 'A' AEAD
                30, 'B' AEAD of two, 'c' a cookie of 100, 'L' of 300, 'k' an
@@ -76362,7 +76362,7 @@ static fn nts_ke_pieces(void)
         {
                 positive at = 0;
                 bipolar verdict;
-                bool ok;
+                p8 ok;
 
                 memory_fill(cookie, 0x41, sizeof cookie);
                 for (const p8 *part = rows[row].parts; *part; part++)
@@ -76577,7 +76577,7 @@ static fn nts_ke_pieces(void)
                 holders = 0;
                 for (positive at = used + 36 + 108; at + 108 < length; at += 108)
                 {
-                        bool zero = true;
+                        p8 zero = true;
 
                         for (positive in = 4; in < 108; in++)
                                 zero = zero && !packet[at + in];
@@ -76643,7 +76643,7 @@ static fn dns_tls_pieces(void)
         {
                 p8 udp[DNS_MAX_MESSAGE];
                 p8 small[DNS_HEADER + 4 + DNS_EDNS_LENGTH - 1];
-                bool mixed = false;
+                p8 mixed = false;
                 positive question = 0;
                 positive length = 0;
 
@@ -76681,13 +76681,13 @@ static fn tls12_pieces(void)
         static const struct
         {
                 string_address name;
-                bool named;
+                p8 named;
                 p8 session;
                 p16 suite;
                 p8 sentinel;
                 p8 length;
                 p8 bytes[24];
-                bool accept;
+                p8 accept;
         } rows[] = {
             {"EMS and renegotiation_info", false, 0, 0xc02f, 0, 9,
              {0, 0x17, 0, 0, 0xff, 1, 0, 1, 0}, true},
@@ -76764,7 +76764,7 @@ static fn tls12_pieces(void)
             "87347b66";
         static p8 scratch[5 + TLS_PLAINTEXT_MAX];
         tls_conn address_to tls = address_of tls_hello_conn;
-        bool all = true;
+        p8 all = true;
 
         for (positive row = 0; row < array_count(rows); row++)
         {
@@ -76775,7 +76775,7 @@ static fn tls12_pieces(void)
                 const p8 address_to cookie = null;
                 positive cookie_length = 0;
                 positive at = 38;
-                bool accepted;
+                p8 accepted;
 
                 memory_fill(tls, 0, TLS_CONN_HEAD);
                 tls->group = 0x1d;
@@ -76843,7 +76843,7 @@ static fn tls12_pieces(void)
                 p8 type = 0;
                 p8 address_to inner = null;
                 positive length = 0;
-                bool opened = system_call_4(syscall(socketpair), AF_UNIX,
+                p8 opened = system_call_4(syscall(socketpair), AF_UNIX,
                                             SOCK_STREAM, 0,
                                             (positive)pair) == 0;
 
@@ -77096,8 +77096,8 @@ static fn redirect_urls(void)
         p8 host[64];
         string_address path;
         p16 port;
-        bool tls;
-        bool secure = false;
+        p8 tls;
+        p8 secure = false;
 
         check("absolute Location wins",
               http_absolutize(true, "geo.mirror.pkgbuild.com", 443, "/iso/latest/",
@@ -77253,7 +77253,7 @@ static fn redirect_urls(void)
                 p8 long_host[64];
                 string_address long_path;
                 p16 long_port;
-                bool long_tls;
+                p8 long_tls;
                 b32 code = 0;
                 http_buffer body = {0};
                 /* Loopback with a closed port: length checks run before the
@@ -78010,7 +78010,7 @@ static fn fetching_for_real(void)
                         for (positive at = 0; at < answers; at++)
                         {
                                 //      Each fetch starts on 127.0.0.1.
-                                bool on_a = ((at < HTTP_HOPS ? at : at - HTTP_HOPS) & 1) == 0;
+                                p8 on_a = ((at < HTTP_HOPS ? at : at - HTTP_HOPS) & 1) == 0;
                                 bipolar listening = on_a ? listen_a : listen_b;
                                 p16 next_port = on_a ? port_b : port_a;
                                 string_address next_host =
@@ -78627,9 +78627,9 @@ static fn http_run_edges(void)
                 positive wrong = 0;
 
                 for (positive at = 0; at < array_count(statuses); at++)
-                        wrong += http_apart_status(statuses[at][0]) != (bool)statuses[at][1];
+                        wrong += http_apart_status(statuses[at][0]) != (p8)statuses[at][1];
                 for (positive at = 0; at < array_count(dns); at++)
-                        wrong += dns_apart_status(dns[at][0]) != (bool)dns[at][1];
+                        wrong += dns_apart_status(dns[at][0]) != (p8)dns[at][1];
                 check("a child apart is believed only in the statuses its work can say", wrong == 0);
         }
         if (!net_as_emulated())
@@ -79222,7 +79222,7 @@ static fn tls_ct_real(void)
         static p8 issuer[sizeof ct_real_issuer];
         tls_cert certs[2];
         positive chain[2] = {0, 1};
-        bool named = true;
+        p8 named = true;
 
         for (positive at = 0; at < array_count(tls_ct_logs); at++)
         {
@@ -79256,7 +79256,7 @@ static fn tls_ct_real(void)
                 //      the tight one up it does, for being unlogged, and
                 //      below it the path goes on to its revocation checks.
                 static tls_conn conn;
-                bool held;
+                p8 held;
 
                 memory_fill(address_of conn, 0, sizeof conn);
                 held = tls_trust_holds(address_of conn, certs, chain, 1, certs + 1, null, 0,
@@ -79403,7 +79403,7 @@ static fn dhcp_frames_judged(void)
                   got.length == sizeof message &&
                   !memory_compare(got.message, message, sizeof message));
         {
-                bool refused = true;
+                p8 refused = true;
 
                 for (positive cut = 0; cut < size; cut++)
                         refused &= !dhcp_unframe(frame, cut, false, address_of got);
@@ -79428,8 +79428,8 @@ static fn dhcp_frames_judged(void)
         {
                 p8 at;
                 p8 value;
-                bool sums;
-                bool taken;
+                p8 sums;
+                p8 taken;
         } faults[] = {
             {0, 0x65, true, false},     // version 6
             {0, 0x44, true, false},     // a header of four words
@@ -79725,7 +79725,7 @@ static fn dhcp_frames_on_loopback(void)
 #undef SHARED_filter_run
 
 //      check() with a name made at run time.
-static fn net_apart_check(string_address name, bool passed)
+static fn net_apart_check(string_address name, p8 passed)
 {
         checks++;
         if (!passed)
@@ -79810,7 +79810,7 @@ static fn net_apart_filter_decisions(void)
         };
         net_filter filter;
         static const p64 none[6] = {0};
-        bool landed = true;
+        p8 landed = true;
 
         net_filter_build(address_of filter, false);
         check("the client filter fits its program",
@@ -79909,7 +79909,7 @@ typedef struct
 
 /* What the child finds, eight bytes of 1 when all is as it should be, then
    the call it was asked to make when it has no business making it. */
-static bool net_apart_probe_task(address_any context, bipolar answer)
+static p8 net_apart_probe_task(address_any context, bipolar answer)
 {
         net_apart_probe address_to probe = context;
         p8 said[NET_APART_PROBE_ANSWER] = {0};
@@ -79999,7 +79999,7 @@ static fn net_apart_confinement(void)
             "executable memory", "mprotect", "ioctl"};
         b32 ends[2];
         bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
-        bool emulated = net_as_emulated();
+        p8 emulated = net_as_emulated();
 
         check("the client confinement fixture opens",
               spare >= 0 &&
@@ -80013,7 +80013,7 @@ static fn net_apart_confinement(void)
                 byte_store answer = {0};
                 bipolar ran = net_apart(net_apart_probe_task, address_of probe,
                                         ends[1], address_of answer, 64, false);
-                bool all = answer.used == NET_APART_PROBE_ANSWER;
+                p8 all = answer.used == NET_APART_PROBE_ANSWER;
                 p8 name[96];
 
                 for (positive byte = 0; all && byte < answer.used; byte++)
@@ -80052,13 +80052,13 @@ static fn net_apart_confinement(void)
 typedef struct
 {
         positive bytes;
-        bool spill;
-        bool probe_keep;
-        bool fail;
+        p8 spill;
+        p8 probe_keep;
+        p8 fail;
         bipolar keep;
 } net_apart_edge;
 
-static bool net_apart_edge_task(address_any context, bipolar answer)
+static p8 net_apart_edge_task(address_any context, bipolar answer)
 {
         net_apart_edge address_to edge = (net_apart_edge address_to)context;
         p8 bytes[160];
@@ -80092,7 +80092,7 @@ static fn net_apart_edges(void)
                 static const struct
                 {
                         bipolar uid, euid, groups, gid, uid_set;
-                        bool want;
+                        p8 want;
                 } rows[] = {
                     {1000, 1000, -EIO, -EIO, -EIO, true}, // not root: nothing to give up
                     {0, 0, 0, 0, 0, true},
@@ -80188,7 +80188,7 @@ static fn net_apart_edges(void)
                         static p8 fill[65536];
                         net_apart_edge edge = {.bytes = 16, .spill = true, .keep = hold[1]};
                         byte_store answer = {0};
-                        bool full = system_write_all((positive)hold[1], fill, sizeof fill) ==
+                        p8 full = system_write_all((positive)hold[1], fill, sizeof fill) ==
                                     (bipolar)sizeof fill;
 
                         check("a child still running when it says too much is killed for it",
@@ -80375,7 +80375,7 @@ static DEAD_END fn net_apart_server(bipolar listening, const positive address_to
         __builtin_unreachable();
 }
 
-static bool net_apart_body_right(const p8 address_to bytes, positive length,
+static p8 net_apart_body_right(const p8 address_to bytes, positive length,
                                  positive want)
 {
         if (length != want || (want && !bytes))
@@ -80389,7 +80389,7 @@ static bool net_apart_body_right(const p8 address_to bytes, positive length,
 typedef struct
 {
         string_address url;
-        bool held;
+        p8 held;
         positive count;
         p32 servers[DNS_SERVERS_MAX];
 } net_apart_planted;
@@ -80397,7 +80397,7 @@ typedef struct
 /* The engine itself, run in the child the way http_run_apart runs it, then
    a call no fetch makes: the answer says the fetch worked, and the death
    says the filter was there all along. */
-static bool net_apart_planted_task(address_any context, bipolar answer)
+static p8 net_apart_planted_task(address_any context, bipolar answer)
 {
         net_apart_planted address_to planted = context;
         http_buffer body = {0};
@@ -80417,7 +80417,7 @@ static bool net_apart_planted_task(address_any context, bipolar answer)
    on (the servers it holds are the ones this process reads now), and a
    lookup after it opens nothing -- a UDP query to loopback, answered or
    refused, and the child still alive to say so. */
-static bool net_apart_resolver_task(address_any context, bipolar answer)
+static p8 net_apart_resolver_task(address_any context, bipolar answer)
 {
         net_apart_planted address_to planted = context;
         p32 found = 0;
@@ -80441,7 +80441,7 @@ static fn net_apart_fetching(void)
         p32 size = sizeof where;
         b32 one = 1;
         b32 proof[2] = {-1, -1};
-        bool emulated = net_as_emulated();
+        p8 emulated = net_as_emulated();
         bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         bipolar server;
         p8 url[64];
@@ -80643,7 +80643,7 @@ static fn net_apart_fetching(void)
 */
 #define NET_APART_NPROC 6
 
-static bool net_apart_nts_empty(const nts_state address_to state)
+static p8 net_apart_nts_empty(const nts_state address_to state)
 {
         const p8 *bytes = (const p8 *)state;
 
@@ -80655,7 +80655,7 @@ static bool net_apart_nts_empty(const nts_state address_to state)
 
 static fn net_apart_nts(void)
 {
-        bool emulated = net_as_emulated();
+        p8 emulated = net_as_emulated();
         nts_state apart;
         nts_state direct;
         bipolar expect;
@@ -80836,7 +80836,7 @@ static fn leasing(void)
                 //      the rest of chaddr, sname and file must stay clear.
                 p8 wide[8] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0xee, 0xee};
                 p8 built[400];
-                bool clear = true;
+                p8 clear = true;
 
                 memory_fill(built, 0xa5, sizeof built);
                 dhcp_build(built, sizeof built, DHCP_DISCOVER, 7, wide, 0, 0, 0,
@@ -80871,7 +80871,7 @@ static fn leasing(void)
         length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, 0x01020304,
                             hardware, 0x0a00020f, 0x0a000202, 0, false);
         {
-                bool padded = true;
+                p8 padded = true;
 
                 for (positive at = 256; at < 300; at++)
                         padded &= packet[at] == 0;
@@ -80972,7 +80972,7 @@ static fn leasing(void)
                            four bytes. */
                         p8 option = options[i];
                         p32 value = i == 0 ? 0xffff0000 : 0x12345678;
-                        bool lost = size != 0 && i != 1 && i != 2 && i != 7;
+                        p8 lost = size != 0 && i != 1 && i != 2 && i != 7;
                         dhcp_lease expected = {0x0a00020f,
                             lost && i == 0 ? 0 : 0xffffff00,
                             0x0a000202,
@@ -81104,11 +81104,11 @@ static fn leasing(void)
                         for (positive value = 0; value <= 4; value++)
                                 for (positive ends = 0; ends < 4; ends++)
                                 {
-                                        bool file_walked = value == 1 || value == 3;
-                                        bool name_walked = value == 2 || value == 3;
-                                        bool file_ends = ends & 1;
-                                        bool name_ends = ends & 2;
-                                        bool expected = value >= 1 && value <= 3 &&
+                                        p8 file_walked = value == 1 || value == 3;
+                                        p8 name_walked = value == 2 || value == 3;
+                                        p8 file_ends = ends & 1;
+                                        p8 name_ends = ends & 2;
+                                        p8 expected = value >= 1 && value <= 3 &&
                                             (!file_walked || file_ends) &&
                                             (!name_walked || name_ends);
 
@@ -81344,10 +81344,10 @@ static fn leasing(void)
                                         p32 network_mask = masks[m] ? masks[m]
                                                                     : 0xffffff00;
                                         p32 network = addresses[a] & network_mask;
-                                        bool unicast = addresses[a] >> 24 &&
+                                        p8 unicast = addresses[a] >> 24 &&
                                                        addresses[a] >> 24 != 127 &&
                                                        addresses[a] < 0xe0000000;
-                                        bool router_ok =
+                                        p8 router_ok =
                                             !routers[r] ||
                                             (routers[r] >> 24 &&
                                              routers[r] >> 24 != 127 &&
@@ -81358,17 +81358,17 @@ static fn leasing(void)
                                                   network));
                                         //      The prefix may not reach 0/8,
                                         //      127/8 or 224/3.
-                                        bool covers =
+                                        p8 covers =
                                             !((network ^ 0x00000000) & network_mask & 0xff000000) ||
                                             !((network ^ 0x7f000000) & network_mask & 0xff000000) ||
                                             !((network ^ 0xe0000000) & network_mask & 0xe0000000);
                                         //      A subnet's own first and last
                                         //      address name the subnet, unless
                                         //      it is a /31 or a /32.
-                                        bool named = network_mask < 0xfffffffe &&
+                                        p8 named = network_mask < 0xfffffffe &&
                                                      (addresses[a] == network ||
                                                       addresses[a] == (network | ~network_mask));
-                                        bool want = unicast && router_ok &&
+                                        p8 want = unicast && router_ok &&
                                                     !covers && !named;
 
                                         rows++;
@@ -81394,7 +81394,7 @@ static fn leasing(void)
                         //      Each octet twice: inside its /8 and at its
                         //      first address, where 224.0.0.0 is the bound.
                         p32 spot = (p32)(o & 255) << 24 | (o < 256 ? 0x00010203u : 0);
-                        bool want = (o & 255) && (o & 255) != 127 && (o & 255) < 224;
+                        p8 want = (o & 255) && (o & 255) != 127 && (o & 255) < 224;
                         dhcp_lease server = {.address = 0x0a00020f,
                                              .mask = 0xffffff00,
                                              .server = spot,
@@ -81536,12 +81536,12 @@ static fn dhcp_reacquisition_state_matrix(void)
                     .address = addresses[address_at],
                     .server = servers[server_at],
                 };
-                bool reply_kind = kind == DHCP_ACK || kind == DHCP_NAK;
-                bool server_known = answer.server != 0;
-                bool server_allowed = rebinding || answer.server == held.server;
-                bool address_allowed = kind != DHCP_ACK ||
+                p8 reply_kind = kind == DHCP_ACK || kind == DHCP_NAK;
+                p8 server_known = answer.server != 0;
+                p8 server_allowed = rebinding || answer.server == held.server;
+                p8 address_allowed = kind != DHCP_ACK ||
                                        answer.address == held.address;
-                bool expected = reply_kind && server_known && server_allowed &&
+                p8 expected = reply_kind && server_known && server_allowed &&
                                 address_allowed;
 
                 check("every DHCP reacquisition state has the declared authorization",
@@ -81590,9 +81590,9 @@ static fn dhcp_ack_lease_integrity(void)
                     .router = routers[router], .server = before.server + server,
                     .seconds = lifetimes[life],
                 };
-                bool expected = ((prefixes[mask].routers >> router) & 1) &&
+                p8 expected = ((prefixes[mask].routers >> router) & 1) &&
                                 (!server || lifetimes[life]);
-                bool taken = dhcp_lease_take(address_of held, address_of answer);
+                p8 taken = dhcp_lease_take(address_of held, address_of answer);
 
                 check("every merged DHCP ACK has a usable address, prefix, router and lifetime",
                       taken == expected);
@@ -81635,7 +81635,7 @@ static fn dhcp_ack_invalid_then_valid(void)
         p32 size = sizeof at;
         bipolar receiver = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-        bool opened = receiver >= 0 && sender >= 0 &&
+        p8 opened = receiver >= 0 && sender >= 0 &&
             socket_bind(receiver, address_of at, sizeof at) == 0 &&
             socket_bind(sender, address_of from, sizeof from) == 0 &&
             socket_name(receiver, address_of at, address_of size) == 0 &&
@@ -81654,7 +81654,7 @@ static fn dhcp_ack_invalid_then_valid(void)
                 const p32 server = held.server + rebinding;
                 const p8 fields[] = {DHCP_OPTION_MASK, DHCP_OPTION_ROUTER,
                                      DHCP_OPTION_SERVER, DHCP_OPTION_LEASE};
-                bool queued = true;
+                p8 queued = true;
 
                 for (positive valid = 0; valid < 2; valid++)
                 {
@@ -81715,7 +81715,7 @@ static fn dhcp_mixed_discard_budget(void)
         p32 size = sizeof at;
         bipolar receiver = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-        bool opened = receiver >= 0 && sender >= 0 &&
+        p8 opened = receiver >= 0 && sender >= 0 &&
             socket_bind(receiver, address_of at, sizeof at) == 0 &&
             socket_bind(sender, address_of from, sizeof from) == 0 &&
             socket_name(receiver, address_of at, address_of size) == 0 &&
@@ -81735,11 +81735,11 @@ static fn dhcp_mixed_discard_budget(void)
                                    .renewal = 1800, .rebinding = 3150};
                 dhcp_lease old = held;
                 positive unwanted = NETWORK_DISCARD_MAX + over;
-                bool queued = true;
+                p8 queued = true;
 
                 for (positive row = 0; row <= unwanted; row++)
                 {
-                        bool bad_syntax = row < unwanted &&
+                        p8 bad_syntax = row < unwanted &&
                             (reverse ? row >= unwanted - syntax : row < syntax);
                         /* A replay fails packet identity. A matching OFFER
                            parses but cannot complete a REQUEST. */
@@ -81754,7 +81754,7 @@ static fn dhcp_mixed_discard_budget(void)
                                       sizeof packet;
                 }
                 network_deadline deadline;
-                bool began = network_deadline_begin(address_of deadline, 1, 0);
+                p8 began = network_deadline_begin(address_of deadline, 1, 0);
                 net_recv_calls = 0;
                 bipolar result = queued && began
                     ? dhcp_complete(receiver, received, sizeof received, 123,
@@ -82122,7 +82122,7 @@ static fn dhcp_test_random_child(positive which)
             .server = 0x0a000202,
             .seconds = 60,
         };
-        bool ok;
+        p8 ok;
 
         if (random_filter(first, second) < 0)
                 system_call_1(syscall(exit_group), 77);
@@ -82554,7 +82554,7 @@ static revocation_held_cert revocation_ca, revocation_leaf, revocation_staple,
     revocation_rsa;
 static tls_conn revocation_conn;
 
-static bool revocation_load(revocation_held_cert address_to held,
+static p8 revocation_load(revocation_held_cert address_to held,
                             string_address hex)
 {
         held->length = crypto_hex_into(held->der, sizeof held->der, hex);
@@ -82571,7 +82571,7 @@ static fn revocation_forget(void)
 
 /* A CRL held as tls_crl_get leaves one fetched from url at the date given,
    or with no hex a fetch that failed. */
-static bool revocation_hold(string_address url, string_address hex, p64 when)
+static p8 revocation_hold(string_address url, string_address hex, p64 when)
 {
         tls_crl_held address_to slot = null;
         positive length = hex ? string_length(hex) / 2 : 0;
@@ -82622,7 +82622,7 @@ static p8 revocation_crl(revocation_held_cert address_to cert,
 
 static fn tls_revocation_parsing(void)
 {
-        bool loaded = revocation_load(address_of revocation_ca, revocation_ca_hex) &&
+        p8 loaded = revocation_load(address_of revocation_ca, revocation_ca_hex) &&
                       revocation_load(address_of revocation_leaf, revocation_leaf_hex) &&
                       revocation_load(address_of revocation_staple, revocation_staple_hex) &&
                       revocation_load(address_of revocation_bare, revocation_bare_hex) &&
@@ -82662,7 +82662,7 @@ static fn tls_revocation_parsing(void)
                 tls_cert copy = k ? revocation_rsa.cert : revocation_ca.cert;
                 p8 rebuilt[32 + CRYPTO_RSA_BYTES];
                 positive length;
-                bool same;
+                p8 same;
 
                 copy.key_bits = null;
                 length = tls_key_bits(address_of copy, rebuilt, sizeof rebuilt);
@@ -82894,7 +82894,7 @@ static fn tls_revocation_answers(void)
                              null) == TLS_ANSWER_NONE);
         {
                 /* One signature bit flipped in a held CRL. */
-                bool held = revocation_hold((string_address) "http://crl.example/ca.crl",
+                p8 held = revocation_hold((string_address) "http://crl.example/ca.crl",
                                             revocation_crl_empty_hex, REVOCATION_NOW);
                 tls_crl_held address_to slot = tls_crl_cache;
 
@@ -82916,7 +82916,7 @@ static fn tls_crl_spent_budget(void)
 {
         network_deadline spent;
         positive used = 0;
-        bool held;
+        p8 held;
 
         revocation_forget();
         spent.began = 1;
@@ -82932,8 +82932,8 @@ static fn tls_crl_spent_budget(void)
 
 /* The tiers: tls_revocation_holds over the leaf and its CA, the staple and
    the CRL each made to answer one way. */
-static bool revocation_tier(revocation_held_cert address_to leaf,
-                            string_address staple, string_address crl, bool failed)
+static p8 revocation_tier(revocation_held_cert address_to leaf,
+                            string_address staple, string_address crl, p8 failed)
 {
         static p8 bytes[4096];
         tls_cert chain[2] = {leaf->cert, revocation_ca.cert};
@@ -82952,7 +82952,7 @@ static bool revocation_tier(revocation_held_cert address_to leaf,
 
 static fn tls_revocation_tiers(void)
 {
-        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+        p8 tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
         p8 address_to fault = address_of revocation_conn.fault;
         revocation_held_cert address_to leaf = address_of revocation_leaf;
         revocation_held_cert address_to staple = address_of revocation_staple;
@@ -83003,8 +83003,8 @@ static fn tls_revocation_entries(void)
         {
                 string_address name;
                 string_address hex;
-                bool asked;
-                bool accept;
+                p8 asked;
+                p8 accept;
                 positive response;
         } rows[] = {
             {"no extensions", "", false, true, 0},
@@ -83018,7 +83018,7 @@ static fn tls_revocation_entries(void)
             {"two extensions", "0005000801000004300205000012000400020000", true, false, 0},
             {"an SCT list", "001200040002aabb", true, false, 0},
         };
-        bool all = true;
+        p8 all = true;
 
         for (positive row = 0; row < array_count(rows); row++)
         {
@@ -83026,7 +83026,7 @@ static fn tls_revocation_entries(void)
                 positive length = crypto_hex_into(bytes, sizeof bytes, rows[row].hex);
                 const p8 address_to response = (const p8 address_to)bytes;
                 positive response_length = 99;
-                bool accepted = tls_entry_status(bytes, length, rows[row].asked,
+                p8 accepted = tls_entry_status(bytes, length, rows[row].asked,
                                                  address_of response,
                                                  address_of response_length);
 
@@ -83057,7 +83057,7 @@ static fn tls_revocation_handshake(void)
         for (positive checked = 0; checked < 2; checked++)
         {
                 tls_conn client = {.host = "revocation.example", .check_cert = checked};
-                bool offered = tls_client_hello(address_of client, hello, sizeof hello,
+                p8 offered = tls_client_hello(address_of client, hello, sizeof hello,
                                                 address_of used, null, 0) == TLS_OK &&
                                client.status_requested == checked &&
                                tls_hello_extension(hello, used, 5, address_of at,
@@ -83081,8 +83081,8 @@ static fn tls_revocation_handshake(void)
                         string_address name;
                         string_address extensions;
                         p16 suite;
-                        bool asked;
-                        bool accept;
+                        p8 asked;
+                        p8 accept;
                 } rows[] = {
                     {"a TLS 1.2 echo of status_request", "00170000ff01000100" "00050000",
                      0xc02b, true, true},
@@ -83096,7 +83096,7 @@ static fn tls_revocation_handshake(void)
                      "002b00020304" "00330024001d0020" "4242424242424242424242424242424242424242424242424242424242424242"
                      "00050000", 0x1301, true, false},
                 };
-                bool all = true;
+                p8 all = true;
 
                 for (positive row = 0; row < array_count(rows); row++)
                 {
@@ -83107,7 +83107,7 @@ static fn tls_revocation_handshake(void)
                         const p8 address_to cookie = null;
                         positive cookie_length = 0;
                         positive length;
-                        bool accepted;
+                        p8 accepted;
 
                         memory_fill(tls, 0, TLS_CONN_HEAD);
                         tls->group = 0x1d;
@@ -83480,9 +83480,9 @@ typedef fn (*net_group_body)(void);
 /* `--only NAME` (any number of them) runs those groups and no other: what a
    guest of another machine runs where a whole CHECK_net would take an hour
    of emulation. */
-static bool net_group_wanted(string_address name)
+static p8 net_group_wanted(string_address name)
 {
-        bool any = false;
+        p8 any = false;
 
         for (positive at = 1; at + 1 < program_argument_count(); at++)
                 if (!string_compare(program_argument(at), (string_address) "--only"))
@@ -83703,7 +83703,7 @@ b32 main(void)
 
 /* PKCS#1 v1.5 at the two digests the vectors ask about; production
    reaches crypto_rsa_pkcs1 through tls_verify_one's signature table. */
-static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
+static p8 crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
                                     p64 exponent, p8 address_to sig,
                                     positive sig_length, p8 address_to hash)
 {
@@ -83715,7 +83715,7 @@ static bool crypto_rsa_pkcs1_sha256(p8 address_to n_bytes, positive n_length,
                                 digestinfo, sizeof digestinfo, hash, 32);
 }
 
-static bool crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
+static p8 crypto_rsa_pkcs1_sha384(p8 address_to n_bytes, positive n_length,
                                     p64 exponent, p8 address_to sig,
                                     positive sig_length, p8 address_to hash)
 {
@@ -83763,7 +83763,7 @@ static positive crypto_vector_word(p8 address_to address_to at,
         return length;
 }
 
-static bool crypto_vector_hex(p8 address_to word, positive length,
+static p8 crypto_vector_hex(p8 address_to word, positive length,
                               positive field)
 {
         if (length == 1 && word[0] == '-')
@@ -83778,7 +83778,7 @@ static bool crypto_vector_hex(p8 address_to word, positive length,
         return true;
 }
 
-static bool crypto_vector_is(const p8 address_to got, positive field)
+static p8 crypto_vector_is(const p8 address_to got, positive field)
 {
         return memory_compare(got, crypto_vector_field[field],
                               crypto_vector_length[field]) == 0;
@@ -83799,8 +83799,8 @@ static p64 crypto_vector_number(positive field)
 //      One vector, under whichever body the feature bytes now name: whether
 //      it came out as expected. A field of the wrong size for its kind is a
 //      bad line, and that is a disagreement too.
-static bool crypto_vector_run(p8 address_to kind, positive kind_length,
-                              bool expect)
+static p8 crypto_vector_run(p8 address_to kind, positive kind_length,
+                              p8 expect)
 {
         p8 address_to out = crypto_vector_out;
         p8 address_to work = crypto_vector_work;
@@ -83843,7 +83843,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
         if (KIND("gcm"))
         {
                 p8 tag[16];
-                bool opened;
+                p8 opened;
 
                 if (CL(0) != 16 || CL(1) != 12 || CL(5) != 16 ||
                     CL(3) != CL(4))
@@ -83924,7 +83924,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                 static nts_state state;
                 nts_exchange exchange;
                 bipolar verdict;
-                bool good;
+                p8 good;
                 positive at = 0;
                 positive seen = 0;
 
@@ -83959,7 +83959,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
         }
         if (KIND("x25519"))
         {
-                bool valid;
+                p8 valid;
 
                 if (CL(0) != 32 || CL(1) != 32 || CL(2) != 32)
                         return false;
@@ -83969,7 +83969,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
         if (KIND("share256") || KIND("share384"))
         {
                 positive size = KIND("share256") ? 32 : 48;
-                bool valid;
+                p8 valid;
 
                 if (CL(0) != size || CL(1) != 2 * size + 1)
                         return false;
@@ -83980,7 +83980,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
         if (KIND("ecdh256") || KIND("ecdh384"))
         {
                 positive size = KIND("ecdh256") ? 32 : 48;
-                bool valid;
+                p8 valid;
 
                 if (CL(0) != size || CL(1) != 2 * size + 1 || CL(2) != size)
                         return false;
@@ -84043,7 +84043,7 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
 }
 
 //      The kinds whose routines have a body for each feature byte.
-static bool crypto_vector_tiered(p8 address_to kind, positive length)
+static p8 crypto_vector_tiered(p8 address_to kind, positive length)
 {
         static const char tiered[] = "sha2 sha3 hmac hkdf pbkd gcm  pss  x255 ";
 
@@ -84090,8 +84090,8 @@ b32 main(void)
                 p8 address_to number = word;
                 positive expect_length = crypto_vector_word(address_of at,
                                                             address_of word);
-                bool expect = expect_length == 1 && word[0] == '1';
-                bool parsed = kind_length && number_length && expect_length == 1;
+                p8 expect = expect_length == 1 && word[0] == '1';
+                p8 parsed = kind_length && number_length && expect_length == 1;
                 positive fields = 0;
                 positive bodies;
 
@@ -84191,7 +84191,7 @@ static p16 heard_length[64];
 static p8 heard_first[64];
 static positive heard;
 
-static bool hear(address_any context, struct waterlink_frame address_to head,
+static p8 hear(address_any context, struct waterlink_frame address_to head,
                  p8 address_to payload)
 {
         (void)context;
@@ -84209,7 +84209,7 @@ static bool hear(address_any context, struct waterlink_frame address_to head,
 
 //      One datagram out of the sender and straight into the receiver, which
 //      is the whole link minus the two things this file does not do.
-static positive carry(p64 now, bool address_to alone)
+static positive carry(p64 now, p8 address_to alone)
 {
         p8 body[WATERLINK_PAYLOAD];
         positive used = waterlink_fill(address_of one, body, now, alone);
@@ -84272,7 +84272,7 @@ static fn refusals(void)
 
 static fn supersession(void)
 {
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
 
@@ -84296,7 +84296,7 @@ static fn supersession(void)
 
 static fn class_is_the_keys(void)
 {
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
 
@@ -84325,7 +84325,7 @@ static fn class_is_the_keys(void)
 
 static fn urgency(void)
 {
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
 
@@ -84359,7 +84359,7 @@ static fn stale_arrivals(void)
         p8 first[WATERLINK_PAYLOAD];
         positive used;
         positive kept;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
 
@@ -84397,7 +84397,7 @@ static fn durable_reordered(void)
         positive early_used;
         positive late_used;
         positive before_early;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(7, WATERLINK_FRAME_DURABLE, 'a', 0);
@@ -84453,7 +84453,7 @@ static fn malformed_bodies(void)
         p8 body[WATERLINK_PAYLOAD];
         positive used;
         positive refused = 0;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(7, WATERLINK_FRAME_DURABLE, 'a', 0);
@@ -84577,9 +84577,9 @@ static fn body_prefix_boundaries(void)
 
         for (positive length = 0; length <= sizeof body; length++)
         {
-                bool want = length == 0 || length == 7 || length >= 11;
+                p8 want = length == 0 || length == 7 || length >= 11;
                 struct waterlink_link before;
-                bool got;
+                p8 got;
 
                 waterlink_link_reset(address_of one);
                 before = one;
@@ -84610,7 +84610,7 @@ static fn body_prefix_boundaries(void)
         itself; and it says what a body holds, part for part, so the judge
         must agree on every word it hands the application, not only on yes.
 */
-static bool judge_model_number(p8 address_to body, positive length,
+static p8 judge_model_number(p8 address_to body, positive length,
                                positive address_to at, p64 address_to value)
 {
         p64 got = 0;
@@ -84647,8 +84647,8 @@ static bipolar judge_model(p8 address_to body, positive length,
                 p8 flags = body[at++];
                 p8 key = body[at++];
                 p64 first, second;
-                bool replaceable = (flags & 1) != 0;
-                bool durable = (flags & 2) != 0;
+                p8 replaceable = (flags & 1) != 0;
+                p8 durable = (flags & 2) != 0;
 
                 if (key >= 64 ||
                     !judge_model_number(body, length, address_of at,
@@ -84711,7 +84711,7 @@ static fn apply_walk_acknowledge(struct waterlink_link address_to link, p8 key,
                 struct waterlink_slot address_to slot = link->slot + at;
                 p32 next = slot->chain;
                 p32 gap = slot->sequence - delivered - 1;
-                bool taken = slot->sequence <= delivered;
+                p8 taken = slot->sequence <= delivered;
 
                 //      A key's slots are in sequence order: past the mask,
                 //      the rest are too.
@@ -84834,8 +84834,8 @@ static fn apply_walk(struct waterlink_link address_to link, address_any body,
                      p64 now, waterlink_sink sink, address_any context)
 {
         p8 address_to bytes = (p8 address_to)body;
-        bool framed = false;
-        bool acked = false;
+        p8 framed = false;
+        p8 acked = false;
         p64 newly = 0, latest = 0, sample = 0;
 
         if (now > link->clock)
@@ -84926,7 +84926,7 @@ static fn apply_walk(struct waterlink_link address_to link, address_any body,
         a link exactly where this walk leaves it, having handed on the same
         frames in the same order.
 */
-static bool judge_walk_number(p8 address_to bytes, positive length,
+static p8 judge_walk_number(p8 address_to bytes, positive length,
                               positive address_to at, p64 address_to value)
 {
         positive used = memory_vli_get(bytes + address_to at,
@@ -84936,15 +84936,15 @@ static bool judge_walk_number(p8 address_to bytes, positive length,
         return used != 0;
 }
 
-static bool judge_walk(struct waterlink_link address_to link,
+static p8 judge_walk(struct waterlink_link address_to link,
                        p8 address_to bytes, positive length, p64 now,
                        waterlink_sink sink, address_any context)
 {
         positive at = 0;
-        bool framed = false;
-        bool acked = false;
+        p8 framed = false;
+        p8 acked = false;
         p64 newly = 0, latest = 0, sample = 0;
-        bool good;
+        p8 good;
 
         if (length > WATERLINK_PAYLOAD)
                 return false;
@@ -85031,7 +85031,7 @@ static bool judge_walk(struct waterlink_link address_to link,
 static p64 judge_heard[2][512];
 static positive judge_heard_count[2];
 
-static bool judge_hear(address_any context, struct waterlink_frame address_to head,
+static p8 judge_hear(address_any context, struct waterlink_frame address_to head,
                        p8 address_to payload)
 {
         positive side = (positive)context - 1;
@@ -85100,7 +85100,7 @@ static p64 judge_pick(void)
         time. `plausible` keeps to what a live link sends: small keys,
         sequences near the start and payloads that fit.
 */
-static positive judge_body(p8 address_to body, bool plausible)
+static positive judge_body(p8 address_to body, p8 plausible)
 {
         positive used = 0;
         positive frames = 1 + (positive)(judge_next() % 7);
@@ -85119,7 +85119,7 @@ static positive judge_body(p8 address_to body, bool plausible)
         {
                 p8 number[24];
                 positive n = 0;
-                bool ack = judge_next() % 4 == 0;
+                p8 ack = judge_next() % 4 == 0;
                 p8 flags = ack ? 8
                                : (p8)((judge_next() & 1 ? 2 : 1) |
                                       (judge_next() & 3 ? 0 : 0x10) |
@@ -85237,7 +85237,7 @@ static fn judge_procedural(void)
         for (positive run = 0; run < 400; run++)
         {
                 p8 payload[64];
-                bool alone = false;
+                p8 alone = false;
 
                 waterlink_link_reset(address_of judge_one);
                 waterlink_link_reset(address_of judge_two);
@@ -85263,7 +85263,7 @@ static fn judge_procedural(void)
                 for (positive step = 0; step < 40; step++)
                 {
                         positive length = judge_body(body, true);
-                        bool first, second;
+                        p8 first, second;
 
                         if (waterlink_judge(body, length, parts) < 0)
                                 continue;
@@ -85414,14 +85414,14 @@ static positive fill_walk_ack_write(struct waterlink_link address_to link,
 }
 
 static positive fill_walk(struct waterlink_link address_to link,
-                          address_any out, p64 now, bool address_to alone)
+                          address_any out, p64 now, p8 address_to alone)
 {
         p8 address_to bytes = (p8 address_to)out;
         positive used = 0;
         positive room = WATERLINK_PAYLOAD;
         positive paced = 0;
-        bool probed = false;
-        bool full = false;
+        p8 probed = false;
+        p8 full = false;
         positive urgent = 0;
 
         address_to alone = false;
@@ -85777,7 +85777,7 @@ static p64 fill_change(struct waterlink_link address_to link, p64 state,
         walks trust has to be what is there, whoever moved the band, and
         every key with a frame there has its bit (a bit may outlive its
         frames; a walk clears it). */
-static bool band_counts_hold(struct waterlink_link address_to link)
+static p8 band_counts_hold(struct waterlink_link address_to link)
 {
         p16 counted[WATERLINK_KEYS];
         p64 keys = 0;
@@ -85796,7 +85796,7 @@ static bool band_counts_hold(struct waterlink_link address_to link)
 /*      Two links the same from a place on, but for which keys' bits are
         set in banded past their last frame: the reference fill never clears
         one, and waterlink_fill clears those its walk comes across. */
-static bool fill_links_apart(struct waterlink_link address_to one,
+static p8 fill_links_apart(struct waterlink_link address_to one,
                              struct waterlink_link address_to two,
                              positive from)
 {
@@ -85809,7 +85809,7 @@ static bool fill_links_apart(struct waterlink_link address_to one,
 }
 
 //      The walk wake did before it could end early: any frame the window lets by.
-static bool sendable_walk(struct waterlink_link address_to link)
+static p8 sendable_walk(struct waterlink_link address_to link)
 {
         for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
              at = link->slot[at].next)
@@ -85819,7 +85819,7 @@ static bool sendable_walk(struct waterlink_link address_to link)
 }
 
 //      Whether a walk now ends early: a stream blocked with more behind it.
-static bool band_walk_bounded(struct waterlink_link address_to link)
+static p8 band_walk_bounded(struct waterlink_link address_to link)
 {
         for (p32 at = link->head[WATERLINK_BAND_NORMAL]; at != WATERLINK_NONE;
              at = link->slot[at].next)
@@ -85853,8 +85853,8 @@ static fn fill_procedural(void)
                         state = fill_change(address_of fill_two, state, now);
                         for (positive fill = 0; fill < fills; fill++)
                         {
-                                bool alone_one = (fill_next(address_of state) & 1) != 0;
-                                bool alone_two = alone_one;
+                                p8 alone_one = (fill_next(address_of state) & 1) != 0;
+                                p8 alone_two = alone_one;
                                 p64 at = fill_next(address_of state) % 16 == 0
                                                  ? now - fill_next(address_of state) % 200
                                                  : now;
@@ -85928,7 +85928,7 @@ static fn fill_procedural(void)
         list and the chains the whole of it. The count it returns is how many
         frames the link holds.
 */
-static bool held_consistent(struct waterlink_link address_to link,
+static p8 held_consistent(struct waterlink_link address_to link,
                             positive address_to total)
 {
         positive free = 0;
@@ -85987,7 +85987,7 @@ static p64 apply_heard[2][2048];
 static positive apply_heard_count[2];
 static positive apply_sink_mode;
 
-static bool apply_hear(address_any context, struct waterlink_frame address_to head,
+static p8 apply_hear(address_any context, struct waterlink_frame address_to head,
                        p8 address_to payload)
 {
         positive side = (positive)context - 1;
@@ -86133,7 +86133,7 @@ static fn apply_procedural(void)
                         state = fill_change(address_of fill_two, state, now);
                         if (fill_next(address_of state) % 3 == 0)
                         {
-                                bool alone = false;
+                                p8 alone = false;
                                 static p8 out[WATERLINK_PAYLOAD];
 
                                 (void)fill_walk(address_of fill_one, out, now,
@@ -86331,7 +86331,7 @@ static fn datagram_make(p8 address_to datagram, p64 counter, p8 fill)
 {
         struct waterlink_datagram head;
         positive used;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(7, WATERLINK_FRAME_DURABLE, fill, 0);
@@ -86358,8 +86358,8 @@ static fn sealed(void)
         p8 tag[16];
         p8 iv[12];
         positive used;
-        bool alone = false;
-        bool agreed;
+        p8 alone = false;
+        p8 agreed;
 
         for (positive i = 0; i < sizeof raw; i++)
                 raw[i] = (p8)(0x5a ^ (i * 29));
@@ -86404,7 +86404,7 @@ static fn sealed(void)
                         0, 8, 15, 16, 16 + 24, 16 + WATERLINK_PAYLOAD - 1,
                         16 + WATERLINK_PAYLOAD, WATERLINK_DATAGRAM - 1};
                 positive refused = 0;
-                bool wiped = true;
+                p8 wiped = true;
 
                 for (positive at = 0; at < sizeof where / sizeof where[0];
                      at++)
@@ -86577,7 +86577,7 @@ static fn sealed_generated(void)
                         positive used;
                         positive length;
                         positive flip;
-                        bool clean = true;
+                        p8 clean = true;
 
                         for (positive i = 0; i < 16; i++)
                         {
@@ -86680,7 +86680,7 @@ static fn sealed_small(void)
                 p8 before[WATERLINK_DATAGRAM];
                 struct waterlink_datagram head;
                 positive length = 32 + box;
-                bool clean;
+                p8 clean;
 
                 for (positive i = 0; i < 16; i++)
                 {
@@ -86819,7 +86819,7 @@ static fn replay_generated(void)
                 struct waterlink_replay window;
                 p64 base;
                 p64 top = 0;
-                bool any = false;
+                p8 any = false;
 
                 traffic_state = 0xd1b54a32d192ed03ull * seed;
                 base = seed % 3 == 0 ? ~0ull - REPLAY_REGION
@@ -86833,8 +86833,8 @@ static fn replay_generated(void)
                         p64 roll = traffic_next();
                         p64 offset;
                         p64 counter;
-                        bool want;
-                        bool got;
+                        p8 want;
+                        p8 got;
 
                         if (roll % 8 == 0)
                                 offset = REPLAY_REGION;
@@ -86893,7 +86893,7 @@ static fn last_arrives_once(void)
 {
         p8 body[WATERLINK_PAYLOAD];
         positive used;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(40, WATERLINK_FRAME_DURABLE, 'x', 0);
@@ -86947,7 +86947,7 @@ static fn full_frame_beside_owed_ack(void)
         p8 body[WATERLINK_PAYLOAD];
         p8 big[WATERLINK_FRAME_MAX];
         positive used;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(3, WATERLINK_FRAME_REPLACEABLE, 'c', 0);
@@ -86973,9 +86973,9 @@ static fn full_frame_beside_owed_ack(void)
         does not send it again however long it waits, and a key runs no further than its
         window past what was taken -- then, taken, everything flows.
 */
-static bool refusing;
+static p8 refusing;
 
-static bool hear_or_refuse(address_any context,
+static p8 hear_or_refuse(address_any context,
                            struct waterlink_frame address_to head,
                            p8 address_to payload)
 {
@@ -86985,7 +86985,7 @@ static bool hear_or_refuse(address_any context,
 static fn pump(p64 from, p64 to)
 {
         p8 body[WATERLINK_PAYLOAD];
-        bool alone = false;
+        p8 alone = false;
 
         for (p64 now = from; now < to; now++)
         {
@@ -87126,7 +87126,7 @@ static positive flood_ticks(positive shape)
 }
 
 //      One frame of that, delivered to the link under test.
-static bool flood_one(p8 key, p8 flags, p32 sequence, positive copies)
+static p8 flood_one(p8 key, p8 flags, p32 sequence, positive copies)
 {
         p8 body[WATERLINK_PAYLOAD];
 
@@ -87225,7 +87225,7 @@ static struct waterlink_link held_sender, held_reader;
 static fn held_answer_lost(void)
 {
         p8 body[WATERLINK_PAYLOAD];
-        bool alone = false;
+        p8 alone = false;
         positive used;
         p64 now = 1000;
         p64 wake;
@@ -87284,7 +87284,7 @@ static fn register_behind_its_newest(void)
 {
         struct waterlink_link address_to l = address_of register_link;
         p8 body[WATERLINK_PAYLOAD];
-        bool alone = false;
+        p8 alone = false;
         p8 value = 'v';
         p32 slot[5];
         p64 now = 1000;
@@ -87328,7 +87328,7 @@ static fn register_behind_its_newest(void)
 static fn held_after_losses(void)
 {
         p8 body[WATERLINK_PAYLOAD];
-        bool alone = false;
+        p8 alone = false;
         positive used = 0;
         p64 now = 1000;
         p64 wake;
@@ -87437,7 +87437,7 @@ static fn superseded_in_flight(void)
         p8 body[WATERLINK_PAYLOAD];
         positive old_used;
         positive used;
-        bool alone = false;
+        p8 alone = false;
 
         waterlink_link_reset(address_of one);
         post_one(9, WATERLINK_FRAME_REPLACEABLE, '1', 0);
@@ -87531,8 +87531,8 @@ typedef struct {
         p64 last_arrival;
         p64 resume_at; // when a slow reader at this end comes back
         positive refusals;
-        bool wrong;
-        bool bulk;
+        p8 wrong;
+        p8 bulk;
 } sim_end;
 
 static sim_end sim_ends[2];
@@ -87681,7 +87681,7 @@ static fn sim_wrong_at(sim_end address_to edge)
 
 static p64 sim_now;
 
-static bool sim_hear(address_any context, struct waterlink_frame address_to head,
+static p8 sim_hear(address_any context, struct waterlink_frame address_to head,
                      p8 address_to payload)
 {
         sim_end address_to edge = sim_ends + (positive)context;
@@ -87740,7 +87740,7 @@ static bool sim_hear(address_any context, struct waterlink_frame address_to head
         return true;
 }
 
-static fn sim_workload(sim_end address_to edge, bool bulk_only)
+static fn sim_workload(sim_end address_to edge, p8 bulk_only)
 {
         memory_zero(edge, sizeof(address_to edge));
         edge->bulk = bulk_only;
@@ -87801,7 +87801,7 @@ static fn sim_post(sim_end address_to edge, positive side, p64 now)
                 p8 flags;
                 p16 length;
                 positive index;
-                bool last_post;
+                p8 last_post;
 
                 for (positive tries = 0;
                      edge->key[k].posted >= edge->key[k].posts &&
@@ -87846,7 +87846,7 @@ static fn sim_drain_sends(positive side, p64 now)
 {
         for (positive guard = 0; guard < 4096; guard++)
         {
-                bool alone = false;
+                p8 alone = false;
                 positive used = waterlink_fill(sim_link + side, sim_scratch,
                                                now, address_of alone);
 
@@ -87883,8 +87883,8 @@ static sim_tally sim_total;
 
 static fn sim_seed(positive seed)
 {
-        bool bulk_path = seed % 5 == 0;
-        bool filtered = seed % 2 == 0;
+        p8 bulk_path = seed % 5 == 0;
+        p8 filtered = seed % 2 == 0;
         p64 now = 0;
         p64 limit;
 
@@ -88007,7 +88007,7 @@ static fn sim_seed(positive seed)
         {
                 sim_end address_to edge = sim_ends + side;
                 struct waterlink_link address_to link = sim_link + side;
-                bool finished = !edge->remaining &&
+                p8 finished = !edge->remaining &&
                                 waterlink_idle(sim_link + 0) &&
                                 waterlink_idle(sim_link + 1);
 
@@ -88152,7 +88152,7 @@ static fn clock_ordering(void)
                 //      The same through waterlink_fill, which is assembly on
                 //      every machine: its own compare of now with owed.
                 p8 body[WATERLINK_PAYLOAD];
-                bool alone = false;
+                p8 alone = false;
 
                 check("sec: a body filled before an owed acknowledgement carries none",
                       waterlink_fill(address_of link, body, 1000000,
@@ -88532,7 +88532,7 @@ static fn group_keys(struct waterlink_group_keys address_to keys,
         blocks of output): the derivation waterlink's groups and WPA's
         pre-shared key are both made with.
 */
-static bool pbkdf2_is(positive algorithm, positive size, string_address password,
+static p8 pbkdf2_is(positive algorithm, positive size, string_address password,
                       string_address salt, positive rounds, string_address hex)
 {
         p8 out[64];
@@ -88685,7 +88685,7 @@ static fn mdns_page_make(void)
         system_call_3(syscall(mprotect), (positive)(mdns_page + 4096), 4096, 0);
 }
 
-static bool mdns_read_edge(const p8 address_to packet, positive length,
+static p8 mdns_read_edge(const p8 address_to packet, positive length,
                            struct waterlink_found address_to found)
 {
         p8 address_to at = mdns_page + 4096 - length;
@@ -88816,7 +88816,7 @@ static fn mdns_wire_exact(void)
         {
                 p32 ttl = shape & 1 ? 0 : 120;
                 p32 address = shape & 2 ? 0 : 0x0a000105;
-                bool asked = shape & 4;
+                p8 asked = shape & 4;
                 positive want, got;
 
                 //      Poisoned first, so a field the builder leaves alone
@@ -89301,7 +89301,7 @@ static b32 mdns_modes(string_address mode)
                         positive used = 0;
                         p8 packet[WATERLINK_MDNS_MAX];
                         struct waterlink_found found;
-                        bool good;
+                        p8 good;
 
                         for (;;)
                         {
@@ -89420,7 +89420,7 @@ b32 main(void)
 #include "../src/lib.util.c"
 #undef system_random_fill
 
-static bool entropy_down;
+static p8 entropy_down;
 static positive entropy_draws;
 static positive entropy_fail_length;
 static fn (*entropy_before_fill)(void);
@@ -89442,7 +89442,7 @@ static bipolar system_random_fill(address_any into, positive length,
         return system_random_fill_kernel(into, length, flags);
 }
 
-static bool wls_open_capture;
+static p8 wls_open_capture;
 static positive wls_open_calls;
 static bipolar wls_reopen_error;
 
@@ -89457,7 +89457,7 @@ static bipolar wls_call3(positive number, positive one, positive two,
         return system_call_3(number, one, two, three);
 }
 
-static bool wls_wait_capture;
+static p8 wls_wait_capture;
 static timespec wls_wait_limit;
 static positive wls_wait_calls;
 
@@ -89485,11 +89485,11 @@ static bipolar wls_poll_wait(system_poll_descriptor address_to descriptors,
 #include "checks.c"
 #undef SHARED_counted
 
-static bool wls_write(string_address path, address_any data, positive length,
+static p8 wls_write(string_address path, address_any data, positive length,
                       positive mode)
 {
         bipolar handle;
-        bool good;
+        p8 good;
 
         (void)system_remove_at(AT_FDCWD, path, 0);
         handle = system_open_at_mode(AT_FDCWD, path,
@@ -89503,11 +89503,11 @@ static bool wls_write(string_address path, address_any data, positive length,
         return good;
 }
 
-static bool wls_text(string_address path, string_address text)
+static p8 wls_text(string_address path, string_address text)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC);
         positive length = string_length(text);
-        bool good;
+        p8 good;
 
         if (handle < 0)
                 return false;
@@ -89517,7 +89517,7 @@ static bool wls_text(string_address path, string_address text)
 }
 
 //      A namespace where this process is root and /root and /run are its own.
-static bool wls_sandbox(void)
+static p8 wls_sandbox(void)
 {
         p8 map[64];
         bipolar uid = system_call_1(syscall(getuid), 0);
@@ -89785,7 +89785,7 @@ static fn authorization_files(void)
 static positive key_claim_kind;
 static p8 key_claim[33];
 static file_facts key_claim_facts;
-static bool key_claim_ready;
+static p8 key_claim_ready;
 
 /* Runs after link_secret has observed ENOENT and before its publication.
    The competing initializer controls a real pathname, not a mocked stat. */
@@ -89944,7 +89944,7 @@ static fn staging(void)
 }
 
 //      A push session whose part file is opened and filled as the server does.
-static bool wls_push(struct link_session address_to s, string_address target)
+static p8 wls_push(struct link_session address_to s, string_address target)
 {
         if (!link_session_open(s))
                 return false;
@@ -90029,7 +90029,7 @@ static fn publication(void)
         ends with it, or one that ignores it and ends on its own a moment
         later. Answers its pidfd, which the session closes with.
 */
-static bipolar wls_command(struct link_session address_to s, bool deaf)
+static bipolar wls_command(struct link_session address_to s, p8 deaf)
 {
         b32 ends[2];
         bipolar child;
@@ -90070,7 +90070,7 @@ static bipolar wls_command(struct link_session address_to s, bool deaf)
 }
 
 //      Whether a process is still in the table, a zombie or not.
-static bool wls_present(bipolar pid)
+static p8 wls_present(bipolar pid)
 {
         return system_call_2(syscall(kill), (positive)pid, 0) == 0;
 }
@@ -90101,7 +90101,7 @@ static fn reaped_commands(void)
         bipolar group;
         bipolar many[LINK_REAPING + 4];
         positive before;
-        bool all = true;
+        p8 all = true;
 
         //      Whatever the checks before this closed on a command that was
         //      still running -- a pull's cat -- is waited for first, so the
@@ -90183,8 +90183,8 @@ static fn reaped_commands(void)
         A request for a file, as a peer holding `files` and nothing else would
         send it: the answer is whether the machine took it up.
 */
-static bool wls_file_over(struct link_session address_to s, p8 ask,
-                          string_address path, bool over)
+static p8 wls_file_over(struct link_session address_to s, p8 ask,
+                          string_address path, p8 over)
 {
         p8 request[LINK_REQUEST_MAX + 8];
         p8 key[32];
@@ -90210,7 +90210,7 @@ static bool wls_file_over(struct link_session address_to s, p8 ask,
         return !s->exit_sent && s->kind != LINK_KIND_NONE;
 }
 
-static bool wls_file_asked(struct link_session address_to s, p8 ask,
+static p8 wls_file_asked(struct link_session address_to s, p8 ask,
                            string_address path)
 {
         return wls_file_over(s, ask, path, false);
@@ -90227,9 +90227,9 @@ static fn own_files(void)
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         struct link_session address_to s = link_self.session;
         file_facts before[array_count(own)];
-        bool named = true, linked = true, doubled = true, spelled = true;
-        bool kept = true, pushed = false, pulled = false;
-        bool made[array_count(own)];
+        p8 named = true, linked = true, doubled = true, spelled = true;
+        p8 kept = true, pushed = false, pulled = false;
+        p8 made[array_count(own)];
         string_address hard;
         p8 round[64];
         p8 key[32];
@@ -90561,7 +90561,7 @@ static fn stream_failures(void)
         {
                 static p8 body[LINK_CHUNK + 1];
                 positive frames = (positive)((8ull << 20) / LINK_CHUNK);
-                bool early = true;
+                p8 early = true;
 
                 memory_fill(body, 'z', sizeof body);
                 body[0] = LINK_DATA;
@@ -90690,7 +90690,7 @@ static fn names_and_words(void)
               !link_name_good("run") && !link_name_good("on") &&
                       link_name_good("running"));
         {
-                bool refused = !link_name_good("group") &&
+                p8 refused = !link_name_good("group") &&
                                !link_name_good("leave") &&
                                !link_name_good("help");
 
@@ -90798,14 +90798,14 @@ static fn private_records_never_wait(void)
         static const string_address names[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH};
-        bool refused = true;
-        bool quick = true;
+        p8 refused = true;
+        p8 quick = true;
 
         for (positive at = 0; at < array_count(names); at++)
         {
                 bipolar child;
                 positive status = 0;
-                bool done = false;
+                p8 done = false;
 
                 (void)system_remove_at(AT_FDCWD, names[at], 0);
                 if (system_call_4(syscall(mknodat), (positive)(bipolar)AT_FDCWD,
@@ -90948,7 +90948,7 @@ static fn responder(bipolar listener, p16 port)
         link_self.server = false;
         {
                 bipolar heard;
-                bool answered = false;
+                p8 answered = false;
 
                 //      Told the session is closed, and nothing else.
                 while ((heard = wls_heard(listener, answer)) > 0)
@@ -91613,7 +91613,7 @@ static fn seen_once_a_second(void)
         p8 raw[16], datagram[64], from[16];
         link_state address_to state = address_of link_self.state;
         positive dirtied = 0;
-        bool noted;
+        p8 noted;
         p64 now;
 
         link_self.server = true;
@@ -91700,8 +91700,8 @@ static fn control_records_are_canonical(void)
         for (positive type = 0; type < 256; type++)
                 for (positive length = 0; length <= sizeof payload; length++)
                 {
-                        bool ended = type == LINK_END && length == 1;
-                        bool answer = (type == 'N' && length >= 1) ||
+                        p8 ended = type == LINK_END && length == 1;
+                        p8 answer = (type == 'N' && length >= 1) ||
                                       (type == 'O' && length == 1);
 
                         memory_zero(address_of s, sizeof s);
@@ -91969,7 +91969,7 @@ static fn idle_grant_refresh(void)
                 link_sessions_granted(now);
                 check("idle grant refresh opens no authorization file",
                       !wls_open_calls && !link_self.granted);
-                bool opened = link_session_open(s);
+                p8 opened = link_session_open(s);
 
                 check("idle grant refresh session fixture opens", opened);
                 if (opened)
@@ -92003,7 +92003,7 @@ static fn idle_grant_refresh(void)
         }
 }
 
-static bool terminal_hold(address_any context,
+static p8 terminal_hold(address_any context,
                            struct waterlink_frame address_to head,
                            p8 address_to payload)
 {
@@ -92021,7 +92021,7 @@ static fn terminal_sessions_never_stream(void)
                      LINK_DATA, '!',
                      WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_LAST,
                      LINK_KEY_INPUT, 2, 1, LINK_END};
-        bool outer_server = link_self.server;
+        p8 outer_server = link_self.server;
         p64 outer_granted = link_self.granted;
 
         for (positive slot = 0; slot < array_count(slots); slot++)
@@ -92032,7 +92032,7 @@ static fn terminal_sessions_never_stream(void)
                 p8 read[16], part[LINK_REQUEST_MAX + 32];
                 file_facts gone;
                 p64 now = 1000000000 + slot * 10000000 + cause * 1000000;
-                bool pushed = wls_write("/root/terminal-target", "before", 6, 0600) &&
+                p8 pushed = wls_write("/root/terminal-target", "before", 6, 0600) &&
                               wls_push(s, "/root/terminal-target");
 
                 check("terminal-session staged upload fixture opens", pushed);
@@ -92046,7 +92046,7 @@ static fn terminal_sessions_never_stream(void)
                 link_keys_install(address_of s->now, send, receive, 123, 124);
                 s->now.made = s->heard = s->spoke = now;
                 string_copy(part, s->part);
-                bool piped = system_pipe(ends, O_CLOEXEC | O_NONBLOCK) >= 0;
+                p8 piped = system_pipe(ends, O_CLOEXEC | O_NONBLOCK) >= 0;
                 bipolar observer = piped
                     ? system_call_3(syscall(fcntl), ends[0], 1030, 10) : -1;
 
@@ -92109,7 +92109,7 @@ static fn quiet_streams(void)
 {
         struct link_session address_to s = link_self.session;
         system_poll_descriptor watch[5];
-        bool address_to quiet[5];
+        p8 address_to quiet[5];
         positive count = 0;
         b32 pipe[2];
         p64 now = link_now();
@@ -92517,7 +92517,7 @@ static fn mdns_amplification(void)
                                   3000000 + at);
         link_nearby_heard(packet, length, loopback4, network_order_16(where.port),
                           HOST_LOOPBACK, 3000000 + LINK_ANSWER_AGAIN);
-        bool right_address = true;
+        p8 right_address = true;
         bipolar heard;
         while ((heard = wls_heard(asker, back)) > 0)
         {
@@ -92788,7 +92788,7 @@ static fn greeting_freshness(bipolar listener, p16 port)
         static const struct
         {
                 long ahead;
-                bool kept;
+                p8 kept;
         } dated[] = {
             {0, true},         {-60, true},        {-3500, true},
             {3500, true},      {-3700, false},     {3700, false},
@@ -93162,7 +93162,7 @@ static fn nearby_address(void)
         p8 message[64];
         netlink_header address_to header = (netlink_header address_to)message;
         netlink_address address_to body = (netlink_address address_to)(message + 16);
-        bool refused_all = true;
+        p8 refused_all = true;
 
         wls_group();
         link_nearby.socket = wls_quiet_socket();
@@ -93307,7 +93307,7 @@ static fn groups_scrub_edges(void)
         link_groups groups;
         bipolar handle;
         positive got;
-        bool kept = true;
+        p8 kept = true;
 
         memory_zero(three, sizeof three);
         for (positive at = 0; at < 3; at++)
@@ -93487,7 +93487,7 @@ static fn wls_groups_hostile(positive kind)
 }
 
 //      Each is true when the change was refused, or has no answer to give.
-static bool wls_change_join(void)
+static p8 wls_change_join(void)
 {
         //      The secret is wiped where it was typed: it must be writable.
         p8 secret[] = "sesame-sesame";
@@ -93496,12 +93496,12 @@ static bool wls_change_join(void)
         return link_group_join(words, 2) != 0;
 }
 
-static bool wls_change_leave(void)
+static p8 wls_change_leave(void)
 {
         return link_group_leave("lab", false) != 0;
 }
 
-static bool wls_change_open(void)
+static p8 wls_change_open(void)
 {
         p8 code[LINK_CODE_LENGTH] = {'a', 'b', 'c', 'd', 'e', 'f'};
         p32 mark = 0;
@@ -93509,20 +93509,20 @@ static bool wls_change_open(void)
         return link_pair_open("gadget", code, null, address_of mark) < 0;
 }
 
-static bool wls_change_taken_back(void)
+static p8 wls_change_taken_back(void)
 {
         link_pair_close(0x12345678);
         return true;
 }
 
-static bool wls_change_closed(void)
+static p8 wls_change_closed(void)
 {
         wls_group();
         link_group_close(0);
         return true;
 }
 
-static bool wls_change_expired(void)
+static p8 wls_change_expired(void)
 {
         wls_group();
         link_nearby.groups.record[0].flags = LINK_GROUP_ONCE;
@@ -93533,11 +93533,11 @@ static bool wls_change_expired(void)
 
 static fn groups_unreadable(void)
 {
-        static bool (*const changes[])(void) = {
+        static p8 (*const changes[])(void) = {
             wls_change_join,     wls_change_leave,  wls_change_open,
             wls_change_taken_back, wls_change_closed, wls_change_expired,
         };
-        bool held[array_count(changes)];
+        p8 held[array_count(changes)];
         struct wls_groups_look before, after;
         struct link_group_record three[3];
         link_groups groups;
@@ -93555,7 +93555,7 @@ static fn groups_unreadable(void)
                 held[change] = true;
                 for (positive kind = 0; kind < WLS_HOSTILE; kind++)
                 {
-                        bool refused;
+                        p8 refused;
 
                         wls_groups_hostile(kind);
                         wls_groups_look(address_of before);
@@ -93854,9 +93854,9 @@ static fn wifi_air_capacity(void)
 {
         radio_air air;
         radio_heard one;
-        bool real = false;
-        bool weak = false;
-        bool joined = false;
+        p8 real = false;
+        p8 weak = false;
+        p8 joined = false;
 
         memory_zero(address_of air, sizeof air);
         for (positive at = 0; at < RADIO_AIR_MOST; at++)
@@ -94016,7 +94016,7 @@ static const p8 kdf_anonce[32] = {0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b
 static const p8 kdf_snonce[32] = {0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7};
 static const p8 kdf_ptk[48] = {0xf9, 0xf1, 0xe7, 0x2f, 0x64, 0x83, 0xe3, 0x04, 0xe1, 0x07, 0x17, 0xe1, 0x85, 0xad, 0x39, 0xbe, 0x33, 0x50, 0xf0, 0xc0, 0x45, 0xa1, 0xca, 0x99, 0xd4, 0xfc, 0x43, 0x3f, 0xc6, 0xfb, 0x84, 0x98, 0x5c, 0x8c, 0x5e, 0x99, 0x96, 0x0f, 0xde, 0x49, 0x50, 0x01, 0xbd, 0x5a, 0x87, 0xfa, 0x58, 0xb0};
 
-static bool wls_same(const p8 address_to a, const p8 address_to b, positive n)
+static p8 wls_same(const p8 address_to a, const p8 address_to b, positive n)
 {
         return !memory_compare(a, b, n);
 }
@@ -94174,7 +94174,7 @@ static fn wifi_sae_checks(void)
         static const p8 access[6] = {2, 0, 0, 0, 1, 0};
         static const p8 station[6] = {2, 0, 0, 0, 2, 0};
         p8 rsn[48];
-        bool parity = true;
+        p8 parity = true;
 
         check("the RSN element of SAE carries the PMKID and BIP-CMAC-128",
               wifi_rsn_build(rsn, 8, 3, (p8 address_to)sae0_pmkid) == 44 && rsn[1] == 42 &&
@@ -94327,7 +94327,7 @@ static fn wifi_sae_frame_checks(void)
         wifi_sae_frame read;
         positive size;
         positive at;
-        bool all;
+        p8 all;
         p16 status;
 
         check("nothing at all is no frame", !wifi_sae_frame_read(frame, 0, access, false, address_of read));
@@ -94475,7 +94475,7 @@ static fn wifi_unwrap_checks(void)
         p8 got[CRYPTO_WRAP_MOST];
         p8 bent[CRYPTO_WRAP_MOST + 8];
         positive size = 99;
-        bool inverts = true;
+        p8 inverts = true;
 
         for (positive value = 0; value < 256; value++)
                 inverts &= crypto_aes_unsubstitute(crypto_aes_substitute((p8)value)) ==
@@ -94769,8 +94769,8 @@ static fn wifi_family_checks(void)
         //      Cut anywhere: what is read is what was whole before the cut, and
         //      nothing is read past it.
         {
-                bool sane = true;
-                bool never_more = true;
+                p8 sane = true;
+                p8 never_more = true;
                 p32 seen_mlme = 7;
 
                 for (positive cut = 1; cut < whole - 20; cut++)
@@ -94824,7 +94824,7 @@ static fn wifi_interface_checks(void)
         static const positive sizes[] = {1, 6, 15, 16, 17, 200};
         netlink_buffer buffer = {0};
         nl80211_iface found;
-        bool names = true;
+        p8 names = true;
 
         for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
         {
@@ -94887,7 +94887,7 @@ static fn wifi_features_checks(void)
         p8 bits[3];
         p32 wiphy = 5;
         positive size;
-        bool took[4];
+        p8 took[4];
 
         for (size = 0; size < 4; size++)
         {
@@ -94941,7 +94941,7 @@ static fn wifi_features_checks(void)
 }
 
 static positive wifi_news(nl80211 address_to session, p8 command, p32 index, p32 type,
-                          const p8 address_to frame, positive frame_size, bool reason_given,
+                          const p8 address_to frame, positive frame_size, p8 reason_given,
                           p16 reason)
 {
         netlink_buffer buffer;
@@ -95015,7 +95015,7 @@ typedef struct
         positive lengths[8];
 } wifi_walk;
 
-static bool wifi_walk_take(netlink_header address_to header, address_any context)
+static p8 wifi_walk_take(netlink_header address_to header, address_any context)
 {
         wifi_walk address_to walk = (wifi_walk address_to)context;
 
@@ -95025,7 +95025,7 @@ static bool wifi_walk_take(netlink_header address_to header, address_any context
         return walk->seen != walk->stop_at;
 }
 
-static bool wifi_chain_take(p16 type, p8 address_to value, positive size, address_any context)
+static p8 wifi_chain_take(p16 type, p8 address_to value, positive size, address_any context)
 {
         wifi_walk address_to walk = (wifi_walk address_to)context;
 
@@ -95208,8 +95208,8 @@ static fn wifi_password_checks(void)
                                                         "Zm9vYmE=", "Zm9vYmFy"};
                 p8 text[16];
                 p8 back[8];
-                bool loose;
-                bool good = true;
+                p8 loose;
+                p8 good = true;
 
                 for (positive count = 0; count < array_count(vector); count++)
                 {
@@ -95265,7 +95265,7 @@ static fn wifi_last_checks(void)
 {
         radio_last last;
         bipolar kinds[] = {-110, -111, -62, -121, -1015, -19, -22, -1};
-        bool quiet = true;
+        p8 quiet = true;
         static const p64 waits[] = {3000, 6000, 12000, 24000, 48000, 60000, 60000, 60000};
 
         for (positive count = 1; count <= 8; count++)
@@ -95342,7 +95342,7 @@ static fn wifi_scan_checks(void)
 {
         p8 text[RADIO_SCAN_ROOM];
         positive lines = 0;
-        bool names = true;
+        p8 names = true;
 
         system_remove_at(AT_FDCWD, RADIO_SCAN_PATH, 0);
         check("with no scan on record the age is the most there is",
@@ -95477,7 +95477,7 @@ static fn wifi_wait_checks(void)
 //      The process that keeps a link: named by its lock, ended by it without
 //      a pid that was somebody else's by then, and a daemon made of a fork
 //      with nothing of its maker's open.
-static bool wifi_descriptor_count(string_address directory, string_address name, address_any context)
+static p8 wifi_descriptor_count(string_address directory, string_address name, address_any context)
 {
         (void)directory, (void)name;
         (*(positive address_to)context)++;
@@ -95552,7 +95552,7 @@ static fn wifi_keeper_checks(void)
                 //      Its parent, itself, its session and what it has open.
                 string_address at = (string_address)text;
                 positive said[4] = {0, 0, 0, 0};
-                bool whole = got > 0;
+                p8 whole = got > 0;
 
                 for (positive field = 0; field < 4 && whole; field++)
                 {
@@ -95573,7 +95573,7 @@ static fn wifi_keeper_checks(void)
 //      A key's text and back, and text that is not quite a key.
 static fn key_text(void)
 {
-        bool round_trips = true;
+        p8 round_trips = true;
         p8 key[32], back[32], text[48];
 
         for (positive seed = 0; seed < 64; seed++)
@@ -95595,7 +95595,7 @@ static fn key_text(void)
 
 //      Where a peer is, as text and back: IPv6 with its gap anywhere and of
 //      any width, IPv4, ports, and the spellings that are not an address.
-static bool wls_place(string_address text, string_address address,
+static p8 wls_place(string_address text, string_address address,
                       p16 want_port)
 {
         p8 into[16], expect[16];
@@ -95629,7 +95629,7 @@ static fn places(void)
                 "0.0.0.0", "0.255.255.255", "224.0.0.1", "239.255.255.250",
                 "240.0.0.1", "255.255.255.255", "255.255.255.255:22348",
                 "::", "[::]:9", "ff02::1", "[ff02::1]", "[::ffff:224.0.0.1]"};
-        bool whole = true, gapped = true, none = true;
+        p8 whole = true, gapped = true, none = true;
         p8 address[16], back[16], text[64], spelled[64];
         p16 port;
 
@@ -96112,7 +96112,7 @@ static p64 epoch_next(void)
 }
 static positive epoch_twice;
 
-static bool epoch_sink(address_any context, struct waterlink_frame address_to head,
+static p8 epoch_sink(address_any context, struct waterlink_frame address_to head,
                        p8 address_to payload)
 {
         p32 id;
@@ -96170,8 +96170,8 @@ static fn epochs_generated(void)
                 positive epochs = 0;
                 p64 base;
                 p64 at = 0;
-                bool forgotten = false;
-                bool again = false;
+                p8 forgotten = false;
+                p8 again = false;
                 p64 again_counter = 0;
                 positive again_epoch = 0;
                 positive again_body = 0;
@@ -96235,14 +96235,14 @@ static fn epochs_generated(void)
                                 positive which;
                                 positive b;
                                 p64 counter;
-                                bool flip = false;
+                                p8 flip = false;
                                 struct epoch address_to e;
                                 struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 0, 0};
                                 positive length;
                                 bipolar in = -1;
-                                bool want = false;
-                                bool got;
-                                bool duplicate;
+                                p8 want = false;
+                                p8 got;
+                                p8 duplicate;
 
                                 if (again)
                                 {
@@ -96279,7 +96279,7 @@ static fn epochs_generated(void)
                                         else
                                         {
                                                 p32 id = (p32)(seed * 1000 + bodies);
-                                                bool alone = false;
+                                                p8 alone = false;
 
                                                 b = bodies % 64;
                                                 (void)waterlink_post(tx, (p8)(1 + bodies % 8), WATERLINK_FRAME_DURABLE,
@@ -96405,7 +96405,7 @@ static fn mdns_apart(void)
         {
                 string_address name;
                 p32 number;
-                bool allowed;
+                p8 allowed;
         } rows[] = {
             {"recvfrom", syscall(recvfrom), true}, {"sendto", syscall(sendto), true},
             {"ppoll", syscall(ppoll), true},       {"exit_group", syscall(exit_group), true},
@@ -96416,15 +96416,15 @@ static fn mdns_apart(void)
         };
         static const p64 none[6] = {0};
         net_filter filter;
-        bool all = true;
+        p8 all = true;
         p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
         p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
         p8 packet[WATERLINK_MDNS_MAX];
         positive length;
         struct waterlink_found here;
         struct waterlink_found apart;
-        bool read_here;
-        bool read_apart;
+        p8 read_here;
+        p8 read_apart;
 
         link_mdns_filter_build(address_of filter);
         for (positive at = 0; at < array_count(rows); at++)
@@ -96589,7 +96589,7 @@ b32 main(void)
 
 static fn names(void)
 {
-        static const struct { string_address name; bool valid; } roots[] = {
+        static const struct { string_address name; p8 valid; } roots[] = {
             {null, false}, {"", false}, {"/", false}, {"/bowl", false},
             {BOWL_ROOT_DIRECTORY, false}, {BOWL_ROOT_PREFIX, false}, {BOWL_ROOT_PREFIX "a", true},
             {BOWL_ROOT_PREFIX "bin", false}, {BOWL_ROOT_PREFIX "a.b_-", true}, {BOWL_ROOT_PREFIX ".", false},
@@ -96604,7 +96604,7 @@ static fn names(void)
         for (positive plus = 0; plus < 2; plus++)
         {
                 p8 name[] = {'x', byte, 'y', 0};
-                bool valid = !byte || (byte >= 'a' && byte <= 'z') ||
+                p8 valid = !byte || (byte >= 'a' && byte <= 'z') ||
                     (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') ||
                     byte == '-' || byte == '_' || byte == '.' || (plus && byte == '+');
                 check("Bowl root and command byte policies",
@@ -96627,9 +96627,9 @@ static fn launchers(void)
                 p8 kept[56];
                 string_address program = null;
                 memory_fill(kept, 0xa5, sizeof kept);
-                bool got = bowl_launcher(encoded[item], kept + 4, room, &program);
-                bool valid = item < 2 && room > string_length(roots[item]);
-                bool intact = true;
+                p8 got = bowl_launcher(encoded[item], kept + 4, room, &program);
+                p8 valid = item < 2 && room > string_length((const_string)roots[item]);
+                p8 intact = true;
                 for (positive at = 0; at < sizeof kept; at++)
                         if (at < 4 || at >= 4 + room)
                                 intact &= kept[at] == 0xa5;
@@ -96678,7 +96678,7 @@ static fn isolation(void)
                 positive stop = at;
                 positive length = 0;
                 p8 name[64];
-                bool known = false;
+                p8 known = false;
                 positive item;
 
                 while (stop < used && text[stop] != '\n')
@@ -96713,7 +96713,7 @@ static fn isolation(void)
         for (form = 0; form < 4; form++)
         {
                 positive length = string_length(words[word]);
-                bool known = false;
+                p8 known = false;
                 positive item;
 
                 memory_fill(line, 0, sizeof(line));
@@ -96746,7 +96746,7 @@ static fn isolation(void)
 }
 
 /* statfs reports the mount's flags, and read-only is the first of them. */
-static bool kernel_settings_read_only(string_address path)
+static p8 kernel_settings_read_only(string_address path)
 {
         file_mount_facts facts;
 
@@ -96758,7 +96758,7 @@ static bool kernel_settings_read_only(string_address path)
 /* The same of a setting only some kernels have (/proc/sysrq-trigger needs
    CONFIG_MAGIC_SYSRQ): read-only where it is there, as the seal leaves it,
    and nothing to bind where it is not. */
-static bool kernel_settings_read_only_if_there(string_address path)
+static p8 kernel_settings_read_only_if_there(string_address path)
 {
         file_mount_facts facts;
         bipolar asked = system_call_2(syscall(statfs), (positive)path,
@@ -96778,9 +96778,9 @@ static bool kernel_settings_read_only_if_there(string_address path)
 /* Root inside a user namespace just made, as the check's own user
    outside: without a mapping a file created on a tmpfs there has no owner
    the kernel can store, and its creation fails. */
-static bool namespace_root(positive user, positive group)
+static p8 namespace_root(positive user, positive group)
 {
-        static const struct { string_address path; bool id; bool of_group; } maps[] = {
+        static const struct { string_address path; p8 id; p8 of_group; } maps[] = {
             {"/proc/self/setgroups", false, false},
             {"/proc/self/gid_map", true, true},
             {"/proc/self/uid_map", true, false}};
@@ -96812,7 +96812,7 @@ static bool namespace_root(positive user, positive group)
 static fn kernel_settings(void)
 {
         struct bowl_mount_point address_to sysfs = null;
-        bool trigger = false;
+        p8 trigger = false;
 
         for (positive at = 0; bowl_isolated_mounts[at].target; at++)
                 if (string_equals(bowl_isolated_mounts[at].target, "/sys"))
@@ -96984,7 +96984,7 @@ static fn room(void)
 
 static fn archive_policy(void)
 {
-        bool before = tar_extract_special;
+        p8 before = tar_extract_special;
 
         tar_extract_special = false;
         check("Bowl extraction rejects character devices",
@@ -97100,7 +97100,7 @@ static fn unpack_path(p8 address_to into, string_address name,
         string_append_bounded(into, rest, 256);
 }
 
-static bool unpack_write(string_address base, string_address rest,
+static p8 unpack_write(string_address base, string_address rest,
                          string_address text, positive mode)
 {
         p8 path[256];
@@ -97111,7 +97111,7 @@ static bool unpack_write(string_address base, string_address rest,
         bipolar handle = system_open_at_mode(AT_FDCWD, path,
                                              O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC,
                                              mode);
-        bool wrote = handle >= 0 &&
+        p8 wrote = handle >= 0 &&
                      system_write_all((positive)handle, text, length) == length;
 
         if (handle >= 0)
@@ -97128,7 +97128,7 @@ static fn unpack_directory(string_address base, string_address rest)
         bowl_mkdir_parents(path);
 }
 
-static bool unpack_says(string_address base, string_address rest,
+static p8 unpack_says(string_address base, string_address rest,
                         string_address want)
 {
         p8 path[256];
@@ -97155,8 +97155,8 @@ static positive unpack_mode(string_address base, string_address rest)
 }
 
 // Our own tar, in a child, as bowl runs it.
-static bool unpack_tar(string_address archive, string_address directory,
-                       bool gzip, string_address address_to members)
+static p8 unpack_tar(string_address archive, string_address directory,
+                       p8 gzip, string_address address_to members)
 {
         string_address argv[16];
         positive n = 0;
@@ -97187,7 +97187,7 @@ static bool unpack_tar(string_address archive, string_address directory,
 }
 
 // A file moved into the layout under its own digest; its descriptor appended.
-static bool unpack_blob(string_address layout, string_address file,
+static p8 unpack_blob(string_address layout, string_address file,
                         string_address type, p8 address_to descriptor,
                         positive room, p8 address_to named)
 {
@@ -97196,7 +97196,7 @@ static bool unpack_blob(string_address layout, string_address file,
         p8 digits[24];
         p64 size = 0;
         bipolar handle = system_open_at(AT_FDCWD, file, FILE_READ | O_CLOEXEC);
-        bool hashed = handle >= 0 && bowl_sha256_of(handle, hex, address_of size);
+        p8 hashed = handle >= 0 && bowl_sha256_of(handle, hex, address_of size);
 
         if (handle >= 0)
                 system_close(handle);
@@ -97225,7 +97225,7 @@ static fn distros(void)
         for (positive at = 0; at < array_count(bowl_distros); at++)
         {
                 const struct bowl_distro address_to row = bowl_distros + at;
-                bool isolated = true;
+                p8 isolated = true;
 
                 for (string_address address_to program = row->expose;
                      program && *program; program++)
@@ -97261,9 +97261,9 @@ static fn distros(void)
         for (positive at = 0; at < array_count(bowl_distros); at++)
         {
                 const struct bowl_distro address_to row = bowl_distros + at;
-                bool url_own = false;
-                bool store_own = false;
-                bool foreign = false;
+                p8 url_own = false;
+                p8 store_own = false;
+                p8 foreign = false;
 
                 //      A release pinned by commit or by date names its build by
                 //      the digest, which Debian's URL has no arch in to show.
@@ -97304,7 +97304,7 @@ static fn distros(void)
 static fn profiles(void)
 {
         const struct bowl_profile address_to profile = null;
-        bool remove = false;
+        p8 remove = false;
         static string_address plain[] = {"bowl", "profile", "desktop", null};
         static string_address install[] = {"bowl", "profile", "desktop", "install", null};
         static string_address drop[] = {"bowl", "profile", "desktop", "remove", null};
@@ -97317,8 +97317,8 @@ static fn profiles(void)
         for (positive at = 0; at < array_count(bowl_profiles); at++)
         {
                 const struct bowl_profile address_to row = bowl_profiles + at;
-                bool packages = true;
-                bool session = row->libraries || (row->session && row->session[0]);
+                p8 packages = true;
+                p8 session = row->libraries || (row->session && row->session[0]);
                 positive words = 0;
 
                 for (const struct bowl_component address_to part = row->components;
@@ -97490,7 +97490,7 @@ static fn profiles(void)
         unpack_directory(first, "/usr/bin");
         unpack_directory(first, BOWL_PROFILE_STATE);
         unpack_directory(second, "/usr/bin");
-        bool made = unpack_write(first, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
+        p8 made = unpack_write(first, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
                     unpack_write(second, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
                     bowl_expose_program(first, "/usr/bin/tool", "profatool", false) == 0 &&
                     bowl_expose_program(second, "/usr/bin/tool", "profbtool", false) == 0;
@@ -97626,7 +97626,7 @@ static fn profiles(void)
         install wrote and no more, and a package another installed profile
         holds is left to it.
 */
-static bool chrome_has(string_address address_to list, string_address word)
+static p8 chrome_has(string_address address_to list, string_address word)
 {
         for (; list && *list; list++)
                 if (string_equals(*list, word))
@@ -97697,13 +97697,13 @@ static fn multilib_rows(void)
 static fn record_rows(void)
 {
         static string_address listed[] = {"mesa", "libpulse", "lib32-mesa", null};
-        bool added[BOWL_PROFILE_ARGV] = {false};
-        bool recorded = false;
-        bool grants = bowl_profile_recorded_line("package mesa added", listed, added, address_of recorded);
-        bool held = bowl_profile_recorded_line("package libpulse held", listed, added, address_of recorded);
-        bool named = bowl_profile_recorded_line("package lib32-mesa added", listed, added, address_of recorded);
-        bool launcher_recorded = false;
-        bool launcher_line = bowl_profile_recorded_line("steam", listed, added, address_of launcher_recorded);
+        p8 added[BOWL_PROFILE_ARGV] = {false};
+        p8 recorded = false;
+        p8 grants = bowl_profile_recorded_line("package mesa added", listed, added, address_of recorded);
+        p8 held = bowl_profile_recorded_line("package libpulse held", listed, added, address_of recorded);
+        p8 named = bowl_profile_recorded_line("package lib32-mesa added", listed, added, address_of recorded);
+        p8 launcher_recorded = false;
+        p8 launcher_line = bowl_profile_recorded_line("steam", listed, added, address_of launcher_recorded);
 
         check("A local database entry is its package by name: lib32-mesa is not mesa, mesa is mesa, and no version is no package",
               bowl_entry_is("lib32-mesa-26.0-1", "lib32-mesa") && !bowl_entry_is("lib32-mesa-26.0-1", "mesa") &&
@@ -97726,8 +97726,8 @@ static fn steam_profile(void)
         static string_address daemons[] = {
             "pipewire", "networkmanager", "gamemode", "lib32-gamemode", "systemd",
             "xorg-server", "sddm", "elogind", "seatd", "wireplumber", "greetd", null};
-        bool unique = true;
-        bool named = true;
+        p8 unique = true;
+        p8 named = true;
 
         check("The steam profile is a program with one component, Arch's, and no libraries",
               steam && steam->program && !steam->libraries && steam->session && part &&
@@ -97744,7 +97744,7 @@ static fn steam_profile(void)
                 named &= !chrome_has(part ? part->packages : null, *name);
         check("No package the steam profile names is a daemon, a display server or a seat Moonwater does not run",
               named);
-        bool graphic = true;
+        p8 graphic = true;
 
         for (string_address address_to name = bowl_graphics_arch; *name; name++)
                 graphic &= chrome_has(part ? part->packages : null, *name);
@@ -97844,8 +97844,8 @@ static fn chrome_profile(void)
             "weston", "kwin", "sway", "wayfire", "hyprland", "labwc", "mutter", "xorg", "xserver",
             "xvfb", "xwayland", "sddm", "gdm", "lightdm", "elogind", "seatd", "logind", "plasma",
             "gnome", "kde", "portal", "polkit", null};
-        bool clean = part != null;
-        bool graphic = part != null;
+        p8 clean = part != null;
+        p8 graphic = part != null;
 
         check("The chrome profile is a program with Alpine's chromium as its one component",
               chrome && chrome->program && !chrome->libraries && chrome->session &&
@@ -97909,16 +97909,16 @@ static fn chrome_profile(void)
                                  {"d", null}, {"DE", null}, {"d1", null}, {"deu", null}, {"german", null}, {"\xff\xff", null}};
                 char path[] = "/tmp/language-check-XXXXXX";
                 int handle = mkstemp(path);
-                bool right = handle >= 0;
+                p8 right = handle >= 0;
 
                 for (unsigned each = 0; right && each < sizeof(languages) / sizeof(languages[0]); each++)
                 {
                         string_address offered;
 
                         right &= ftruncate(handle, 0) == 0 && lseek(handle, 0, SEEK_SET) == 0 &&
-                                 write(handle, languages[each].file, strlen(languages[each].file)) == (long)strlen(languages[each].file);
+                                 write(handle, languages[each].file, string_length((const_string)languages[each].file)) == (long)string_length((const_string)languages[each].file);
                         offered = bowl_language_offered((string_address)path);
-                        right &= languages[each].want ? offered && !strcmp((const char *)offered, languages[each].want) : !offered;
+                        right &= languages[each].want ? offered && !string_compare((string_address)offered, (string_address)languages[each].want) : !offered;
                 }
                 right &= !bowl_language_offered((string_address) "/tmp/language-check-missing-file");
                 if (handle >= 0)
@@ -97945,7 +97945,7 @@ static fn chrome_profile(void)
                   !strstr(start, "--no-sandbox") && !strstr(start, "--disable-software-rasterizer") &&
                   !strstr(start, "--disable-features") && !strstr(start, "--in-process-gpu"));
 
-        bool known = true;
+        p8 known = true;
 
         for (positive at = 0; at < array_count(bowl_profiles); at++)
                 known &= strstr(BOWL_PROFILES_KNOWN, bowl_profiles[at].name) != null;
@@ -98000,7 +98000,7 @@ static fn chrome_profile(void)
                 string_copy_bounded(listing, BOWL_EXPOSE_DIRECTORY, sizeof listing);
                 unpack_directory(root, "/usr/bin");
                 unpack_directory(other, "/usr/bin");
-                bool stood = unpack_write(root, "/usr/bin/profxone", "#!/bin/sh\n", 0755) &&
+                p8 stood = unpack_write(root, "/usr/bin/profxone", "#!/bin/sh\n", 0755) &&
                              unpack_write(root, "/usr/bin/profxtwo", "#!/bin/sh\n", 0755) &&
                              unpack_write(other, "/usr/bin/profxthree", "#!/bin/sh\n", 0755);
 
@@ -98029,7 +98029,7 @@ static fn chrome_profile(void)
                           !bowl_name_listed(nothing, "profxone") && bowl_name_listed(null, "profxone"));
 
                 bowl_quiet = true;
-                bool marked = bowl_profile_expose(other, "profymark", nothing) == 0;
+                p8 marked = bowl_profile_expose(other, "profymark", nothing) == 0;
                 bowl_quiet = false;
                 check("A list of none exposes nothing of a bowl that holds a program, and the profile is marked",
                       marked && bowl_profile_marked(other, "profymark") &&
@@ -98054,7 +98054,7 @@ static fn chrome_profile(void)
                 p8 foreign[256];
                 p8 own[256];
                 p8 target[256];
-                bool stood;
+                p8 stood;
 
                 unpack_path(foreign, "profz", "");
                 unpack_directory(foreign, "/usr/bin");
@@ -98276,7 +98276,7 @@ static fn oci(void)
         unpack_directory(spoiled, "");
         unpack_directory(outside, "");
 
-        bool made = unpack_write(base, "/one/a/keep", "one", 0644) &&
+        p8 made = unpack_write(base, "/one/a/keep", "one", 0644) &&
                     unpack_write(base, "/one/a/gone", "gone", 0644) &&
                     unpack_write(base, "/one/a/sub/x", "x", 0644) &&
                     unpack_write(base, "/one/opq/old", "old", 0644) &&
@@ -98454,7 +98454,7 @@ static fn nix(void)
 
         unpack_directory(base, "/nix-9.9-x86_64-linux/store/"
                                "0123456789abcdfghijklmnpqrsvwxyz-nix-9.9/bin");
-        bool made = unpack_write(base, "/nix-9.9-x86_64-linux/install", script, 0755) &&
+        p8 made = unpack_write(base, "/nix-9.9-x86_64-linux/install", script, 0755) &&
                     unpack_write(base, "/nix-9.9-x86_64-linux/.reginfo", "registered\n", 0644) &&
                     unpack_write(base, "/nix-9.9-x86_64-linux/install-multi-user", "", 0755) &&
                     unpack_write(base, "/nix-9.9-x86_64-linux/store/"
@@ -98503,7 +98503,7 @@ static fn nix(void)
                     {"nameserver 9.9.9.9\nnameserver 1.1.1.1\n",
                      "nameserver 9.9.9.9\nnameserver 1.1.1.1\n"},
                 };
-                bool same = true;
+                p8 same = true;
 
                 for (positive at = 0; at < array_count(resolv_case); at++)
                 {
@@ -98546,7 +98546,7 @@ static fn executable_in_root(void)
         unpack_path(root, "exec", "");
         unpack_directory(root, "/opt/real");
         unpack_directory(root, "/bin");
-        bool made = unpack_write(root, "/opt/real/tool", "#!/bin/sh\n", 0755) &&
+        p8 made = unpack_write(root, "/opt/real/tool", "#!/bin/sh\n", 0755) &&
                     unpack_write(root, "/opt/real/data", "data\n", 0644);
 
         string_copy_bounded(path, root, sizeof path);
@@ -98771,12 +98771,12 @@ static fn launch_failure_words(void)
         pinned row is checked for having a digest or a key, and the Arch Linux
         ARM key for being the key its fingerprint names.
 */
-static bool put_file(string_address path, const p8 address_to bytes,
+static p8 put_file(string_address path, const p8 address_to bytes,
                      positive length)
 {
         bipolar handle = system_open_at_mode(
             AT_FDCWD, path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
-        bool done = handle >= 0 &&
+        p8 done = handle >= 0 &&
                     system_write_all((positive)handle, bytes, length) == length;
 
         if (handle >= 0)
@@ -98889,12 +98889,12 @@ static fn downloads(void)
                         //      which bowl_signature_read does not read.
                         positive hashed = 3 + 6 + ((positive)sig[7] << 8) + sig[8];
                         positive unhashed = ((positive)sig[hashed] << 8) + sig[hashed + 1];
-                        bool refused = true;
-                        bool cut_refused = true;
+                        p8 refused = true;
+                        p8 cut_refused = true;
 
                         for (positive at = 0; at < length; at++)
                         {
-                                bool free_byte = at >= hashed + 2 &&
+                                p8 free_byte = at >= hashed + 2 &&
                                                  at < hashed + 2 + unhashed;
 
                                 memory_copy(copy, sig, length);
@@ -98974,15 +98974,15 @@ static fn download_ceiling(void)
         string_address fake = BOWL_ROOT_DIRECTORY "/fake-wget";
         string_address said = BOWL_ROOT_DIRECTORY "/fake-wget.status";
         string_address part = BOWL_ROOT_DIRECTORY "/fetched.part";
-        bool named = true;
-        static const struct { string_address bytes; p64 ceiling; bool whole; } rows[] = {
+        p8 named = true;
+        static const struct { string_address bytes; p64 ceiling; p8 whole; } rows[] = {
             {"0", 4096, true},       {"1", 4096, true},     {"4095", 4096, true},
             {"4096", 4096, true},    {"4097", 4096, false}, {"8192", 4096, false},
             {"1048576", 4096, false}, {"65536", 65536, true}, {"65537", 65536, false},
             {"200000", 65536, false},
         };
-        bool held = true;
-        bool whole = true;
+        p8 held = true;
+        p8 whole = true;
 
         system_make_directory_at(AT_FDCWD, BOWL_ROOT_DIRECTORY, 0755);
         if (!put_file(fake, writer, sizeof(writer) - 1) ||
@@ -98996,7 +98996,7 @@ static fn download_ceiling(void)
                 file_facts facts;
                 b32 failed = bowl_setup_fetch(fake, part, rows[at].bytes,
                                               rows[at].ceiling);
-                bool there = file_look_code(AT_FDCWD, part, 0, address_of facts) >= 0;
+                p8 there = file_look_code(AT_FDCWD, part, 0, address_of facts) >= 0;
                 p64 size = there ? facts.size : 0;
 
                 if (rows[at].whole)
@@ -99037,7 +99037,7 @@ static fn download_ceiling(void)
 */
 static fn secret_lines(void)
 {
-        static const struct { string_address line; bool secret; } lines[] = {
+        static const struct { string_address line; p8 secret; } lines[] = {
             {"moonwater wifi add home hunter2hunter2", true},
             {"moonwater wifi add 'my home' 'pass phrase here'", true},
             {"moonwater wifi add \"my home\" pass\\ phrase", true},
@@ -99086,7 +99086,7 @@ static fn secret_lines(void)
 
         for (positive at = 0; at < array_count(lines); at++)
         {
-                bool said = history_secret_line(lines[at].line,
+                p8 said = history_secret_line(lines[at].line,
                                                 string_length(lines[at].line));
 
                 if (said != lines[at].secret)
@@ -99106,7 +99106,7 @@ static fn secret_lines(void)
         message is read back from standard error. The forms with "-" are not
         in question here, they read the terminal.
 */
-static bool secret_refused(string_address what, bool group)
+static p8 secret_refused(string_address what, p8 group)
 {
         static string_address wifi[] = {"moonwater", "wifi", "add", "home", "hunter2hunter2"};
         static string_address link[] = {"lab", "s3cr3tsecret"};
@@ -99139,11 +99139,11 @@ static fn secret_arguments(void)
 
 /* A file at path holding length bytes, its mode set after the write (which
    the umask would cut): whether it was written. */
-static bool switches_file(string_address path, const p8 address_to bytes, positive length,
+static p8 switches_file(string_address path, const p8 address_to bytes, positive length,
                           positive mode)
 {
         bipolar handle;
-        bool written;
+        p8 written;
 
         system_remove_at(AT_FDCWD, path, 0);
         handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0600);
@@ -99175,13 +99175,13 @@ static fn switches_asked(void)
         p32 me = (p32)system_call(syscall(geteuid));
         p32 both = (p32)1 << (SECURITY_SWITCH_PACKAGES_OFF - 1) |
                    (p32)1 << (SECURITY_SWITCH_SUDO_ON - 1);
-        bool tight = MOONWATER_STRICT_BOWL >= STRICT_TIGHT;
+        p8 tight = MOONWATER_STRICT_BOWL >= STRICT_TIGHT;
         positive used = TLS_OVERLAY_HEAD;
         positive packages = array_count(security_switches);
         positive sudo = array_count(security_switches);
         positive tls12 = array_count(security_switches);
         positive revocation = array_count(security_switches);
-        bool written;
+        p8 written;
 
         //      The file moonwater security publishes with both turned.
         for (p16 id = SECURITY_SWITCH_PACKAGES_OFF; id <= SECURITY_SWITCH_SUDO_ON; id++)
@@ -99304,7 +99304,7 @@ static fn switches_asked(void)
 */
 static fn boot_links(void)
 {
-        static const struct { string_address link; bool external; } links[] = {
+        static const struct { string_address link; p8 external; } links[] = {
             {"../../devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb", true},
             {"../../devices/pci0000:00/0000:00:03.0/usb1/1-1/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda", true},
             {"../../devices/pci0000:00/0000:00:0d.2/0-0/thunderbolt/0-1/nvme/nvme1/nvme1n1", true},
@@ -99343,7 +99343,7 @@ typedef struct
         p8 group;
         p8 pairwise;
         p8 rules;
-        bool key_only;
+        p8 key_only;
         //      What the safe tier and the tight one do: the suite and its
         //      fallback, or the refusal.
         bipolar safe;
@@ -99406,7 +99406,7 @@ static fn wifi_plans(void)
         wifi_plan plan;
         positive plans = 0;
         positive refusals = 0;
-        bool held = true;
+        p8 held = true;
 
         for (positive at = 0; at < array_count(cases); at++)
         {
@@ -99420,7 +99420,7 @@ static fn wifi_plans(void)
                         p8 fallback = tier >= STRICT_TIGHT ? one->tight_fallback : one->safe_fallback;
                         bipolar got = wifi_join_plan(tier, address_of caps, one->rules, one->key_only,
                                                      address_of plan);
-                        bool right = want < 0 ? got == want
+                        p8 right = want < 0 ? got == want
                                               : !got && plan.akm == want &&
                                                     plan.fallback == fallback &&
                                                     plan.pmf == (want == 8 || one->pmf ? (CAP | REQ) : 0);
@@ -99444,7 +99444,7 @@ static fn wifi_plans(void)
         for (p8 key_only = 0; key_only < 2; key_only++)
         {
                 wifi_rsn_caps caps = {.akms = akms, .pmf = pmf, .group = group, .pairwise = pairwise};
-                bool tight = tier >= STRICT_TIGHT;
+                p8 tight = tier >= STRICT_TIGHT;
                 bipolar got = wifi_join_plan(tier, address_of caps, rules, key_only, address_of plan);
                 wifi_plan other;
                 bipolar beside = wifi_join_plan(tight ? STRICT_SAFE : STRICT_TIGHT, address_of caps,
@@ -99521,7 +99521,7 @@ static fn wifi_plans(void)
 #undef SHARED_filter_run
 
 //      check() with a name made at run time.
-static fn station_check(string_address name, bool passed)
+static fn station_check(string_address name, p8 passed)
 {
         checks++;
         if (!passed)
@@ -99531,7 +99531,7 @@ static fn station_check(string_address name, bool passed)
         }
 }
 
-static bool station_emulated(void)
+static p8 station_emulated(void)
 {
         return program_argument_count() > 1 &&
                !string_compare(program_argument(1), (string_address)"--emulated");
@@ -99545,7 +99545,7 @@ static fn station_filter(void)
                 string_address name;
                 p32 number;
                 p64 arguments[6];
-                bool allowed;
+                p8 allowed;
         } rows[] = {
             {"recvfrom", syscall(recvfrom), {0}, true},
             {"sendto", syscall(sendto), {0}, true},
@@ -99605,7 +99605,7 @@ static fn station_filter(void)
         };
         static const p64 none[6] = {0};
         net_filter filter;
-        bool landed = true;
+        p8 landed = true;
 
         radio_filter_build(address_of filter);
         check("the station's filter fits its program",
@@ -99650,7 +99650,7 @@ static fn station_statuses(void)
         static const struct
         {
                 b64 status;
-                bool believed;
+                p8 believed;
         } rows[] = {
             {0, true},
             {-13, true},
@@ -99668,7 +99668,7 @@ static fn station_statuses(void)
             {WIFI_REFUSE_APART, false},
             {-(b64)1 << 40, false},
         };
-        bool all = true;
+        p8 all = true;
 
         for (positive at = 0; at < array_count(rows); at++)
                 all = all && radio_join_status(rows[at].status) == rows[at].believed;
@@ -99731,13 +99731,13 @@ static DEAD_END fn station_probe(positive which, b32 said, b32 go)
 }
 
 //      One of a child's maps, written from here: "0 ID 1", or the word.
-static bool station_map(bipolar child, string_address file, string_address text)
+static p8 station_map(bipolar child, string_address file, string_address text)
 {
         p8 path[64];
         p8 address_to put = string_copy_end(path, (string_address) "/proc/");
         bipolar handle;
         positive length = string_length(text);
-        bool wrote;
+        p8 wrote;
 
         put += positive_into(put, (positive)child);
         string_copy_end(string_copy_end(put, (string_address) "/"), file);
@@ -99755,8 +99755,8 @@ static fn station_confinement(void)
             "opens a generic netlink socket", "opens a route netlink socket",
             "asks for the EAPOL packet socket", "dies of openat", "dies of an IPv4 socket",
             "dies of execve", "dies of ptrace", "dies of a raw packet socket", "dies of prctl"};
-        bool emulated = station_emulated();
-        bool unprivileged = false;
+        p8 emulated = station_emulated();
+        p8 unprivileged = false;
 
         //      qemu-user cannot filter itself: the confinement is refused
         //      there, before any namespace, which is what the station does.
@@ -100009,9 +100009,9 @@ static fn paths(void)
                 positive used = 0;
                 positive kept = 0;
                 positive at;
-                bool climb = false;
-                bool ok;
-                bool expect;
+                p8 climb = false;
+                p8 ok;
+                p8 expect;
 
                 parts[0] = piece[a];
                 parts[1] = piece[b];
@@ -100061,8 +100061,8 @@ static fn paths(void)
         {
                 p8 head[TAR_PREFIX + 1];
                 p8 leaf[TAR_NAME + 1];
-                bool ok;
-                bool expect = prefixes[prefix][0] || names[name][0];
+                p8 ok;
+                p8 expect = prefixes[prefix][0] || names[name][0];
 
                 memory_fill(head, 0, sizeof(head));
                 memory_fill(leaf, 0, sizeof(leaf));
@@ -100087,7 +100087,7 @@ static fn packs(void)
                 p8 magic[8];
                 positive n;
                 p8 pack;
-                bool packed;
+                p8 packed;
         } magics[] = {
             {{0x1f, 0x8b}, 2, TAR_PACK_GZIP, true},
             {{0xfd, 0x37, 0x7a, 0x58, 0x5a, 0}, 6, TAR_PACK_XZ, true},
@@ -100100,7 +100100,7 @@ static fn packs(void)
         {
                 string_address suffix;
                 p8 pack;
-                bool packed;
+                p8 packed;
         } suffixes[] = {
             {".gz", TAR_PACK_GZIP, true},
             {".tgz", TAR_PACK_GZIP, true},
@@ -100194,7 +100194,7 @@ static fn packs(void)
         }
 }
 
-static bool tar_pax_record(p8 address_to into, positive room,
+static p8 tar_pax_record(p8 address_to into, positive room,
                            positive address_to used, string_address key,
                            const p8 address_to value, positive n)
 {
@@ -100240,7 +100240,7 @@ static fn pax_records(void)
         {
                 p8 bytes[8];
                 positive n;
-                bool numeric;
+                p8 numeric;
         } values[] = {
             {{0}, 0, true},
             {{'0'}, 1, true},
@@ -100264,8 +100264,8 @@ static fn pax_records(void)
         {
                 positive used = 0;
                 positive extra_used = 0;
-                bool size_key = string_equals(keys[key], "size");
-                bool well = !size_key ||
+                p8 size_key = string_equals(keys[key], "size");
+                p8 well = !size_key ||
                     (values[value].numeric && values[value].n);
 
                 tar_pax_clear(address_of tar_pax_local);
@@ -100363,9 +100363,9 @@ static fn name_precedence(void)
 
         for (shape = 0; shape < 8; shape++)
         {
-                bool by_local = (shape & 1) != 0;
-                bool by_global = (shape & 2) != 0;
-                bool by_long = (shape & 4) != 0;
+                p8 by_local = (shape & 1) != 0;
+                p8 by_global = (shape & 2) != 0;
+                p8 by_long = (shape & 4) != 0;
                 string_address want =
                     by_local ? (string_address) "local"
                     : by_global ? (string_address) "global"
@@ -100435,7 +100435,7 @@ static fn name_spelling(void)
         {
                 string_address name = names[at];
                 positive length = string_length(name);
-                bool made = tar_spell_directory(name, spelled,
+                p8 made = tar_spell_directory(name, spelled,
                                                 sizeof(spelled));
 
                 if (!length || name[length - 1] == '/')
@@ -100462,10 +100462,10 @@ static fn digit_words(void)
 {
         static const char digits[] = "0123456789abcdef";
         p64 state = 0x9e3779b97f4a7c15ull;
-        bool octal_whole = true;
-        bool hex_short = true;
-        bool hex_wide = true;
-        bool reversed = true;
+        p8 octal_whole = true;
+        p8 hex_short = true;
+        p8 hex_wide = true;
+        p8 reversed = true;
 
         for (p64 value = 0; value < ((p64)1 << 17); value++)
         {
@@ -100626,7 +100626,7 @@ static p8 zstd_host_huff_out[] = {
         0x38, 0x20, 0x73, 0x79, 0x6d, 0x62, 0x6f, 0x6c, 0x3b, 0x0a, 0x7d, 0x20,
         0x7a, 0x73, 0x74, 0x64, 0x5f, 0x66, 0x73, 0x65};
 
-static bool zstd_decoded_is(p8 address_to src, positive src_len,
+static p8 zstd_decoded_is(p8 address_to src, positive src_len,
                             string_address want)
 {
         p8 into[64];
@@ -100751,7 +100751,7 @@ static p64 bits_model_load(p8 address_to at, positive count)
         return value;
 }
 
-static bool bits_model_open(zstd_bits address_to b, p8 address_to src, positive size)
+static p8 bits_model_open(zstd_bits address_to b, p8 address_to src, positive size)
 {
         positive high = 7;
 
@@ -100776,7 +100776,7 @@ static p64 bits_model_get(zstd_bits address_to b, positive n)
         return value;
 }
 
-static bool bits_model_reload(zstd_bits address_to b)
+static p8 bits_model_reload(zstd_bits address_to b)
 {
         positive bytes;
         positive have;
@@ -100808,7 +100808,7 @@ static fn bits_model(void)
         p8 address_to const map = memory(3 * page);
         p32 random = 0x1b873593u;
         positive streams = 0;
-        bool same = true;
+        p8 same = true;
 
         if (!map || system_failed(map))
         {
@@ -100825,7 +100825,7 @@ static fn bits_model(void)
                                                                        : map + page / 2 + shift;
                                 zstd_bits ours;
                                 zstd_bits model;
-                                bool opened;
+                                p8 opened;
 
                                 for (positive i = 0; i < size; i++)
                                 {
@@ -100854,7 +100854,7 @@ static fn bits_model(void)
                                         }
                                         else
                                         {
-                                                bool const live = bits_model_reload(address_of model);
+                                                p8 const live = bits_model_reload(address_of model);
 
                                                 same &= (zstd_bits_reload(address_of ours) == 0) == live;
                                                 if (!live)
@@ -100883,7 +100883,7 @@ static fn sequence_capacity(void)
         p8 literals[1] = {0};
         p8 window[32];
         p32 rep[3] = {1, 1, 1};
-        bool guard = true;
+        p8 guard = true;
 
         zstd_fse_rle(address_of ll, 0);
         zstd_fse_rle(address_of of, 0);
@@ -100950,7 +100950,7 @@ static fn huffman_exact_end(void)
                                       : (p8)(random >> 16);
         }
         positive hn = 0;
-        bool fresh = false;
+        p8 fresh = false;
         positive cn = zstd_pack_literals(null, src, sizeof(src), header,
                                          address_of hn, address_of fresh);
         positive tree = 0;
@@ -100974,7 +100974,7 @@ static fn huffman_exact_end(void)
         for (positive need = 1; need < 6; need++)
         {
                 p8 small[96];
-                bool untouched = true;
+                p8 untouched = true;
 
                 memory_fill(small, 0xa5, sizeof(small));
                 check("four streams into fewer than six bytes are refused",
@@ -101079,7 +101079,7 @@ static fn literal_codebooks(void)
                         }
                         src[n - 1] = (p8)alphabets[a];
                         positive hn = 0;
-                        bool fresh = false;
+                        p8 fresh = false;
                         positive cn = zstd_pack_literals(null, src, n, packed,
                                                          address_of hn, address_of fresh);
                         if (!cn)
@@ -101113,7 +101113,7 @@ static fn pull_block_shapes(void)
                 for (positive block = 0; block < 3; block++)
                 {
                         positive n = block == 0 && (shape & 4) ? 4097 : ZSTD_BLOCK_MAX;
-                        bool rle = (shape >> (block % 2)) & 1;
+                        p8 rle = (shape >> (block % 2)) & 1;
                         p32 h = (p32)(n << 3) | (rle ? 2 : 0) | (block == 2);
                         packed[pn++] = (p8)h; packed[pn++] = (p8)(h >> 8); packed[pn++] = (p8)(h >> 16);
                         if (rle)
@@ -101147,7 +101147,7 @@ static fn pull_block_shapes(void)
                                 p8 extra;
                                 got = zstd_decode_read(address_of extra, 1);
                         }
-                        bool done = zstd_decode_end();
+                        p8 done = zstd_decode_end();
                         if (cut)
                                 check("pull reader refuses a truncated raw/RLE block", got < 0 && !done);
                         else
@@ -101194,7 +101194,7 @@ static fn job_widths(void)
         for (positive w = 0; w < array_count(widths); w++)
         {
                 p8 address_to const into = w ? again : first;
-                bool ok;
+                p8 ok;
 
                 parallel_reset(widths[w]);
                 zstd_output.bytes = into;
@@ -101222,7 +101222,7 @@ static fn job_widths(void)
            frame was 5242903 bytes here, the input all but stored, and 17%
            bigger than libzstd's at -1 on a source tar. */
         {
-                bool single;
+                p8 single;
 
                 zstd_single_job = true;
                 zstd_output.bytes = again;
@@ -101390,10 +101390,10 @@ static p32 fast_parse_chain_a[1 << 16], fast_parse_chain_b[1 << 16];
 static p8 fast_parse_data[ZSTD_BLOCK_MAX * 2 + 256];
 
 /* The two walks, fast and then dfast, over the same kinds of blocks. */
-static fn fast_parse_walk(bool dfast)
+static fn fast_parse_walk(p8 dfast)
 {
         p32 random = dfast ? 0x1b873593u : 0x7f4a7c15u;
-        bool same = true;
+        p8 same = true;
         positive total = 0;
 
 #define FAST_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
@@ -101544,7 +101544,7 @@ static fn row_mask(void)
 {
         static p8 row[64 + 16];
         p32 random = 0x2545f491u;
-        bool same = true;
+        p8 same = true;
 
         for (positive trial = 0; trial < 3000; trial++)
         {
@@ -101588,7 +101588,7 @@ static fn par_audit_decode(const zstd_seq_decode_job address_to before,
 {
         zstd_seq_decode_job model = *before;
         p32 address_to const out = memory_take(12 * before->nseq + 16);
-        bool same = out != null;
+        p8 same = out != null;
 
         __atomic_fetch_add(address_of par_audited, 1, __ATOMIC_RELAXED);
         if (same)
@@ -101678,7 +101678,7 @@ static fn par_data(p8 address_to dst, positive n, p32 seed)
 static bipolar par_encode(p8 address_to src, positive n, p8 address_to dst, positive cap, b32 level)
 {
         zstd_params params;
-        bool ok;
+        p8 ok;
 
         zstd_output.bytes = dst;
         zstd_output.room = cap;
@@ -101712,7 +101712,7 @@ static par_result par_decode_frame(p8 address_to frame, positive len, p8 address
         return r;
 }
 
-static bool par_same_text(string_address a, string_address b)
+static p8 par_same_text(string_address a, string_address b)
 {
         return is_null(a) ? is_null(b) : !is_null(b) && !string_compare_max(a, b, 200);
 }
@@ -101720,7 +101720,7 @@ static bool par_same_text(string_address a, string_address b)
 /* The two decoders on one frame: the same count, the same bytes (whole
    buffer, so nothing is written that the serial decoder does not write) and
    the same reason. */
-static bool par_agree(p8 address_to frame, positive len, p8 address_to a, p8 address_to b, positive cap)
+static p8 par_agree(p8 address_to frame, positive len, p8 address_to a, p8 address_to b, positive cap)
 {
         par_result const serial = par_decode_frame(frame, len, a, cap, 1);
         par_result const pooled = par_decode_frame(frame, len, b, cap, 4);
@@ -101740,7 +101740,7 @@ static fn par_frames(void)
         static const b32 levels[] = {1, 2, 3, 4, 5, 7, 9, 12, 15, 19};
         positive agreed = 0;
         positive tried = 0;
-        bool good = true;
+        p8 good = true;
 
         zstd_par_audit_decode = par_audit_decode;
         zstd_par_audit_exec = par_audit_exec;
@@ -101970,7 +101970,7 @@ static fn par_decode_kernel(void)
                 zstd_fse address_to use[3] = {address_of tables[0], address_of tables[1], address_of tables[2]};
                 positive const nseq = 1 + XORSHIFT32(random) % (trial % 5 ? 40 : 600);
                 positive bytes;
-                bool flaw = trial % 3 == 2;
+                p8 flaw = trial % 3 == 2;
                 zstd_seq_decode_job a;
                 zstd_seq_decode_job b;
                 bipolar ra;
@@ -102057,7 +102057,7 @@ static fn par_exec_kernel(void)
         positive agree = 0;
         positive total_cases = 0;
         positive guarded = 0;
-        bool mapped = map && !system_failed(map);
+        p8 mapped = map && !system_failed(map);
 
         if (mapped)
                 memory_free(map + 2 * page, page);
@@ -102069,7 +102069,7 @@ static fn par_exec_kernel(void)
                 positive total = par_records(recs, nseq, history, address_of random, address_of lit_total);
                 zstd_seq_exec_job a;
                 zstd_seq_exec_job b;
-                bool same;
+                p8 same;
 
                 if (history + total + 64 > sizeof(win_a) || lit_total + 64 > sizeof(lits))
                         continue;
@@ -102186,7 +102186,7 @@ static p8 gzip_hello_py[] = {
         0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0xe7, 0x02, 0x00, 0x20, 0x30,
         0x3a, 0x36, 0x06, 0x00, 0x00, 0x00};
 
-static bool gzip_out_is(p8 address_to src, positive src_len, string_address want)
+static p8 gzip_out_is(p8 address_to src, positive src_len, string_address want)
 {
         p8 into[64];
         bipolar n = gzip_inflate_mem(src, src_len, into, sizeof(into));
@@ -102238,7 +102238,7 @@ static fn finder_tables(void)
         gzip_slide(&encoder);
         for (positive table = 0; table < array_count(tables); table++)
         {
-                bool same = true;
+                p8 same = true;
                 for (positive i = 0; i < counts[table]; i++)
                 {
                         p16 before = positions[i % array_count(positions)];
@@ -102468,14 +102468,14 @@ static positive gz_slurp(bipolar fd, p8 address_to into, positive cap)
 
 typedef struct
 {
-        bool ok;
+        p8 ok;
         positive length;
         string_address why;
         bipolar pooled;
 } gz_answer;
 
 /* The member through the serial decoder alone, or through the pool first. */
-static gz_answer gz_decode(const p8 address_to member, positive len, p8 address_to into, bool pooled)
+static gz_answer gz_decode(const p8 address_to member, positive len, p8 address_to into, p8 pooled)
 {
         gz_answer r = {false, 0, null, 0};
         bipolar const in = gz_memfd(member, len);
@@ -102506,12 +102506,12 @@ static gz_answer gz_decode(const p8 address_to member, positive len, p8 address_
         return r;
 }
 
-static bool gz_same_note(string_address a, string_address b)
+static p8 gz_same_note(string_address a, string_address b)
 {
         return is_null(a) ? is_null(b) : !is_null(b) && !string_compare_max(a, b, 90);
 }
 
-static bool gz_agree(const p8 address_to member, positive len)
+static p8 gz_agree(const p8 address_to member, positive len)
 {
         gz_answer const alone = gz_decode(member, len, gz_a, false);
         gz_answer const both = gz_decode(member, len, gz_b, true);
@@ -102528,12 +102528,12 @@ static fn gz_pool(void)
         positive pooled = 0;
         positive total = 0;
         positive whole = 0;
-        bool good = true;
-        bool good_whole = true;
-        bool good_cut = true;
-        bool good_more = true;
-        bool good_double = true;
-        bool good_flips = true;
+        p8 good = true;
+        p8 good_whole = true;
+        p8 good_cut = true;
+        p8 good_more = true;
+        p8 good_double = true;
+        p8 good_flips = true;
 
         parallel_reset(4);
         gzip_par_least = 0;
@@ -102602,7 +102602,7 @@ static fn gz_pool(void)
 static fn gz_combine(void)
 {
         p32 random = 0x9e3779b9u;
-        bool good = true;
+        p8 good = true;
 
         for (positive trial = 0; trial < 300; trial++)
         {
@@ -102741,7 +102741,7 @@ static p8 xz_sha_text_py[] = {
         0x44, 0x70, 0x8a, 0xb6, 0xe9, 0xdf, 0x1c, 0x02, 0x00, 0x00, 0x00,
         0x00, 0x0a, 0x59, 0x5a};
 
-static bool xz_out_is(p8 address_to src, positive src_len, string_address want)
+static p8 xz_out_is(p8 address_to src, positive src_len, string_address want)
 {
         p8 into[64];
         bipolar n = xz_inflate_mem(src, src_len, into, sizeof(into));
@@ -102832,7 +102832,7 @@ static fn streamed(void)
         static p8 packed[8192];
         static p8 back[65536 + 1024];
         positive at;
-        bool wrote = true;
+        p8 wrote = true;
         bipolar m;
 
         memory_fill(src, 'a', sizeof(src));
@@ -102930,7 +102930,7 @@ static fn pulled(void)
         {
                 if (pass == 2)
                         packed[n / 2] ^= 0x40;
-                bool prepared = system_seek(handle, 0, FILE_SEEK_SET) == 0 &&
+                p8 prepared = system_seek(handle, 0, FILE_SEEK_SET) == 0 &&
                                 system_truncate_handle(handle, 0) == 0 &&
                                 system_write_all(handle, packed + 7, (positive)n - 7) == n - 7 &&
                                 system_seek(handle, 0, FILE_SEEK_SET) == 0;
@@ -102969,7 +102969,7 @@ static fn pulled(void)
                 }
                 if (pass < 2)
                 {
-                        bool rebuilt = last == 0 && got == sizeof(src) &&
+                        p8 rebuilt = last == 0 && got == sizeof(src) &&
                                        !memory_compare(back, src, sizeof(src)) &&
                                        !xz_pull_error(d);
 
@@ -103056,7 +103056,7 @@ static fn blocks(void)
         check("block fixture index adds up", plain == sizeof(src));
 
         address_any d = xz_block_decoder();
-        bool all = d != null;
+        p8 all = d != null;
 
         for (positive k = count; all && k--;)
         {
@@ -103092,17 +103092,17 @@ static fn blocks(void)
                    three kinds of 4096-byte run the fixture lays down so that
                    some cut falls inside a match: refused by name, and not a
                    byte lands past the room. */
-                bool contained = sizes[0] > 4 * 4096;
+                p8 contained = sizes[0] > 4 * 4096;
 
                 for (positive run = 0; contained && run < 3; run++)
                         for (positive cut = 1; contained && cut < 40; cut += 3)
                         {
                                 positive room = sizes[0] - run * 4096 - 2048 - cut;
-                                bool untouched = true;
+                                p8 untouched = true;
 
                                 memory_fill(back + room, 0xa5, 512);
 
-                                bool refused = !xz_block_decode(d, packed + starts[0], lengths[0],
+                                p8 refused = !xz_block_decode(d, packed + starts[0], lengths[0],
                                                                 room, back, check_type, null, null) &&
                                                xz_pull_error(d) != null;
 
@@ -103171,7 +103171,7 @@ static fn filters_split(void)
         {
                 xz_filter list[XZ_FILTERS_MAX];
                 positive count = at < array_count(ids) ? 1 : at < 2 * array_count(ids) ? 2 : 3;
-                bool all_ok = true;
+                p8 all_ok = true;
 
                 memory_fill(list, 0, sizeof(list));
                 for (positive k = 0; k < count; k++)
@@ -103328,7 +103328,7 @@ static fn salvaged(void)
         memory_copy_apart(damaged, packed, (positive)n);
         damaged[index - 1] ^= 1;
         positive got = xz_salvage_pull(handle, damaged, (positive)n, back, sizeof(back), address_of last);
-        bool refused = !xz_block_decode(d, damaged + 12, block_len, sizeof(src), out, type,
+        p8 refused = !xz_block_decode(d, damaged + 12, block_len, sizeof(src), out, type,
                                         null, address_of written);
 
         check("a block whose check fails is handed out whole before the failure",
@@ -103337,7 +103337,7 @@ static fn salvaged(void)
                refused && written == sizeof(src) && !memory_compare(out, src, sizeof(src))));
 
         positive before = 0;
-        bool cut_ok = true;
+        p8 cut_ok = true;
 
         for (positive part = 1; part <= 9; part += 2)
         {
@@ -103549,9 +103549,9 @@ static fn reuse_bulk_output(void)
                 memory_fill(source, 0x37, sizeof(source));
                 memory_fill(target, 0xa5, sizeof(target));
                 byte_store sink = {target + 1, room, prefix};
-                bool complete = byte_store_append_span(&sink, length ? source : null, length);
+                p8 complete = byte_store_append_span(&sink, length ? source : null, length);
                 positive kept = min(length, room - prefix);
-                bool okay = complete == (kept == length) && sink.used == prefix + kept;
+                p8 okay = complete == (kept == length) && sink.used == prefix + kept;
                 for (positive at = 0; at < sizeof(target); at++)
                         okay &= target[at] == (at > prefix && at <= prefix + kept ? 0x37 : 0xa5);
                 check("bounded sink preserves its prefix and both guards", okay);
@@ -103581,8 +103581,8 @@ static fn reuse_stable_arena(void)
                 memory_arena arena = {held, 128, prefix};
                 positive rounded = (wanted + alignment - 1) & ~(alignment - 1);
                 p8 address_to answer = memory_arena_take(&arena, wanted, alignment);
-                bool fits = rounded <= 128 - prefix;
-                bool okay = fits ? answer == held + prefix && arena.used == prefix + rounded
+                p8 fits = rounded <= 128 - prefix;
+                p8 okay = fits ? answer == held + prefix && arena.used == prefix + rounded
                                  : !answer && arena.used == prefix;
                 for (positive at = 0; at < sizeof(held); at++)
                         okay &= held[at] == 0xa5;
@@ -103605,19 +103605,19 @@ static fn reuse_stable_arena(void)
                         check("arena read fixture opens its pipe", false);
                         return;
                 }
-                bool sent = system_call_3(syscall(write), pipe[1],
+                p8 sent = system_call_3(syscall(write), pipe[1],
                                            (positive)input, length) == (bipolar)length;
                 system_close(pipe[1]);
                 memory_fill(held, 0xa5, sizeof(held));
                 arena = (memory_arena){held, 80, 16};
                 positive first = firsts[first_at], used = 0;
-                bool read_failed = false;
+                p8 read_failed = false;
                 p8 address_to start = memory_arena_take(&arena, first, 16);
                 p8 address_to answer = memory_arena_read_tail(
                     &arena, pipe[0], 16, first, 16, &used, &read_failed);
                 system_close(pipe[0]);
-                bool fits = first && length < 64;
-                bool okay = sent && start == held + 16 && !read_failed &&
+                p8 fits = first && length < 64;
+                p8 okay = sent && start == held + 16 && !read_failed &&
                     (fits ? answer == start && used == length && !answer[length] &&
                             !memory_compare(answer, input, length) &&
                             arena.used == 16 + ((length + 16) & ~(positive)15)
@@ -103628,7 +103628,7 @@ static fn reuse_stable_arena(void)
         }
         arena = (memory_arena){held, 80, 16};
         positive used = 0;
-        bool read_failed = false;
+        p8 read_failed = false;
         memory_arena_take(&arena, 16, 16);
         check("arena read failure retains the previous allocations",
               !memory_arena_read_tail(&arena, (positive)-1, 16, 16, 16,
@@ -103648,7 +103648,7 @@ static fn reuse_stable_arena(void)
                 p8 tail[50];
                 b32 pipe[2];
                 positive length = sizeof(tail), roomy_used = 0;
-                bool roomy_failed = false;
+                p8 roomy_failed = false;
 
                 for (positive at = 0; at < sizeof(tail); at++)
                         tail[at] = (p8)(at + 1);
@@ -103659,7 +103659,7 @@ static fn reuse_stable_arena(void)
                         check("arena fixture opens its pipe", false);
                         return;
                 }
-                bool sent = system_call_3(syscall(write), pipe[1],
+                p8 sent = system_call_3(syscall(write), pipe[1],
                                            (positive)tail, length) == (bipolar)length;
                 system_close(pipe[1]);
                 p8 address_to answer = memory_arena_read_tail(
@@ -103794,7 +103794,7 @@ static fn reuse_lists(void)
                         ul_cpu_list_write(reuse_capture, set, sizeof(set), true);
                         reuse_output[reuse_used] = 0;
                         memory_zero(parsed, sizeof(parsed));
-                        bool okay = !reuse_used || ul_bit_list_read(reuse_output, parsed, UL_CPU_BITS, false);
+                        p8 okay = !reuse_used || ul_bit_list_read(reuse_output, parsed, UL_CPU_BITS, false);
                         check("stride list round trip all 12-bit masks across word boundaries",
                               okay && !memory_compare(parsed, set, sizeof(set)));
                 }
@@ -103901,7 +103901,7 @@ static fn reuse_percent_b(void)
 }
 
 #ifdef REUSE_BENCHMARK
-static fn reuse_json_scalar(byte_span value, bool lower)
+static fn reuse_json_scalar(byte_span value, p8 lower)
 {
         text_put_character('"');
         for (positive i = 0; i < value.length; i++)
@@ -103963,8 +103963,8 @@ static fn reuse_lookup_contracts(void)
 {
         for (positive byte = 0; byte < 256; byte++)
         {
-                bool digit = byte >= '0' && byte <= '9';
-                bool name = digit || byte == '_' ||
+                p8 digit = byte >= '0' && byte <= '9';
+                p8 name = digit || byte == '_' ||
                             (byte >= 'A' && byte <= 'Z') ||
                             (byte >= 'a' && byte <= 'z');
                 p8 text[] = {(p8)byte, 0};
@@ -104029,7 +104029,7 @@ static fn reuse_utility_numbers(void)
                                         positive_max, &scaled) &&
               scaled == 73);
         positive unit = 0;
-        bool human = false, si = false;
+        p8 human = false, si = false;
         p8 suffix[8];
         check("ls block size applies the checked count and suffix together",
               ls_block_size_read("2K", &unit, &human, &si, suffix) &&
@@ -104147,7 +104147,7 @@ static fn reuse_regex(void)
         {
                 static regex_program many[1100];
                 static p8 pattern[32], subject[32];
-                bool made = true, answered = true, apart = true;
+                p8 made = true, answered = true, apart = true;
 
                 for (positive i = 0; i < 1100; i++)
                 {
@@ -104213,7 +104213,7 @@ static fn reuse_regex(void)
                       regex_slots[0] == 0 && regex_slots[1] == 0);
         }
         {
-                static const struct { string_address pattern, text; positive length; bool found; } folds[] = {
+                static const struct { string_address pattern, text; positive length; p8 found; } folds[] = {
                     {"\xc3\x89", "caf\xc3\xa9", 5, true},
                     {"caf\xc3\xa9+", "CAF\xc3\x89\xc3\x89", 7, true},
                     {"[\xc3\xa9x]\xc3\xa0", "\xc3\x89\xc3\x80", 4, true},
@@ -104224,7 +104224,7 @@ static fn reuse_regex(void)
                     {"\xcf\x82", "\xcf\x83", 2, true},
                     {"\xe2\x84\xaa", "k", 1, false},
                     {"\xc3\x85", "\xe2\x84\xab", 3, false}};
-                bool every = true;
+                p8 every = true;
 
                 for (positive i = 0; i < sizeof(folds) / sizeof(folds[0]); i++)
                         every = every &&
@@ -104309,7 +104309,7 @@ b32 main(void)
         shell_memory_failed = false;
         {
                 shell_store odd = {0};
-                bool aligned = true;
+                p8 aligned = true;
 
                 //      A string of any length ahead of a record must leave
                 //      the record eight-aligned: it holds pointers, and a
@@ -104408,7 +104408,7 @@ static bipolar path_stage_read(
         return got;
 }
 
-static bool path_stage_exists(bipolar directory, string_address name)
+static p8 path_stage_exists(bipolar directory, string_address name)
 {
         system_path_identity identity;
 
@@ -104815,7 +104815,7 @@ static fn capture(address_any data, positive length)
                 captured[captured_used] = 0;
         }
 }
-static fn enable_name(string_address name, bool off)
+static fn enable_name(string_address name, p8 off)
 {
         shell_argc = off ? 3 : 2;
         shell_argv[0] = "enable";
@@ -104857,7 +104857,7 @@ b32 main(void)
                 static const struct
                 {
                         string_address value;
-                        bool bash;
+                        p8 bash;
                         string_address listed;
                 } aliases[] = {
                     {"echo one", false, "'mw_a=echo one'\n"},
@@ -105039,7 +105039,7 @@ b32 main(void)
                    after open, so a pathname swap cannot change this proof. */
                 opened = system_open_at(
                     AT_FDCWD, output, FILE_READ_WRITE | O_CLOEXEC);
-                bool foreign = opened >= 0 &&
+                p8 foreign = opened >= 0 &&
                     system_call_3(syscall(fchown), (positive)opened,
                                   65534, 65534) == 0;
                 if (opened >= 0)
@@ -105191,7 +105191,7 @@ static fn slurp_test_unlink(string_address path)
                       (positive)path, 0);
 }
 
-static bool slurp_test_file(string_address path, address_any data, positive length)
+static p8 slurp_test_file(string_address path, address_any data, positive length)
 {
         slurp_test_unlink(path);
 
@@ -105207,7 +105207,7 @@ static bool slurp_test_file(string_address path, address_any data, positive leng
         return written == length;
 }
 
-static bool slurp_test_guards(p8 address_to room, positive size,
+static p8 slurp_test_guards(p8 address_to room, positive size,
                               positive at, positive capacity)
 {
         for (positive i = 0; i < at; i++)
@@ -105221,7 +105221,7 @@ static bool slurp_test_guards(p8 address_to room, positive size,
         return true;
 }
 
-static bool slurp_test_all(p8 address_to room, positive size, p8 value)
+static p8 slurp_test_all(p8 address_to room, positive size, p8 value)
 {
         for (positive i = 0; i < size; i++)
                 if (room[i] != value)
@@ -105237,7 +105237,7 @@ static fn slurp_test_nap(void)
 }
 
 static fn slurp_test_fifo_child(string_address path, positive parent,
-                                bool signal_before_open,
+                                p8 signal_before_open,
                                 address_any data, positive length)
 {
         bipolar handle;
@@ -105267,7 +105267,7 @@ static fn slurp_test_fifo_child(string_address path, positive parent,
         exit(written == length ? 0 : 92);
 }
 
-static fn slurp_test_fifo(string_address path, bool signal_before_open)
+static fn slurp_test_fifo(string_address path, p8 signal_before_open)
 {
         static p8 payload[] = "EINTR survived";
         p8 room[64];
@@ -105625,7 +105625,7 @@ static fn wait_retry_proc_path(p8 address_to into, bipolar process)
         memory_copy(into + at, suffix, sizeof suffix);
 }
 
-static bool wait_retry_observe_wait(bipolar process)
+static p8 wait_retry_observe_wait(bipolar process)
 {
         p8 path[64], state[512];
 
@@ -105653,7 +105653,7 @@ static bool wait_retry_observe_wait(bipolar process)
         return false;
 }
 
-static bool wait_retry_usage_changed(p8 address_to room)
+static p8 wait_retry_usage_changed(p8 address_to room)
 {
         for (positive i = 3; i < 3 + WAIT_RETRY_USAGE; i++)
                 if (room[i] != 0xa5)
@@ -105662,7 +105662,7 @@ static bool wait_retry_usage_changed(p8 address_to room)
         return false;
 }
 
-static bool wait_retry_usage_guards(p8 address_to room, positive size)
+static p8 wait_retry_usage_guards(p8 address_to room, positive size)
 {
         for (positive i = 0; i < 3; i++)
                 if (room[i] != 0xa5)
@@ -105758,7 +105758,7 @@ static fn wait_retry_interrupted()
                       system_read_retry((positive)channel[0], address_of worker,
                                         sizeof worker) == sizeof worker && worker > 0);
 
-                bool observed = worker > 0 && wait_retry_observe_wait(waiter);
+                p8 observed = worker > 0 && wait_retry_observe_wait(waiter);
                 check("wait4 observed before signal", observed);
 
                 if (observed)
@@ -105870,7 +105870,7 @@ b32 main(void)
 #include "checks.c"
 #undef SHARED_counted
 
-static bool read_exact(positive handle, p8 address_to into, positive want)
+static p8 read_exact(positive handle, p8 address_to into, positive want)
 {
         positive have = 0;
 
@@ -105887,7 +105887,7 @@ static bool read_exact(positive handle, p8 address_to into, positive want)
         return true;
 }
 
-static bool bytes_are(p8 address_to got, string_address want, positive length)
+static p8 bytes_are(p8 address_to got, string_address want, positive length)
 {
         return !memory_compare(got, want, length);
 }
@@ -105903,11 +105903,11 @@ b32 main(void)
         p8 large[17] = "ABCDEFGHIJKLMNOPQ";
         positive used = 0;
         bipolar saved_output;
-        bool deferred_not_failed;
-        bool flush_failed;
-        bool direct_failed;
-        bool large_failed;
-        bool failure_stuck;
+        p8 deferred_not_failed;
+        p8 flush_failed;
+        p8 direct_failed;
+        p8 large_failed;
+        p8 failure_stuck;
 
         check("pipe made", system_call_2(syscall(pipe2), (positive)ends, 0) == 0);
         memory_fill(guarded, 0xa5, sizeof guarded);
@@ -106113,18 +106113,18 @@ b32 main(void)
    out-of-line program table receives deterministic short reads and EINTR. */
 static positive storage_test_mode, storage_test_calls, storage_test_number;
 static positive storage_test_offset, storage_test_length, storage_test_used;
-static bool storage_test_arguments, storage_test_preclear;
+static p8 storage_test_arguments, storage_test_preclear;
 static p8 address_to storage_test_destination;
 static positive storage_test_net_syncs, storage_test_net_sync_failure;
 static bipolar storage_test_net_close_failure = -1;
 
-typedef struct { bool send; bipolar result; positive ask; } copy_test_step;
+typedef struct { p8 send; bipolar result; positive ask; } copy_test_step;
 static const copy_test_step address_to copy_test_steps;
 static positive copy_test_count, copy_test_at, copy_test_used, copy_test_seeks;
 static positive copy_test_seek_failure;
-static bool copy_test_active, copy_test_explicit;
+static p8 copy_test_active, copy_test_explicit;
 
-static bipolar copy_test_transfer(bool send, positive in, positive out,
+static bipolar copy_test_transfer(p8 send, positive in, positive out,
                                   positive source, positive destination,
                                   positive ask)
 {
@@ -106199,7 +106199,7 @@ static bipolar storage_test_call4(positive number, positive handle,
         return (bipolar)take;
 }
 
-static bool directory_test_active;
+static p8 directory_test_active;
 static positive directory_test_calls, directory_test_capacity;
 static bipolar directory_test_result;
 
@@ -106388,7 +106388,7 @@ static fn storage_test_replay(void)
                                 positive size = header + 1 + width;
                                 if (ending == 2) bytes[size++] = '\r';
                                 if (ending) bytes[size++] = '\n';
-                                bool prepared = system_seek(handle, 0, FILE_SEEK_SET) == 0 &&
+                                p8 prepared = system_seek(handle, 0, FILE_SEEK_SET) == 0 &&
                                     system_truncate_handle(handle, size) == 0 &&
                                     system_write_all(handle, bytes, size) == size &&
                                     system_seek(handle, 0, FILE_SEEK_SET) == 0;
@@ -106396,14 +106396,14 @@ static fn storage_test_replay(void)
                                 if (!prepared) continue;
                                 process_replay_reader reader = {.failed = false};
                                 byte_input_open_fd(address_of reader.from, handle, reader.bytes, sizeof(reader.bytes));
-                                bool accepted = process_replay_skip_header(address_of reader);
+                                p8 accepted = process_replay_skip_header(address_of reader);
                                 check("replay header bound",
                                       accepted == (header < REPLAY_HEADER_MAX));
                                 if (!accepted) continue;
                                 p8 line[1026];
                                 memory_fill(line, 0xa5, sizeof(line));
                                 bipolar got = process_replay_line(address_of reader, line + 1, 1024);
-                                bool fits = width + (ending == 2) < 1024;
+                                p8 fits = width + (ending == 2) < 1024;
                                 bipolar expected = fits ? (width || ending ? (bipolar)width + 1 : 0) : -1;
                                 check("replay line bound/CRLF/EOF", got == expected && reader.failed == !fits);
                                 check("replay line output guards", line[0] == 0xa5 && line[1025] == 0xa5);
@@ -106424,7 +106424,7 @@ static fn utility_test_decimal(void)
                 {
                         string_address text = cases[i], at = text;
                         positive expected = 0, digits = 0;
-                        bool overflow = false;
+                        p8 overflow = false;
                         while (text[digits] >= '0' && text[digits] <= '9')
                         {
                                 positive digit = text[digits++] - '0';
@@ -106433,8 +106433,8 @@ static fn utility_test_decimal(void)
                                 expected = overflow ? positive_max : expected * 10 + digit;
                         }
                         positive value = 123;
-                        bool good = file_decimal_read(address_of at, saturate, address_of value);
-                        bool want = digits && (saturate || !overflow);
+                        p8 good = file_decimal_read(address_of at, saturate, address_of value);
+                        p8 want = digits && (saturate || !overflow);
                         check("decimal checked/saturated answer", good == want);
                         check("decimal cursor and output rollback", want
                               ? at == text + digits && value == expected
@@ -106491,7 +106491,7 @@ static fn storage_test_copy(void)
         // must copy the explicit extent, preserving the hole before it.
         for (positive mode = 0; mode < 3; mode++)
         {
-                bool range = mode == 0, send = mode < 2;
+                p8 range = mode == 0, send = mode < 2;
                 check("copy output reset", system_truncate_handle(out, 0) == 0);
                 check("copy input position", system_seek(in, 5, FILE_SEEK_SET) == 5);
                 check("copy output position", system_seek(out, 7, FILE_SEEK_SET) == 7);
@@ -106525,7 +106525,7 @@ static fn storage_test_copy_faults(void)
         static const struct {
                 const copy_test_step address_to steps;
                 positive count, copied, seek_failure, seeks;
-                bool okay, range, send;
+                p8 okay, range, send;
         } cases[] = {
             {partial, array_count(partial), 12, 0, 1, true, false, true},
             {range_eof, array_count(range_eof), 0, 0, 0, false, true, true},
@@ -106538,13 +106538,13 @@ static fn storage_test_copy_faults(void)
         for (positive i = 0; i < array_count(cases); i++)
         {
                 p64 offsets[] = {7, 13};
-                bool range = true, send = true;
+                p8 range = true, send = true;
                 copy_test_steps = cases[i].steps;
                 copy_test_count = cases[i].count;
                 copy_test_at = copy_test_used = copy_test_seeks = 0;
                 copy_test_seek_failure = cases[i].seek_failure;
                 copy_test_active = copy_test_explicit = true;
-                bool okay = file_copy_stream(12345, 54321, 12, true,
+                p8 okay = file_copy_stream(12345, 54321, 12, true,
                                              &range, &send, offsets, null);
                 copy_test_active = false;
                 check("copy cascade result and cached capability flags",
@@ -106555,13 +106555,13 @@ static fn storage_test_copy_faults(void)
                       copy_test_seeks == cases[i].seeks);
         }
         static const copy_test_step stream_eof[] = {{false, 0, FILE_KERNEL_COPY_SIZE}};
-        bool range = true, send = true;
+        p8 range = true, send = true;
         copy_test_steps = stream_eof;
         copy_test_count = 1;
         copy_test_at = copy_test_used = copy_test_seeks = 0;
         copy_test_active = true;
         copy_test_explicit = false;
-        bool okay = file_copy_stream(12345, 54321, 0, false, &range, &send, null,
+        p8 okay = file_copy_stream(12345, 54321, 0, false, &range, &send, null,
                                      null);
         copy_test_active = false;
         check("unbounded copy accepts EOF without descriptor seeks", okay && !copy_test_seeks);
@@ -106650,7 +106650,7 @@ static fn storage_test_capture(address_any bytes, positive length)
    byte, DEL or one past ASCII as \xNN, and a backslash only where an x
    follows it; its column is as wide as what it shows. */
 static positive storage_test_encode(p8 address_to into, string_address text,
-                                     bool raw, bool pairs)
+                                     p8 raw, p8 pairs)
 {
         positive used = 0;
         for (positive i = 0; text[i]; i++)
@@ -106789,7 +106789,7 @@ static fn storage_test_link_state(void)
         {
                 netlink_search loopback = {.wanted = (string_address)"lo"};
                 bipolar handle = netlink_open_groups(0);
-                bool found = handle >= 0 &&
+                p8 found = handle >= 0 &&
                              netlink_link_find((b32)handle, address_of loopback) >= 0;
 
                 if (handle >= 0)
@@ -106976,11 +106976,11 @@ static fn storage_test_link_state(void)
         netlink_forget(address_of net_states);
 }
 
-static bool storage_test_write_text(string_address path, const void address_to text,
+static p8 storage_test_write_text(string_address path, const void address_to text,
                                     positive length)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
-        bool written = handle >= 0 &&
+        p8 written = handle >= 0 &&
                        system_write_all((positive)handle, text, length) == length;
 
         if (handle >= 0)
@@ -106996,7 +106996,7 @@ static bool storage_test_write_text(string_address path, const void address_to t
    runs cannot ask these rows; the native run on the box does. */
 #define STORAGE_TEST_THREADED 7
 
-static bool storage_test_not_run(b32 status, string_address what,
+static p8 storage_test_not_run(b32 status, string_address what,
                                  string_address otherwise)
 {
         if (status != 2 && status != STORAGE_TEST_THREADED)
@@ -107081,7 +107081,7 @@ static fn storage_test_lease_asleep(void)
         static const struct
         {
                 string_address offsets;
-                bool expired;
+                p8 expired;
                 positive due;
         } cases[] = {{"boottime 7200 0\n", true, 1},
                      {"boottime 100 0\n", false, 1700},
@@ -107213,7 +107213,7 @@ static fn storage_test_arp_claims(void)
                         check("an ARP packet of another medium, protocol, length or operation is no claim",
                               !net_arp_claims(copy, sizeof copy, mine, offered));
                 }
-                bool refused = true;
+                p8 refused = true;
 
                 for (positive length = 0; length < NET_ARP_PACKET; length++)
                         refused &= !net_arp_claims(padded, length, mine, offered);
@@ -107390,11 +107390,11 @@ static fn storage_test_lease_over_existing(void)
 typedef struct
 {
         p32 host;
-        bool found;
+        p8 found;
         p32 valid;
 } storage_test_address_facts;
 
-static bool storage_test_address_seen(netlink_header address_to header,
+static p8 storage_test_address_seen(netlink_header address_to header,
                                       address_any context)
 {
         storage_test_address_facts address_to facts = context;
@@ -107568,11 +107568,11 @@ static fn storage_test_link_news(b32 events, net_holding address_to held,
 typedef struct
 {
         p32 gateway;
-        bool found;
+        p8 found;
         p32 flags;
 } storage_test_route_facts;
 
-static bool storage_test_route_seen(netlink_header address_to header,
+static p8 storage_test_route_seen(netlink_header address_to header,
                                     address_any context)
 {
         storage_test_route_facts address_to facts = context;
@@ -107726,7 +107726,7 @@ static fn storage_test_name_stable(void)
                 static const string_address parents[] = {
                     "/etc", "/etc/open", "/etc/sticky", "/", "/etc/file"};
                 positive failed = 0;
-                bool trusted[5];
+                p8 trusted[5];
                 bipolar made;
 
                 storage_test_namespace(0);
@@ -107973,7 +107973,7 @@ typedef struct
         p32 resolver;
 } storage_epoch_state;
 
-static bool storage_epoch_address(netlink_header address_to header,
+static p8 storage_epoch_address(netlink_header address_to header,
                                   address_any context)
 {
         storage_epoch_state address_to state = context;
@@ -107993,7 +107993,7 @@ static bool storage_epoch_address(netlink_header address_to header,
         return true;
 }
 
-static bool storage_epoch_route(netlink_header address_to header,
+static p8 storage_epoch_route(netlink_header address_to header,
                                 address_any context)
 {
         storage_epoch_state address_to state = context;
@@ -108015,7 +108015,7 @@ static bool storage_epoch_route(netlink_header address_to header,
         return true;
 }
 
-static bool storage_epoch_read(b32 handle, p32 index,
+static p8 storage_epoch_read(b32 handle, p32 index,
                                storage_epoch_state address_to state)
 {
         p8 text[128];
@@ -108046,7 +108046,7 @@ static bool storage_epoch_read(b32 handle, p32 index,
         return true;
 }
 
-static bool storage_epoch_same(const storage_epoch_state address_to a,
+static p8 storage_epoch_same(const storage_epoch_state address_to a,
                                const storage_epoch_state address_to b)
 {
         if (a->addresses != b->addresses || a->routes != b->routes ||
@@ -108054,7 +108054,7 @@ static bool storage_epoch_same(const storage_epoch_state address_to a,
                 return false;
         for (positive at = 0; at < a->addresses; at++)
         {
-                bool found = false;
+                p8 found = false;
 
                 for (positive other = 0; other < b->addresses; other++)
                         found |= a->address[at] == b->address[other] &&
@@ -108064,7 +108064,7 @@ static bool storage_epoch_same(const storage_epoch_state address_to a,
         }
         for (positive at = 0; at < a->routes; at++)
         {
-                bool found = false;
+                p8 found = false;
 
                 for (positive other = 0; other < b->routes; other++)
                         found |= a->router[at] == b->router[other];
@@ -108152,7 +108152,7 @@ static b32 storage_epoch_walk(const p8 address_to events, positive depth)
                         refused = net_holding_release((b32)handle, address_of held) ? 1 : 0;
                 else
                 {
-                        bool fault = event >= STORAGE_EPOCH_LEASES;
+                        p8 fault = event >= STORAGE_EPOCH_LEASES;
                         dhcp_lease lease = leases[event % STORAGE_EPOCH_LEASES];
 
                         //      A multicast router is one the kernel refuses
@@ -108757,7 +108757,7 @@ static fn storage_test_wget_304(string_address target)
                 //      network half runs in a confined child (net_apart),
                 //      which qemu-user cannot filter, so there wget refuses
                 //      to fetch at all and the server is never asked.
-                bool emulated = program_argument_count() > 1 &&
+                p8 emulated = program_argument_count() > 1 &&
                                 !string_compare(program_argument(1),
                                                 (string_address) "--emulated");
                 b32 said;
@@ -108797,7 +108797,7 @@ static fn storage_test_wget_304(string_address target)
 //      A stage as a writer of that pid would have left it: its name, and in
 //      it, for a directory, the file it was making.
 static fn storage_test_stage(p8 address_to into, p8 address_to root, positive pid,
-                             string_address tail, bool directory)
+                             string_address tail, p8 directory)
 {
         p8 object[FILE_PATH_MAX];
         p8 address_to at = string_copy_end(into, root);
@@ -108891,7 +108891,7 @@ static fn storage_test_net_files(void)
               got == 3 && !memory_compare(bytes, "old", 3));
 
         file_facts endpoint = {0};
-        bool endpoint_known = file_look(
+        p8 endpoint_known = file_look(
             AT_FDCWD, target, AT_SYMLINK_NOFOLLOW,
             address_of endpoint);
         check("direct endpoint fixture has complete facts",
@@ -109131,7 +109131,7 @@ static fn storage_test_net_files(void)
                              "1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1 1.1.1.1\n", 0, 0, 0},
                             {"", 0, 0, 0},
                         };
-                        bool held = true;
+                        p8 held = true;
                         p32 chosen[DNS_SERVERS_MAX];
 
                         for (positive at = 0; at < array_count(kept_case); at++)
@@ -109336,7 +109336,7 @@ b32 main(void)
 static fn format_layout_holds(p64 asked)
 {
         storage_ext4_plan plan;
-        bool made = storage_ext4_layout(address_of plan,
+        p8 made = storage_ext4_layout(address_of plan,
                                         asked * STORAGE_EXT4_BLOCK);
         p64 last;
         p64 used = 0;
@@ -109478,7 +109478,7 @@ static fn format_spans(void)
         512 MiB at 1 MiB, the data partition follows it and both begin on a
         MiB, and nothing goes past the GPT's last usable sector.
 */
-static bool place_holds(p64 bytes, b32 sector, storage_format_partition address_to parts)
+static p8 place_holds(p64 bytes, b32 sector, storage_format_partition address_to parts)
 {
         p64 align = ((p64)1 << 20) / (p64)sector;
         p64 first;
@@ -109582,7 +109582,7 @@ static fn install_census(void)
         //      past it (a UBSan build traps on the index; a plain one wrote over
         //      the stack beside it).
         p8 name[5 + HOST_NAME_ROOM + 1];
-        bool held = true;
+        p8 held = true;
 
         memory_zero(address_of census, sizeof(census));
         for (positive at = 0; at < 9; at++)
@@ -109656,8 +109656,8 @@ static bipolar install_line(string_address text, p8 address_to into,
 */
 static fn install_helpers(void)
 {
-        bool swapped_same = true;
-        bool names = true;
+        p8 swapped_same = true;
+        p8 names = true;
         p32 seed = 12345;
         p8 text[64];
         p8 next[32];
@@ -109884,7 +109884,7 @@ static fn settings_security(void)
                 p8 kind;
                 p16 id;
                 p16 length;
-                bool good;
+                p8 good;
         } shapes[] = {
             {SPARK_SETTINGS_BLOCK, SPARK_SETTINGS_BY_HAND, 32, true},
             {SPARK_SETTINGS_BLOCK, SPARK_SETTINGS_BY_HAND, 31, false},
@@ -109908,7 +109908,7 @@ static fn settings_security(void)
         p16 id = SPARK_SETTINGS_BY_HAND;
         host_setting setting;
         positive at = 0;
-        bool right = true;
+        p8 right = true;
 
         for (positive i = 0; i < array_count(shapes); i++)
         {
@@ -109966,7 +109966,7 @@ static fn settings_security(void)
                   spark_settings_check(slot) == 1);
 }
 
-static bool settings_same(host_settings address_to left, host_settings address_to right)
+static p8 settings_same(host_settings address_to left, host_settings address_to right)
 {
         return left->length == right->length &&
                !memory_compare(left, right, SPARK_SETTINGS_HEADER + left->length);
@@ -109981,8 +109981,8 @@ static fn settings_format(void)
         host_setting setting;
         positive at = 0;
         positive seen = 0;
-        bool order = true;
-        bool caught = true;
+        p8 order = true;
+        p8 caught = true;
         p16 id = 0;
 
         //      The same sums the core_state harness holds its reference CRC-32 to.
@@ -110073,7 +110073,7 @@ static fn settings_bounds(void)
 {
         host_settings address_to slot = address_of settings_block_slot;
         string_address failed;
-        bool refused = true;
+        p8 refused = true;
         p16 id = 0;
         host_setting setting;
 
@@ -110191,8 +110191,8 @@ static fn settings_bounds(void)
 
 static fn settings_torn(void)
 {
-        bool held = true;
-        bool bytes = true;
+        p8 held = true;
+        p8 bytes = true;
         positive target;
 
         settings_one(settings_pair, 5, 'o', 4000);
@@ -110218,7 +110218,7 @@ static fn settings_torn(void)
                 memory_copy_apart(settings_pair + target, address_of settings_block_next, landed);
                 newest = spark_settings_newest(settings_pair);
 
-                bool kept = newest == (b32)target
+                p8 kept = newest == (b32)target
                                 ? settings_same(settings_pair + target,
                                                 address_of settings_block_next)
                                 : newest == 0 &&
@@ -110388,7 +110388,7 @@ static p8 settings_image[0x10000];
 
 /* A PE image whose section table names one section at raw with size, in a
    settings_image; the settings slots are empty ones, the second only when asked. */
-static fn settings_build(string_address name, p32 raw, p32 size, bool second)
+static fn settings_build(string_address name, p32 raw, p32 size, p8 second)
 {
         p8 address_to image = settings_image;
         p8 address_to table = image + 0x80 + 24 + 0xf0;
@@ -110423,7 +110423,7 @@ static fn settings_sections(void)
                 string_address name;
                 p32 raw;
                 p32 size;
-                bool second;
+                p8 second;
                 p64 found;
         } cases[] = {
             {".mwset\0\0", 0x2000, 0x8000, true, 0x2000},
@@ -110432,7 +110432,7 @@ static fn settings_sections(void)
             {".mwset\0\0", 0x2000, 0x4000, true, 0},
             {".mwset\0\0", 0x2000, 0x8000, false, 0},
         };
-        bool held = true;
+        p8 held = true;
 
         for (positive at = 0; at < array_count(cases); at++)
         {
@@ -110477,8 +110477,8 @@ static fn image_builds(void)
         static const p8 want[] =
             "7.2.6moonwater-25 (root@box) #4 SMP PREEMPT Tue Sep 22 07:21:00 CEST 2026";
         p8 got[256];
-        bool held = true;
-        bool refused = true;
+        p8 held = true;
+        p8 refused = true;
 
 #if X64
         static const p8 version[] =
@@ -110592,8 +110592,8 @@ static fn settings_hostile(void)
             {0x80 + 24 + 0xf0 + 40 + 16, 4, 0, 0}, // a section with no size
             {0x80 + 24 + 0xf0 + 40 + 16, 4, 0xffffffff, 0x2000},
         };
-        bool held = true;
-        bool second = true;
+        p8 held = true;
+        p8 second = true;
 
         for (positive at = 0; at < array_count(cases); at++)
         {
@@ -110657,7 +110657,7 @@ static fn image_hostile(void)
             {0x202, 1, 'X'},    // not a setup header
             {0, 1, 'Z'},        // not MZ
         };
-        bool refused = true;
+        p8 refused = true;
         p8 got[256];
 
         for (positive at = 0; at < array_count(cases) + 2; at++)
@@ -110706,10 +110706,10 @@ static fn settings_codes(void)
         p8 path[64];
         bipolar handle = system_call_2(syscall(memfd_create),
                                        (positive)(string_address)"codes", 0);
-        bool held = handle >= 0;
+        p8 held = handle >= 0;
         b32 kinds[4] = {0, 0, 0, 0};
         bipolar stamps[4] = {0, 0, 0, 0};
-        bool whole = true;
+        p8 whole = true;
 
         if (handle < 0)
                 return;
@@ -111131,11 +111131,11 @@ static fn machine_policy(void)
 
         {
                 unsigned int event;
-                bool named_recover = false;
-                bool named_canvas_on = false;
-                bool named_canvas_off = false;
-                bool named_micmute = false;
-                bool named_resume = false;
+                p8 named_recover = false;
+                p8 named_canvas_on = false;
+                p8 named_canvas_off = false;
+                p8 named_micmute = false;
+                p8 named_resume = false;
 
                 for (event = 0; event < SPARK_BIND_EVENTS; event++)
                 {
@@ -111177,7 +111177,7 @@ static fn machine_policy(void)
 */
 static fn machine_stop_self(void)
 {
-        bool held = host_machine_self;
+        p8 held = host_machine_self;
 
         memory_zero(address_of host_machine, sizeof(host_machine));
         host_machine_ended = false;
@@ -111210,7 +111210,7 @@ static fn sntp_test_random_child(positive which)
         network_deadline deadline = {0};
         p32 sequence = 0;
         sntp_sample sample = {0};
-        bool ok;
+        p8 ok;
 
         memory_fill(field, 0xa5, sizeof field);
         if (random_filter(which, which) < 0)
@@ -111441,7 +111441,7 @@ static fn machine_ntp_no_child(void)
         locale_child child = {0, -1};
         p64 next = locale_ntp_next;
         positive retry = locale_ntp_retry;
-        bool on = locale_ntp_on;
+        p8 on = locale_ntp_on;
         p64 later = locale_auto_next;
         positive wait = locale_auto_wait;
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
@@ -111561,7 +111561,7 @@ static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
                                4294967296ull / SNTP_NANOSECONDS));
 }
 
-static COLD bool sntp_math_ok(void)
+static COLD p8 sntp_math_ok(void)
 {
         bipolar offset = 0;
         bipolar delay = 0;
@@ -111580,7 +111580,7 @@ static COLD bool sntp_math_ok(void)
                 b32 level;
                 b32 kind;
                 positive held;    /* what the buffer actually holds */
-                bool want;
+                p8 want;
         } control_case[] = {
             /* the message the kernel really sends */
             {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS,
@@ -111610,7 +111610,7 @@ static COLD bool sntp_math_ok(void)
                 p32 root_delay;
                 p32 root_dispersion;
                 p32 reference_id;
-                bool echoed;
+                p8 echoed;
                 bipolar want;
         } reply_case[] = {
             /* a stratum 2 server answering the question we asked */
@@ -111679,7 +111679,7 @@ static COLD bool sntp_math_ok(void)
                 bipolar off;
                 bipolar del;
                 bipolar most;
-                bool want;
+                p8 want;
         } sane_case[] = {
             {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
              SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
@@ -112145,14 +112145,14 @@ static COLD bool sntp_math_ok(void)
         instead: what goes in the request for a given offset, rather than
         what the kernel does with it.
 */
-static COLD bool locale_discipline_ok(void)
+static COLD p8 locale_discipline_ok(void)
 {
         positive words[LOGGER_TIMEX_WORDS];
         positive at;
         static const struct
         {
                 bipolar offset_ns;
-                bool step;
+                p8 step;
                 bipolar sec; /* what a step carries, floored */
                 bipolar nsec;
         } discipline_case[] = {
@@ -112344,7 +112344,7 @@ static fn machine_sntp(void)
         {
                 bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
                 positive raw = 0;
-                bool held;
+                p8 held;
 
                 check("SNTP entropy-policy child starts", child >= 0);
                 if (!child)
@@ -112426,11 +112426,11 @@ static fn machine_auto(void)
                         {"HTTP/1.1 200 OK\r\ntimezone: CET\r\n\r\n", "", ""},
                         {"HTTP/1.1 200 OK\r\n\r\n", "", ""},
                 };
-                bool all = true;
+                p8 all = true;
 
                 for (positive at = 0; at < array_count(heads); at++)
                 {
-                        bool took;
+                        p8 took;
 
                         memory_zero(address_of answer, sizeof(answer));
                         took = locale_auto_from_headers(
@@ -112499,7 +112499,7 @@ static fn machine_auto(void)
                         {1, "Europe/Stockholm", "auto cloudflare", HTTP_APART, "", ""},
                         {-1000, "", "", HTTP_APART, "", ""},
                 };
-                bool all = true;
+                p8 all = true;
 
                 for (positive at = 0; at < array_count(said); at++)
                 {
@@ -112563,11 +112563,11 @@ b32 main(void)
             "7 (worker) R", "7 (worker)R 1", "7 (worker)  1", "7 (worker) RR 1",
         };
         p8 address_to pages = memory(8192);
-        bool mapped = (bipolar)(positive)pages > 0;
+        p8 mapped = (bipolar)(positive)pages > 0;
         check("snapshot guard mapping", mapped);
         if (!mapped)
                 return test_report(null);
-        bool protected = system_call_3(syscall(mprotect),
+        p8 protected = system_call_3(syscall(mprotect),
             (positive)(pages + 4096), 4096, 0) == 0;
         check("snapshot sentinel guard page", protected);
         if (!protected)
@@ -112712,7 +112712,7 @@ static fn sensors_remove(string_address path)
 
 //      A named question about the rows, which says what they read when
 //      the answer is no.
-static fn sensors_expect(string_address name, bool right)
+static fn sensors_expect(string_address name, p8 right)
 {
         checks++;
         if (!right)
@@ -112737,7 +112737,7 @@ static fn sensors_rows(monitor_hardware address_to hardware)
 typedef struct
 {
         p8 text[40];
-        bool number;
+        p8 number;
         bipolar value;
 } sensors_value;
 
@@ -112808,7 +112808,7 @@ static fn model_item(p8 address_to row, string_address label)
 
 //      One sensor the monitor would find: counted against the room it has,
 //      and drawn when its value is one.
-static bool model_room(void)
+static p8 model_room(void)
 {
         return model_count++ < MONITOR_SENSORS;
 }
@@ -112857,7 +112857,7 @@ static fn sensors_file_name(p8 address_to into, string_address stem,
         string_copy_bounded(into + length, tail, 32);
 }
 
-static fn sensors_chip(string_address root, positive number, bool address_to have_cpu)
+static fn sensors_chip(string_address root, positive number, p8 address_to have_cpu)
 {
         static string_address names[] = {"k10temp", "coretemp", "amdgpu", "nvme",
                                          "drivetemp", "acpitz", "nct6775", "it87",
@@ -112886,7 +112886,7 @@ static fn sensors_chip(string_address root, positive number, bool address_to hav
 
         string_address label = null;
         positive index = 1;
-        bool cpu = false;
+        p8 cpu = false;
 
         if (string_equals(name, "k10temp") || string_equals(name, "zenpower") ||
             string_equals(name, "coretemp"))
@@ -112989,7 +112989,7 @@ static fn sensors_chip(string_address root, positive number, bool address_to hav
 static fn sensors_supplies(string_address root)
 {
         positive batteries = sensors_next(3);
-        bool mains = sensors_next(2);
+        p8 mains = sensors_next(2);
 
         //      power_supply is walked in name order: AC before BAT0.
         if (mains)
@@ -113013,7 +113013,7 @@ static fn sensors_supplies(string_address root)
         {
                 p8 directory[64];
                 p8 relative[128];
-                bool device = sensors_next(4) == 0;
+                p8 device = sensors_next(4) == 0;
                 sensors_value capacity;
 
                 sensors_file_name(directory, "class/power_supply/BAT", at, "");
@@ -113030,7 +113030,7 @@ static fn sensors_supplies(string_address root)
 
                 string_address status = sensors_next(2) ? "Discharging\n"
                                                         : "Not charging\n";
-                bool has_status = sensors_next(4) != 0;
+                p8 has_status = sensors_next(4) != 0;
 
                 if (has_status)
                 {
@@ -113099,7 +113099,7 @@ static fn sensors_grammar(void)
                 static monitor_hardware hardware;
                 static system_snapshot sample;
                 static struct snapshot_cpu cpus[9];
-                bool have_cpu = false;
+                p8 have_cpu = false;
 
                 sensors_file_name(root, (string_address)sensors_base, round, "");
                 sensors_mkdir_parents(root);
@@ -113185,7 +113185,7 @@ static fn sensors_grammar(void)
                                               round, sensors_out, want);
                 }
 
-                bool clocks_right = hardware.clocks == known &&
+                p8 clocks_right = hardware.clocks == known &&
                                     hardware.khz_average == (known ? sum / known : 0);
 
                 for (positive at = 0; at < processors; at++)
@@ -113339,7 +113339,7 @@ static fn sensors_moments(void)
         cannot carry an escape sequence to the terminal (one that rewrites the
         title or sets the clipboard).
 */
-static bool sensors_has(p8 address_to bytes, positive length, string_address text)
+static p8 sensors_has(p8 address_to bytes, positive length, string_address text)
 {
         positive wanted = string_length(text);
 
@@ -113981,7 +113981,7 @@ static float *tensor_region[5];
 //      Five regions of TENSOR_GUARD_FLOATS, each followed by a page that
 //      faults: the first three for a routine's arrays, the last two for the
 //      backward's other two.
-static bool tensor_guard(void)
+static p8 tensor_guard(void)
 {
         positive span = (TENSOR_GUARD_FLOATS * 4 + 4095) / 4096 * 4096;
 
@@ -113997,7 +113997,7 @@ static bool tensor_guard(void)
 }
 
 // Every call the first in a process, on riscv64's first tier.
-static bool tensor_first;
+static p8 tensor_first;
 
 static fn tensor_call_swiglu_forward(float *out, const float *gate, const float *up, unsigned long long n)
 {
@@ -114600,7 +114600,7 @@ static fn check_square(const font_face address_to face)
                         //      Edges in 1/8192 px, size * 8 of them to the unit.
                         p64 x0 = 64 * size * 8 + phase * 1024, x1 = 576 * size * 8 + phase * 1024;
                         p64 y0 = 100 * size * 8, y1 = 612 * size * 8;
-                        bool exact = !refused && box.left == (b32)(x0 >> 13) &&
+                        p8 exact = !refused && box.left == (b32)(x0 >> 13) &&
                                      box.top == (b32)((y1 + 8191) >> 13) && box.width < 256;
 
                         for (b32 r = 0; exact && r < box.height; r++)
@@ -114730,10 +114730,10 @@ static fn check_circle(const font_face address_to face, p32 glyph, const b32 add
 }
 
 //      Two glyphs of a face drawn alike at every phase and two sizes.
-static bool same_glyphs(const font_face address_to face, p32 one, p32 two)
+static p8 same_glyphs(const font_face address_to face, p32 one, p32 two)
 {
         static p8 first[1 << 16];
-        bool same = true;
+        p8 same = true;
 
         for (p32 size = 13; size <= 40; size += 27)
                 for (p32 phase = 0; phase < FONT_PHASES; phase++)
@@ -114849,7 +114849,7 @@ static fn check_long_run(const font_face address_to two)
         p8 text[4000];
         positive placed;
         b64 advance, steps = 0;
-        bool exact = true;
+        p8 exact = true;
 
         for (positive i = 0; i < sizeof(text); i++)
                 text[i] = 'M';
@@ -114911,7 +114911,7 @@ static p32 light_byte(p32 light)
         return low;
 }
 
-static p32 light_mix(p32 back, p32 fore, p32 a, bool linear, p32 weight)
+static p32 light_mix(p32 back, p32 fore, p32 a, p8 linear, p32 weight)
 {
         p32 mixed = 0;
 
@@ -114929,7 +114929,7 @@ static p32 light_mix(p32 back, p32 fore, p32 a, bool linear, p32 weight)
 
 static fn check_light()
 {
-        bool round = true, rising = true;
+        p8 round = true, rising = true;
 
         for (p32 s = 0; s < 256; s++)
         {
@@ -114946,13 +114946,13 @@ static fn check_light()
                 light_begins[s] = (p32)half + ((f64)(p32)half < half);
         }
         light_begins[0] = 0;
-        bool back = true;
+        p8 back = true;
         for (p32 light = 0; light < 65536; light++)
                 back = back && font_srgb(light) == light_byte(light);
         check("sRGB: all 65536 lights go back to the byte whose half step they have reached", back);
 
-        bool same = true;
-        static const struct { bool linear; p32 weight; } modes[] = {{true, 0}, {true, 21}, {true, 43}, {true, 63}, {true, 64}, {false, 0}};
+        p8 same = true;
+        static const struct { p8 linear; p32 weight; } modes[] = {{true, 0}, {true, 21}, {true, 43}, {true, 63}, {true, 64}, {false, 0}};
         for (p32 m = 0; m < 6; m++)
         {
                 engine.linear = modes[m].linear;
@@ -114972,7 +114972,7 @@ static fn check_light()
         engine.plain = 0;
         check("blend: every coverage level of a spread of grounds and inks is the formula over the definition", same);
 
-        bool ends = true;
+        p8 ends = true;
         for (p32 s = 0; s < 256; s += 17)
                 ends = ends && font_mix(&engine, s * 0x010101, 0x204060, 0) == s * 0x010101 &&
                        font_mix(&engine, s * 0x010101, 0x204060, 255) == 0x204060;
@@ -114997,7 +114997,7 @@ static fn check_light()
               (font_polarity(0, 0x202020, FONT_UNKNOWN) & FONT_DARKEN) && !(font_polarity(0, 0xe0e0e0, FONT_UNKNOWN) & FONT_DARKEN));
 
         p32 c = engine.contrast;
-        bool rises = true;
+        p8 rises = true;
         for (p32 px = 13; px < engine.darken_until; px++)
                 rises = rises && font_strength(&engine, px * 64, FONT_DARKEN) >= font_strength(&engine, (px - 1) * 64, FONT_DARKEN);
         check("strength: darkened, a quarter at 12 px and under, rising to all of it where darkening ends",
@@ -115029,7 +115029,7 @@ static fn draw_cell(p32 code, b32 width, b32 height, p8 address_to into)
         font_drawn(&engine, code, width, height, into, 128);
 }
 
-static bool edge_same(const p8 address_to a, const p8 address_to b, b32 width, b32 height, p32 side)
+static p8 edge_same(const p8 address_to a, const p8 address_to b, b32 width, b32 height, p32 side)
 {
         for (b32 i = 0; i < (side < 2 ? width : height); i++)
         {
@@ -115050,7 +115050,7 @@ static fn check_drawn()
         for (p32 s = 0; s < 4; s++)
         {
                 b32 width = sizes[s][0], height = sizes[s][1];
-                bool seams = true;
+                p8 seams = true;
 
                 for (p32 k = 0; k < 6; k++)
                         draw_cell(lines[k], width, height, plain[k]);
@@ -115077,7 +115077,7 @@ static fn check_drawn()
 
                 draw_cell(0x2571, width, height, drawn);
                 draw_cell(0x2572, width, height, plain[0]);
-                bool mirror = true;
+                p8 mirror = true;
                 for (b32 r = 0; r < height; r++)
                         for (b32 c = 0; c < width; c++)
                         {
@@ -115089,7 +115089,7 @@ static fn check_drawn()
                 //      Blocks: halves complementary, shades even, quadrants placed.
                 draw_cell(0x2580, width, height, drawn);
                 draw_cell(0x2584, width, height, plain[0]);
-                bool halves = true;
+                p8 halves = true;
                 for (b32 r = 0; r < height; r++)
                         for (b32 c = 0; c < width; c++)
                                 halves = halves && drawn[r * 128 + c] + plain[0][r * 128 + c] == 255;
@@ -115102,7 +115102,7 @@ static fn check_drawn()
                           drawn[width - 1] == 0 && drawn[(height - 1) * 128] == 0);
 
                 //      Braille: each dot's centre is lit exactly when its bit is set.
-                bool dots = true;
+                p8 dots = true;
                 for (p32 pattern = 0; pattern < 256; pattern += 37)
                 {
                         draw_cell(0x2800 + pattern, width, height, drawn);
@@ -115142,7 +115142,7 @@ static fn check_shapes(void)
                                        {0x25b6, 0x25b7}, {0x25b8, 0x25b9}, {0x25bc, 0x25bd}, {0x25be, 0x25bf},
                                        {0x25c0, 0x25c1}, {0x25c2, 0x25c3}, {0x25c6, 0x25c7}, {0x25cf, 0x25cb}};
         static const p32 alone[] = {0x25e6, 0x25ac, 0x25ca, 0x25c4, 0x25ba, 0x2717, 0x21b5};
-        bool lit = true, lighter = true, mirrors = true, edges = true;
+        p8 lit = true, lighter = true, mirrors = true, edges = true;
 
         for (p32 s = 0; s < 4; s++)
         {
@@ -115208,7 +115208,7 @@ static p32 canvas[96 * 96], canvas_again[96 * 96];
         the engine in 1024ths of a pixel: a face of 1024 units at 16 px, so a
         unit of the standard stem is 1/64 px, 1229 a stem of 1.2 px.
 */
-static fn snap_load(const b32 address_to xy, p32 count, bool turned)
+static fn snap_load(const b32 address_to xy, p32 count, p8 turned)
 {
         engine.point_count = count;
         engine.contour_count = 1;
@@ -115242,7 +115242,7 @@ static fn check_snap()
 
                 snap_load(stem, 4, turned);
                 font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
-                bool snapped = true;
+                p8 snapped = true;
                 for (p32 i = 0; i < 4; i++)
                         snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
                 memory_zero(bits, sizeof(bits));
@@ -115347,7 +115347,7 @@ static fn check_cells(font_engine address_to with, const font_face address_to tw
                 for (p32 i = 0; i < n; i++)
                         font_cell(with, chain, 1, codes[i], 1, &grid, 18 * 64, 0, &other, x + (b32)i * grid.cell_width,
                                   5, 0xdfe7ef, 0x303030);
-                bool same = !memory_compare(cells_one, cells_two, sizeof(cells_one));
+                p8 same = !memory_compare(cells_one, cells_two, sizeof(cells_one));
                 check("cells: a run draws what its cells draw one at a time", same);
         }
 }
@@ -115413,7 +115413,7 @@ static p8 bounds_cell[128 * 128];
 static fn check_drawn_bounds()
 {
         static const p32 ranges[][2] = {{0x2500, 0x25ff}, {0x2800, 0x28ff}, {0x21b5, 0x21b5}, {0x2717, 0x2717}, {0xad, 0xad}};
-        bool stays = true;
+        p8 stays = true;
 
         for (p32 r = 0; r < sizeof(ranges) / sizeof(ranges[0]) && stays; r++)
                 for (b32 width = 1; width <= 5 && stays; width++)
@@ -115589,7 +115589,7 @@ static b32 invariant_holes(b32 w, b32 h)
         return count;
 }
 
-static bool invariant_shape(const font_face address_to face, p32 glyph, p32 size, p32 phase, p32 style,
+static p8 invariant_shape(const font_face address_to face, p32 glyph, p32 size, p32 phase, p32 style,
                             font_bitmap address_to box)
 {
         if (font_shape(&invariant_engine, face, glyph, size, phase, style, box) < 0 || box->width <= 0 ||
@@ -115657,7 +115657,7 @@ static fn check_invariants(void)
                                                 }
                                         b32 hinted = invariant_holes(box.width, box.height);
                                         b32 x0 = (eighth >> 3) + box.left, y0 = grid.baseline - box.top;
-                                        bool out = x0 < 0 || y0 < 0 || x0 + box.width > grid.cell_width ||
+                                        p8 out = x0 < 0 || y0 < 0 || x0 + box.width > grid.cell_width ||
                                                    y0 + box.height > grid.cell_height;
 
                                         if (!invariant_shape(&face, glyph, size, (p32)eighth & 7, path ? 0 : 2, &plain))
@@ -115708,7 +115708,7 @@ static p8 dots_bitmap[256 * 256];
 static p8 dots_file[1 << 20];
 
 //      The glyph for code drawn into dots_bitmap; false when it is empty or too large to look at.
-static bool dots_draw(const font_face address_to face, p32 code, p32 size, p32 phase, p32 style, font_bitmap address_to box)
+static p8 dots_draw(const font_face address_to face, p32 code, p32 size, p32 phase, p32 style, font_bitmap address_to box)
 {
         if (font_shape(&dots_engine, face, font_glyph(face, code), size, phase, style, box) < 0 || box->width <= 0 ||
             box->height <= 0 || box->width * box->height > 256 * 256)
@@ -115723,7 +115723,7 @@ static b32 dots_band(const font_bitmap address_to box)
 {
         b32 band = 0;
 
-        for (bool any = true; band < box->height && any; band++)
+        for (p8 any = true; band < box->height && any; band++)
         {
                 any = false;
                 for (b32 c = 0; c < box->width; c++)
@@ -115760,7 +115760,7 @@ static fn dots_contour(p32 c, b64 address_to box)
 
 //      Whether the dot of the zero just shaped sits in its counter as the engine sets it: the smallest contour, whole
 //      pixels, a pixel or more of air across either side alike and up and down; or drawn as nothing.
-static bool dots_zero_dot(void)
+static p8 dots_zero_dot(void)
 {
         p32 dot = 0, counter = dots_engine.contour_count;
         b64 box[4], best = (b64)1 << 62, room[4];
@@ -115787,7 +115787,7 @@ static bool dots_zero_dot(void)
         dots_contour(counter, room);
         b64 left = (room[0] + FONT_ONE - 1) & ~(b64)(FONT_ONE - 1), right = room[2] & ~(b64)(FONT_ONE - 1);
         b64 bottom = (room[1] + FONT_ONE - 1) & ~(b64)(FONT_ONE - 1), top = room[3] & ~(b64)(FONT_ONE - 1);
-        bool whole = true;
+        p8 whole = true;
 
         for (p32 k = 0; k < 4; k++)
                 whole = whole && font_on_grid(box[k]);
@@ -115848,7 +115848,7 @@ static fn check_dots(void)
                                         }
 
                                         b32 runs = 0;
-                                        bool in = false;
+                                        p8 in = false;
                                         for (b32 c = 0; c < box.width; c++)
                                         {
                                                 p32 most = 0;
@@ -115943,7 +115943,7 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         check("draw: a known ground draws what an unknown one blends to",
               !memory_compare(canvas, canvas_again, sizeof(canvas)));
 
-        bool inside = true;
+        p8 inside = true;
         for (p32 i = 0; i < 96 * 96; i++)
                 inside = inside && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) || canvas[i] == 0xabcdef);
         check("draw: nothing outside the target", inside);
@@ -115956,7 +115956,7 @@ static fn check_drawing(const font_face address_to one, const font_face address_
                 ground(canvas);
                 font_draw(&engine, chain, 2, text, sizeof(text) - 1, 30 * 64, 0, &target, corners[k][0] * (1 << 16),
                           corners[k][1], 0xffffff, k & 1 ? FONT_UNKNOWN : 0x101820);
-                bool clipped = true;
+                p8 clipped = true;
                 for (p32 i = 0; i < 96 * 96; i++)
                         clipped = clipped && ((i / 96 >= 8 && i / 96 < 88 && i % 96 >= 8 && i % 96 < 88) ||
                                               canvas[i] == 0xabcdef);
@@ -115971,13 +115971,13 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         {
                 ground(canvas);
                 font_cell(&engine, chain + 1, 1, codes[k], 1, &grid, 16 * 64, 0, &target, 20, 30, 0xdfe7ef, 0x303030);
-                bool whole = true;
+                p8 whole = true;
                 for (b32 y = 0; y < 96; y++)
                         for (b32 x = 0; x < 96; x++)
                         {
-                                bool in = x >= 28 && x < 28 + grid.cell_width && y >= 38 && y < 38 + grid.cell_height;
+                                p8 in = x >= 28 && x < 28 + grid.cell_width && y >= 38 && y < 38 + grid.cell_height;
                                 p32 pixel = canvas[y * 96 + x];
-                                bool tone = false;
+                                p8 tone = false;
 
                                 for (p32 c = 0; c < 256 && in && !tone; c++)
                                         tone = pixel == tones[c];
@@ -115993,7 +115993,7 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         font_target wide = {strip, 1100, 1100, 4};
         memory_fill_u32(strip, sizeof(strip) / 4, 0xabcdef);
         font_cell(&engine, chain + 1, 1, ' ', 1000 / grid.cell_width, &grid, 16 * 64, 0, &wide, 7, -1, 0xdfe7ef, 0x303030);
-        bool blank = true;
+        p8 blank = true;
         for (b32 i = 0; i < 4 * 1100; i++)
         {
                 b32 x = i % 1100;
@@ -116043,7 +116043,7 @@ static fn check_translate_table(p32 kind)
         static p32 table[512];
         p8 address_to source = memory(4 * 4096);
         p32 address_to into = memory(4 * 4096);
-        bool guarded = source && into &&
+        p8 guarded = source && into &&
                        system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
         p64 state = 0x8f3a1c5e7b2d9046ull;
@@ -116075,7 +116075,7 @@ static fn check_translate_table(p32 kind)
                 cpu_has_avx512_vbmi = tier ? 0 : planes;
 #endif
                 static const positive wide[] = {127, 128, 129, 255, 256, 257, 300, 640};
-                bool fine = true;
+                p8 fine = true;
                 for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
                         for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 9u); height++)
                                 for (positive gap = 0; gap <= 37; gap += 37)
@@ -116095,7 +116095,7 @@ static fn check_translate_table(p32 kind)
                                         memory_translate_u32_rect(to, stride, from, stride, width, height, table);
                                         for (b64 i = -16; i < (b64)span; i++)
                                         {
-                                                bool inside = i >= 0 && (positive)i % stride < width;
+                                                p8 inside = i >= 0 && (positive)i % stride < width;
                                                 fine = fine && to[i] == (inside ? table[from[i]] : 0xdeadbeef);
                                         }
                                 }
@@ -116121,11 +116121,11 @@ static fn check_translate_planes()
         static p32 table[512];
         p8 address_to source = memory(8 * 4096);
         p32 address_to into = memory(4 * 4096);
-        bool guarded = source && into &&
+        p8 guarded = source && into &&
                        system_call_3(syscall(mprotect), (positive)(source + 7 * 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
         p64 state = 0x51ce0f7a3d2b9c41ull;
-        bool fine = true;
+        p8 fine = true;
 
         check("translate planes: guard pages", guarded);
         if (!guarded)
@@ -116181,7 +116181,7 @@ static fn check_translate_planes()
                                                 memory_translate_planes_u32_rect(to, stride, from, from_stride, width, height, table);
                                                 for (b64 i = -16; i < (b64)words; i++)
                                                 {
-                                                        bool inside = i >= 0 && (positive)i % stride < width;
+                                                        p8 inside = i >= 0 && (positive)i % stride < width;
                                                         p32 want = 0xdeadbeef;
 
                                                         if (inside)
@@ -116241,7 +116241,7 @@ static fn check_blend_baseline(void)
         static p32 table[513], want[64 * 16], into[64 * 16], seed[64 * 16];
         static p8 from[64 * 16];
         p64 state = 0x9e3779b97f4a7c15ull;
-        bool fine = true;
+        p8 fine = true;
 
         for (p32 i = 0; i < 256; i++)
         {
@@ -116280,7 +116280,7 @@ static fn check_blend()
         p8 address_to source = memory(4 * 4096);
         p32 address_to into = memory(4 * 4096);
         p64 state = 0x2b7e151628aed2a6ull;
-        bool guarded = source && into &&
+        p8 guarded = source && into &&
                        system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
 
@@ -116310,7 +116310,7 @@ static fn check_blend()
         {
                 cpu_has_avx512_vbmi = tier ? 0 : planes;
 #endif
-                bool fine = true;
+                p8 fine = true;
                 for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
                         for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
                                 for (positive shape = 0; shape < 6; shape++)
@@ -116362,10 +116362,10 @@ static fn check_text_mix(font_engine address_to e)
         p8 address_to source = memory(4 * 4096);
         p32 address_to into = memory(4 * 4096);
         p64 state = 0x243f6a8885a308d3ull;
-        bool guarded = source && into &&
+        p8 guarded = source && into &&
                        system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
-        bool linear = e->linear;
+        p8 linear = e->linear;
         b32 plain = e->plain;
 
         check("mix: guard pages", guarded);
@@ -116378,7 +116378,7 @@ static fn check_text_mix(font_engine address_to e)
         }
         ramp[0] = 0, ramp[1] = 255, ramp[2] = 1, ramp[3] = 254, ramp[255] = 128;
         e->linear = true;
-        bool fine = true;
+        p8 fine = true;
         for (p32 weight = 0; weight <= 64; weight++)
         {
                 for (positive w = 0; w <= 40 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
@@ -116435,7 +116435,7 @@ static fn check_average_ahead()
         static p8 want[3 * 4096];
         p8 address_to base = memory(4 * 4096);
         p64 state = 0x6a09e667f3bcc908ull;
-        bool guarded = base && system_call_3(syscall(mprotect), (positive)(base + 3 * 4096), 4096, 0) == 0;
+        p8 guarded = base && system_call_3(syscall(mprotect), (positive)(base + 3 * 4096), 4096, 0) == 0;
 
         check("average: a guard page", guarded);
         if (!guarded)
@@ -116458,7 +116458,7 @@ static fn check_average_ahead()
                 cpu_has_avx512 = tier == 0 ? wide512 : 0;
                 cpu_has_avx2 = tier == 2 ? 0 : wide256;
 #endif
-                bool fine = true;
+                p8 fine = true;
                 for (positive d = 0; d < sizeof(distances) / sizeof(distances[0]); d++)
                         for (positive n = 0; n < 301 + sizeof(longs) / sizeof(longs[0]); n++)
                         {
@@ -116582,7 +116582,7 @@ static fn check_glass_routines()
         p32 address_to base = (p32 address_to)memory(16 * 4096);
         p32 address_to target = base + 10240;
         p64 state = 0x452821e638d01377ull;
-        bool guarded = base && system_call_3(syscall(mprotect), (positive)(base + 4096), 4096, 0) == 0 &&
+        p8 guarded = base && system_call_3(syscall(mprotect), (positive)(base + 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)(base + 12288), 4096, 0) == 0;
 
         check("glass routines: a guard page", guarded);
@@ -116614,7 +116614,7 @@ static fn check_glass_routines()
         {
                 cpu_has_avx2 = tier ? 0 : wide256;
 #endif
-                bool halved = true, doubled = true, laid = true, in_place = true;
+                p8 halved = true, doubled = true, laid = true, in_place = true;
 
                 for (positive width = 0; width <= 40; width++)
                         for (positive height = 0; height <= 5; height++)
@@ -116696,7 +116696,7 @@ static fn check_glass_routines()
                 // reference: the rows, and the words around them, which the reference's bounds hold still.
                 {
                         static p32 swept_from[2800], swept_copy[2800], swept_into[1000], swept_want[1000];
-                        bool wide = true;
+                        p8 wide = true;
 
                         for (positive width = 0; width <= 300; width++)
                                 for (positive at = 0; at < 64; at++)
@@ -116731,7 +116731,7 @@ static fn check_glass_routines()
                 // bits), against glass_over_reference: the same picture and ground the sweep above makes.
                 {
                         static p32 glass_picture[400], glass_ground[400], glass_into[400], glass_made[400];
-                        bool glassy = true;
+                        p8 glassy = true;
 
                         for (positive count = 0; count <= 300; count++)
                                 for (positive at = 0; at < 64; at++)
@@ -116779,7 +116779,7 @@ static fn check_glass_tiers(void)
 {
         static p32 field[4][8192], want[8192], grain[128];
         p64 state = 0x2d358dccaa6c78a5ull;
-        bool halved = true, doubled = true, laid = true;
+        p8 halved = true, doubled = true, laid = true;
 
         for (positive i = 0; i < 128; i++)
         {
@@ -116920,7 +116920,7 @@ static fn check_saturate(void)
         static p32 source[1 << 16], made[1 << 16], want[1 << 16];
         static p32 small[512], small_made[512];
         p64 state = 0x6a09e667f3bcc909ull;
-        bool same = true, untouched = true, whole = true;
+        p8 same = true, untouched = true, whole = true;
 
 #if X64
         p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
@@ -117004,7 +117004,7 @@ static fn check_sum_swap(void)
         static p32 old[300 + 32], made[300 + 32], now[300 + 32];
         unsigned long long sums[3], want[3];
         p64 state = 0x2545f4914f6cdd1dull;
-        bool same = true, untouched = true, big = true;
+        p8 same = true, untouched = true, big = true;
 #if RISCV64
         /* the vector body and the scalar one, each run: the first call asks the machine for V, as the body does */
         p8 vector_asked;
@@ -117080,7 +117080,7 @@ static fn check_invert(void)
 {
         static p32 source[300 + 32], made[300 + 32], shared[300 + 32], big_source[1 << 16], big_made[1 << 16];
         p64 state = 0x6a09e667f3bcc908ull;
-        bool same = true, untouched = true, inplace = true, big = true;
+        p8 same = true, untouched = true, inplace = true, big = true;
 #if RISCV64
         /* the vector body and the scalar one, each run: the first call asks the machine for V, as the body does */
         p8 vector_asked;
@@ -117187,7 +117187,7 @@ static fn check_tint(void)
         static p32 small[512], small_made[512];
         static const p32 amounts[4] = {96, 0, 255, 37}, caps[5] = {0x5c, 255, 0, 1, 200}, floors[4] = {0xb4, 0, 255, 77};
         p64 state = 0x3c6ef372fe94f82bull;
-        bool same = true, untouched = true, whole = true;
+        p8 same = true, untouched = true, whole = true;
 
 #if X64
         p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
@@ -117277,7 +117277,7 @@ static fn check_mix(void)
         static p32 ink[512], made[512], want[512], row[256], ground[256];
         static p8 cover[512], cover_row[256];
         p64 state = 0x2545f4914f6cdd1dull;
-        bool same = true, untouched = true, whole = true;
+        p8 same = true, untouched = true, whole = true;
 
 #if RISCV64
         p8 vector = cpu_has_vector;
@@ -117357,7 +117357,7 @@ static fn check_fill_rect()
 {
         static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
         p32 address_to into = memory(4 * 4096);
-        bool guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+        p8 guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
 
         check("fill: a guard page", guarded);
         if (!guarded)
@@ -117375,7 +117375,7 @@ static fn check_fill_rect()
         {
                 cpu_has_avx512 = tier ? 0 : wide_on;
 #endif
-                bool fine = true;
+                p8 fine = true;
                 for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
                         for (positive width = w <= 80 ? w : wide[w - 81], height = 0; height <= (width > 80 ? 3u : 6u); height++)
                                 for (positive gap = 0; gap <= 37; gap += 37)
@@ -117411,7 +117411,7 @@ static fn check_copy_rect()
         static const positive gaps[3][2] = {{0, 0}, {1, 37}, {37, 1}};
         p32 address_to from_pool = memory(4 * 4096);
         p32 address_to to_pool = memory(4 * 4096);
-        bool guarded = from_pool && to_pool && system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 3 * 4096), 4096, 0) == 0
+        p8 guarded = from_pool && to_pool && system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 3 * 4096), 4096, 0) == 0
                        && system_call_3(syscall(mprotect), (positive)((p8 address_to)to_pool + 3 * 4096), 4096, 0) == 0;
 
         check("copy rect: a guard page at the end of each", guarded);
@@ -117423,7 +117423,7 @@ static fn check_copy_rect()
         {
                 cpu_has_avx512 = tier ? 0 : wide_on;
 #endif
-                bool fine = true, kept = true;
+                p8 fine = true, kept = true;
                 p32 address_to from_end = from_pool + 3 * 4096 / 4;
                 p32 address_to to_end = to_pool + 3 * 4096 / 4;
 
@@ -117453,7 +117453,7 @@ static fn check_copy_rect()
                                                 for (b64 i = 0; i < (b64)(48 + span_d); i++)
                                                 {
                                                         b64 j = i - (16 + (b64)da);
-                                                        bool inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
+                                                        p8 inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
 
                                                         fine = fine && (inside || twin[i] == 0xdeadbeef);
                                                 }
@@ -117501,7 +117501,7 @@ static fn check_copy_rect_stream()
         static const positive gaps[3][2] = {{0, 0}, {1, 37}, {37, 1}};
         p32 address_to from_pool = memory(4 * 4096);
         p32 address_to to_pool = memory(4 * 4096);
-        bool guarded = from_pool && to_pool && system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 3 * 4096), 4096, 0) == 0 &&
+        p8 guarded = from_pool && to_pool && system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 3 * 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)to_pool + 3 * 4096), 4096, 0) == 0;
 
         check("copy rect stream: a guard page at the end of each", guarded);
@@ -117513,7 +117513,7 @@ static fn check_copy_rect_stream()
         {
                 cpu_has_avx2 = tier ? 0 : wide_on;
 #endif
-                bool fine = true, kept = true;
+                p8 fine = true, kept = true;
                 p32 address_to from_end = from_pool + 3 * 4096 / 4;
                 p32 address_to to_end = to_pool + 3 * 4096 / 4;
 
@@ -117542,7 +117542,7 @@ static fn check_copy_rect_stream()
                                                         for (b64 i = 0; i < (b64)(48 + span_d); i++)
                                                         {
                                                                 b64 j = i - (16 + (b64)da);
-                                                                bool inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
+                                                                p8 inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
 
                                                                 fine = fine && (inside || twin[i] == 0xdeadbeef);
                                                         }
@@ -117575,12 +117575,12 @@ static void runs_reference(p8 address_to rows, const p32 address_to from, positi
                 p8 address_to row = rows + y * 128;
                 const p32 address_to line = from + y * from_stride;
                 positive count = 0, start = 0;
-                bool open = false;
+                p8 open = false;
                 p32 colour = 0;
 
                 for (positive c = 0; c <= chunks; c++)
                 {
-                        bool flat = false;
+                        p8 flat = false;
 
                         if (c < chunks)
                         {
@@ -117617,7 +117617,7 @@ static fn check_runs()
         p32 address_to from_pool = memory(80 * 4096);
         p8 address_to out_pool = memory(4096);
         p8 address_to want_pool = memory(4096);
-        bool guarded = from_pool && out_pool && want_pool &&
+        p8 guarded = from_pool && out_pool && want_pool &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 79 * 4096), 4096, 0) == 0;
         p64 seed = 0x9e3779b97f4a7c15ull;
 
@@ -117630,7 +117630,7 @@ static fn check_runs()
         {
                 cpu_has_avx512 = tier ? 0 : wide_on;
 #endif
-                bool fine = true, kept = true;
+                p8 fine = true, kept = true;
                 p32 address_to stop = from_pool + 79 * 4096 / 4;
 
                 // Widths to 300 words, and three that hold more runs than a row keeps and one past the 4095th chunk.
@@ -117651,7 +117651,7 @@ static fn check_runs()
                                                 while (x < w)
                                                 {
                                                         positive length;
-                                                        bool solid;
+                                                        p8 solid;
                                                         p32 colour;
 
                                                         XORSHIFT64(seed);
@@ -117741,7 +117741,7 @@ static fn check_resample_rect()
         static const positive heights[] = {1, 2, 3, 4, 7, 8, 9, 16, 17, 31, 33, 64, 65, 127, 129, 255, 300};
         static const positive offsets[] = {0, 1, 8, 15};
         static unsigned int picture[1 << 19], into_asm[1 << 17], into_ref[1 << 17];
-        bool fine = true;
+        p8 fine = true;
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
 #endif
@@ -117816,7 +117816,7 @@ static fn check_copy_changed()
 {
         static const positive wide[] = {127, 128, 129, 255, 256, 257, 300, 1000};
         p32 address_to pages = memory(4 * 4096 * 3);
-        bool guarded = pages != null;
+        p8 guarded = pages != null;
 
         for (positive at = 0; guarded && at < 3; at++)
                 guarded = system_call_3(syscall(mprotect), (positive)((p8 address_to)pages + (at * 4 + 3) * 4096), 4096, 0) == 0;
@@ -117837,7 +117837,7 @@ static fn check_copy_changed()
         {
                 cpu_has_vector = tier ? 1 : vector;
 #endif
-                bool answers = true, mirrored = true, into_right = true, outside = true, same = true;
+                p8 answers = true, mirrored = true, into_right = true, outside = true, same = true;
 
                 for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
                 {
@@ -117865,7 +117865,7 @@ static fn check_copy_changed()
                                                 from[i] ^= 0x00010000u;
                                 for (positive chunk = 0; chunk < count; chunk += 16)
                                 {
-                                        bool differs = false;
+                                        p8 differs = false;
 
                                         for (positive i = chunk; i < count && i < chunk + 16; i++)
                                                 differs = differs || from[i] != mirror[i];
@@ -117884,7 +117884,7 @@ static fn check_copy_changed()
                                 for (positive i = 0; i < count; i++)
                                 {
                                         positive chunk = i / 16 * 16;
-                                        bool differed = false;
+                                        p8 differed = false;
 
                                         for (positive j = chunk; j < count && j < chunk + 16; j++)
                                                 differed = differed || kept[j] != from[j];
@@ -117911,7 +117911,7 @@ static fn check_copy_changed()
                                         mirror[i] = 3, from[i] = i % 37 ? 3 : 4;
                                 for (positive chunk = 0; chunk < count; chunk += 16)
                                 {
-                                        bool differs = false;
+                                        p8 differs = false;
 
                                         for (positive i = chunk; i < count && i < chunk + 16; i++)
                                                 differs = differs || i % 37 == 0;
@@ -117950,7 +117950,7 @@ static fn check_first_differs(void)
 {
         static const unsigned int values[] = {0xffffffu, 0u, 0x80000000u, 0x00ff00ffu};
         unsigned int address_to pages = (unsigned int address_to)memory(2 * 4096);
-        bool guarded = pages != null;
+        p8 guarded = pages != null;
 
         if (guarded)
                 guarded = system_call_3(syscall(mprotect), (positive)((p8 address_to)pages + 4096), 4096, 0) == 0;
@@ -117973,7 +117973,7 @@ static fn check_first_differs(void)
         for (positive tier = 0; tier < 1; tier++)
         {
 #endif
-                bool answers = true;
+                p8 answers = true;
                 unsigned int address_to ends = pages + 1024;
 
                 for (positive count = 0; count <= 200; count++)
@@ -118045,7 +118045,7 @@ static fn check_over_tone()
 {
         static const positive counts[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 1000};
         p32 address_to into = memory(4 * 4096);
-        bool guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+        p8 guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
 
         check("over tone: a guard page", guarded);
         if (!guarded)
@@ -118057,7 +118057,7 @@ static fn check_over_tone()
                 cpu_has_avx512 = tier == 2 ? wide_on : 0;
                 cpu_has_avx2 = tier >= 1 ? narrow_on : 0;
 #endif
-                bool fine = true;
+                p8 fine = true;
                 for (p32 alpha = 0; alpha < 256; alpha++)
                         for (p32 trial = 0; trial < 6; trial++)
                                 for (positive k = 0; k < sizeof counts / sizeof counts[0]; k++)
@@ -118125,7 +118125,7 @@ static fn check_sweep()
         static p32 want_cells[1100];
         static p8 want_bytes[1100];
         p64 state = 0x5d1c3a9e7f20b468ull;
-        bool guarded = bytes && cells &&
+        p8 guarded = bytes && cells &&
                        system_call_3(syscall(mprotect), (positive)(bytes + 4096), 4096, 0) == 0 &&
                        system_call_3(syscall(mprotect), (positive)((p8 address_to)cells + 4096), 4096, 0) == 0;
 
@@ -118147,7 +118147,7 @@ static fn check_sweep()
                 cpu_has_avx512 = tier ? 0 : wide;
                 cpu_has_avx2 = tier == 2 ? 0 : two;
 #endif
-                bool fine = true;
+                p8 fine = true;
                 for (positive k = 0; k <= 80 + sizeof(long_runs) / sizeof(long_runs[0]) - 1; k++)
                         for (p32 shape = 0; shape < 4; shape++)
                         {
@@ -118216,7 +118216,7 @@ static const string_address line_texts[] = {
 static const p32 line_sizes[] = {11 * 64, 13 * 64, 1056, 24 * 64};
 static const p32 line_inks[][2] = {{0x101010, 0xf0f0f0}, {0xe4e4e4, 0x2f2f33}, {0x3366ff, 0xffee88}, {0xffffff, FONT_UNKNOWN}};
 
-static bool line_load(void)
+static p8 line_load(void)
 {
         bipolar inter = file_slurp_regular_at(AT_FDCWD, "fonts/inter/Inter-Regular.ttf", line_inter, sizeof(line_inter), 0);
         bipolar plex = file_slurp_regular_at(AT_FDCWD, "fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf", line_plex,
@@ -118299,7 +118299,7 @@ static fn check_upright(void)
 static p32 turn_upright[LINE_W * LINE_H], turn_turned[LINE_W * LINE_H], turn_want[LINE_W * LINE_H];
 
 //      The picture width by height turned onto into (height by width): clockwise, or anticlockwise for left.
-static fn turn_picture(const p32 address_to from, b32 width, b32 height, p32 address_to into, bool left)
+static fn turn_picture(const p32 address_to from, b32 width, b32 height, p32 address_to into, p8 left)
 {
         for (b32 y = 0; y < width; y++)
                 for (b32 x = 0; x < height; x++)
@@ -118307,13 +118307,13 @@ static fn turn_picture(const p32 address_to from, b32 width, b32 height, p32 add
 }
 
 //      One run both ways on width by height; answers whether both turns are the upright run turned.
-static bool turn_run(font_engine address_to e, const font_face address_to const address_to faces, p32 count,
+static p8 turn_run(font_engine address_to e, const font_face address_to const address_to faces, p32 count,
                      string_address text, p32 size, b32 x, b32 baseline, p32 colour, p32 background, b32 width,
                      b32 height, p32 address_to upright, p32 address_to turned, p32 address_to want)
 {
         font_target flat = {upright, (positive)width, width, height}, stood = {turned, (positive)height, height, width};
         positive length = string_length(text);
-        bool same = true;
+        p8 same = true;
 
         line_ground(upright, width, height, background);
         b64 advance = font_draw(e, faces, count, (const p8 address_to)text, length, size, 0, &flat, x, baseline, colour,
@@ -118692,7 +118692,7 @@ static fn check_edges(font_face address_to one, font_face address_to two)
         //      Issued ids were once reused after 65536 loads, which put the
         //      first face's id on a live face.
         font_face next;
-        bool refused = false, shared = false;
+        p8 refused = false, shared = false;
 
         font_start(&reissue_engine, reissue_atlas, 512, 512);
         edge_draw(&reissue_engine, chain, code, 20 * 64, 0);
@@ -118744,7 +118744,7 @@ static fn check_strip(void)
 {
         static p8 source[41 * 80 + 16], asm_into[41 * 96 + 16], c_into[41 * 96 + 16];
         p64 state = 0x2c7d9e11b5a38f04ull;
-        bool same = true;
+        p8 same = true;
 
         for (p32 trial = 0; trial < 4000; trial++)
         {
@@ -119544,7 +119544,7 @@ static p32 sample_dec(string_address text, positive address_to at)
 }
 
 //      A row of levels, "x" for one the algorithm removes, or of indices, up to the next semicolon or the end.
-static p32 sample_list(string_address text, positive address_to at, p32 address_to out, bool gone)
+static p32 sample_list(string_address text, positive address_to at, p32 address_to out, p8 gone)
 {
         p32 n = 0;
 
@@ -119561,11 +119561,11 @@ static p32 sample_list(string_address text, positive address_to at, p32 address_
 }
 
 //      Whether the levels and order the algorithm gives w's n characters are the ones wanted.
-static bool bidi_agrees(font_work address_to w, p32 n, const p32 address_to levels, p32 nlevels, const p32 address_to order,
+static p8 bidi_agrees(font_work address_to w, p32 n, const p32 address_to levels, p32 nlevels, const p32 address_to order,
                         p32 norder)
 {
         static p16 got[FONT_PARA];
-        bool same = n == nlevels;
+        p8 same = n == nlevels;
 
         for (p32 i = 0; i < n && same; i++)
                 same = w->level[i] == levels[i];
@@ -121549,7 +121549,7 @@ static p32 shape_pixels[1280 * 96];
 #define SHAPE_SIZE (32 * 64)
 #define LINE_SIZE (20 * 64)
 
-static bool shape_load(void)
+static p8 shape_load(void)
 {
         static const string_address arabic[2] = {"fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf",
                                                  "fonts/noto-sans-arabic/NotoSansArabic-Bold.ttf"};
@@ -121557,7 +121557,7 @@ static bool shape_load(void)
                                                  "fonts/noto-sans-hebrew/NotoSansHebrew-Bold.ttf"};
         bipolar n = file_slurp_regular_at(AT_FDCWD, "fonts/inter/Inter-Regular.ttf", shape_inter_bytes,
                                           sizeof(shape_inter_bytes), 0);
-        bool ok = n > 0 && font_load(&shape_inter, shape_inter_bytes, (positive)n, 0) == 0;
+        p8 ok = n > 0 && font_load(&shape_inter, shape_inter_bytes, (positive)n, 0) == 0;
 
         for (p32 i = 0; i < 2; i++)
         {
@@ -121606,7 +121606,7 @@ static fn check_shaping(void)
                 positive length = shape_utf8(shape_codes + def[1], def[2], text, sizeof(text));
                 positive n = font_layout(&engine, chain, 1, text, length, SHAPE_SIZE, FONT_RTL, shape_places, 64);
                 b64 pen = 0;
-                bool same = n == def[4];
+                p8 same = n == def[4];
                 positive at = 0;
 
                 for (positive k = 0; k < n && same; k++)
@@ -121640,7 +121640,7 @@ static fn check_shaping(void)
 }
 
 //      Whether none of the code points is right to left, an Arabic number or a directional control, by the class table.
-static bool shape_plain(const p32 address_to codes, positive n)
+static p8 shape_plain(const p32 address_to codes, positive n)
 {
         for (positive k = 0; k < n; k++)
         {
@@ -121654,7 +121654,7 @@ static bool shape_plain(const p32 address_to codes, positive n)
 
 //      The expected places of a mixed case, laid by walking its runs: Latin runs by the engine's own glyph, advance and
 //      kerning calls, shaped runs by HarfBuzz's numbers.
-static bool mixed_agrees(positive c, const font_place address_to places, positive n, b64 address_to total)
+static p8 mixed_agrees(positive c, const font_place address_to places, positive n, b64 address_to total)
 {
         const p32 address_to def = mixed_case[c];
         positive at = def[3] + 1;
@@ -121787,7 +121787,7 @@ static fn check_segments(void)
         segment_cuts(13, at, 13, cuts);
         n = font_segments(&engine, chain, 1, latin, 13, LINE_SIZE, 0, cuts, 13, left, right, level);
         positive count = font_layout(&engine, chain, 1, latin, 13, LINE_SIZE, 0, shape_places, 64);
-        bool same = n == 13 && count == 13;
+        p8 same = n == 13 && count == 13;
 
         for (positive k = 0; k < 13 && same; k++)
                 same = left[k] == (b32)shape_places[k].x && right[k] == (b32)(shape_places[k].x + shape_places[k].advance) &&
@@ -121829,7 +121829,7 @@ static fn check_segments(void)
         same = n == 13;
         for (positive k = 0; k < 13 && same; k++)
                 same = level[k] == expect[k] && left[k] <= right[k] && right[k] <= (b32)extent + 1;
-        bool order = same;
+        p8 order = same;
 
         //      Reading order: the Arabic letters go right to left inside their run, the Latin around it left to right.
         for (positive k = 1; k < 4 && order; k++)
@@ -121977,7 +121977,7 @@ static fn check_render(void)
         static const p8 word[] = "\xd8\xa7\xd9\x84\xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a\xd8\xa9";
         const font_face address_to arabic[1] = {&shape_arabic[0]};
         positive count = font_layout(&engine, arabic, 1, word, sizeof(word) - 1, LINE_SIZE, FONT_RTL, shape_places, 64);
-        bool run = count > 6;
+        p8 run = count > 6;
 
         for (positive k = 1; k < count && run; k++)
                 run = shape_places[k].cluster <= shape_places[k - 1].cluster;
@@ -122036,7 +122036,7 @@ static fn check_simple(void)
                         length++;
                 positive a = font_layout(&engine, two, 2, (const p8 address_to)lines[k], length, LINE_SIZE, 0, plain, 128);
                 positive b = font_layout_flow(&engine, two, 2, (const p8 address_to)lines[k], length, LINE_SIZE, 0, full, 128);
-                bool same = a == b && font_is_simple((const p8 address_to)lines[k], length);
+                p8 same = a == b && font_is_simple((const p8 address_to)lines[k], length);
 
                 for (positive j = 0; j < a && same; j++)
                         same = plain[j].glyph == full[j].glyph && plain[j].face == full[j].face && plain[j].x == full[j].x &&
@@ -122073,7 +122073,7 @@ static fn check_fallback(void)
                 const p32 address_to def = shape_case[c];
                 const font_face address_to bold = shape_face(def[0]);
 
-                bool alone = true;
+                p8 alone = true;
 
                 if (def[0] != 1 && def[0] != 3)
                         continue;
@@ -122087,7 +122087,7 @@ static fn check_fallback(void)
                 positive length = shape_utf8(shape_codes + def[1], def[2], text, sizeof(text));
                 positive n = font_layout(&engine, chain, 1, text, length, SHAPE_SIZE, FONT_RTL | FONT_BOLD, shape_places, 64);
                 b64 pen = 0;
-                bool same = n == def[4];
+                p8 same = n == def[4];
 
                 for (positive k = 0; k < n && same; k++)
                 {
@@ -138338,7 +138338,7 @@ static fn check_registry(void)
         {
                 const struct settings_row address_to row = null;
                 positive menu = 0, named = 0, aliases = 0;
-                bool menu_in_help = true, others_twinned = true;
+                p8 menu_in_help = true, others_twinned = true;
                 string_address spelt[] = {(string_address) "gb", (string_address) "sv", (string_address) "nb"};
                 string_address twin[] = {(string_address) "uk", (string_address) "se", (string_address) "no"};
 
@@ -138362,7 +138362,7 @@ static fn check_registry(void)
                         string_copy_bounded(one, (string_address)word, size < sizeof(one) ? size + 1 : sizeof(one));
                         if (setting_place(row->choices, (string_address)one) < 0)
                         {
-                                bool twinned = false;
+                                p8 twinned = false;
 
                                 aliases++;
                                 for (positive at = 0; at < 3; at++)
@@ -141647,10 +141647,10 @@ static fn check_display_section(void)
                         windows_display_line(word, length, &line);
                         check("display section: each scale preset reads as a screen's scale, and the verb's word judges the same value",
                               line.bad == 0 && line.scale == percent[each] &&
-                                  windows_display_value(WINDOWS_DISPLAY_SCALE, presets[each], (unsigned int)strlen(presets[each]), &value) &&
+                                  windows_display_value(WINDOWS_DISPLAY_SCALE, presets[each], (unsigned int)string_length((const_string)presets[each]), &value) &&
                                   value == (int)percent[each]);
                 }
-                windows_display_line("Virtual-2 scale=60", (unsigned int)strlen("Virtual-2 scale=60"), &line);
+                windows_display_line("Virtual-2 scale=60", (unsigned int)string_length((const_string)"Virtual-2 scale=60"), &line);
                 check("display section: a scale that is no preset is bad, is kept at 100, and the verb refuses it",
                       line.scale == 100 && line.bad == WINDOWS_DISPLAY_SCALE && !windows_display_value(WINDOWS_DISPLAY_SCALE, "60", 2, &value));
                 check("display section: the verb takes no percent sign and no decimal point as a scale",
@@ -141661,11 +141661,11 @@ static fn check_display_section(void)
                           scaled[3].bad == WINDOWS_DISPLAY_SCALE);
                 written = windows_displays_write(text, sizeof(text), scaled, count);
                 check("display section: a write puts scale= after refresh, and writes no line for a screen at 100 with nothing else",
-                      written && !strcmp(text, "HDMI-A-1 rotation=0 refresh=preferred scale=75\nVirtual-2 rotation=90 refresh=preferred scale=200 x=1 y=2\n"));
+                      written && !string_compare((string_address)text, (string_address)"HDMI-A-1 rotation=0 refresh=preferred scale=75\nVirtual-2 rotation=90 refresh=preferred scale=200 x=1 y=2\n"));
                 count = windows_displays_read(text, back, WINDOWS_DISPLAYS);
                 check("display section: the file round-trips: read back, the scales are the same settings",
                       count == 2 && back[0].scale == 75 && back[1].scale == 200 && back[1].rotation == 90 && back[1].placed);
-                memset(&line, 0, sizeof(line));
+                memory_fill(&line, 0, sizeof(line));
                 line.scale = 150;
                 set_made = windows_displays_set(set_text, sizeof(set_text), "HDMI-A-1 rotation=90\n", "HDMI-A-1", WINDOWS_DISPLAY_SCALE, &line);
                 check("display section: setting a scale keeps the screen's other fields",
@@ -143404,9 +143404,9 @@ static positive render_glyph(p8 address_to bytes, p32 code)
 }
 
 // Whether a cell of the frame is drawn: some pixel is not the paper, and the cell is not the picture of a missing glyph.
-static bool render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 column)
+static p8 render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 column)
 {
-        bool lit = false, missing = true;
+        p8 lit = false, missing = true;
 
         for (p32 y = 0; y < terminal.cell_h; y++)
                 for (p32 x = 0; x < terminal.cell_w; x++)
@@ -151061,7 +151061,7 @@ static fn check_kit_spring_fresh(void)
         {
                 struct ui_spring spring;
 
-                memset(&spring, fills[f], sizeof(spring));
+                memory_fill(&spring, fills[f], sizeof(spring));
                 ui_spring_go(&spring, 322122547ll, -10737418ll);
                 spring.speed[0] = 1073741824ll * 2;
                 for (int k = 0; k < 12; k++)
@@ -163795,7 +163795,7 @@ b32 main()
 
         {
                 unsigned int shipped = 0, wanted = 0;
-                bool soft = true;
+                p8 soft = true;
 
                 for (unsigned int at = 2; at < program_argument_count(); at++)
                 {
@@ -163859,7 +163859,7 @@ b32 main()
                     0x250c, 0x2510, 0x2514, 0x2518, 0x253c, 0x2581, 0x2586, 0x2588, 0x2591, 0x2592, 0x2593, 0x2590,
                     0x21b5, 0x2717, 0x2191, 0x2193, 0x2190, 0x2192, 0x00b7, 0x2022, 0x2026};
                 static const p32 bold[] = {0x25a0, 0x25b2, 0x25bc, 0x25cb, 0x25cf, 0x25c6};
-                bool every = true;
+                p8 every = true;
                 p32 address_to pixels = null;
                 p32 paper = 0;
 
@@ -164627,7 +164627,7 @@ static p8 hash_check_byte(void)
         return (p8)(hash_check_seed >> 29);
 }
 
-static bool hash_check_hex(const p8 address_to bytes, positive length,
+static p8 hash_check_hex(const p8 address_to bytes, positive length,
                            string_address hex)
 {
         p8 text[130];
@@ -164811,7 +164811,7 @@ static positive hash_check_streams(const p8 address_to pattern)
 #define HASH_HMAC_MADE false
 #endif
 
-static positive hash_check_hmac(p8 address_to limit, bool made)
+static positive hash_check_hmac(p8 address_to limit, p8 made)
 {
         positive wrong = 0;
 
@@ -164848,7 +164848,7 @@ static positive hash_check_hmac(p8 address_to limit, bool made)
                         digest_close(address_of work, want);
 
                         memory_fill(out, 0xa5, sizeof out);
-                        bool got = hash_hmac_sha256_prepared(inner.state.narrow,
+                        p8 got = hash_hmac_sha256_prepared(inner.state.narrow,
                                                              outer.state.narrow,
                                                              data, length, out);
 
@@ -165880,7 +165880,7 @@ b32 main(void)
 
         static const positive rates[] = {136, 72};
         static const positive pers[] = {DIGESTS_BENCH_BLOCKS, 1};
-        bool agree = true;
+        p8 agree = true;
 
         for (positive which = 0; which < array_count(rates); which++)
                 for (positive per = 0; per < array_count(pers); per++)
@@ -165975,7 +165975,7 @@ b32 main(void)
 
 static p32 former_crc_table[FORMER_CRC_SLICES][256];
 static p32 former_crc_shift_power[positive_bits];
-static bool former_crc_table_ready;
+static p8 former_crc_table_ready;
 #if X64
 /* 0 is unprobed, 1 is unavailable, 2 is PCLMUL, 3 is VPCLMUL. A shell should
    not serialize itself with CPUID again on every cksum call on an older CPU. */
@@ -166200,7 +166200,7 @@ former_crc_vpclmul(p8 address_to bytes, positive length, p32 crc)
             0x08090a0b0c0d0e0full, 0x0001020304050607ull,
             0x08090a0b0c0d0e0full, 0x0001020304050607ull};
         former_crc_wide value = {0, (p64)crc << 32, 0, 0, 0, 0, 0, 0};
-        bool first = true;
+        p8 first = true;
 
         do
         {
@@ -166332,7 +166332,7 @@ static fn cksum_bench_assembly(void)
         cksum_bench_sink = crc;
 }
 
-static fn cksum_bench_tier(positive tier, bool former)
+static fn cksum_bench_tier(positive tier, p8 former)
 {
         cpu_has_pclmul = tier >= 2 ? cksum_bench_pclmul : 0;
 #if X64
@@ -166512,7 +166512,7 @@ b32 main(void)
             "tier 1 former C", "tier 2 former C", "tier 3 former C"};
         static const string_address assembly_names[] = {
             "tier 1 assembly", "tier 2 assembly", "tier 3 assembly"};
-        bool agree = true;
+        p8 agree = true;
 
         former_crc_prepare();
         for (positive which = 0; which < array_count(sizes); which++)
@@ -166808,7 +166808,7 @@ b32 main(void)
                 width_bench_fill(stream);
                 width_bench_rounds = width_bench_number(program_argument(4), 64);
 
-                bool terminal = string_equals(variant, "terminal");
+                p8 terminal = string_equals(variant, "terminal");
 
                 if (!terminal && !string_equals(variant, "wcwidth"))
                         return 2;
@@ -166826,7 +166826,7 @@ b32 main(void)
                 return 0;
         }
 
-        bool agree = true;
+        p8 agree = true;
 
         for (positive at = 0; at < array_count(width_bench_streams); at++)
         {
@@ -166892,7 +166892,7 @@ static const char *step_name[STEPS] = {"post",  "fill",  "seal",
                                        "open",  "judge", "replay",
                                        "apply", "fill ack", "take ack"};
 
-static fn frame_once(positive length, p16 flags, bool timed)
+static fn frame_once(positive length, p16 flags, p8 timed)
 {
         p64 t[STEPS + 1];
         positive used;
@@ -166900,7 +166900,7 @@ static fn frame_once(positive length, p16 flags, bool timed)
         positive acked;
         bipolar count;
         struct waterlink_part parts[WATERLINK_PARTS];
-        bool alone = false;
+        p8 alone = false;
         struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 1, 0};
 
         stream_clock += 20;
@@ -167107,7 +167107,7 @@ b32 main(void)
 
         if (program_argument_count() > 2)
         {
-                bool keystroke = string_equals(words[1], "keystroke");
+                p8 keystroke = string_equals(words[1], "keystroke");
                 positive count = 0;
 
                 for (string_address at = words[2]; *at; at++)
@@ -167308,7 +167308,7 @@ b32 main(void)
 static positive te_checks, te_failures;
 static p64 te_seed = 0x2545f4914f6cdd1dull;
 
-static fn te_check(bool condition, const char address_to what, positive detail)
+static fn te_check(p8 condition, const char address_to what, positive detail)
 {
         te_checks++;
         if (condition)
@@ -182205,7 +182205,7 @@ static double al_abs(double value)
 static p8 address_to al_low[AL_REGIONS];
 static p8 address_to al_high[AL_REGIONS];
 
-static bool al_guard(void)
+static p8 al_guard(void)
 {
         for (int at = 0; at < AL_REGIONS; at++)
         {
@@ -182225,7 +182225,7 @@ static bool al_guard(void)
 }
 
 //      A first call in a process on riscv64 asks the machine for V; the walk can make every call that first call.
-static bool al_first;
+static p8 al_first;
 
 typedef struct
 {
@@ -183193,12 +183193,12 @@ typedef struct
         unsigned long long cases, values, peaks, outside, kept;
 } al_scale_faults;
 
-static bool al_same(float got, float want)
+static p8 al_same(float got, float want)
 {
         return want != want ? got != got : al_bits(got) == al_bits(want);
 }
 
-static float al_special(bool specials)
+static float al_special(p8 specials)
 {
         static const unsigned pattern[] = {0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345, 0x00000001, 0x807fffff,
                                            0x7f7fffff, 0x3f800000, 0xbf800000, 0x00800000};
@@ -183215,7 +183215,7 @@ static float al_special(bool specials)
         return al_unit() * (float)(1u << (r >> 20 & 7));
 }
 
-static void al_scale_case(unsigned long long count, int add, int front, int inplace, unsigned dst_off, unsigned x_off, bool specials, float gain,
+static void al_scale_case(unsigned long long count, int add, int front, int inplace, unsigned dst_off, unsigned x_off, p8 specials, float gain,
                           al_scale_faults *faults)
 {
         static float want[8192], from[8192];
@@ -183303,7 +183303,7 @@ static void al_scale_walk(al_scale_faults *faults)
 
                         for (int place = 0; place < 4; place++)
                         {
-                                bool specials = (at + (unsigned long long)place) % 3 == 0;
+                                p8 specials = (at + (unsigned long long)place) % 3 == 0;
                                 float gain = (at + (unsigned long long)place) % 5 == 0 ? al_special(true) : place == 3 ? 0.125f : al_unit() * 3.0f;
 
                                 al_scale_case(count, add, place & 1, place == 2, (unsigned)(al_next() % 17), (unsigned)(al_next() % 17), specials, gain, faults);
@@ -183859,7 +183859,7 @@ static float al_pairs_in[2][16384], al_pairs_table[513 * 512], al_pairs_two[2][5
 static unsigned long long al_polyphase_pairs(void)
 {
         unsigned long long bad = 0;
-        static bool filled;
+        static p8 filled;
 
         if (!filled)
         {
@@ -199940,7 +199940,7 @@ static positive edit_check_failure;
 #include "checks.c"
 #undef SHARED_counted
 
-static bool edit_check_line(positive at, string_address want)
+static p8 edit_check_line(positive at, string_address want)
 {
         positive length = string_length(want);
 
@@ -200038,7 +200038,7 @@ static fn lexer_span_owned(p8 *line, p8 *continuation,
                            string_address const *words, positive count)
 {
         parse_reset();
-        bool ready = parse_feed(line);
+        p8 ready = parse_feed(line);
         if (ready && continuation) ready = parse_feed(continuation);
         check("parser accepts source", ready);
         if (!ready) return;
@@ -200081,7 +200081,7 @@ b32 main(void)
         p8 *pages = memory(3 * 4096);
         check("guard allocation", (bipolar)(positive)pages > 0);
         if ((bipolar)(positive)pages <= 0) return test_report(null);
-        bool guarded = !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
+        p8 guarded = !system_call_3(syscall(mprotect), (positive)pages, 4096, 0) &&
             !system_call_3(syscall(mprotect), (positive)(pages + 8192), 4096, 0);
         check("guard protection", guarded);
         if (guarded)
@@ -200159,7 +200159,7 @@ b32 main(void)
 
 static positive proof_checks, proof_failures;
 
-static fn proof_check(bool condition)
+static fn proof_check(p8 condition)
 {
         proof_checks++;
         proof_failures += !condition;
@@ -200186,7 +200186,7 @@ b32 main(void)
         {
                 regex_pool.used = (rx_mark){0};
                 regex_program program;
-                bool compiled = rx_compile(&regex_pool, &program, patterns[p], true, fold, true,
+                p8 compiled = rx_compile(&regex_pool, &program, patterns[p], true, fold, true,
                                            REGEX_POLICY_DEFAULT);
                 proof_check(compiled);
                 if (!compiled)
@@ -200285,7 +200285,7 @@ b32 main(void)
         {
                 regex_pool.used = (rx_mark){0};
                 regex_program program;
-                bool compiled = rx_compile(&regex_pool, &program, shape_patterns[p], true, fold, true,
+                p8 compiled = rx_compile(&regex_pool, &program, shape_patterns[p], true, fold, true,
                                            shape_policies[q]);
                 proof_check(compiled);
                 if (!compiled || regex_pool.used.nodes > array_count(plain_nodes))
@@ -200318,7 +200318,7 @@ b32 main(void)
                                 rx_match slow = fast;
                                 p8 one = rx_find(&fast, &program, mode, capture, bytes, length, start);
                                 p8 two = rx_find(&slow, &plain, mode, capture, bytes, length, start);
-                                bool same = one == two;
+                                p8 same = one == two;
                                 if (one == RX_MATCH && two == RX_MATCH)
                                         same = same && !memory_compare(fast.slots, slow.slots,
                                             (capture ? (program.groups + 1) * 2 : 2) * sizeof(positive));
@@ -200346,7 +200346,7 @@ b32 main(void)
                 memory_fill(line, 'a', sizeof(line));
                 regex_pool.used = (rx_mark){0};
                 regex_program program;
-                bool compiled = rx_compile(&regex_pool, &program, "(a+)\\1+b", true, false, true,
+                p8 compiled = rx_compile(&regex_pool, &program, "(a+)\\1+b", true, false, true,
                                            REGEX_POLICY_DEFAULT);
                 proof_check(compiled);
                 for (b32 known = 0; compiled && known < 2; known++)
@@ -201249,7 +201249,7 @@ static positive values[VALUE_COUNT];
 static volatile positive sink;
 
 NOT_INLINED positive scalar_base(p8 address_to into, positive value,
-                                 positive base, bool upper)
+                                 positive base, p8 upper)
 {
         p8 scratch[64];
         positive have = 0;
@@ -201289,16 +201289,16 @@ static fn make_values()
         values[6] = ~(positive)0;
 }
 
-BENCH_BEST_ONCE(scalar_run, (positive base, bool upper), TRIES, ROUNDS, r,
+BENCH_BEST_ONCE(scalar_run, (positive base, p8 upper), TRIES, ROUNDS, r,
                 sink += scalar_base(output,
                                     values[r & (VALUE_COUNT - 1)],
                                     base, upper))
 
-BENCH_BEST_ONCE(assembly_run, (positive base, bool upper), TRIES, ROUNDS, r,
+BENCH_BEST_ONCE(assembly_run, (positive base, p8 upper), TRIES, ROUNDS, r,
                 sink += positive_into_base(
                     output, values[r & (VALUE_COUNT - 1)], base, upper))
 
-static fn row(string_address name, positive base, bool upper)
+static fn row(string_address name, positive base, p8 upper)
 {
         p64 scalar = scalar_run(base, upper);
         p64 assembly = assembly_run(base, upper);
@@ -201356,7 +201356,7 @@ __attribute__((noinline, noclone)) static positive former_hex(
         return size * 2;
 }
 
-static p64 run(bool assembly, positive size, positive rounds)
+static p64 run(p8 assembly, positive size, positive rounds)
 {
         p64 start = get_cpu_time();
         for (positive at = 0; at < rounds; at++)
@@ -201406,7 +201406,7 @@ static p8 former_out[HEX_CASES][64];
 static p8 assembly_out[HEX_CASES][64];
 static volatile positive sink;
 
-__attribute__((noinline, noclone)) static bool former_decode(
+__attribute__((noinline, noclone)) static p8 former_decode(
     address_any into, string_address text, positive bytes)
 {
         p8 *out = (p8 *)into;
@@ -201425,7 +201425,7 @@ __attribute__((noinline, noclone)) static bool former_decode(
         return true;
 }
 
-static p64 run(bool assembly, positive bytes, positive rounds)
+static p64 run(p8 assembly, positive bytes, positive rounds)
 {
         p64 start = get_cpu_time();
         for (positive r = 0; r < rounds; r++)
@@ -201490,7 +201490,7 @@ __attribute__((noinline, noclone)) static fn former_translate(
 }
 
 //      Sixty four cells side by side a turn, as a terminal row draws them.
-static p64 run(bool assembly, positive width, positive height, positive rounds)
+static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -201586,7 +201586,7 @@ __attribute__((noinline, noclone)) static fn former_average(p8 address_to data, 
                 data[i] = (p8)((data[i] + data[i + distance] + 1) >> 1);
 }
 
-static p64 run(bool assembly, positive distance, positive rounds)
+static p64 run(p8 assembly, positive distance, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -201736,7 +201736,7 @@ __attribute__((noinline, noclone)) static fn former_over(p32 address_to into)
         }
 }
 
-static p64 run(bool assembly, positive which, positive rounds)
+static p64 run(p8 assembly, positive which, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -201941,7 +201941,7 @@ static fn matrix_prepare(positive s)
                         matrix_bk[k * N + j] = matrix_shapes[s].trans ? matrix_b[j * K + k] : matrix_b[k * N + j];
 }
 
-static p64 run(bool assembly, positive s, positive reps)
+static p64 run(p8 assembly, positive s, positive reps)
 {
         positive M = matrix_rows(s), N = matrix_shapes[s].N, K = matrix_depth(s);
         p64 start = get_cpu_time();
@@ -202121,7 +202121,7 @@ __attribute__((noinline, noclone)) static positive former_blend(
 }
 
 //      Sixteen glyphs along a line, each laid on ground the turn before it.
-static p64 run(bool assembly, positive width, positive height, positive rounds)
+static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         p64 took = 0;
 
@@ -202247,7 +202247,7 @@ __attribute__((noinline, noclone)) static positive former_mix(p32 address_to int
 }
 
 //      Sixteen glyphs along a line, each laid on ground the turn before it.
-static p64 run(bool assembly, positive width, positive height, positive rounds)
+static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         p64 took = 0;
 
@@ -202340,7 +202340,7 @@ __attribute__((noinline, noclone)) static fn former_fill(p32 address_to into, po
                 memory_fill_u32(into + r * stride, width, value);
 }
 
-static p64 run(bool assembly, positive width, positive height, positive rounds)
+static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -202413,7 +202413,7 @@ __attribute__((noinline, noclone)) static fn former_over(p32 address_to into, po
                 into[i] = over_tone_reference(tone, into[i]);
 }
 
-static p64 run_over(bool assembly, positive count, positive rounds)
+static p64 run_over(p8 assembly, positive count, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -202563,7 +202563,7 @@ static f32 *train_x, *train_h;
 static p16 *train_b;
 static p32 train_tier;
 
-static p64 train_residual(bool assembly, positive count, positive reps)
+static p64 train_residual(p8 assembly, positive count, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -202579,7 +202579,7 @@ static p64 train_residual(bool assembly, positive count, positive reps)
         return get_cpu_time() - start;
 }
 
-static p64 train_to_bf16(bool assembly, positive count, positive reps)
+static p64 train_to_bf16(p8 assembly, positive count, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -202595,7 +202595,7 @@ static p64 train_to_bf16(bool assembly, positive count, positive reps)
         return get_cpu_time() - start;
 }
 
-static p64 train_from_bf16(bool assembly, positive count, positive reps)
+static p64 train_from_bf16(p8 assembly, positive count, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -202613,7 +202613,7 @@ static p64 train_from_bf16(bool assembly, positive count, positive reps)
 
 static volatile positive train_sink;
 
-static p64 train_argmax(bool assembly, positive count, positive reps)
+static p64 train_argmax(p8 assembly, positive count, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -202629,7 +202629,7 @@ static p64 train_argmax(bool assembly, positive count, positive reps)
         return get_cpu_time() - start;
 }
 
-static p64 train_argmax_fast(bool assembly, positive count, positive reps)
+static p64 train_argmax_fast(p8 assembly, positive count, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -202645,7 +202645,7 @@ static p64 train_argmax_fast(bool assembly, positive count, positive reps)
         return get_cpu_time() - start;
 }
 
-typedef p64 (*train_run)(bool assembly, positive count, positive reps);
+typedef p64 (*train_run)(p8 assembly, positive count, positive reps);
 
 static fn train_hundredths(positive value)
 {
@@ -202927,10 +202927,10 @@ static const al_shape al_shapes[] = {
 #define AL_VOICES 3
 #define AL_INPUT 16384
 static f32 *al_table[AL_VOICES], *al_in[AL_VOICES][2], *al_out[2];
-static bool al_wide = true; // the tier under test has the wider instruction set the -O3 bar is built for
+static p8 al_wide = true; // the tier under test has the wider instruction set the -O3 bar is built for
 static p32 al_bar; // 0 the C as the service is built, 1 -O3 for the wide tier (x86-64-v3, V), 2 -O3 for the baseline
 
-static p64 al_run(bool assembly, positive shape, positive reps)
+static p64 al_run(p8 assembly, positive shape, positive reps)
 {
         const al_shape *s = al_shapes + shape;
         p64 start = get_cpu_time();
@@ -202977,7 +202977,7 @@ static p32 al_scale_bar; // 0 the C as built, 1 -O3 for the tier, 2 -O3 for the 
 
 static volatile f32 al_scale_sink;
 
-static p64 al_scale_run(bool assembly, positive shape, positive reps)
+static p64 al_scale_run(p8 assembly, positive shape, positive reps)
 {
         const al_scale_shape *s = al_scale_shapes + shape;
         p64 start = get_cpu_time();
@@ -203058,7 +203058,7 @@ static const al_rows_shape al_rows_shapes[] = {
 
 static volatile p64 al_rows_sink;
 
-static p64 al_rows_run(bool rows, positive shape, positive reps)
+static p64 al_rows_run(p8 rows, positive shape, positive reps)
 {
         const al_rows_shape *s = al_rows_shapes + shape;
         p64 start = get_cpu_time(), walked = 0;
@@ -203124,7 +203124,7 @@ static p8 *al_decode_in;
 static f32 *al_decode_out[8];
 static p32 al_decode_bar; // 0 the C as built, 1 -O3 for the tier, 2 -O3 for the baseline
 
-static p64 al_decode_run(bool assembly, positive shape, positive reps)
+static p64 al_decode_run(p8 assembly, positive shape, positive reps)
 {
         const al_decode_shape *s = al_decode_shapes + shape;
         p64 start = get_cpu_time();
@@ -203152,7 +203152,7 @@ static p64 al_decode_run(bool assembly, positive shape, positive reps)
         return get_cpu_time() - start;
 }
 
-static fn al_decode_rows(string_address tier, bool wide)
+static fn al_decode_rows(string_address tier, p8 wide)
 {
         for (positive shape = 0; shape < sizeof(al_decode_shapes) / sizeof(al_decode_shapes[0]); shape++)
                 for (p32 bar = 0; bar < 2; bar++)
@@ -203201,7 +203201,7 @@ static f32 *al_encode_left, *al_encode_right, *al_encode_keep_left, *al_encode_k
 static p8 *al_encode_out;
 static p32 al_encode_bar;
 
-static p64 al_encode_run(bool assembly, positive shape, positive reps)
+static p64 al_encode_run(p8 assembly, positive shape, positive reps)
 {
         const al_encode_shape *s = al_encode_shapes + shape;
         p64 start = get_cpu_time();
@@ -203259,7 +203259,7 @@ static f32 *al_mix2_rows, *al_mix2_out0, *al_mix2_out1;
 static f32 al_mix2_matrix[16] = {0.7071f, 0.5f, 0.25f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 0.7071f, 0.25f, 0.5f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f};
 static p32 al_mix2_bar;
 
-static p64 al_mix2_run(bool assembly, positive shape, positive reps)
+static p64 al_mix2_run(p8 assembly, positive shape, positive reps)
 {
         positive channels = al_mix2_channels[shape];
         p64 start = get_cpu_time();
@@ -203410,7 +203410,7 @@ static const char *const al_widen_names[10] = {"u8", "A-law", "mu-law", "s16 big
 static int al_widen_format;
 static long al_widen_channels;
 
-static p64 al_widen_run(bool assembly, positive shape, positive reps)
+static p64 al_widen_run(p8 assembly, positive shape, positive reps)
 {
         float *planes[8];
         p64 start = get_cpu_time();
@@ -203480,7 +203480,7 @@ static fn al_widen_bench(string_address tier)
                 }
 }
 
-static fn al_mix2_rows_run(string_address tier, bool wide)
+static fn al_mix2_rows_run(string_address tier, p8 wide)
 {
         for (positive shape = 0; shape < 3; shape++)
                 for (p32 bar = 0; bar < 2; bar++)
@@ -203510,7 +203510,7 @@ static fn al_mix2_rows_run(string_address tier, bool wide)
                 }
 }
 
-static fn al_encode_rows(string_address tier, bool wide)
+static fn al_encode_rows(string_address tier, p8 wide)
 {
         for (positive shape = 0; shape < sizeof(al_encode_shapes) / sizeof(al_encode_shapes[0]); shape++)
                 for (p32 bar = 0; bar < 2; bar++)
@@ -203577,7 +203577,7 @@ __attribute__((noinline, noclone, optimize("O2"))) static void al_pack_old(unsig
                 }
 }
 
-static p64 al_pack_run(bool assembly, positive shape, positive reps)
+static p64 al_pack_run(p8 assembly, positive shape, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -203693,7 +203693,7 @@ static long al_pulse_new(positive shape)
         return (long)memory_window_peaks(al_pulse_out0, al_pulse_out1, al_pulse_left, al_pulse_right, size, al_pulse_state, &al_pulse_count_a, extra, 0);
 }
 
-static p64 al_pulse_run(bool assembly, positive shape, positive reps)
+static p64 al_pulse_run(p8 assembly, positive shape, positive reps)
 {
         p64 start = get_cpu_time();
         long sink = 0;
@@ -203759,7 +203759,7 @@ static fn al_pulse_bench(string_address tier)
         }
 }
 
-static fn al_scale_rows(string_address tier, bool wide, bool has512_tier)
+static fn al_scale_rows(string_address tier, p8 wide, p8 has512_tier)
 {
         for (positive shape = 0; shape < sizeof(al_scale_shapes) / sizeof(al_scale_shapes[0]); shape++)
                 for (p32 bar = 0; bar < 3; bar++)
@@ -204016,7 +204016,7 @@ static void bd_random(void *context, unsigned char *bytes, long count)
 static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0};
 static string_address bd_only; // a row to run alone (call, readone, setting), or every row
 
-static bool bd_want(string_address row)
+static p8 bd_want(string_address row)
 {
         return !bd_only[0] || string_equals(bd_only, "engine") || string_equals(bd_only, row);
 }
@@ -204289,7 +204289,7 @@ __attribute__((noinline)) static int bd_former_equal(const char *a, const char *
         return a[n] == b[n];
 }
 
-static p64 bd_run_copy(bool library, positive n, positive rounds)
+static p64 bd_run_copy(p8 library, positive n, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -204304,7 +204304,7 @@ static p64 bd_run_copy(bool library, positive n, positive rounds)
         return get_cpu_time() - start;
 }
 
-static p64 bd_run_utf8(bool library, positive n, positive rounds)
+static p64 bd_run_utf8(p8 library, positive n, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -204318,7 +204318,7 @@ static p64 bd_run_utf8(bool library, positive n, positive rounds)
         return get_cpu_time() - start;
 }
 
-static p64 bd_run_length(bool library, positive which, positive rounds)
+static p64 bd_run_length(p8 library, positive which, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -204331,7 +204331,7 @@ static p64 bd_run_length(bool library, positive which, positive rounds)
         return get_cpu_time() - start;
 }
 
-static p64 bd_run_equal(bool library, positive which, positive rounds)
+static p64 bd_run_equal(p8 library, positive which, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -204412,7 +204412,7 @@ static positive bd_agree(void)
         return wrong;
 }
 
-static fn bd_loop(string_address name, p64 (*one)(bool, positive, positive), positive n, positive rounds)
+static fn bd_loop(string_address name, p64 (*one)(p8, positive, positive), positive n, positive rounds)
 {
         p64 best_c = ~(p64)0, best_library = ~(p64)0;
 
@@ -204794,7 +204794,7 @@ __attribute__((noinline, noclone)) static fn former_planes(p32 address_to into, 
                                   (p32)planes[512 + from[4 * c + 2]] << 16;
 }
 
-static p64 run(bool assembly, positive width, positive height, positive rounds)
+static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         p64 start = get_cpu_time();
 
@@ -204996,7 +204996,7 @@ __attribute__((noinline, noclone)) static positive former_first(const unsigned i
         return at;
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -205100,7 +205100,7 @@ __attribute__((noinline, noclone)) static p32 former_boost(p32 pixel)
         return (p32)(r << 16 | g << 8 | b);
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         p64 start;
 
@@ -205207,7 +205207,7 @@ __attribute__((noinline, noclone)) static void former_sum_swap(p64 address_to su
         }
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         p64 start;
 
@@ -205269,7 +205269,7 @@ __attribute__((noinline, noclone)) static void former_invert(p32 address_to into
                 into[at] = ~from[at];
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         p64 start;
 
@@ -205346,7 +205346,7 @@ __attribute__((noinline, noclone)) static p32 former_tone(p32 pixel)
         }
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         p64 start;
 
@@ -205464,7 +205464,7 @@ __attribute__((noinline, noclone)) static void former_mix(p32 address_to into, c
                         into[at] = cover[at] == 255 ? ink[at] : compositor_mix(into[at], ink[at], cover[at]);
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive length, positive rounds)
 {
         p64 start;
 
@@ -205558,7 +205558,7 @@ static unsigned int into_plane[STRIDE * ROWS];
 static unsigned int from_plane[STRIDE * ROWS];
 static volatile positive sink;
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive width, positive height, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -205582,7 +205582,7 @@ __attribute__((noinline, noclone)) static p64 run(bool assembly, positive width,
 
 /* memory_copy_rect_stream_u32 against memory_copy_rect_u32 on ordinary cached memory, where it has nothing to win (its
    streaming loads are for a GPU's write-combined buffer, which this file cannot make): a control that it does not lose. */
-__attribute__((noinline, noclone)) static p64 run_stream(bool stream, positive width, positive height, positive rounds)
+__attribute__((noinline, noclone)) static p64 run_stream(p8 stream, positive width, positive height, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -205702,7 +205702,7 @@ __attribute__((noinline, noclone)) static void turn_c_loop(unsigned int address_
         }
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive rows, positive cols, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive rows, positive cols, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -205783,12 +205783,12 @@ __attribute__((noinline, noclone)) static void runs_c(unsigned char address_to r
                 unsigned char address_to row = rows + y * 128;
                 const unsigned int address_to line = from + y * from_stride;
                 positive count = 0, start = 0;
-                bool open = false;
+                p8 open = false;
                 unsigned int colour = 0;
 
                 for (positive c = 0; c <= chunks; c++)
                 {
-                        bool flat = false;
+                        p8 flat = false;
 
                         if (c < chunks)
                         {
@@ -205819,7 +205819,7 @@ __attribute__((noinline, noclone)) static void runs_c(unsigned char address_to r
         }
 }
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive width, positive height, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -205905,7 +205905,7 @@ static unsigned int picture[PICTURE_WIDTH * PICTURE_HEIGHT];
 static unsigned int drawn[1024 * 640];
 static volatile positive sink;
 
-__attribute__((noinline, noclone)) static p64 run(bool assembly, positive width, positive height, positive rounds)
+__attribute__((noinline, noclone)) static p64 run(p8 assembly, positive width, positive height, positive rounds)
 {
         positive answers = 0;
         p64 start;
@@ -206096,7 +206096,7 @@ static positive cut_walk(p8 address_to into, const p8 address_to base, positive 
                                 continue;
                         }
                         positive from = line_start;
-                        bool wrote = false;
+                        p8 wrote = false;
 
                         for (positive f = 0; f <= fields; f++)
                         {
@@ -206676,7 +206676,7 @@ static tensor_c_rmsnorm tensor_former_norm;
 static tensor_c_rmsnorm_back tensor_former_back;
 static f32 tensor_sink;
 
-static p64 run(bool assembly, positive h, positive rows, positive reps)
+static p64 run(p8 assembly, positive h, positive rows, positive reps)
 {
         p64 start = get_cpu_time();
 
@@ -206739,7 +206739,7 @@ static fn tensor_swiglu_shapes(string_address tier)
 //      rmsnorm rows: x (dy and x for the backward) from the big arrays, w and
 //      dw one row each, as a trainer holds them. rows 0 is the chain: one
 //      row in place, each call waiting on the last, which is the latency.
-static p64 run_rmsnorm(bool assembly, bool backward, positive d, positive rows, positive reps)
+static p64 run_rmsnorm(p8 assembly, p8 backward, positive d, positive rows, positive reps)
 {
         p64 start = get_cpu_time();
         positive each = rows ? rows : 1;
@@ -207000,7 +207000,7 @@ __attribute__((noinline, noclone)) static p32 former_sweep(p8 address_to into, p
 }
 
 //      Each run starts from the cells the pattern holds, as a band does.
-static p64 run(bool assembly, positive count, positive rounds)
+static p64 run(p8 assembly, positive count, positive rounds)
 {
         p64 took = 0;
 
@@ -207152,7 +207152,7 @@ static fn former_json(void)
         capture("\"", 1);
 }
 
-static p64 run(bool assembly, positive size, positive rounds, bool json)
+static p64 run(p8 assembly, positive size, positive rounds, p8 json)
 {
         p64 start = get_cpu_time();
         for (positive at = 0; at < rounds; at++)
@@ -207287,7 +207287,7 @@ __attribute__((noinline, noclone)) static positive former(p8 address_to into,
         return (positive)(into - start);
 }
 
-static p64 run(bool assembly, positive size, positive rounds)
+static p64 run(p8 assembly, positive size, positive rounds)
 {
         p64 address_to table = spelling_caret(SPELL_SHOW);
         p64 start = get_cpu_time();
@@ -207503,7 +207503,7 @@ b32 main(void)
         for (positive s = 0; s < array_count(steps); s++)
                 for (positive pass = 0; pass < 4; pass++)
                 {
-                        bool assembly = pass & 1;
+                        p8 assembly = pass & 1;
                         positive started = get_cpu_time();
                         for (positive run = 0; run < 1000; run++)
                         {
@@ -208240,14 +208240,14 @@ static fn make_values()
         values[3][1] = ((positive)15 << 60) + 1;
 }
 
-BENCH_ONCE(buffer_once, (positive shape, bool assembly), ROUNDS, r,
+BENCH_ONCE(buffer_once, (positive shape, p8 assembly), ROUNDS, r,
            sink += assembly
                        ? positive_into_human_1024_string(
                              output, values[shape][r & (VALUE_COUNT - 1)])
                        : former_human_buffer(
                              output, values[shape][r & (VALUE_COUNT - 1)]))
 
-BENCH_ONCE(writer_once, (positive shape, bool assembly), ROUNDS, r,
+BENCH_ONCE(writer_once, (positive shape, p8 assembly), ROUNDS, r,
            if (assembly)
                    positive_to_human_1024(
                        discard_writer, values[shape][r & (VALUE_COUNT - 1)]);
@@ -208255,7 +208255,7 @@ BENCH_ONCE(writer_once, (positive shape, bool assembly), ROUNDS, r,
                    former_human_writer(
                        discard_writer, values[shape][r & (VALUE_COUNT - 1)]))
 
-static fn row(string_address name, positive shape, bool writer_form)
+static fn row(string_address name, positive shape, p8 writer_form)
 {
         p64 former = positive_max;
         p64 assembly = positive_max;
@@ -208307,7 +208307,7 @@ static volatile positive sink;
 // Verbatim policy removed from tools.c. Keeping the whole body -- including
 // decimal emission and suffix construction -- makes this a body-to-body
 // measurement rather than a scaling-loop proxy.
-NOT_INLINED positive former_dd_human(p8 address_to into, positive n, bool binary)
+NOT_INLINED positive former_dd_human(p8 address_to into, positive n, p8 binary)
 {
         positive base = binary ? 1024 : 1000;
         positive amount = n;
@@ -208319,7 +208319,7 @@ NOT_INLINED positive former_dd_human(p8 address_to into, positive n, bool binary
         positive have = 0;
         positive used = 0;
         positive fraction = 0;
-        bool point = false;
+        p8 point = false;
 
         if (base <= amount)
         {
@@ -208423,7 +208423,7 @@ static fn make_values()
         }
 }
 
-static p64 run_once(bool assembly, bool binary, positive shape)
+static p64 run_once(p8 assembly, p8 binary, positive shape)
 {
         p64 start = get_cpu_time();
         for (positive i = 0; i < ROUNDS; i++)
@@ -208438,7 +208438,7 @@ static p64 run_once(bool assembly, bool binary, positive shape)
         return get_cpu_time() - start;
 }
 
-static fn row(string_address name, bool binary, positive shape)
+static fn row(string_address name, p8 binary, positive shape)
 {
         p64 former = positive_max;
         p64 assembly = positive_max;
@@ -208511,7 +208511,7 @@ typedef positive2 (*string_hash_call)(string_address text);
 static string_hash_call volatile string_hash_calls[2] = {
     former_string_hash_length, string_hash_33_length};
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         static const positive offsets[] = {0, 1, 3, 7, 15, 4093, 4095};
 
@@ -208567,10 +208567,10 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+BENCH_ONCE(run, (p8 assembly, positive length, positive rounds), rounds, round,
            sink += hash_calls[assembly](block, length))
 
-BENCH_ONCE(run_string, (bool assembly, positive rounds), rounds, round,
+BENCH_ONCE(run_string, (p8 assembly, positive rounds), rounds, round,
         {
                 positive2 answer = string_hash_calls[assembly]((string_address)block);
 
@@ -208674,7 +208674,7 @@ static span_call volatile span_calls[2] = {former_span, memory_span_byte};
 static span_call volatile reverse_span_calls[2] = {
     former_span_reverse, memory_span_byte_reverse};
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         static const positive long_lengths[] = {255, 256, 257, 4095};
 
@@ -208826,7 +208826,7 @@ b32 main(void)
 static volatile positive sink;
 
 NOT_INLINED static bipolar walk_pad(p8 address_to region, positive size,
-                                    bool library)
+                                    p8 library)
 {
         positive at = 0;
 
@@ -208862,7 +208862,7 @@ NOT_INLINED static bipolar walk_pad(p8 address_to region, positive size,
 }
 
 NOT_INLINED static bipolar key_usage(p8 address_to value, positive length,
-                                     tls_cert address_to cert, bool library)
+                                     tls_cert address_to cert, p8 library)
 {
         positive at = 0;
         positive stop = 0;
@@ -208901,7 +208901,7 @@ NOT_INLINED static bipolar key_usage(p8 address_to value, positive length,
 static p8 host_set[] =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._";
 
-NOT_INLINED static bool host_valid(string_address text, bool library)
+NOT_INLINED static p8 host_valid(string_address text, p8 library)
 {
         if (!string_get(text))
                 return false;
@@ -208923,7 +208923,7 @@ NOT_INLINED static bool host_valid(string_address text, bool library)
    every byte above it. Built once; the '%' escapes still take the peel. */
 static p8 target_reject[1 + 32 + 2 + 129];
 
-NOT_INLINED static bool target_plain(string_address text, bool library)
+NOT_INLINED static p8 target_plain(string_address text, p8 library)
 {
         if (library)
         {
@@ -208957,7 +208957,7 @@ static p8 usage_digital[] = {0x03, 0x02, 0x07, 0x80};
 static p8 usage_sign[] = {0x03, 0x02, 0x01, 0x06};
 static string_address bench_text;
 
-static positive run_row(positive which, bool library)
+static positive run_row(positive which, p8 library)
 {
         positive total = 0;
         tls_cert cert = {0};
@@ -209142,7 +209142,7 @@ static fn net_hot_work(void)
 
                 for (positive round = 0; round < net_hot_rounds; round++)
                 {
-                        bool sent;
+                        p8 sent;
 
                         if (net_hot_kind == 3)
                                 sent = network_stream_send_all_for(
@@ -209417,7 +209417,7 @@ static inline positive library_valid(address_any bytes, positive length)
 }
 
 static positive rounds_for(positive n){positive r=TARGET_BYTES/(n?n:1);if(r<64)r=64;if(r>(1u<<21))r=1u<<21;return r;}
-static p64 run(bool assembly, positive n, positive rounds)
+static p64 run(p8 assembly, positive n, positive rounds)
 {
         p64 start = get_cpu_time();
         if (assembly)
@@ -209427,7 +209427,7 @@ static p64 run(bool assembly, positive n, positive rounds)
         return get_cpu_time() - start;
 }
 
-static fn fill(positive n, bool mixed)
+static fn fill(positive n, p8 mixed)
 {
         static const char line[] = "h\xc3\xa9llo w\xc3\xb6rld \xc3\xb1" "and\xc3\xba "
             "\xe6\xbc\xa2\xe5\xad\x97\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88 "
@@ -209449,7 +209449,7 @@ static fn fill(positive n, bool mixed)
                         block[i] = ' ';
 }
 
-static fn row(positive n, bool mixed)
+static fn row(positive n, p8 mixed)
 {
         positive raw[TRIES], rounds = rounds_for(n);
         p64 best_asm = ~(p64)0, best_c = ~(p64)0;
@@ -209480,7 +209480,7 @@ static fn row(positive n, bool mixed)
         a line, ${#x} -- its block body against the walk it had alone, which
         is the same routine with the feature byte cleared.
 */
-static p64 span_run(bool wide, positive n, positive rounds)
+static p64 span_run(p8 wide, positive n, positive rounds)
 {
         p8 avx2 = cpu_has_avx2;
         if (!wide)
@@ -209493,7 +209493,7 @@ static p64 span_run(bool wide, positive n, positive rounds)
         return elapsed;
 }
 
-static fn span_row(positive n, bool mixed)
+static fn span_row(positive n, p8 mixed)
 {
         positive raw[TRIES], rounds = rounds_for(n);
         p64 best_wide = ~(p64)0, best_walk = ~(p64)0;
@@ -209539,7 +209539,7 @@ NOT_INLINED static positive library_ascii(address_any bytes, positive length)
         return memory_ascii_span(bytes, length);
 }
 
-static p64 ascii_run(bool assembly, positive n, positive rounds)
+static p64 ascii_run(p8 assembly, positive n, positive rounds)
 {
         p64 start = get_cpu_time();
         if (assembly)
@@ -209549,7 +209549,7 @@ static p64 ascii_run(bool assembly, positive n, positive rounds)
         return get_cpu_time() - start;
 }
 
-static fn ascii_row(positive n, bool late)
+static fn ascii_row(positive n, p8 late)
 {
         positive raw[TRIES], rounds = rounds_for(n);
         memory_fill(block, 'a', n);
@@ -209763,7 +209763,7 @@ static p64 random_next(void)
 }
 
 /* The two loops leave every line the same, pairs and all. */
-static bool correctness(void)
+static p8 correctness(void)
 {
         static struct bench_cell start[BENCH_COLUMNS], after[BENCH_COLUMNS];
 
@@ -210129,7 +210129,7 @@ static fill_call volatile calls[] = {
 };
 #endif
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         for (positive offset = 0; offset < 2; offset++)
                 for (positive count = 0; count <= MAXIMUM; count++)
@@ -210329,7 +210329,7 @@ static fn paths_make_long()
         long_path[at] = end;
 }
 
-BENCH_ONCE(path_run, (bool assembly, positive operation,
+BENCH_ONCE(path_run, (p8 assembly, positive operation,
                     string_address directory, string_address name,
                     string_address path, positive rounds), rounds, i,
         {
@@ -210354,7 +210354,7 @@ BENCH_ONCE(path_run, (bool assembly, positive operation,
         })
 
 /* path_join's generic against its zero-to-fourteen-byte size class, the same join at a short length. */
-BENCH_ONCE(path_class_run, (bool classed, string_address directory, string_address name,
+BENCH_ONCE(path_class_run, (p8 classed, string_address directory, string_address name,
                             positive rounds), rounds, i,
         {
                 positive length = classed
@@ -210526,7 +210526,7 @@ static positive rounds_for(positive size)
         return rounds;
 }
 
-BENCH_ONCE(primitive_run, (bool assembly, positive size, positive rounds), rounds, i,
+BENCH_ONCE(primitive_run, (p8 assembly, positive size, positive rounds), rounds, i,
         {
                 address_any answer = assembly ? memory_reverse(block, size)
                                               : former_memory_reverse(block, size);
@@ -210534,7 +210534,7 @@ BENCH_ONCE(primitive_run, (bool assembly, positive size, positive rounds), round
                 sink += (positive)answer + block[0] + block[size - 1];
         })
 
-static p64 rev_run(bool folded, positive size, positive rounds)
+static p64 rev_run(p8 folded, positive size, positive rounds)
 {
         output_used = 0;
         p64 start = get_cpu_time();
@@ -210638,7 +210638,7 @@ NOT_INLINED fn discard_writer(address_any data, positive length)
 
 NOT_INLINED fn former_writer_field(writer write, address_any data,
                                    positive length, positive width,
-                                   b8 pad, bool left)
+                                   b8 pad, p8 left)
 {
         positive padding = width > length ? width - length : 0;
 
@@ -210653,7 +210653,7 @@ NOT_INLINED fn former_writer_field(writer write, address_any data,
 }
 
 NOT_INLINED fn former_string_to_field(writer write, string_address text,
-                                      positive width, b8 pad, bool left)
+                                      positive width, b8 pad, p8 left)
 {
         positive length = string_length(text);
         positive padding = width > length ? width - length : 0;
@@ -210681,8 +210681,8 @@ static positive rounds_for(positive length, positive width)
         return rounds;
 }
 
-static p64 raw_once(bool assembly, positive shape, positive width,
-                    bool left, positive rounds)
+static p64 raw_once(p8 assembly, positive shape, positive width,
+                    p8 left, positive rounds)
 {
         positive length = lengths[shape];
         p64 start = get_cpu_time();
@@ -210698,8 +210698,8 @@ static p64 raw_once(bool assembly, positive shape, positive width,
         return get_cpu_time() - start;
 }
 
-BENCH_ONCE(string_once, (bool assembly, positive shape, positive width,
-                       bool left, positive rounds), rounds, i,
+BENCH_ONCE(string_once, (p8 assembly, positive shape, positive width,
+                       p8 left, positive rounds), rounds, i,
            if (assembly)
                    string_to_field(discard_writer, texts[shape], width,
                                    (b8)0xa5, left);
@@ -210707,8 +210707,8 @@ BENCH_ONCE(string_once, (bool assembly, positive shape, positive width,
                    former_string_to_field(discard_writer, texts[shape], width,
                                           (b8)0xa5, left))
 
-static fn row(string_address name, bool string_form, positive shape,
-              positive width, bool left)
+static fn row(string_address name, p8 string_form, positive shape,
+              positive width, p8 left)
 {
         positive rounds = rounds_for(lengths[shape], width);
         p64 former = positive_max;
@@ -210802,7 +210802,7 @@ NOT_INLINED static b32 former_flush(positive handle, p8 address_to buffer,
 
 NOT_INLINED static b32 former_put(positive handle, p8 address_to buffer,
                                   positive capacity, positive address_to count,
-                                  address_any data, positive length, bool hold_equal)
+                                  address_any data, positive length, p8 hold_equal)
 {
         if (!length)
                 return true;
@@ -210881,7 +210881,7 @@ NOT_INLINED static fn former_log(address_any data, positive length)
                           address_of log_writer_buffer_length, data, length);
 }
 
-static p64 put_once(positive length, bool hold_equal, bool assembly,
+static p64 put_once(positive length, p8 hold_equal, p8 assembly,
                     positive rounds, positive pending)
 {
         positive capacity = benchmark_capacity;
@@ -210913,7 +210913,7 @@ static p64 put_once(positive length, bool hold_equal, bool assembly,
         return get_cpu_time() - start;
 }
 
-static p64 byte_once(bool assembly)
+static p64 byte_once(p8 assembly)
 {
         positive capacity = benchmark_capacity;
         p64 start = get_cpu_time();
@@ -210966,7 +210966,7 @@ static p64 reserve_once(b32 which)
         return get_cpu_time() - start;
 }
 
-BENCH_ONCE(flush_once, (bool assembly), SYSCALL_ROUNDS, i,
+BENCH_ONCE(flush_once, (p8 assembly), SYSCALL_ROUNDS, i,
         {
                 b32 success;
                 used = CAPACITY;
@@ -210979,7 +210979,7 @@ BENCH_ONCE(flush_once, (bool assembly), SYSCALL_ROUNDS, i,
                 sink += used + (positive)success;
         })
 
-BENCH_ONCE(log_once, (positive length, bool assembly), BUFFER_ROUNDS, i,
+BENCH_ONCE(log_once, (positive length, p8 assembly), BUFFER_ROUNDS, i,
         {
                 log_writer_buffer_length = 0;
 
@@ -210991,8 +210991,8 @@ BENCH_ONCE(log_once, (positive length, bool assembly), BUFFER_ROUNDS, i,
                 sink += log_writer_buffer_length + log_writer_buffer[0];
         })
 
-static fn row(string_address name, positive length, bool hold_equal,
-              positive rounds, positive pending, bool byte, bool flush)
+static fn row(string_address name, positive length, p8 hold_equal,
+              positive rounds, positive pending, p8 byte, p8 flush)
 {
         positive ratios[TRIES];
 
@@ -211122,7 +211122,7 @@ static p8 one[BLOCK];
 static p8 two[BLOCK];
 static volatile positive sink;
 
-static bool prefix_boundaries(void)
+static p8 prefix_boundaries(void)
 {
         p8 left[272];
         p8 right[272];
@@ -211270,23 +211270,23 @@ NOT_INLINED static positive folded_newline(p8 address_to data, positive length)
         return found ? (positive)(found - data) : length;
 }
 
-BENCH_ONCE(compare_once, (bool folded), ROUNDS, round,
+BENCH_ONCE(compare_once, (p8 folded), ROUNDS, round,
            sink += (positive)(folded ? folded_compare(one, BLOCK, two, BLOCK)
                                      : former_compare(one, BLOCK, two, BLOCK)))
 
-BENCH_ONCE(equal_once, (bool folded), ROUNDS, round,
+BENCH_ONCE(equal_once, (p8 folded), ROUNDS, round,
            sink += folded ? folded_equal_block(one, two, BLOCK)
                           : former_equal_block(one, two, BLOCK))
 
-BENCH_ONCE(newline_once, (bool folded), ROUNDS, round,
+BENCH_ONCE(newline_once, (p8 folded), ROUNDS, round,
            sink += folded ? folded_newline(one, BLOCK)
                           : former_newline(one, BLOCK))
 
-BENCH_ONCE(late_once, (bool folded), ROUNDS, round,
+BENCH_ONCE(late_once, (p8 folded), ROUNDS, round,
            sink += folded ? folded_late_difference(one, two, BLOCK)
                           : former_late_difference(one, two, BLOCK))
 
-BENCH_ONCE(prefix_once, (bool folded), ROUNDS, round,
+BENCH_ONCE(prefix_once, (p8 folded), ROUNDS, round,
            if (folded)
                    sink += memory_common_prefix(one, two, BLOCK);
            else
@@ -211339,7 +211339,7 @@ NOT_INLINED static positive former_ascii(p8 address_to data, positive length)
         return at;
 }
 
-static p64 class_once(bool folded, const b8 address_to set, positive length,
+static p64 class_once(p8 folded, const b8 address_to set, positive length,
                       positive (*former)(p8 address_to, positive))
 {
         p64 start = get_cpu_time();
@@ -211351,27 +211351,27 @@ static p64 class_once(bool folded, const b8 address_to set, positive length,
         return get_cpu_time() - start;
 }
 
-static p64 alpha_short_once(bool folded)
+static p64 alpha_short_once(p8 folded)
 {
         return class_once(folded, string_set_alpha, 6, former_alpha);
 }
 
-static p64 digit_short_once(bool folded)
+static p64 digit_short_once(p8 folded)
 {
         return class_once(folded, string_set_digits, 8, former_digit);
 }
 
-static p64 high_short_once(bool folded)
+static p64 high_short_once(p8 folded)
 {
         return class_once(folded, string_set_high, 5, former_high);
 }
 
-static p64 ascii_medium_once(bool folded)
+static p64 ascii_medium_once(p8 folded)
 {
         return class_once(folded, string_set_ascii, 128, former_ascii);
 }
 
-static bool class_boundaries(void)
+static p8 class_boundaries(void)
 {
         for (positive byte = 0; byte < 256; byte++)
                 if (string_set_alpha[byte] != byte_is_alpha((p8)byte) ||
@@ -211385,7 +211385,7 @@ static bool class_boundaries(void)
         return true;
 }
 
-static fn row(string_address name, p64 (*run)(bool))
+static fn row(string_address name, p64 (*run)(p8))
 {
         positive ratios[TRIES];
 
@@ -211602,7 +211602,7 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-static p64 run(bool assembly, positive length, positive rounds)
+static p64 run(p8 assembly, positive length, positive rounds)
 {
         p8 address_to block = assembly ? assembly_block : former_block;
         p64 start = get_cpu_time();
@@ -211618,7 +211618,7 @@ static p64 run(bool assembly, positive length, positive rounds)
         return get_cpu_time() - start;
 }
 
-static bool row(positive length)
+static p8 row(positive length)
 {
         positive rounds = rounds_for(length);
         positive ratios[TRIES];
@@ -211645,7 +211645,7 @@ static bool row(positive length)
         return true;
 }
 
-static bool boundaries(void)
+static p8 boundaries(void)
 {
         p8 guarded[264];
         p8 expected[264];
@@ -211853,7 +211853,7 @@ BENCH_ONCE(run_copy, (positive length, positive rounds), rounds, round,
                 sink += former_block[0];
         })
 
-static p64 run(bool assembly, positive length, positive rounds)
+static p64 run(p8 assembly, positive length, positive rounds)
 {
         p8 address_to block = assembly ? assembly_block : former_block;
         p64 start = get_cpu_time();
@@ -211876,7 +211876,7 @@ static p64 run(bool assembly, positive length, positive rounds)
         return get_cpu_time() - start;
 }
 
-static bool row(positive length, positive set)
+static p8 row(positive length, positive set)
 {
         positive rounds = rounds_for(length);
         positive ratios[TRIES];
@@ -211908,7 +211908,7 @@ static bool row(positive length, positive set)
 }
 
 #ifdef BENCH_delete
-static bool boundaries(void)
+static p8 boundaries(void)
 {
         p8 guarded[264];
         p8 expected[264];
@@ -212025,7 +212025,7 @@ static fn prepare_source(void)
         }
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+BENCH_ONCE(run, (p8 assembly, positive length, positive rounds), rounds, round,
         {
                 positive count = assembly
                                      ? memory_offsets_of_either(assembly_offsets, source_block,
@@ -212067,7 +212067,7 @@ NOT_INLINED static positive former_in_set(p32 address_to positions,
         return count;
 }
 
-static bool set_row(positive length)
+static p8 set_row(positive length)
 {
         positive rounds = TARGET_BYTES / length;
         positive ratios[TRIES];
@@ -212099,7 +212099,7 @@ static bool set_row(positive length)
         return true;
 }
 
-static bool range_row(positive length)
+static p8 range_row(positive length)
 {
         positive rounds = TARGET_BYTES / length;
         positive ratios[TRIES];
@@ -212129,7 +212129,7 @@ static bool range_row(positive length)
         return true;
 }
 
-static bool row(positive length)
+static p8 row(positive length)
 {
         positive rounds = TARGET_BYTES / length;
         positive ratios[TRIES];
@@ -212265,7 +212265,7 @@ NOT_INLINED static positive assembly_fields(const p8 address_to line, positive l
         return count;
 }
 
-static p64 fields_run(bool assembly)
+static p64 fields_run(p8 assembly)
 {
         p64 start = get_cpu_time();
         positive total = 0;
@@ -212311,7 +212311,7 @@ NOT_INLINED static positive former_nth_last(const p8 address_to block, positive 
         return stop;
 }
 
-static p64 nth_run(bool assembly, bool back, positive n)
+static p64 nth_run(p8 assembly, p8 back, positive n)
 {
         p64 start = get_cpu_time();
         positive at = 0, total = 0;
@@ -212347,7 +212347,7 @@ NOT_INLINED static const p8 address_to former_either(const p8 address_to window,
         return tab > space ? tab : space;
 }
 
-static p64 either_run(bool assembly, positive width)
+static p64 either_run(p8 assembly, positive width)
 {
         p64 start = get_cpu_time();
         positive total = 0;
@@ -212483,7 +212483,7 @@ NOT_INLINED static bipolar former_compare(p8 address_to a, p8 address_to b,
         return 0;
 }
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         p8 a;
         p8 b;
@@ -212573,7 +212573,7 @@ static bool correctness(void)
         return true;
 }
 
-static fn prepare(positive length, bool late)
+static fn prepare(positive length, p8 late)
 {
         for (positive at = 0; at < length; at++)
         {
@@ -212596,12 +212596,12 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+BENCH_ONCE(run, (p8 assembly, positive length, positive rounds), rounds, round,
            sink += (positive)(assembly
                                   ? memory_compare_ascii_case(one, two, length)
                                   : former_compare(one, two, length)))
 
-static fn row(string_address name, positive length, bool late)
+static fn row(string_address name, positive length, p8 late)
 {
         positive ratios[TRIES];
         positive rounds = rounds_for(length);
@@ -212760,7 +212760,7 @@ NOT_INLINED static positive former_line_end(string_address input,
                                              positive length,
                                              positive start,
                                              positive columns,
-                                             bool wrap)
+                                             p8 wrap)
 {
         positive i;
         positive last_space = 0;
@@ -212787,7 +212787,7 @@ NOT_INLINED static positive shared_line_end(string_address input,
                                              positive length,
                                              positive start,
                                              positive columns,
-                                             bool wrap)
+                                             p8 wrap)
 {
         positive remaining;
         positive scanned;
@@ -212824,14 +212824,14 @@ static positive next_random(void)
         return random_state;
 }
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         for (positive length = 0; length < 257; length++)
                 for (positive trial = 0; trial < 257; trial++)
                 {
                         positive columns = next_random() % 65;
                         positive start = next_random() % (length + 2);
-                        bool wrap = (bool)(next_random() & 1);
+                        p8 wrap = (p8)(next_random() & 1);
 
                         for (positive at = 0; at < length; at++)
                         {
@@ -212856,12 +212856,12 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-BENCH_ONCE(run, (bool shared, positive length, positive columns, bool wrap,
+BENCH_ONCE(run, (p8 shared, positive length, positive columns, p8 wrap,
                positive rounds), rounds, round,
            sink += shared ? shared_line_end(text, length, 0, columns, wrap)
                           : former_line_end(text, length, 0, columns, wrap))
 
-static void row(string_address name, positive length, positive columns, bool wrap,
+static void row(string_address name, positive length, positive columns, p8 wrap,
                 positive space)
 {
         positive ratios[TRIES];
@@ -213107,7 +213107,7 @@ static fn fill(p8 address_to block, positive length, positive salt)
                 block[at] = (p8)(at * 37 + salt);
 }
 
-static bool correctness_one(enum case_operation operation)
+static p8 correctness_one(enum case_operation operation)
 {
         p8 guarded[4128];
         p8 expected[4128];
@@ -213379,14 +213379,14 @@ NOT_INLINED static address_any former_find(p8 address_to text, positive length,
         return null;
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive size, positive rounds), rounds, i,
+BENCH_ONCE(run, (p8 assembly, positive length, positive size, positive rounds), rounds, i,
            sink += (positive)(assembly
                                   ? memory_search_ascii_case(hay, length,
                                                              needle, size)
                                   : former_find(hay, length, needle, size)))
 
 static fn row(string_address name, positive length, string_address wanted,
-              bool late, positive traffic)
+              p8 late, positive traffic)
 {
         positive size = string_length(wanted);
 
@@ -213470,11 +213470,11 @@ struct prepared_search
         positive size;
         positive anchor;
         positive second_anchor;
-        bool icase;
+        p8 icase;
 };
 
 static fn prepare(struct prepared_search address_to search,
-                  p8 address_to wanted, positive size, bool icase)
+                  p8 address_to wanted, positive size, p8 icase)
 {
         positive2 anchors = memory_search_prepare(wanted, size, icase);
 
@@ -213498,7 +213498,7 @@ NOT_INLINED static p8 address_to prepared_find(
                                             search->second_anchor);
 }
 
-static positive scan(bool prepared, positive length,
+static positive scan(p8 prepared, positive length,
                      struct prepared_search address_to search)
 {
         positive at = 0;
@@ -213527,11 +213527,11 @@ static positive scan(bool prepared, positive length,
         return count;
 }
 
-BENCH_ONCE(run, (bool prepared, positive length,
+BENCH_ONCE(run, (p8 prepared, positive length,
                struct prepared_search address_to search, positive rounds), rounds, round,
            sink += scan(prepared, length, search))
 
-static fn row(string_address name, string_address wanted, bool icase,
+static fn row(string_address name, string_address wanted, p8 icase,
               positive traffic)
 {
         struct prepared_search search;
@@ -213793,7 +213793,7 @@ static bipolar named(string_address name)
         return -1;
 }
 
-static bool boundaries(void)
+static p8 boundaries(void)
 {
         p8 small[320];
 
@@ -213821,7 +213821,7 @@ static bool boundaries(void)
    cover an absent sparse anchor, one match in nearly every short record and
    a final record without a delimiter; the model remains byte-at-a-time and
    independent of both optimized searches. */
-static bool guarded_boundaries(void)
+static p8 guarded_boundaries(void)
 {
         p8 address_to base = (p8 address_to)memory(3 * PAGE);
 
@@ -213941,7 +213941,7 @@ NOT_INLINED static address_any former_last(address_any memory, b8 value,
         return null;
 }
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         static const positive values[] = {0, 37, 255};
         p8 guarded[336];
@@ -214006,7 +214006,7 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+BENCH_ONCE(run, (p8 assembly, positive length, positive rounds), rounds, round,
         {
                 address_any found = assembly
                                         ? memory_last_of(block, (b8)NEEDLE, length)
@@ -214064,20 +214064,20 @@ b32 main(void)
 static p8 block[MAXIMUM + 16];
 static volatile positive sink;
 
-static bool is_space(p8 value)
+static p8 is_space(p8 value)
 {
         return value == 0x20 || (value >= 0x09 && value <= 0x0d);
 }
 
 NOT_INLINED static positive2 former_words(address_any memory, positive length,
-                                          bool inside)
+                                          p8 inside)
 {
         p8 address_to bytes = memory;
         positive2 answer = {.x = 0, .y = inside ? 1 : 0};
 
         for (positive at = 0; at < length; at++)
         {
-                bool next = !is_space(bytes[at]);
+                p8 next = !is_space(bytes[at]);
 
                 if (next && !answer.y)
                         answer.x++;
@@ -214088,12 +214088,12 @@ NOT_INLINED static positive2 former_words(address_any memory, positive length,
         return answer;
 }
 
-static bool same(positive2 a, positive2 b)
+static p8 same(positive2 a, positive2 b)
 {
         return a.x == b.x && a.y == b.y;
 }
 
-static bool correctness(void)
+static p8 correctness(void)
 {
         p8 byte;
 
@@ -214101,8 +214101,8 @@ static bool correctness(void)
                 for (positive inside = 0; inside < 2; inside++)
                 {
                         byte = (p8)value;
-                        if (!same(memory_count_words(address_of byte, 1, (bool)inside),
-                                  former_words(address_of byte, 1, (bool)inside)))
+                        if (!same(memory_count_words(address_of byte, 1, (p8)inside),
+                                  former_words(address_of byte, 1, (p8)inside)))
                                 return false;
                 }
 
@@ -214120,9 +214120,9 @@ static bool correctness(void)
                         for (positive inside = 0; inside < 2; inside++)
                         {
                                 positive2 want = former_words(block + offset, length,
-                                                               (bool)inside);
+                                                               (p8)inside);
                                 positive2 got = memory_count_words(block + offset, length,
-                                                                   (bool)inside);
+                                                                   (p8)inside);
 
                                 if (!same(want, got))
                                         return false;
@@ -214140,10 +214140,10 @@ static bool correctness(void)
                                                 continue;
 
                                         positive2 first = memory_count_words(
-                                            block + offset, split, (bool)inside);
+                                            block + offset, split, (p8)inside);
                                         positive2 second = memory_count_words(
                                             block + offset + split, length - split,
-                                            (bool)first.y);
+                                            (p8)(first.y != 0));
 
                                         if (first.x + second.x != want.x ||
                                             second.y != want.y)
@@ -214174,7 +214174,7 @@ static positive rounds_for(positive length)
         return rounds;
 }
 
-BENCH_ONCE(run, (bool assembly, positive length, positive rounds), rounds, round,
+BENCH_ONCE(run, (p8 assembly, positive length, positive rounds), rounds, round,
         {
                 positive2 answer = assembly
                                        ? memory_count_words(block, length, false)
@@ -216020,7 +216020,7 @@ static fn ordered_light_job(address_any context, positive index,
         parallel_write(output, address_of sum, 8);
 }
 
-static bool ordered_bench_sink(address_any context, positive index,
+static p8 ordered_bench_sink(address_any context, positive index,
                                address_any data, positive length)
 {
         (void)context;
@@ -216052,7 +216052,7 @@ static positive2 ordered_bench_usage(void)
                            usage[2] * 1000000ull + usage[3]};
 }
 
-static fn ordered_bench_run(string_address label, string_address path, bool heavy)
+static fn ordered_bench_run(string_address label, string_address path, p8 heavy)
 {
         positive best = positive_max;
         positive best_user = 0;
@@ -216196,7 +216196,7 @@ typedef struct bench_tree_node
 static p8 bench_tree_buffer[1 << 16];
 static positive bench_tree_used;
 static bipolar bench_tree_out = 1;
-static bool bench_tree_du;
+static p8 bench_tree_du;
 
 static bench_tree_node address_to bench_tree_new(bench_tree_node address_to parent,
                                                  string_address name)
@@ -216337,8 +216337,8 @@ static fn bench_tree_leave(address_any context, address_any node, bipolar direct
                 atomic_add(address_of self->parent->total, total);
 }
 
-static bool bench_tree_sink(address_any context, address_any node, address_any data,
-                            positive length, bool finished)
+static p8 bench_tree_sink(address_any context, address_any node, address_any data,
+                            positive length, p8 finished)
 {
         (void)context;
 
@@ -216442,7 +216442,7 @@ b32 main(void)
                 mib = string_to_number_unsigned(program_argument(1), null, 10);
         if (!mib || mib > 128)
                 return 2;
-        bool sparse = program_argument_count() > 2 &&
+        p8 sparse = program_argument_count() > 2 &&
                 !string_compare(program_argument(2), (string_address)"sparse");
         positive have = mib * 1024 * 1024, used = have;
         address_any held = memory(have);
@@ -216456,12 +216456,12 @@ b32 main(void)
         ((p8 address_to)held)[used - 1] = 0x7a;
 
         p64 started = get_cpu_time();
-        bool grown = memory_reserve(address_of held, address_of have,
+        p8 grown = memory_reserve(address_of held, address_of have,
                                     used, used + 1, 1, 64);
         p64 ticks = get_cpu_time() - started;
         positive usage[18] = {0};
         bipolar measured = system_call_2(syscall(getrusage), 0, (positive)usage);
-        bool valid = grown && ((p8 address_to)held)[0] == 0x3e &&
+        p8 valid = grown && ((p8 address_to)held)[0] == 0x3e &&
                 ((p8 address_to)held)[used - 1] == 0x7a;
         string_format(log,
                 "reserve mib=%p sparse=%p ticks=%p peak_rss_kib=%p minor_faults=%p valid=%p\n",
@@ -216503,7 +216503,7 @@ b32 main(void)
         for (positive i = 0; i < loops; i++)
                 total += storage_read(handle, bytes, size, 0);
         p64 ticks = get_cpu_time() - start;
-        bool valid = total == loops * size &&
+        p8 valid = total == loops * size &&
                      bytes[0] == 0x5a && bytes[size - 1] == 0x5a;
         system_close((positive)handle);
         string_format(log,
@@ -217386,9 +217386,9 @@ b32 main(void)
         p64 wide[FORMAT_BOUNDS_TRIALS];
         p64 normal[FORMAT_BOUNDS_TRIALS];
         p64 rounding[FORMAT_BOUNDS_TRIALS];
-        bool run_wide = true;
-        bool run_normal = true;
-        bool run_rounding = true;
+        p8 run_wide = true;
+        p8 run_normal = true;
+        p8 run_rounding = true;
 
         if (program_argument_count() > 1)
         {
@@ -217613,7 +217613,7 @@ positive now_ns()
         return (positive)t.tv_sec * 1000000000 + (positive)t.tv_nsec;
 }
 
-static bool bench_wait_child(bipolar child)
+static p8 bench_wait_child(bipolar child)
 {
         positive status = 0;
         return child > 0 &&
@@ -217628,7 +217628,7 @@ positive run_many_flags(string_address path, positive flags)
 {
         string_address argv[] = {path, null};
         positive start = now_ns();
-        bool failed = false;
+        p8 failed = false;
 
         for (positive i = 0; i < ROUNDS; i++)
         {
@@ -217710,7 +217710,7 @@ positive bench_spawn_device(string_address path)
         request.envp_generation = 0;
 
         positive start = now_ns();
-        bool failed = false;
+        p8 failed = false;
 
         for (positive i = 0; i < ROUNDS; i++)
         {
@@ -217784,7 +217784,7 @@ positive bench_execveat(string_address path)
                 return 0;
 
         positive start = now_ns();
-        bool failed = false;
+        p8 failed = false;
 
         for (positive i = 0; i < ROUNDS; i++)
         {
@@ -217827,7 +217827,7 @@ positive bench_spawn_submission(string_address path)
         request.envp_generation = 0;
 
         positive elapsed = 0;
-        bool failed = false;
+        p8 failed = false;
 
         for (positive i = 0; i < ROUNDS; i++)
         {
@@ -218228,7 +218228,7 @@ b32 main()
                              ? string_digits(program_argument(1), null) : 65536;
         positive repeats = program_argument(2)
                                ? string_digits(program_argument(2), null) : 1000;
-        bool dollar = program_argument(3) &&
+        p8 dollar = program_argument(3) &&
                       word_is(program_argument(3), "dollar");
         positive sum = 0;
         p8 address_to body;
@@ -218493,7 +218493,7 @@ static fn floor_tree_reference(xz_range_state address_to s, p16 address_to probs
         positive count = mode & 255;
         positive symbol = count ? 1 : 0;
         positive result = 0;
-        bool matched = (mode & 512) != 0;
+        p8 matched = (mode & 512) != 0;
         positive match = (mode >> 16) & 255;
         if (!count) count = 1;
         for (positive i = 0; i < count; i++)
@@ -218592,7 +218592,7 @@ static fn floor_huffman(void)
                 for (positive i = 0; i < n; i++) src[i] = (p8)(i * 17 + n);
                 dst[-1] = 0x5a;
                 positive got = huffman_encode_back(dst, src, n, table);
-                bool okay = got == n + 1 && dst[n] == 1 && dst[-1] == 0x5a;
+                p8 okay = got == n + 1 && dst[n] == 1 && dst[-1] == 0x5a;
                 for (positive i = 0; i < n; i++) okay &= dst[i] == src[n - 1 - i];
                 check("backward stream exact byte/word ends and alignments", okay);
         }
@@ -218696,7 +218696,7 @@ static fn floor_deflate(void)
                 p8 address_to from = guard - GZIP_SPAN_OUT - residue - 4000;
                 gzip_decode_job run = {0, 0, input + FLOOR_PAGE, stop, from, guard, from, lit, dist, gzip_extra_masks, 0};
                 deflate_decode_span(address_of run);
-                bool same = run.status == 0 && run.out >= guard - 300 && run.out <= guard - 298 &&
+                p8 same = run.status == 0 && run.out >= guard - 300 && run.out <= guard - 298 &&
                             (positive)(run.next - (input + FLOOR_PAGE)) * 8 - run.count == (positive)(run.out - from);
                 for (p8 address_to at = from; same && at < run.out; at++)
                         same = *at == 0x5a;
@@ -218742,7 +218742,7 @@ static fn floor_deflate_codes(void)
                         lit[i] = GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SUBTABLE | (p32)((i * 37) % 4000) << 16 | 0x0400;
                 for (positive i = 0; i < GZIP_OFFSET_CELLS; i++)
                         dist[i] = GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SUBTABLE | (p32)((i * 29) % 3000) << 16 | 0x0700;
-                bool built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
+                p8 built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
                              huffman_lengths(freq + GZIP_MAXLIT, 30, lens + GZIP_MAXLIT, 15);
                 lens[GZIP_MAXLIT + 30] = lens[GZIP_MAXLIT + 31] = 0;
                 built = built && gzip_huffman_cells(lit, lens, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) == 0 &&
@@ -218775,7 +218775,7 @@ static fn floor_deflate_codes(void)
                 {
                         XORSHIFT32(random);
                         positive mode = (trial >> 1) % 4;
-                        bool literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
+                        p8 literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
                         if (literal)
                         {
                                 positive s = (random >> 8) & 255;
@@ -218812,7 +218812,7 @@ static fn floor_deflate_codes(void)
                 positive consumed = (positive)(job.next - next) * 8 - job.count;
                 positive k = 0;
                 while (k < tokens && boundary_out[k] < out) k++;
-                bool same = job.status == 0 && k < tokens && boundary_out[k] == out &&
+                p8 same = job.status == 0 && k < tokens && boundary_out[k] == out &&
                             boundary_bits[k] == consumed && !memory_compare(dst, full + 32768, out) &&
                             ((trial & 1) ? out + 300 >= room : stop - job.next <= 32);
                 check("deflate kernel stops on a token boundary with exactly its bytes and bits", same);
@@ -218826,7 +218826,7 @@ static fn floor_deflate_codes(void)
                 byte_input_open_memory(address_of z->input, packed, bytes, z->input.buf, GZIP_DECODE_IN);
                 memory_copy_apart(z->out - 32768, full, 32768);
                 z->flushed = 32768;
-                bool scalar = true;
+                p8 scalar = true;
                 for (positive i = 0; scalar && i < tokens; i++)
                         scalar = gzip_inflate_token(z) == 0 && z->fill == boundary_out[i] &&
                                  z->input.at * 8 - z->count == boundary_bits[i];
@@ -218874,7 +218874,7 @@ static fn floor_deflate_marked(void)
                         p32 next = a + b; a = b; b = next;
                 }
                 freq[256 + trial % 30] += 100000;
-                bool built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
+                p8 built = huffman_lengths(freq, GZIP_MAXLIT, lens, 15) &&
                              huffman_lengths(freq + GZIP_MAXLIT, 30, lens + GZIP_MAXLIT, 15);
                 lens[GZIP_MAXLIT + 30] = lens[GZIP_MAXLIT + 31] = 0;
                 built = built && gzip_huffman_cells(lit, lens, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) == 0 &&
@@ -218909,7 +218909,7 @@ static fn floor_deflate_marked(void)
                 {
                         XORSHIFT32(random);
                         positive mode = (trial >> 1) % 4;
-                        bool literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
+                        p8 literal = mode == 0 ? (random & 7) != 0 : mode == 1 ? (random & 7) == 0 : (random & 1);
                         if (literal)
                         {
                                 positive s = (random >> 8) & 255;
@@ -218947,7 +218947,7 @@ static fn floor_deflate_marked(void)
                 positive consumed = (positive)(job.next - next) * 8 - job.count;
                 positive k = 0;
                 while (k < tokens && boundary_out[k] < out) k++;
-                bool same = job.status == 0 && k < tokens && boundary_out[k] == out &&
+                p8 same = job.status == 0 && k < tokens && boundary_out[k] == out &&
                             boundary_bits[k] == consumed &&
                             !memory_compare(dst, full + 32768, out * sizeof(p16)) &&
                             ((trial & 1) ? 2 * out + 600 >= 2 * room : stop - job.next <= 32);
@@ -218969,7 +218969,7 @@ typedef struct
         positive pos, full, unpacked;
         positive rep[4];
         p32 state, lc, lp, pb;
-        bool short_input;
+        p8 short_input;
 } floor_lzma_oracle;
 
 static p32 floor_lzma_bit(floor_lzma_oracle address_to o, p16 address_to prob)
@@ -219033,7 +219033,7 @@ static fn floor_lzma_put(floor_lzma_oracle address_to o, p8 byte, p8 address_to 
         *(*out)++ = byte;
 }
 
-static p32 floor_lzma_length(floor_lzma_oracle address_to o, bool repeat, positive ps)
+static p32 floor_lzma_length(floor_lzma_oracle address_to o, p8 repeat, positive ps)
 {
         xz_probability_state address_to m = address_of o->m;
 
@@ -219045,7 +219045,7 @@ static p32 floor_lzma_length(floor_lzma_oracle address_to o, bool repeat, positi
 }
 
 /* One packet of at most room bytes; false for a malformed packet. */
-static bool floor_lzma_packet(floor_lzma_oracle address_to o, p8 address_to address_to out,
+static p8 floor_lzma_packet(floor_lzma_oracle address_to o, p8 address_to address_to out,
                               positive room)
 {
         xz_probability_state address_to m = address_of o->m;
@@ -219216,9 +219216,9 @@ static fn floor_lzma_span(void)
         for (positive trial = 0; trial < 17; trial++)
         {
                 p32 random = 0x57139021u + (p32)trial;
-                bool low = trial == 16;
-                bool far = trial == 14 || low;
-                bool overrun = trial == 15;
+                p8 low = trial == 16;
+                p8 far = trial == 14 || low;
+                p8 overrun = trial == 15;
                 p8 address_to dict = low ? low_dict : guarded;
                 positive first_match_end = 0;
                 positive at = 0;
@@ -219270,7 +219270,7 @@ static fn floor_lzma_span(void)
                         {
                                 positive dist = (random >> 8) % (at < limit ? at : limit) + 1;
                                 positive which = (random >> 6) & 3;
-                                bool repeat = (random & 4) && e->reps[which] + 1 <= (at < limit ? at : limit);
+                                p8 repeat = (random & 4) && e->reps[which] + 1 <= (at < limit ? at : limit);
                                 if (repeat) dist = e->reps[which] + 1;
                                 if (trial < 7 && !repeat) dist = trial + 1;
                                 n = 2 + ((random >> 16) % 272);
@@ -219298,7 +219298,7 @@ static fn floor_lzma_span(void)
                 positive packed = (positive)(e->rc.next - e->chunk);
                 positive total = at;
                 positive goal = overrun ? first_match_end - 1 : total;
-                bool fits = !e->rc.full && packed <= 4 * FLOOR_PAGE && packed > 5;
+                p8 fits = !e->rc.full && packed <= 4 * FLOOR_PAGE && packed > 5;
                 p8 address_to bytes = input + 5 * FLOOR_PAGE - packed;
 
                 check("LZMA differential fixture fits", fits);
@@ -219343,9 +219343,9 @@ static fn floor_lzma_span(void)
                 p8 address_to oracle_out = expect;
                 positive produced = 0;
                 positive spans = 0;
-                bool wrapped = false;
-                bool same = true;
-                bool rejected = false;
+                p8 wrapped = false;
+                p8 same = true;
+                p8 rejected = false;
 
                 while (produced < goal && same)
                 {
@@ -219363,7 +219363,7 @@ static fn floor_lzma_span(void)
 
                         positive left = (positive)(bytes + packed - job.next);
                         p8 address_to from = job.next;
-                        bool padded = left < XZ_PACKET_IN;
+                        p8 padded = left < XZ_PACKET_IN;
 
                         if (padded)
                         {
@@ -219411,7 +219411,7 @@ static fn floor_lzma_span(void)
                                 ;
                         if (job.error)
                         {
-                                bool agrees = oracle.unpacked == want &&
+                                p8 agrees = oracle.unpacked == want &&
                                         !floor_lzma_packet(address_of oracle, address_of oracle_out,
                                                            goal - oracle.unpacked);
 
@@ -219469,7 +219469,7 @@ static fn floor_huffman_heap_down(p32 address_to count, p32 address_to heap, pos
         heap[at] = item;
 }
 
-static bool floor_huffman_heap(p32 address_to freq, positive n, p8 address_to length, positive limit)
+static p8 floor_huffman_heap(p32 address_to freq, positive n, p8 address_to length, positive limit)
 {
         p32 count[576], heap[577];
         b32 dad[576];
@@ -219558,7 +219558,7 @@ static fn floor_huffman_lengths(void)
         static p32 freq[288];
         p8 got[288], want[288];
         p32 random = 0x9e3779b9u;
-        bool same = true;
+        p8 same = true;
         positive widths[] = {1, 2, 3, 19, 30, 32, 256, 286, 288};
 
         for (positive trial = 0; trial < 60000; trial++)
@@ -219597,8 +219597,8 @@ static fn floor_huffman_lengths(void)
                         }
                 }
                 memory_fill(got, 0x5a, sizeof(got));
-                bool r1 = floor_huffman_heap(freq, n, want, limit);
-                bool r2 = huffman_lengths(freq, n, got, limit);
+                p8 r1 = floor_huffman_heap(freq, n, want, limit);
+                p8 r2 = huffman_lengths(freq, n, got, limit);
                 if (r1 != r2 || (r1 && memory_compare(got, want, n)))
                         same = false;
 #undef FLOOR_RANDOM
@@ -219622,7 +219622,7 @@ static fn floor_codebook(void)
                                 freq[(i + rotate) % n] = a;
                                 p32 next = a + b; a = b; b = next;
                         }
-                        bool valid = huffman_lengths(freq, n, length, limit);
+                        p8 valid = huffman_lengths(freq, n, length, limit);
                         positive kraft = 0;
                         for (positive i = 0; i < n; i++)
                         {
@@ -219651,7 +219651,7 @@ static fn floor_deflate_tokens(void)
         p32 lit[GZIP_MAXLIT], dist[GZIP_MAXDIST], count_lit[GZIP_MAXLIT], count_dist[GZIP_MAXDIST];
         p32 want_lit[GZIP_MAXLIT], want_dist[GZIP_MAXDIST];
         p32 random = 0x2545f491u;
-        bool same = true, counted = true;
+        p8 same = true, counted = true;
 
         for (positive trial = 0; trial < 3000; trial++)
         {
@@ -219661,7 +219661,7 @@ static fn floor_deflate_tokens(void)
                 //      Every third block is dense in pairs: the tables the wide body
                 //      makes only pay from 64 pairs, and the short pairs run back to
                 //      back with no literal between them.
-                bool dense = trial % 3 == 0;
+                p8 dense = trial % 3 == 0;
                 for (positive i = 0; i < GZIP_MAXLIT; i++)
                 {
                         positive len = 1 + FLOOR_RANDOM() % 15;
@@ -219862,7 +219862,7 @@ static fn floor_deflate_parse(void)
         static p16 mlen_got[8192 + 16], mlen_want[8192 + 16], mdist_got[8192 + 16], mdist_want[8192 + 16];
         p32 lit_got[288], lit_want[288], dist_got[32], dist_want[32];
         p32 random = 0x7a3c91d5u;
-        bool same = true, anything = false;
+        p8 same = true, anything = false;
         //      The input the walk reads lives against a guard page, its end on even
         //      trials and its start on odd ones, so a read past the last byte or
         //      before the first (a candidate, a window, a sixteen byte compare) is a
@@ -220188,7 +220188,7 @@ static fn floor_deflate_chain(void)
         static const positive starts[8] = {0, 3, 4096, 20000, 32400, 33000, 41000, 64900};
         p32 lit_got[288], lit_want[288], dist_got[32], dist_want[32], fresh_got[10], fresh_want[10];
         p32 random = 0x5d2f1b97u;
-        bool same = true, anything = false;
+        p8 same = true, anything = false;
 
 #define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
         for (positive trial = 0; trial < 189; trial++)
@@ -220337,7 +220337,7 @@ static fn floor_zstd_huffman_cells(void)
         p8 length[256], weight[256];
         p16 want[2048 + 8], got[2048 + 8];
         p32 random = 0x6b43a9b5u;
-        bool same = true;
+        p8 same = true;
 
         for (positive trial = 0; trial < 20000; trial++)
         {
@@ -220387,7 +220387,7 @@ static fn floor_huffman_codes(void)
         p8 length[288];
         p32 got[288], want[288];
         p32 random = 0x85ebca6bu;
-        bool same = true;
+        p8 same = true;
 
         for (positive trial = 0; trial < 20000; trial++)
         {
@@ -220438,7 +220438,7 @@ static fn floor_zstd_fse_cells(void)
         p16 next[64], model_next[64];
         p64 template[64], got[512], want[512];
         p32 random = 0x27d4eb2fu;
-        bool same = true;
+        p8 same = true;
 
         for (positive trial = 0; trial < 20000; trial++)
         {
@@ -220481,7 +220481,7 @@ static fn floor_zstd_huffman_codes(void)
         p8 length[256], weight[256];
         p32 got[256], want[256];
         p32 random = 0x94d049bbu;
-        bool same = true;
+        p8 same = true;
 
         for (positive trial = 0; trial < 20000; trial++)
         {
@@ -220655,7 +220655,7 @@ static fn floor_zstd_sequences_encode_run(void)
         static p8 want[8192];
         p8 address_to pages = floor_pages(4);
         p32 random = 0x3c6ef372u;
-        bool same = true, finished = true, short_ok = true;
+        p8 same = true, finished = true, short_ok = true;
         positive ran = 0, refused = 0;
 
         check("sequence encoder protected mappings", pages != null);
@@ -220672,7 +220672,7 @@ static fn floor_zstd_sequences_encode_run(void)
                 floor_zct address_to ct[3];
                 p64 begin[3];
                 p64 finish[3];
-                bool rle[3];
+                p8 rle[3];
                 positive bit = 0, held = FLOOR_RANDOM() % 8;
                 p64 pending = FLOOR_RANDOM() & (((p64)1 << held) - 1);
 
@@ -220940,7 +220940,7 @@ static fn floor_lzma_walk(void)
         static p32 hash_want[4096], hash_got[4096], son_want[2 * 9001 + 4], son_got[2 * 9001 + 4];
         static xz_found found_want[XZ_MATCH_MAX + 2], found_got[XZ_MATCH_MAX + 2];
         p32 random = 0x2f6e91b5u;
-        bool same = true, anything = false, longs = false;
+        p8 same = true, anything = false, longs = false;
 
         if (!pages)
         {
@@ -221016,7 +221016,7 @@ static fn floor_lzma_walk(void)
                         p32 h = (cur[0] * 0x9e3779b1u ^ cur[1] * 0x85ebca6bu ^ cur[2] * 0xc2b2ae35u ^ cur[3] * 0x27d4eb2fu) >> 20;
                         p32 cur_match = hash_want[h];
                         p32 best = 3 + FLOOR_RANDOM() % 3;
-                        bool find = FLOOR_RANDOM() % 4 != 0;
+                        p8 find = FLOOR_RANDOM() % 4 != 0;
 
                         if (best >= limit)
                                 best = limit - 1;
@@ -221136,7 +221136,7 @@ static fn floor_lzma_prices(void)
         static xz_found matches[16];
         p8 address_to region = floor_pages(42);
         p32 random = 0x7f4a7c15u;
-        bool same = true, extended = false, far = false;
+        p8 same = true, extended = false, far = false;
         positive bodies = 1;
 
         if (!region)
@@ -221332,7 +221332,7 @@ static fn compression_huffman_work(void)
         for (positive i = 0; i < COMPRESSION_BENCH_ROUNDS; i++)
                 compression_sink ^= compression_huffman_call(compression_output,compression_input,COMPRESSION_BENCH_SIZE,compression_codes);
 }
-static fn compression_range_work(bool assembly)
+static fn compression_range_work(p8 assembly)
 {
         for (positive trial = 0; trial < 32; trial++)
         {
@@ -229294,13 +229294,13 @@ b32 main(void)
 #define KERNEL(code, vgprs) HEAD code BLOCK(vgprs)
 
 //      The assembler stops, with this line.
-static bool refuses(string_address source, string_address message)
+static p8 refuses(string_address source, string_address message)
 {
         return !gpuasm_assemble("bad.asm", source) && string_equals(gpuasm_message, message);
 }
 
 //      The assembler makes this text.
-static bool makes(string_address source, string_address text)
+static p8 makes(string_address source, string_address text)
 {
         return gpuasm_assemble("bad.asm", source) && string_equals((string_address)gpuasm_output, text);
 }

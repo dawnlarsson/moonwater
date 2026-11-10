@@ -89,7 +89,7 @@ static fn link_ago(p64 then, p8 address_to text)
         line: "link group NAME" followed by a word that is not "allow" and
         not "-" (the secret on standard input, which is not in the script).
 */
-static bool link_script_names_secret(string_address script,
+static p8 link_script_names_secret(string_address script,
                                      string_address namespace)
 {
         positive length = string_length(namespace);
@@ -185,7 +185,7 @@ static b32 link_status(void)
                 {
                         struct waterlink_group_keys keys;
                         p8 grants[96];
-                        bool shown;
+                        p8 shown;
 
                         if (groups.record[g].flags & LINK_GROUP_ONCE)
                         {
@@ -381,7 +381,7 @@ static b32 link_add_locked(string_address name, string_address text,
         {
                 p8 scalar[32] = {1};
                 p8 shared[32];
-                bool valid = crypto_x25519(shared, scalar, peer.key);
+                p8 valid = crypto_x25519(shared, scalar, peer.key);
 
                 crypto_forget(scalar, sizeof scalar);
                 crypto_forget(shared, sizeof shared);
@@ -390,7 +390,7 @@ static b32 link_add_locked(string_address name, string_address text,
                                            text);
         }
 
-        bool own = link_identity(address_of me, false) >= 0 &&
+        p8 own = link_identity(address_of me, false) >= 0 &&
                    crypto_same(me.public, peer.key, 32);
 
         crypto_forget(address_of me, sizeof me);
@@ -479,7 +479,7 @@ static b32 link_remove_locked(string_address name)
         return 0;
 }
 
-static b32 link_grant_locked(string_address name, bool allow,
+static b32 link_grant_locked(string_address name, p8 allow,
                              string_address address_to words, positive count)
 {
         link_peers peers;
@@ -522,7 +522,7 @@ static b32 link_grant_locked(string_address name, bool allow,
         process's child, so a terminal closing takes nothing with it. The
         machine process keeps its own child and restarts it if it dies.
 */
-static fn link_serve_start(bool detached, bipolar ready)
+static fn link_serve_start(p8 detached, bipolar ready)
 {
         p8 digits[12];
         string_address words[] = {"moonwater", "link", "serve", (string_address)digits, null};
@@ -553,7 +553,7 @@ static fn link_serve_start(bool detached, bipolar ready)
         lock again. A holder that cannot be opened as a pidfd is waited for a
         turn at a time, as before. Three seconds, then refused.
 */
-static bool link_wait_stopped(void)
+static p8 link_wait_stopped(void)
 {
         p64 until = system_clock_ns(HOST_CLOCK_BOOTTIME) + 3000000000ull;
 
@@ -587,7 +587,7 @@ static bool link_wait_stopped(void)
         ends without the byte is a listener that did not start. Three seconds,
         then the same question as before: is the lock held by someone?
 */
-static bool link_wait_started(bipolar ready)
+static p8 link_wait_started(bipolar ready)
 {
         timespec limit = {3, 0};
         p8 byte;
@@ -598,7 +598,7 @@ static bool link_wait_started(bipolar ready)
         return host_lock_owner(LINK_LOCK_PATH) > 0;
 }
 
-static b32 link_switch(bool on, bool say)
+static b32 link_switch(p8 on, p8 say)
 {
         struct waterlink_identity me;
         p8 key[48];
@@ -634,7 +634,7 @@ static b32 link_switch(bool on, bool say)
         if (host_lock_owner(LINK_LOCK_PATH) <= 0)
         {
                 b32 ends[2];
-                bool started;
+                p8 started;
                 bipolar piped = system_pipe(ends, 0);
 
                 //      A pipe that cannot be made is the command's failure,
@@ -662,7 +662,7 @@ static b32 link_switch(bool on, bool say)
 
 //      Whether the switch says on: the machine process starts the listener
 //      from it, and a person's `link on` or Settings switch is what sets it.
-static bool link_switch_is_on(void)
+static p8 link_switch_is_on(void)
 {
         p8 word[16];
 
@@ -671,7 +671,7 @@ static bool link_switch_is_on(void)
 }
 
 static p32 link_grants_of(string_address address_to words, positive count,
-                          bool address_to good)
+                          p8 address_to good)
 {
         p32 may = 0;
 
@@ -720,9 +720,9 @@ static b32 link_group_join(string_address address_to words, positive count)
         struct link_group_record address_to record = null;
         p8 made[256];
         p8 typed[sizeof made + 1];
-        bool generated = false;
-        bool granted = false;
-        bool good;
+        p8 generated = false;
+        p8 granted = false;
+        p8 good;
         p32 may = 0;
         p32 taken = 0;
         p32 mark = 0;
@@ -731,7 +731,7 @@ static b32 link_group_join(string_address address_to words, positive count)
         p8 grants[96];
         bipolar lock;
         p8 fresh[32];
-        bool derived;
+        p8 derived;
 
         scope_exit(crypto_forget(typed, sizeof typed));
         scope_exit(crypto_forget(fresh, sizeof fresh));
@@ -957,12 +957,12 @@ static b32 link_group_join(string_address address_to words, positive count)
 }
 
 // group leave NAMESPACE [forget]: stop announcing it, and maybe its machines too.
-static b32 link_group_leave(string_address namespace, bool forget)
+static b32 link_group_leave(string_address namespace, p8 forget)
 {
         link_groups groups;
         struct waterlink_group_keys keys;
-        bool found = false;
-        bool saved;
+        p8 found = false;
+        p8 saved;
         bipolar lock = link_peers_lock();
 
         if (lock < 0)
@@ -999,8 +999,8 @@ static b32 link_group_leave(string_address namespace, bool forget)
                 link_peers peers;
                 bipolar held = link_peers_lock();
                 positive dropped = 0;
-                bool read = held >= 0 && link_peers_for_change(address_of peers);
-                bool wrote = false;
+                p8 read = held >= 0 && link_peers_for_change(address_of peers);
+                p8 wrote = false;
 
                 for (positive at = 0; read && at < peers.count; at++)
                         if (peers.peer[at].group == keys.mark)
@@ -1061,7 +1061,7 @@ static const char link_code_alphabet[] = "0123456789abcdefghjkmnpqrstvwxyz";
 #define LINK_PAIR_MAY (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | \
                        WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
 
-static bool link_code_make(p8 address_to code)
+static p8 link_code_make(p8 address_to code)
 {
         p32 bits;
 
@@ -1078,7 +1078,7 @@ static bool link_code_make(p8 address_to code)
         look-alikes read as what they stand for. False unless it comes to
         exactly six symbols of the alphabet, which is also how a word after a
         machine's name is told from a command. */
-static bool link_code_clean(string_address text, p8 address_to code)
+static p8 link_code_clean(string_address text, p8 address_to code)
 {
         positive used = 0;
 
@@ -1221,7 +1221,7 @@ static fn link_pair_close(p32 mark)
         and not on for good. */
 typedef struct
 {
-        bool running;
+        p8 running;
         p8 word[16];
 } link_before;
 
@@ -1283,10 +1283,10 @@ static fn link_pair_release(void)
 }
 
 //      Whether the listener has closed this namespace's code on a machine.
-static bool link_pair_closed(string_address namespace)
+static p8 link_pair_closed(string_address namespace)
 {
         link_groups groups;
-        bool closed = false;
+        p8 closed = false;
 
         link_groups_load(address_of groups);
         for (positive at = 0; at < groups.count; at++)
@@ -1310,7 +1310,7 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         p64 until = link_boot_seconds() + link_pair_seconds() + 2;
         bipolar signals = link_signals_open(false);
         b32 stopped = 0;
-        bool closed = false;
+        p8 closed = false;
 
         scope_exit(if (signals >= 0) system_close(signals));
         scope_exit(link_pair_release());
@@ -1466,7 +1466,7 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
 }
 
 // Whether a name is a machine this one is linked with.
-static bool link_known(string_address name)
+static p8 link_known(string_address name)
 {
         link_peers peers;
 
@@ -1487,7 +1487,7 @@ static b32 link_port_verb(string_address word)
         p8 text[16];
         bipolar port;
         bipolar failed;
-        bool running = host_lock_owner(LINK_LOCK_PATH) > 0;
+        p8 running = host_lock_owner(LINK_LOCK_PATH) > 0;
         positive before = (positive)link_port();
 
         if (word && !string_equals(word, "auto"))
@@ -1551,7 +1551,7 @@ static string_address link_modem_why(void)
         return null;
 }
 
-static bool link_modem_ready(void)
+static p8 link_modem_ready(void)
 {
         return !link_modem_why();
 }
@@ -1560,7 +1560,7 @@ static bool link_modem_ready(void)
         The transport is the modem when /root/link.transport says so and the
         modem is ready: what is said is what is used.
 */
-static bool link_modem_in_use(void)
+static p8 link_modem_in_use(void)
 {
         p8 kept[16];
 
@@ -1668,7 +1668,7 @@ static const struct
 //      The code as it is printed, abc-def: a word of six letters is as likely
 //      to be a command (whoami, reboot) as a code, and a misspelt machine
 //      would otherwise start a five minute wait.
-static bool link_code_shaped(string_address word)
+static p8 link_code_shaped(string_address word)
 {
         p8 code[LINK_CODE_LENGTH + 1];
 
@@ -1840,7 +1840,7 @@ static b32 link_main(string_address address_to arguments, positive count)
                                                  "remove", "allow", "deny", "group"};
         string_address verb = count > 2 ? arguments[2] : null;
         positive previous[4];
-        bool ignored = false;
+        p8 ignored = false;
         b32 answer;
 
         for (positive at = 0; verb && at < array_count(changes); at++)
