@@ -539,7 +539,7 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
 #if (defined(MOONWATER_ASSEMBLY) || defined(MODEM_TONE_LINKED)) && !defined(MODEM_NO_TONE_ASM) && !defined(KERNEL_MODE) && \
         ((MODEM_TONES) == 8 || (MODEM_TONES) == 16)
 #define MODEM_TONE_ASM 1
-void modem_tone_scan(const b32 *rows, sized sym, sized tones, const b16 *pcm, sized n, p8 *best);
+void modem_tone_scan(const b32 *rows, positive sym, positive tones, const b16 *pcm, positive n, p8 *best);
 #endif
 
 #ifdef MODEM_TONE_ASM
@@ -702,9 +702,9 @@ static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
         /* Every phase is searched, and the frame that ends first in the capture is the one taken. A capture can hold frames
            at different phases (two sends recorded one after another), so taking the first phase that has a frame would pass
            over a frame that comes earlier in time at another phase. A refused candidate at any phase is passed over, not
-           the end of the search. */
+           the frame_end of the search. */
         for (off = 0; off < MODEM_SYM; off++) {
-                sized nb = 0, at, endbit = 0, end, cut_bit = 0;
+                sized nb = 0, at, endbit = 0, frame_end, cut_bit = 0;
                 p8 cand[MODEM_PAYLOAD_MAX];
                 p32 cand_seq = 0;
                 int r;
@@ -726,10 +726,10 @@ static int modem_decode_core(const b16 *pcm, sized n, const modem_mac *mac,
                         }
                         continue;
                 }
-                end = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
-                if (!found || end < pick_end) {
+                frame_end = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
+                if (!found || frame_end < pick_end) {
                         found = 1;
-                        pick_end = end;
+                        pick_end = frame_end;
                         pick_len = (sized)r;
                         pick_seq = cand_seq;
                         memory_copy(pick, cand, pick_len);
@@ -1127,7 +1127,7 @@ static bipolar modem_stream_choose(bipolar in, bipolar *src, p8 *mark, positive 
                                            FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (modem_zip_fd < 0)
                 return modem_zip_fd;
-        if (gzip_stream(in, modem_zip_fd, 0, null) != 0)
+        if (gzip_stream(in, modem_zip_fd, 0, 0) != 0)
                 return -EIO;
         zipped = system_seek(modem_zip_fd, 0, SEEK_END);
         if (zipped < 0 || system_seek(modem_zip_fd, 0, SEEK_SET) < 0)

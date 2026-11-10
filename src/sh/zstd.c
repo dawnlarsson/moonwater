@@ -1,3 +1,5 @@
+#ifndef MOONWATER_ZSTD_C
+#define MOONWATER_ZSTD_C
 /*
         zstd -- RFC 8878 decode and encode.
 
@@ -8293,3 +8295,4 @@ static b32 file_zstd(void)
 }
 
 #endif /* ZSTD_CORE_ONLY */
+#endif /* MOONWATER_ZSTD_C */
