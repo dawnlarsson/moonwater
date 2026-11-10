@@ -274,6 +274,8 @@ cover('direct_benchmark', 'test/checks.c#BENCH_translate', 'memory_translate',
 cover('direct_benchmark', 'test/checks.c#BENCH_translate_rect', 'memory_translate_u32_rect',
       'paired former-C/assembly timing over terminal cells at 1080p, 4K and 8K '
       'and a wide strip, from atlas rows into frame rows, both x86-64 bodies')
+cover('correctness_only', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_rect_baseline',
+      'the baseline body writes the fast path\'s words on the benchmark glyphs; the rows that time the blend are the direct benchmarks')
 cover('direct_benchmark', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_rect',
       'paired former-C/assembly timing over glyphs of UI text and a 4K heading '
       'laid on a known ground, both x86-64 bodies')
@@ -585,7 +587,7 @@ file_load file_new file_read file_valid file_write memory memory_copy_end
 memory_copy_apart_end memory_exchange_apart memory_frob memory_free memory_search
 path_basename positive_digits
 memory_fill_32 memory_fill_64
-positive_into_string positive_to_base_field program_argument_list
+positive_into_string positive_into_string_2_2 positive_into_string_9_12 positive_to_base_field program_argument_list
 program_arguments_own
 program_arguments_use program_environment
 string_append string_bipolar string_copy_max

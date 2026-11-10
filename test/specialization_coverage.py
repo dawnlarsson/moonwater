@@ -358,6 +358,11 @@ cover('folds_already', 'trans_b', 'gemm_f32',
       'a trainer passes its shapes, trans_b and beta as constants of the model, '
       'but what a literal could settle is a branch a K block: the blocks, the '
       'packing and the tiles are the work, and run the sizes they are given')
+# Asm-only bodies with no C declaration: the size-class entries of positive_into_string (a caller that knows
+# the size class calls one, and it has no parameter a C caller could fold) and the baseline body of the blend
+# (the fast path's contract, called with the rectangle's own sizes).
+cover('nothing_to_fold', None, 'positive_into_string_2_2 positive_into_string_9_12 memory_blend_u32_rect_baseline',
+      'asm-only: no C declaration and the parameters are run-time sizes of their callers')
 cover('nothing_to_fold', None, 'matrix_engine_f32',
       'a private core with no C declaration: it takes a job record gemm_f32 '
       'builds, so no call site can hand it a literal')

@@ -23096,6 +23096,10 @@ static positive into_exacts[] = {
 
 #define INTO_EXACT_COUNT (sizeof(into_exacts) / sizeof(into_exacts[0]))
 
+/* The size-class entries are asm-only (lib.c has no C declaration for them): the checks call them directly. */
+positive positive_into_string_2_2(p8 address_to into, positive value);
+positive positive_into_string_9_12(p8 address_to into, positive value);
+
 fn check_into_one(positive value, positive offset, p8 guard)
 {
         p8 address_to got;
@@ -23135,6 +23139,35 @@ fn check_into_one(positive value, positive offset, p8 guard)
                    got, want, want_length + 1);
 
         same_guarded("positive_into_string", got, got_length, guard, 1);
+
+        // The size-class entries: each is the generic routine for its class, so it is checked against the same
+        // reference on the values of its class only (a caller that knows the class is the only one that may call it).
+        if (value >= 10 && value <= 99)
+        {
+                reference_fill(span_room, guard, sizeof(span_room));
+                reference_fill(field, guard, sizeof(field));
+                got = span_subject(offset);
+                want = (p8 address_to)aligned_at(field) + SPAN_HEAD + offset;
+                got_length = positive_into_string_2_2(got, value);
+                want_length = reference_into(want, value);
+                want[want_length] = end;
+                same("positive_into_string_2_2", "how many", got_length, want_length);
+                same_bytes("positive_into_string_2_2", "the string", got, want, want_length + 1);
+                same_guarded("positive_into_string_2_2", got, got_length, guard, 1);
+        }
+        if (value >= 100000000 && value <= 999999999999)
+        {
+                reference_fill(span_room, guard, sizeof(span_room));
+                reference_fill(field, guard, sizeof(field));
+                got = span_subject(offset);
+                want = (p8 address_to)aligned_at(field) + SPAN_HEAD + offset;
+                got_length = positive_into_string_9_12(got, value);
+                want_length = reference_into(want, value);
+                want[want_length] = end;
+                same("positive_into_string_9_12", "how many", got_length, want_length);
+                same_bytes("positive_into_string_9_12", "the string", got, want, want_length + 1);
+                same_guarded("positive_into_string_9_12", got, got_length, guard, 1);
+        }
 }
 
 fn check_bipolar_into_one(bipolar value, positive offset, p8 guard)
@@ -116197,6 +116230,48 @@ static positive blend_reference(p32 address_to into, positive stride, const p8 a
         return width * height;
 }
 
+/*
+        memory_blend_u32_rect_baseline against the reference on random glyph rows: the answer (the index of the
+        first pixel the run stops at, or the whole rectangle) and every word written must match, on widths and
+        heights to 17 and 5 with gaps in both strides.
+*/
+static fn check_blend_baseline(void)
+{
+        static p32 table[513], want[64 * 16], into[64 * 16], seed[64 * 16];
+        static p8 from[64 * 16];
+        p64 state = 0x9e3779b97f4a7c15ull;
+        bool fine = true;
+
+        for (p32 i = 0; i < 256; i++)
+        {
+                XORSHIFT64(state);
+                table[i] = (p32)state & 0xffffff;
+                for (p32 k = 0; k < 4; k++)
+                        ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+        }
+        table[512] = 0x203040;
+        for (positive trial = 0; trial < 300; trial++)
+        {
+                positive width = trial % 17 + 1, height = trial % 5 + 1, stride = width + trial % 4;
+                positive from_stride = width + (trial / 4) % 3;
+                positive span = (height - 1) * stride + width;
+
+                for (positive i = 0; i < span; i++)
+                {
+                        XORSHIFT64(state);
+                        from[i] = state & 1 ? 0 : (p8)(state >> 8);
+                        seed[i] = state & 4 ? (p32)0x203040 : (p32)(state >> 20) | (p32)0xff000000;
+                        into[i] = seed[i];
+                        want[i] = seed[i];
+                }
+                positive expected = blend_reference(want, stride, from, from_stride, width, height, table);
+                positive answered = memory_blend_u32_rect_baseline(into, stride, from, from_stride, width, height, table);
+
+                fine = fine && answered == expected && !memory_compare(into, want, span * 4);
+        }
+        check("blend: the baseline body answers and writes what the reference does", fine);
+}
+
 static fn check_blend()
 {
         static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
@@ -116259,6 +116334,9 @@ static fn check_blend()
                                         fine = fine && answered == expected && !memory_compare(to, want, span * 4);
                                 }
                 check("blend: the ground's pixels its tones, the first other one answered, nothing after touched", fine);
+#ifdef CHECK_verify
+        check_blend_baseline(); /* memory_blend_u32_rect_baseline: the asm baseline body against the reference */
+#endif
 #if X64
         }
         cpu_has_avx512_vbmi = planes;
@@ -201204,6 +201282,11 @@ b32 main(void)
                         if (memory_blend_u32_rect(frame, 3840, glyph, 256, width, height, table) !=
                                 former_blend(frame_c, 3840, glyph, 256, width, height, table) ||
                             memory_compare(frame, frame_c, sizeof(frame)))
+                                return 1;
+                        /* memory_blend_u32_rect_baseline: the baseline body writes the fast path's words on these glyphs */
+                        memory_fill_u32(frame_c, sizeof(frame_c) / 4, 0x203040);
+                        memory_blend_u32_rect_baseline(frame_c, 3840, glyph, 256, width, height, table);
+                        if (memory_compare(frame, frame_c, sizeof(frame)))
                                 return 1;
                         BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
                         string_format(log, "memory_blend_u32_rect %p by %p%s: paired median ASM/C %p.", width, height,
