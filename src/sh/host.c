@@ -17033,17 +17033,21 @@ static bool usb_list_disk(string_address directory, string_address name, address
 
         (void)directory;
         (void)context;
+        text[0] = 0;
         if (host_starts(name, "loop") || host_starts(name, "ram") || host_starts(name, "zram") ||
             host_starts(name, "dm-") || host_starts(name, "md") || host_starts(name, "sr") || host_starts(name, "fd"))
                 return true;
+        // An eMMC's boot areas are block devices of their own, and no drive a person keeps.
+        if (host_starts(name, "mmcblk") && string_find(name, "boot"))
+                return true;
+        // A disk on a USB bus is listed as the USB device it is. Every other disk is listed, Thunderbolt and unreadable ones too.
         if (!host_join(sysfs, sizeof(sysfs), "/sys/class/block/", name) ||
-            file_link_text(sysfs, link, sizeof(link)) <= 0 || host_link_external(link))
+            (file_link_text(sysfs, link, sizeof(link)) > 0 && string_find(link, "/usb")))
                 return true;
-        if (!host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") ||
-            host_read_kernel(sysfs, text, sizeof(text)) <= 0)
-                return true;
-        for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
-                sectors = sectors * 10 + (unsigned long long)(text[at] - '0');
+        if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") &&
+            host_read_kernel(sysfs, text, sizeof(text)) > 0)
+                for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
+                        sectors = sectors * 10 + (unsigned long long)(text[at] - '0');
         host_say(log, "  %s drive %p MB allowed\n", name, (positive)(sectors * 512 / 1000000ull));
         return true;
 }
