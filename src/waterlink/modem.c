@@ -34,9 +34,14 @@
 	The tests are test/modem.c, run by the modem lane (sh test/run modem).
 */
 
+/* The box builds this freestanding (-ffreestanding -nostdlib): the compiler's own stddef.h and stdint.h are there, but
+   string.h is not, and memcpy and memset are the kernel library's, declared in lib.c ahead of any file that includes
+   this one. A hosted build (the test, the receiver in tools/) gets string.h as before. */
 #include <stddef.h>
 #include <stdint.h>
+#if __STDC_HOSTED__
 #include <string.h>
+#endif
 
 /* ---- configuration ----------------------------------------------------- */
 
