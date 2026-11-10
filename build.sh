@@ -214,6 +214,7 @@ arch_image() {
 #       mixed in any order: sh build.sh --run desktop.
 #
 host=${MOONWATER_BUILD_HOST:-}
+host_given=0
 #
 #       One build directory per source tree and architecture, not one per
 #       machine. The suffix is a checksum of this tree's own path, so the same
@@ -358,10 +359,11 @@ while [ "$remaining" -gt 0 ]; do
         --host)
                 [ "$remaining" -gt 0 ] || die "--host wants a machine to build on"
                 host=$1
+                host_given=1
                 shift
                 remaining=$((remaining - 1))
                 ;;
-        --host=*) host=${argument#--host=} ;;
+        --host=*) host=${argument#--host=}; host_given=1 ;;
         --arch)
                 [ "$remaining" -gt 0 ] || die "--arch wants x64, arm64 or riscv64"
                 arch_asked=$(arch_name "$1") || die "unknown architecture $1 -- x64, arm64 or riscv64"
@@ -400,6 +402,9 @@ fi
 case $host in
 -* | *[[:space:][:cntrl:]]*) die "not a machine to build on: $host" ;;
 esac
+#       --host with nothing after it names no machine, and must not fall through
+#       to the Lima VM the way an unnamed build does.
+[ "$host_given" = 0 ] || [ -n "$host" ] || die "--host wants a machine to build on"
 
 #       Which architecture.
 #
@@ -522,8 +527,11 @@ exec "$@"'
         # remote cleans itself, the same way it builds.
         if [ "$do_clean" -eq 1 ]; then
                 say "Cleaning $host:$remote"
+                #       A directory that never had a tree (an architecture not
+                #       built yet, or the stage made just now) has nothing to
+                #       clean, and "sh build.sh" is not in it to run.
                 # shellcheck disable=SC2029
-                ssh -n "$host" "$(remote_command sudo sh build.sh --clean)" ||
+                ssh -n "$host" "$(remote_command sh -c 'if [ -f build.sh ]; then exec sudo sh build.sh --clean; fi')" ||
                         die "cleaning failed on $host"
                 return 0
         fi
@@ -542,7 +550,19 @@ exec "$@"'
         # The kernel source, its artifacts and the built filesystem stay on
         # the build host: they are large, and none of them belong to this
         # checkout. linux/ is the upstream tree, not part of this repository.
-        rsync -az --delete --no-perms ${lima_ssh:+-e "ssh -F $lima_ssh"} \
+        #       rsync splits its -e command at every blank and reads no quotes
+        #       (openrsync: a home such as /Users/Jane Doe breaks it), so Lima's
+        #       ssh settings are reached through a link in a fresh directory, and
+        #       the link's path has no blank in it. The link goes once rsync has.
+        rsync_link=
+        rsync_rsh=
+        if [ -n "$lima_ssh" ]; then
+                rsync_link=$(mktemp -d) && ln -s "$lima_ssh" "$rsync_link/ssh.config" ||
+                        die "could not link the Lima ssh settings"
+                rsync_rsh="ssh -F $rsync_link/ssh.config"
+        fi
+        rsync_status=0
+        rsync -az --delete --no-perms ${rsync_rsh:+-e "$rsync_rsh"} \
                 --exclude '/.moonwater-stage-v1' \
                 --exclude '.git' \
                 --exclude '.claude' \
@@ -550,7 +570,12 @@ exec "$@"'
                 --exclude 'artifacts' \
                 --exclude 'fs' \
                 --exclude 'dist' \
-                ./ "$host:$remote_target" || die "copying the tree failed"
+                ./ "$host:$remote_target" || rsync_status=$?
+        if [ -n "$rsync_link" ]; then
+                rm -f "$rsync_link/ssh.config"
+                rmdir "$rsync_link"
+        fi
+        [ "$rsync_status" = 0 ] || die "copying the tree failed"
 
         # The architecture travels as --arch rather than as a profile, which
         # would replace the default set rather than swap its arch/ member.
