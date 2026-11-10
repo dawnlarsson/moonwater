@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d volte, %4$d min fa)
 notices_open	c9cf	Apri gli avvisi di sistema
 settings_already_joined	71fb	già connesso a %s
+settings_already_set	0053	già impostato
 settings_any_text	89dc	un comando qualsiasi, come le parole dopo moonwater: il verbo e i suoi argomenti
 settings_asks_first	e9bd	chiede prima
 settings_badge_error	9cf1	Errore

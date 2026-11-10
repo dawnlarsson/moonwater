@@ -72,6 +72,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דקות)
 notices_open	c9cf	פתיחת הודעות המערכת
 settings_already_joined	71fb	כבר מחובר אל %s
+settings_already_set	0053	כבר מוגדר
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
 settings_asks_first	e9bd	ישאל קודם
 settings_badge_error	9cf1	שגיאה

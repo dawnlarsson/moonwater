@@ -3763,26 +3763,42 @@ static fn settings_output_apply(int row, const char address_to label)
         if (which->output == SETTINGS_OUT_SCREEN)
         {
                 unsigned int number[WINDOWS_OUTPUTS] = {0};
+                int screen;
 
                 windows_screen_numbers(table, number);
-                settings.map.display = settings_map_numbered(number, settings_map_count(), (unsigned int)at + 1);
+                screen = settings_map_numbered(number, settings_map_count(), (unsigned int)at + 1);
+                if (screen == chosen)
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
+                        return;
+                }
+                settings.map.display = screen;
                 ui_page_redraw(&settings.page);
                 return;
         }
         if (chosen < 0)
+        {
+                settings_say((string_address)WORDS(settings_no_screen));
                 return;
+        }
         length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
         if (which->output == SETTINGS_OUT_TURN)
         {
                 if (settings_turns[at].degrees == (int)table->output_turn[chosen])
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
                         return;
+                }
                 length = settings_map_add(value, sizeof(value), length, " rotation ");
                 settings_map_number(value, sizeof(value), length, settings_turns[at].degrees);
         }
         else if (which->output == SETTINGS_OUT_SCALE && at < (int)(sizeof(settings_scales) / sizeof(settings_scales[0])))
         {
                 if (settings_scales[at] == table->output_asked_scale[chosen])
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
                         return;
+                }
                 length = settings_map_add(value, sizeof(value), length, " scale ");
                 settings_map_number(value, sizeof(value), length, (long)settings_scales[at]);
         }
@@ -3791,7 +3807,10 @@ static fn settings_output_apply(int row, const char address_to label)
                 unsigned int hz = table->output_hz[chosen][at];
 
                 if (hz == table->output_now[chosen])
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
                         return;
+                }
                 length = settings_map_add(value, sizeof(value), length, " refresh ");
                 if (at == 0)
                         settings_map_add(value, sizeof(value), length, "preferred");
@@ -3856,7 +3875,7 @@ static fn settings_menu_open(int row)
         ui_page_redraw(&settings.page);
 }
 
-// The item's word (as the row has it) set, and the menu closed; a choice the row has already sends nothing.
+// The item's word (as the row has it) set, and the menu closed; a choice the row already shows sends nothing, and says so.
 static fn settings_menu_apply(int at)
 {
         char word[SETTINGS_VALUE];
@@ -3878,6 +3897,8 @@ static fn settings_menu_apply(int at)
                 settings_word_of(row, word, value, sizeof(value));
                 settings_change(row, value);
         }
+        else
+                settings_say((string_address)WORDS(settings_already_set));
 }
 
 /*
@@ -4047,7 +4068,13 @@ static fn settings_activate(int row, int way)
                         settings_run(row, "");
                 return;
         }
-        if (!which->output && (settings.state[row] == SETTINGS_ABSENT || settings.state[row] == SETTINGS_UNREAD))
+        // A row the machine has none of takes no choice: its status says so, where a press on it would otherwise look dead.
+        if (!which->output && settings.state[row] == SETTINGS_ABSENT)
+        {
+                settings_say((string_address)WORDS(settings_not_here));
+                return;
+        }
+        if (!which->output && settings.state[row] == SETTINGS_UNREAD)
                 return;
 
         switch (which->kind)

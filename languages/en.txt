@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d times, %4$d min ago)
 notices_open	c9cf	Open System notices
 settings_already_joined	71fb	already joined to %s
+settings_already_set	0053	already set
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first
 settings_badge_error	9cf1	Error

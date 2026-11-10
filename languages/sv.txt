@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d gånger, för %4$d min sedan)
 notices_open	c9cf	Öppna systemmeddelanden
 settings_already_joined	71fb	redan ansluten till %s
+settings_already_set	0053	redan inställd
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
 settings_asks_first	e9bd	frågar först
 settings_badge_error	9cf1	Fel

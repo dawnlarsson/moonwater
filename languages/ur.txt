@@ -72,6 +72,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d منٹ پہلے)
 notices_open	c9cf	سسٹم کی اطلاعات کھولیں
 settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
+settings_already_set	0053	پہلے سے مقرر ہے
 settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس
 settings_asks_first	e9bd	پہلے پوچھتا ہے
 settings_badge_error	9cf1	خرابی

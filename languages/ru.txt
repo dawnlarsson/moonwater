@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d раз, %4$d мин назад)
 notices_open	c9cf	Открыть системные уведомления
 settings_already_joined	71fb	уже подключено к %s
+settings_already_set	0053	уже установлено
 settings_any_text	89dc	любая команда, как слова после moonwater: её глагол, затем аргументы
 settings_asks_first	e9bd	сначала спросит
 settings_badge_error	9cf1	Ошибка

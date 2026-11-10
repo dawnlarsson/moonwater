@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d kez, %4$d dk önce)
 notices_open	c9cf	Sistem bildirimlerini aç
 settings_already_joined	71fb	%s ağına zaten bağlı
+settings_already_set	0053	zaten ayarlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
 settings_asks_first	e9bd	önce sorar
 settings_badge_error	9cf1	Hata

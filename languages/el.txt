@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d φορές, πριν %4$d λεπτά)
 notices_open	c9cf	Άνοιγμα ειδοποιήσεων συστήματος
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
+settings_already_set	0053	ήδη ορισμένο
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα
 settings_badge_error	9cf1	Σφάλμα

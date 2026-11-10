@@ -72,6 +72,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d دقیقه پیش)
 notices_open	c9cf	باز کردن اعلان‌های سیستم
 settings_already_joined	71fb	از قبل به %s متصل است
+settings_already_set	0053	از قبل تنظیم شده است
 settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
 settings_asks_first	e9bd	ابتدا می‌پرسد
 settings_badge_error	9cf1	خطا

@@ -72,6 +72,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d مرة، قبل %4$d دقيقة)
 notices_open	c9cf	فتح إشعارات النظام
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
+settings_already_set	0053	معيّن بالفعل
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
 settings_asks_first	e9bd	يسأل أولا
 settings_badge_error	9cf1	خطأ

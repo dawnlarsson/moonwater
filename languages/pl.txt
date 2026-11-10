@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d razy, %4$d min temu)
 notices_open	c9cf	Otwórz powiadomienia systemowe
 settings_already_joined	71fb	już połączono z %s
+settings_already_set	0053	już ustawione
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
 settings_asks_first	e9bd	pyta najpierw
 settings_badge_error	9cf1	Błąd

@@ -71,6 +71,7 @@ notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d keer, %4$d min geleden)
 notices_open	c9cf	Systeemmeldingen openen
 settings_already_joined	71fb	al verbonden met %s
+settings_already_set	0053	al ingesteld
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst
 settings_badge_error	9cf1	Fout
