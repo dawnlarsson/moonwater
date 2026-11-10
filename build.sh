@@ -542,7 +542,7 @@ exec "$@"'
         # The kernel source, its artifacts and the built filesystem stay on
         # the build host: they are large, and none of them belong to this
         # checkout. linux/ is the upstream tree, not part of this repository.
-        rsync -az --delete --no-perms \
+        rsync -az --delete --no-perms ${lima_ssh:+-e "ssh -F $lima_ssh"} \
                 --exclude '/.moonwater-stage-v1' \
                 --exclude '.git' \
                 --exclude '.claude' \
@@ -712,6 +712,23 @@ build_local() {
 sensitive filesystem, and this is $(uname). Name a machine that has them with
 --host, or set MOONWATER_BUILD_HOST."
 }
+
+#
+#       A Mac with its Lima VM running builds in that VM when no machine was
+#       named: the kernel wants Linux and a case-sensitive disk, and the VM
+#       has both. Lima's own ssh settings are used, and ~/.ssh is left alone.
+#       MOONWATER_NO_LIMA=1 keeps the refusal below.
+#
+lima_ssh=
+if [ -z "$host" ] && [ "$(uname -s)" = Darwin ] && [ -z "${MOONWATER_NO_LIMA:-}" ] &&
+        command -v limactl > /dev/null 2>&1 && [ -f "$HOME/.lima/default/ssh.config" ] &&
+        limactl list --format '{{.Name}} {{.Status}}' 2> /dev/null | grep -qx 'default Running'; then
+        lima_ssh="$HOME/.lima/default/ssh.config"
+        host=lima-default
+fi
+if [ -n "$lima_ssh" ]; then
+        ssh() { command ssh -F "$lima_ssh" "$@"; }
+fi
 
 #
 #       Removing what a build produced.
