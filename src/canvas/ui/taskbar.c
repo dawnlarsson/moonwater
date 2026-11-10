@@ -88,7 +88,7 @@ struct taskbar_layout
         int count, most;             // the tabs, and the widest a tab may be
         const unsigned char *lengths; // each tab's title in characters, which its tab fits
         int start, windows;          // where the first tab is along the edge, and what the tabs take with their gaps
-        int tray, tray_at;           // the tray's length and where it starts along the edge
+        int tray, tray_at, item;     // the tray's length and where it starts along the edge, and the length of one of its items (the standard tray's)
         int across, across_len;      // the tabs' place and thickness across the edge
         int button, lead;            // the launcher tab's length along the edge (0: none), and what it and its gap take of the start
 };
@@ -232,13 +232,10 @@ static int taskbar_text(int high, int pad, int characters)
         return wanted < high ? high : wanted;
 }
 
-// The tray's length along the edge: the clock, and the battery before it, on a band of any side.
-static int taskbar_tray(int high, int pad)
+// The standard tray's items along the edge: the clock, and the battery, the volume, the microphone and the notices dot that are there.
+static int taskbar_tray_items(void)
 {
-        if (taskbar.tray_custom)
-                return taskbar_text(high, pad, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
-        return taskbar_text(high, pad, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) +
-                                             (taskbar.notices_item ? 1 : 0));
+        return 1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) + (taskbar.notices_item ? 1 : 0);
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
@@ -272,7 +269,7 @@ static int taskbar_launcher_tab(int high, int pad)
 
 static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layout *lay)
 {
-        int room, windows = 0;
+        int room, windows = 0, tray_most, items;
 
         taskbar_band(view, &lay->bx, &lay->by, &lay->bw, &lay->bh);
         lay->vertical = taskbar_vertical(view->position);
@@ -285,13 +282,24 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->high = lay->thick - lay->inset;
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
-        lay->tray = taskbar_tray(lay->high, lay->pad);
-        // A format of the person's may be long, but the tabs keep half of the band.
-        if (taskbar.tray_custom && lay->tray > lay->length / 2)
-                lay->tray = lay->length / 2;
         // The launcher tab is a tab high at the leading end, a gap in from it, as long as its mark and the padding either side; the tabs have what is left.
         lay->button = taskbar.launcher && lay->high > 0 ? taskbar_launcher_tab(lay->high, lay->pad) : 0;
         lay->lead = lay->button ? lay->gap + lay->button : 0;
+        // The tray is held to the far end and never runs into the launcher: it takes at most half the band (the tabs keep the rest) and
+        // no more than the launcher and its gaps leave of the band. A format of the person's is one text, cut to that; the standard tray
+        // has an item of its own for each thing it shows, and when they would not all fit in it each item is narrower.
+        items = taskbar.tray_custom ? 1 : taskbar_tray_items();
+        tray_most = lay->length / 2 < lay->length - lay->lead - 2 * lay->gap ? lay->length / 2 : lay->length - lay->lead - 2 * lay->gap;
+        tray_most = tray_most > 0 ? tray_most : 0;
+        lay->item = taskbar_text(lay->high, lay->pad, taskbar.tray_custom ? (taskbar.tray_chars > 0 ? taskbar.tray_chars : 1) : 5);
+        lay->tray = lay->item * items;
+        if (lay->tray > tray_most)
+        {
+                if (taskbar.tray_custom)
+                        lay->tray = tray_most;
+                else
+                        lay->item = tray_most / items, lay->tray = lay->item * items;
+        }
         room = lay->length - lay->lead - lay->tray - (lay->count + 2) * lay->gap;
         lay->most = lay->count && room > 0 ? room / lay->count : 0;
         lay->most = lay->most > 8 * lay->thick ? 8 * lay->thick : lay->most;
@@ -321,17 +329,19 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 /*
         Where a slot is along the edge: its start and length. Slot -2 is the
         tray as a whole, -3 the clock, -4 the battery, TASKBAR_VOLUME (-6) the
-        volume item and TASKBAR_MIC (-7) the microphone's (all inside the tray, the
-        microphone first, then the volume), and
-        TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the leading
-        end. Answers 0 for a slot that has none: a tab past the count or too
-        narrow for one, the battery when none is shown, the volume when the
-        sound server is not there, the microphone when nothing records, or the
-        button when the band has none.
+        volume item, TASKBAR_MIC (-7) the microphone's and TASKBAR_NOTICES (-8)
+        the notices dot's (all inside the tray: from its start the dot, the
+        microphone, the volume, the battery, then the clock, each lay->item
+        long), and TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the
+        leading end. Answers 0 for a slot that has none: a tab past the count or
+        too narrow for one, the battery when none is shown, the volume when the
+        sound server is not there, the microphone when nothing records, the dot
+        when the board is clean, a tray of the person's (only the whole tray has
+        a slot), or the button when the band has none.
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
-        int text = taskbar_text(lay->high, lay->pad, 5), at, notice = taskbar.notices_item ? text : 0;
+        int text = lay->item, at, notice = taskbar.notices_item ? text : 0;
 
         if (which >= 0)
         {
@@ -427,7 +437,7 @@ static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int 
 */
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 {
-        int half = reach ? 2 * view->scale / 100 : 0;
+        int half = reach ? taskbar_scaled(view->scale) * TASKBAR_GAP / 200 : 0; // half the gap between the tabs, at the taskbar's scale
 
         for (int which = TASKBAR_NOTICES; which < (int)view->count; which++)
         {
