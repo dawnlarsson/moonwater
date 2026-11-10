@@ -241,6 +241,9 @@ static const struct settings_feed settings_feeds[] = {
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
 #define SETTINGS_LEGEND 200
+#define SETTINGS_STATE 24        // a port's state word (allowed, blocked, waiting), or a drive's kind and state (drive, view only)
+#define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
+#define SETTINGS_SEGMENT_TEXT 16 // a segment's size, drawn in the segment where it has room (ui.c's UI_STRIP_TEXT is this)
 
 struct settings_item
 {
@@ -253,6 +256,9 @@ struct settings_item
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
         char legend[SETTINGS_LEGEND];                   // what the strip is, in words: role and size of each segment
+        char state[SETTINGS_STATE];                     // a port's state word, or a drive's kind and state
+        char size[SETTINGS_SIZE_TEXT];                  // a drive's size
+        char segment_text[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_TEXT]; // each segment's size, as the legend says it
 };
 
 /*
@@ -2622,30 +2628,6 @@ static fn settings_item_label(struct settings_item address_to item, const char a
         item->label[size] = 0;
 }
 
-/*
-        A device's line as its label. A line too long for the label is cut in its middle, with "..." where the cut is, so that
-        the last word (its state: allowed, blocked or waiting) is still there; a cut at the end would take the state away.
-*/
-static fn settings_item_label_state(struct settings_item address_to item, const char address_to text, positive size)
-{
-        positive state = size, tail, head;
-
-        if (size < sizeof(item->label))
-                return settings_item_label(item, text, size);
-        while (state > 0 && text[state - 1] != ' ')
-                state--;
-        if (!state)
-                return settings_item_label(item, text, size);
-        tail = size - state + 1;
-        if (tail + 4 >= sizeof(item->label))
-                return settings_item_label(item, text, size);
-        head = sizeof(item->label) - 1 - 3 - tail;
-        memory_copy(item->label, text, head);
-        memory_copy(item->label + head, "...", 3);
-        memory_copy(item->label + head + 3, text + state - 1, tail);
-        item->label[head + 3 + tail] = 0;
-}
-
 static struct settings_item address_to settings_item_find(int list, const char address_to name, positive size)
 {
         for (int at = 0; at < settings.item_count[list]; at++)
@@ -2832,6 +2814,23 @@ static const char address_to settings_role_word(unsigned int role)
         A drive's legend: each segment's role and its size, in a whole number of GB (from 1 GB) or MB, in order. It is what
         the strip's colours stand for, said in words, so the strip needs no hover to be read.
 */
+static fn settings_size_text(unsigned long long bytes, char address_to into, positive room)
+{
+        unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
+        char digits[24];
+        positive count = 0, length = 0;
+
+        do
+        {
+                digits[count++] = (char)('0' + scaled % 10);
+                scaled /= 10;
+        } while (scaled && count < sizeof(digits));
+        while (count && length + 1 < room)
+                into[length++] = digits[--count];
+        into[length] = 0;
+        string_append_bounded((string_address)into, bytes >= 1000000000ull ? (string_address)" GB" : (string_address)" MB", room);
+}
+
 static fn settings_legend(struct settings_item address_to item)
 {
         item->legend[0] = 0;
@@ -2840,27 +2839,38 @@ static fn settings_legend(struct settings_item address_to item)
                 language_format(item->legend, sizeof(item->legend), WORDS(settings_not_shown), (long)item->segment_more);
         for (positive at = 0; at < item->segment_count; at++)
         {
-                unsigned long long bytes = item->segment_bytes[at];
-                unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
-                char digits[24], size[24];
-                positive count = 0, length = 0;
-
                 if (at)
                         string_append_bounded((string_address)item->legend, (string_address)", ", sizeof(item->legend));
                 else if (item->segment_more)
                         string_append_bounded((string_address)item->legend, (string_address)"; ", sizeof(item->legend));
                 string_append_bounded((string_address)item->legend, (string_address)settings_role_word(item->segment_role[at]), sizeof(item->legend));
-                do
-                {
-                        digits[count++] = (char)('0' + scaled % 10);
-                        scaled /= 10;
-                } while (scaled && count < sizeof(digits));
-                while (count)
-                        size[length++] = digits[--count];
-                size[length] = 0;
+                settings_size_text(item->segment_bytes[at], item->segment_text[at], sizeof(item->segment_text[at]));
                 string_append_bounded((string_address)item->legend, (string_address)" ", sizeof(item->legend));
-                string_append_bounded((string_address)item->legend, (string_address)size, sizeof(item->legend));
-                string_append_bounded((string_address)item->legend, bytes >= 1000000000ull ? (string_address)" GB" : (string_address)" MB", sizeof(item->legend));
+                string_append_bounded((string_address)item->legend, (string_address)item->segment_text[at], sizeof(item->legend));
+        }
+}
+
+/*
+        A port's line as its label and its state: the state is the line's last word (allowed, blocked or waiting), and the label is
+        what comes before it. The label is cut by the row when it is too long; the state is its own, and is always shown.
+*/
+static fn settings_item_split(struct settings_item address_to item, const char address_to text, positive size)
+{
+        positive state = size, stop;
+
+        while (state > 0 && text[state - 1] != ' ')
+                state--;
+        stop = state;
+        while (stop > 0 && text[stop - 1] == ' ')
+                stop--;
+        if (!state || !stop)
+                return settings_item_label(item, text, size);
+        settings_item_label(item, text, stop);
+        {
+                positive took = size - state >= sizeof(item->state) ? sizeof(item->state) - 1 : size - state;
+
+                memory_copy(item->state, text + state, took);
+                item->state[took] = 0;
         }
 }
 
@@ -2871,6 +2881,30 @@ static fn settings_legend(struct settings_item address_to item)
         press on it does nothing. A drive's segment lines come after it, four blanks and part START BYTES ROLE NAME, and the
         strip is those; a list from before the strip has none and reads as it did.
 */
+/*
+        A drive's line from its word after the name (word is the blank after it): "NAME drive N MB STATE". The name is the label, N MB
+        is the size (in GB from 1000 MB, as the legend says it), and the state is "drive, " and what the line says after the size.
+*/
+static fn settings_item_drive(struct settings_item address_to item, const char address_to text, positive size, positive word)
+{
+        positive at = word + 7, megabytes = 0, took;
+
+        settings_item_label(item, text + 2, word - 2);
+        for (; at < size && text[at] >= '0' && text[at] <= '9'; at++)
+                megabytes = megabytes * 10 + (positive)(text[at] - '0');
+        while (at < size && text[at] == ' ')
+                at++;
+        if (at + 1 < size && text[at] == 'M' && text[at + 1] == 'B')
+                at += 2;
+        while (at < size && text[at] == ' ')
+                at++;
+        settings_size_text(megabytes * 1000000ull, item->size, sizeof(item->size));
+        memory_copy(item->state, "drive, ", 7);
+        took = size - at > sizeof(item->state) - 8 ? sizeof(item->state) - 8 : size - at;
+        memory_copy(item->state + 7, text + at, took);
+        item->state[7 + took] = 0;
+}
+
 static fn settings_feed_hardware(void)
 {
         struct settings_item address_to items = settings_large->item[2];
@@ -2939,7 +2973,11 @@ static fn settings_feed_hardware(void)
                         items[count].flags = (size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
                                              (items[count].kind == SETTINGS_NOTE ? SETTINGS_ITEM_DRIVE : 0);
                         open = items[count].kind == SETTINGS_NOTE;
-                        settings_item_label_state(&items[count++], text + 2, size - 2);
+                        if (open)
+                                settings_item_drive(&items[count], text, size, word);
+                        else
+                                settings_item_split(&items[count], text + 2, size - 2);
+                        count++;
                 }
         }
         // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown.
@@ -3942,9 +3980,9 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_edit_begin(row, "", false);
                 settings_say((string_address)WORDS(settings_type_device));
         }
-        // A drive runs no verb: the status says that it is shown and held by none. Any other note says what it says already.
+        // A drive runs no verb: the status says that it is shown and held by none, and the legend in full when the row cut it short.
         else if (item->flags & SETTINGS_ITEM_DRIVE)
-                settings_say((string_address)WORDS(settings_item_drive));
+                settings_say((string_address)(item->legend[0] ? item->legend : WORDS(settings_item_drive)));
         else if (item->kind != SETTINGS_NOTE)
                 settings_say((string_address)settings_item_text(item));
         ui_page_redraw(&settings.page);
@@ -4572,16 +4610,29 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 else if (item->kind == SETTINGS_DEVICE)
                         row->value = WORDS(settings_kept);
                 else if (item->kind == SETTINGS_PORT)
-                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
-                else if (item->kind == SETTINGS_NOTE && (item->segment_count || item->segment_more))
                 {
+                        // The state is the note, and the value is what a press does: deny for an allowed port, else allow.
+                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
+                        row->note = item->state[0] ? item->state : null;
+                        row->value = language_of(row->mark ? "deny" : "allow");
+                }
+                else if (item->flags & SETTINGS_ITEM_DRIVE)
+                {
+                        // A drive is two rows high when it has a strip (or a note of the partitions not shown): its line, then the strip, then the legend.
+                        row->note = item->state;
+                        row->value = item->size;
+                        if (item->segment_count || item->segment_more)
+                        {
+                                row->tall = true;
+                                row->legend = item->legend;
+                        }
                         if (item->segment_count)
                         {
                                 row->strip_bytes = item->segment_bytes;
                                 row->strip_roles = item->segment_role;
+                                row->strip_text = &item->segment_text[0][0];
                                 row->strip_count = item->segment_count;
                         }
-                        row->value = item->legend;
                 }
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;

@@ -9518,7 +9518,10 @@ struct ui_row
         int bars;                          // the bars of a signal at its edge, 1 to 4 (0 none)
         const unsigned long long address_to strip_bytes; // a drive's partition strip: the bytes of each segment, in order (none when null)
         const unsigned char address_to strip_roles;      // and each segment's role, UI_STRIP_*
+        const char address_to strip_text;                // and each segment's size, drawn in it where it has room: UI_STRIP_TEXT bytes each
         int strip_count;                   // the segments of the strip; 0 for no strip
+        b32 tall;                          // two rows high: a drive's line, its strip under it, and its legend (ui_list_strip_row)
+        const char address_to legend;      // the words under a tall row's strip: what each segment is, and its size
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
@@ -9600,7 +9603,8 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
                 section = row.section;
                 l->top[at] = y;
                 // A row is its share of a row while it folds: a line under an option that is opening or shutting (the app's spring).
-                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, ui_dev(ui, UI_ROW));
+                // A tall row is two rows high (a drive's strip under its line); a row that folds is its share of that.
+                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, (row.tall ? 2 : 1) * ui_dev(ui, UI_ROW));
                 y += l->tall[at];
         }
         // A list in sections has the gap under its last one too; a list of rows alone ends with its last row.
@@ -9823,22 +9827,39 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         the label at the left cut to leave its value a third of the row, and the value as its kind says at the right.
 */
 /*
-        A drive's strip: its segments from left to right, each as wide as its share of the bytes, in the colour its
-        role takes from the theme. The last segment runs to the strip's end, so rounding leaves no gap.
+        A drive's strip, and the roles' colours. Each role is a container of the theme and its on-colour for the size written in it,
+        so the six are told apart in both themes: EFI system is the accent, Linux data the success container, swap the secondary
+        container, other the warning container, free room the outline (a track of nothing), and a disk with no table the info container.
 */
+#define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
+#define UI_STRIP_GAP 2   // logical pixels between two segments, each end of the strip rounded
+
 static int ui_strip_role(unsigned int role)
 {
         return role == UI_STRIP_EFI ? UI_PRIMARY
-               : role == UI_STRIP_LINUX ? UI_SUCCESS
+               : role == UI_STRIP_LINUX ? UI_SUCCESS_CONTAINER
                : role == UI_STRIP_SWAP ? UI_SECONDARY_CONTAINER
-               : role == UI_STRIP_OTHER ? UI_ON_SURFACE_VARIANT
-               : role == UI_STRIP_FREE ? UI_OUTLINE_VARIANT : UI_OUTLINE;
+               : role == UI_STRIP_OTHER ? UI_WARNING_CONTAINER
+               : role == UI_STRIP_FREE ? UI_OUTLINE_VARIANT : UI_INFO_CONTAINER;
 }
 
+static int ui_strip_ink(unsigned int role)
+{
+        return role == UI_STRIP_EFI ? UI_ON_PRIMARY
+               : role == UI_STRIP_LINUX ? UI_ON_SUCCESS_CONTAINER
+               : role == UI_STRIP_SWAP ? UI_ON_SECONDARY_CONTAINER
+               : role == UI_STRIP_OTHER ? UI_ON_WARNING_CONTAINER
+               : role == UI_STRIP_FREE ? UI_ON_SURFACE : UI_ON_INFO_CONTAINER;
+}
+
+/*
+        The strip's segments from left to right, each as wide as its share of the bytes: a pill of its own, its ends rounded, with
+        UI_STRIP_GAP between it and the next. A segment wide enough for its size has the size in its middle, in its role's ink.
+*/
 static fn ui_strip(struct ui address_to ui, int left, int top, int width, int height, const struct ui_row address_to row)
 {
         unsigned long long total = 0, run = 0;
-        int cursor = left;
+        int cursor = left, gap = ui_dev(ui, UI_STRIP_GAP);
 
         for (int at = 0; at < row->strip_count; at++)
                 total += row->strip_bytes[at];
@@ -9848,12 +9869,63 @@ static fn ui_strip(struct ui address_to ui, int left, int top, int width, int he
                 run += row->strip_bytes[at];
                 int stop = at + 1 == row->strip_count ? left + width
                            : left + (int)(run * (unsigned long long)width / total);
-                struct ui_box box = {cursor * 256, top * 256, stop * 256, (top + height) * 256, 0, 0};
+                int from = cursor + (at ? gap / 2 : 0), to = stop - (at + 1 < row->strip_count ? gap / 2 : 0);
 
-                if (stop > cursor)
+                if (to > from)
+                {
+                        int radius = (to - from < height ? to - from : height) / 2;
+                        struct ui_box box = {from * 256, top * 256, to * 256, (top + height) * 256, radius * 256, radius * 256};
+                        const char address_to text = row->strip_text ? row->strip_text + at * UI_STRIP_TEXT : null;
+                        int size_w = text && text[0] ? ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM) : 0;
+
                         ui_kit_fill(ui, &box, ui_role(ui_strip_role(row->strip_roles[at])), null);
+                        // The strip is in the window's own order already (left is mirrored by the row), so its text goes at device x as it is.
+                        if (size_w && size_w + ui_dev(ui, 8) <= to - from)
+                                ui_kit_text(ui, from + (to - from - size_w) / 2, ui_kit_baseline(ui, top + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM),
+                                            (string_address)text, UI_LABEL_MEDIUM, ui_text_colour(ui, ui_strip_ink(row->strip_roles[at])), 0);
+                }
                 cursor = stop;
         }
+}
+
+/*
+        A tall row (a drive): two rows high. Its first line is the row's label at the left, cut to the room the size and the note
+        leave (the note being the state, drive, view only), the size at the right. Under it is the strip, the full width, and under
+        the strip the legend, in quiet words, cut to the row's width. A hairline ends the row. A drive is a note: nothing here is
+        pressed, and the row's controls are the list's own.
+*/
+static fn ui_list_strip_row(struct ui address_to ui, struct ui_list address_to l, int y, int height, const struct ui_row address_to row)
+{
+        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10), band = ui_dev(ui, UI_ROW);
+        int text_left = x + inset, right = x + w - inset, baseline, value_w = 0, note_w = 0, room;
+        unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+        char cut[UI_CUT_TEXT];
+        struct ui_box line;
+
+        if (row->value)
+                value_w = ui_kit_measure(ui, (string_address)row->value, UI_BODY_MEDIUM);
+        if (row->note)
+                note_w = ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM);
+        room = right - text_left - value_w - (value_w ? gap : 0) - note_w - (note_w ? gap : 0);
+        baseline = ui_kit_baseline(ui, y + (band - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM);
+        if (row->label)
+                ui_kit_text_flipped(ui, text_left, baseline,
+                                    ui_fit(ui, (string_address)row->label, UI_BODY_MEDIUM, room < ui_dev(ui, 40) ? ui_dev(ui, 40) : room, cut, sizeof(cut)),
+                                    UI_BODY_MEDIUM, ink, 0, x, w);
+        if (row->value)
+                ui_kit_text_flipped(ui, right - value_w, baseline, (string_address)row->value, UI_BODY_MEDIUM, ink, 0, x, w);
+        if (row->note)
+                ui_kit_text_flipped(ui, right - value_w - (value_w ? gap : 0) - note_w, ui_kit_baseline(ui, y + (band - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM),
+                                    (string_address)row->note, UI_LABEL_MEDIUM, quiet, 0, x, w);
+        if (row->strip_count > 0)
+                ui_strip(ui, ui_mirror(text_left, right - text_left, x, w), y + band + ui_dev(ui, 6), right - text_left, ui_dev(ui, 16), row);
+        if (row->legend && row->legend[0])
+                ui_kit_text_flipped(ui, text_left, ui_kit_baseline(ui, y + band + ui_dev(ui, 24), UI_LABEL_MEDIUM),
+                                    ui_fit(ui, (string_address)row->legend, UI_LABEL_MEDIUM, right - text_left, cut, sizeof(cut)),
+                                    UI_LABEL_MEDIUM, quiet, 0, x, w);
+        line = (struct ui_box){ui_mirror(text_left, right - text_left, x, w) * 256, (y + height - 1) * 256,
+                               (ui_mirror(text_left, right - text_left, x, w) + right - text_left) * 256, (y + height) * 256, 0, 0};
+        ui_kit_fill(ui, &line, ui_role(UI_OUTLINE_VARIANT), null);
 }
 
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
@@ -9914,6 +9986,12 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 }
                 ui_control_draw(ui, own);
         }
+        // A tall row (a drive) is laid out as its own: its line, its strip under it and its legend (ui_list_strip_row).
+        if (row.tall)
+        {
+                ui_list_strip_row(ui, l, y, height, &row);
+                return;
+        }
         if (row.mark)
         {
                 int dot = ui_dev(ui, 7);
@@ -9923,14 +10001,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_kit_fill(ui, &box, ui_role(UI_PRIMARY), null);
                 text_left += ui_dev(ui, 17);
         }
-        // The trailing pieces from the right: the strip of a drive's partitions, the signal, then the control or the value, then the note.
-        if (row.strip_count > 0)
-        {
-                int strip_width = ui_dev(ui, 120), strip_height = ui_dev(ui, 8);
-
-                ui_strip(ui, ui_mirror(right - strip_width, strip_width, x, w), y + (height - strip_height) / 2, strip_width, strip_height, &row);
-                right -= strip_width + gap;
-        }
+        // The trailing pieces from the right: the signal, then the control or the value, then the note.
         if (row.bars > 0)
         {
                 // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
