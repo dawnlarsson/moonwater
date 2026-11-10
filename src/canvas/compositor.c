@@ -18613,9 +18613,21 @@ static void compositor_input_read(unsigned int at)
                         compositor.table->input_number[at] = -1;
                         compositor.devices &= ~(1ul << compositor.device_number[at]);
 
-                        // What it held down will never be let go of: not a key, not a button, not a finger.
+                        // What it held down will never be let go of: not a key, not a button, not a finger. A keyboard's keys are
+                        // not told apart by device, so every key down is let go (to the window it went to); a pointer lets go of
+                        // each button it may have held. A keyboard that held no button releases none another device holds.
                         compositor.held[at] = 0;
-                        compositor_release(COMPOSITOR_BTN_LEFT, 0);
+                        if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
+                                compositor_keys_release();
+                        if (compositor.input_kinds[at] & (WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_TABLET | WINDOWS_INPUT_BUTTONS |
+                                                          WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
+                        {
+                                // The left is let go even with no button recorded: a drag of a titlebar or a resize has none.
+                                compositor_release(COMPOSITOR_BTN_LEFT, 0);
+                                for (unsigned int index = 1; index < 8; index++)
+                                        if (compositor.button_down >> index & 1)
+                                                compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
+                        }
                         if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE &&
                             compositor.touch.device == (int)at)
                                 ui_touch_reset(&compositor.touch.gesture);
