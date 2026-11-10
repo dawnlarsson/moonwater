@@ -3070,9 +3070,13 @@ static struct window *window_grid_open(unsigned int columns, unsigned int rows,
         */
         if (history > 0x80000000u)
                 return 0;
-        for (unsigned long power = 1; power < history; power <<= 1)
-                ;
-        history = (unsigned int)power;
+        // The ring's own name for the size: `power` outside the loop was lib.util.c's function of that name, and its address cut to 32 bits
+        // was the history, so no terminal or kernel log ever got its cells.
+        unsigned long ring = 1;
+
+        while (ring < history)
+                ring <<= 1;
+        history = (unsigned int)ring;
 
         cells = (unsigned long)history * max_columns;
         if (cells > 0xffffffffu / sizeof(struct window_cell))
