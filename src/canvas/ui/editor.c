@@ -702,11 +702,27 @@ static fn editor_draw(unsigned int address_to pixels)
                                     (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
                 if (tab->changed_on_disk || editor.status[0])
                 {
-                        const char address_to say = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status;
+                        int edge = editor.width - ui_px(ui, UI_INSET), baseline = ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);
 
-                        ui_kit_text_flipped(ui, editor.width - ui_px(ui, UI_INSET) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
-                                            ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
-                                            ui_role(tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
+                        /*
+                                What the status says (a key's ask, a save's failure) is at the right end, and the warning of a file changed on
+                                disk beside it: neither hides the other, so a save that asks again or fails is said on a changed file too.
+                        */
+                        if (editor.status[0])
+                        {
+                                int width = ui_kit_measure(ui, (string_address)editor.status, UI_LABEL_MEDIUM);
+
+                                ui_kit_text_flipped(ui, edge - width, baseline, (string_address)editor.status, UI_LABEL_MEDIUM,
+                                                    ui_role(UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
+                                edge -= width + ui_px(ui, UI_INSET);
+                        }
+                        if (tab->changed_on_disk)
+                        {
+                                int width = ui_kit_measure(ui, (string_address)WORDS(editor_changed_on_disk), UI_LABEL_MEDIUM);
+
+                                ui_kit_text_flipped(ui, edge - width, baseline, (string_address)WORDS(editor_changed_on_disk), UI_LABEL_MEDIUM,
+                                                    ui_role(UI_WARNING), 0, 0, editor.width);
+                        }
                 }
         }
         // A finger's selection: its handles and actions bar, over everything, the find bar's and then the code view's.
