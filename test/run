@@ -3785,6 +3785,32 @@ lane_modem()
 		note "modem: the self-test failed under $compiler"
 		exit 1
 	}
+	#	The decoder at every symbol length and tone count the header allows,
+	#	each built and run under the sanitizers: the window's indices and sums
+	#	at every size, not only the default's. The pinned wire format and the
+	#	noise margins are the default's, so only the sanitized run is asked here.
+	modem_configs=0
+	modem_configs_ok=0
+	for modem_pair in "10 2" "10 4" "20 2" "20 4" "20 8" "40 2" "40 4" "40 8"
+	do
+		modem_sym=${modem_pair%% *}
+		modem_tones=${modem_pair#* }
+		modem_configs=$((modem_configs + 1))
+		modem_bin=$modem_work/config_${modem_sym}_$modem_tones
+		$compiler $modem_flags -DMODEM_SYM=$modem_sym -DMODEM_TONES=$modem_tones -o "$modem_bin" test/modem.c -lm 2> "$modem_bin.err" || {
+			note "modem: test/modem.c did not build at $modem_sym samples and $modem_tones tones"
+			cat "$modem_bin.err" >&2
+			continue
+		}
+		if "$modem_bin" > "$modem_bin.out" 2>&1; then
+			modem_configs_ok=$((modem_configs_ok + 1))
+		else
+			cat "$modem_bin.out" >&2
+			note "modem: the self-test failed at $modem_sym samples and $modem_tones tones"
+		fi
+	done
+	tally modem.configurations "$modem_configs_ok" "$modem_configs"
+	[ "$modem_configs_ok" = "$modem_configs" ] || exit 1
 	if [ -n "${MODEM_FUZZ_SECONDS:-}" ] && echo 'int x;' | $compiler -fsanitize=fuzzer,address -c -x c -o /dev/null - 2>/dev/null; then
 		$compiler $modem_flags -DMODEM_FUZZ -fsanitize=fuzzer -o "$modem_work/fuzz" test/modem.c -lm || exit 1
 		mkdir -p "$modem_work/corpus"
