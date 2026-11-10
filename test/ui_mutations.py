@@ -126,7 +126,9 @@ M = [
     (C, "the microphone's mute told to the sink", "ctl_set_source_mute(&compositor_ctl, source, muted)", "ctl_set_sink_mute(&compositor_ctl, source, muted)"),
     (C, "the microphone's mute thrown not shown", "compositor_volume.recording || compositor_volume.mic_flash_until", "compositor_volume.recording"),
     (C, "the microphone's cell asks for the volume's popup", "compositor_script_say(\"mic_button\");", "compositor_script_say(\"volume_button\");"),
-    (T, "the microphone not struck when muted", "size, taskbar.mic_muted, ui_role(UI_ERROR)", "size, 0, ui_role(UI_ERROR)"),
+    (T, "the microphone not struck when muted", "size, taskbar.mic_muted, compositor_ink_role(UI_ERROR)", "size, 0, compositor_ink_role(UI_ERROR)"),
+    (T, "the notices dot in the kit's roles, which the compositor never makes", "unsigned int colour = compositor_ink_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);", "unsigned int colour = ui_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);"),
+    (T, "the tabs centred in what the tray leaves of the band", "lay->start = lay->origin + (lay->length - group) / 2;", "lay->start = lay->origin + lay->lead + (lay->length - lay->lead - lay->tray - windows) / 2;"),
     # ---- the fullscreen slide (`taskbar fullscreen on`) ----
     (T, "fullscreen on, no slide: the band jumps off at once", "taskbar.slide_at = animate ? now : 0;", "taskbar.slide_at = 0;"),
     (T, "fullscreen on, the band never leaves its edge", "int off = (int)(((long long)thick * (long long)shift) / (long long)UI_ONE);", "int off = 0;"),
