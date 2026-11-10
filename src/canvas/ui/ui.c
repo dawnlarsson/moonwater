@@ -8294,7 +8294,7 @@ static p32 ui_buttons_key(struct ui_buttons address_to b, const struct window_ev
                 return drawn;
         }
         if (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD || key == UI_KEY_SPACE)
-                return repeat ? UI_BUTTONS_TAKEN : ui_buttons_press(b, at);
+                return repeat || !ui_control_live(&b->button[at]) ? UI_BUTTONS_TAKEN : ui_buttons_press(b, at); // a disabled button takes no press
         ui_confirm_drop(&b->confirm);
         if (key == UI_KEY_LEFT || key == UI_KEY_RIGHT)
         {
