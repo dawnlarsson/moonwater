@@ -185,6 +185,7 @@ static struct
         // Per buffer: the top margin was drawn over by what the compositor wrote, and is drawn again.
         b32 margin_spoiled[2];
         int shift[2];              // the pixels the grid was slid by in each buffer when it was last drawn (terminal_grid_shift): a slid buffer is drawn whole
+        b32 stretched[2];          // whether each buffer's grid was stretched past an end when it was last drawn (ui_scroll_pull): a stretched buffer is drawn whole
         // The theme's default ink and paper the pictures were drawn in: a turn of the theme draws them whole again.
         unsigned int painted_ink, painted_paper;
 
@@ -592,18 +593,38 @@ static void terminal_bar_follow(void)
         terminal.bar.scroll = ui_body_px(&terminal.bar.body);
 }
 
-// The grid's shift in device pixels, down positive: the body's place less the view's whole row, which is the overscroll past an end
-// (the body's rubber band) and the part of a notch's glide between rows the view cannot draw. Nothing on the alternate screen, and
-// nothing while a program has the pointer: it has no scrollback to stretch, and the wheel is its.
+// The grid's height in device pixels: its rows, from the top of the paper round it (ui_scroll_pull stretches it by a pull).
+static int terminal_grid_height(void)
+{
+        return (int)(ROWS * terminal.cell_h);
+}
+
+// The grid's shift in device pixels, down positive: the view's whole row less the body's rest (ui_scroll_rest), which is the part of a
+// notch's glide between rows the view cannot draw. The overscroll past an end is no shift: the kit stretches the picture (terminal_grid_pull).
+// Nothing on the alternate screen, and nothing while a program has the pointer: it has no scrollback to stretch, and the wheel is its.
 static int terminal_grid_shift(void)
 {
         unsigned int first, shown, total;
-        int shift;
+        int drawn, shift;
 
         if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
                 return 0;
-        shift = (int)(first * terminal.cell_h) - ui_body_px(&terminal.bar.body);
+        drawn = ui_body_px(&terminal.bar.body);
+        shift = (int)(first * terminal.cell_h) - ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
         return shift > (int)terminal.height ? (int)terminal.height : shift < -(int)terminal.height ? -(int)terminal.height : shift;
+}
+
+// The grid's pull past an end in device pixels, down positive: the body's place less its rest. The kit stretches the picture by it
+// (ui_scroll_pull), from the end it is pulled past, under the same rules as every region's.
+static int terminal_grid_pull(void)
+{
+        unsigned int first, shown, total;
+        int drawn;
+
+        if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
+                return 0;
+        drawn = ui_body_px(&terminal.bar.body);
+        return drawn - ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
 }
 
 // The view is where the body is, to the nearest row (a row is a cell's height): the grid's only rounding of the body's place.
@@ -632,12 +653,11 @@ static void terminal_bar_turn(const struct window_event address_to event, b32 ad
 // grid's shift is a frame too, the last one of a spring included.
 static void terminal_bar_step(void)
 {
+        struct ui kit = terminal_kit(null);
         int shift = terminal_grid_shift(), before = terminal.bar.scroll;
 
         ui_kit.busy = 0;
-        ui_body_step(&terminal.bar.body, ui_kit_time());
-        ui_scroll_extent(&terminal.bar);
-        terminal.bar.scroll = ui_body_px(&terminal.bar.body);
+        ui_scroll_frame(&kit, &terminal.bar); // the kit's frame, as every region's: a trackpad's hand that went quiet is let go, and the body steps
         if (terminal_bar_out() || terminal.bar.scroll != before || terminal_grid_shift() != shift)
                 terminal.dirty = true;
 }
@@ -1674,8 +1694,8 @@ static b32 terminal_frame(void)
         unsigned int first, shown, total;
         unsigned int row_x0[1024], row_x1[1024];
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
-        b32 bar, bar_told, any, right = false, turning, full;
-        int shift;
+        b32 bar, bar_told, any, right = false, turning, full, stretched = false;
+        int shift, pull;
 
         terminal_paint_theme();
         if (slot < 0)
@@ -1695,18 +1715,19 @@ static b32 terminal_frame(void)
         terminal_build(now);
         terminal_caret_frame();
         terminal_extent(&first, &shown, &total);
-        // A grid shifted (a stretch past an end, a glide between rows) is drawn whole, every row and the bar; so is a buffer that
-        // still holds a shifted grid, which the incremental draw would otherwise diff against cells it does not show.
+        // A grid shifted (a glide between rows) or pulled past an end (stretched, ui_scroll_pull) is drawn whole, every row and the bar; so is
+        // a buffer that still holds a shifted or stretched grid, which the incremental draw would otherwise diff against cells it does not show.
         // The bar is put where the view is first (unless it is moving), so the shift reads the bar's place of this frame.
         if (total > shown)
                 terminal_bar_place(first, shown, total);
         shift = terminal_grid_shift();
-        full = shift != 0 || terminal.shift[slot] != 0;
-        // A frame the compositor draws from the window's list: no shift (the list has no copy within a picture), and the last picture taken
+        pull = terminal_grid_pull();
+        full = shift != 0 || pull != 0 || terminal.shift[slot] != 0 || terminal.stretched[slot];
+        // A frame the compositor draws from the window's list: no shift or pull (the list has no copy within a picture), and the last picture taken
         // (windows_ready), so nothing it reads is written. The selection's handles and bar are recorded with the grid (terminal_list_draw).
         // A list the recorder lost is not recorded again while what it was made of holds (terminal_list_key): the frames after it are
         // the processor's until the cells, the size or the theme change, or TERMINAL_LIST_RETRY frames have gone by.
-        if (!shift && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own))
+        if (!shift && !pull && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own))
         {
                 unsigned long key = terminal_list_key(now);
 
@@ -1827,6 +1848,16 @@ static b32 terminal_frame(void)
         // which is the window's own and not the grid's).
         terminal_grid_slide(whole, shift);
 
+        // A grid pulled past an end is its picture stretched from that end (ui_scroll_pull), its rows drawn at rest under it: the region is
+        // the grid's, the paper round it is not. The bar is drawn over the picture after.
+        if (pull)
+        {
+                struct ui kit = terminal_kit(whole);
+
+                stretched = ui_scroll_pull(&kit, &terminal.bar, ui_body_px(&terminal.bar.body), (int)terminal.pad, (int)terminal.pad_y,
+                                           (int)(COLUMNS * terminal.cell_w), terminal_grid_height());
+        }
+
         // Nothing differs from the buffer or from the screen: nothing is made or said.
         if (!any)
         {
@@ -1918,6 +1949,7 @@ static b32 terminal_frame(void)
         table->height[own] = terminal.height;
         windows_show(&terminal.own, (unsigned int)slot);
         terminal.shift[slot] = shift;
+        terminal.stretched[slot] = stretched;
         terminal.forced = false;
         terminal.shown = slot;
         return true;
@@ -2408,16 +2440,16 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 if (!alternate)
                 {
                         unsigned int first, shown, total;
-                        int shift = terminal_grid_shift();
+                        int shift = terminal_grid_shift(), drawn = ui_body_px(&terminal.bar.body);
 
                         if (terminal_extent(&first, &shown, &total) && total > shown)
                                 terminal_bar_place(first, shown, total);
                         moved_px = ui_press_follow(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                         // The grid moves one for one with the finger, up for a finger that goes down (the tracker's reports are kept
-                        // where the grid fits, for a drag that finds it scrolling later). Past an end the body's rubber band draws it.
+                        // where the grid fits, for a drag that finds it scrolling later). Past an end the kit stretches the picture.
                         if (terminal.finger.dragged)
                                 ui_body_track(&terminal.bar.body, -(b64)moved_px * UI_ONE, ui_kit_time());
-                        if (terminal_bar_out() | (terminal_grid_shift() != shift))
+                        if (terminal_bar_out() | (terminal_grid_shift() != shift) | (ui_body_px(&terminal.bar.body) != drawn))
                                 *dirty = true;
                         return true;
                 }

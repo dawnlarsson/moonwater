@@ -149544,9 +149544,9 @@ static void hand_report(struct ui address_to ui, struct ui_scroll address_to s, 
 /*
     A stretch of the grid: a finger's pull past the oldest line or the live end (ui_body_track, held for eight frames), then let go at no
     speed, so the body springs home (ui_body_let_go), and stepped a frame at a time (terminal_bar_step). Each frame the grid is drawn whole
-    (terminal_frame), and its pixels in the grid's columns are the still frame's moved by the grid's shift (terminal_grid_shift). Held past an
-    end the shift is the body's rubber band of the pull (ui_body_rubber), down at the top and up at the live end. The still frame is the view
-    at rest, taken before the pull.
+    (terminal_frame), and the grid is the kit's pull (terminal_grid_pull): the body's rubber band (ui_body_rubber) past an end, down at the top
+    and up at the live end, its picture stretched from the pinned end row (ui_scroll_pull), which is the still frame's. The still frame is the
+    view at rest, taken before the pull.
 */
 static unsigned int terminal_stretch_still[1 << 21], terminal_stretch_moved[1 << 21];
 
@@ -149572,9 +149572,9 @@ static int terminal_rubber_px(b64 past)
 static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b32 *settled, b32 *body_match)
 {
     unsigned int first, shown, total, *buffer, width = terminal.pad + COLUMNS * terminal.cell_w;
-    unsigned int height = terminal.height, pitch = terminal.pitch;
+    unsigned int height = terminal.height, pitch = terminal.pitch, pinned = top ? terminal.pad_y : terminal.pad_y + ROWS * terminal.cell_h - 1;
     b64 clock = 70000000000ll, far;
-    int move = top ? -12 * UI_SCROLL_SCALE : 12 * UI_SCROLL_SCALE, shift, expect; // a pull: past the top, or past the live end
+    int move = top ? -12 * UI_SCROLL_SCALE : 12 * UI_SCROLL_SCALE, shift, pull, expect; // a pull: past the top, or past the live end
 
     *peak = 0, *pixels_match = true, *settled = false, *body_match = false;
     for (int k = 0; k < 60; k++)
@@ -149596,9 +149596,9 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
         ui_body_track(&terminal.bar.body, (b64)move * UI_ONE / UI_SCROLL_SCALE, (b64)clock);
     }
     far = terminal.bar.body.content > terminal.bar.body.view ? terminal.bar.body.content - terminal.bar.body.view : 0;
-    shift = terminal_grid_shift();
-    expect = top ? terminal_rubber_px(-terminal.bar.body.raw) : -terminal_rubber_px(terminal.bar.body.raw - far);
-    *body_match = (top ? shift > 4 : shift < -4) && shift - expect >= -1 && shift - expect <= 1;
+    pull = terminal_grid_pull();
+    expect = top ? -terminal_rubber_px(-terminal.bar.body.raw) : terminal_rubber_px(terminal.bar.body.raw - far);
+    *body_match = (top ? pull < -4 : pull > 4) && pull - expect >= -1 && pull - expect <= 1;
     // Let go at no speed: the body springs home, and each frame the grid is drawn until it is whole.
     ui_body_let_go(&terminal.bar.body, 0, (b64)clock, 100, true);
     for (int k = 0; k < 120; k++)
@@ -149607,22 +149607,19 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
         terminal_bar_step();
         terminal.own.table->shown[0] = terminal.own.table->frame[0];
         terminal_frame();
+        pull = terminal_grid_pull();
         shift = terminal_grid_shift();
-        if (shift > *peak)
-            *peak = shift;
-        else if (-shift > *peak)
-            *peak = -shift;
+        if (pull > *peak)
+            *peak = pull;
+        else if (-pull > *peak)
+            *peak = -pull;
         buffer = windows_buffer(terminal.own.table, terminal.own.row, terminal.shown);
         memory_copy(terminal_stretch_moved, buffer, (positive)pitch * height * sizeof(unsigned int));
-        for (unsigned int y = 0; y < height / 2; y++)
-            for (unsigned int x = 0; x < width; x++)
-            {
-                long src = (long)y - shift;
-
-                if (src >= 0 && src < (long)height && terminal_stretch_moved[y * pitch + x] != terminal_stretch_still[(unsigned long)src * pitch + x])
-                    *pixels_match = false;
-            }
-        if (shift == 0)
+        // A pull is the grid stretched from its pinned end (ui_scroll_pull): that row is the still frame's, in the grid's first cell column.
+        for (unsigned int x = terminal.pad; pull && x < terminal.pad + terminal.cell_w; x++)
+            if (terminal_stretch_moved[pinned * pitch + x] != terminal_stretch_still[pinned * pitch + x])
+                *pixels_match = false;
+        if (pull == 0 && shift == 0)
         {
             *settled = true;
             for (unsigned int y = 0; y < height / 2; y++)
@@ -149644,7 +149641,7 @@ static void check_terminal_stretch_edges(void)
 {
     unsigned int first, shown, total;
     b64 clock = 80000000000ll;
-    int shift_stretched, shift_alternate, shift_mouse, shift_output, shift_back;
+    int pull_stretched, pull_alternate, pull_mouse, pull_output, pull_back;
     b32 framed = true;
 
     for (int k = 0; k < 60; k++)
@@ -149658,16 +149655,16 @@ static void check_terminal_stretch_edges(void)
         clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
         ui_body_track(&terminal.bar.body, -12 * UI_ONE, (b64)clock);
     }
-    shift_stretched = terminal_grid_shift();
+    pull_stretched = terminal_grid_pull();
 
     // The alternate screen: the grid is not stretched there, and it is again when the primary screen is back.
     term_bytes((const p8 address_to) "\x1b[?1049h", 8);
-    shift_alternate = terminal_grid_shift();
+    pull_alternate = terminal_grid_pull();
     term_bytes((const p8 address_to) "\x1b[?1049l", 8);
 
     // A program that asked for the mouse has the wheel: no stretch while it has.
     term_bytes((const p8 address_to) "\x1b[?1000h", 8);
-    shift_mouse = terminal_grid_shift();
+    pull_mouse = terminal_grid_pull();
     term_bytes((const p8 address_to) "\x1b[?1000l", 8);
 
     // New output while stretched: the frame is made, and the stretch is what it was (the view stays where it is).
@@ -149676,17 +149673,17 @@ static void check_terminal_stretch_edges(void)
         term_bytes((const p8 address_to) "fresh output\r\n", 14);
     terminal.own.table->shown[0] = terminal.own.table->frame[0];
     framed = terminal_frame() && framed;
-    shift_output = terminal_grid_shift();
+    pull_output = terminal_grid_pull();
 
     terminal_stretch_rest();
-    shift_back = terminal_grid_shift();
+    pull_back = terminal_grid_pull();
     string_format(log, "  terminal stretch edges: stretched %b px, alternate %b, mouse %b, after output %b (frame %b), back at the live end %b\n",
-                  (bipolar)shift_stretched, (bipolar)shift_alternate, (bipolar)shift_mouse, (bipolar)shift_output, (bipolar)framed, (bipolar)shift_back);
-    check("terminal stretch edges: a pull past the oldest line stretches the grid", shift_stretched > 4);
-    check("terminal stretch edges: on the alternate screen there is no stretch (the shift is 0)", shift_alternate == 0);
-    check("terminal stretch edges: a program that asked for the mouse has the wheel, so no stretch", shift_mouse == 0);
-    check("terminal stretch edges: output that arrives while stretched is drawn, and the stretch holds", framed && shift_output > 4);
-    check("terminal stretch edges: and at rest at the live end there is none", shift_back == 0);
+                  (bipolar)pull_stretched, (bipolar)pull_alternate, (bipolar)pull_mouse, (bipolar)pull_output, (bipolar)framed, (bipolar)pull_back);
+    check("terminal stretch edges: a pull past the oldest line stretches the grid", pull_stretched > 4);
+    check("terminal stretch edges: on the alternate screen there is no stretch (the pull is 0)", pull_alternate == 0);
+    check("terminal stretch edges: a program that asked for the mouse has the wheel, so no stretch", pull_mouse == 0);
+    check("terminal stretch edges: output that arrives while stretched is drawn, and the stretch holds", framed && pull_output > 4);
+    check("terminal stretch edges: and at rest at the live end there is none", pull_back == 0);
     ui_kit.test_clock = 0;
 }
 
@@ -149700,7 +149697,7 @@ static void check_terminal_stretch_cost(void)
     unsigned int first, shown, total;
     positive best_normal = ~0ull, best_stretched = ~0ull, t0, t1;
     b64 clock = 90000000000ll;
-    int shift = 0;
+    int pull = 0;
 
     terminal_view_set(0);
     terminal_extent(&first, &shown, &total);
@@ -149730,15 +149727,15 @@ static void check_terminal_stretch_cost(void)
         t0 = clock_monotonic_nanoseconds();
         terminal_frame();
         t1 = clock_monotonic_nanoseconds();
-        shift = terminal_grid_shift();
+        pull = terminal_grid_pull();
         if (t1 - t0 < best_stretched)
             best_stretched = t1 - t0;
     }
-    string_format(log, "  terminal stretch cost: a normal frame %p ns, a stretched frame %p ns (the grid whole, %b px shifted), the minimum of %p frames each\n",
-                  (positive)best_normal, (positive)best_stretched, (bipolar)shift, (positive)COST_FRAMES);
+    string_format(log, "  terminal stretch cost: a normal frame %p ns, a stretched frame %p ns (the grid whole, %b px stretched), the minimum of %p frames each\n",
+                  (positive)best_normal, (positive)best_stretched, (bipolar)pull, (positive)COST_FRAMES);
     terminal_stretch_rest();
     ui_kit.test_clock = 0;
-    check("terminal stretch cost: a stretched frame was measured (the grid shifted)", shift != 0 && best_stretched > 0);
+    check("terminal stretch cost: a stretched frame was measured (the grid stretched)", pull != 0 && best_stretched > 0);
 }
 
 static void check_terminal_stretch(void)
@@ -149751,10 +149748,10 @@ static void check_terminal_stretch(void)
     string_format(log, "  terminal stretch: at the top %p px peak, pixels %b, springs whole %b, the body's rubber band %b; at the live end %p px peak, pixels %b, springs whole %b, the body's rubber band %b\n",
                   (positive)peak_top, (bipolar)top_pixels, (bipolar)top_settled, (bipolar)top_body,
                   (positive)peak_end, (bipolar)end_pixels, (bipolar)end_settled, (bipolar)end_body);
-    check("terminal stretch: a pull past the oldest line draws the grid moved down by the stretch, row for row the still frame's", top_pixels);
-    check("terminal stretch: a pull past the live end draws the grid moved up by the stretch, row for row the still frame's", end_pixels);
+    check("terminal stretch: a pull past the oldest line stretches the grid from its top row, which stays the still frame's", top_pixels);
+    check("terminal stretch: a pull past the live end stretches the grid from its bottom row, which stays the still frame's", end_pixels);
     check("terminal stretch: each stretch peaks past 4 px and springs back to a whole frame that is the still one", peak_top > 4 && peak_end > 4 && top_settled && end_settled);
-    check("terminal stretch: held past an end, the grid is shifted by the body's rubber band of the pull, at both ends", top_body && end_body);
+    check("terminal stretch: held past an end, the pull is the body's rubber band of the pull, at both ends", top_body && end_body);
     // Both buffers are drawn whole and unshifted before anything else reads them: a buffer the run left in a shifted state would
     // be diffed against cells it does not show by whatever draws the terminal next.
     for (int k = 0; k < 2; k++)
