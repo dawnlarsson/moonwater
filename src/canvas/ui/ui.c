@@ -3803,7 +3803,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
 #define UI_TABS_VERTICAL 2 // the segmented strip stood on its end: a column of items h tall, the pip travelling along y
-#define UI_ITEMS 16
+#define UI_ITEMS 32 // a column's items: Settings has its sections and All commands, 17 groups, and the column must reach the last
 #define UI_RADIO_PITCH 64 // a radio row and the gap under it (48 + 16, the card's gap)
 
 struct ui_control
