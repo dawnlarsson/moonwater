@@ -25447,7 +25447,9 @@ static const host_row host_rows[] = {
     {null, "link group leave NAME [forget]", "stop, and forget the key of the group", 'f'},
     {null, "link on|off", "the listener, kept across boots [off]", 'f'},
     {null, "link port [N|auto]", "the udp port it takes, and `link add` assumes [22348]", 'f'},
-    {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, not available yet [network]", 'f'},
+    {null, "link transport [network|modem]", "how linked machines reach each other: network, or the audio modem, which needs a sound card open on the sound server [network]", 'f'},
+    {null, "link modem key", "the audio modem's key, in hex, made on first use: the receiver needs the same", 'f'},
+    {null, "link modem send FILE", "FILE over the sound card to the Mac's receiver (tools/modem_rx.c); nothing is acknowledged", 'f'},
 };
 
 /* The column the words of a row start in. A command that would not leave two

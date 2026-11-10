@@ -59,6 +59,7 @@
 #define LINK_GROUPS_PATH "/root/link.groups"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_TRANSPORT_PATH "/root/link.transport"
+#define LINK_MODEM_PATH "/root/link.modem"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STAMPS_PATH "/root/link.stamps"
@@ -214,7 +215,7 @@ static bool link_key_parse(string_address text, p8 address_to key)
 static const string_address link_words[] = {
     "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
     "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
-    "run",  "help",  "transport",
+    "run",  "help",  "transport", "modem",
 };
 
 #define LINK_NAME_CHARACTERS                                                  \

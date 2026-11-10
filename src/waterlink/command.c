@@ -17,6 +17,8 @@
                                         themselves
                 link on | off           the listener, kept across boots
                 link transport [network|modem]   how machines reach each other
+                link modem key          the modem's key, made on first use, in hex
+                link modem send FILE    FILE over the sound card, to the receiver
 
         `key` and `serve` are not in the page: the key is in the status, and
         `serve` is how the listener starts itself.
@@ -1505,9 +1507,71 @@ static b32 link_port_verb(string_address word)
         available, until link_modem_ready says it is. The state is the one
         place that says so, so a row that shows it is never wrong.
 */
+//      The forward declarations of the two things this part calls that are
+//      made later in the one unit: the sound server's page, and the send
+//      (src/waterlink/modem_send.c, after the sound server's client).
+static b32 modem_send_file(string_address path);
+static int audio_test_page(struct audio_state *copy);
+
+/*
+        The audio modem is ready when the sound server has a sound card open
+        for it to play on: its page is there, the output is a card and not a
+        clock (a clock is where the sound goes to nothing), and the card has
+        a device. A server that is not running leaves no page to read.
+*/
 static bool link_modem_ready(void)
 {
-        return false;
+        struct audio_state page;
+
+        return audio_test_page(&page) && (page.output_state & AUDIO_STATE_OUT_CARD) &&
+               page.device[0] != 0;
+}
+
+/*
+        The transport is the modem when /root/link.transport says so and the
+        modem is ready: what is said is what is used.
+*/
+static bool link_modem_in_use(void)
+{
+        p8 kept[16];
+
+        host_read_word(LINK_TRANSPORT_PATH, kept, sizeof kept);
+        return string_equals((string_address)kept, "modem") && link_modem_ready();
+}
+
+/*
+        The modem's key, made on first use and said in hex: the receiver is
+        given the same, in a file of its own. It is root's, as the link key is.
+*/
+static b32 link_modem_key_verb(void)
+{
+        p8 key[32];
+        p8 text[65];
+        static const char digits[] = "0123456789abcdef";
+        bipolar got = link_secret_at(LINK_MODEM_PATH, key, true);
+
+        scope_exit(crypto_forget(key, sizeof key));
+        if (got == -EPERM)
+                return host_refuse("%s is not a modem key: it must be a 32-byte "
+                                   "file only root can read\n", LINK_MODEM_PATH);
+        return_if(got < 0, host_fail(LINK_MODEM_PATH, got));
+        for (positive at = 0; at < 32; at++)
+        {
+                text[2 * at] = digits[((p8)key[at] >> 4) & 15];
+                text[2 * at + 1] = digits[(p8)key[at] & 15];
+        }
+        text[64] = 0;
+        host_say(log, "%s\n", (string_address)text);
+        return 0;
+}
+
+static b32 link_modem_send(string_address path)
+{
+        if (!link_modem_ready())
+                return host_refuse("the audio modem is not available: no sound "
+                                   "card is open on the sound server (moonwater "
+                                   "audio says which)\n");
+        return modem_send_file(path);
 }
 
 static b32 link_transport_verb(string_address word)
@@ -1521,15 +1585,14 @@ static b32 link_transport_verb(string_address word)
                 //      What is said is what is used: a file written by hand as
                 //      modem, when the modem is not there, is network.
                 host_say(log, host_label "transport %s\n",
-                         string_equals((string_address)kept, "modem") && link_modem_ready()
-                                 ? "modem"
-                                 : "network");
+                         link_modem_in_use() ? "modem" : "network");
                 host_say(log, host_label "audio modem %s\n",
                          link_modem_ready() ? "ready" : "not available yet");
                 return 0;
         }
         if (string_equals(word, "modem") && !link_modem_ready())
-                return host_refuse("the audio modem is not available yet: the "
+                return host_refuse("the audio modem is not available: no sound "
+                                   "card is open on the sound server, so the "
                                    "transport stays network\n");
         if (!string_equals(word, "network") && !string_equals(word, "modem"))
                 return host_refuse("transport is network or modem, not %s\n", word);
@@ -1553,7 +1616,7 @@ static const struct
         positive most;
 } link_shapes[] = {
     {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 4},
-    {"port", 3, 4},  {"transport", 3, 4},
+    {"port", 3, 4},  {"transport", 3, 4}, {"modem", 4, 5},
     {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
@@ -1621,6 +1684,25 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 return link_port_verb(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "transport"))
                 return link_transport_verb(count == 4 ? arguments[3] : null);
+        if (string_equals(verb, "modem"))
+        {
+                if (count == 4 && string_equals(arguments[3], "key"))
+                        return link_modem_key_verb();
+                if (count == 5 && string_equals(arguments[3], "send"))
+                        return link_modem_send(arguments[4]);
+                return host_usage();
+        }
+        //      With the transport on the modem a push goes over the sound
+        //      card instead: the file reaches the receiver, which writes it
+        //      where it chooses, so the machine and the path are not used.
+        if (string_equals(verb, "push") && link_modem_in_use())
+        {
+                host_say(log, host_label "the transport is the audio modem: %s "
+                                          "goes over the sound card, not to %s, "
+                                          "and %s is not used\n",
+                         arguments[4], arguments[3], arguments[5]);
+                return modem_send_file(arguments[4]);
+        }
         if (string_equals(verb, "serve"))
                 return link_serve(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "pair"))
