@@ -2475,7 +2475,14 @@ static fn settings_ask_all(void)
         memory_zero(settings.unread, sizeof(settings.unread));
         for (positive row = 0; row < SETTINGS_ROWS; row++)
                 if (settings_rows[row].output == SETTINGS_OUT_NONE)
-                        settings_unread_set(row, 1);
+                {
+                        // A row with no verb to read (a pairing's field and button) has nothing to ask: it is ready at once. Asking
+                        // it would run the bare moonwater, and until that read ended a press on it did nothing.
+                        if (settings_rows[row].read[0])
+                                settings_unread_set(row, 1);
+                        else
+                                settings.state[row] = SETTINGS_READ;
+                }
 }
 
 // Where a change to row waits in the queue, or queued when it has none.
