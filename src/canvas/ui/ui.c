@@ -6057,7 +6057,10 @@ static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to
         int was = c->hover | c->down << 1;
         p32 bits;
 
-        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) || (ui_kit_held && ui_kit_held != c) ||
+        // Another control's hold takes the motions and the release (capture); a press is never held back by it, since the press
+        // lets a hold that lost its release go (ui_kit_pointer), so a stale hold does not stop the tabs answering.
+        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) ||
+            (ui_kit_held && ui_kit_held != c && !(event->type == WINDOW_EVENT_BUTTON && down)) ||
             (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT))
                 return 0;
         if (event->type == WINDOW_EVENT_MOTION)
