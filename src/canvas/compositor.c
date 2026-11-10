@@ -15913,6 +15913,9 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         // A press goes to the window that has the keys and is held there; a repeat or a
         // release of a key whose press went elsewhere (or nowhere) is nobody's to hear.
         // While the window has a popup open, the topmost popup is where its keys go.
+        // A repeat or a release goes where its press went (keys_to), not where the keys go now: a popup opened
+        // since the press would otherwise get a release it never had the press of, and the window the press went
+        // to would be left holding the key down.
         target = compositor_popup_top(compositor.focus);
         if (code < 128)
         {
@@ -15927,8 +15930,12 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 }
                 else if (!(*down & mask))
                         return;
-                else if (!value)
-                        *down &= (unsigned char)~mask;
+                else
+                {
+                        target = compositor.keys_to;
+                        if (!value)
+                                *down &= (unsigned char)~mask;
+                }
         }
 
         flags = modifiers | (value ? WINDOW_KEY_DOWN : 0) | (value == 2 ? WINDOW_KEY_REPEAT : 0);
