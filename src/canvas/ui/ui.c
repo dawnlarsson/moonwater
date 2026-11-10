@@ -9443,6 +9443,14 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_EXPANDER_OPEN 2
 
 // What a row shows, said by the app whenever the kit asks (ui_list.describe); what is not said is none.
+/* A partition strip's segment roles: EFI system, Linux data, swap, other, free room, and a disk with no partition table. */
+#define UI_STRIP_EFI 0
+#define UI_STRIP_LINUX 1
+#define UI_STRIP_SWAP 2
+#define UI_STRIP_OTHER 3
+#define UI_STRIP_FREE 4
+#define UI_STRIP_UNPARTITIONED 5
+
 struct ui_row
 {
         const char address_to label;       // at the left
@@ -9456,6 +9464,9 @@ struct ui_row
         int kind;                          // UI_ROW_*
         int at;                            // a tabs or a swatches row's choice now, -1 none
         int bars;                          // the bars of a signal at its edge, 1 to 4 (0 none)
+        const unsigned long long address_to strip_bytes; // a drive's partition strip: the bytes of each segment, in order (none when null)
+        const unsigned char address_to strip_roles;      // and each segment's role, UI_STRIP_*
+        int strip_count;                   // the segments of the strip; 0 for no strip
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
@@ -9741,6 +9752,38 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch),
         the label at the left cut to leave its value a third of the row, and the value as its kind says at the right.
 */
+/*
+        A drive's strip: its segments from left to right, each as wide as its share of the bytes, in the colour its
+        role takes from the theme. The last segment runs to the strip's end, so rounding leaves no gap.
+*/
+static int ui_strip_role(unsigned int role)
+{
+        return role == UI_STRIP_EFI ? UI_PRIMARY
+               : role == UI_STRIP_LINUX ? UI_SUCCESS
+               : role == UI_STRIP_SWAP ? UI_SECONDARY_CONTAINER
+               : role == UI_STRIP_OTHER ? UI_ON_SURFACE_VARIANT
+               : role == UI_STRIP_FREE ? UI_OUTLINE_VARIANT : UI_OUTLINE;
+}
+
+static fn ui_strip(struct ui address_to ui, int left, int top, int width, int height, const struct ui_row address_to row)
+{
+        unsigned long long total = 0;
+        int cursor = left;
+
+        for (int at = 0; at < row->strip_count; at++)
+                total += row->strip_bytes[at];
+        for (int at = 0; at < row->strip_count && total; at++)
+        {
+                int stop = at + 1 == row->strip_count ? left + width
+                           : left + (int)(row->strip_bytes[at] * (unsigned long long)width / total);
+                struct ui_box box = {cursor * 256, top * 256, stop * 256, (top + height) * 256, 0, 0};
+
+                if (stop > cursor)
+                        ui_kit_fill(ui, &box, ui_role(ui_strip_role(row->strip_roles[at])), null);
+                cursor = stop;
+        }
+}
+
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
@@ -9807,7 +9850,14 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_kit_fill(ui, &box, ui_role(UI_PRIMARY), null);
                 text_left += ui_dev(ui, 17);
         }
-        // The trailing pieces from the right: the signal, then the control or the value, then the note.
+        // The trailing pieces from the right: the strip of a drive's partitions, the signal, then the control or the value, then the note.
+        if (row.strip_count > 0)
+        {
+                int strip_width = ui_dev(ui, 120), strip_height = ui_dev(ui, 8);
+
+                ui_strip(ui, ui_mirror(right - strip_width, strip_width, x, w), y + (height - strip_height) / 2, strip_width, strip_height, &row);
+                right -= strip_width + gap;
+        }
         if (row.bars > 0)
         {
                 // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.

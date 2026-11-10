@@ -141157,6 +141157,44 @@ static int settings_groups_named(const char address_to name)
         Every row of the table is checked by its verb's family, the moved ones by name, and each is found in its group and by
         the filter, which lists the rows of every group.
 */
+/*
+        The device list's feed, read as device list says it: a drive with four segments (EFI, Linux, swap and free room) is a
+        note with its strip; a drive with no partition table is one unpartitioned segment; a USB device's line has no segments
+        and reads as it always did, and a press on it is a port's, not a note's.
+*/
+static fn check_settings_device_strip(void)
+{
+        static const char text[] = "  vda drive 2048 MB view only\n"
+                "    part 2048 536870912 efi -\n"
+                "    part 1050624 1073741824 linux -\n"
+                "    part 3148800 536870912 swap -\n"
+                "    part 4245504 1073741824 free -\n"
+                "  sdb drive 512 MB view only\n"
+                "    part 0 536870912 unpartitioned -\n"
+                "  1-1 usb 0627:0001 Stick allowed\n";
+        struct settings_item address_to items = settings_large->item[2];
+        positive length = sizeof(text) - 1;
+
+        for (positive at = 0; at < length; at++)
+                settings_large->said[at] = text[at];
+        settings.said_length = length;
+        settings_feed_hardware();
+        check("settings: a drive's partitions are its strip, in order, with free room",
+              settings.item_count[2] == 3 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 4 &&
+                  items[0].segment_role[0] == 0 && items[0].segment_role[1] == 1 && items[0].segment_role[2] == 2 &&
+                  items[0].segment_role[3] == 4 && items[0].segment_bytes[1] == 1073741824ull &&
+                  string_equals((string_address)items[0].label, (string_address) "vda drive 2048 MB view only"));
+        check("settings: a drive with no partition table is one unpartitioned segment",
+              items[1].kind == SETTINGS_NOTE && items[1].segment_count == 1 && items[1].segment_role[0] == 5 &&
+                  items[1].segment_bytes[0] == 536870912ull);
+        check("settings: a USB device's line has no strip, and is a port a press allows or blocks",
+              items[2].kind == SETTINGS_PORT && items[2].segment_count == 0 && (items[2].flags & SETTINGS_ITEM_JOINED) != 0);
+        check("settings: a drive's legend says its roles in words, and free room among them",
+              string_find((string_address)items[0].legend, (string_address) "EFI") != null &&
+                  string_find((string_address)items[0].legend, (string_address) "EFI system 536 MB") != null &&
+                  string_find((string_address)items[0].legend, (string_address) "Linux data 1 GB") != null);
+}
+
 static fn check_settings_groups(void)
 {
         static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
@@ -163308,6 +163346,7 @@ b32 main()
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_groups();
+        check_settings_device_strip();
         check_settings_keys();
         check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                               program_argument_count() > 4 ? program_argument(4) : null);

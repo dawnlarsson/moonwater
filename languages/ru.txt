@@ -75,6 +75,12 @@ settings_asks_first	e9bd	сначала спросит
 settings_badge_error	9cf1	Ошибка
 settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
+settings_role_efi	d41a	Системный EFI
+settings_role_linux	2c8f	Данные Linux
+settings_role_swap	874e	подкачка
+settings_role_other	8df5	прочее
+settings_role_free	eedb	свободно
+settings_role_unpartitioned	61a9	без разделов
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
 settings_battery_idle	1635	, не заряжается

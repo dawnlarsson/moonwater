@@ -75,6 +75,12 @@ settings_asks_first	e9bd	спершу запитає
 settings_badge_error	9cf1	Помилка
 settings_badge_warning	fc8f	Попередження
 settings_battery_charging	5116	, заряджається
+settings_role_efi	d41a	Системний EFI
+settings_role_linux	2c8f	Дані Linux
+settings_role_swap	874e	підкачка
+settings_role_other	8df5	інше
+settings_role_free	eedb	вільно
+settings_role_unpartitioned	61a9	без розділів
 settings_battery_discharging	7964	, розряджається
 settings_battery_full	ded8	, заряджена
 settings_battery_idle	1635	, не заряджається

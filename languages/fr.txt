@@ -75,6 +75,12 @@ settings_asks_first	e9bd	demande d'abord
 settings_badge_error	9cf1	Erreur
 settings_badge_warning	fc8f	Avertissement
 settings_battery_charging	5116	, en charge
+settings_role_efi	d41a	Système EFI
+settings_role_linux	2c8f	Données Linux
+settings_role_swap	874e	échange
+settings_role_other	8df5	autre
+settings_role_free	eedb	libre
+settings_role_unpartitioned	61a9	non partitionné
 settings_battery_discharging	7964	, en décharge
 settings_battery_full	ded8	, pleine
 settings_battery_idle	1635	, ne charge pas

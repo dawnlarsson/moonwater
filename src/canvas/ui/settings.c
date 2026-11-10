@@ -235,12 +235,19 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_OPEN 8u    // asks for no passphrase
 #define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
 
+#define SETTINGS_SEGMENTS 12
+#define SETTINGS_LEGEND 200
+
 struct settings_item
 {
         char label[SETTINGS_ITEM_LABEL];
         char security[12];
         signed short dbm;
         unsigned char bars, flags, kind;
+        unsigned char segment_count;                    // a drive's partitions and free room, in order (SETTINGS_SEGMENTS most)
+        unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
+        unsigned long long segment_bytes[SETTINGS_SEGMENTS];
+        char legend[SETTINGS_LEGEND];                   // what the strip is, in words: role and size of each segment
 };
 
 /*
@@ -2734,6 +2741,62 @@ static fn settings_feed_devices(void)
         the line: allowed, blocked or waiting. A line that does not say allowed is not allowed. A drive's line
         has drive as its second word and is a note: no verb holds a drive, so a press on it does nothing.
 */
+// The role a segment's word is (efi, linux, swap, other, free, unpartitioned), or -1 for a word that is none.
+static int settings_role_code(const char address_to text, positive length)
+{
+        static const char address_to const words[] = {"efi", "linux", "swap", "other", "free", "unpartitioned"};
+
+        for (int at = 0; at < 6; at++)
+                if (length == string_length((string_address)words[at]) && !memory_compare(text, words[at], length))
+                        return at;
+        return -1;
+}
+
+// A role in words, in the language the window speaks.
+static const char address_to settings_role_word(unsigned int role)
+{
+        return role == 0 ? WORDS(settings_role_efi) : role == 1 ? WORDS(settings_role_linux) : role == 2 ? WORDS(settings_role_swap)
+               : role == 3 ? WORDS(settings_role_other) : role == 4 ? WORDS(settings_role_free) : WORDS(settings_role_unpartitioned);
+}
+
+/*
+        A drive's legend: each segment's role and its size, in a whole number of GB (from 1 GB) or MB, in order. It is what
+        the strip's colours stand for, said in words, so the strip needs no hover to be read.
+*/
+static fn settings_legend(struct settings_item address_to item)
+{
+        item->legend[0] = 0;
+        for (positive at = 0; at < item->segment_count; at++)
+        {
+                unsigned long long bytes = item->segment_bytes[at];
+                unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
+                char digits[24], size[24];
+                positive count = 0, length = 0;
+
+                if (at)
+                        string_append_bounded((string_address)item->legend, (string_address)", ", sizeof(item->legend));
+                string_append_bounded((string_address)item->legend, (string_address)settings_role_word(item->segment_role[at]), sizeof(item->legend));
+                do
+                {
+                        digits[count++] = (char)('0' + scaled % 10);
+                        scaled /= 10;
+                } while (scaled && count < sizeof(digits));
+                while (count)
+                        size[length++] = digits[--count];
+                size[length] = 0;
+                string_append_bounded((string_address)item->legend, (string_address)" ", sizeof(item->legend));
+                string_append_bounded((string_address)item->legend, (string_address)size, sizeof(item->legend));
+                string_append_bounded((string_address)item->legend, bytes >= 1000000000ull ? (string_address)" GB" : (string_address)" MB", sizeof(item->legend));
+        }
+}
+
+/*
+        The devices the system sees, as device list says them: two blanks, then the name a press allows or blocks (a port,
+        or a drive's name), the kind, the size and the state, which ends the line: allowed, blocked or waiting. A line that does
+        not say allowed is not allowed. A drive's line has drive as its second word and is a note: no verb holds a drive, so a
+        press on it does nothing. A drive's segment lines come after it, four blanks and part START BYTES ROLE NAME, and the
+        strip is those; a list from before the strip has none and reads as it did.
+*/
 static fn settings_feed_hardware(void)
 {
         struct settings_item address_to items = settings_large->item[2];
@@ -2743,6 +2806,34 @@ static fn settings_feed_hardware(void)
 
         memory_zero(items, sizeof(settings_large->item[2]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
+        {
+                if (size > 9 && text[0] == ' ' && text[1] == ' ' && text[2] == ' ' && text[3] == ' ' && !memory_compare(text + 4, "part ", 5))
+                {
+                        struct settings_item address_to drive = count ? &items[count - 1] : null;
+                        positive word = 9, role_at, role_length;
+                        unsigned long long bytes = 0;
+                        int code;
+
+                        while (word < size && text[word] >= '0' && text[word] <= '9')
+                                word++;
+                        while (word < size && text[word] == ' ')
+                                word++;
+                        for (; word < size && text[word] >= '0' && text[word] <= '9'; word++)
+                                bytes = bytes * 10 + (unsigned long long)(text[word] - '0');
+                        while (word < size && text[word] == ' ')
+                                word++;
+                        role_at = word;
+                        while (word < size && text[word] != ' ')
+                                word++;
+                        role_length = word - role_at;
+                        code = settings_role_code(text + role_at, role_length);
+                        if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS)
+                        {
+                                drive->segment_bytes[drive->segment_count] = bytes;
+                                drive->segment_role[drive->segment_count++] = (unsigned char)code;
+                        }
+                        continue;
+                }
                 if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
                         positive word = 0;
@@ -2754,6 +2845,10 @@ static fn settings_feed_hardware(void)
                         items[count].flags = size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0;
                         settings_item_label(&items[count++], text + 2, size - 2);
                 }
+        }
+        for (positive each = 0; each < count; each++)
+                if (items[each].kind == SETTINGS_NOTE && items[each].segment_count)
+                        settings_legend(&items[each]);
         settings.item_count[2] = (unsigned short)count;
 }
 
@@ -4190,6 +4285,13 @@ static fn settings_describe(int id, struct ui_row address_to row)
                         row->value = WORDS(settings_kept);
                 else if (item->kind == SETTINGS_PORT)
                         row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
+                else if (item->kind == SETTINGS_NOTE && item->segment_count)
+                {
+                        row->strip_bytes = item->segment_bytes;
+                        row->strip_roles = item->segment_role;
+                        row->strip_count = item->segment_count;
+                        row->value = item->legend;
+                }
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
         }

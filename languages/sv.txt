@@ -75,6 +75,12 @@ settings_asks_first	e9bd	frågar först
 settings_badge_error	9cf1	Fel
 settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
+settings_role_efi	d41a	EFI-system
+settings_role_linux	2c8f	Linux-data
+settings_role_swap	874e	swap
+settings_role_other	8df5	annat
+settings_role_free	eedb	ledigt
+settings_role_unpartitioned	61a9	opartitionerad
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte

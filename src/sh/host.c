@@ -17024,12 +17024,152 @@ static fn usb_recover(void)
         /sys/block that is not a loop, ram, device-mapper, optical or floppy disk, and one on a USB bus is
         listed as the USB device it is. It reads and changes nothing and needs no root.
 */
+/*
+        The partitions of a disk the list shows, as the strip of its row says them. A segment is where a
+        partition starts and how many bytes it is, its role (efi, linux, swap, other: from the name the kernel
+        has from the GPT entry, PARTNAME in the partition's uevent, or free: the room no partition has, or
+        unpartitioned for a disk with no partition table), and its name when the kernel has one. Free room
+        is what the strip shows between the partitions and after the last. Start and size are sectors of
+        512 bytes in sysfs; the segments are printed in order, one line each, as "    part START BYTES ROLE NAME".
+*/
+#define USB_SEGMENTS_MOST 16
+#define USB_ROLE_EFI 0
+#define USB_ROLE_LINUX 1
+#define USB_ROLE_SWAP 2
+#define USB_ROLE_OTHER 3
+#define USB_ROLE_FREE 4
+#define USB_ROLE_UNPARTITIONED 5
+static const string_address usb_role_words[] = {"efi", "linux", "swap", "other", "free", "unpartitioned"};
+
+typedef struct
+{
+        unsigned long long start, bytes;
+        unsigned int role;
+        p8 name[64];
+} usb_segment;
+
+typedef struct
+{
+        string_address disk;
+        usb_segment part[USB_SEGMENTS_MOST];
+        positive count;
+} usb_parts;
+
+static unsigned long long usb_decimal(p8 address_to text)
+{
+        unsigned long long value = 0;
+
+        for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
+                value = value * 10 + (unsigned long long)(text[at] - '0');
+        return value;
+}
+
+static fn usb_list_segment(unsigned long long start, unsigned long long bytes, unsigned int role, string_address name)
+{
+        host_say(log, "    part %p %p %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-");
+}
+
+static bool usb_part_visit(string_address directory, string_address name, address_any context)
+{
+        usb_parts address_to parts = (usb_parts address_to)context;
+        usb_segment address_to part;
+        string_address rest;
+        p8 path[HOST_PATH_ROOM], text[256];
+        positive dlen = string_length(parts->disk);
+
+        (void)directory;
+        // A partition is the disk's name and digits: sda1, or nvme0n1p1 and mmcblk0p1 where the disk's name ends in a digit.
+        if (string_length(name) <= dlen || string_compare_max(name, parts->disk, dlen))
+                return true;
+        rest = name + dlen;
+        if (*rest == 'p' && parts->disk[dlen - 1] >= '0' && parts->disk[dlen - 1] <= '9')
+                rest++;
+        if (!*rest)
+                return true;
+        for (string_address at = rest; *at; at++)
+                if (*at < '0' || *at > '9')
+                        return true;
+        if (parts->count >= USB_SEGMENTS_MOST)
+                return true;
+        part = &parts->part[parts->count];
+        if (!host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/start") ||
+            host_read_kernel(path, text, sizeof(text)) <= 0)
+                return true;
+        part->start = usb_decimal(text) * 512ull;
+        if (!host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/size") ||
+            host_read_kernel(path, text, sizeof(text)) <= 0)
+                return true;
+        part->bytes = usb_decimal(text) * 512ull;
+        part->name[0] = 0;
+        if (host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/uevent") &&
+            host_read_kernel(path, text, sizeof(text)) > 0)
+                for (p8 address_to line = text; *line;)
+                {
+                        p8 address_to stop = line;
+                        positive room = 0;
+
+                        while (*stop && *stop != '\n')
+                                stop++;
+                        if (stop - line > 9 && !string_compare_max(line, "PARTNAME=", 9))
+                        {
+                                for (p8 address_to at = line + 9; at < stop && room + 1 < sizeof(part->name); at++, room++)
+                                        part->name[room] = *at;
+                                part->name[room] = 0;
+                        }
+                        line = *stop ? stop + 1 : stop;
+                }
+        part->role = USB_ROLE_OTHER;
+        if (string_find((string_address)part->name, (string_address) "EFI"))
+                part->role = USB_ROLE_EFI;
+        else if (string_find((string_address)part->name, (string_address) "swap"))
+                part->role = USB_ROLE_SWAP;
+        else if (string_find((string_address)part->name, (string_address) "Linux"))
+                part->role = USB_ROLE_LINUX;
+        parts->count++;
+        return true;
+}
+
+// The segments of a disk of total bytes, in order, free room between and after its partitions included.
+static fn usb_list_strip(string_address name, unsigned long long total, usb_parts address_to parts)
+{
+        unsigned long long cursor = 0;
+
+        (void)name;
+        if (!parts->count)
+        {
+                usb_list_segment(0, total, USB_ROLE_UNPARTITIONED, null);
+                return;
+        }
+        // Insertion by start: a disk's partitions are few, and sysfs lists them in no order.
+        for (positive at = 1; at < parts->count; at++)
+                for (positive back = at; back > 0 && parts->part[back].start < parts->part[back - 1].start; back--)
+                {
+                        usb_segment swap = parts->part[back];
+
+                        parts->part[back] = parts->part[back - 1];
+                        parts->part[back - 1] = swap;
+                }
+        for (positive at = 0; at < parts->count; at++)
+        {
+                usb_segment address_to part = &parts->part[at];
+
+                if (part->start > cursor)
+                        usb_list_segment(cursor, part->start - cursor, USB_ROLE_FREE, null);
+                usb_list_segment(part->start, part->bytes, part->role, part->name[0] ? (string_address)part->name : null);
+                if (part->start + part->bytes > cursor)
+                        cursor = part->start + part->bytes;
+        }
+        if (total > cursor)
+                usb_list_segment(cursor, total - cursor, USB_ROLE_FREE, null);
+}
+
 static bool usb_list_disk(string_address directory, string_address name, address_any context)
 {
         p8 sysfs[HOST_PATH_ROOM];
         p8 link[HOST_PATH_ROOM * 2];
         p8 text[32];
         unsigned long long sectors = 0;
+        usb_parts parts;
 
         (void)directory;
         (void)context;
@@ -17046,10 +17186,14 @@ static bool usb_list_disk(string_address directory, string_address name, address
                 return true;
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") &&
             host_read_kernel(sysfs, text, sizeof(text)) > 0)
-                for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
-                        sectors = sectors * 10 + (unsigned long long)(text[at] - '0');
+                sectors = usb_decimal(text);
         // No verb holds a drive, so its row is shown and not pressed: it says what is true of it.
         host_say(log, "  %s drive %p MB view only\n", name, (positive)(sectors * 512 / 1000000ull));
+        memory_zero(&parts, sizeof(parts));
+        parts.disk = name;
+        if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name))
+                host_each_entry((string_address)sysfs, usb_part_visit, address_of parts);
+        usb_list_strip(name, sectors * 512, &parts);
         return true;
 }
 

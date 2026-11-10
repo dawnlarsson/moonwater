@@ -76,6 +76,12 @@ settings_asks_first	e9bd	ישאל קודם
 settings_badge_error	9cf1	שגיאה
 settings_badge_warning	fc8f	אזהרה
 settings_battery_charging	5116	, בטעינה
+settings_role_efi	d41a	מערכת EFI
+settings_role_linux	2c8f	נתוני Linux
+settings_role_swap	874e	החלפה
+settings_role_other	8df5	אחר
+settings_role_free	eedb	פנוי
+settings_role_unpartitioned	61a9	ללא מחיצות
 settings_battery_discharging	7964	, בפריקה
 settings_battery_full	ded8	, מלאה
 settings_battery_idle	1635	, לא בטעינה
