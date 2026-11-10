@@ -596,8 +596,10 @@ exec "$@"'
         carry=""
         [ -z "${MOONWATER_STOCK:-}" ] || carry="MOONWATER_STOCK=1"
 
+        # One build at a time on the build host: a build holds /tmp/moonwater-build.lock, so builds from several
+        # trees queue here rather than running out of memory together (a kernel build wants most of an 8 GB VM).
         # shellcheck disable=SC2029
-        ssh -n "$host" "$(remote_command sudo env $carry sh build.sh "$@")" ||
+        ssh -n "$host" "$(remote_command flock /tmp/moonwater-build.lock sudo env $carry sh build.sh "$@")" ||
                 die "the build failed on $host"
 
         # The host which built the configured profile is authoritative about
