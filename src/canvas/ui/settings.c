@@ -146,13 +146,13 @@
 
 #define SETTINGS_VALUE 128   // a value read
 #define SETTINGS_TYPED 256   // what is typed in a field: a value, or the words of a command
-#define SETTINGS_SAID 16384  // what a verb says: the whole of moonwater help is five thousand
+#define SETTINGS_SAID 24576  // what a verb says: the whole of moonwater help is about fifteen thousand
 #define SETTINGS_STATUS 160
 #define SETTINGS_WORDS 24
 #define SETTINGS_WAIT_NS 20000000000ll
 #define SETTINGS_FILTER 64   // what the filter holds, in bytes: its field holds no more
-#define SETTINGS_GENERATED 96 // rows of All commands, at most
-#define SETTINGS_POOL 8192    // the bytes of their words
+#define SETTINGS_GENERATED 128 // rows of All commands, at most: help's main page is 123, and the kit's list holds 320 in all (ui.c)
+#define SETTINGS_POOL 16384    // the bytes of their words
 #define SETTINGS_CARD 12288   // the bytes of what a command said, shown as a card
 #define SETTINGS_CARD_LINES 256
 #define SETTINGS_PROBE 512    // one line, cut
@@ -2048,7 +2048,9 @@ static fn settings_generic_more(const char address_to text, positive size)
         is two blanks, its command, two blanks or more and what it does; a
         command too long for that has what it does on the line under it, and
         a line indented far under a row is more of what that row does. The
-        page ends at its first blank line, before the notes.
+        section names (no indent) and the blank lines between the sections are
+        skipped; the notes are indented past a row's two blanks, so they are
+        no row.
 */
 static fn settings_help(const char address_to said, positive length)
 {
@@ -2069,11 +2071,7 @@ static fn settings_help(const char address_to said, positive length)
                 while (size > indent && line[size - 1] == ' ')
                         size--;
                 if (size == indent)
-                {
-                        if (settings.generic_count)
-                                break;
                         continue;
-                }
                 if (indent == 2)
                 {
                         const char address_to apart = (const char address_to)(memory_search)((address_any)(line + 2), size - 2, (address_any)"  ", 2);

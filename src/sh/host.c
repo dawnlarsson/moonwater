@@ -25665,10 +25665,10 @@ static positive host_settings_rows_write(writer out, string_address first, strin
 }
 
 /*
-        The main page when verb is null, else that verb's own: its full rows
-        where it has them, and what the main page shows of it where it has
-        not. How many rows were written, so that a word that is no verb is
-        told from one.
+        A verb's own page: its full rows where it has them, and what the main
+        page shows of it where it has not. How many rows were written, so that
+        a word that is no verb is told from one. The main page is
+        host_page_write's.
 */
 static positive host_rows_write(writer out, string_address verb)
 {
@@ -25676,7 +25676,7 @@ static positive host_rows_write(writer out, string_address verb)
         bool live = false;
         positive written = 0;
 
-        for (positive at = 0; verb && at < array_count(host_rows); at++)
+        for (positive at = 0; at < array_count(host_rows); at++)
                 full |= host_rows[at].kind == 'f' && host_rows[at].command[0] &&
                         host_row_is(host_rows + at, verb);
 
@@ -25690,8 +25690,8 @@ static positive host_rows_write(writer out, string_address verb)
                         continue;
                 }
                 if (row->command[0])
-                        live = !verb || host_row_is(row, verb);
-                if (live && (verb && full ? row->kind != 'm' : row->kind != 'f'))
+                        live = host_row_is(row, verb);
+                if (live && (full ? row->kind != 'm' : row->kind != 'f'))
                 {
                         host_row_write(out, row);
                         written++;
@@ -25700,15 +25700,167 @@ static positive host_rows_write(writer out, string_address verb)
         return written;
 }
 
+/*
+        The main page's rows, in the sections of the settings window (registry.c):
+        a section is the group of the first settings row whose verb a row's
+        first word is, and All commands is the rows no settings row has. A
+        settings row of a marker is in its own group. Each block is a row and
+        the lines under it, which go with it. A row of a verb's full page ('f')
+        is not on the main page.
+*/
+#define HOST_LINES (array_count(host_rows) + SETTINGS_ROWS)
+
+typedef struct
+{
+        positive section; // the settings row that names the section, or SETTINGS_ROWS for All commands
+        positive first;   // the block's first line
+        positive count;   // and how many lines it has
+} host_block;
+
+// The settings row that names the group at is in: the last row at or before at that has a section.
+static positive host_group_of(positive at)
+{
+        while (!settings_rows[at].section)
+                at--;
+        return at;
+}
+
+// Whether word is the first word of command.
+static bool host_word_first(string_address command, string_address word)
+{
+        positive length = string_length(word);
+
+        return !string_compare_max(command, word, length) && (command[length] == ' ' || !command[length]);
+}
+
+// The section of a command: the group of the first settings row whose verb it starts with, All commands when none does.
+static positive host_section_of(string_address command)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].read[0] && host_word_first(command, (string_address)settings_rows[at].read[0]))
+                        return host_group_of(at);
+        return (positive)SETTINGS_ROWS;
+}
+
+// Whether command comes before other in the alphabet, a capital as its small letter.
+static bool host_command_before(string_address command, string_address other)
+{
+        for (positive at = 0;; at++)
+        {
+                p8 a = command[at], b = other[at];
+
+                if (a >= 'A' && a <= 'Z')
+                        a = (p8)(a + ('a' - 'A'));
+                if (b >= 'A' && b <= 'Z')
+                        b = (p8)(b + ('a' - 'A'));
+                if (a != b || !a)
+                        return a < b;
+        }
+}
+
+// Whether block comes before other: by section, then by the command of its row.
+static bool host_block_before(const host_block address_to block, const host_block address_to other, const host_row address_to lines)
+{
+        if (block->section != other->section)
+                return block->section < other->section;
+        return host_command_before(lines[block->first].command, lines[other->first].command);
+}
+
+// The lines and blocks of the main page, in table order; the count of blocks. Each settings row a marker names is a block of its own.
+static positive host_page_collect(host_row address_to lines, host_block address_to blocks)
+{
+        positive rows = 0, count = 0;
+        bool shown = false;
+
+        for (positive at = 0; at < array_count(host_rows); at++)
+        {
+                const host_row address_to row = host_rows + at;
+
+                if (row->kind == 'r')
+                {
+                        shown = false;
+                        for (positive set = 0; set < SETTINGS_ROWS; set++)
+                        {
+                                const struct settings_row address_to setting = &settings_rows[set];
+                                host_row line = {null, (string_address)setting->usage, (string_address)setting->help, 'b'};
+
+                                if (!setting->usage || !host_word_first((string_address)setting->usage, (string_address)row->command + 1))
+                                        continue;
+                                blocks[count].section = host_group_of(set);
+                                blocks[count].first = rows;
+                                blocks[count].count = 1;
+                                lines[rows++] = line;
+                                count++;
+                        }
+                        continue;
+                }
+                if (row->kind == 'f')
+                {
+                        shown = false;
+                        continue;
+                }
+                if (row->command[0])
+                {
+                        blocks[count].section = host_section_of(row->command);
+                        blocks[count].first = rows;
+                        blocks[count].count = 0;
+                        count++;
+                        shown = true;
+                }
+                if (shown)
+                {
+                        lines[rows++] = *row;
+                        blocks[count - 1].count++;
+                }
+        }
+        return count;
+}
+
+// The main page's rows, each section named and sorted by its command, two blank lines before each section after the first.
+static fn host_page_rows_write(writer out)
+{
+        static host_row lines[HOST_LINES];
+        static host_block blocks[HOST_LINES];
+        positive count = host_page_collect(lines, blocks);
+
+        for (positive at = 1; at < count; at++)
+        {
+                host_block key = blocks[at];
+                positive back = at;
+
+                while (back && host_block_before(&key, &blocks[back - 1], lines))
+                {
+                        blocks[back] = blocks[back - 1];
+                        back--;
+                }
+                blocks[back] = key;
+        }
+        for (positive at = 0; at < count; at++)
+        {
+                const host_block address_to block = blocks + at;
+
+                if (!at || block->section != blocks[at - 1].section)
+                {
+                        if (at)
+                                string_format(out, "\n\n");
+                        string_format(out, TERM_BOLD "%s" TERM_RESET "\n",
+                                      block->section < SETTINGS_ROWS ? (string_address)settings_rows[block->section].section
+                                                                     : (string_address)"All commands");
+                }
+                for (positive each = 0; each < block->count; each++)
+                        host_row_write(out, lines + block->first + each);
+        }
+}
+
 static fn host_page_write(writer out)
 {
-        host_rows_write(out, null);
+        host_page_rows_write(out);
         host_say(out,
                  "\n"
-                 TERM_DIM "  Settings stay in the image this session started from.\n"
-                 "  install takes the settings of this session; update keeps those of the disk.\n"
-                 "  The machine script overwrites bind, init and exit.\n"
-                 "  " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
+                 TERM_DIM "    Settings stay in the image this session started from.\n"
+                 "    install takes the settings of this session; update keeps those of the disk.\n"
+                 "    The machine script overwrites bind, init and exit.\n"
+                 "    " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
 }
 
 /* A wrong argument's page: the verb's rows, or the whole of it for a word that is none. */
