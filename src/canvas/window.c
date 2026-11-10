@@ -787,6 +787,12 @@ struct window_place
 // WINDOW_KEY_* flags (DOWN, the modifiers, REPEAT). The program writes at osk_head and knocks; the compositor reads from osk_tail.
 #define WINDOWS_OSK 16
 
+// The pointer's shape over a program's controls, the compositor's CP_ codes (compositor.c checks they agree): the arrow, the
+// default; the I-beam over a text field or a text well; the hand over a button, a tab, a switch or any other control that is pressed.
+#define WINDOW_POINTER_ARROW 0u
+#define WINDOW_POINTER_TEXT 5u
+#define WINDOW_POINTER_HAND 8u
+
 // What the compositor did not do of a screen's displays line (struct windows' output_refused): a refresh rate the screen
 // does not offer at its size, which it keeps its mode for; a turn it cannot do, which it is left unturned for; and a place
 // the file does not read (a bad x or y), which it is put at its default for.
@@ -920,6 +926,9 @@ struct windows
         int damage_x[WINDOWS], damage_y[WINDOWS], damage_width[WINDOWS], damage_height[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
         unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, WINDOW_NO_CLOSE and WINDOW_DISMISS, read with the first picture
+        // The program's: the shape its pointer wears over its controls (WINDOW_POINTER_*, the arrow when none). The compositor shows it,
+        // and a press on the titlebar at the top of the window is the program's while the pointer is on one of its controls there.
+        unsigned int pointer_shape[WINDOWS];
         unsigned int asked[WINDOWS];  // the launch's: 1 when the user asked for the program (MOONWATER_ASKED=1 at its start), so its first window takes the keys
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
@@ -3219,6 +3228,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
                 table->title[row][at] = 0;
         table->glass[row] = 0;
+        __atomic_store_n(&table->pointer_shape[row], WINDOW_POINTER_ARROW, __ATOMIC_RELEASE);
         table->asked[row] = 0;
         table->ground[row] = 0;
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);

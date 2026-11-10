@@ -2850,6 +2850,8 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 #define CP_WAIT 9               // the hourglass: busy
 #define CP_NOTALLOWED 10        // the circle and slash: no drop, not allowed
 #define CP_SHAPES 11
+_Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEXT && WINDOW_POINTER_HAND == CP_HAND,
+               "a program's pointer shapes are the compositor's CP_ codes");
 // The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
 #define CP_PLANE 64
 
@@ -15997,6 +15999,23 @@ static void compositor_pointer_to(int row)
 static int compositor_wl_asked_shape(int row); // wayland_host.c: the CP_ shape the row's client asked for, or -1
 #endif
 
+/*
+        The shape a window's pointer wears over its controls: the one its client asked for with wp_cursor_shape, or else the one the
+        program's kit published (WINDOW_POINTER_*, the arrow when it has none). -1 is no request, which is none for a window of the kit.
+*/
+static int compositor_asked_shape(int row)
+{
+#ifdef CONFIG_MOONWATER_WAYLAND
+        int asked = compositor_wl_asked_shape(row);
+
+        if (asked >= 0 || asked == -2)
+                return asked;
+#endif
+        if (!compositor.table || row < 0 || row >= WINDOWS)
+                return -1;
+        return (int)__atomic_load_n(&compositor.table->pointer_shape[row], __ATOMIC_ACQUIRE);
+}
+
 static void compositor_motion(void)
 {
         int under, tab;
@@ -16005,15 +16024,11 @@ static void compositor_motion(void)
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
         // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
-        // the shape its client asked for with wp_cursor_shape (the arrow when it asked for none).
+        // the shape its client asked for with wp_cursor_shape, or the program's controls publish (the arrow when it has none).
         {
                 unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 ? 0
                                     : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
-#ifdef CONFIG_MOONWATER_WAYLAND
-                int asked = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? compositor_wl_asked_shape(under) : -1;
-#else
-                int asked = -1;
-#endif
+                int asked = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? compositor_asked_shape(under) : -1;
 
                 compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
                                           : compositor.drag >= 0 || under < 0 ? CP_ARROW
@@ -16550,13 +16565,18 @@ static void compositor_button(unsigned int code, int down)
                         on the close button it asks the window to go, twice
                         quickly it fills the output or gives it back, and
                         otherwise it takes hold of the window to move it.
-                        With Alt, anywhere on the window is the same.
+                        With Alt, anywhere on the window is the same. A control
+                        of the window under the pointer there (a button, a tab,
+                        a field: the pointer shows a hand or an I-beam over it)
+                        is the window's press, not the titlebar's: its pressing
+                        is what the window's controls are for.
                 */
                 top = !alt && code == COMPOSITOR_BTN_LEFT && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
                       compositor.pointer_x >= compositor.x[under] &&
                       compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
                       compositor.pointer_y >= compositor.y[under] &&
-                      compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
+                      compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100 &&
+                      compositor_asked_shape(under) <= WINDOW_POINTER_ARROW;
 
                 if (top && compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
                 {

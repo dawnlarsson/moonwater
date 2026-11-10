@@ -5601,11 +5601,25 @@ static struct ui_control address_to ui_kit_held;
         least UI_TARGET each way, in every control and every scrollbar, ui_hit) and the time it is handled at, which is what
         the animations an event starts are stamped with (the frame's clock is the last frame's, and an idle window's is old).
 */
+// The pointer's shape over the window's controls (WINDOW_POINTER_*): each motion starts it at the arrow, the hover of a control
+// sets it (ui_kit_shape_note), and the pass sends a change to the table, where the compositor shows it and takes a titlebar press
+// on a control for the window's (compositor_press_at). The table row is the window's, set when it starts (ui_app_start).
+static unsigned int ui_kit_shape;
+static unsigned int ui_kit_shape_sent;
+static struct windows address_to ui_kit_table;
+static unsigned int ui_kit_row;
+
 // The window's pointer is the last motion's place: a press or a key carries none, so an app asks the kit for it (ui_text_send).
 static fn ui_kit_track(const struct window_event address_to event)
 {
         if (event->type == WINDOW_EVENT_MOTION)
-                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
+                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b, ui_kit_shape = WINDOW_POINTER_ARROW;
+}
+
+// A control under the pointer: an input's I-beam, and the hand over any other control (a button, a tab, a switch, a row).
+static void ui_kit_shape_note(const struct ui_control address_to c)
+{
+        ui_kit_shape = c->kind == UI_INPUT ? WINDOW_POINTER_TEXT : WINDOW_POINTER_HAND;
 }
 
 /*
@@ -5617,6 +5631,11 @@ static fn ui_kit_pass(void)
 {
         ui_kit.now = (b64)ui_kit_clock();
         ui_kit.stamp = 0; // the pass's own time: no event's stamp goes on past the pass's events
+        if (ui_kit_table && ui_kit_shape != ui_kit_shape_sent)
+        {
+                __atomic_store_n(&ui_kit_table->pointer_shape[ui_kit_row], ui_kit_shape, __ATOMIC_RELEASE);
+                ui_kit_shape_sent = ui_kit_shape;
+        }
 }
 
 static fn ui_event_context(const struct window_event address_to event)
@@ -5782,6 +5801,8 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->hover = hit >= 0;
                                 c->item = hit;
                         }
+                        if (hit >= 0)
+                                ui_kit_shape_note(c);
                         if (c->kind == UI_SLIDER)
                                 c->hover_x = hit >= 0 ? ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
                 }
@@ -11633,6 +11654,7 @@ static int ui_app_run(struct ui_app address_to app)
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
+        ui_kit_table = table, ui_kit_row = row, ui_kit_shape = ui_kit_shape_sent = WINDOW_POINTER_ARROW;
         // No field of this program has the keys yet: a count left by the window that had this row is none of its (ui_field_focus).
         table->field[row] = 0;
         *app->ground = table->ground[row];
@@ -14472,6 +14494,10 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         struct ui_select address_to s = ui_text_sel(t);
         b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
+
+        // A text well is the I-beam's, as an input field is (ui_kit_shape_note).
+        if (event->type == WINDOW_EVENT_MOTION && well)
+                ui_kit_shape = WINDOW_POINTER_TEXT;
         positive now = ui_kit_clock();
 
         if (event->type == WINDOW_EVENT_WHEEL)
