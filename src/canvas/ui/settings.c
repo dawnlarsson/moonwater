@@ -4708,6 +4708,9 @@ static void settings_slid(void)
         if (row < 0 || row >= SETTINGS_ANY || settings_rows[row].kind != SETTINGS_SLIDER || settings.state[row] != SETTINGS_READ)
                 return;
         positive_into_string((p8 address_to)word, (positive)settings.list.slid_value);
+        // A hand let go where the row already is is no change: the verb is not run for it.
+        if (string_equals((string_address)word, (string_address)settings.value[row]))
+                return;
         settings_change(row, word);
 }
 
