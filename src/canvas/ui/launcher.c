@@ -107,7 +107,9 @@ static const struct launcher_power
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {
+#if MOONWATER_UI_SETTINGS // its tool is in the table only with the switch on (features.h): a row that is listed starts
     {"Settings", "settings preferences options", "/settings", 0},
+#endif
     {"Terminal", "terminal shell console", "/terminal", 1},
     {"Kernel log", "kernel log klog dmesg messages", "/klog", 1},
 #if MOONWATER_UI_MIXER
