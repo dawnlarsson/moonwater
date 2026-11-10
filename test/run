@@ -1142,9 +1142,13 @@ freestanding()
         #           MW_CLANG=1 sh test/run verify hex utf8
         rwx_flag=-Wl,--no-warn-rwx-segments
         case $compiler in *clang*) rwx_flag= ;; esac
+        #       A freestanding tool on aarch64 must not call the compiler's outline
+        #       atomics: -nostdlib leaves libgcc out, and the calls are unresolved.
+        outline_flag=
+        case $(uname -m) in aarch64 | arm64) outline_flag=-mno-outline-atomics ;; esac
 
         # shellcheck disable=SC2086
-        if build_cached "$output" $compiler -O2 -static -nostdlib -nostartfiles \
+        if build_cached "$output" $compiler -O2 -static -nostdlib -nostartfiles $outline_flag \
                 -fno-stack-protector -fno-builtin "$@" -w -T src/build/spark.ld \
                 -Wl,-e,_start -Wl,--build-id=none $rwx_flag \
                 $coverage_args -o "$output" "$source_file"

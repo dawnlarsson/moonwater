@@ -119,11 +119,22 @@ if [ "$(uname)" = "Linux" ]; then
                 # never a half-written file. clang has no nested functions,
                 # and scope_exit is its defer statement, which it takes when
                 # asked (src/lib.util.c).
+                #       Probed, not assumed: some clang builds (Ubuntu's 19, for one) do not
+                #       take -fdefer-ts, and test/run probes the same way.
                 defer=
                 case $("$compiler" --version 2> /dev/null) in
-                *clang*) defer=-fdefer-ts ;;
+                *clang*)
+                        printf 'int x;\n' | "$compiler" -fdefer-ts -x c -c -o /dev/null - 2> /dev/null &&
+                                defer=-fdefer-ts
+                        ;;
                 esac
-                "$compiler" -O2 -static -nostdlib -nostartfiles \
+                # On Linux aarch64 the build tool is freestanding, so the atomics
+                # must be inline: -nostdlib leaves libgcc's outline helpers out.
+                outline=
+                case $(uname -sm) in
+                "Linux aarch64" | "Linux arm64") outline=-mno-outline-atomics ;;
+                esac
+                "$compiler" -O2 -static -nostdlib -nostartfiles $outline \
                         -fno-stack-protector -fno-builtin -w $defer \
                         -MMD -MT "$tool" -MF "$depfile.$$" \
                         -o "$tool.$$" "$source" &&
