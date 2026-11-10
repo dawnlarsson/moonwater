@@ -127,6 +127,7 @@ static void test_roundtrip(void)
 	free(shifted);
 }
 
+#if MODEM_SYM == 40 && MODEM_TONES == 16
 static void test_golden(void)
 {
 	static const uint8_t payload[] = "golden frame";
@@ -145,6 +146,8 @@ static void test_golden(void)
 	check(strcmp(got, MODEM_GOLDEN) == 0, "frame samples match the pinned wire format");
 	free(pcm);
 }
+
+#endif /* the default configuration's golden frame */
 
 static void test_bounds(void)
 {
@@ -240,6 +243,59 @@ static void test_stale_frame_does_not_hide_fresh(void)
 	free(both);
 }
 
+/* Frames of 0 and of MODEM_PAYLOAD_MAX bytes, the two ends of the one-byte LEN, round-trip exactly. */
+static void test_length_limits(void)
+{
+	size_t cap = modem_encode_samples(MODEM_PAYLOAD_MAX);
+	int16_t *pcm = malloc(sizeof(int16_t) * cap);
+	uint8_t payload[MODEM_PAYLOAD_MAX], out[MODEM_PAYLOAD_MAX];
+	size_t i;
+	int ok = 1;
+
+	for (i = 0; i < MODEM_PAYLOAD_MAX; i++)
+		payload[i] = (uint8_t)(0xA5 ^ i);
+	for (i = 0; i < 2; i++)
+	{
+		size_t len = i ? MODEM_PAYLOAD_MAX : 0;
+		uint32_t seq = i ? 0xFFFFFFFEu : 1u, got_seq = 0;
+		size_t n = modem_encode(KEY, KEYLEN, seq, payload, len, pcm, cap);
+		int got = modem_decode(pcm, n, KEY, KEYLEN, out, sizeof(out), &got_seq);
+
+		ok = ok && n > 0 && got == (int)len && got_seq == seq && (len == 0 || memcmp(out, payload, len) == 0);
+	}
+	check(ok, "a frame of 0 bytes and one of 255 bytes round-trip exactly, with the largest sequence number");
+	free(pcm);
+}
+
+/* Every cut of a frame, down to the bytes the buffer holds: a decode of a truncated capture must find nothing or the
+   whole frame, and must not read past the buffer (the buffer is exactly the cut's length, so ASan sees an overread). */
+static void test_truncation(void)
+{
+	static const uint8_t payload[] = "cut";
+	size_t cap = modem_encode_samples(sizeof(payload) - 1);
+	int16_t *pcm = malloc(sizeof(int16_t) * cap);
+	size_t n = modem_encode(KEY, KEYLEN, 3, payload, sizeof(payload) - 1, pcm, cap), cut;
+	int bad = 0;
+
+	for (cut = 0; cut <= n; cut += (cut + 400 < n) ? 97 : 1)
+	{
+		int16_t *exact = malloc(sizeof(int16_t) * (cut ? cut : 1));
+		uint8_t out[8];
+		uint32_t seq = 0;
+		int got;
+
+		memcpy(exact, pcm, cut * sizeof(int16_t));
+		got = modem_decode(exact, cut, KEY, KEYLEN, out, sizeof(out), &seq);
+		if (got != -1 && !(got == (int)(sizeof(payload) - 1) && seq == 3 && memcmp(out, payload, 3) == 0))
+			bad++;
+		if (cut == n && got != (int)(sizeof(payload) - 1))
+			bad++;
+		free(exact);
+	}
+	check(bad == 0, "a capture cut at every length finds nothing or the frame, and never reads past its buffer");
+	free(pcm);
+}
+
 static void test_noise(void)
 {
 	static const double snrs[] = {10, 6, 3, 0, -3};
@@ -247,6 +303,7 @@ static void test_noise(void)
 	int16_t *noisy = malloc(sizeof(int16_t) * (modem_encode_samples(32) + 200));
 	uint8_t payload[32], out[64];
 	size_t i;
+	int decoded[sizeof(snrs) / sizeof(snrs[0])];
 
 	for (i = 0; i < 32; i++)
 		payload[i] = (uint8_t)(i * 37 + 11);
@@ -274,8 +331,16 @@ static void test_noise(void)
 			    got_seq == (uint32_t)trial && memcmp(out, payload, 32) == 0)
 				ok++;
 		}
+		decoded[i] = ok;
 		printf("      snr %4.0f dB: %2d of 50 frames (32 bytes) decode\n", snrs[i], ok);
 	}
+#if MODEM_SYM == 40 && MODEM_TONES == 16
+	/* The default configuration's margins, measured with the seeds above: 3 dB decodes every frame, 0 dB most. */
+	check(decoded[2] == 50, "at 3 dB every frame decodes");
+	check(decoded[3] >= 45, "at 0 dB at least 45 of 50 frames decode");
+#else
+	(void)decoded;
+#endif
 	free(pcm);
 	free(noisy);
 }
@@ -312,11 +377,15 @@ int main(void)
 {
 	test_vectors();
 	test_roundtrip();
-	test_golden();
+#if MODEM_SYM == 40 && MODEM_TONES == 16
+	test_golden(); /* the wire format is pinned for the default configuration only */
+#endif
 	test_bounds();
 	test_wrongkey_and_replay();
 	test_session();
 	test_stale_frame_does_not_hide_fresh();
+	test_length_limits();
+	test_truncation();
 	test_noise();
 	test_bench();
 	printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
