@@ -99,6 +99,10 @@ arm64 | aarch64) host_arch=arm64 ;;
 riscv64)         host_arch=riscv64 ;;
 *)               host_arch=unknown ;;
 esac
+#       A static harness on arm64 keeps its atomics inline, as freestanding() does: -nostdlib leaves libgcc out,
+#       so an outline helper such as __aarch64_ldadd4_sync is an undefined reference at link time.
+harness_atomics=
+[ "$host_arch" = arm64 ] && harness_atomics=-mno-outline-atomics
 
 #       A lane started by `run -j` works in its parent's directory: the
 #       shell, the farms and the tally are built there once and shared, and
@@ -2040,7 +2044,7 @@ riscv_alignment_audit()
         alignment_image="$work/riscv-alignment.elf"
         alignment_error="$work/riscv-alignment.err"
 
-        if ! "$@" -O2 -static -nostdlib -nostartfiles \
+        if ! "$@" -O2 -static -nostdlib -nostartfiles $harness_atomics \
                 -fno-stack-protector -fno-builtin -w \
                 -march=rv64imafd_zicsr_zicntr -mabi=lp64d \
                 -DSTANDARD_NO_PLATFORM -T src/build/spark.ld -Wl,-e,string_length \
@@ -6010,7 +6014,7 @@ riscv_default_startup()
                 return 2
         }
 
-        if ! "$startup_cross" -O2 -static -nostdlib -nostartfiles \
+        if ! "$startup_cross" -O2 -static -nostdlib -nostartfiles $harness_atomics \
                 -fno-stack-protector -fno-builtin \
                 -march=rv64imafd_zicsr_zicntr -mabi=lp64d -w \
                 -Wl,-e,_start -Wl,--build-id=none \
@@ -10779,7 +10783,7 @@ HARNESS
 
 coverage_build "$host_arch" "$work/term" || exit 1
 # shellcheck disable=SC2086
-if ! $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
+if ! $compiler -O2 -static -nostdlib -nostartfiles $harness_atomics -fno-stack-protector \
         -fno-builtin -Wall -Wextra -Werror=unused-variable \
         -Werror=unused-but-set-variable -I "$root" -T src/build/spark.ld -Wl,-e,_start \
         -Wl,--build-id=none -Wl,--no-warn-rwx-segments $coverage_args \
@@ -10797,7 +10801,7 @@ coverage_keep "$work/term"
 #       Built without coverage: the coverage map is one file per lane build,
 #       and its addresses belong to the term binary alone.
 # shellcheck disable=SC2086
-if ! $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
+if ! $compiler -O2 -static -nostdlib -nostartfiles $harness_atomics -fno-stack-protector \
         -fno-builtin -Wall -Wextra -Werror=unused-variable \
         -Werror=unused-but-set-variable -I "$root" -T src/build/spark.ld -Wl,-e,_start \
         -Wl,--build-id=none -Wl,--no-warn-rwx-segments -DTERM_FIXED_QUEUE \
@@ -13615,7 +13619,7 @@ HARNESS
 
 coverage_build "$host_arch" "$work/edit" || exit 1
 # shellcheck disable=SC2086
-if ! $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
+if ! $compiler -O2 -static -nostdlib -nostartfiles $harness_atomics -fno-stack-protector \
         -fno-builtin -Wall -Wextra -Werror=unused-variable \
         -Werror=unused-but-set-variable -I "$root" -T src/build/spark.ld -Wl,-e,_start \
         -Wl,--build-id=none -Wl,--no-warn-rwx-segments $coverage_args \
@@ -28116,7 +28120,7 @@ bench_target()
 
         # shellcheck disable=SC2086
         "$bench_compiler" $bench_arch_flags \
-                -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
+                -O2 -static -nostdlib -nostartfiles $harness_atomics -fno-stack-protector \
                 -fno-builtin -T src/build/spark.ld -Wl,-e,_start -Wl,--build-id=none \
                 -Wl,--no-warn-rwx-segments \
                 -o "$bench_binary" "-D$bench_section" test/checks.c || return 1
