@@ -13,6 +13,9 @@
 #           sh build.sh --host box            build on another machine over ssh
 #           sh build.sh --arch arm64 --run    build and boot another architecture
 #           sh build.sh --run --ram 8         boot with 8 GB of memory (default 4)
+#           sh build.sh --env check           report the local x86-64 build environment
+#           sh build.sh --env setup [--yes]   wrappers, and brew installs with --yes
+#           sh build.sh --env prove           link an x86-64 program and run it under the VM
 #
 #       Memory is what a live image keeps its bowls in, so it is the room a
 #       setup has: Arch's tree is 0.6 GB on x86-64 and 2.1 GB on arm64, with
@@ -235,6 +238,94 @@ ram_gigs() {
         printf '%s' "$gigs"
 }
 
+#       --env check|setup|prove sets up and proves the local build environment for other
+#       architectures on this machine, with no service: the toolchains are the
+#       machine's own (Homebrew's llvm, lld and qemu, the Lima VM already here).
+#       check reports what is present; setup installs what is missing, but only with
+#       --yes, and otherwise says what it would run; prove compiles a x86-64 program,
+#       links it with lld and runs it under the VM's qemu-user. Nothing under the
+#       source tree is written, and the wrappers live in ~/.cache/mw-x86-proof.
+mw_env_dir=$HOME/.cache/mw-x86-proof
+mw_env_lld=/opt/homebrew/opt/lld/bin/ld.lld
+mw_env_clang=/opt/homebrew/opt/llvm/bin/clang
+
+env_say() { printf '%s\n' "$*"; }
+
+env_check()
+{
+        env_missing=0
+        for formula in llvm lld qemu; do
+                if brew list --versions "$formula" >/dev/null 2>&1; then
+                        env_say "ok       brew $formula"
+                else
+                        env_say "missing  brew $formula"
+                        env_missing=1
+                fi
+        done
+        if [ -x "$mw_env_lld" ]; then env_say "ok       ld.lld"; else env_say "missing  ld.lld"; env_missing=1; fi
+        if limactl list 2>/dev/null | grep -q 'default.*Running.*aarch64'; then
+                env_say "ok       Lima VM default is running"
+                if limactl shell default -- bash -lc 'command -v qemu-x86_64 >/dev/null' 2>/dev/null; then
+                        env_say "ok       qemu-x86_64 in the VM"
+                else
+                        env_say "missing  qemu-x86_64 in the VM"
+                        env_missing=1
+                fi
+        else
+                env_say "missing  Lima VM default (limactl start default)"
+                env_missing=1
+        fi
+        [ "$env_missing" = 0 ]
+}
+
+env_setup()
+{
+        for formula in llvm lld qemu; do
+                brew list --versions "$formula" >/dev/null 2>&1 && continue
+                if [ "$env_yes" = 1 ]; then
+                        env_say "installing brew $formula"
+                        brew install "$formula" || return 1
+                else
+                        env_say "would run: brew install $formula   (add --yes to run it)"
+                fi
+        done
+        mkdir -p "$mw_env_dir/bin" || return 1
+        for arch in x86_64 aarch64 riscv64; do
+                printf '%s\n' '#!/bin/sh' \
+                        "exec limactl shell --workdir \"\$PWD\" default -- qemu-$arch \"\$@\"" \
+                        > "$mw_env_dir/bin/qemu-$arch" || return 1
+                chmod +x "$mw_env_dir/bin/qemu-$arch"
+        done
+        env_say "wrappers in $mw_env_dir/bin (qemu-x86_64, qemu-aarch64, qemu-riscv64)"
+}
+
+env_prove()
+{
+        mkdir -p "$mw_env_dir" || return 1
+        cd "$mw_env_dir" || return 1
+        cat > prove.c <<'PROVE'
+void _start(void) { __asm__ volatile("mov $60, %eax\n mov $7, %edi\n syscall"); }
+PROVE
+        "$mw_env_clang" --target=x86_64-linux-gnu -O2 -static -nostdlib -fuse-ld=lld \
+                -o prove prove.c || {
+                env_say "FAIL  x86-64 link with lld"; return 1; }
+        env_say "ok       x86-64 ELF linked by lld"
+        code=0
+        "$mw_env_dir/bin/qemu-x86_64" ./prove || code=$?
+        [ "$code" = 7 ] && env_say "ok       ran under the VM's qemu-x86_64 (exit 7)" || {
+                env_say "FAIL  expected exit 7, got $code"; return 1; }
+}
+
+env_command()
+{
+        case "$1" in
+        check) env_check ;;
+        setup) env_setup ;;
+        prove) env_check >/dev/null 2>&1; env_prove ;;
+        *) die "--env wants check, setup or prove" ;;
+        esac
+}
+
 remaining=$#
 while [ "$remaining" -gt 0 ]; do
         argument=$1
@@ -242,6 +333,13 @@ while [ "$remaining" -gt 0 ]; do
         remaining=$((remaining - 1))
         case "$argument" in
         --clean) do_clean=1 ;;
+        --env)
+                [ "$remaining" -gt 0 ] || die "--env wants check, setup or prove"
+                env_cmd=$1
+                shift
+                remaining=$((remaining - 1))
+                ;;
+        --yes) env_yes=1 ;;
         --run) do_run=1 ;;
         --boot) do_run=1; do_build=0 ;;
         --shell) console=1 ;;
@@ -278,6 +376,11 @@ while [ "$remaining" -gt 0 ]; do
         *) set -- "$@" "$argument" ;;
         esac
 done
+
+if [ -n "${env_cmd:-}" ]; then
+        env_command "$env_cmd"
+        exit $?
+fi
 
 #       The machine to build on is a word of ssh's and rsync's command lines,
 #       where one that begins with a dash is an option: -oProxyCommand=CMD
