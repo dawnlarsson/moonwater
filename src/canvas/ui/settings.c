@@ -4514,10 +4514,12 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_STEP;
         else if (which->kind == SETTINGS_SLIDER)
         {
-                // The number the verb says, on a slider from the row's least to its greatest; its unit is said after the number.
+                // The number the verb says, on a slider from the row's least to its greatest; its unit is said after the number. A number the
+                // verb says outside the range (a file written before the range was) rests at the nearer end: the kit draws it on its track.
                 long number = 0;
 
                 setting_whole((string_address)shown, &number);
+                number = number < which->low ? which->low : number > which->high ? which->high : number;
                 row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
                 row->step = settings_slider_step(which), row->words = which->unit;
         }
