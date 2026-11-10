@@ -5967,8 +5967,11 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         b32 right = (dx > 0) != ui_rtl();
 
                         b32 was = c->kind == UI_RADIOS ? c->item == c->at : c->on;
+                        // A radio is picked by a press let go on the circle it went down on: a drag that ends elsewhere picks nothing.
+                        b32 pick = c->kind == UI_RADIOS ? ui_control_hit(ui, c, x, y) == c->item
+                                                        : (c->moved && right != was && (ldx > ui_q(100) || ldx < -ui_q(100))) || !c->moved;
 
-                        if ((c->moved && right != was && (ldx > ui_q(100) || ldx < -ui_q(100))) || !c->moved)
+                        if (pick)
                         {
                                 if (c->kind == UI_RADIOS)
                                 {
@@ -5977,7 +5980,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                                 ui_radios_choose(c, c->item);
                                                 changed = c;
                                         }
-                                        else if (!ui_kit.motion)
+                                        else if (!c->moved && !ui_kit.motion)
                                         {
                                                 // Pressed again on the chosen circle: a squish in place, and the pip's own.
                                                 int lx = x * 100 / ui->scale;
