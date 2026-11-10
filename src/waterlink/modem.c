@@ -1063,7 +1063,7 @@ static b32 modem_send_file(string_address path)
         scope_exit(system_close(in));
         got = modem_stream_choose(in, &src, &mark, &stream);
         if (got < 0)
-                return host_refuse("%s could not be read for the modem (%p): nothing is sent\n", path, (positive)(-got));
+                return host_refuse("%s could not be read or compressed for the modem (error %p): nothing is sent\n", path, (positive)(-got));
         if (stream <= 1)
                 return host_refuse("%s is empty: nothing to send\n", path);
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, key, &first_seq, &first_id) < 0)
