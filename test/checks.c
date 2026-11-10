@@ -126569,6 +126569,19 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
 
 static unsigned int launcher_band_pixels[BAND_W * 2 * COMPOSITOR_PANEL];
 
+// The launcher tab's length along the edge at a screen scale, the taskbar's own at 100: the grid of its mark (taskbar_launcher_grid, written out
+// again) and the standard padding either side of it, never under the tab's height.
+static int launcher_tab_length(int scale)
+{
+    int high = COMPOSITOR_PANEL * scale / 100 - 3 * scale / 100, pad = TASKBAR_PADDING_STANDARD * scale / 100;
+    int step = (high * 28 + 50) / 100, dot = (step * 65 + 50) / 100, wide;
+
+    dot = dot < 1 ? 1 : dot;
+    step = step < dot + 1 ? dot + 1 : step;
+    wide = 2 * step + dot + 2 * pad;
+    return wide < high ? high : wide;
+}
+
 static void check_taskbar_launcher(void)
 {
     static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
@@ -126598,7 +126611,7 @@ static void check_taskbar_launcher(void)
             unsigned int position = positions[at];
             int scale = scales[each], vertical = position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
             int x, y, w, h, bx, by, bw, bh, tx, ty, tw, th, start, wide[3], tray_at, tray_length, length, origin, lead, thick, gap, high, inset;
-            int along[3], span[3];
+            int along[3], span[3], tab;
 
             memory_zero(&view, sizeof(view));
             view.width = BAND_W;
@@ -126631,14 +126644,15 @@ static void check_taskbar_launcher(void)
 
             // On: the button, a gap in from the leading end.
             taskbar_launcher_set(1);
-            lead = gap + high;
+            tab = launcher_tab_length(scale);
+            lead = gap + tab;
             launcher_oracle(position, scale, 3, lengths, length, origin, lead, &start, wide, &tray_at, &tray_length);
             if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
             {
                 button_square = button_leads = tabs_after = hits = anchored = damaged = glyphs = 0;
                 continue;
             }
-            button_square &= w == high && h == high;
+            button_square &= vertical ? w == high && h == tab : w == tab && h == high; // a tab as high as the others, as long as its mark and the padding
             button_leads &= (vertical ? y : x) == origin + gap && x >= bx && y >= by && x + w <= bx + bw && y + h <= by + bh &&
                             (position == TASKBAR_TOP ? y == by : position == TASKBAR_BOTTOM ? y == by + inset
                                                              : position == TASKBAR_LEFT ? x == bx : x == bx + inset);
@@ -126759,7 +126773,7 @@ static void check_taskbar_launcher(void)
             }
         }
     check("launcher button: with it off the tabs and the tray are where the band's own formula puts them, at every position and scale, and no slot is the button's", off_same);
-    check("launcher button: on, it is a tab-sized square a gap in from the leading end of the band, inside it", button_square && button_leads);
+    check("launcher button: on, it is a tab as high as the others, as long as its mark and the padding, a gap in from the leading end of the band, inside it", button_square && button_leads);
     check("launcher button: and the tabs are laid out in what it leaves, clear of it and of the tray", tabs_after);
     check("launcher button: a point on it is the launcher button, a point on a tab or the tray is theirs, and the gap between is none", hits);
     check("launcher button: its anchor is its length along the edge and the band's whole thickness across it", anchored);
@@ -138107,10 +138121,10 @@ static fn check_launcher_anchor(void)
 
                                 switch (edges[at])
                                 {
-                                case TASKBAR_BOTTOM: button[0] = screen[0] + gap, button[1] = bottom - thick, button[2] = high, button[3] = thick; break;
-                                case TASKBAR_TOP: button[0] = screen[0] + gap, button[1] = screen[1], button[2] = high, button[3] = thick; break;
-                                case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
-                                default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
+                                case TASKBAR_BOTTOM: button[0] = screen[0] + gap, button[1] = bottom - thick, button[2] = launcher_tab_length(scale), button[3] = thick; break;
+                                case TASKBAR_TOP: button[0] = screen[0] + gap, button[1] = screen[1], button[2] = launcher_tab_length(scale), button[3] = thick; break;
+                                case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = launcher_tab_length(scale); break;
+                                default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = launcher_tab_length(scale); break;
                                 }
                                 ui_anchor_place(ui_panel_side(edges[at]), 0, button, screen, width, height, &x, &y);
                                 beside &= edges[at] == TASKBAR_BOTTOM ? y + height == button[1] && x == button[0]

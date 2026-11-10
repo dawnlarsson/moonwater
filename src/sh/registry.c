@@ -473,12 +473,12 @@ static const struct settings_row settings_rows[] = {
                       .unit = "px", .low = 0, .high = 24, .need = "how Canvas draws",
                       .usage = "taskbar padding [PX|default]",
                       .help = "the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]"),
-    //  Off by default: the launcher opens from its key alone. On, the band has a button at its leading end (the left of a
-    //  bottom or top band, the top of a side one) that opens and closes the launcher beside it.
+    //  Off by default: the launcher opens from its key alone. On, the band has a tab with the launcher's mark at its leading end (the
+    //  left of a bottom or top band, the top of a side one) that opens and closes the launcher beside it.
     SETTING_PLAIN_ROW(null, "Taskbar launcher button", SETTINGS_SWITCH, 0, ("taskbar", "launcher"), "launcher ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "taskbar launcher [on|off]",
-                      .help = "a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]"),
+                      .help = "a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again [off]"),
     //  On, which is the default, the band slides off its edge while a window is fullscreen (compositor.c takes it from its file,
     //  and a missing file or a file that says default is on) and comes back when none is. Off, the band stays where it is.
     SETTING_PLAIN_ROW(null, "Taskbar hides for fullscreen", SETTINGS_SWITCH, 0, ("taskbar", "fullscreen"), "fullscreen ", null,
