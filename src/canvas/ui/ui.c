@@ -10166,7 +10166,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 // Whether a press at px (device pixels) is on the expander of row id: the strip its chevron and its badge are drawn in, at the row's end
 // (left of a switch, which sits at that end). Those open and close its lines rather than acting on the row. The strip is the one
 // ui_list_row lays out (the chevron's slot, the badge's width), so a switch, a field or a dropdown's value beside it is not in it.
-static b32 ui_list_expander_at(const struct ui address_to ui, const struct ui_list address_to l, int id, int px)
+static b32 ui_list_expander_at(struct ui address_to ui, const struct ui_list address_to l, int id, int px)
 {
         struct ui_row row;
         struct ui_control measure;
