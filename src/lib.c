@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        477 routines (451 public, 26 local), 463 of them on all three and 11 local to one.
+        477 routines (451 public, 26 local), 466 of them on all three and 11 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -234,7 +234,7 @@
           memory_ascii_span              public  yes     yes     yes
           memory_average_ahead           public  yes     yes     yes
           memory_blend_u32_rect          public  yes     yes     yes
-          memory_blend_u32_rect_baseline public  yes     yes     --
+          memory_blend_u32_rect_baseline public  yes     yes     yes
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
           memory_compare                 public  yes     yes     yes
@@ -391,8 +391,8 @@
           positive_into_padded           public  yes     yes     yes
           positive_into_pair             public  yes     yes     yes
           positive_into_string           public  yes     yes     yes
-          positive_into_string_2_2       public  yes     yes     --
-          positive_into_string_9_12      public  yes     yes     --
+          positive_into_string_2_2       public  yes     yes     yes
+          positive_into_string_9_12      public  yes     yes     yes
           positive_to_base_field         public  yes     yes     yes
           positive_to_human_1024         public  yes     yes     yes
           positive_to_padded             public  yes     yes     yes
@@ -559,11 +559,6 @@
           sha512_blocks_avx2 -- local to x86_64
           zstd_sequences_decode_bmi2 -- local to x86_64
           zstd_sequences_run_bmi2 -- local to x86_64
-
-        Not yet on every machine:
-          memory_blend_u32_rect_baseline -- missing on riscv64
-          positive_into_string_2_2 -- missing on riscv64
-          positive_into_string_9_12 -- missing on riscv64
 */
 
 /*
@@ -39099,6 +39094,42 @@ ASM_FUNC(positive_to_string)
     ASM_FUNC(positive_into_string)
     "li a4, 2\n   j positive_into_core\n"
     ASM_END(positive_into_string)
+    //
+    //       Size-class variant for 10 to 99 on RISC-V: the two digits of the pair are two byte loads
+    //       and two byte stores (baseline RISC-V does not promise an unaligned halfword), the terminator
+    //       a byte store, the count 2. The same answer as the x86_64 and arm64 bodies.
+    //
+    ASM_FUNC(positive_into_string_2_2)
+    "lla t0, digit_pairs\n   slli a2, a1, 1\n   add a2, t0, a2\n   lbu t1, 0(a2)\n   lbu t2, 1(a2)\n"
+    "sb t1, 0(a0)\n   sb t2, 1(a0)\n   sb zero, 2(a0)\n   li a0, 2\n" ASM_RET
+    ASM_END(positive_into_string_2_2)
+    //
+    //       Size-class variant for 10^8 to 10^12 - 1 on RISC-V: the generic entry already writes the
+    //       terminator, so this is a tail call to it.
+    //
+    ASM_FUNC(positive_into_string_9_12)
+    "j positive_into_string\n"
+    ASM_END(positive_into_string_9_12)
+    //
+    //       memory_blend_u32_rect_baseline on RISC-V: the contract of the arm64 body's scalar tail, one pixel at a time.
+    //       For each pixel, the coverage byte is cov and the word dest. The run stops at the first pixel whose
+    //       dest, low 24 bits, is not the ground while cov is not zero: the answer is that pixel's index, row times
+    //       width plus column, and nothing from it on is written. Otherwise a non-zero cov writes table[cov] and a
+    //       zero cov keeps dest. A width or height of zero is nothing; a finished run answers width times height.
+    //       Baseline RISC-V has no vector unit, so this is the scalar floor; the loop is the arm64 tail's, with the
+    //       same arguments: a0 into, a1 into stride in words, a2 from, a3 from stride, a4 width, a5 height, a6 table
+    //       (the ground is the word after its 256 entries of 4 bytes, at byte 2048).
+    //
+    ASM_FUNC(memory_blend_u32_rect_baseline)
+    "beqz a4, 8f\n   beqz a5, 8f\n   slli a1, a1, 2\n   li t1, 2048\n   add t1, a6, t1\n   lwu t0, 0(t1)\n   li a7, 0xffffff\n   and t0, t0, a7\n   li t6, 0\n"
+    "1:  li t5, 0\n"
+    "2:  bgeu t5, a4, 3f\n   add t1, a2, t5\n   lbu t2, 0(t1)\n   slli t1, t5, 2\n   add t1, a0, t1\n   lwu t3, 0(t1)\n   and t4, t3, a7\n"
+    "   beq t4, t0, 4f\n   beqz t2, 4f\n   mul t1, t6, a4\n   add a0, t1, t5\n" ASM_RET
+    "4:  beqz t2, 5f\n   slli t1, t2, 2\n   add t1, a6, t1\n   lwu t3, 0(t1)\n"
+    "5:  slli t1, t5, 2\n   add t1, a0, t1\n   sw t3, 0(t1)\n   addi t5, t5, 1\n   j 2b\n"
+    "3:  add a0, a0, a1\n   add a2, a2, a3\n   addi t6, t6, 1\n   bltu t6, a5, 1b\n"
+    "8:  mul a0, a4, a5\n" ASM_RET
+    ASM_END(memory_blend_u32_rect_baseline)
     ASM_FUNC(bipolar_into)
     "li a4, 0\n   j bipolar_into_core\n"
     ASM_END(bipolar_into)
