@@ -23,6 +23,7 @@ editor_position	3696	שורה %1$d, עמודה %2$d
 editor_read_failed	5f78	לא ניתן לקרוא את הקובץ: הוא אינו נפתח
 editor_replace_usage	c677	תבנית ההחלפה: חיפוש/תחליף
 editor_replaced	1128	הוחלפו %d
+editor_save_as_none	0745	שמירה בשם אינה זמינה כאן: Ctrl+S שומר את הקובץ
 editor_save_failed	069d	השמירה נכשלה: הקובץ נשאר כפי שהיה
 editor_saved	9f44	נשמר
 editor_selected	a686	(%d נבחרו)

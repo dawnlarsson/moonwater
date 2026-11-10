@@ -22,6 +22,7 @@ editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	le fichier n'a pas pu être lu : il n'est pas ouvert
 editor_replace_usage	c677	remplacer s'écrit RECHERCHE/REMPLACEMENT
 editor_replaced	1128	%d remplacés
+editor_save_as_none	0745	enregistrer sous n'est pas ici : Ctrl+S enregistre le fichier
 editor_save_failed	069d	l'enregistrement a échoué : le fichier est inchangé
 editor_saved	9f44	enregistré
 editor_selected	a686	(%d sélectionnés)

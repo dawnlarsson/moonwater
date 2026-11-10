@@ -23,6 +23,7 @@ editor_position	3696	سطر %1$d، ستون %2$d
 editor_read_failed	5f78	پرونده خوانده نشد: باز نمی‌شود
 editor_replace_usage	c677	قالب جایگزینی: جستجو/جایگزین
 editor_replaced	1128	%d مورد جایگزین شد
+editor_save_as_none	0745	ذخیره با نام اینجا نیست: Ctrl+S پرونده را ذخیره می‌کند
 editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که بود مانده است
 editor_saved	9f44	ذخیره شد
 editor_selected	a686	(%d انتخاب‌شده)

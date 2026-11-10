@@ -22,6 +22,7 @@ editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	no se pudo leer el archivo: no se abre
 editor_replace_usage	c677	reemplazar es BUSCAR/REEMPLAZO
 editor_replaced	1128	%d reemplazados
+editor_save_as_none	0745	guardar como no está aquí: Ctrl+S guarda el archivo
 editor_save_failed	069d	no se pudo guardar: el archivo sigue como estaba
 editor_saved	9f44	guardado
 editor_selected	a686	(%d seleccionados)

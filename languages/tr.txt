@@ -22,6 +22,7 @@ editor_position	3696	Sat %1$d, Sütun %2$d
 editor_read_failed	5f78	dosya okunamadı: açılmadı
 editor_replace_usage	c677	değiştirme ARANAN/YERİNE biçimindedir
 editor_replaced	1128	%d değiştirildi
+editor_save_as_none	0745	farklı kaydet burada yok: Ctrl+S dosyayı kaydeder
 editor_save_failed	069d	kaydedilemedi: dosya eskisi gibi
 editor_saved	9f44	kaydedildi
 editor_selected	a686	(%d seçili)

@@ -22,6 +22,7 @@ editor_position	3696	Стр %1$d, Стлб %2$d
 editor_read_failed	5f78	не удалось прочитать файл: он не открыт
 editor_replace_usage	c677	замена — НАЙТИ/ЗАМЕНА
 editor_replaced	1128	заменено: %d
+editor_save_as_none	0745	сохранить как здесь нет: Ctrl+S сохраняет файл
 editor_save_failed	069d	не удалось сохранить: файл не изменился
 editor_saved	9f44	сохранено
 editor_selected	a686	(выделено: %d)

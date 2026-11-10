@@ -22,6 +22,7 @@ editor_position	3696	Ri %1$d, Col %2$d
 editor_read_failed	5f78	impossibile leggere il file: non viene aperto
 editor_replace_usage	c677	sostituire è TROVA/SOSTITUZIONE
 editor_replaced	1128	%d sostituiti
+editor_save_as_none	0745	salva con nome non è disponibile: Ctrl+S salva il file
 editor_save_failed	069d	salvataggio non riuscito: il file è com'era
 editor_saved	9f44	salvato
 editor_selected	a686	(%d selezionati)

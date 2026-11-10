@@ -22,6 +22,7 @@ editor_position	3696	Wrs %1$d, Kol %2$d
 editor_read_failed	5f78	nie udało się odczytać pliku: nie zostaje otwarty
 editor_replace_usage	c677	zamiana to SZUKANE/ZAMIENNIK
 editor_replaced	1128	zamieniono: %d
+editor_save_as_none	0745	zapisz jako nie jest tutaj: Ctrl+S zapisuje plik
 editor_save_failed	069d	zapis się nie udał: plik jest bez zmian
 editor_saved	9f44	zapisano
 editor_selected	a686	(zaznaczono: %d)

@@ -715,8 +715,11 @@ static b32 editor_frame(void)
 // A command the view answered the app's: the files, the find bar, the tabs.
 static fn editor_command(p32 command)
 {
-        if (command == DOC_CMD_SAVE || command == DOC_CMD_SAVE_AS)
+        // Save As has no name to ask for yet: it would write the file in place, so it says so and writes nothing.
+        if (command == DOC_CMD_SAVE)
                 editor_save_asked();
+        else if (command == DOC_CMD_SAVE_AS)
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_save_as_none), sizeof(editor.status));
         else if (ui_findbar_is_command(command))
                 editor_bar(command);
         else if (command == DOC_CMD_NEW)

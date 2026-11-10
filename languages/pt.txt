@@ -22,6 +22,7 @@ editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	não foi possível ler o arquivo: ele não é aberto
 editor_replace_usage	c677	substituir é PROCURAR/SUBSTITUIÇÃO
 editor_replaced	1128	%d substituídos
+editor_save_as_none	0745	salvar como não está aqui: Ctrl+S salva o arquivo
 editor_save_failed	069d	falha ao salvar: o arquivo está como estava
 editor_saved	9f44	salvo
 editor_selected	a686	(%d selecionados)

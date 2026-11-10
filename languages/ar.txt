@@ -23,6 +23,7 @@ editor_position	3696	سطر %1$d، عمود %2$d
 editor_read_failed	5f78	تعذرت قراءة الملف: لم يُفتح
 editor_replace_usage	c677	صيغة الاستبدال: البحث/البديل
 editor_replaced	1128	تم استبدال %d
+editor_save_as_none	0745	حفظ باسم غير متاح هنا: Ctrl+S يحفظ الملف
 editor_save_failed	069d	فشل الحفظ: الملف كما كان
 editor_saved	9f44	تم الحفظ
 editor_selected	a686	(%d محدد)

@@ -22,6 +22,7 @@ editor_position	3696	Rad %1$d, Kol %2$d
 editor_read_failed	5f78	filen kunde inte läsas: den öppnas inte
 editor_replace_usage	c677	ersätt är SÖK/ERSÄTTNING
 editor_replaced	1128	%d ersatta
+editor_save_as_none	0745	spara som finns inte här: Ctrl+S sparar filen
 editor_save_failed	069d	sparandet misslyckades: filen är som den var
 editor_saved	9f44	sparad
 editor_selected	a686	(%d markerade)

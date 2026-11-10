@@ -22,6 +22,7 @@ editor_position	3696	Rg %1$d, Kol %2$d
 editor_read_failed	5f78	het bestand kon niet worden gelezen: het wordt niet geopend
 editor_replace_usage	c677	vervangen is ZOEK/VERVANGING
 editor_replaced	1128	%d vervangen
+editor_save_as_none	0745	opslaan als is hier niet: Ctrl+S slaat het bestand op
 editor_save_failed	069d	opslaan mislukt: het bestand is ongewijzigd
 editor_saved	9f44	opgeslagen
 editor_selected	a686	(%d geselecteerd)

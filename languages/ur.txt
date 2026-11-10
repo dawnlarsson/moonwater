@@ -23,6 +23,7 @@ editor_position	3696	لائن %1$d، کالم %2$d
 editor_read_failed	5f78	فائل پڑھی نہیں جا سکی: وہ کھولی نہیں گئی
 editor_replace_usage	c677	تبدیلی کی شکل: تلاش/متبادل
 editor_replaced	1128	%d تبدیل کیے گئے
+editor_save_as_none	0745	محفوظ کریں بطور یہاں نہیں ہے: Ctrl+S فائل محفوظ کرتا ہے
 editor_save_failed	069d	محفوظ کرنا ناکام رہا: فائل جیسی تھی ویسی ہی ہے
 editor_saved	9f44	محفوظ ہو گیا
 editor_selected	a686	(%d منتخب)

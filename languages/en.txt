@@ -22,6 +22,7 @@ editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	the file could not be read: it is not opened
 editor_replace_usage	c677	replace is FIND/REPLACEMENT
 editor_replaced	1128	%d replaced
+editor_save_as_none	0745	save as is not here: Ctrl+S saves the file
 editor_save_failed	069d	the save failed: the file is as it was
 editor_saved	9f44	saved
 editor_selected	a686	(%d selected)
