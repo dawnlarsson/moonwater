@@ -373,6 +373,112 @@ static void test_bench(void)
 	free(pcm);
 }
 
+/* ---- datagrams over the modem: chunks, reassembly, the session ---- */
+
+static size_t put_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *buf, size_t cap, size_t *at)
+{
+	size_t n = modem_tx_datagram(tx, dg, len, buf + *at, cap - *at);
+
+	*at += n;
+	return n;
+}
+
+static void test_datagrams(void)
+{
+	/* the largest configuration (two tones) puts a full datagram at about 0.5 million samples */
+	enum { CAP = 1 << 21 };
+	static const size_t sizes[3] = {1, 251, 1200};
+	static uint8_t sent[3][MODEM_DATAGRAM_MAX];
+	uint8_t got[MODEM_DATAGRAM_MAX];
+	int16_t *pcm = malloc(sizeof(int16_t) * CAP);
+	modem_tx tx;
+	modem_chunk_rx cr;
+	size_t at = 0, pos = 0, used = 0, k, j;
+	int ok = 1;
+	int r;
+
+	check(MODEM_CHUNKS == 5 && MODEM_CHUNK_DATA == 251, "a 1200-byte datagram is five chunks of 251 bytes");
+	modem_tx_open(&tx, KEY, KEYLEN);
+	check(modem_tx_datagram(&tx, sent[0], 0, pcm, CAP) == 0 && modem_tx_datagram(&tx, sent[0], 1201, pcm, CAP) == 0,
+	      "a datagram of 0 or 1201 bytes is refused");
+	for (k = 0; k < 3; k++) {
+		for (j = 0; j < sizes[k]; j++)
+			sent[k][j] = (uint8_t)rnd();
+		if (put_datagram(&tx, sent[k], sizes[k], pcm, CAP, &at) == 0)
+			ok = 0;
+	}
+	check(ok && at < CAP, "three datagrams of 1, 251 and 1200 bytes encode into one capture");
+	check(modem_tx_datagram(&tx, sent[0], 1200, pcm, 1000) == 0, "a datagram whose frames do not fit is refused");
+
+	modem_chunk_open(&cr, KEY, KEYLEN);
+	ok = 1;
+	for (k = 0; k < 3; k++) {
+		r = modem_chunk_take(&cr, pcm + pos, at - pos, got, sizeof got, &used);
+		if (r != (int)sizes[k] || memcmp(got, sent[k], sizes[k]) != 0)
+			ok = 0;
+		pos += used;
+	}
+	check(ok, "the three datagrams come back exactly, in order, from one capture");
+	check(modem_chunk_take(&cr, pcm + pos, at - pos, got, sizeof got, &used) == 0 && used == 0,
+	      "an exhausted capture gives no datagram");
+	check(modem_chunk_take(&cr, pcm, at, got, sizeof got, &used) == 0, "a replayed capture gives nothing: every frame is stale");
+	free(pcm);
+}
+
+static void test_datagram_dropped_chunk(void)
+{
+	enum { CAP = 1 << 20 };
+	int16_t *pcm = malloc(sizeof(int16_t) * CAP);
+	uint8_t big[MODEM_DATAGRAM_MAX], small[10], got[MODEM_DATAGRAM_MAX];
+	size_t full = modem_encode_samples(MODEM_PAYLOAD_MAX), last = modem_encode_samples(MODEM_CHUNK_HEAD + 196);
+	size_t total, at = 0, used = 0, k;
+	modem_tx tx;
+	modem_chunk_rx cr;
+	int r;
+
+	for (k = 0; k < sizeof big; k++)
+		big[k] = (uint8_t)rnd();
+	for (k = 0; k < sizeof small; k++)
+		small[k] = (uint8_t)rnd();
+	modem_tx_open(&tx, KEY, KEYLEN);
+	total = put_datagram(&tx, big, sizeof big, pcm, CAP, &at);
+	check(total == 4 * full + last, "a 1200-byte datagram is four full frames and one of 196 bytes of data");
+	/* cut the third frame out, as a lost burst would: the set can never complete */
+	memmove(pcm + 2 * full, pcm + 3 * full, sizeof(int16_t) * (total - 3 * full));
+	at = total - full;
+	put_datagram(&tx, small, sizeof small, pcm, CAP, &at);
+
+	modem_chunk_open(&cr, KEY, KEYLEN);
+	r = modem_chunk_take(&cr, pcm, at, got, sizeof got, &used);
+	check(r == (int)sizeof small && memcmp(got, small, sizeof small) == 0,
+	      "a partial set is dropped when the next datagram starts, and the next datagram is delivered");
+	check(used + MODEM_LEAD == at, "the capture is taken through the datagram that completed, and the silence after it is left");
+	free(pcm);
+}
+
+static void test_datagram_session(void)
+{
+	int16_t *bad = malloc(sizeof(int16_t) * 8 * modem_encode_samples(4));
+	static const uint8_t attacker[] = "an attacker key!";
+	uint8_t out[MODEM_DATAGRAM_MAX];
+	size_t at = 0, k, n, used = 0;
+	modem_chunk_rx cr;
+	int ok = 1;
+
+	for (k = 0; k < 8; k++)
+		at += modem_encode(attacker, sizeof attacker - 1, (uint32_t)k + 1, (const uint8_t *)"evil", 4, bad + at,
+				   modem_encode_samples(4));
+	n = at;
+	modem_chunk_open(&cr, KEY, KEYLEN);
+	for (k = 0; k < MODEM_REFUSE_LIMIT - 1; k++)
+		if (modem_chunk_take(&cr, bad, n, out, sizeof out, &used) != 0 || cr.rx.closed)
+			ok = 0;
+	check(ok, "attacker frames are refused without closing the session before MODEM_REFUSE_LIMIT");
+	check(modem_chunk_take(&cr, bad, n, out, sizeof out, &used) == -1 && cr.rx.closed,
+	      "the session closes at MODEM_REFUSE_LIMIT, and a closed session takes no datagram");
+	free(bad);
+}
+
 int main(void)
 {
 	test_vectors();
@@ -383,6 +489,9 @@ int main(void)
 	test_bounds();
 	test_wrongkey_and_replay();
 	test_session();
+	test_datagrams();
+	test_datagram_dropped_chunk();
+	test_datagram_session();
 	test_stale_frame_does_not_hide_fresh();
 	test_length_limits();
 	test_truncation();

@@ -122,6 +122,57 @@ void modem_rx_open(modem_rx *rx, const uint8_t *key, size_t klen);
 /* Takes one frame from pcm. Returns the payload length for a fresh, authentic frame, or -1 for anything else. */
 int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq);
 
+/* As modem_rx_frame, and sets *used to the sample just past the frame taken (0 when none is taken), so a caller can
+   take the frames of one capture one after another. */
+int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used);
+
+/* ---- datagrams over the modem ------------------------------------------ */
+
+/* A Waterlink datagram is cut into chunks, one frame each. A chunk's payload is a four-byte head, the datagram's id
+   (two bytes, big endian), the chunk's index and the chunk count, then the chunk's bytes. Every chunk but the last is
+   MODEM_CHUNK_DATA bytes, so a chunk's place is index * MODEM_CHUNK_DATA. The modem's own sequence number is the only
+   freshness there is: a chunk is taken only as modem_rx_next takes it. */
+#define MODEM_DATAGRAM_MAX 1200u
+#define MODEM_CHUNK_HEAD 4
+#define MODEM_CHUNK_DATA (MODEM_PAYLOAD_MAX - MODEM_CHUNK_HEAD)
+#define MODEM_CHUNKS ((MODEM_DATAGRAM_MAX + MODEM_CHUNK_DATA - 1) / MODEM_CHUNK_DATA)
+
+/* The sender: one per session, with its own datagram ids. */
+typedef struct
+{
+	const uint8_t *key;
+	size_t klen;
+	uint32_t seq;
+	uint16_t id;
+} modem_tx;
+
+void modem_tx_open(modem_tx *tx, const uint8_t *key, size_t klen);
+
+/* Writes every frame of one datagram (1 to MODEM_DATAGRAM_MAX bytes) into pcm, back to back. Returns the sample
+   count, or 0 if the datagram is the wrong size or the frames do not all fit in cap; a 0 means the caller sends
+   nothing from pcm. */
+size_t modem_tx_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *pcm, size_t cap);
+
+/* The receiver: one session, and at most one datagram being put together. A chunk that starts another datagram, or
+   that does not fit the set's count, drops the partial set. A set that never completes is never delivered. */
+typedef struct
+{
+	modem_rx rx;
+	uint16_t id;
+	unsigned count;
+	unsigned have;
+	int building;
+	size_t total;
+	uint8_t part[MODEM_CHUNKS * MODEM_CHUNK_DATA];
+} modem_chunk_rx;
+
+void modem_chunk_open(modem_chunk_rx *cr, const uint8_t *key, size_t klen);
+
+/* Takes the fresh frames of pcm one by one until one completes a datagram, which is copied to out. Returns its length
+   (with *used past the frame that completed it), or 0 when pcm holds no further complete datagram (*used is what was
+   taken; call again with the rest), or -1 when the session is closed or the input is refused. */
+int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, size_t *used);
+
 /* ---- SHA-256 and HMAC-SHA256 (FIPS 180-4, RFC 2104) ---------------------- */
 
 typedef struct
@@ -376,7 +427,7 @@ static int modem_read_bytes(const uint8_t *bits, size_t nb, size_t p, uint8_t *d
    authentic frame that is not fresh after last: such a frame is passed over, so a replay ahead of a fresh frame
    does not hide it. */
 static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, size_t klen,
-			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last)
+			    uint8_t *out, size_t cap, uint32_t *seq, int *refusal, int gated, uint32_t last, size_t *end_bit)
 {
 	uint32_t window = 0;
 	size_t i;
@@ -412,8 +463,9 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 						else
 						{
 							*seq = got;
-							memcpy(out, buf + MODEM_HDR, len);
-					return (int)len;
+						memcpy(out, buf + MODEM_HDR, len);
+						*end_bit = i + 32 + 8 * (MODEM_HDR + len + MODEM_TAG);
+						return (int)len;
 						}
 				}
 			}
@@ -432,7 +484,7 @@ static int modem_find_frame(const uint8_t *bits, size_t nb, const uint8_t *key, 
 static uint8_t modem_best[MODEM_MAX_SAMPLES];
 
 static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
-			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last)
+			     uint8_t *out, size_t cap, uint32_t *seq, unsigned *refused, int gated, uint32_t last, size_t *used)
 {
 	int64_t P[MODEM_TONES + 1], Q[MODEM_TONES + 1];
 	size_t ia[MODEM_TONES + 1], ir[MODEM_TONES + 1], is[MODEM_TONES + 1];
@@ -504,9 +556,14 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 			for (j = 0; j < MODEM_SYM_BITS; j++)
 				modem_bits[nb++] = (uint8_t)((v >> j) & 1);
 		}
-		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &refusal, gated, last);
-		if (r >= 0)
+		size_t endbit = 0;
+
+		r = modem_find_frame(modem_bits, nb, key, klen, out, cap, seq, &refusal, gated, last, &endbit);
+		if (r >= 0) {
+			if (used)
+				*used = off + ((endbit + MODEM_SYM_BITS - 1) / MODEM_SYM_BITS) * MODEM_SYM;
 			return r;
+		}
 	}
 	if (refused && refusal)
 		*refused = 1;
@@ -516,7 +573,7 @@ static int modem_decode_core(const int16_t *pcm, size_t n, const uint8_t *key, s
 int modem_decode(const int16_t *pcm, size_t n, const uint8_t *key, size_t klen,
 		 uint8_t *out, size_t cap, uint32_t *seq)
 {
-	return modem_decode_core(pcm, n, key, klen, out, cap, seq, 0, 0, 0);
+	return modem_decode_core(pcm, n, key, klen, out, cap, seq, 0, 0, 0, 0);
 }
 
 int modem_fresh(uint32_t last, uint32_t seq)
@@ -544,18 +601,144 @@ static int modem_refuse(modem_rx *rx)
 	return -1;
 }
 
-int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq)
+int modem_rx_next(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq, size_t *used)
 {
 	unsigned refused = 0;
+	size_t end = 0;
 	int r;
 
+	if (used)
+		*used = 0;
 	if (!rx || rx->closed)
 		return -1;
-	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last);
+	r = modem_decode_core(pcm, n, rx->key, rx->klen, out, cap, seq, &refused, 1, rx->last, &end);
 	if (r < 0)
 		return refused ? modem_refuse(rx) : -1;
 	if (!modem_fresh(rx->last, *seq))
 		return modem_refuse(rx);
 	rx->last = *seq;
+	if (used)
+		*used = end;
 	return r;
+}
+
+int modem_rx_frame(modem_rx *rx, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, uint32_t *seq)
+{
+	return modem_rx_next(rx, pcm, n, out, cap, seq, 0);
+}
+
+/* ---- datagram chunks, the code ---------------------------------------- */
+
+void modem_tx_open(modem_tx *tx, const uint8_t *key, size_t klen)
+{
+	tx->key = key;
+	tx->klen = klen;
+	tx->seq = 0;
+	tx->id = 0;
+}
+
+size_t modem_tx_datagram(modem_tx *tx, const uint8_t *dg, size_t len, int16_t *pcm, size_t cap)
+{
+	uint8_t payload[MODEM_PAYLOAD_MAX];
+	size_t count, index, total = 0;
+
+	if (!tx || !dg || len == 0 || len > MODEM_DATAGRAM_MAX)
+		return 0;
+	count = (len + MODEM_CHUNK_DATA - 1) / MODEM_CHUNK_DATA;
+	for (index = 0; index < count; index++) {
+		size_t take = len - index * MODEM_CHUNK_DATA, got;
+
+		if (take > MODEM_CHUNK_DATA)
+			take = MODEM_CHUNK_DATA;
+		payload[0] = (uint8_t)(tx->id >> 8);
+		payload[1] = (uint8_t)tx->id;
+		payload[2] = (uint8_t)index;
+		payload[3] = (uint8_t)count;
+		memcpy(payload + MODEM_CHUNK_HEAD, dg + index * MODEM_CHUNK_DATA, take);
+		got = modem_encode(tx->key, tx->klen, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
+		if (got == 0)
+			return 0;
+		total += got;
+	}
+	tx->id++;
+	return total;
+}
+
+void modem_chunk_open(modem_chunk_rx *cr, const uint8_t *key, size_t klen)
+{
+	modem_rx_open(&cr->rx, key, klen);
+	cr->id = 0;
+	cr->count = 0;
+	cr->have = 0;
+	cr->building = 0;
+	cr->total = 0;
+}
+
+/* Puts one chunk into its set. Returns the datagram's length when this chunk completes it, else 0. */
+static size_t modem_chunk_put(modem_chunk_rx *cr, const uint8_t *p, size_t len, uint8_t *out, size_t cap)
+{
+	uint16_t id;
+	unsigned index, count, data;
+
+	if (len < MODEM_CHUNK_HEAD) {
+		cr->building = 0;
+		return 0;
+	}
+	id = (uint16_t)(((unsigned)p[0] << 8) | p[1]);
+	index = p[2];
+	count = p[3];
+	data = (unsigned)(len - MODEM_CHUNK_HEAD);
+	if (count == 0 || count > MODEM_CHUNKS || index >= count || data == 0 || data > MODEM_CHUNK_DATA ||
+	    (index + 1 < count && data != MODEM_CHUNK_DATA)) {
+		cr->building = 0;
+		return 0;
+	}
+	if (!cr->building || id != cr->id || count != cr->count) {
+		cr->building = 1;
+		cr->id = id;
+		cr->count = count;
+		cr->have = 0;
+		cr->total = 0;
+	}
+	memcpy(cr->part + index * MODEM_CHUNK_DATA, p + MODEM_CHUNK_HEAD, data);
+	cr->have |= 1u << index;
+	if (index + 1 == count)
+		cr->total = (size_t)index * MODEM_CHUNK_DATA + data;
+	if (cr->total == 0 || cr->have != (1u << count) - 1)
+		return 0;
+	cr->building = 0;
+	if (cr->total > MODEM_DATAGRAM_MAX || cr->total > cap)
+		return 0;
+	memcpy(out, cr->part, cr->total);
+	return cr->total;
+}
+
+int modem_chunk_take(modem_chunk_rx *cr, const int16_t *pcm, size_t n, uint8_t *out, size_t cap, size_t *used)
+{
+	uint8_t payload[MODEM_PAYLOAD_MAX];
+	size_t at = 0;
+
+	if (used)
+		*used = 0;
+	if (!cr || !pcm || !out)
+		return -1;
+	for (;;) {
+		size_t took = 0;
+		uint32_t seq;
+		int len = modem_rx_next(&cr->rx, pcm + at, n - at, payload, sizeof payload, &seq, &took);
+		size_t whole;
+
+		if (len < 0) {
+			if (used)
+				*used = at;
+			return cr->rx.closed ? -1 : 0;
+		}
+		at += took;
+		whole = modem_chunk_put(cr, payload, (size_t)len, out, cap);
+		if (whole) {
+			if (used)
+				*used = at;
+			return (int)whole;
+		}
+	}
 }
