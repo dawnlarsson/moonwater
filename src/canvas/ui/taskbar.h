@@ -24,7 +24,8 @@
 #define TASKBAR_RIGHT 3u
 
 // What a point of the band is over: a tab's number (0 up), -2 the tray, TASKBAR_LAUNCHER for the launcher button (which
-// is a slot of the band's like the tray, its own bit of the redo mask), or TASKBAR_HIT_NONE for none of them.
+// is a slot of the band's like the tray, its own bit of the redo mask), the tray's cells (TASKBAR_VOLUME, TASKBAR_MIC,
+// TASKBAR_NOTICES, defined below), or TASKBAR_HIT_NONE for none of them.
 #define TASKBAR_HIT_NONE (-3)
 #define TASKBAR_LAUNCHER (-5)
 // The volume item at the start of the tray, a cell of its own when the sound server is there: pressed, it opens the mixer, a middle
@@ -81,7 +82,8 @@
 // drawn into (none when there is no font, and the tabs are shapes the compositor draws).
 struct taskbar_view
 {
-        int width, height, scale;        // the output, and the device pixels a logical one is
+        int width, height;               // the output, in device pixels
+        int scale;                       // the output's scale in percent (100 is one device pixel to a logical one)
         int x, y;                        // where that output is in the desktop's space: its screen's top left
         unsigned int position;           // TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT or TASKBAR_RIGHT
         unsigned int *pixels;            // the band's pixels, or none

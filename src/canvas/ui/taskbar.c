@@ -5,7 +5,8 @@
         Along the edge the band runs in (its length) the tabs come first, in the
         order the windows showed, each as long as its title needs at a width a
         character has, and the tray is at the far end: the clock, and the battery
-        beside it when the settings name one. Across the band a tab is its
+        beside it when the settings name one, and the volume, microphone and notices
+        cells when they are there. Across the band a tab is its
         thickness less an inset, and it hangs off the output's edge it is along, so
         its round corners show on the side towards the middle of the output. A
         bottom or top band runs left to right, with the tray at the right end and
@@ -276,7 +277,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->thick = lay->vertical ? lay->bw : lay->bh;
         lay->length = lay->vertical ? lay->bh : lay->bw;
         lay->origin = lay->vertical ? lay->by : lay->bx;
-        lay->gap = TASKBAR_GAP * taskbar_scaled(view->scale) / 100; // fixed: the kit's gap between pieces that go together
+        lay->gap = TASKBAR_GAP * taskbar_scaled(view->scale) / 100; // not a setting: the kit's gap between pieces that go together (TASKBAR_GAP), scaled like the rest
         lay->pad = taskbar.padding * taskbar_scaled(view->scale) / 100; // `taskbar padding`: the room round the text inside a tab
         lay->inset = 3 * taskbar_scaled(view->scale) / 100;
         lay->high = lay->thick - lay->inset;
@@ -1165,9 +1166,9 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 }
 
 /*
-        The tray's clock has changed minute, or the battery came or went: the
-        band is drawn whole. Answers 1 when the minute has changed; the battery is
-        read again then.
+        The tray's clock has changed minute, or the language its words are taken in: the
+        band is drawn whole. Answers 1 when either has changed, and then the battery
+        and the tray's text are read again.
 */
 static int taskbar_tick(void)
 {
