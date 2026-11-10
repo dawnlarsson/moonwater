@@ -9790,15 +9790,17 @@ static int ui_strip_role(unsigned int role)
 
 static fn ui_strip(struct ui address_to ui, int left, int top, int width, int height, const struct ui_row address_to row)
 {
-        unsigned long long total = 0;
+        unsigned long long total = 0, run = 0;
         int cursor = left;
 
         for (int at = 0; at < row->strip_count; at++)
                 total += row->strip_bytes[at];
         for (int at = 0; at < row->strip_count && total; at++)
         {
+                // The end is the share of every byte so far, not this segment's share from the left: each segment starts where the last ended.
+                run += row->strip_bytes[at];
                 int stop = at + 1 == row->strip_count ? left + width
-                           : left + (int)(row->strip_bytes[at] * (unsigned long long)width / total);
+                           : left + (int)(run * (unsigned long long)width / total);
                 struct ui_box box = {cursor * 256, top * 256, stop * 256, (top + height) * 256, 0, 0};
 
                 if (stop > cursor)
