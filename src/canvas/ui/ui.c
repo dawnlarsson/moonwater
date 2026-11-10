@@ -4643,7 +4643,11 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 // Where a press under the hand would land (ui_slider_of, the step it takes), and the thumb there: the ghost runs to it.
                 b64 land = ui_slider_ratio(c, ui_slider_of(ui, c, c->hover_x - ui_dev(ui, c->x)));
                 b32 hx = rx + (b32)ui_qmul(land, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
-                b32 left = stop < hx - rx ? rx + stop : hx, right = stop < hx - rx ? hx : rx + stop;
+                // Each end of the ghost is the track's end where its value is at the end of the range (the thumb's centre is half a
+                // thumb in from it), else the thumb's centre there; so a preview at the minimum or the maximum fills the whole first or last part.
+                b32 from = ratio <= 0 ? rx : ratio >= UI_ONE ? rx + rw : rx + stop;
+                b32 to = land <= 0 ? rx : land >= UI_ONE ? rx + rw : hx;
+                b32 left = from < to ? from : to, right = from < to ? to : from;
                 b32 under = hx - rx < stop;
                 unsigned int ghost = ui_mix(accent, 40, off);
                 b32 thumb_x = rx + stop;
