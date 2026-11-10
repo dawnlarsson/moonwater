@@ -59,6 +59,9 @@ static b32 autowrap = true;
 static b32 insert_mode;
 static b32 cursor_visible = true;
 static b32 application_keys;
+// DECKPAM (ESC =) and DECKPNM (ESC >): the keypad sends its own sequences
+// while this is set, and digits and operators while it is not.
+static b32 application_keypad;
 /* DEC private mode 2026: programs may update a complete frame without the
    compositor presenting the intermediate rows. The cells are still written
    immediately; only publication is held by terminal.c until the mode ends. */
@@ -1602,6 +1605,7 @@ static fn attributes_reset()
         insert_mode = false;
         cursor_visible = true;
         application_keys = false;
+        application_keypad = false;
         synchronized_output = false;
         mouse_mode = 0;
         mouse_bits = 0;
@@ -2372,8 +2376,14 @@ static fn consume(unsigned int c)
                 case 'c':
                         full_reset();
                         break;
-                // ESC = and ESC > are the keypad's modes, and the keypad
-                // sends the same in both. They are not DECCKM's arrows.
+                // ESC = is DECKPAM and ESC > DECKPNM: the keypad's own
+                // sequences, or its digits. They are not DECCKM's arrows.
+                case '=':
+                        application_keypad = true;
+                        break;
+                case '>':
+                        application_keypad = false;
+                        break;
                 }
 
                 return;
@@ -3826,6 +3836,29 @@ static string_address key_sequence(unsigned int code)
 }
 
 /*
+        The keypad's keys in its application mode (DECKPAM): SS3 and a letter
+        for each digit, operator, Enter and the decimal point, which is how
+        xterm and tmux send them. The codes are the Linux keypad codes the
+        compositor hands over, with and without Num Lock. Zero for any other
+        key.
+*/
+static unsigned int keypad_letter(unsigned int code)
+{
+        static const struct { unsigned short code; unsigned char letter; } keys[] = {
+            {82, 'p'}, {79, 'q'}, {80, 'r'}, {81, 's'}, {75, 't'},
+            {76, 'u'}, {77, 'v'}, {71, 'w'}, {72, 'x'}, {73, 'y'},
+            {96, 'M'}, {78, 'k'}, {74, 'm'}, {55, 'j'}, {98, 'o'},
+            {83, 'n'}, {117, 'X'},
+        };
+
+        for (positive i = 0; i < array_count(keys); i++)
+                if (keys[i].code == code)
+                        return keys[i].letter;
+
+        return 0;
+}
+
+/*
         One keystroke, turned into whatever it means.
 
         With the line editor running that is a change to the buffer and what
@@ -3902,6 +3935,14 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
         if (line_editing && line_key(character, code))
         {
                 line_show();
+                return;
+        }
+
+        if (application_keypad && keypad_letter(code))
+        {
+                emit(27);
+                emit('O');
+                emit(keypad_letter(code));
                 return;
         }
 
