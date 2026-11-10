@@ -2033,7 +2033,7 @@ static COLD fn array_element_forget(array_table address_to table, positive at)
 /* Bash's string hash, FNV-1 over the bytes read as signed chars: the order
    its associative arrays, completion specifications and command hash table
    list their entries in, which is the order these have to agree with. */
-static PURE p32 shell_fnv1(string_address key, positive length)
+static PURE p32 shell_fnv1(const_string key, positive length)
 {
         p32 hash = 2166136261u;
 
@@ -2046,7 +2046,7 @@ static PURE p32 shell_fnv1(string_address key, positive length)
         return hash;
 }
 
-static CONST p32 array_assoc_bucket(string_address key, positive length)
+static CONST p32 array_assoc_bucket(const_string key, positive length)
 {
         return shell_fnv1(key, length) & 1023;
 }
@@ -3050,7 +3050,9 @@ static COLD bool shell_reference_leads_to(string_address name, positive length,
              !memory_compare(resolved.name, name, length)))
                 return false;
 
-        address_to led = resolved.name;
+        //      env_reference holds the name as const. The caller only reads
+        //      the led name, so the cast env_reading makes is safe here.
+        address_to led = env_reading(resolved.name);
         address_to led_length = resolved.length;
         return true;
 }
