@@ -5147,9 +5147,10 @@ static int settings_open(void)
                                                    : ui_lift_other(&settings.own, (string_address) "settings", false)))
                 return 0;
 
-        settings_refilter();
+        // The group is chosen before the rows are listed: the rows are those of the group the column shows.
         if (settings_notices_asked)
                 settings.page.chosen = settings_system_group();
+        settings_refilter();
         if (gallery.on)
         {
                 int width = ui_px(&settings.ui, GALLERY_W), height = ui_px(&settings.ui, GALLERY_H);
