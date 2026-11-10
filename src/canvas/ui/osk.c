@@ -648,7 +648,12 @@ static b32 osk_event(const struct window_event address_to event)
                         int index = osk_hit(ui_kit.pointer_x, ui_kit.pointer_y);
 
                         if (index >= 0)
+                        {
+                                // A press while another key is still down (a second finger, a press whose release went nowhere) lets that
+                                // key up first: osk_press would forget it, and the program would keep it down.
+                                osk_release();
                                 osk_press(index);
+                        }
                 }
                 else
                 {
