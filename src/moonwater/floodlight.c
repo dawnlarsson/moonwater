@@ -77,7 +77,7 @@
 enum { RUN, FLAG, SPAWN, NETWORK, SETTINGS };
 
 static const char *const setting_name[SETTINGS] = {
-	"run", "flag", "spawn", "network"
+        "run", "flag", "spawn", "network"
 };
 
 /*
@@ -110,61 +110,61 @@ static const char *const setting_name[SETTINGS] = {
  * says is enforced in full: what then breaks is the policy working.
  */
 struct rule {
-	const char *subject;
-	unsigned char setting;
-	unsigned char allowed;
+        const char *subject;
+        unsigned char setting;
+        unsigned char allowed;
 };
 
 static const struct rule baseline[] = {
-	/*
-	 * awk is the sharpest of these, because it is the only one where the
-	 * name of the program to run comes out of the data: find and xargs
-	 * take the command on their own command line, while awk's system()
-	 * and "cmd" | getline build it from program text that arrives in
-	 * files and variables. It was refused here until 2026-09-28, and so
-	 * were script and setarch; that refusal broke awk in every pipeline
-	 * and substitution of a machine that had asked for nothing, and now
-	 * lives in MOONWATER_FLOODLIGHT_AWK_SPAWN and _SHELL_ESCAPES.
-	 *
-	 * Every applet that can spawn keeps its row, so a machine that wants
-	 * one shut can say so in one line and this file is still where that
-	 * is written down.
-	 */
-	{ "awk", SPAWN, 1 },       /* DERIVED: system(), "cmd" | getline */
-	{ "find", SPAWN, 1 },      /* NAMED: -exec runs what the line named */
-	{ "xargs", SPAWN, 1 },     /* NAMED: likewise, with data in the args */
-	{ "bowl", SPAWN, 1 },      /* NAMED: runs the program the line named */
-	{ "script", SPAWN, 1 },    /* SHELL: the session it records is a shell */
-	{ "setarch", SPAWN, 1 },   /* SHELL: falls back to /bin/sh given no command */
-	{ "init", SPAWN, 1 },      /* SHELL: PID 1 starts everything; refusing it
-				      would refuse the machine */
-	{ "moonwater", SPAWN, 1 }, /* NAMED: cp, spelled in the install itself */
-	{ "chroot", SPAWN, 1 },    /* NAMED */
-	{ "choom", SPAWN, 1 },     /* NAMED */
-	{ "chrt", SPAWN, 1 },      /* NAMED */
-	{ "coresched", SPAWN, 1 }, /* NAMED */
-	{ "env", SPAWN, 1 },       /* NAMED */
-	{ "flock", SPAWN, 1 },     /* NAMED */
-	{ "ionice", SPAWN, 1 },    /* NAMED */
-	{ "install", SPAWN, 1 },   /* NAMED: strip, for -s */
-	{ "nice", SPAWN, 1 },      /* NAMED */
-	{ "nohup", SPAWN, 1 },     /* NAMED */
-	{ "nsenter", SPAWN, 1 },   /* NAMED */
-	{ "pipesz", SPAWN, 1 },    /* NAMED */
-	{ "prlimit", SPAWN, 1 },   /* NAMED */
-	{ "setpgid", SPAWN, 1 },   /* NAMED */
-	{ "setpriv", SPAWN, 1 },   /* NAMED */
-	{ "setsid", SPAWN, 1 },    /* NAMED */
-	{ "sort", SPAWN, 1 },      /* NAMED: --compress-program names it */
-	{ "split", SPAWN, 1 },     /* SHELL: --filter hands the line's text to
-				      sh -c, as GNU's split does; a machine
-				      that refuses shells refuses --filter
-				      (SHELL_ESCAPES, SPLIT_FILTER) */
-	{ "stdbuf", SPAWN, 1 },    /* NAMED */
-	{ "taskset", SPAWN, 1 },   /* NAMED */
-	{ "timeout", SPAWN, 1 },   /* NAMED */
-	{ "uclampset", SPAWN, 1 }, /* NAMED */
-	{ "unshare", SPAWN, 1 },   /* NAMED */
+        /*
+         * awk is the sharpest of these, because it is the only one where the
+         * name of the program to run comes out of the data: find and xargs
+         * take the command on their own command line, while awk's system()
+         * and "cmd" | getline build it from program text that arrives in
+         * files and variables. It was refused here until 2026-09-28, and so
+         * were script and setarch; that refusal broke awk in every pipeline
+         * and substitution of a machine that had asked for nothing, and now
+         * lives in MOONWATER_FLOODLIGHT_AWK_SPAWN and _SHELL_ESCAPES.
+         *
+         * Every applet that can spawn keeps its row, so a machine that wants
+         * one shut can say so in one line and this file is still where that
+         * is written down.
+         */
+        { "awk", SPAWN, 1 },       /* DERIVED: system(), "cmd" | getline */
+        { "find", SPAWN, 1 },      /* NAMED: -exec runs what the line named */
+        { "xargs", SPAWN, 1 },     /* NAMED: likewise, with data in the args */
+        { "bowl", SPAWN, 1 },      /* NAMED: runs the program the line named */
+        { "script", SPAWN, 1 },    /* SHELL: the session it records is a shell */
+        { "setarch", SPAWN, 1 },   /* SHELL: falls back to /bin/sh given no command */
+        { "init", SPAWN, 1 },      /* SHELL: PID 1 starts everything; refusing it
+                                      would refuse the machine */
+        { "moonwater", SPAWN, 1 }, /* NAMED: cp, spelled in the install itself */
+        { "chroot", SPAWN, 1 },    /* NAMED */
+        { "choom", SPAWN, 1 },     /* NAMED */
+        { "chrt", SPAWN, 1 },      /* NAMED */
+        { "coresched", SPAWN, 1 }, /* NAMED */
+        { "env", SPAWN, 1 },       /* NAMED */
+        { "flock", SPAWN, 1 },     /* NAMED */
+        { "ionice", SPAWN, 1 },    /* NAMED */
+        { "install", SPAWN, 1 },   /* NAMED: strip, for -s */
+        { "nice", SPAWN, 1 },      /* NAMED */
+        { "nohup", SPAWN, 1 },     /* NAMED */
+        { "nsenter", SPAWN, 1 },   /* NAMED */
+        { "pipesz", SPAWN, 1 },    /* NAMED */
+        { "prlimit", SPAWN, 1 },   /* NAMED */
+        { "setpgid", SPAWN, 1 },   /* NAMED */
+        { "setpriv", SPAWN, 1 },   /* NAMED */
+        { "setsid", SPAWN, 1 },    /* NAMED */
+        { "sort", SPAWN, 1 },      /* NAMED: --compress-program names it */
+        { "split", SPAWN, 1 },     /* SHELL: --filter hands the line's text to
+                                      sh -c, as GNU's split does; a machine
+                                      that refuses shells refuses --filter
+                                      (SHELL_ESCAPES, SPLIT_FILTER) */
+        { "stdbuf", SPAWN, 1 },    /* NAMED */
+        { "taskset", SPAWN, 1 },   /* NAMED */
+        { "timeout", SPAWN, 1 },   /* NAMED */
+        { "uclampset", SPAWN, 1 }, /* NAMED */
+        { "unshare", SPAWN, 1 },   /* NAMED */
 };
 
 /*
@@ -194,60 +194,60 @@ static const struct rule baseline[] = {
  */
 static const char configured_text[] =
 #ifdef CONFIG_MOONWATER_FLOODLIGHT_POLICY
-	CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"
+        CONFIG_MOONWATER_FLOODLIGHT_POLICY ";"
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_AWK_SPAWN
-	"awk spawn deny;"
+        "awk spawn deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_SHELL_ESCAPES
-	"script spawn deny; setarch spawn deny; split flag --filter deny;"
+        "script spawn deny; setarch spawn deny; split flag --filter deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_EXEC
-	"find flag -exec deny; find flag -execdir deny;"
-	"find flag -ok deny; find flag -okdir deny;"
+        "find flag -exec deny; find flag -execdir deny;"
+        "find flag -ok deny; find flag -okdir deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_DELETE
-	"find flag -delete deny;"
+        "find flag -delete deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_FIND_WRITE
-	"find flag -fprint deny; find flag -fprint0 deny; find flag -fprintf deny;"
+        "find flag -fprint deny; find flag -fprint0 deny; find flag -fprintf deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_XARGS
-	"xargs run deny;"
+        "xargs run deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_SPLIT_FILTER
-	"split flag --filter deny;"
+        "split flag --filter deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_SORT_COMPRESS
-	"sort flag --compress-program deny;"
+        "sort flag --compress-program deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_ENV_SPLIT
-	"env flag -S deny; env flag --split-string deny;"
+        "env flag -S deny; env flag --split-string deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_LAUNCHERS
-	"timeout run deny; nice run deny; nohup run deny; stdbuf run deny;"
-	"setsid run deny; flock run deny; chrt run deny; ionice run deny;"
-	"taskset run deny; prlimit run deny; choom run deny; uclampset run deny;"
-	"coresched run deny; setpgid run deny; pipesz run deny;"
+        "timeout run deny; nice run deny; nohup run deny; stdbuf run deny;"
+        "setsid run deny; flock run deny; chrt run deny; ionice run deny;"
+        "taskset run deny; prlimit run deny; choom run deny; uclampset run deny;"
+        "coresched run deny; setpgid run deny; pipesz run deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_NAMESPACES
-	"unshare run deny; nsenter run deny;"
-	"chroot run deny; pivot_root run deny; setpriv run deny;"
+        "unshare run deny; nsenter run deny;"
+        "chroot run deny; pivot_root run deny; setpriv run deny;"
 #endif
 #ifndef CONFIG_MOONWATER_FLOODLIGHT_NETWORK_FETCH
-	"wget run deny; fetch run deny;"
+        "wget run deny; fetch run deny;"
 #endif
 #endif
-	"";
+        "";
 
 /* Rows the configuration may add. Every one is a row of the report, and the
  * shell's reader is sized from this, so it is a limit rather than a hint. */
 #define CONFIGURED 64
 
 struct configured {
-	char subject[SUBJECT];
-	char detail[DETAIL];
-	unsigned char setting;
-	unsigned char allowed;
+        char subject[SUBJECT];
+        char detail[DETAIL];
+        unsigned char setting;
+        unsigned char allowed;
 };
 
 static struct configured configured[CONFIGURED] __ro_after_init __aligned(8);
@@ -268,17 +268,17 @@ static bool configured_invalid __ro_after_init;
 #define CHANGES 16
 
 struct light {
-	char subject[SUBJECT];
-	char detail[DETAIL];
-	unsigned char setting;
-	unsigned char allowed;
-	unsigned int who;
-	unsigned long long when; /* realtime seconds when it was changed */
+        char subject[SUBJECT];
+        char detail[DETAIL];
+        unsigned char setting;
+        unsigned char allowed;
+        unsigned int who;
+        unsigned long long when; /* realtime seconds when it was changed */
 
-	/* Everything above, folded with the boot secret. A write that reached
-	 * this row without coming through the device does not know to update
-	 * it, and every reader checks. */
-	u32 seal;
+        /* Everything above, folded with the boot secret. A write that reached
+         * this row without coming through the device does not know to update
+         * it, and every reader checks. */
+        u32 seal;
 };
 
 static struct light changed[CHANGES];
@@ -309,8 +309,8 @@ static unsigned long long generation;
 static siphash_key_t token_key __ro_after_init;
 
 struct floodlight_answer {
-	unsigned long long token;
-	unsigned long long generation;
+        unsigned long long token;
+        unsigned long long generation;
 };
 
 /* One way. Nothing here clears it and no parameter relaxes it: a seal that
@@ -357,12 +357,12 @@ static bool compromised;
  * reader can afford to check and small enough to read in one sitting. */
 static u32 fold(u32 hash, const void *from, unsigned int bytes)
 {
-	const unsigned char *at = from;
+        const unsigned char *at = from;
 
-	while (bytes--)
-		hash = (hash ^ *at++) * 16777619u;
+        while (bytes--)
+                hash = (hash ^ *at++) * 16777619u;
 
-	return hash;
+        return hash;
 }
 
 /*
@@ -379,54 +379,54 @@ static u32 fold(u32 hash, const void *from, unsigned int bytes)
  * covered. The source is aligned for it.
  */
 static inline unsigned long long fold_step(unsigned long long chain,
-					   unsigned long long word)
+                                           unsigned long long word)
 {
-	chain = (chain ^ word) * 0xff51afd7ed558ccdull;
-	return chain << 31 | chain >> 33;
+        chain = (chain ^ word) * 0xff51afd7ed558ccdull;
+        return chain << 31 | chain >> 33;
 }
 
 static u32 fold_wide(u32 hash, const void *from, unsigned int bytes)
 {
-	const unsigned long long *at = from;
-	unsigned long long a = hash, b = hash ^ 0x9e3779b97f4a7c15ull;
-	unsigned long long c = hash ^ 0xc2b2ae3d27d4eb4full;
-	unsigned long long d = hash ^ 0x165667b19e3779f9ull;
-	unsigned long long e = hash ^ 0x27d4eb2f165667c5ull;
-	unsigned long long f = hash ^ 0x85ebca77c2b2ae63ull;
-	unsigned long long g = hash ^ 0xd6e8feb86659fd93ull;
-	unsigned long long h = hash ^ 0xa0761d6478bd642full;
-	unsigned int steps = bytes / 64, words = bytes % 64 / 8;
+        const unsigned long long *at = from;
+        unsigned long long a = hash, b = hash ^ 0x9e3779b97f4a7c15ull;
+        unsigned long long c = hash ^ 0xc2b2ae3d27d4eb4full;
+        unsigned long long d = hash ^ 0x165667b19e3779f9ull;
+        unsigned long long e = hash ^ 0x27d4eb2f165667c5ull;
+        unsigned long long f = hash ^ 0x85ebca77c2b2ae63ull;
+        unsigned long long g = hash ^ 0xd6e8feb86659fd93ull;
+        unsigned long long h = hash ^ 0xa0761d6478bd642full;
+        unsigned int steps = bytes / 64, words = bytes % 64 / 8;
 
-	for (; steps; steps--, at += 8) {
-		a = fold_step(a, at[0]);
-		b = fold_step(b, at[1]);
-		c = fold_step(c, at[2]);
-		d = fold_step(d, at[3]);
-		e = fold_step(e, at[4]);
-		f = fold_step(f, at[5]);
-		g = fold_step(g, at[6]);
-		h = fold_step(h, at[7]);
-	}
+        for (; steps; steps--, at += 8) {
+                a = fold_step(a, at[0]);
+                b = fold_step(b, at[1]);
+                c = fold_step(c, at[2]);
+                d = fold_step(d, at[3]);
+                e = fold_step(e, at[4]);
+                f = fold_step(f, at[5]);
+                g = fold_step(g, at[6]);
+                h = fold_step(h, at[7]);
+        }
 
-	a = (a ^ (b << 11 | b >> 53)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (c << 17 | c >> 47)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (d << 23 | d >> 41)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (e << 29 | e >> 35)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (f << 37 | f >> 27)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (g << 43 | g >> 21)) * 0xc4ceb9fe1a85ec53ull;
-	a = (a ^ (h << 53 | h >> 11)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (b << 11 | b >> 53)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (c << 17 | c >> 47)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (d << 23 | d >> 41)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (e << 29 | e >> 35)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (f << 37 | f >> 27)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (g << 43 | g >> 21)) * 0xc4ceb9fe1a85ec53ull;
+        a = (a ^ (h << 53 | h >> 11)) * 0xc4ceb9fe1a85ec53ull;
 
-	for (; words; words--)
-		a = fold_step(a, *at++);
+        for (; words; words--)
+                a = fold_step(a, *at++);
 
-	return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 8);
+        return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 8);
 }
 
 /* A row's seal covers everything about it except the seal itself. */
 static u32 seal_of(const struct light *row)
 {
-	return fold(secret ^ 2166136261u, row,
-		    offsetof(struct light, seal));
+        return fold(secret ^ 2166136261u, row,
+                    offsetof(struct light, seal));
 }
 
 /*
@@ -438,18 +438,18 @@ static u32 baseline_sum __ro_after_init;
 
 static u32 baseline_seal(void)
 {
-	u32 sum = fold_wide(secret ^ 2166136261u, baseline, sizeof(baseline));
+        u32 sum = fold_wide(secret ^ 2166136261u, baseline, sizeof(baseline));
 
-	/* The configured rows are built-in answers too, and written once at
-	 * boot like the secret; the same sum covers them and how many there are.
-	 * Only the rows that are there: every reader stops at the count, which
-	 * the sum covers, so a row past it is not an answer and is not read --
-	 * and most of the sixty-four are not there. */
-	sum = fold_wide(sum, configured,
-			(configured_count < CONFIGURED ? configured_count
-						       : CONFIGURED) *
-				sizeof(*configured));
-	return fold(sum, &configured_count, sizeof(configured_count));
+        /* The configured rows are built-in answers too, and written once at
+         * boot like the secret; the same sum covers them and how many there are.
+         * Only the rows that are there: every reader stops at the count, which
+         * the sum covers, so a row past it is not an answer and is not read --
+         * and most of the sixty-four are not there. */
+        sum = fold_wide(sum, configured,
+                        (configured_count < CONFIGURED ? configured_count
+                                                       : CONFIGURED) *
+                                sizeof(*configured));
+        return fold(sum, &configured_count, sizeof(configured_count));
 }
 
 /*
@@ -470,7 +470,7 @@ static u32 shown_sum;
 
 static u32 shown_seal(void)
 {
-	return fold_wide(secret ^ shown_len, shown, shown_len);
+        return fold_wide(secret ^ shown_len, shown, shown_len);
 }
 
 /*
@@ -489,9 +489,9 @@ static u32 shown_seal(void)
 #define GUARD 16
 
 static struct {
-	unsigned char before[GUARD];
-	char line[LINE];
-	unsigned char after[GUARD];
+        unsigned char before[GUARD];
+        char line[LINE];
+        unsigned char after[GUARD];
 } parse;
 
 /* Where a write's bytes land before they are copied into parse.line under
@@ -518,26 +518,26 @@ static unsigned char guard_tail __ro_after_init;
 
 static void guard_arm(void)
 {
-	guard_head = (unsigned char)secret;
-	if (!guard_head || guard_head == 0x5a)
-		guard_head = 0xa5;
+        guard_head = (unsigned char)secret;
+        if (!guard_head || guard_head == 0x5a)
+                guard_head = 0xa5;
 
-	guard_tail = guard_head ^ 0x5a;
+        guard_tail = guard_head ^ 0x5a;
 
-	memset(parse.before, guard_head, GUARD);
-	memset(parse.after, guard_tail, GUARD);
+        memset(parse.before, guard_head, GUARD);
+        memset(parse.after, guard_tail, GUARD);
 }
 
 static bool guard_intact(void)
 {
-	unsigned int i;
+        unsigned int i;
 
-	for (i = 0; i < GUARD; i++)
-		if (parse.before[i] != guard_head ||
-		    parse.after[i] != guard_tail)
-			return false;
+        for (i = 0; i < GUARD; i++)
+                if (parse.before[i] != guard_head ||
+                    parse.after[i] != guard_tail)
+                        return false;
 
-	return true;
+        return true;
 }
 
 /*
@@ -549,43 +549,43 @@ static bool guard_intact(void)
  */
 static bool intact(void)
 {
-	unsigned int i;
+        unsigned int i;
 
-	lockdep_assert_held(&lock);
+        lockdep_assert_held(&lock);
 
-	if (unlikely(compromised || configured_invalid))
-		return false;
+        if (unlikely(compromised || configured_invalid))
+                return false;
 
-	if (unlikely(baseline_seal() != baseline_sum)) {
-		compromised = true;
-		pr_alert("floodlight: the built-in answers have been altered in memory; refusing to answer further\n");
-		return false;
-	}
+        if (unlikely(baseline_seal() != baseline_sum)) {
+                compromised = true;
+                pr_alert("floodlight: the built-in answers have been altered in memory; refusing to answer further\n");
+                return false;
+        }
 
-	for (i = 0; i < CHANGES; i++) {
-		if (likely(!changed[i].subject[0]))
-			continue;
-		if (likely(seal_of(&changed[i]) == changed[i].seal))
-			continue;
+        for (i = 0; i < CHANGES; i++) {
+                if (likely(!changed[i].subject[0]))
+                        continue;
+                if (likely(seal_of(&changed[i]) == changed[i].seal))
+                        continue;
 
-		compromised = true;
-		pr_alert("floodlight: a deviation was altered without going through this device; refusing to answer further\n");
-		return false;
-	}
+                compromised = true;
+                pr_alert("floodlight: a deviation was altered without going through this device; refusing to answer further\n");
+                return false;
+        }
 
-	if (unlikely(!guard_intact())) {
-		compromised = true;
-		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
-		return false;
-	}
+        if (unlikely(!guard_intact())) {
+                compromised = true;
+                pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
+                return false;
+        }
 
-	if (shown_len && unlikely(shown_len > REPORT || shown_seal() != shown_sum)) {
-		compromised = true;
-		pr_alert("floodlight: the kept report has been altered in memory; refusing to answer further\n");
-		return false;
-	}
+        if (shown_len && unlikely(shown_len > REPORT || shown_seal() != shown_sum)) {
+                compromised = true;
+                pr_alert("floodlight: the kept report has been altered in memory; refusing to answer further\n");
+                return false;
+        }
 
-	return true;
+        return true;
 }
 
 /*
@@ -611,24 +611,24 @@ static bool intact(void)
  */
 static bool plain(const char *word)
 {
-	const char *at = word;
+        const char *at = word;
 
-	for (; *at; at++) {
-		if (*at >= 'a' && *at <= 'z')
-			continue;
-		if (*at >= 'A' && *at <= 'Z')
-			continue;
-		if (*at >= '0' && *at <= '9')
-			continue;
-		if (*at == '.' || *at == '_' || *at == '-')
-			continue;
-		if (*at == '/' || *at == '+' || *at == ':')
-			continue;
+        for (; *at; at++) {
+                if (*at >= 'a' && *at <= 'z')
+                        continue;
+                if (*at >= 'A' && *at <= 'Z')
+                        continue;
+                if (*at >= '0' && *at <= '9')
+                        continue;
+                if (*at == '.' || *at == '_' || *at == '-')
+                        continue;
+                if (*at == '/' || *at == '+' || *at == ':')
+                        continue;
 
-		return false;
-	}
+                return false;
+        }
 
-	return at != word;
+        return at != word;
 }
 
 /*
@@ -640,47 +640,47 @@ static bool plain(const char *word)
  * comparisons is nothing beside the syscall that got here.
  */
 static struct light *find(const char *subject, unsigned int setting,
-			  const char *detail)
+                          const char *detail)
 {
-	int i;
+        int i;
 
-	lockdep_assert_held(&lock);
+        lockdep_assert_held(&lock);
 
-	for (i = 0; i < CHANGES; i++) {
-		struct light *row = &changed[i];
+        for (i = 0; i < CHANGES; i++) {
+                struct light *row = &changed[i];
 
-		/* The name marks the row in use, never the timestamp: a machine
-		 * with no clock set boots at the epoch, and a change made in
-		 * that first second would write a zero and hand its own row
-		 * straight back -- losing the change and leaving the report
-		 * saying it never happened. */
-		if (!row->subject[0])
-			continue;
-		if (row->setting != setting || strcmp(row->subject, subject))
-			continue;
-		if (setting == FLAG && strcmp(row->detail, detail))
-			continue;
+                /* The name marks the row in use, never the timestamp: a machine
+                 * with no clock set boots at the epoch, and a change made in
+                 * that first second would write a zero and hand its own row
+                 * straight back -- losing the change and leaving the report
+                 * saying it never happened. */
+                if (!row->subject[0])
+                        continue;
+                if (row->setting != setting || strcmp(row->subject, subject))
+                        continue;
+                if (setting == FLAG && strcmp(row->detail, detail))
+                        continue;
 
-		return row;
-	}
+                return row;
+        }
 
-	return NULL;
+        return NULL;
 }
 
 /* The configured row for one subject, setting and flag, if there is one. */
 static const struct configured *configured_row(const char *subject,
-					       unsigned int setting,
-					       const char *detail)
+                                               unsigned int setting,
+                                               const char *detail)
 {
-	unsigned int i;
+        unsigned int i;
 
-	for (i = 0; i < configured_count; i++)
-		if (configured[i].setting == setting &&
-		    !strcmp(configured[i].subject, subject) &&
-		    !strcmp(configured[i].detail, detail))
-			return &configured[i];
+        for (i = 0; i < configured_count; i++)
+                if (configured[i].setting == setting &&
+                    !strcmp(configured[i].subject, subject) &&
+                    !strcmp(configured[i].detail, detail))
+                        return &configured[i];
 
-	return NULL;
+        return NULL;
 }
 
 /*
@@ -691,49 +691,49 @@ static const struct configured *configured_row(const char *subject,
  */
 static int built(const char *subject, unsigned int setting, const char *detail)
 {
-	const struct configured *row = configured_row(subject, setting, detail);
-	unsigned int i;
+        const struct configured *row = configured_row(subject, setting, detail);
+        unsigned int i;
 
-	if (row)
-		return row->allowed;
+        if (row)
+                return row->allowed;
 
-	if (setting == FLAG)
-		return -1;
+        if (setting == FLAG)
+                return -1;
 
-	for (i = 0; i < ARRAY_SIZE(baseline); i++)
-		if (baseline[i].setting == setting &&
-		    !strcmp(baseline[i].subject, subject))
-			return baseline[i].allowed;
+        for (i = 0; i < ARRAY_SIZE(baseline); i++)
+                if (baseline[i].setting == setting &&
+                    !strcmp(baseline[i].subject, subject))
+                        return baseline[i].allowed;
 
-	return -1;
+        return -1;
 }
 
 /* One row of the report, however the answer was arrived at. */
 static void say(struct seq_file *seq, const char *subject, unsigned int setting,
-		const char *detail, bool allowed, struct light *row)
+                const char *detail, bool allowed, struct light *row)
 {
-	unsigned long long now = ktime_get_real_seconds();
+        unsigned long long now = ktime_get_real_seconds();
 
-	seq_printf(seq, "%-16s %-8s%s%-*s %-5s ", subject,
-		   /* Always in range by construction. Checked anyway: this
-		    * index reads a pointer out of a table and prints what it
-		    * points at, which is the last thing that should trust
-		    * memory to be as it was left. */
-		   setting < SETTINGS ? setting_name[setting] : "?",
-		   setting == FLAG ? " " : "",
-		   setting == FLAG ? DETAIL - 1 : 0, setting == FLAG ? detail : "",
-		   allowed ? "allow" : "deny");
+        seq_printf(seq, "%-16s %-8s%s%-*s %-5s ", subject,
+                   /* Always in range by construction. Checked anyway: this
+                    * index reads a pointer out of a table and prints what it
+                    * points at, which is the last thing that should trust
+                    * memory to be as it was left. */
+                   setting < SETTINGS ? setting_name[setting] : "?",
+                   setting == FLAG ? " " : "",
+                   setting == FLAG ? DETAIL - 1 : 0, setting == FLAG ? detail : "",
+                   allowed ? "allow" : "deny");
 
-	if (!row) {
-		seq_puts(seq, "built in\n");
-		return;
-	}
+        if (!row) {
+                seq_puts(seq, "built in\n");
+                return;
+        }
 
-	/* The wall clock can be set backwards, and an elapsed time that
-	 * underflows prints as six hundred billion years -- which reads as a
-	 * broken machine rather than as a moved clock. */
-	seq_printf(seq, "changed %llus ago by uid %u\n",
-		   now > row->when ? now - row->when : 0, row->who);
+        /* The wall clock can be set backwards, and an elapsed time that
+         * underflows prints as six hundred billion years -- which reads as a
+         * broken machine rather than as a moved clock. */
+        seq_printf(seq, "changed %llus ago by uid %u\n",
+                   now > row->when ? now - row->when : 0, row->who);
 }
 
 /*
@@ -746,103 +746,103 @@ static void say(struct seq_file *seq, const char *subject, unsigned int setting,
  */
 static int floodlight_show(struct seq_file *seq, void *unused)
 {
-	unsigned int i, deviations = 0;
-	size_t start;
+        unsigned int i, deviations = 0;
+        size_t start;
 
-	mutex_lock(&lock);
+        mutex_lock(&lock);
 
-	/* Nobody tampered with anything; the configuration said something that
-	 * does not read, and the only honest answer to that is none. */
-	if (unlikely(configured_invalid)) {
-		seq_puts(seq, "# floodlight: the configured policy does not read; refusing to answer until it is fixed\n");
-		mutex_unlock(&lock);
-		return 0;
-	}
+        /* Nobody tampered with anything; the configuration said something that
+         * does not read, and the only honest answer to that is none. */
+        if (unlikely(configured_invalid)) {
+                seq_puts(seq, "# floodlight: the configured policy does not read; refusing to answer until it is fixed\n");
+                mutex_unlock(&lock);
+                return 0;
+        }
 
-	if (unlikely(!intact())) {
-		seq_puts(seq, "# floodlight: TAMPERED -- this register has been written to behind its own back and no longer answers\n");
-		mutex_unlock(&lock);
-		return 0;
-	}
+        if (unlikely(!intact())) {
+                seq_puts(seq, "# floodlight: TAMPERED -- this register has been written to behind its own back and no longer answers\n");
+                mutex_unlock(&lock);
+                return 0;
+        }
 
-	if (likely(shown_len)) {
-		seq_write(seq, shown, shown_len);
-		mutex_unlock(&lock);
-		return 0;
-	}
+        if (likely(shown_len)) {
+                seq_write(seq, shown, shown_len);
+                mutex_unlock(&lock);
+                return 0;
+        }
 
-	start = seq->count;
-	seq_printf(seq, "# floodlight%s\n", sealed ? " (sealed)" : "");
+        start = seq->count;
+        seq_printf(seq, "# floodlight%s\n", sealed ? " (sealed)" : "");
 
-	for (i = 0; i < ARRAY_SIZE(baseline); i++) {
-		const struct rule *rule = &baseline[i];
-		struct light *row = find(rule->subject, rule->setting, "");
+        for (i = 0; i < ARRAY_SIZE(baseline); i++) {
+                const struct rule *rule = &baseline[i];
+                struct light *row = find(rule->subject, rule->setting, "");
 
-		/* A configured row says what this one would, once. */
-		if (configured_row(rule->subject, rule->setting, ""))
-			continue;
+                /* A configured row says what this one would, once. */
+                if (configured_row(rule->subject, rule->setting, ""))
+                        continue;
 
-		deviations += row != NULL;
-		say(seq, rule->subject, rule->setting, "",
-		    row ? row->allowed : rule->allowed, row);
-	}
+                deviations += row != NULL;
+                say(seq, rule->subject, rule->setting, "",
+                    row ? row->allowed : rule->allowed, row);
+        }
 
-	for (i = 0; i < configured_count; i++) {
-		const struct configured *rule = &configured[i];
-		struct light *row = find(rule->subject, rule->setting,
-					 rule->detail);
+        for (i = 0; i < configured_count; i++) {
+                const struct configured *rule = &configured[i];
+                struct light *row = find(rule->subject, rule->setting,
+                                         rule->detail);
 
-		deviations += row != NULL;
-		say(seq, rule->subject, rule->setting, rule->detail,
-		    row ? row->allowed : rule->allowed, row);
-	}
+                deviations += row != NULL;
+                say(seq, rule->subject, rule->setting, rule->detail,
+                    row ? row->allowed : rule->allowed, row);
+        }
 
-	for (i = 0; i < CHANGES; i++) {
-		struct light *row = &changed[i];
+        for (i = 0; i < CHANGES; i++) {
+                struct light *row = &changed[i];
 
-		if (!row->subject[0])
-			continue;
-		/* Already shown beside the built-in answer it deviates from. */
-		if (built(row->subject, row->setting, row->detail) >= 0)
-			continue;
+                if (!row->subject[0])
+                        continue;
+                /* Already shown beside the built-in answer it deviates from. */
+                if (built(row->subject, row->setting, row->detail) >= 0)
+                        continue;
 
-		deviations++;
-		say(seq, row->subject, row->setting, row->detail,
-		    row->allowed, row);
-	}
+                deviations++;
+                say(seq, row->subject, row->setting, row->detail,
+                    row->allowed, row);
+        }
 
-	/* Kept for the next reader when it says nothing about the clock, fits,
-	 * and was not cut short: a reader that has to be handed a larger buffer
-	 * is asked again, and only the render that completed is kept. */
-	if (!deviations && !seq_has_overflowed(seq) && !start &&
-	    seq->count <= REPORT) {
-		memcpy(shown, seq->buf, seq->count);
-		shown_len = seq->count;
-		shown_sum = shown_seal();
-	}
+        /* Kept for the next reader when it says nothing about the clock, fits,
+         * and was not cut short: a reader that has to be handed a larger buffer
+         * is asked again, and only the render that completed is kept. */
+        if (!deviations && !seq_has_overflowed(seq) && !start &&
+            seq->count <= REPORT) {
+                memcpy(shown, seq->buf, seq->count);
+                shown_len = seq->count;
+                shown_sum = shown_seal();
+        }
 
-	mutex_unlock(&lock);
-	return 0;
+        mutex_unlock(&lock);
+        return 0;
 }
 
 /* One word at a time out of the line, so the parse has no allocation, no
  * length to get wrong, and nothing to leave behind on a bad line. */
 static char *word(char **at)
 {
-	char *start = *at;
+        char *start = *at;
 
-	while (*start == ' ' || *start == '\t')
-		start++;
-	if (!*start)
-		return NULL;
+        while (*start == ' ' || *start == '\t')
+                start++;
+        if (!*start)
+                return NULL;
 
-	*at = start;
-	while (**at && **at != ' ' && **at != '\t')
-		(*at)++;
-	if (**at)
-		*(*at)++ = 0;
+        *at = start;
+        while (**at && **at != ' ' && **at != '\t')
+                (*at)++;
+        if (**at)
+                *(*at)++ = 0;
 
-	return start;
+        return start;
 }
 
 /*
@@ -853,42 +853,42 @@ static char *word(char **at)
  * cannot drift apart.
  */
 struct row_text {
-	const char *detail;
-	unsigned int setting;
-	bool allow;
+        const char *detail;
+        unsigned int setting;
+        bool allow;
 };
 
 static bool row_take(char *at, const char *subject, struct row_text *row)
 {
-	char *setting = word(&at), *state = word(&at);
-	unsigned int i;
+        char *setting = word(&at), *state = word(&at);
+        unsigned int i;
 
-	row->detail = "";
-	if (!setting || !state)
-		return false;
+        row->detail = "";
+        if (!setting || !state)
+                return false;
 
-	for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
-		;
-	if (i == SETTINGS)
-		return false;
+        for (i = 0; i < SETTINGS && strcmp(setting, setting_name[i]); i++)
+                ;
+        if (i == SETTINGS)
+                return false;
 
-	if (i == FLAG) {
-		row->detail = state;
-		state = word(&at);
-		if (!state)
-			return false;
-	}
+        if (i == FLAG) {
+                row->detail = state;
+                state = word(&at);
+                if (!state)
+                        return false;
+        }
 
-	if (word(&at) || (strcmp(state, "allow") && strcmp(state, "deny")))
-		return false;
-	if (strlen(subject) >= SUBJECT || strlen(row->detail) >= DETAIL)
-		return false;
-	if (!plain(subject) || (i == FLAG && !plain(row->detail)))
-		return false;
+        if (word(&at) || (strcmp(state, "allow") && strcmp(state, "deny")))
+                return false;
+        if (strlen(subject) >= SUBJECT || strlen(row->detail) >= DETAIL)
+                return false;
+        if (!plain(subject) || (i == FLAG && !plain(row->detail)))
+                return false;
 
-	row->setting = i;
-	row->allow = !strcmp(state, "allow");
-	return true;
+        row->setting = i;
+        row->allow = !strcmp(state, "allow");
+        return true;
 }
 
 /*
@@ -902,273 +902,273 @@ static bool row_take(char *at, const char *subject, struct row_text *row)
  */
 static bool __init configure(const char *text)
 {
-	unsigned int count = 0;
+        unsigned int count = 0;
 
-	while (*text) {
-		char *at = parse.line, *subject;
-		struct row_text row;
-		unsigned int length = 0, i, j;
+        while (*text) {
+                char *at = parse.line, *subject;
+                struct row_text row;
+                unsigned int length = 0, i, j;
 
-		while (text[length] && text[length] != ';' && text[length] != '\n')
-			length++;
-		if (length >= LINE)
-			return false;
-		for (i = 0; i < length; i++)
-			parse.line[i] = text[i];
-		parse.line[length] = 0;
-		text += length + (text[length] != 0);
+                while (text[length] && text[length] != ';' && text[length] != '\n')
+                        length++;
+                if (length >= LINE)
+                        return false;
+                for (i = 0; i < length; i++)
+                        parse.line[i] = text[i];
+                parse.line[length] = 0;
+                text += length + (text[length] != 0);
 
-		subject = word(&at);
-		if (!subject)
-			continue; /* nothing between two semicolons */
+                subject = word(&at);
+                if (!subject)
+                        continue; /* nothing between two semicolons */
 
-		/* Sealing at boot is its own switch. */
-		if (!strcmp(subject, "seal") || !row_take(at, subject, &row))
-			return false;
+                /* Sealing at boot is its own switch. */
+                if (!strcmp(subject, "seal") || !row_take(at, subject, &row))
+                        return false;
 
-		for (j = 0; j < count; j++)
-			if (configured[j].setting == row.setting &&
-			    !strcmp(configured[j].subject, subject) &&
-			    !strcmp(configured[j].detail, row.detail))
-				break;
-		if (j < count)
-			continue; /* named before, and the first says it */
+                for (j = 0; j < count; j++)
+                        if (configured[j].setting == row.setting &&
+                            !strcmp(configured[j].subject, subject) &&
+                            !strcmp(configured[j].detail, row.detail))
+                                break;
+                if (j < count)
+                        continue; /* named before, and the first says it */
 
-		if (count == CONFIGURED)
-			return false;
+                if (count == CONFIGURED)
+                        return false;
 
-		strscpy(configured[count].subject, subject, SUBJECT);
-		strscpy(configured[count].detail, row.detail, DETAIL);
-		configured[count].setting = row.setting;
-		configured[count].allowed = row.allow;
-		count++;
-	}
+                strscpy(configured[count].subject, subject, SUBJECT);
+                strscpy(configured[count].detail, row.detail, DETAIL);
+                configured[count].setting = row.setting;
+                configured[count].allowed = row.allow;
+                count++;
+        }
 
-	configured_count = count;
-	return true;
+        configured_count = count;
+        return true;
 }
 
 static ssize_t floodlight_write(struct file *file, const char __user *from,
-				size_t count, loff_t *offset)
+                                size_t count, loff_t *offset)
 {
-	char *line, *at, *subject;
-	const char *detail;
-	struct row_text text;
-	struct light *row;
-	int rule;
-	unsigned int i;
-	bool allow, was, faulted;
-	long answer;
+        char *line, *at, *subject;
+        const char *detail;
+        struct row_text text;
+        struct light *row;
+        int rule;
+        unsigned int i;
+        bool allow, was, faulted;
+        long answer;
 
-	/* Before anything else, so an unprivileged caller cannot even make the
-	 * copy below, let alone reach the parse behind it. */
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
+        /* Before anything else, so an unprivileged caller cannot even make the
+         * copy below, let alone reach the parse behind it. */
+        if (!capable(CAP_SYS_ADMIN))
+                return -EPERM;
 
-	if (count >= LINE)
-		return -EINVAL;
+        if (count >= LINE)
+                return -EINVAL;
 
-	/*
-	 * The copy from the caller can fault, and a fault takes as long as the
-	 * page behind the address takes to service. It lands in staged[], under
-	 * stage_lock alone, so the readers wait for the memcpy into parse.line
-	 * and not for that. stage_lock stays held until the memcpy is done, so
-	 * a second writer cannot overwrite staged[] in between.
-	 */
-	mutex_lock(&stage_lock);
-	faulted = copy_from_user(staged, from, count);
+        /*
+         * The copy from the caller can fault, and a fault takes as long as the
+         * page behind the address takes to service. It lands in staged[], under
+         * stage_lock alone, so the readers wait for the memcpy into parse.line
+         * and not for that. stage_lock stays held until the memcpy is done, so
+         * a second writer cannot overwrite staged[] in between.
+         */
+        mutex_lock(&stage_lock);
+        faulted = copy_from_user(staged, from, count);
 
-	/* Held across the parse as well as the change, because the buffer the
-	 * line is parsed in is floodlight's own and there is one of it. */
-	mutex_lock(&lock);
+        /* Held across the parse as well as the change, because the buffer the
+         * line is parsed in is floodlight's own and there is one of it. */
+        mutex_lock(&lock);
 
-	if (!intact()) {
-		answer = -EPERM;
-		goto out;
-	}
+        if (!intact()) {
+                answer = -EPERM;
+                goto out;
+        }
 
-	if (faulted) {
-		answer = -EFAULT;
-		goto out;
-	}
+        if (faulted) {
+                answer = -EFAULT;
+                goto out;
+        }
 
-	line = parse.line;
-	memcpy(line, staged, count);
+        line = parse.line;
+        memcpy(line, staged, count);
 
-	line[count] = 0;
+        line[count] = 0;
 
-	/* The guards are checked before a single byte of this is believed. */
-	if (!guard_intact()) {
-		compromised = true;
-		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
-		answer = -EPERM;
-		goto out;
-	}
+        /* The guards are checked before a single byte of this is believed. */
+        if (!guard_intact()) {
+                compromised = true;
+                pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
+                answer = -EPERM;
+                goto out;
+        }
 
-	at = line;
-	if (count && line[count - 1] == '\n')
-		line[count - 1] = 0;
+        at = line;
+        if (count && line[count - 1] == '\n')
+                line[count - 1] = 0;
 
-	subject = word(&at);
-	if (!subject) {
-		answer = -EINVAL;
-		goto out;
-	}
+        subject = word(&at);
+        if (!subject) {
+                answer = -EINVAL;
+                goto out;
+        }
 
-	if (!strcmp(subject, "seal")) {
-		bool already;
+        if (!strcmp(subject, "seal")) {
+                bool already;
 
-		/*
-			The whole line, or not the command.
+                /*
+                        The whole line, or not the command.
 
-			Matched on the first word alone, "seal anything at all"
-			sealed the register and threw the rest away -- so a
-			mistyped line closed the machine to further change, and
-			a deliberate one did it while looking like something
-			else. There is nothing to say after it.
-		*/
-		if (word(&at)) {
-			answer = -EINVAL;
-			goto out;
-		}
+                        Matched on the first word alone, "seal anything at all"
+                        sealed the register and threw the rest away -- so a
+                        mistyped line closed the machine to further change, and
+                        a deliberate one did it while looking like something
+                        else. There is nothing to say after it.
+                */
+                if (word(&at)) {
+                        answer = -EINVAL;
+                        goto out;
+                }
 
-		already = sealed;
-		sealed = true;
+                already = sealed;
+                sealed = true;
 
-		/* Only the once. A line that can be repeated is a line that can
-		 * be repeated until the record above it has scrolled out of
-		 * the log. */
-		if (!already)
-			pr_warn("floodlight: sealed by uid %u; no change until reboot\n",
-				from_kuid(&init_user_ns, current_uid()));
+                /* Only the once. A line that can be repeated is a line that can
+                 * be repeated until the record above it has scrolled out of
+                 * the log. */
+                if (!already)
+                        pr_warn("floodlight: sealed by uid %u; no change until reboot\n",
+                                from_kuid(&init_user_ns, current_uid()));
 
-		answer = count;
-		goto out;
-	}
+                answer = count;
+                goto out;
+        }
 
-	/* Words after the state are refused, as after seal: a line that says
-	 * more than a row is not the row it starts as. Nothing is let through
-	 * that could rewrite the report it is about to appear in, either. */
-	if (!row_take(at, subject, &text)) {
-		answer = -EINVAL;
-		goto out;
-	}
+        /* Words after the state are refused, as after seal: a line that says
+         * more than a row is not the row it starts as. Nothing is let through
+         * that could rewrite the report it is about to appear in, either. */
+        if (!row_take(at, subject, &text)) {
+                answer = -EINVAL;
+                goto out;
+        }
 
-	i = text.setting;
-	detail = text.detail;
-	allow = text.allow;
-	answer = count;
-	if (sealed) {
-		answer = -EPERM;
-		goto out;
-	}
+        i = text.setting;
+        detail = text.detail;
+        allow = text.allow;
+        answer = count;
+        if (sealed) {
+                answer = -EPERM;
+                goto out;
+        }
 
-	rule = built(subject, i, detail);
-	row = find(subject, i, detail);
+        rule = built(subject, i, detail);
+        row = find(subject, i, detail);
 
-	/*
-	 * What the machine answers now: the deviation if there is one, else
-	 * what it was built with, else nothing at all -- a subject this kernel
-	 * has never heard of, which the first write is entitled to introduce.
-	 */
-	if (row)
-		was = row->allowed;
-	else if (rule >= 0)
-		was = rule;
-	else
-		was = !allow;
+        /*
+         * What the machine answers now: the deviation if there is one, else
+         * what it was built with, else nothing at all -- a subject this kernel
+         * has never heard of, which the first write is entitled to introduce.
+         */
+        if (row)
+                was = row->allowed;
+        else if (rule >= 0)
+                was = rule;
+        else
+                was = !allow;
 
-	/* Saying again what is already true is not a change, and a line that
-	 * can be repeated is a line that can be repeated until the record
-	 * above it has scrolled out of the log. */
-	if (was == allow && (row || rule >= 0))
-		goto out;
+        /* Saying again what is already true is not a change, and a line that
+         * can be repeated is a line that can be repeated until the record
+         * above it has scrolled out of the log. */
+        if (was == allow && (row || rule >= 0))
+                goto out;
 
-	/*
-	 * Back to what it was built as, so the deviation is given back rather
-	 * than kept saying the same thing the baseline already says. The report
-	 * then calls the row "built in" again, which is the truth.
-	 */
-	if (rule >= 0 && allow == rule) {
-		if (row)
-			memset(row, 0, sizeof(*row));
+        /*
+         * Back to what it was built as, so the deviation is given back rather
+         * than kept saying the same thing the baseline already says. The report
+         * then calls the row "built in" again, which is the truth.
+         */
+        if (rule >= 0 && allow == rule) {
+                if (row)
+                        memset(row, 0, sizeof(*row));
 
-		pr_warn("floodlight: %s restored to built in by uid %u\n",
-			subject, from_kuid(&init_user_ns, current_uid()));
-		goto out;
-	}
+                pr_warn("floodlight: %s restored to built in by uid %u\n",
+                        subject, from_kuid(&init_user_ns, current_uid()));
+                goto out;
+        }
 
-	if (!row) {
-		unsigned int free;
+        if (!row) {
+                unsigned int free;
 
-		for (free = 0; free < CHANGES && changed[free].subject[0]; free++)
-			;
-		if (free == CHANGES) {
-			answer = -ENOSPC;
-			goto out;
-		}
+                for (free = 0; free < CHANGES && changed[free].subject[0]; free++)
+                        ;
+                if (free == CHANGES) {
+                        answer = -ENOSPC;
+                        goto out;
+                }
 
-		row = &changed[free];
+                row = &changed[free];
 
-		/* Already refused above if either would not fit; bounded again
-		 * here because this is the copy, and a bound that lives at the
-		 * copy cannot be separated from it by a later edit. */
-		if (strscpy(row->subject, subject, SUBJECT) < 0 ||
-		    strscpy(row->detail, detail, DETAIL) < 0) {
-			memset(row, 0, sizeof(*row));
-			answer = -EINVAL;
-			goto out;
-		}
+                /* Already refused above if either would not fit; bounded again
+                 * here because this is the copy, and a bound that lives at the
+                 * copy cannot be separated from it by a later edit. */
+                if (strscpy(row->subject, subject, SUBJECT) < 0 ||
+                    strscpy(row->detail, detail, DETAIL) < 0) {
+                        memset(row, 0, sizeof(*row));
+                        answer = -EINVAL;
+                        goto out;
+                }
 
-		row->setting = i;
-	}
+                row->setting = i;
+        }
 
-	row->allowed = allow;
+        row->allowed = allow;
 
-	/* Taken here, never from the line: a writer that could supply these
-	 * could say the change was somebody else's, at some other time. */
-	row->who = from_kuid(&init_user_ns, current_uid());
-	row->when = ktime_get_real_seconds();
-	row->seal = seal_of(row);
+        /* Taken here, never from the line: a writer that could supply these
+         * could say the change was somebody else's, at some other time. */
+        row->who = from_kuid(&init_user_ns, current_uid());
+        row->when = ktime_get_real_seconds();
+        row->seal = seal_of(row);
 
-	/*
-	 * Said out loud. This machine draws its kernel log on its own screen,
-	 * so a change is visible on the glass without anybody going to look.
-	 */
-	pr_warn("floodlight: %s %s%s%s for %s by uid %u\n",
-		allow ? "allowed" : "denied", setting_name[i],
-		i == FLAG ? " " : "", i == FLAG ? detail : "",
-		subject, row->who);
+        /*
+         * Said out loud. This machine draws its kernel log on its own screen,
+         * so a change is visible on the glass without anybody going to look.
+         */
+        pr_warn("floodlight: %s %s%s%s for %s by uid %u\n",
+                allow ? "allowed" : "denied", setting_name[i],
+                i == FLAG ? " " : "", i == FLAG ? detail : "",
+                subject, row->who);
 
 out:
-	/* Whatever was written, the kept report is no longer known to be what
-	 * the register would say, and nobody holding the last one is either. */
-	shown_len = 0;
-	generation++;
+        /* Whatever was written, the kept report is no longer known to be what
+         * the register would say, and nobody holding the last one is either. */
+        shown_len = 0;
+        generation++;
 
-	/* Nothing is left in it between commands: the line held a policy
-	 * somebody typed, and there is no reason for it to still be here. */
-	memset(parse.line, 0, LINE);
-	memset(staged, 0, LINE);
+        /* Nothing is left in it between commands: the line held a policy
+         * somebody typed, and there is no reason for it to still be here. */
+        memset(parse.line, 0, LINE);
+        memset(staged, 0, LINE);
 
-	mutex_unlock(&lock);
-	mutex_unlock(&stage_lock);
-	return answer;
+        mutex_unlock(&lock);
+        mutex_unlock(&stage_lock);
+        return answer;
 }
 
 static int floodlight_open(struct inode *inode, struct file *file)
 {
-	/*
-	 * misc_open leaves the miscdevice in private_data for a driver that
-	 * wants to know which node it was opened through, and seq_open warns
-	 * if it finds anything there at all -- so every process that read this
-	 * register put a kernel warning in the log, once each, for the whole
-	 * life of the machine. Nothing below wants the pointer: the register is
-	 * one device and one array.
-	 */
-	file->private_data = NULL;
+        /*
+         * misc_open leaves the miscdevice in private_data for a driver that
+         * wants to know which node it was opened through, and seq_open warns
+         * if it finds anything there at all -- so every process that read this
+         * register put a kernel warning in the log, once each, for the whole
+         * life of the machine. Nothing below wants the pointer: the register is
+         * one device and one array.
+         */
+        file->private_data = NULL;
 
-	return single_open(file, floodlight_show, NULL);
+        return single_open(file, floodlight_show, NULL);
 }
 
 /*
@@ -1187,37 +1187,37 @@ static int floodlight_open(struct inode *inode, struct file *file)
 #define FLOODLIGHT_ANSWER 0x80106601u
 
 static long floodlight_ioctl(struct file *file, unsigned int command,
-			     unsigned long argument)
+                             unsigned long argument)
 {
-	struct floodlight_answer answer;
-	bool whole;
+        struct floodlight_answer answer;
+        bool whole;
 
-	if (command != FLOODLIGHT_ANSWER)
-		return -ENOTTY;
+        if (command != FLOODLIGHT_ANSWER)
+                return -ENOTTY;
 
-	mutex_lock(&lock);
-	whole = intact();
-	answer.generation = generation;
-	mutex_unlock(&lock);
+        mutex_lock(&lock);
+        whole = intact();
+        answer.generation = generation;
+        mutex_unlock(&lock);
 
-	if (unlikely(!whole))
-		return -EIO;
+        if (unlikely(!whole))
+                return -EIO;
 
-	answer.token = siphash_1u64((unsigned long)file, &token_key);
+        answer.token = siphash_1u64((unsigned long)file, &token_key);
 
-	return copy_to_user((void __user *)argument, &answer, sizeof(answer))
-		       ? -EFAULT
-		       : 0;
+        return copy_to_user((void __user *)argument, &answer, sizeof(answer))
+                       ? -EFAULT
+                       : 0;
 }
 
 static const struct file_operations floodlight_ops = {
-	.owner = THIS_MODULE,
-	.open = floodlight_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-	.write = floodlight_write,
-	.unlocked_ioctl = floodlight_ioctl,
+        .owner = THIS_MODULE,
+        .open = floodlight_open,
+        .read = seq_read,
+        .llseek = seq_lseek,
+        .release = single_release,
+        .write = floodlight_write,
+        .unlocked_ioctl = floodlight_ioctl,
 };
 
 /*
@@ -1240,51 +1240,51 @@ static const struct file_operations floodlight_ops = {
 #define FLOODLIGHT_DEVICE_MINOR 249
 
 static struct miscdevice floodlight_device __ro_after_init = {
-	.minor = FLOODLIGHT_DEVICE_MINOR,
-	.name = "floodlight",
-	.fops = &floodlight_ops,
-	.mode = 0644, /* anyone may read what is allowed; only root may change it */
+        .minor = FLOODLIGHT_DEVICE_MINOR,
+        .name = "floodlight",
+        .fops = &floodlight_ops,
+        .mode = 0644, /* anyone may read what is allowed; only root may change it */
 };
 
 static int __init floodlight_start(void)
 {
-	int answer;
+        int answer;
 
-	/* Before the device exists, so nothing can be answered or written
-	 * until the seals it will be checked against are in place. */
-	secret = get_random_u32();
-	get_random_bytes(&token_key, sizeof(token_key));
-	guard_arm();
+        /* Before the device exists, so nothing can be answered or written
+         * until the seals it will be checked against are in place. */
+        secret = get_random_u32();
+        get_random_bytes(&token_key, sizeof(token_key));
+        guard_arm();
 
-	configured_invalid = !configure(configured_text);
-	if (configured_invalid) {
-		memset(configured, 0, sizeof(configured));
-		configured_count = 0;
-		pr_alert("floodlight: the configured policy has a row this register cannot read; every launch is refused until CONFIG_MOONWATER_FLOODLIGHT_POLICY is fixed\n");
-	}
-	memset(parse.line, 0, LINE);
-	if (!guard_intact()) {
-		compromised = true;
-		pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
-	}
+        configured_invalid = !configure(configured_text);
+        if (configured_invalid) {
+                memset(configured, 0, sizeof(configured));
+                configured_count = 0;
+                pr_alert("floodlight: the configured policy has a row this register cannot read; every launch is refused until CONFIG_MOONWATER_FLOODLIGHT_POLICY is fixed\n");
+        }
+        memset(parse.line, 0, LINE);
+        if (!guard_intact()) {
+                compromised = true;
+                pr_alert("floodlight: the parse buffer was overrun; refusing to answer further\n");
+        }
 
-	baseline_sum = baseline_seal();
+        baseline_sum = baseline_seal();
 
-	/*
-	 * Sealed before the device exists, so there is no moment a write could
-	 * land first: the configuration is the whole policy until reboot, and
-	 * root can read it but not loosen it.
-	 */
+        /*
+         * Sealed before the device exists, so there is no moment a write could
+         * land first: the configuration is the whole policy until reboot, and
+         * root can read it but not loosen it.
+         */
 #ifdef CONFIG_MOONWATER_FLOODLIGHT_SEAL
-	sealed = true;
-	pr_warn("floodlight: sealed at boot by the kernel's configuration; no change until reboot\n");
+        sealed = true;
+        pr_warn("floodlight: sealed at boot by the kernel's configuration; no change until reboot\n");
 #endif
 
-	answer = misc_register(&floodlight_device);
-	if (answer)
-		pr_err("floodlight: no device, so no policy (%d)\n", answer);
+        answer = misc_register(&floodlight_device);
+        if (answer)
+                pr_err("floodlight: no device, so no policy (%d)\n", answer);
 
-	return answer;
+        return answer;
 }
 
 /*

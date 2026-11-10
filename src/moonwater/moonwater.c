@@ -812,7 +812,7 @@ static struct bind_row bind_table[SPARK_BIND_EVENTS];
 static DEFINE_SPINLOCK(bind_lock);
 static atomic_t bind_ctrl;
 static atomic_t bind_alt;
-static _Bool bind_handler_registered;
+static bool bind_handler_registered;
 static struct work_struct bind_state_work;
 
 /*
@@ -841,7 +841,7 @@ static struct {
         struct file *owner;
         struct pid *process; // the thread group that attached it
         wait_queue_head_t wait;
-        _Bool ending;
+        bool ending;
 } bind_machine;
 
 static DEFINE_SPINLOCK(bind_machine_lock);
@@ -928,13 +928,13 @@ static const unsigned char bind_machine_admin[MOONWATER_END + 1] = {
 static struct bind_row *bind_row(unsigned int event)
 {
         if (!event || event > SPARK_BIND_EVENTS)
-                return NULL;
+                return null;
         return bind_table + event - 1;
 }
 
 static u8 bind_code_event[BIND_CODES];
 
-static void bind_watch_code(unsigned int code, unsigned int event, _Bool on)
+static void bind_watch_code(unsigned int code, unsigned int event, bool on)
 {
         if (!code || code >= BIND_CODES)
                 return;
@@ -947,7 +947,7 @@ static void bind_watch_code(unsigned int code, unsigned int event, _Bool on)
         Read where the watch is written, under bind_lock, so a detach that
         lands after another attach reads that attach's state and not its own.
 */
-static _Bool bind_row_bound(struct bind_row *row)
+static bool bind_row_bound(struct bind_row *row)
 {
         return row && (atomic_read(&bind_machine_live) || atomic_read(&row->bound));
 }
@@ -955,7 +955,7 @@ static _Bool bind_row_bound(struct bind_row *row)
 static void bind_watch_row(struct bind_row *row)
 {
         unsigned int i, event = row->event;
-        _Bool on = bind_row_bound(row);
+        bool on = bind_row_bound(row);
 
         for (i = 0; i < BIND_CODES_PER; i++)
                 bind_watch_code(bind_spec[event - 1].code[i], event, on);
@@ -966,9 +966,9 @@ static int bind_spawn_enter(void *data)
         struct bind_spawn *spawn = data;
         char command[SPARK_BIND_COMMAND_MAX];
         char event_env[sizeof("MOONWATER_EVENT=") + SPARK_BIND_NAME_MAX];
-        char *argv[] = { SPARK_TOOL_PROGRAM, "-c", command, NULL };
+        char *argv[] = { SPARK_TOOL_PROGRAM, "-c", command, null };
         char *envp[] = { SPARK_COMMAND_ENVIRONMENT(SPARK_ENVIRONMENT_ENTRY)
-                         event_env, NULL };
+                         event_env, null };
         int ret;
 
         strscpy(command, spawn->command, sizeof(command));
@@ -1005,7 +1005,7 @@ static void bind_run(struct bind_row *row)
         struct bind_spawn spawn;
         const char *name = spark_bind_event_name[row->event - 1];
         const char *how;
-        _Bool poweroff, reboot;
+        bool poweroff, reboot;
         pid_t pid;
         int ret = 0, stat = 0, number, shown;
         unsigned long flags;
@@ -1019,11 +1019,11 @@ static void bind_run(struct bind_row *row)
         if (!spawn.command[0])
                 goto done;
 
-        poweroff = !strcmp(spawn.command, "poweroff");
-        reboot = !strcmp(spawn.command, "reboot");
+        poweroff = !string_compare(spawn.command, "poweroff");
+        reboot = !string_compare(spawn.command, "reboot");
         //      %*pE: the line is somebody's text, and a log is not a terminal. It is said only when it fails:
         //      a press that did what it is bound to is not news.
-        shown = (int)strlen(spawn.command);
+        shown = (int)string_length(spawn.command);
 
         kernel_sigaction(SIGCHLD, SIG_DFL);
         pid = user_mode_thread(bind_spawn_enter, &spawn, SIGCHLD);
@@ -1074,7 +1074,7 @@ static void bind_machine_shift(unsigned int at)
         unsigned int n = --bind_machine.count - at;
 
         if (n)
-                memmove(bind_machine.event + at, bind_machine.event + at + 1,
+                memory_copy(bind_machine.event + at, bind_machine.event + at + 1,
                         n * sizeof(bind_machine.event[0]));
 }
 
@@ -1107,7 +1107,7 @@ static void bind_machine_watch_all(void)
         process has not read the first in all that time, and the image line is
         the only other way to stop this machine.
 */
-static _Bool bind_machine_push(struct bind_row *row)
+static bool bind_machine_push(struct bind_row *row)
 {
         unsigned long flags;
         unsigned int event = row->event, i;
@@ -1227,8 +1227,8 @@ static struct pid *bind_machine_reset(void)
 {
         struct pid *process = bind_machine.process;
 
-        bind_machine.owner = NULL;
-        bind_machine.process = NULL;
+        bind_machine.owner = null;
+        bind_machine.process = null;
         bind_machine.ending = false;
         bind_machine.count = 0;
         atomic_set(&bind_machine_live, 0);
@@ -1245,8 +1245,8 @@ static void bind_machine_detach(struct file *file, struct pid *process)
 {
         unsigned long flags;
         unsigned int drain[BIND_MACHINE_QUEUE], n = 0, i;
-        struct pid *gone = NULL;
-        _Bool was_owner = false;
+        struct pid *gone = null;
+        bool was_owner = false;
 
         spin_lock_irqsave(&bind_machine_lock, flags);
         if (bind_machine.owner == file &&
@@ -1401,7 +1401,7 @@ static void machine_script_reset(void)
         }
         mutex_lock(&machine_script_lock);
         machine_script_commit(moonwater_machine_builtin, machine_script_builtin,
-                              MOONWATER_ORIGIN_BUILTIN, NULL);
+                              MOONWATER_ORIGIN_BUILTIN, null);
         mutex_unlock(&machine_script_lock);
 }
 
@@ -1456,7 +1456,7 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 break;
         }
         case MOONWATER_DETACH:
-                bind_machine_detach(file, NULL);
+                bind_machine_detach(file, null);
                 request.flags = 0;
                 request.queued = 0;
                 break;
@@ -1504,7 +1504,7 @@ static long report_machine_script(struct machine_script __user *out)
                    script's length, and the two share one word. */
                 unsigned int room = request.length;
                 unsigned int length;
-                char *copy = NULL;
+                char *copy = null;
 
                 /*      The text is root's. It is read from
                         /root/main.moonwater.sh, which is where a person who
@@ -1542,7 +1542,7 @@ static long report_machine_script(struct machine_script __user *out)
                                 mutex_unlock(&machine_script_lock);
                                 return -ENOMEM;
                         }
-                        memcpy(copy, machine_script_text, length);
+                        memory_copy_apart(copy, machine_script_text, length);
                 }
                 mutex_unlock(&machine_script_lock);
 
@@ -1565,7 +1565,7 @@ static long report_machine_script(struct machine_script __user *out)
                         and an overlay that still describe the old one, and
                         the refusal says nothing about it. Taking it whole
                         first means a refused SET changes nothing at all. */
-                char *fresh = NULL;
+                char *fresh = null;
 
                 if (!capable(CAP_SYS_ADMIN))
                         return -EPERM;
@@ -1586,7 +1586,7 @@ static long report_machine_script(struct machine_script __user *out)
                 else
                         machine_script_commit(moonwater_machine_builtin,
                                               machine_script_builtin,
-                                              MOONWATER_ORIGIN_BUILTIN, NULL);
+                                              MOONWATER_ORIGIN_BUILTIN, null);
                 machine_script_answer(&request);
                 mutex_unlock(&machine_script_lock);
                 break;
@@ -1598,7 +1598,7 @@ static long report_machine_script(struct machine_script __user *out)
         return copy_to_user(out, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
-static _Bool bind_debounce(struct bind_row *row)
+static bool bind_debounce(struct bind_row *row)
 {
         unsigned long now = jiffies | 1;
         unsigned long last = READ_ONCE(row->last);
@@ -1621,21 +1621,21 @@ static struct bind_row *bind_match(unsigned int type, unsigned int code, int val
                 unsigned int i;
 
                 if ((unsigned int)value > 1)
-                        return NULL;
+                        return null;
                 for (i = 0; i < ARRAY_SIZE(bind_sw); i++)
                         if (bind_sw[i].code == code)
                                 return bind_row(bind_sw[i].event[value]);
-                return NULL;
+                return null;
         }
         if (type != EV_KEY || value != 1 || code >= BIND_CODES)
-                return NULL;
+                return null;
 
         event = READ_ONCE(bind_code_event[code]);
         if (likely(!event))
-                return NULL;
+                return null;
         if ((bind_spec[event - 1].flags & BIND_CAD) &&
             !(atomic_read(&bind_ctrl) > 0 && atomic_read(&bind_alt) > 0))
-                return NULL;
+                return null;
         return bind_row(event);
 }
 
@@ -1816,7 +1816,7 @@ static void bind_start(void)
         spin_unlock_irq(&bind_machine_lock);
         atomic_set(&bind_ctrl, 0);
         atomic_set(&bind_alt, 0);
-        memset(bind_code_event, 0, sizeof(bind_code_event));
+        memory_fill(bind_code_event, 0, sizeof(bind_code_event));
 
         for (at = 0; at < SPARK_BIND_EVENTS; at++) {
                 struct bind_row *row = bind_table + at;
@@ -1874,8 +1874,8 @@ static void bind_stop(void)
 
         mutex_lock(&machine_script_lock);
         kfree(machine_script_held);
-        machine_script_held = NULL;
-        machine_script_text = NULL;
+        machine_script_held = null;
+        machine_script_text = null;
         machine_script_length = 0;
         mutex_unlock(&machine_script_lock);
 }
@@ -1894,7 +1894,7 @@ static void bind_stop(void)
         copied in whole to be compared, and the answer is the whole field.
 */
 static void bind_answer(struct bind_control *request, struct bind_row *row,
-                        _Bool reveal)
+                        bool reveal)
 {
         unsigned long flags;
 
@@ -1907,10 +1907,10 @@ static void bind_answer(struct bind_control *request, struct bind_row *row,
         request->runs = (unsigned int)atomic_read(&row->runs);
         request->count = SPARK_BIND_EVENTS;
         request->flags = 0;
-        if (!strcmp(request->command, row->def))
+        if (!string_compare(request->command, row->def))
                 request->flags |= SPARK_BIND_DEFAULT;
         else if (!reveal)
-                memset(request->command, 0, sizeof(request->command));
+                memory_fill(request->command, 0, sizeof(request->command));
         if (atomic_read(&row->busy))
                 request->flags |= SPARK_BIND_RUNNING;
         if (work_pending(&row->work) ||
@@ -1947,7 +1947,7 @@ static long report_bind(struct bind_control __user *out)
                                        ? -EFAULT
                                        : -EPERM;
                 }
-                if (!memchr(request.command, 0, sizeof(request.command)))
+                if (!memory_first_of(request.command, 0, sizeof(request.command)))
                         return -ENAMETOOLONG;
 
                 spin_lock_irqsave(&bind_lock, flags);

@@ -1015,7 +1015,7 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
         if (put_user(0UL, slot++) ||
             copy_to_user(slot, pairs, words * sizeof(unsigned long)))
                 return -EFAULT;
-        memcpy(mm->saved_auxv, pairs, words * sizeof(unsigned long));
+        memory_copy_apart(mm->saved_auxv, pairs, words * sizeof(unsigned long));
 
         *out = bottom;
         return 0;
@@ -1269,7 +1269,7 @@ int execute_spark(struct linux_binprm *bprm)
 
                 // Bss is anonymous and already zero. File regions carry their
                 // offset from the image base; all three share one lock scope.
-                unsigned long mapped = do_mmap(i == 2 ? NULL : bprm->file,
+                unsigned long mapped = do_mmap(i == 2 ? null : bprm->file,
                     address, sizes[i], PROT_READ | (i ? PROT_WRITE : PROT_EXEC),
                     MAP_PRIVATE | MAP_FIXED | (i == 2 ? MAP_ANONYMOUS : 0),
                     // The bss is fixed per-tool arenas of which a program
@@ -1277,7 +1277,7 @@ int execute_spark(struct linux_binprm *bprm)
                     // pages, said once here rather than by a call per start.
                     i == 2 ? mk_vma_flags(VMA_NOHUGEPAGE_BIT) : EMPTY_VMA_FLAGS,
                     i == 2 ? 0 : (address - header->base) >> PAGE_SHIFT,
-                    &populate[i], NULL);
+                    &populate[i], null);
                 if (IS_ERR_VALUE(mapped))
                 {
                         mmap_write_unlock(current->mm);
@@ -1348,7 +1348,7 @@ int execute_spark(struct linux_binprm *bprm)
            exec'ing program's own, whatever it had put in them, handed to an
            image that may run with more privilege than it did. Only the entry
            ABI's four are set. */
-        memset(regs, 0, offsetof(struct pt_regs, orig_ax));
+        memory_fill(regs, 0, offsetof(struct pt_regs, orig_ax));
 
         /* CPUID and XGETBV are serialising startup work whose answer the
            kernel already has.  Spark's private entry ABI hands that answer
@@ -1366,7 +1366,7 @@ int execute_spark(struct linux_binprm *bprm)
         regs->ss = __USER_DS;
 #elif defined(CONFIG_ARM64)
         // As start_thread_common zeroes them for an ELF.
-        memset(regs->regs, 0, sizeof(regs->regs));
+        memory_fill(regs->regs, 0, sizeof(regs->regs));
         regs->regs[19] = SPARK_START_MAGIC_FACTS;
         regs->regs[20] = spark_cpu_features;
         regs->regs[21] = spark_entry_process();
@@ -1463,7 +1463,7 @@ static void spawn_strings_put(struct spawn_strings *strings)
 
 static atomic_long_t spark_env_cached = ATOMIC_LONG_INIT(0);
 
-static bool spark_env_cache_take(size_t bytes)
+static bool spark_env_cache_take(sized bytes)
 {
         if (bytes > SPARK_ENV_CACHE_ONE)
                 return false;
@@ -1531,7 +1531,7 @@ static int spawn_enter(void *data)
         u64 started = ktime_get_ns();
 
         struct spawn_work *work = data;
-        static const char *const empty_envp[] = {NULL};
+        static const char *const empty_envp[] = {null};
         const char *const *environment = work->environment
                 ? (const char *const *)work->environment->vector : empty_envp;
         int ret;
@@ -1571,7 +1571,7 @@ static int spawn_enter(void *data)
         {
                 const char **script_argv;
 
-                script_argv = kcalloc((size_t)work->argc + 2,
+                script_argv = kcalloc((sized)work->argc + 2,
                                       sizeof(*script_argv), GFP_KERNEL);
 
                 if (!script_argv)
@@ -1620,7 +1620,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
         char *block;
         char **vector;
         char *walk;
-        size_t pointer_bytes;
+        sized pointer_bytes;
         unsigned int i;
 
         if (unlikely(count == 0 || count > SPARK_SPAWN_MAX_STRINGS ||
@@ -1629,7 +1629,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
 
         /* The limits above put this below 3 MiB on every supported 64-bit
            architecture, so none of the size arithmetic can overflow. */
-        pointer_bytes = ((size_t)count + 1) * sizeof(char *);
+        pointer_bytes = ((sized)count + 1) * sizeof(char *);
 
         /* The immutable bytes and their pointers have exactly the same
            lifetime. One allocation removes a slab round trip from each of
@@ -1656,8 +1656,8 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
         walk = block;
         for (i = 0; i < count; i++)
         {
-                size_t remaining = (size_t)(block + bytes - walk);
-                size_t length = string_length_max(walk, remaining);
+                sized remaining = (sized)(block + bytes - walk);
+                sized length = string_length_max(walk, remaining);
 
                 if (unlikely(length == remaining))
                 {
@@ -1668,7 +1668,7 @@ static int copy_strings(unsigned long user_block, unsigned int bytes,
                 vector[i] = walk;
                 walk += length + 1;
         }
-        vector[count] = NULL;
+        vector[count] = null;
 
         *out = strings;
         return 0;
@@ -1714,9 +1714,9 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         struct device_context *context = file->private_data;
         struct spawn args;
         struct spawn_work *work;
-        struct spawn_strings *old_environment = NULL;
-        struct pid *old_owner = NULL;
-        const struct cred *old_cred = NULL;
+        struct spawn_strings *old_environment = null;
+        struct pid *old_owner = null;
+        const struct cred *old_cred = null;
         bool shell_fallback;
         const char *fixed_path;
         long ret;
@@ -1734,7 +1734,7 @@ static long do_spawn(struct file *file, struct spawn __user *request)
                 return -EINVAL;
 
         shell_fallback = args.flags & SPARK_SPAWN_SHELL;
-        fixed_path = args.flags & SPARK_SPAWN_TOOL ? SPARK_TOOL_PROGRAM : NULL;
+        fixed_path = args.flags & SPARK_SPAWN_TOOL ? SPARK_TOOL_PROGRAM : null;
 
         work = kzalloc(sizeof(*work), GFP_KERNEL);
         if (unlikely(!work))
@@ -1763,7 +1763,7 @@ static long do_spawn(struct file *file, struct spawn __user *request)
                 if (unlikely(IS_ERR(work->path)))
                 {
                         ret = PTR_ERR(work->path);
-                        work->path = NULL;
+                        work->path = null;
                         goto fail;
                 }
 
@@ -1825,10 +1825,10 @@ static long do_spawn(struct file *file, struct spawn __user *request)
                                 {
                                         // Not kept, and what was kept is
                                         // for a generation that is gone.
-                                        context->environment = NULL;
+                                        context->environment = null;
                                         context->environment_generation = 0;
-                                        context->environment_owner = NULL;
-                                        context->environment_cred = NULL;
+                                        context->environment_owner = null;
+                                        context->environment_cred = null;
                                 }
                                 mutex_unlock(&context->spawn_lock);
                                 spark_env_cache_give(old_environment);
@@ -1913,12 +1913,12 @@ static u32 snapshot_room;
 
 static void *snapshot_append(struct snapshot_builder *build, u32 bytes)
 {
-        void *record = NULL;
+        void *record = null;
 
         if (unlikely(bytes > U32_MAX - build->required))
         {
                 build->required = U32_MAX;
-                return NULL;
+                return null;
         }
 
         u32 stop = build->required + bytes;
@@ -2099,7 +2099,7 @@ unsigned int moonwater_settings_flags(void)
 static long settings_get(struct spark_settings_request __user *request)
 {
         struct spark_settings_request asked;
-        struct spark_settings *held = NULL;
+        struct spark_settings *held = null;
         long answer = 0;
 
         if (!capable(CAP_SYS_ADMIN))
@@ -2206,7 +2206,7 @@ static HOT long report_snapshot(struct snapshot_request __user *out)
         mutex_lock(&snapshot_lock);
         data = snapshot;
         room = snapshot_room;
-        snapshot = NULL;
+        snapshot = null;
         snapshot_room = 0;
         mutex_unlock(&snapshot_lock);
 
@@ -2280,7 +2280,7 @@ keep:
         {
                 snapshot = data;
                 snapshot_room = room;
-                data = NULL;
+                data = null;
         }
         mutex_unlock(&snapshot_lock);
         kvfree(data);
