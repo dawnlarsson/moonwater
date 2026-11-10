@@ -728,6 +728,9 @@ static struct
         // The verb being run: its process, the read end of its output, what it said, when it began, for which row.
         bipolar child;
         b32 output;
+        // The child is ending: 1 its output ended and it is not yet reaped, 2 it was killed and is not yet reaped. Its exit is polled
+        // (settings_reap) from the window's timers, never waited for, so the window's events go on while it goes.
+        int ending;
         positive said_length, began;
         int job;
         b32 job_sets;
@@ -792,6 +795,7 @@ static fn settings_say(string_address text);
 #define SETTINGS_SUBS 40           // the lines under the rows at most
 #define SETTINGS_SUB_TEXT 240      // bytes of one line
 #define SETTINGS_BOARD_NS 1000000000ll
+#define SETTINGS_REAP_NS 10000000ll // how often a child that is ending is asked whether it has exited (settings_reap)
 #define SETTINGS_GPU_SAMPLES 10    // samples of the GPU's presents the status is judged on (a second each)
 struct settings_sub
 {
@@ -2266,6 +2270,7 @@ static b32 settings_start(string_address address_to words, positive count, const
 
         settings.child = child;
         settings.output = ends[0];
+        settings.ending = 0;
         settings.said_length = 0;
         settings.began = (positive)ui_kit.now;
         return true;
@@ -3122,18 +3127,13 @@ static fn settings_waiting_say(void)
                 settings_say((string_address)line);
 }
 
-// The verb running has finished, or taken too long: what it said, put where it belongs.
-static fn settings_finished(b32 killed)
+/*
+        The verb running has ended, its child reaped: what it said, put where it belongs. killed is a verb stopped for taking too long, or a
+        feed dropped for a change (settings_finished), and status is the child's wait status.
+*/
+static fn settings_complete(b32 killed, positive status)
 {
-        positive status = 0;
         int row = settings.job;
-
-        if (killed)
-                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
-        system_wait4_retry(settings.child, address_of status, 0, null);
-        system_close(settings.output);
-        settings.child = 0;
-        settings.output = -1;
 
         if (settings.job_sets)
         {
@@ -3208,6 +3208,48 @@ static fn settings_finished(b32 killed)
                 compositor_kmsg((string_address) "settings: rows unread or not understood when first asked: ", failed,
                                 failed ? (string_address) "" : (string_address) "0");
         }
+}
+
+/*
+        The child that is ending is reaped without waiting for it (WNOHANG, the wait's 1): true when it had exited and the verb is complete
+        (settings_complete), false while it has not, which settings_tick asks again every SETTINGS_REAP_NS. A child that has gone already is
+        complete with no status to tell it by.
+*/
+static b32 settings_reap(void)
+{
+        positive status = 0;
+        b32 killed = settings.ending == 2;
+        bipolar got;
+
+        if (settings.child <= 0 || !settings.ending)
+                return false;
+        got = system_wait4_retry(settings.child, address_of status, 1, null);
+        if (got == 0)
+                return false;
+        if (got < 0)
+                status = 0;
+        system_close(settings.output);
+        settings.child = 0;
+        settings.output = -1;
+        settings.ending = 0;
+        settings_complete(killed, status);
+        return true;
+}
+
+/*
+        The verb running has finished, or taken too long (killed): a child that was killed, or whose output ended, is reaped by settings_reap
+        when it has exited, and until then the window goes on, polling it from settings_tick (settings.ending).
+*/
+static fn settings_finished(b32 killed)
+{
+        if (killed)
+        {
+                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
+                settings.ending = 2;
+        }
+        else if (!settings.ending)
+                settings.ending = 1;
+        settings_reap();
 }
 
 // A feed's reading under way is dropped, for a change that is wanted now.
@@ -4912,6 +4954,15 @@ static fn settings_chose(int id)
         }
 }
 
+// How long the verb running may take, in nanoseconds: a feed's reading, a join's handshake, a pairing's code, or the standard.
+static positive settings_most(void)
+{
+        return settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
+               : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
+               : settings_waits(settings.job)     ? (positive)SETTINGS_WAIT_PAIR_NS
+                                                  : (positive)SETTINGS_WAIT_NS;
+}
+
 // The settings' timers: the caret's blink, a verb's time, the due reading of a feed, and the descriptor of a verb running.
 // 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
@@ -4932,13 +4983,26 @@ static long settings_tick(long timeout, long address_to other)
 
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
+        // A child that is ending (its output ended, or it was killed) is reaped here when it has exited, never waited for: its output is not
+        // read any more, and the window's events go on meanwhile. A verb whose output ended and that does not exit is killed when its time is up.
+        if (settings.child > 0 && settings.ending)
+        {
+                positive now = (positive)ui_kit.now;
+
+                if (settings_reap())
+                        return 0;
+                if (settings.ending == 1 && !(settings.job_sets && settings.job >= SETTINGS_ANY) && now - settings.began >= settings_most())
+                {
+                        settings_finished(true);
+                        return 0;
+                }
+                *other = -1;
+                return timeout < 0 || timeout > SETTINGS_REAP_NS ? (long)SETTINGS_REAP_NS : timeout;
+        }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
                 positive now = (positive)ui_kit.now, left;
-                positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
-                                : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
-                                : settings_waits(settings.job)     ? (positive)SETTINGS_WAIT_PAIR_NS
-                                                                   : (positive)SETTINGS_WAIT_NS;
+                positive most = settings_most();
 
                 if (now - settings.began >= most)
                 {
