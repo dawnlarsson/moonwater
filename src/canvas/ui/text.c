@@ -2310,17 +2310,22 @@ static p64 doc_map(p64 offset, const struct doc_edit address_to edits, positive 
 */
 static b32 doc_apply(struct doc address_to doc, struct doc_edit address_to edits, positive count, p8 kind, p32 typed)
 {
-        b32 done = true, placed = count == doc->selection_count && count;
+        b32 done = true, placed = count == doc->selection_count && count, changes = false;
 
         for (positive i = 0; i < count; i++)
         {
                 if (doc_readonly(doc, edits[i].at, edits[i].removed))
                         return false;
                 placed = placed && edits[i].anchor != DOC_NONE;
+                changes = changes || edits[i].removed || edits[i].length;
         }
-        if (!doc_group_begin(doc, kind, typed))
+        /*
+                An edit list that changes no text begins no group. Beginning one drops the redo at once, so a Delete at
+                the end of the text threw away what an undo had given back, and the group was then dropped as no change.
+        */
+        if (changes && !doc_group_begin(doc, kind, typed))
                 return false;
-        for (positive i = count; i--;)
+        for (positive i = count; changes && i--;)
                 if (!doc_replace(doc, edits[i].at, edits[i].removed, edits[i].text, edits[i].length))
                         done = false;
         if (placed)
@@ -2349,7 +2354,8 @@ static b32 doc_apply(struct doc address_to doc, struct doc_edit address_to edits
                                 sel->anchor = sel->active = finish;
                 }
         doc_normalize(doc);
-        doc_group_end(doc, typed);
+        if (changes)
+                doc_group_end(doc, typed);
         return done;
 }
 

@@ -473,6 +473,9 @@ static fn editor_save_asked(void)
         struct editor_tab address_to tab = editor_now();
         char line[UI_CONFIRM_TEXT];
 
+        // The disk is looked at now, not only when the window last took focus: a program that wrote the file while the
+        // window kept it would otherwise be written over without the question.
+        editor_check_disk(tab);
         // A file with no write bit is asked for the same way: the rename that saves would replace it without a word.
         if (ui_confirm_gate(&editor.confirm, DOC_CMD_SAVE, tab->changed_on_disk || !(tab->mode & 0222),
                             tab->changed_on_disk ? WORDS(editor_writes_over_changed) : WORDS(editor_writes_over_readonly), line, sizeof(line)))
