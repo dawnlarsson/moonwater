@@ -10075,7 +10075,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 
                 if (row.words && row.words[0] && length + 2 < sizeof(number))
                 {
-                        number[length++] = ' ';
+                        // A percent is written against its number (100%), any other unit after a blank (30 per second).
+                        if (row.words[0] != '%')
+                                number[length++] = ' ';
                         string_copy_bounded((string_address)number + length, (string_address)row.words, sizeof(number) - length);
                 }
                 else

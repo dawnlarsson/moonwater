@@ -3617,15 +3617,19 @@ static b32 settings_is_modes(int row)
         return settings_rows[row].set[1] && string_equals((string_address)settings_rows[row].set[1], (string_address) "modes");
 }
 
-// The English a choice's word is shown as, before the language says it: the on-screen keyboard's three say what they do (the
-// verb and the file keep auto, off and on); any other choice says its own word.
+// The English a choice's word is shown as, before the language says it. One mapping for every choice row, so a word reads the
+// same wherever it is shown (the menu, the value, a row's tabs): auto is Automatic, which the language files translate by name.
+// The on-screen keyboard's off and on say what they do (the verb and the file keep auto, off and on); any other word is its own.
 static const char address_to settings_choice_said(int row, const char address_to word)
 {
-        if (!settings_rows[row].path || !string_equals((string_address)settings_rows[row].path, (string_address)SETTING_ONSCREEN_PATH))
-                return word;
-        return string_equals((string_address)word, (string_address) "auto") ? "Automatic"
-               : string_equals((string_address)word, (string_address) "off") ? "Always off"
-               : string_equals((string_address)word, (string_address) "on") ? "Always on" : word;
+        if (settings_rows[row].path && string_equals((string_address)settings_rows[row].path, (string_address)SETTING_ONSCREEN_PATH))
+        {
+                if (string_equals((string_address)word, (string_address) "off"))
+                        return "Always off";
+                if (string_equals((string_address)word, (string_address) "on"))
+                        return "Always on";
+        }
+        return string_equals((string_address)word, (string_address) "auto") ? "Automatic" : word;
 }
 
 // The plain word a row's verb word is read as: Screen modes says Biggest picture and Recommended, others say their word.
@@ -4136,7 +4140,7 @@ static fn settings_activate(int row, int way)
                 long number = 0, to;
 
                 // A value not read as a number (or not read at all) is not stepped: the step would start from 0 and write the row's least.
-                if (settings.state[row] != SETTINGS_READ || !setting_whole((string_address)settings.value[row], &number))
+                if (settings.state[row] != SETTINGS_READ || !setting_typed_number(which, (string_address)settings.value[row], &number))
                         return;
                 to = number + way * settings_slider_step(which);
                 to = to < which->low ? which->low : to > which->high ? which->high : to;
@@ -4620,13 +4624,12 @@ static b32 settings_row_is(int at, const char address_to path)
 */
 // The words of a row of tabs (the theme's, the motion's) as the language says them, one word each with a blank between, which
 // a check holds the translations to; English is the row's own list.
-static const char address_to settings_tab_words(const struct settings_row address_to which, int slot)
+static const char address_to settings_tab_words(int row, const struct settings_row address_to which, int slot)
 {
         static char shown[2][SETTINGS_VALUE];
         positive at = 0;
 
-        if (!language.loaded)
-                return which->choices;
+        // Each tab is the label its menu item has (settings_choice_said), English when no language is taken.
         for (positive k = 0; k < 8; k++)
         {
                 char each[SETTINGS_VALUE];
@@ -4634,7 +4637,7 @@ static const char address_to settings_tab_words(const struct settings_row addres
 
                 if (!settings_word(which->choices, k, each, sizeof(each)))
                         break;
-                said = language_of(each);
+                said = language_of(settings_choice_said(row, each));
                 if (at + string_length((string_address)said) + 2 >= sizeof(shown[slot]))
                         break;
                 if (at)
@@ -4660,6 +4663,32 @@ static const char address_to settings_port_words(void)
                         shown[at++] = ' ';
                 string_copy_bounded((string_address)shown + at, (string_address)words[k], sizeof(shown) - at);
                 at += string_length((string_address)words[k]);
+        }
+        return shown;
+}
+
+/*
+        What a typed number row shows as its value: the number and its unit the way the verb says it (30 per second, 100%), so a
+        number typed as 100 percent and one the verb printed read the same. A slider shows its number on its own (the kit draws
+        the unit after it), and a word that is no number is shown as it is.
+*/
+static const char address_to settings_number_shown(int row, const char address_to word)
+{
+        static char shown[SETTINGS_VALUE];
+        const struct settings_row address_to which = &settings_rows[row];
+        long number = 0;
+        positive length;
+
+        if (which->type != SETTING_NUMBER || which->kind != SETTINGS_FIELD || !setting_typed_number(which, (string_address)word, &number))
+                return settings_label_of(row, word);
+        positive_into_string((p8 address_to)shown, (positive)number);
+        length = string_length((string_address)shown);
+        if (setting_percent(which))
+                string_copy_bounded((string_address)shown + length, (string_address) "%", sizeof(shown) - length);
+        else if (which->unit)
+        {
+                string_copy_bounded((string_address)shown + length, (string_address) " ", sizeof(shown) - length);
+                string_copy_bounded((string_address)shown + length + 1, (string_address)which->unit, sizeof(shown) - length - 1);
         }
         return shown;
 }
@@ -4764,13 +4793,13 @@ static fn settings_describe(int id, struct ui_row address_to row)
         }
         row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
         row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? WORDS(settings_not_here)
-                     : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_label_of(id, shown);
+                     : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_number_shown(id, shown);
         if (state != SETTINGS_READ)
                 return;
         if (which->kind == SETTINGS_SWITCH)
                 row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on");
         else if (settings_row_is(id, SETTING_THEME_PATH) || settings_row_is(id, SETTING_MOTION_PATH))
-                row->kind = UI_ROW_TABS, row->words = settings_tab_words(which, settings_row_is(id, SETTING_THEME_PATH) ? 0 : 1),
+                row->kind = UI_ROW_TABS, row->words = settings_tab_words(id, which, settings_row_is(id, SETTING_THEME_PATH) ? 0 : 1),
                 row->at = (int)setting_place(which->choices, (string_address)shown);
         else if (settings_row_is(id, SETTING_ACCENT_PATH) && which->kind == SETTINGS_CHOICE)
         {
@@ -4789,10 +4818,10 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 // verb says outside the range (a file written before the range was) rests at the nearer end: the kit draws it on its track.
                 long number = 0;
 
-                setting_whole((string_address)shown, &number);
+                setting_typed_number(which, (string_address)shown, &number);
                 number = number < which->low ? which->low : number > which->high ? which->high : number;
                 row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
-                row->step = settings_slider_step(which), row->words = which->unit;
+                row->step = settings_slider_step(which), row->words = setting_percent(which) ? "%" : which->unit;
         }
 }
 

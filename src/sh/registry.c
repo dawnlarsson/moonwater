@@ -690,6 +690,64 @@ static bool setting_whole(string_address word, long address_to into)
         return !*stop && !range;
 }
 
+// Whether word is unit, without the case of its letters: the one a row's number is written with.
+static bool setting_unit_same(string_address word, const char address_to unit)
+{
+        positive at = 0;
+
+        while (word[at] && unit[at])
+        {
+                p8 a = word[at], b = (p8)unit[at];
+
+                if (a >= 'A' && a <= 'Z')
+                        a += 'a' - 'A';
+                if (b >= 'A' && b <= 'Z')
+                        b += 'a' - 'A';
+                if (a != b)
+                        return false;
+                at++;
+        }
+        return word[at] == 0 && unit[at] == 0;
+}
+
+// Whether a number row's unit is a percent, which is written % (`100%`) where it is shown.
+static bool setting_percent(const struct settings_row address_to row)
+{
+        return row->unit && setting_unit_same((string_address)row->unit, "percent");
+}
+
+/*
+        A whole number as a row takes it when it is typed: its digits, then
+        nothing, or its unit after one blank or none. A percent's unit is %
+        or percent, in any case, so 100, 100% and 100 percent are all 100.
+        The number is what is kept (setting_parse writes it as digits). False
+        for anything else: a sign, a fraction, a zero in front, or another
+        unit.
+*/
+static bool setting_typed_number(const struct settings_row address_to row, string_address word, long address_to into)
+{
+        positive digits = 0, length = string_length(word);
+        p8 digit[12];
+        string_address rest;
+
+        while (digits < length && byte_is_digit(word[digits]))
+                digits++;
+        if (!digits || digits >= sizeof(digit))
+                return false;
+        memory_copy(digit, word, digits);
+        digit[digits] = end;
+        if (!setting_whole((string_address)digit, into))
+                return false;
+        if (digits == length)
+                return true;
+        if (!row->unit)
+                return false;
+        rest = word + digits + (word[digits] == ' ');
+        if (setting_percent(row) && setting_unit_same(rest, "%"))
+                return true;
+        return setting_unit_same(rest, row->unit);
+}
+
 /*
         What a word is to a plain row. False when it is not one of its
         words; else it is kept as it is wanted in the file, normalised (a
@@ -739,9 +797,10 @@ static bool setting_parse(const struct settings_row address_to row, string_addre
         {
                 long number;
 
-                if (!setting_whole(word, &number) || number < row->low || number > row->high)
+                // The kept word is the number alone, digits as the file holds them, whatever unit was typed after it.
+                if (!setting_typed_number(row, word, &number) || number < row->low || number > row->high)
                         return false;
-                string_copy_bounded(kept, word, room);
+                positive_into_string((p8 address_to)kept, (positive)number);
                 address_to value = number;
                 return true;
         }
