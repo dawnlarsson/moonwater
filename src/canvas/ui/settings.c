@@ -1177,7 +1177,7 @@ static const char address_to settings_label(int row)
                 return item->label;
         if (row < SETTINGS_ANY)
                 return settings_rows[row].label;
-        return generic ? settings_large->pool + generic->command : "Run any moonwater command";
+        return generic ? settings_large->pool + generic->command : WORDS(settings_run_any);
 }
 
 /*
@@ -2791,7 +2791,11 @@ static fn settings_feed_devices(void)
                         settings_item_label(&items[count++], text + 2, size - 2);
                 }
         items[count].kind = SETTINGS_ADD;
-        settings_item_label(&items[count++], "Keep a device by its name", string_length((string_address) "Keep a device by its name"));
+        {
+                const char address_to keep = language_of("Keep a device by its name");
+
+                settings_item_label(&items[count++], keep, string_length((string_address)keep));
+        }
         settings.item_count[1] = (unsigned short)count;
 }
 
@@ -2849,9 +2853,9 @@ static fn settings_legend(struct settings_item address_to item)
         for (positive at = 0; at < item->segment_count; at++)
         {
                 if (at)
-                        string_append_bounded((string_address)item->legend, (string_address)", ", sizeof(item->legend));
+                        string_append_bounded((string_address)item->legend, (string_address)WORDS(settings_legend_comma), sizeof(item->legend));
                 else if (item->segment_more)
-                        string_append_bounded((string_address)item->legend, (string_address)"; ", sizeof(item->legend));
+                        string_append_bounded((string_address)item->legend, (string_address)WORDS(settings_legend_semicolon), sizeof(item->legend));
                 string_append_bounded((string_address)item->legend, (string_address)settings_role_word(item->segment_role[at]), sizeof(item->legend));
                 settings_size_text(item->segment_bytes[at], item->segment_text[at], sizeof(item->segment_text[at]));
                 string_append_bounded((string_address)item->legend, (string_address)" ", sizeof(item->legend));
@@ -2896,7 +2900,7 @@ static fn settings_item_split(struct settings_item address_to item, const char a
 */
 static fn settings_item_drive(struct settings_item address_to item, const char address_to text, positive size, positive word)
 {
-        positive at = word + 7, megabytes = 0, took;
+        positive at = word + 7, megabytes = 0;
 
         settings_item_label(item, text + 2, word - 2);
         for (; at < size && text[at] >= '0' && text[at] <= '9'; at++)
@@ -2908,10 +2912,15 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
         while (at < size && text[at] == ' ')
                 at++;
         settings_size_text(megabytes * 1000000ull, item->size, sizeof(item->size));
-        memory_copy(item->state, "drive, ", 7);
-        took = size - at > sizeof(item->state) - 8 ? sizeof(item->state) - 8 : size - at;
-        memory_copy(item->state + 7, text + at, took);
-        item->state[7 + took] = 0;
+        // The state is the window's word for a drive (drive, in the language), then what the line says after the size.
+        string_copy_bounded((string_address)item->state, (string_address)WORDS(settings_drive_state), sizeof(item->state));
+        {
+                positive word_length = string_length((string_address)item->state), left = sizeof(item->state) - word_length - 1;
+                positive tail = size - at > left ? left : size - at;
+
+                memory_copy(item->state + word_length, text + at, tail);
+                item->state[word_length + tail] = 0;
+        }
 }
 
 static fn settings_feed_hardware(void)
@@ -3638,6 +3647,9 @@ static const char address_to settings_label_of(int row, const char address_to wo
         // The Language row says each language by its own name, whichever language is taken (language_names).
         if (settings_rows[row].flags & SETTINGS_LANGUAGE)
                 return language_name_of(word);
+        // The Battery picker's auto and none are words the window shows (its batteries' names are their own).
+        if (settings_rows[row].flags & SETTINGS_BATTERIES)
+                return language_of(word);
         if (!settings_is_modes(row))
                 // A choice's own word is English the language says (language_of is English when no language is taken); anything else
                 // a row holds is what it is.
@@ -3669,6 +3681,9 @@ static void settings_word_of(int row, const char address_to label, char address_
                                 return;
                         }
         }
+        else if (settings_rows[row].flags & SETTINGS_BATTERIES)
+                word = string_equals((string_address)label, (string_address)language_of("auto")) ? "auto" // shown against shown
+                       : string_equals((string_address)label, (string_address)language_of("none")) ? "none" : label; // shown against shown
         else if (settings_is_modes(row))
                 word = string_equals((string_address)label, (string_address)WORDS(settings_mode_largest)) ? "largest" // shown against shown
                        : string_equals((string_address)label, (string_address)WORDS(settings_mode_preferred)) ? "preferred" : label; // shown against shown
@@ -4851,7 +4866,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 setting_typed_number(which, (string_address)shown, &number);
                 number = number < which->low ? which->low : number > which->high ? which->high : number;
                 row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
-                row->step = settings_slider_step(which), row->words = setting_percent(which) ? "%" : which->unit;
+                row->step = settings_slider_step(which), row->words = setting_percent(which) ? "%" : language_of(which->unit);
         }
 }
 
