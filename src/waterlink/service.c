@@ -744,6 +744,7 @@ typedef struct
         positive batched;
         p8 batch_address[16];
         p16 batch_port;
+        p64 put_at; // the time of the flush sending now: what a datagram put in the modem's queue is stamped with
 } link_service;
 
 static link_service link_self;
@@ -1030,9 +1031,13 @@ static fn link_keys_install(struct link_keys address_to keys,
         are made. They are in the send section of modem.c, after the sound server's client.
 */
 static bool link_modem_carrying(void);
-static bool link_modem_put(p8 address_to bytes, positive length);
+static bool link_modem_put(p8 address_to bytes, positive length, p64 when);
 static p64 link_modem_turn(p64 now);
 static void link_modem_stop(void);
+static p64 link_modem_floor(void);
+static p64 link_modem_ceiling(void);
+static p64 link_modem_queued_from(void);
+static positive link_modem_free(void);
 
 static positive link_destination(socket_address_internet6 address_to into,
                                  p8 address_to address, p16 port)
@@ -1072,8 +1077,23 @@ static bipolar link_send_to(p8 address_to bytes, positive length,
                             p8 address_to address, p16 port)
 {
         if (link_modem_carrying())
-                return link_modem_put(bytes, length) ? (bipolar)length : -EAGAIN;
+                return link_modem_put(bytes, length, link_self.put_at)
+                               ? (bipolar)length
+                               : -EAGAIN;
         return link_udp_send_to(bytes, length, address, port);
+}
+
+/*
+        The link's view of the transport, told before it fills anything: over the modem its timer is floored at the queue's
+        worth of air, its window is no bigger than the queue, and it knows when the oldest datagram the modem holds was sent.
+        Over the network the link keeps what it always had.
+*/
+static fn link_transport_tell(struct link_session address_to s)
+{
+        if (link_modem_carrying())
+                waterlink_transport(s->link, link_modem_floor(), link_modem_ceiling(), link_modem_queued_from());
+        else
+                waterlink_transport(s->link, 0, WATERLINK_WINDOW_MOST, ~0ull);
 }
 
 /*
@@ -1210,6 +1230,9 @@ static fn link_batch_flush(void)
 */
 static fn link_session_flush(struct link_session address_to s, p64 now)
 {
+        //      Every datagram this flush puts in the modem's queue is stamped
+        //      with the time its frames are sent: the same as the frames.
+        link_self.put_at = now;
         /* Filling frames cannot move the session. Check a pending batch's
            destination once, and copy this one's only when a new batch starts. */
         if (link_self.batched &&
@@ -1227,6 +1250,14 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
 
                 if (link_self.batched == LINK_SEGMENTS)
                         link_batch_flush();
+
+                link_transport_tell(s);
+                //      Over the modem, a datagram is filled only when the queue
+                //      has room for it behind those batched: what the window
+                //      allows is not a count of datagrams, and a frame sent
+                //      into a full queue would be lost there. The rest waits.
+                if (link_modem_carrying() && link_modem_free() <= link_self.batched)
+                        break;
 
                 datagram = link_self.batch + link_self.batched *
                                                      WATERLINK_DATAGRAM;
@@ -2855,6 +2886,8 @@ static fn link_sessions_granted(p64 now)
         }
 }
 
+#define LINK_MODEM_WAIT 20000 /* the wait while the modem's queue is full: the modem turn plays it at this pace */
+
 static p64 link_sessions_turn(p64 now)
 {
         p64 wake = now + 1000000;
@@ -2901,6 +2934,11 @@ static p64 link_sessions_turn(p64 now)
                 }
 
                 due = waterlink_wake(s->link, now);
+                //      With the modem's queue full, nothing this session sends
+                //      can go until the queue plays: wait for it, do not spin.
+                if (link_modem_carrying() && !link_modem_free() &&
+                    due < now + LINK_MODEM_WAIT)
+                        due = now + LINK_MODEM_WAIT;
                 if (link_self.server && s->exited && !s->exit_sent &&
                     s->exited_at + 300000 >= now &&
                     s->exited_at + 300000 < due)

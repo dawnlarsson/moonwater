@@ -194,6 +194,17 @@ struct waterlink_link {
                 the sixty four after what was taken, so no two share one. */
         p32 held_last[WATERLINK_KEYS];
         p64 held_mask[WATERLINK_KEYS];
+
+        /*      What the transport is, as the caller last said it
+                (waterlink_transport). The rto_floor is the least the timer may
+                be, zero over the network; the window_ceiling is the most the
+                window may be; and queued_from is the send time of the oldest datagram the
+                transport may still hold. A frame sent at or after it may still
+                be in that queue, so it is neither given up on nor sent again;
+                ~0 when the transport holds nothing. */
+        p64 rto_floor;
+        p64 window_ceiling;
+        p64 queued_from;
 };
 
 /*
@@ -212,7 +223,8 @@ struct waterlink_link {
 #define WATERLINK_REORDER 3             // transmissions after, then lost
 #define WATERLINK_RTT_FIRST 100000ull   // before any sample
 #define WATERLINK_GRANULE 1000ull       // the least a timer means
-#define WATERLINK_RTO_MOST 2000000ull
+#define WATERLINK_RTO_MOST 2000000ull   // over the network; the modem's ceiling is its floor doubled
+#define WATERLINK_QUEUE_POLL 20000ull   // the wait while a flight's datagram is still in the transport
 #define WATERLINK_PERSISTENT 3          // probe expiries, then the path is gone
 #define WATERLINK_HELD_MOST 60000000ull // the longest a held frame waits to be asked about
 
@@ -266,6 +278,8 @@ fn waterlink_link_reset(struct waterlink_link address_to link)
         link->flight_tail = WATERLINK_NONE;
         link->window = WATERLINK_WINDOW_FIRST;
         link->threshold = ~0ull;
+        link->window_ceiling = WATERLINK_WINDOW_MOST;
+        link->queued_from = ~0ull;
 }
 
 static p32 waterlink_band_of(p8 flags)
@@ -597,6 +611,25 @@ p32 waterlink_room(struct waterlink_link address_to link)
 }
 
 /*
+        The caller says what the transport is before each send: rto_floor, the
+        least the probe timer may be (zero over the network); window_ceiling,
+        the most the window may be; and queued_from, the send time of the oldest
+        datagram the transport may still hold (~0 when it holds none). Over
+        the audio modem the window is cut to what its queue holds, so the
+        link never sends more datagrams than the queue has room for; over the
+        network all three are what they always were.
+*/
+fn waterlink_transport(struct waterlink_link address_to link, p64 rto_floor,
+                       p64 window_ceiling, p64 queued_from)
+{
+        link->rto_floor = rto_floor;
+        link->window_ceiling = window_ceiling;
+        link->queued_from = queued_from;
+        if (link->window > window_ceiling)
+                link->window = window_ceiling;
+}
+
+/*
         The probe timer, from the estimate: before any sample, the first
         guess; after, the smoothed round trip, four deviations (a millisecond
         at least) and the longest the far side may hold an acknowledgement,
@@ -605,19 +638,29 @@ p32 waterlink_room(struct waterlink_link address_to link)
         burst, or waiting on the far side -- times out on every last datagram
         the far side is still entitled to sit on: 223 expiries in a 100 MB
         stream over loopback, at 71 MB/s.
+
+        Over the modem the timer is never less than the floor, which is what a
+        datagram needs to be played behind the queue ahead of it, played itself
+        and acknowledged, so an expiry is never a copy of a datagram that is
+        still waiting. A ceiling of twice the floor leaves the doubling room.
 */
 static p64 waterlink_timeout(struct waterlink_link address_to link)
 {
         p64 spread = 4 * link->variance;
         p64 base;
+        p64 most = WATERLINK_RTO_MOST;
         p32 doubling = link->backoff < 10 ? link->backoff : 10;
 
         if (spread < WATERLINK_GRANULE)
                 spread = WATERLINK_GRANULE;
         base = link->smoothed ? link->smoothed + spread + WATERLINK_ACK_DELAY
                               : 3 * WATERLINK_RTT_FIRST;
+        if (base < link->rto_floor)
+                base = link->rto_floor;
         base <<= doubling;
-        return base < WATERLINK_RTO_MOST ? base : WATERLINK_RTO_MOST;
+        if (2 * link->rto_floor > most)
+                most = 2 * link->rto_floor;
+        return base < most ? base : most;
 }
 
 static fn waterlink_congested(struct waterlink_link address_to link)
@@ -661,6 +704,8 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
 
         if (threshold < WATERLINK_GRANULE)
                 threshold = WATERLINK_GRANULE;
+        if (threshold < link->rto_floor)
+                threshold = link->rto_floor;
 
         while (at != WATERLINK_NONE)
         {
@@ -668,6 +713,12 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
                 p32 next = slot->next;
 
                 if (slot->serial >= link->largest)
+                        break;
+                /*      The flight is in the order it was sent, and the
+                        transport's queue is too: this frame and every one
+                        after it may still be waiting there, so none is lost
+                        or sent again yet. */
+                if (slot->sent >= link->queued_from)
                         break;
                 if (slot->serial + WATERLINK_REORDER <= link->largest ||
                     link_age(now, slot->sent) >= threshold)
@@ -682,6 +733,9 @@ static KEEP fn waterlink_losses(struct waterlink_link address_to link, p64 now)
         at = link->flight_head;
         if (at == WATERLINK_NONE ||
             link_age(now, link->slot[at].sent) < waterlink_timeout(link))
+                return;
+        //      Still in the transport's queue: its timer waits for the queue.
+        if (link->slot[at].sent >= link->queued_from)
                 return;
 
         link->timeouts++;
@@ -1563,9 +1617,14 @@ p64 waterlink_wake(struct waterlink_link address_to link, p64 now)
 
         if (link->flight_head != WATERLINK_NONE)
         {
-                p64 due = link->slot[link->flight_head].sent +
-                          waterlink_timeout(link);
+                struct waterlink_slot address_to head =
+                        link->slot + link->flight_head;
+                p64 due = head->sent + waterlink_timeout(link);
 
+                //      Expired while still queued: the queue moves on its own,
+                //      so look again soon, not now, or the caller spins.
+                if (due <= now && head->sent >= link->queued_from)
+                        due = now + WATERLINK_QUEUE_POLL;
                 if (due < wake)
                         wake = due;
         }

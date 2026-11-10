@@ -1252,12 +1252,24 @@ static b32 modem_send_file(string_address path)
 #define MODEM_FRAME_IN 32768   /* the most a record frame carries: the server's chunk is 16 KB */
 #define MODEM_IO_MS 1000       /* the longest a frame's bytes are waited for, once its first byte is there */
 
+/*
+        The retransmission floor and the window's ceiling over the modem. A datagram put when the queue has room waits behind
+        the MODEM_QUEUE - 1 others and the one being written, then plays for its own air: MODEM_QUEUE + 1 datagrams at most.
+        Its acknowledgement is one more datagram at most, and the sound server plays up to MODEM_LEAD_US after the last sample
+        is written. The floor is that much air and that lead; the window is no bigger than the queue holds.
+*/
+#define MODEM_DATAGRAM_AIR_US ((p64)MODEM_SEND_SAMPLES * 1000000u / MODEM_RATE)
+#define MODEM_RTO_FLOOR_US ((MODEM_QUEUE + 2) * MODEM_DATAGRAM_AIR_US + MODEM_LEAD_US)
+#define MODEM_WINDOW_CEILING ((p64)MODEM_QUEUE * WATERLINK_DATAGRAM)
+
 static struct
 {
         p8 bytes[WATERLINK_DATAGRAM];
         positive length;
+        p64 when; /* the send time the link gave the datagram: the time its frames were sent */
 } modem_queue[MODEM_QUEUE];
 static positive modem_queue_at, modem_queue_count;
+static p64 modem_wl_when; /* the send time of the datagram being written, while modem_wl_count is set */
 
 static struct ctl modem_play, modem_record;
 static unsigned long modem_play_channel, modem_record_channel;
@@ -1274,10 +1286,11 @@ static positive modem_in_fill, modem_in_seen;
 static unsigned char modem_frame_in[MODEM_FRAME_IN];
 
 /*
-        Queues one sealed datagram for the modem, from the link's send. False when the queue is full: the datagram is lost, as a
-        full socket loses one, and the link sends it again on its own timers.
+        Queues one sealed datagram for the modem, from the link's send, sent at when. False when the queue is full. The link's
+        own datagrams are filled only while the queue has room (link_modem_free, service.c), so they never find it full; a
+        keepalive or a handshake answer can, and is lost as a full socket loses one, to be sent again by its own timers.
 */
-static bool link_modem_put(p8 address_to bytes, positive length)
+static bool link_modem_put(p8 address_to bytes, positive length, p64 when)
 {
         positive slot;
 
@@ -1286,8 +1299,39 @@ static bool link_modem_put(p8 address_to bytes, positive length)
         slot = (modem_queue_at + modem_queue_count) % MODEM_QUEUE;
         memory_copy(modem_queue[slot].bytes, bytes, length);
         modem_queue[slot].length = length;
+        modem_queue[slot].when = when;
         modem_queue_count++;
         return true;
+}
+
+/* The retransmission floor over the modem, and the most the link's window may be: the queue's bytes. */
+static p64 link_modem_floor(void)
+{
+        return MODEM_RTO_FLOOR_US;
+}
+
+static p64 link_modem_ceiling(void)
+{
+        return MODEM_WINDOW_CEILING;
+}
+
+/*
+        The send time of the oldest datagram the modem still holds: the one being written, or the head of the queue. A frame the
+        link sent at or after it may be in the queue. ~0 when the modem holds nothing.
+*/
+static p64 link_modem_queued_from(void)
+{
+        if (modem_wl_count)
+                return modem_wl_when;
+        if (modem_queue_count)
+                return modem_queue[modem_queue_at].when;
+        return ~0ull;
+}
+
+/* The datagrams the queue has room for now. The link sends none that do not fit. */
+static positive link_modem_free(void)
+{
+        return MODEM_QUEUE - modem_queue_count;
 }
 
 /* Whether the link's datagrams go over the modem now: the transport is the modem and the modem is open. */
@@ -1517,6 +1561,7 @@ static bool link_modem_play(p64 now, p64 *next)
                 {
                         if (!modem_queue_count)
                                 return true;
+                        modem_wl_when = modem_queue[modem_queue_at].when;
                         modem_wl_count = modem_tx_datagram(&modem_wl_tx, modem_queue[modem_queue_at].bytes,
                                                            modem_queue[modem_queue_at].length, modem_wl_pcm,
                                                            MODEM_SEND_SAMPLES);
