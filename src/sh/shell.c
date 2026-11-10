@@ -1065,7 +1065,8 @@ static bool floodlight_parent_supervised;
 // The sound server: a process of its own, and plain C that is mostly loops over floats, which the size optimisation above would not vectorise.
 #define AUDIO_BOARD 1 // the board (window.c) is in this program: the audio service writes its sound card
 #include "../audio/service.c"
-#include "../waterlink/modem_send.c"
+// The audio modem: its codec and, after it, the send of a file over the sound card, which uses the sound server's client above.
+#include "../waterlink/modem.c"
 // The session bus: a process of its own too, which the programs of a bowl find at /run/moonwater/bus (src/dbus).
 #include "../dbus/service.c"
 #include "../canvas/ui/features.h"

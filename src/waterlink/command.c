@@ -1526,7 +1526,7 @@ static b32 link_port_verb(string_address word)
 */
 //      The forward declarations of the two things this part calls that are
 //      made later in the one unit: the sound server's page, and the send
-//      (src/waterlink/modem_send.c, after the sound server's client).
+//      (the send section of src/waterlink/modem.c, after the sound server's client).
 static b32 modem_send_file(string_address path);
 static int audio_test_page(struct audio_state *copy);
 

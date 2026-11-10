@@ -2031,7 +2031,7 @@ static int audio_test_page(struct audio_state *copy)
 /*
         A playback stream on the server c is connected to: 16 bits, two channels, 48000 Hz, a second of buffer which starts when it
         is full, and the properties name it for the mixer. Answers 1 with its channel in *channel, or 0 when the server refused it,
-        and says so in words. The tone and the modem (src/waterlink/modem_send.c) both play as programs of their own this way.
+        and says so in words. The tone and the modem (src/waterlink/modem.c) both play as programs of their own this way.
 */
 static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, unsigned long *channel)
 {

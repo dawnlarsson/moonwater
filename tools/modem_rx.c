@@ -25,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The receiver builds the codec alone: the send section of modem.c needs the shell's sound server and host. */
+#define MODEM_NO_SEND 1
 #include "../src/waterlink/modem.c"
 
 /* The window the decoder is given: one call scans it all, so it is a few frames long, not the whole capture. A frame

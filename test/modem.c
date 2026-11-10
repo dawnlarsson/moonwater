@@ -9,6 +9,9 @@
         is built with -DMODEM_FUZZ when the compiler has libFuzzer.
 */
 
+/* The send section of modem.c (a file over the sound card) needs the shell's sound server and host: the self-test has
+   neither, so it builds the codec alone. */
+#define MODEM_NO_SEND 1
 #include "../src/waterlink/modem.c"
 
 #include <math.h>
