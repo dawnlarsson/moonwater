@@ -266,6 +266,7 @@ struct compositor_frame
         unsigned int position; // the panel: where its band sits (TASKBAR_BOTTOM, TOP, LEFT or RIGHT)
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
         int close;           // a window with a close button over its top right
+        int minimize;        // a window with a minimise button: it has a tab, which brings it back (none for WINDOW_NO_TAB)
         unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
         // What of its line is lit, and in what ink (COMPOSITOR_INK_LINE_HELD or _HOVER): one edge (CP_EDGE_*) lit whole,
         // two that meet a corner lit with COMPOSITOR_LIT_REACH of each, COMPOSITOR_LIT_ALL all of it; 0 none.
@@ -474,7 +475,7 @@ static int compositor_minimize_box(const struct compositor_frame *frame, int *x,
 {
         int bx, by, box, in = UI_CLOSE_IN * frame->scale / 100;
 
-        if (!compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
+        if (!frame->minimize || !compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
                 return 0;
         *side = box;
         *x = language_rtl() ? bx + box + in : bx - in - box;
@@ -5266,6 +5267,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         if (compositor_lent_pixels(row, &lent_pitch))
                 frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
+        frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
         // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
         if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)frame->scale)
                 compositor.woken |= 1u << row;
@@ -13994,6 +13996,7 @@ static void compositor_take(int row)
 }
 
 static void compositor_motion(void);
+static void compositor_chip_hide(void);
 
 /*
         The window the pointer is held to (compositor.grab): the one a button still down was pressed in, kept while it is
@@ -14032,6 +14035,11 @@ static void compositor_leave(int row)
                 compositor_damage_row(row);
                 compositor_tabs_changed();
         }
+        // A controls chip is its window's: it goes with the window, or a tap where it was would act on the next window in the row.
+        if (compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == row)
+                compositor_chip_hide();
+        // A key the keyboard had down is over with it: the next keyboard in the row starts with none held (compositor_osk_read).
+        compositor_osk_held[row] = 0;
 
         compositor_stack_remove(row);
         // An armed assist ends with its own window, and loses the thumbnail of one that goes (it is no window to place).
@@ -14206,12 +14214,15 @@ static void compositor_focus_commit(void)
 // A window put away, by its minimise button or Alt-F9; its tab brings it back. The keys go to the one under it if it had them.
 static void compositor_minimize_row(int row)
 {
-        if (row < 0 || !compositor_visible(row))
+        // A window with no tab (WINDOW_NO_TAB) is in no tab and no Alt-Tab step: put away, nothing would bring it back, so it is not put away.
+        if (row < 0 || !compositor_visible(row) || (compositor.asks[row] & WINDOW_NO_TAB))
                 return;
 
         compositor_damage_row(row);
         compositor.state[row] |= WINDOW_MINIMIZED;
         compositor.table->state[row] = compositor.state[row];
+        if (compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == row)
+                compositor_chip_hide();
         if (row == compositor.focus)
                 compositor_refocus();
         compositor_tabs_changed();
