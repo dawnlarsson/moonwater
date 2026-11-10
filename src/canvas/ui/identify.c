@@ -11,7 +11,8 @@
         corner of its screen, opaque. The rest of the screen is the desktop, not frosted. The compositor gives it the
         frame of a floating window (its corners and its line). It has no close button and no tab (WINDOW_NO_CLOSE,
         WINDOW_NO_TAB), and it asks for no keys: Alt-Tab and the refocus pass over it (compositor_cycles), so it
-        normally has none.
+        normally has none. It asks for no grab (WINDOW_NO_GRAB): the badge is the whole window, so a press on its top
+        band is the badge's press, not the titlebar's (a drag, or a double click that fills the screen).
 
         It goes away after IDENTIFY_SECONDS, or at once when the badge is pressed, or when a key goes down while it has
         the keys (should it have them). Each screen's window goes on its own: a press on one leaves the others.
@@ -204,7 +205,7 @@ static struct ui_app identify_app = {
         .ui = &identify.ui,
         .missing = (string_address) "identify: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Identify",
-        .glass = WINDOW_NO_CLOSE | WINDOW_NO_TAB,
+        .glass = WINDOW_NO_CLOSE | WINDOW_NO_TAB | WINDOW_NO_GRAB,
         .nofont = (string_address) "identify: no font to draw with, pid ",
         .dirty = &identify.dirty,
         .focused = &identify.focused,
