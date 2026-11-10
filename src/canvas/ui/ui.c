@@ -3838,12 +3838,10 @@ struct ui_control
         b64 pip_squash, pip_press;         // the radio pip's keyframes: their first frames (0 none, 1 pending)
         // The slider.
         struct ui_slide slide;
-        b32 sliding, bounce, dragged;
-        b64 slide_from;
+        b32 sliding, bounce;
         int hover_x;                       // where the pointer hovers over it, device pixels, or -1
         struct ui_tween spot;              // the spot's opacity
         int spot_x;
-        b64 spot_gone;
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
         struct ui_text address_to edit;    // a field's text: the engine's widget, which types, selects, pastes and draws it
@@ -4410,6 +4408,23 @@ static b64 ui_slider_snap(const struct ui_control address_to c, b64 value)
         return value < c->low ? c->low : value > c->high ? c->high : value;
 }
 
+// The thumb's size in logical pixels now: its state's (a line slider's is 20 always).
+static int ui_slider_thumb(const struct ui_control address_to c)
+{
+        return c->variant & UI_SLIDER_LINE ? 20 : c->down ? 12 : c->hover ? 20 : 16;
+}
+
+// The value a device x lands on, lx from the control's left end (the reading from the left): the thumb's centre runs from half a thumb in
+// from the left end to half a thumb short of the right (the draw's travel), so the thumb under the hand is the value the press takes.
+static b64 ui_slider_of(const struct ui address_to ui, const struct ui_control address_to c, int lx)
+{
+        int thumb = ui_dev(ui, ui_slider_thumb(c)), track = ui_dev(ui, c->w) - thumb;
+        b64 ratio = track > 0 ? ui_qdiv(ui_q(lx - thumb / 2), ui_q(track)) : 0;
+
+        ratio = ratio < 0 ? 0 : ratio > UI_ONE ? UI_ONE : ratio;
+        return ui_slider_snap(c, c->low + ui_qmul(ratio, c->high - c->low));
+}
+
 /*
         A vertical slider (UI_SLIDER_VERTICAL), the mixer's: a track UI_VSLIDER_BAR wide (hovered 8, held 4) from the box's top to
         its bottom, the value filling it from the bottom in the accent, the rest in the controls' off colour, and a knob that
@@ -4505,7 +4520,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
         b32 ox = rx + rw / 2, oy = ry + rh / 2, sum = 2 * rx + rw;
         b32 line = c->variant & UI_SLIDER_LINE;
-        int thumb = line ? 20 : c->down ? 12 : c->hover ? 20 : 16;
+        int thumb = ui_slider_thumb(c);
         int bar = line ? (c->down ? 4 : c->hover ? 8 : 6) : thumb;
         b32 bare = (c->variant & UI_SLIDER_BARE) != 0;
         b32 track_y = bare ? ry + rh / 2 : ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // the bars' middle: 48 tall, 8 above the row's bottom (a bare one's box is as tall as its thumb)
@@ -4611,26 +4626,14 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         // The ghost: hovered and not dragged, from the value to where a press would land, in the accent at 40%.
         if (c->hover && !c->down && c->hover_x >= 0)
         {
-                b32 hx = c->hover_x * 256, left = stop < hx - rx ? rx + stop : hx, right = stop < hx - rx ? hx : rx + stop;
+                // Where a press under the hand would land (ui_slider_of, the step it takes), and the thumb there: the ghost runs to it.
+                b64 land = ui_slider_ratio(c, ui_slider_of(ui, c, c->hover_x - ui_dev(ui, c->x)));
+                b32 hx = rx + (b32)ui_qmul(land, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
+                b32 left = stop < hx - rx ? rx + stop : hx, right = stop < hx - rx ? hx : rx + stop;
                 b32 under = hx - rx < stop;
                 unsigned int ghost = ui_mix(accent, 40, off);
                 b32 thumb_x = rx + stop;
 
-                if (c->variant & UI_SLIDER_STEPS)
-                {
-                        // Snapped to the steps the value takes (ui_slider_snap): the nearest, never past the last.
-                        b64 span = c->step > 0 ? ui_qdiv(c->high - c->low, c->step) : UI_ONE;
-                        b64 z = ui_qdiv(ui_q(hx - rx - ui_q8(ui, thumb) / 2), ui_q(rw - ui_q8(ui, thumb)));
-                        b64 n;
-
-                        z = z < 0 ? 0 : z > UI_ONE ? UI_ONE : z;
-                        n = (ui_qmul(z, span) + UI_HALF) >> UI_Q;
-                        n = n > span >> UI_Q ? span >> UI_Q : n;
-                        z = ui_qdiv(n << UI_Q, span);
-                        hx = rx + (b32)ui_qmul(z, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
-                        left = stop < hx - rx ? rx + stop : hx;
-                        right = stop < hx - rx ? hx : rx + stop;
-                }
                 // Over the thumb itself the ghost is the fill's colour (under) or none (past).
                 if (hx > thumb_x - ui_q8(ui, 11) && hx < thumb_x + ui_q8(ui, 11))
                         ghost = under ? accent : 0;
@@ -5579,15 +5582,12 @@ static b32 ui_control_live(const struct ui_control address_to c)
                                 c->kind == UI_SLIDER || c->kind == UI_TABS || c->kind == UI_INPUT);
 }
 
-// The slider's value under a device x: ui.js's a(), the track's whole width, snapped to the step.
+// The slider's value under a device x (the hand's, as the window reads it), the thumb's travel and its step (ui_slider_of).
 static b64 ui_slider_at(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
         if (c->variant & UI_SLIDER_VERTICAL)
                 return ui_vslider_at(ui, c, y);
-        b64 ratio = ui_qdiv(ui_q(ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) - ui_dev(ui, c->x)), ui_q(ui_dev(ui, c->w)));
-
-        ratio = ratio < 0 ? 0 : ratio > UI_ONE ? UI_ONE : ratio;
-        return ui_slider_snap(c, c->low + ui_qmul(ratio, c->high - c->low));
+        return ui_slider_of(ui, c, ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) - ui_dev(ui, c->x));
 }
 
 /*
@@ -5892,7 +5892,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->squish_origin = 0;
                                 c->last_frame = 0;
                                 c->bounce = 0;
-                                c->slide_from = from;
                                 if ((to > from ? to - from : from - to) > 1073741 && !ui_kit.motion) // 0.001
                                 {
                                         ui_slide_go(&c->slide, from, to, c->high - c->low, ui_kit.now);
@@ -5903,7 +5902,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                         c->value = to;
                                 if (c->value != from || c->sliding)
                                         changed = c;
-                                c->spot_x = x * 100 / ui->scale - c->x;
+                                c->spot_x = ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 100 / ui->scale - c->x; // logical, as the motion's is
                                 ui_tween_put(&c->spot, UI_Q2(10), UI_TWEEN_NUMBER);
                                 c->hover_x = -1; // v(B): the hover preview is over till the pointer moves again
                         }
