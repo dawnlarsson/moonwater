@@ -10957,7 +10957,7 @@ static void ui_list_slide_undo(const struct ui address_to ui, struct ui_list add
         ui_list_damage(ui, l, id);
 }
 
-static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
+static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                           const struct window_event address_to event)
 {
         struct ui_control address_to c;
@@ -11040,7 +11040,7 @@ static b32 ui_list_slider(const struct ui address_to ui, struct ui_page address_
         The page's pointer: a motion or a button of the mouse or a finger, forwarded here by the app (its map, bars and fields
         have had the first say). done is the app's press action.
 */
-static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
+static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                           const struct window_event address_to event, void (*done)(void))
 {
         // The event's own touch flag, as ui_event_context sets it for the loop's events (a menu the press opens is a finger's).
@@ -11630,7 +11630,7 @@ static b32 ui_list_frame_end(struct window_row address_to own, int width, int he
         while the compositor has not taken the last one (the picture is due again). True once it is done, even when no row
         changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
 */
-static b32 ui_buffers_present(struct ui_buffers address_to b, const struct window_row address_to own, int width, int height,
+static b32 ui_buffers_present(struct ui_buffers address_to b, struct window_row address_to own, int width, int height,
                               void (*paint)(unsigned int address_to pixels, int top, int bottom), void (*before)(void))
 {
         struct windows address_to table = own->table;

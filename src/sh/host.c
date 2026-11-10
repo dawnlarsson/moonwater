@@ -17186,7 +17186,7 @@ static fn usb_list_more(positive count)
 
 static fn usb_list_strip(string_address name, unsigned long long total, usb_parts address_to parts)
 {
-        unsigned long long cursor = 0, end = total;
+        unsigned long long cursor = 0, span_end = total;
 
         (void)name;
         if (!parts->count && !parts->more)
@@ -17206,8 +17206,8 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
                 }
         // Room is free between the partitions kept, and after the last one up to the first one not shown: none of those
         // starts before the kept ones. Where a partition's place is not known, no room is free at all.
-        if (parts->more && parts->more_start < end)
-                end = parts->more_start;
+        if (parts->more && parts->more_start < span_end)
+                span_end = parts->more_start;
         for (positive at = 0; at < parts->count; at++)
         {
                 usb_segment address_to part = &parts->part[at];
@@ -17218,8 +17218,8 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
                 if (part->start + part->bytes > cursor)
                         cursor = part->start + part->bytes;
         }
-        if (!parts->unknown && end > cursor)
-                usb_list_segment(cursor, end - cursor, USB_ROLE_FREE, null);
+        if (!parts->unknown && span_end > cursor)
+                usb_list_segment(cursor, span_end - cursor, USB_ROLE_FREE, null);
         if (parts->more)
                 usb_list_more(parts->more);
 }

@@ -1060,18 +1060,18 @@ static fn dcs_answer(void)
         {
                 while (at <= osc_length)
                 {
-                        unsigned int end = at;
+                        unsigned int stop = at;
 
-                        while (end < osc_length && osc_bytes[end] != ';')
-                                end++;
+                        while (stop < osc_length && osc_bytes[stop] != ';')
+                                stop++;
 
                         if (!answering())
                                 return;
 
                         emit_literal("\x1bP0+r");
-                        emit_bytes(osc_bytes + at, end - at);
+                        emit_bytes(osc_bytes + at, stop - at);
                         emit_literal("\x1b\\");
-                        at = end + 1;
+                        at = stop + 1;
                 }
         }
 }
