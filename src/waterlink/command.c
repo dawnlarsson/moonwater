@@ -1656,12 +1656,15 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 if (!link_known(verb) && link_known((string_address)folded))
                         verb = (string_address)folded;
         }
+        //      A code after a name pairs, linked or not: a code is never a
+        //      command, and the Settings pairing field sends NAME CODE for any
+        //      name, so a linked name would otherwise run the code as a command.
+        if (count == 4 && link_code_shaped(arguments[3]))
+                return link_pair_there(verb, arguments[3]);
         if (link_known(verb))
                 return link_client_run(verb,
                                        count == 3 ? LINK_KIND_SHELL : LINK_KIND_RUN,
                                        arguments + 3, count - 3);
-        if (count == 4 && link_code_shaped(arguments[3]))
-                return link_pair_there(verb, arguments[3]);
         return host_refuse("no machine is called %s: moonwater link pair "
                            "on it, then moonwater link NAME CODE here\n",
                            verb);
