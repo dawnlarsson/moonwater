@@ -2100,6 +2100,9 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
 
         columns = columns ? columns : 1;
         rows = rows ? rows : 1;
+        // A row is a line of the ring, and a screen taller than the ring has rows sharing lines. The ring was cut for
+        // the output as it was at the open, and the output may have grown since.
+        rows = rows < window->history ? rows : window->history;
         pixels_w = terminal_pixels(columns, rows, &pixels_h);
         pixels_w = width > pixels_w ? width : pixels_w;
         pixels_h = height > pixels_h ? height : pixels_h;
