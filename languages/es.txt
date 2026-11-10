@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Buscar/Reemplazar por
 editor_indent_spaces	9db9	Espacios: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Línea
+editor_lock_stale	f9d8	%s quedó de un guardado anterior: bórrelo y guarde de nuevo
 editor_no_file_name	c863	sin nombre de archivo: inicie el editor con uno
 editor_no_match	7de7	sin coincidencias
 editor_not_regular	5955	no es un archivo normal: rechazado

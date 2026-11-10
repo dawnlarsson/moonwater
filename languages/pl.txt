@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Znajdź/Zamień na
 editor_indent_spaces	9db9	Spacje: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Wiersz
+editor_lock_stale	f9d8	%s został po poprzednim zapisie: usuń go, potem zapisz
 editor_no_file_name	c863	brak nazwy pliku: uruchom edytor z nazwą
 editor_no_match	7de7	brak dopasowania
 editor_not_regular	5955	to nie jest zwykły plik: odrzucono

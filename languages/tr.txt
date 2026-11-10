@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Bul/Şununla değiştir
 editor_indent_spaces	9db9	Boşluk: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Satır
+editor_lock_stale	f9d8	%s önceki kaydetmeden kalmış: silin, sonra kaydedin
 editor_no_file_name	c863	dosya adı yok: düzenleyiciyi bir adla başlatın
 editor_no_match	7de7	eşleşme yok
 editor_not_regular	5955	normal bir dosya değil: reddedildi

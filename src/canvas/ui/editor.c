@@ -324,7 +324,12 @@ static b32 editor_save(struct editor_tab address_to tab)
                                                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (handle < 0)
         {
-                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
+                // An earlier save's lock, left when it died between its open and its rename: every save of this file is refused
+                // until it goes, and the status names it so the person can remove it.
+                if (handle == -EEXIST)
+                        language_format((char address_to)editor.status, sizeof(editor.status), WORDS(editor_lock_stale), (const char address_to)temporary);
+                else
+                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
                 return false;
         }
         /*

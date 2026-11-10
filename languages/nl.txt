@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Zoeken/Vervangen door
 editor_indent_spaces	9db9	Spaties: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Regel
+editor_lock_stale	f9d8	%s is overgebleven van een eerder opslaan: verwijder het, sla dan op
 editor_no_file_name	c863	geen bestandsnaam: start de editor met een naam
 editor_no_match	7de7	geen overeenkomst
 editor_not_regular	5955	geen gewoon bestand: geweigerd

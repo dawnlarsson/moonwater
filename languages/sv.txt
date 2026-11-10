@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Sök/Ersätt med
 editor_indent_spaces	9db9	Mellanslag: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Rad
+editor_lock_stale	f9d8	%s blev kvar från en tidigare sparning: ta bort den och spara sedan
 editor_no_file_name	c863	inget filnamn: starta redigeraren med ett
 editor_no_match	7de7	ingen träff
 editor_not_regular	5955	ingen vanlig fil: avvisad

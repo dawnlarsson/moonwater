@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Find/Replace with
 editor_indent_spaces	9db9	Spaces: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Line
+editor_lock_stale	f9d8	%s is left by an earlier save: remove it, then save
 editor_no_file_name	c863	no file name: start the editor with one
 editor_no_match	7de7	no match
 editor_not_regular	5955	not a regular file: refused

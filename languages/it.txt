@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Trova/Sostituisci con
 editor_indent_spaces	9db9	Spazi: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Riga
+editor_lock_stale	f9d8	%s è rimasto da un salvataggio precedente: eliminarlo, poi salvare
 editor_no_file_name	c863	nessun nome di file: avviare l'editor con uno
 editor_no_match	7de7	nessuna corrispondenza
 editor_not_regular	5955	non è un file normale: rifiutato

@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Найти/Заменить на
 editor_indent_spaces	9db9	Пробелы: %d
 editor_indent_tab	d9a7	Таб: %d
 editor_line_hint	f547	Строка
+editor_lock_stale	f9d8	%s остался от прошлого сохранения: удалите его, затем сохраните
 editor_no_file_name	c863	нет имени файла: запустите редактор с именем
 editor_no_match	7de7	нет совпадений
 editor_not_regular	5955	не обычный файл: отказано

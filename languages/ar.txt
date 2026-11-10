@@ -14,6 +14,7 @@ editor_find_replace_hint	3693	بحث/البديل
 editor_indent_spaces	9db9	المسافات: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	السطر
+editor_lock_stale	f9d8	%s بقي من حفظ سابق: احذفه ثم احفظ
 editor_no_file_name	c863	لا يوجد اسم ملف: ابدأ المحرر باسم ملف
 editor_no_match	7de7	لا يوجد تطابق
 editor_not_regular	5955	ليس ملفا عاديا: تم الرفض

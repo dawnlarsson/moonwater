@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Suchen/Ersetzen durch
 editor_indent_spaces	9db9	Leerzeichen: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Zeile
+editor_lock_stale	f9d8	%s stammt von einem früheren Speichern: entfernen, dann speichern
 editor_no_file_name	c863	kein Dateiname: den Editor mit einem starten
 editor_no_match	7de7	kein Treffer
 editor_not_regular	5955	keine normale Datei: abgelehnt

@@ -14,6 +14,7 @@ editor_find_replace_hint	3693	تلاش/متبادل
 editor_indent_spaces	9db9	اسپیسز: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	لائن
+editor_lock_stale	f9d8	%s پچھلی محفوظ کاری سے رہ گیا ہے: اسے حذف کریں، پھر محفوظ کریں
 editor_no_file_name	c863	فائل کا نام نہیں ہے: ایڈیٹر کو فائل کے نام کے ساتھ شروع کریں
 editor_no_match	7de7	کوئی مطابقت نہیں
 editor_not_regular	5955	عام فائل نہیں ہے: مسترد

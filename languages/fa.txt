@@ -14,6 +14,7 @@ editor_find_replace_hint	3693	جستجو/جایگزین
 editor_indent_spaces	9db9	فاصله‌ها: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	سطر
+editor_lock_stale	f9d8	%s از یک ذخیره‌سازی قبلی مانده است: آن را حذف کنید، سپس ذخیره کنید
 editor_no_file_name	c863	نام پرونده وجود ندارد: ویرایشگر را با نام پرونده اجرا کنید
 editor_no_match	7de7	موردی یافت نشد
 editor_not_regular	5955	پرونده عادی نیست: رد شد

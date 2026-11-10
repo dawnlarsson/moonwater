@@ -14,6 +14,7 @@ editor_find_replace_hint	3693	חיפוש/תחליף
 editor_indent_spaces	9db9	רווחים: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	שורה
+editor_lock_stale	f9d8	%s נשאר משמירה קודמת: מחקו אותו, ואז שמרו
 editor_no_file_name	c863	אין שם קובץ: הפעל את העורך עם שם קובץ
 editor_no_match	7de7	אין התאמה
 editor_not_regular	5955	לא קובץ רגיל: נדחה

@@ -13,6 +13,7 @@ editor_find_replace_hint	3693	Εύρεση/Αντικατάσταση με
 editor_indent_spaces	9db9	Κενά: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Γραμμή
+editor_lock_stale	f9d8	το %s έμεινε από μια προηγούμενη αποθήκευση: διαγράψτε το και αποθηκεύστε
 editor_no_file_name	c863	χωρίς όνομα αρχείου: ξεκινήστε τον επεξεργαστή με ένα
 editor_no_match	7de7	καμία αντιστοιχία
 editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
