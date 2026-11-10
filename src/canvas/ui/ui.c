@@ -9684,8 +9684,13 @@ static fn ui_list_damage_all(const struct ui address_to ui, const struct ui_list
 // The row under a point of the window, or -1.
 static int ui_list_hit(const struct ui address_to ui, const struct ui_list address_to l, int x, int y)
 {
-        int inside = y - l->y + l->scroll.scroll, across, wide;
+        // The rows are drawn at rest (ui_list_draw) unless the list is taller than UI_STRETCH_VIEW: a pull past an end stretches the picture
+        // and moves no row, so the hit boxes are where the rows are drawn, at rest too.
+        int at_rest = l->scroll.scroll, most = ui_scroll_most(&l->scroll), inside, across, wide;
 
+        if (l->h <= UI_STRETCH_VIEW)
+                at_rest = at_rest < 0 ? 0 : at_rest > most ? most : at_rest;
+        inside = y - l->y + at_rest;
         ui_list_across(l, &across, &wide);
         if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
