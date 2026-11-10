@@ -88796,6 +88796,7 @@ typedef int8_t b8;
 ''' + WATERLINK_HOSTED_TYPES + r'''
 #define DEAD_END __attribute__((noreturn))
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
+#define offset_of(type, member) __builtin_offsetof(type, member)
 #define difference_or_zero(a, b)                                             \
         ({ __auto_type _a = (a); __auto_type _b = (b); _a > _b ? _a - _b : 0; })
 #define TIOCGWINSZ 0x5413u
