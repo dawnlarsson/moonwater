@@ -6893,6 +6893,10 @@ static b32 ui_scroll_frame(const struct ui address_to ui, struct ui_scroll addre
         ui_scroll_extent(s);
         if (s->precise && s->body.state == BODY_TRACK && now > s->notch && now - s->notch > UI_HAND_GAP_NS)
                 ui_scroll_release(s, 0);
+        // A spring home was aimed at the far end when it began: a content that shrank since then has a nearer one, and the spring goes there
+        // (the body is then at rest on it, not past it).
+        if (s->body.state == BODY_SPRING && s->body.rest > ui_body_far(&s->body))
+                s->body.rest = ui_body_far(&s->body);
         moving = ui_body_step(&s->body, now);
         s->scroll = ui_body_px(&s->body);
         if (moving && s->height > 0)
