@@ -88,6 +88,7 @@ int main(int argc, char **argv)
 	size_t fill = 0, keep, datagrams = 0, bytes = 0, expected = 0;
 	unsigned gaps = 0;
 	int closed = 0, eof = 0;
+	size_t skipped = 0;
 
 	for (int a = 1; a < argc; a++) {
 		if (!strcmp(argv[a], "--key") && a + 1 < argc)
@@ -119,15 +120,22 @@ int main(int argc, char **argv)
 	}
 	modem_chunk_open(&cr, key, sizeof key);
 
-	while (!closed && !eof) {
+	while (!eof) {
 		size_t want = RX_WINDOW - fill, got, at = 0;
 
 		/* Samples are little-endian 16-bit; fread returns whole samples only. */
 		got = fread(raw, 2, want, in);
+		eof = got < want;
+		if (closed) {
+			/* The session is closed and decodes nothing more, but the input is read to its end, so a live pipe
+			   is not cut short and the samples not decoded are counted. */
+			skipped += got;
+			fill = 0;
+			continue;
+		}
 		for (size_t i = 0; i < got; i++)
 			window[fill + i] = (int16_t)((uint16_t)raw[2 * i] | ((uint16_t)raw[2 * i + 1] << 8));
 		fill += got;
-		eof = got < want;
 
 		for (;;) {
 			size_t used = 0;
@@ -180,5 +188,8 @@ int main(int argc, char **argv)
 	fprintf(stderr, "modem_rx: %lu datagrams, %lu bytes to %s; %u gaps; %u refused frames%s\n",
 		(unsigned long)datagrams, (unsigned long)bytes, out_path, gaps, cr.rx.refused,
 		cr.rx.closed ? "; the session closed after too many refusals" : "");
+	if (skipped)
+		fprintf(stderr, "modem_rx: %lu samples after the session closed were read and not decoded\n",
+			(unsigned long)skipped);
 	return datagrams > 0 && gaps == 0 && !cr.rx.closed ? 0 : 1;
 }
