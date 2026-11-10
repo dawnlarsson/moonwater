@@ -47611,8 +47611,8 @@ def harness_moonwater_cli(argv):
         # the first four kilobytes of it.
         lines, finished = session(
             "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/x/etc /bowls/x/bin\n"
-            "awk 'BEGIN { print \"127.0.0.1 localhost\"; for (i = 0; i < 400; i++) "
-            "print \"10.1.\" int(i / 250) \".\" i % 250 \" blocked\" i \".example\" }' > /bowls/x/etc/hosts\n"
+            "{ echo '127.0.0.1 localhost'; i=0; while [ $i -lt 400 ]; do "
+            "echo \"10.1.$((i / 250)).$((i % 250)) blocked$i.example\"; i=$((i + 1)); done; } > /bowls/x/etc/hosts\n"
             "cp /bowls/x/etc/hosts /tmp/hosts.before\n"
             "timeout 20 /tmp/bowl --isolated /bowls/x /bin/true > /dev/null 2>&1\n"
             "echo '@@ big'; cmp /tmp/hosts.before /bowls/x/etc/hosts && echo same; echo '@@end'\n"
