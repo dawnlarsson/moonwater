@@ -2700,7 +2700,7 @@ static b32 host_machine_run(void)
                 radio_recover();
                 usb_recover();
                 locale_recover();
-                link_keep();
+                link_keep_machine();
                 failed = host_machine_wait(device, address_of control);
                 if (failed == -EINTR || failed == -ETIMEDOUT)
                         continue;

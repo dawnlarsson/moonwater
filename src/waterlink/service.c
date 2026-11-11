@@ -3977,6 +3977,27 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
 static fn link_client_answered(p8 address_to datagram, positive length);
 static fn link_client_cookie(p8 address_to datagram, positive length, p64 now);
 
+typedef struct
+{
+        struct waterlink_noise noise;
+        p32 ours;      // an initiation waiting for its answer, or 0
+        p64 initiated; // when it went
+        positive attempts;
+        p8 mac1[16];   // its mac1, which a cookie reply to it is sealed to
+        p8 cookied;  // it carried a cookie
+        p8 cookie[16]; // what the machine last handed out, under load
+        p64 cookie_at; // when; 0 for never
+        positive tries;   // initiations sent: they alternate between the known addresses
+        positive retries; // tries made while the up link was quiet
+        p64 gap;          // the wait before the next of those, doubled each time
+        positive sent;      // initiations that left, for the reason a link fails
+        bipolar send_error; // the last send's error, or 0
+        p8 unverified;      // an answer to our initiation that did not verify
+        struct link_session address_to session; // the session its keys are for
+} link_client_state;
+
+static link_client_state link_client;
+
 static fn link_datagram(p8 address_to datagram, positive length,
                         p8 address_to address, p16 port, p64 now)
 {
@@ -4173,26 +4194,6 @@ static b32 link_serve(string_address ready_text)
         keys run out, under the same conversation so the streams go on as
         they were.
 */
-typedef struct
-{
-        struct waterlink_noise noise;
-        p32 ours;      // an initiation waiting for its answer, or 0
-        p64 initiated; // when it went
-        positive attempts;
-        p8 mac1[16];   // its mac1, which a cookie reply to it is sealed to
-        p8 cookied;  // it carried a cookie
-        p8 cookie[16]; // what the machine last handed out, under load
-        p64 cookie_at; // when; 0 for never
-        positive tries;   // initiations sent: they alternate between the known addresses
-        positive retries; // tries made while the up link was quiet
-        p64 gap;          // the wait before the next of those, doubled each time
-        positive sent;      // initiations that left, for the reason a link fails
-        bipolar send_error; // the last send's error, or 0
-        p8 unverified;      // an answer to our initiation that did not verify
-        struct link_session address_to session; // the session its keys are for
-} link_client_state;
-
-static link_client_state link_client;
 
 /* Why the client's link failed, as the words the CLI and the UI print. The
    order is the order of the reason codes. */
@@ -4206,7 +4207,7 @@ static string_address link_reason_text(positive reason)
             "code refused: it was used already, or by another machine",
         };
 
-        return reason < array_count(texts) ? texts[reason] : "unknown reason";
+        return reason < array_count(texts) ? (string_address)texts[reason] : (string_address)"unknown reason";
 }
 
 /* The reason a client's failure is, from what it heard: an answer that did

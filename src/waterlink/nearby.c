@@ -1191,7 +1191,7 @@ static __attribute__((unused)) string_address link_discovery_reason_text(positiv
             "code refused: it was used already, or by another machine",
         };
 
-        return reason < array_count(texts) ? texts[reason] : "unknown reason";
+        return reason < array_count(texts) ? (string_address)texts[reason] : (string_address)"unknown reason";
 }
 
 static p8 link_nearby_announce(p32 ttl)

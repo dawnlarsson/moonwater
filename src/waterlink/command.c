@@ -2436,7 +2436,7 @@ static b32 link_main(string_address address_to arguments, positive count)
 static p64 link_keep_next;
 static p64 link_keep_wait = 1;
 
-static fn link_keep(void)
+static fn link_keep_machine(void)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000000ull;
         p8 word[16];
