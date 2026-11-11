@@ -38,7 +38,8 @@
 
         The switch, the key and the machines live in /root, beside the
         wireless networks, so install carries them to the disk and wipe keeps
-        them.
+        them. On a Mac they live in the user's ~/Library/Application Support/
+        moonwater instead (host_darwin.c), and nothing on a Mac is root's.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -540,7 +541,7 @@ static fn link_serve_start(p8 detached, bipolar ready)
         }
         //      The listener carries what the one that started it ignored no further.
         (void)system_signal_install(13, 0, 0, 0, null);
-        (void)shell_exec_file((string_address) "/proc/self/exe",
+        (void)shell_exec_file((string_address)LINK_EXECUTABLE,
                               ready >= 0 ? words : plain, ready >= 0 ? 4 : 3,
                               file_environment_all());
         system_call_1(syscall(exit), 127);

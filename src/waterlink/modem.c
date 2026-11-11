@@ -1094,7 +1094,11 @@ static bipolar modem_seq_save(string_address path, const p8 *key, p32 seq, p16 i
         it is. The gzip copy is sent only when it is smaller. The marker is the stream's first byte, so it is the first datagram's
         first byte, and the receiver reads it before anything else. The copy is removed when the send is over, however it ended.
 */
+#if defined(MACOS)
+#define LINK_MODEM_ZIP_PATH link_state_path(LINK_LEAF_MODEM_ZIP)
+#else
 #define LINK_MODEM_ZIP_PATH "/root/link.modem.gz"
+#endif
 #define MODEM_MARK_RAW 0
 #define MODEM_MARK_GZIP 1
 
@@ -1316,7 +1320,11 @@ static b32 modem_send_file(string_address path)
 #define MODEM_LANES 2          /* the card's channels, and the streams the link carries on them: lane 0 the left, lane 1 the right */
 #define MODEM_LIVE 1024        /* a sample at least this loud (of 32768) is signal and not the card's hiss */
 #define MODEM_LOOK_FRAMES MODEM_RATE /* the frames the streams are read from for a copy or no right: a second, so a gap is not no channel */
+#if defined(MACOS)
+#define LINK_MODEM_STREAMS_PATH link_state_path(LINK_LEAF_MODEM_STREAMS) /* the streams the listener has, one word, for `link transport` */
+#else
 #define LINK_MODEM_STREAMS_PATH HOST_STATE "/link.modem.streams" /* the streams the listener has, one word, for `link transport` */
+#endif
 
 /* What the capture is: two streams, one (copied, or with no right channel), the right's receiver closed, or not listening. */
 #define MODEM_STREAMS_TWO 0

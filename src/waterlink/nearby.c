@@ -40,7 +40,11 @@
 
 #include "discover.c"
 
+#if defined(MACOS)
+#define LINK_PEERS_LOCK link_state_path(LINK_LEAF_PEERS_LOCK)
+#else
 #define LINK_PEERS_LOCK HOST_STATE "/link.peers.lock"
+#endif
 #define LINK_GROUPS_MAX 8
 #define LINK_INTERFACES 16
 #define LINK_GREETED 16
@@ -562,20 +566,56 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         return new;
 }
 
+#if !defined(MACOS)
 typedef struct
 {
         p32 multiaddr;
         p32 address;
         b32 index;
 } link_mreqn;
+#endif
 
 /*
-        Every interface with an IPv4 address that takes the membership, and
-        that address for the A record: net.c's walk of the addresses, which
-        is the one the network setup already trusts. A namespace in a test
-        has no default route, so joining on "any" would fail there; one by
-        one, by index, works everywhere.
+        Joins the group on one interface, which is named by its index where
+        the platform takes ip_mreqn (Linux) and by its IPv4 address where it
+        takes only ip_mreq (Darwin). address is the interface's address in host
+        order, as network_load_32 gives it. A namespace in a test has no default
+        route, so joining on "any" would fail there; one by one works everywhere.
+        One without multicast is passed over; joined already (EADDRINUSE) is
+        joined.
 */
+static fn link_nearby_join(b32 index, p32 address)
+{
+#if defined(MACOS)
+        link_ip_mreq join;
+#else
+        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
+#endif
+        bipolar joined;
+
+        for (positive at = 0; at < link_nearby.interfaces; at++)
+                if (link_nearby.interface[at] == index)
+                        return;
+        if (link_nearby.interfaces == LINK_INTERFACES)
+                return;
+#if defined(MACOS)
+        join.multiaddr = network_order_32(WATERLINK_MDNS_GROUP);
+        join.interface = network_order_32(address);
+#else
+        join.index = index;
+#endif
+        joined = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                   IP_ADD_MEMBERSHIP, address_of join,
+                                   sizeof join);
+        if (joined < 0 && joined != -EADDRINUSE)
+                return;
+        link_nearby.interface[link_nearby.interfaces] = index;
+        link_nearby.interface_address[link_nearby.interfaces] = address;
+        link_nearby.interfaces++;
+}
+
+#if !defined(MACOS)
+/* The netlink walk's callback: one address of the dump, IPv4 and with a local address. */
 static p8 link_nearby_address(netlink_header address_to header,
                                 address_any context)
 {
@@ -583,8 +623,6 @@ static p8 link_nearby_address(netlink_header address_to header,
             netlink_message_body(header, sizeof(netlink_address));
         positive size = 0;
         p8 address_to host;
-        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
-        bipolar joined;
 
         (void)context;
         if (header->type != RTM_NEWADDR || !body ||
@@ -594,25 +632,44 @@ static p8 link_nearby_address(netlink_header address_to header,
                              address_of size);
         if (body->family != AF_INET || !host || size < 4)
                 return true;
-        for (positive at = 0; at < link_nearby.interfaces; at++)
-                if (link_nearby.interface[at] == (b32)body->index)
-                        return true;
-
-        //      One without multicast is passed over; joined already
-        //      (EADDRINUSE) is joined.
-        join.index = (b32)body->index;
-        joined = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                   IP_ADD_MEMBERSHIP, address_of join,
-                                   sizeof join);
-        if (joined < 0 && joined != -EADDRINUSE)
-                return true;
-        link_nearby.interface[link_nearby.interfaces] = (b32)body->index;
-        link_nearby.interface_address[link_nearby.interfaces] =
-                network_load_32(host);
-        link_nearby.interfaces++;
+        link_nearby_join((b32)body->index, network_load_32(host));
         return true;
 }
+#endif
 
+/*
+        Every interface with an IPv4 address that takes the membership, and
+        that address for the A record: net.c's walk of the addresses, which
+        is the one the network setup already trusts. Linux walks them with
+        netlink; Darwin has no netlink, and walks them with getifaddrs, which
+        is the BSD routine for the same list.
+*/
+#if defined(MACOS)
+static fn link_nearby_interfaces(void)
+{
+        struct ifaddrs *list = null;
+
+        link_nearby.interfaces = 0;
+        if (getifaddrs(&list) < 0)
+                return;
+        for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
+        {
+                p8 address_to raw;
+                b32 index;
+
+                if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
+                        continue;
+                index = (b32)if_nametoindex(entry->ifa_name);
+                if (!index)
+                        continue;
+                //      A sockaddr_in is sin_len, sin_family, sin_port, then the
+                //      address in network order at offset 4.
+                raw = (p8 address_to)(void address_to)entry->ifa_addr;
+                link_nearby_join(index, network_load_32(raw + 4));
+        }
+        freeifaddrs(list);
+}
+#else
 static fn link_nearby_interfaces(void)
 {
         bipolar handle = netlink_open_groups(0);
@@ -624,6 +681,7 @@ static fn link_nearby_interfaces(void)
                            AF_INET, link_nearby_address, null);
         system_close((b32)handle);
 }
+#endif
 
 static fn link_nearby_close(void)
 {
@@ -757,7 +815,12 @@ static fn link_nearby_reload(p64 now)
 static p8 link_nearby_send(p8 address_to packet, positive length,
                              positive interface_at)
 {
+#if defined(MACOS)
+        //      Darwin's IP_MULTICAST_IF takes the interface's address, an in_addr.
+        p32 out = network_order_32(link_nearby.interface_address[interface_at]);
+#else
         link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
+#endif
         socket_address_internet to = {
             .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
             .host = network_order_32(WATERLINK_MDNS_GROUP)};

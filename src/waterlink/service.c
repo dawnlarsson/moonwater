@@ -44,6 +44,13 @@
 #ifndef WATERLINK_SERVICE_INCLUDED
 #define WATERLINK_SERVICE_INCLUDED
 
+/*      On Darwin the host layer's names come first: the paths below are made
+        from them (link_state_path), and host_darwin.c is the only place the
+        Mac's directory is chosen. Linux has host.c, which the shell includes. */
+#if defined(MACOS)
+#include "host_darwin.c"
+#endif
+
 #include "link.c"
 #include "seal.c"
 #include "handshake.c"
@@ -62,6 +69,26 @@
         the name. */
 #define LINK_PORT 22348
 
+/*      Every path the link keeps. Linux names them in /root and /run/moonwater;
+        Darwin makes each from link_state_path (host_darwin.c), in the user's
+        Application Support directory. The home directory a command starts in
+        is LINK_HOME_DIR, and the listener's own binary is LINK_EXECUTABLE. */
+#if defined(MACOS)
+#define LINK_SWITCH_PATH link_state_path(LINK_LEAF_SWITCH)
+#define LINK_KEY_PATH link_state_path(LINK_LEAF_KEY)
+#define LINK_PEERS_PATH link_state_path(LINK_LEAF_PEERS)
+#define LINK_GROUPS_PATH link_state_path(LINK_LEAF_GROUPS)
+#define LINK_PORT_PATH link_state_path(LINK_LEAF_PORT)
+#define LINK_TRANSPORT_PATH link_state_path(LINK_LEAF_TRANSPORT)
+#define LINK_MODEM_PATH link_state_path(LINK_LEAF_MODEM)
+#define LINK_MODEM_SEQ_PATH link_state_path(LINK_LEAF_MODEM_SEQ)
+#define LINK_MODEM_RX_PATH link_state_path(LINK_LEAF_MODEM_RX)
+#define LINK_LOCK_PATH link_state_path(LINK_LEAF_LOCK)
+#define LINK_STATE_PATH link_state_path(LINK_LEAF_STATE)
+#define LINK_STAMPS_PATH link_state_path(LINK_LEAF_STAMPS)
+#define LINK_HOME_DIR link_run_home()
+#define LINK_EXECUTABLE link_executable()
+#else
 #define LINK_SWITCH_PATH "/root/link"
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
@@ -74,6 +101,9 @@
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STAMPS_PATH "/root/link.stamps"
+#define LINK_HOME_DIR "/root"
+#define LINK_EXECUTABLE "/proc/self/exe"
+#endif
 
 #define LINK_PEERS_MAX 64
 #define LINK_SESSIONS 16
@@ -100,9 +130,22 @@
 /*      The kernel's numbers for the socket options and control messages the
         listener and the greeting ask for, by the names the uapi headers give
         them; wire_constants holds each to the headers. */
-#define SO_REUSEPORT 15
 #define SOL_IPV6 41
 #define SOL_UDP 17
+#if defined(MACOS)
+/*      Darwin's numbers (sys/socket.h, netinet/in.h). IP_PKTINFO is the option
+        that turns the destination info on, which Darwin calls IP_RECVPKTINFO.
+        UDP_SEGMENT and UDP_GRO are Linux's alone and stay as they were. */
+#define SO_REUSEPORT 0x0200
+#define IPV6_V6ONLY 27
+#define IP_TTL 4
+#define IP_PKTINFO 26
+#define IP_RECVTTL 24
+#define IP_MULTICAST_IF 9
+#define IP_MULTICAST_TTL 10
+#define IP_ADD_MEMBERSHIP 12
+#else
+#define SO_REUSEPORT 15
 #define IPV6_V6ONLY 26
 #define IP_TTL 2
 #define IP_PKTINFO 8
@@ -110,6 +153,7 @@
 #define IP_MULTICAST_IF 32
 #define IP_MULTICAST_TTL 33
 #define IP_ADD_MEMBERSHIP 35
+#endif
 #define UDP_SEGMENT 103
 #define UDP_GRO 104
 
@@ -847,7 +891,9 @@ static p8 link_part_owned(bipolar handle, p8 address_to path)
 */
 static p8 link_path_is_own(string_address path)
 {
-        static const string_address own[] = {
+        //      Not static: on Darwin each path is made at the call (link_state_path),
+        //      so the table cannot be a constant.
+        string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
         file_facts target;
@@ -1631,6 +1677,17 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         string_address environment[8];
         positive at = 0;
         positive blocked = 0;
+#if defined(MACOS)
+        p8 home_line[1040] = "HOME=";
+        p8 user_line[200] = "USER=";
+        p8 logname_line[208] = "LOGNAME=";
+        string_address user = file_environment((string_address) "USER");
+
+        //      On a Mac the command is the user's own, in the user's home: not root's.
+        string_copy_bounded((string_address)home_line + 5, link_run_home(), sizeof(home_line) - 5);
+        string_copy_bounded((string_address)user_line + 5, user ? user : (string_address) "", sizeof(user_line) - 5);
+        string_copy_bounded((string_address)logname_line + 8, user ? user : (string_address) "", sizeof(logname_line) - 8);
+#endif
 
         //      Only the three descriptors the caller installed cross into
         //      the command: not the service's sockets and state files, nor
@@ -1661,16 +1718,22 @@ static DEAD_END fn link_child_exec(string_address address_to words,
 
         environment[at++] = (string_address)path_line;
         environment[at++] = (string_address)term_line;
+#if defined(MACOS)
+        environment[at++] = (string_address)home_line;
+        environment[at++] = (string_address)user_line;
+        environment[at++] = (string_address)logname_line;
+#else
         environment[at++] = (string_address) "HOME=/root";
         environment[at++] = (string_address) "USER=root";
         environment[at++] = (string_address) "LOGNAME=root";
+#endif
         environment[at++] = (string_address) "SHELL=/bin/sh";
         environment[at] = null;
 
-        (void)system_call_1(syscall(chdir), (positive)(string_address) "/root");
+        (void)system_call_1(syscall(chdir), (positive)(string_address)LINK_HOME_DIR);
 
         //      The machine's own binary, as whichever utility words[0] names.
-        (void)shell_exec_file((string_address) "/proc/self/exe", words, count,
+        (void)shell_exec_file((string_address)LINK_EXECUTABLE, words, count,
                               environment);
         system_call_1(syscall(exit), 127);
         unreachable_here();
@@ -3463,9 +3526,10 @@ static b32 link_serve(string_address ready_text)
         if (link_identity(address_of link_self.me, true) < 0)
                 return host_refuse("%s cannot be read or made\n", LINK_KEY_PATH);
 
-        //      A relative path in a push is where a command's is, in /root,
-        //      and not wherever whoever started the listener was.
-        (void)system_call_1(syscall(chdir), (positive)(string_address) "/root");
+        //      A relative path in a push is where a command's is, in /root
+        //      (the user's home on a Mac), and not wherever whoever started
+        //      the listener was.
+        (void)system_call_1(syscall(chdir), (positive)(string_address)LINK_HOME_DIR);
         lock = host_lock_file(LINK_LOCK_PATH, HOST_FILE_SETLK, null);
         if (lock < 0)
         {
