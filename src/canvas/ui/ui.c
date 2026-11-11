@@ -12426,6 +12426,36 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         return true;
 }
 
+/*
+        A program started apart: in a session of its own and a process nobody
+        waits for, its input and output nowhere, as the machine script starts
+        what is on the desktop. The launcher, the mixer and the notices start
+        theirs so. False when it could not be.
+*/
+static b32 ui_start_apart(string_address address_to words, positive count)
+{
+        bipolar child = system_fork();
+        positive status = 0;
+
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                bipolar quiet;
+
+                if (system_fork())
+                        system_call_1(syscall(exit_group), 0);
+                system_call(syscall(setsid));
+                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+                for (positive at = 0; quiet >= 0 && at < 3; at++)
+                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
+                (void)shell_exec_file(words[0], words, count, window_asked_environment());
+                system_call_1(syscall(exit_group), 127);
+        }
+        system_wait4_retry(child, address_of status, 0, null);
+        return true;
+}
+
 static int ui_app_run(struct ui_app address_to app)
 {
         struct windows address_to table;

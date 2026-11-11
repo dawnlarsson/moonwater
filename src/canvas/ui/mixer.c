@@ -366,32 +366,6 @@ static fn mixer_page(b32 recording)
         mixer.dirty = true;
 }
 
-// Another program started apart: in a session of its own and a process nobody waits for, its input and output nowhere, as the machine
-// script starts what is on the desktop (the launcher starts its programs the same way).
-static b32 mixer_start(string_address address_to words, positive count)
-{
-        bipolar child = system_fork();
-        positive status = 0;
-
-        if (child < 0)
-                return false;
-        if (child == 0)
-        {
-                bipolar quiet;
-
-                if (system_fork())
-                        system_call_1(syscall(exit_group), 0);
-                system_call(syscall(setsid));
-                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
-                for (positive at = 0; quiet >= 0 && at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
-                system_call_1(syscall(exit_group), 127);
-        }
-        system_wait4_retry(child, address_of status, 0, null);
-        return true;
-}
-
 // A button of the window acted. Allow (0): recording is turned on, where the server reads it; its page follows within a moment. The Mixer row (1):
 // the whole mixer is started, in the face this one is drawn in, and the popup goes (false) once it has.
 static b32 mixer_act(int which)
@@ -407,7 +381,7 @@ static b32 mixer_act(int which)
         }
         if (mixer.recording)
                 words[1] = (string_address) "-i", words[2] = (string_address) "-f", words[3] = face;
-        return !mixer_start(words, mixer.recording ? 4 : 3);
+        return !ui_start_apart(words, mixer.recording ? 4 : 3);
 }
 
 // The window as a tree, every size and place the tree's: the tabs' band (the full window), the strips' area, and the Mixer row at the foot of the

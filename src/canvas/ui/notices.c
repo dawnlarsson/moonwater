@@ -105,38 +105,13 @@ static b32 notices_frame(void)
         return ui_app_present(&notices.own, &notices.shown, &notices.dirty, notices.width, notices.height, notices_draw, null);
 }
 
-// Another program started apart, as the machine script starts what is on the desktop (the mixer's Mixer row starts its own the same way).
-static b32 notices_start(string_address address_to words, positive count)
-{
-        bipolar child = system_fork();
-        positive status = 0;
-
-        if (child < 0)
-                return false;
-        if (child == 0)
-        {
-                bipolar quiet;
-
-                if (system_fork())
-                        system_call_1(syscall(exit_group), 0);
-                system_call(syscall(setsid));
-                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
-                for (positive at = 0; quiet >= 0 && at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
-                system_call_1(syscall(exit_group), 127);
-        }
-        system_wait4_retry(child, address_of status, 0, null);
-        return true;
-}
-
 // Settings on its System notices page: started with -n, which lifts a Settings already up and asks it for that page.
 static b32 notices_settings(void)
 {
         string_address face = notices.font ? notices.font : (string_address)UI_FONT_REGULAR;
         string_address words[5] = {(string_address) "/settings", (string_address) "-f", face, (string_address) "-n", null};
 
-        return notices_start(words, 4);
+        return ui_start_apart(words, 4);
 }
 
 // Dismiss all: every kernel notice leaves the board, and the feeder starts each class again from nothing.

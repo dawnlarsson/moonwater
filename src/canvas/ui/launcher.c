@@ -614,35 +614,6 @@ static fn launcher_scan(const char address_to variable)
 
 /* ---- starting ---- */
 
-/*
-        A program started apart: in a session of its own and a process nobody
-        waits for, its input and output nowhere, as the machine script starts
-        what is on the desktop. False when it could not be.
-*/
-static b32 launcher_start(string_address address_to words, positive count)
-{
-        bipolar child = system_fork();
-        positive status = 0;
-
-        if (child < 0)
-                return false;
-        if (child == 0)
-        {
-                bipolar quiet;
-
-                if (system_fork())
-                        system_call_1(syscall(exit_group), 0);
-                system_call(syscall(setsid));
-                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
-                for (positive at = 0; quiet >= 0 && at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
-                system_call_1(syscall(exit_group), 127);
-        }
-        system_wait4_retry(child, address_of status, 0, null);
-        return true;
-}
-
 // The row's start: false when nothing could be started, and the launcher stays up.
 static b32 launcher_run(int row)
 {
@@ -653,7 +624,7 @@ static b32 launcher_run(int row)
         if (row < 0 || (positive)row >= launcher.entries)
                 return false;
         count = launcher_words(&launcher.entry[row], words, full, sizeof(full));
-        return launcher_start(words, count);
+        return ui_start_apart(words, count);
 }
 
 /*
@@ -677,7 +648,7 @@ static b32 launcher_power_start(int which)
         if (which < 0 || which >= LAUNCHER_POWERS)
                 return false;
         launcher.power_runs++;
-        return launcher_start(words, launcher_power_words(which, words));
+        return ui_start_apart(words, launcher_power_words(which, words));
 }
 
 /* ---- the bar as a view ---- */
