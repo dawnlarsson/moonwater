@@ -213,7 +213,13 @@ static bipolar link_groups_save(link_groups address_to groups)
 
 static p64 link_boot_seconds(void)
 {
+#if defined(MACOS)
+        //      Darwin has no boot clock. CLOCK_MONOTONIC (6 there) is the one
+        //      the pairing window is timed on, and it does not count sleep.
+        return system_clock_ns(6) / 1000000000ull;
+#else
         return system_clock_ns(CLOCK_BOOTTIME) / 1000000000ull;
+#endif
 }
 
 //      The check a name carries in a code's record: its CRC-32, which says
@@ -575,6 +581,21 @@ typedef struct
 } link_mreqn;
 #endif
 
+/*      A socket option set as socket_option_set sets it: zero, or the negative
+        errno. On Darwin it is setsockopt from libc, with Darwin's errno, so
+        the "already joined" answer of a membership is Darwin's EADDRINUSE. */
+static bipolar link_option_set(b32 handle, b32 level, b32 name,
+                               address_any value, positive length)
+{
+#if defined(MACOS)
+        if (setsockopt(handle, level, name, value, (socklen_t)length) < 0)
+                return -errno;
+        return 0;
+#else
+        return socket_option_set(handle, level, name, value, length);
+#endif
+}
+
 /*
         Joins the group on one interface, which is named by its index where
         the platform takes ip_mreqn (Linux) and by its IPv4 address where it
@@ -695,31 +716,61 @@ static fn link_nearby_open(void)
 {
         b32 one = 1;
         b32 ttl = 255;
+#if !defined(MACOS)
         socket_address_internet self = {
             .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT)};
+#endif
 
+#if defined(MACOS)
+        //      A datagram socket from libc, made close-on-exec and nonblocking
+        //      by fcntl, since Darwin has no SOCK_* flags on socket().
+        link_nearby.socket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (link_nearby.socket >= 0)
+        {
+                (void)fcntl(link_nearby.socket, F_SETFD, FD_CLOEXEC);
+                (void)fcntl(link_nearby.socket, F_SETFL, O_NONBLOCK);
+        }
+#else
         link_nearby.socket = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC |
                                                         SOCK_NONBLOCK,
                                         0);
+#endif
         if (link_nearby.socket < 0)
                 return;
-        (void)socket_option_set((b32)link_nearby.socket, SOL_SOCKET,
-                                SO_REUSEADDR, address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, SOL_SOCKET,
-                                SO_REUSEPORT, address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                IP_MULTICAST_TTL, address_of ttl, sizeof ttl);
-        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                IP_RECVTTL, address_of one, sizeof one);
-        (void)socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                IP_PKTINFO, address_of one, sizeof one);
+        (void)link_option_set((b32)link_nearby.socket, SOL_SOCKET,
+                              SO_REUSEADDR, address_of one, sizeof one);
+        (void)link_option_set((b32)link_nearby.socket, SOL_SOCKET,
+                              SO_REUSEPORT, address_of one, sizeof one);
+        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                              IP_MULTICAST_TTL, address_of ttl, sizeof ttl);
+        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                              IP_RECVTTL, address_of one, sizeof one);
+        (void)link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                              IP_PKTINFO, address_of one, sizeof one);
 
+#if defined(MACOS)
+        {
+                struct sockaddr_in local;
+
+                memory_zero(address_of local, sizeof local);
+                local.sin_len = (unsigned char)sizeof local;
+                local.sin_family = AF_INET;
+                local.sin_port = network_order_16(WATERLINK_MDNS_PORT);
+                if (bind((b32)link_nearby.socket, (struct sockaddr *)address_of local,
+                         sizeof local) < 0)
+                {
+                        link_nearby_close();
+                        return;
+                }
+        }
+#else
         if (socket_bind((b32)link_nearby.socket, address_of self,
                         sizeof self) < 0)
         {
                 link_nearby_close();
                 return;
         }
+#endif
         link_nearby_interfaces();
 }
 
@@ -816,11 +867,30 @@ static p8 link_nearby_send(p8 address_to packet, positive length,
                              positive interface_at)
 {
 #if defined(MACOS)
-        //      Darwin's IP_MULTICAST_IF takes the interface's address, an in_addr.
-        p32 out = network_order_32(link_nearby.interface_address[interface_at]);
+        /* Darwin names the interface by its address, in network order, and
+           its sockaddr_in carries a length first. Both are built here, for
+           libc, since the lib's socket address is the Linux layout. */
+        struct in_addr out;
+        struct sockaddr_in to;
+
+        memory_zero(address_of to, sizeof to);
+        to.sin_len = (unsigned char)sizeof to;
+        to.sin_family = AF_INET;
+        to.sin_port = network_order_16(WATERLINK_MDNS_PORT);
+        to.sin_addr.s_addr = network_order_32(WATERLINK_MDNS_GROUP);
+        out.s_addr = network_order_32(link_nearby.interface_address[interface_at]);
+
+        /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
+           If it fails, send would retain the preceding interface selection
+           and put this interface's announcement onto another link. */
+        if (link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                            IP_MULTICAST_IF, address_of out, sizeof out) < 0)
+                return false;
+        return sendto((b32)link_nearby.socket, packet, length, 0,
+                      (struct sockaddr *)address_of to, sizeof to) ==
+               (ssize_t)length;
 #else
         link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
-#endif
         socket_address_internet to = {
             .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
             .host = network_order_32(WATERLINK_MDNS_GROUP)};
@@ -834,6 +904,7 @@ static p8 link_nearby_send(p8 address_to packet, positive length,
         return socket_send((b32)link_nearby.socket, packet, length,
                            MSG_NOSIGNAL, address_of to, sizeof to) ==
                (bipolar)length;
+#endif
 }
 
 static p8 link_nearby_announce(p32 ttl)

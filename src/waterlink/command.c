@@ -569,7 +569,7 @@ static p8 link_wait_stopped(void)
                         return true;
                 if (now >= until)
                         return false;
-                pid = link_pidfd_open((bipolar)owner);
+                pid = link_child_watch((positive)owner);
                 if (pid < 0)
                 {
                         host_pause(50000000);
@@ -577,7 +577,7 @@ static p8 link_wait_stopped(void)
                 }
                 limit.tv_sec = (p64)(until - now) / 1000000000ull;
                 limit.tv_nsec = (p64)(until - now) % 1000000000ull;
-                (void)descriptor_wait_readable(pid, address_of limit, null);
+                (void)link_wait_readable(pid, address_of limit);
                 system_close(pid);
         }
 }
@@ -593,7 +593,7 @@ static p8 link_wait_started(bipolar ready)
         timespec limit = {3, 0};
         p8 byte;
 
-        if (descriptor_wait_readable(ready, address_of limit, null) > 0 &&
+        if (link_wait_readable(ready, address_of limit) > 0 &&
             system_read_retry((positive)ready, address_of byte, 1) == 1)
                 return true;
         return host_lock_owner(LINK_LOCK_PATH) > 0;
@@ -1257,8 +1257,15 @@ static fn link_pair_guard(p32 mark, link_before address_to before)
         b32 ends[2];
         p8 done;
 
+#if defined(MACOS)
+        if (pipe(ends) < 0)
+                return;
+        (void)fcntl(ends[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(ends[1], F_SETFD, FD_CLOEXEC);
+#else
         if (system_pipe(ends, O_CLOEXEC) < 0)
                 return;
+#endif
         if (host_detach((p32)ends[0], descriptors_none))
         {
                 if (system_read_retry((positive)ends[0], address_of done, 1) != 1)
@@ -1266,7 +1273,11 @@ static fn link_pair_guard(p32 mark, link_before address_to before)
                         link_pair_close(mark);
                         link_before_restore(before);
                 }
+#if defined(MACOS)
+                _exit(0);
+#else
                 system_call_1(syscall(exit_group), 0);
+#endif
         }
         system_close((bipolar)ends[0]);
         link_pair_leash = (bipolar)ends[1];
@@ -1313,7 +1324,7 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         b32 stopped = 0;
         p8 closed = false;
 
-        scope_exit(if (signals >= 0) system_close(signals));
+        scope_exit(if (signals >= 0) link_signals_close(signals));
         scope_exit(link_pair_release());
 
         for (;;)
@@ -1340,7 +1351,7 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
                         host_pause(250000000);
                 else
                 {
-                        (void)descriptor_wait_readable(signals, address_of limit, null);
+                        (void)link_wait_readable(signals, address_of limit);
                         link_signals_take(signals, address_of stopped);
                         if (stopped)
                                 break;

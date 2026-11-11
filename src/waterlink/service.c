@@ -44,6 +44,35 @@
 #ifndef WATERLINK_SERVICE_INCLUDED
 #define WATERLINK_SERVICE_INCLUDED
 
+#if defined(MACOS)
+/*      Darwin's own names for what the signal, poll and child paths wait on:
+        kqueue for a child's exit, poll for the wait, a handler and a pipe for
+        the signals, and the socket options and multicast membership of
+        discovery. These are libc calls, made by name, because the system call
+        table has no Darwin answer for ppoll, signalfd, pidfd or waitid.
+        <unistd.h> is not included: it declares syscall(), which lib.c has as
+        a macro, and <time.h> is not included either, since lib.c defines its
+        own struct timespec. */
+#include <errno.h>
+#include <net/if.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/event.h>
+#include <sys/fcntl.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+extern int fcntl(int descriptor, int command, ...);
+extern int pipe(int descriptors[2]);
+extern long write(int descriptor, const void *data, unsigned long length);
+extern void _exit(int status) __attribute__((noreturn));
+extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
+#ifndef IPV6_V6ONLY
+#define IPV6_V6ONLY 27
+#endif
+#endif
+
 /*      On Darwin the host layer's names come first: the paths below are made
         from them (link_state_path), and host_darwin.c is the only place the
         Mac's directory is chosen. Linux has host.c, which the shell includes. */
@@ -955,68 +984,55 @@ static p8 link_part_publish(bipolar handle, p8 address_to part,
         return false;
 }
 
-#ifdef MACOS
-/*
-        Darwin has no pidfd. What stands in for one is a kqueue that watches
-        the pid for its exit (EVFILT_PROC with NOTE_EXIT): it becomes readable
-        when the process has ended, which is the wake a pidfd gives, and it is
-        closed the same way. waitid there names the pid rather than a handle,
-        so the pid is kept beside the handle wherever the handle is.
-*/
-#define LINK_EVFILT_PROC 0xfffb   // -5, as the filter field holds it
-#define LINK_EVFILT_SIGNAL 0xfffa // -6
-#define LINK_EV_ADD 0x0001
-#define LINK_EV_ONESHOT 0x0010
-#define LINK_EV_CLEAR 0x0020
-#define LINK_NOTE_EXIT 0x80000000u
-#define LINK_P_PID 1
-//      siginfo: code at 8, the pid at 12 (zero while it runs, under WNOHANG),
-//      the status at 20.
-#define LINK_SI_PID 3
-#define LINK_SI_STATUS 5
-
-//      struct kevent as the Darwin kernel reads and writes it: 32 bytes.
-typedef struct
-{
-        p64 ident;
-        p16 filter;
-        p16 flags;
-        p32 fflags;
-        p64 data;
-        p64 udata;
-} link_kevent;
-
-static bipolar link_pidfd_open(bipolar pid)
-{
-        link_kevent change = {(p64)pid, LINK_EVFILT_PROC,
-                              LINK_EV_ADD | LINK_EV_ONESHOT, LINK_NOTE_EXIT,
-                              0, 0};
-        bipolar queue = system_call(syscall(kqueue));
-
-        if (queue < 0)
-                return -1;
-        //      A kevent with no events to return answers 0 when it took the
-        //      change, and an exited pid is refused with ESRCH.
-        if (system_call_6(syscall(kevent), (positive)queue,
-                          (positive)address_of change, 1, 0, 0, 0) != 0)
-        {
-                system_close(queue);
-                return -1;
-        }
-        return queue;
-}
-#else
+#if !defined(MACOS)
 #define LINK_P_PIDFD 3
 //      siginfo: code at 8, the pid at 16 (zero while it runs, under
 //      WNOHANG), the status at 24.
 #define LINK_SI_PID 4
 #define LINK_SI_STATUS 6
-
-static bipolar link_pidfd_open(bipolar pid)
-{
-        return system_call_2(syscall(pidfd_open), (positive)pid, 0);
-}
 #endif
+
+/*
+        A handle that becomes readable when a process ends: a pidfd on Linux,
+        and on Darwin a kqueue that watches the pid for NOTE_EXIT. A process
+        that has ended already cannot be watched, so its kqueue is made
+        readable at once instead, and it is waited for as it would be. -1 is
+        the same as a pidfd that could not be opened: nothing is watched.
+*/
+static bipolar link_child_watch(positive pid)
+{
+#if defined(MACOS)
+        struct kevent change;
+        bipolar queue = kqueue();
+
+        if (queue < 0)
+                return -1;
+        (void)fcntl(queue, F_SETFD, FD_CLOEXEC);
+        EV_SET(address_of change, (uintptr_t)pid, EVFILT_PROC,
+               EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, null);
+        if (kevent(queue, address_of change, 1, null, 0, null) < 0)
+        {
+                //      Only a pid that is gone (ESRCH) is made ready. Any other
+                //      refusal leaves nothing watched, as a failed pidfd does:
+                //      a live child that reads ready would spin the wait.
+                if (errno != ESRCH)
+                {
+                        system_close(queue);
+                        return -1;
+                }
+                EV_SET(address_of change, 0, EVFILT_USER, EV_ADD | EV_ONESHOT,
+                       NOTE_TRIGGER, 0, null);
+                if (kevent(queue, address_of change, 1, null, 0, null) < 0)
+                {
+                        system_close(queue);
+                        return -1;
+                }
+        }
+        return queue;
+#else
+        return system_call_2(syscall(pidfd_open), (positive)pid, 0);
+#endif
+}
 
 /*
         Whether the command behind a pidfd has ended, and taken off the
@@ -1025,19 +1041,36 @@ static bipolar link_pidfd_open(bipolar pid)
 */
 static p8 link_command_ended(bipolar pidfd, bipolar pid, b32 address_to status)
 {
+#if defined(MACOS)
+        //      Darwin's handle is a kqueue, and the child is waited for by its
+        //      pid. waitid reaps it, as the pidfd form does.
+        siginfo_t information;
+        int waited;
+
+        (void)pidfd;
+        memory_zero(address_of information, sizeof information);
+        waited = waitid(P_PID, (id_t)pid, address_of information, WEXITED | WNOHANG);
+        if (waited < 0)
+        {
+                if (errno != ECHILD)
+                        return false;
+                address_to status = LINK_FAILED;
+                return true;
+        }
+        if (!information.si_pid)
+                return false;
+        address_to status = information.si_code == CLD_EXITED
+                                    ? information.si_status
+                                    : 128 + information.si_status;
+        return true;
+#else
         p8 information[128];
         bipolar waited;
 
-        memory_zero(information, sizeof information);
-#ifdef MACOS
-        (void)pidfd;
-        waited = system_call_4(syscall(waitid), LINK_P_PID, (positive)pid,
-                               (positive)information, 4 | 1);
-#else
         (void)pid;
+        memory_zero(information, sizeof information);
         waited = system_call_5(syscall(waitid), LINK_P_PIDFD, (positive)pidfd,
                                (positive)information, 4 | 1, 0);
-#endif
         if (waited == -ECHILD)
         {
                 address_to status = LINK_FAILED;
@@ -1052,6 +1085,7 @@ static p8 link_command_ended(bipolar pidfd, bipolar pid, b32 address_to status)
                                                     : 128 + siginfo[LINK_SI_STATUS];
         }
         return true;
+#endif
 }
 
 /*
@@ -1113,11 +1147,12 @@ static fn link_session_close(struct link_session address_to s)
 {
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
-#ifdef MACOS
-        //      No pidfd to signal on Darwin: the pid itself, while it has not
-        //      been waited for (once it has, its number may be another's).
+        //      Signalled before it is waited for, as the group is: once the
+        //      command is reaped its number may be another's. On Darwin there
+        //      is no pidfd to signal, so the pid itself is, while it is unreaped.
+#if defined(MACOS)
         if (s->pid > 0 && !s->exited)
-                (void)system_call_2(syscall(kill), (positive)s->pid, 1);
+                (void)kill((pid_t)s->pid, SIGHUP);
 #else
         if (s->pidfd >= 0)
                 (void)system_call_4(syscall(pidfd_send_signal),
@@ -1126,7 +1161,13 @@ static fn link_session_close(struct link_session address_to s)
         //      The group too, while the command is not yet waited for: once
         //      it is, its number may be some other process's.
         if (s->pid > 0 && !s->exited)
+        {
+#if defined(MACOS)
+                (void)kill((pid_t)-s->pid, SIGHUP);
+#else
                 (void)system_call_2(syscall(kill), (positive)-s->pid, 1);
+#endif
+        }
         if (s->pidfd >= 0)
         {
                 if (s->exited)
@@ -1676,7 +1717,6 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         string_address path = file_environment((string_address) "PATH");
         string_address environment[8];
         positive at = 0;
-        positive blocked = 0;
 #if defined(MACOS)
         p8 home_line[1040] = "HOME=";
         p8 user_line[200] = "USER=";
@@ -1693,21 +1733,21 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         //      the command: not the service's sockets and state files, nor
         //      whatever a hand-started `link serve` inherited.
         (void)descriptors_close_except(3, descriptors_none, descriptors_none);
+#if !defined(MACOS)
+        positive blocked = 0;
+
         (void)system_signal_mask(2, address_of blocked, null, 8);
         for (b32 signal = 1; signal < 32; signal++)
         {
                 p64 action[4] = {0, 0, 0, 0};
 
-#ifdef MACOS
-                //      Darwin's sigaction takes no sigsetsize, and an all-zero
-                //      action is SIG_DFL with an empty mask and no flags.
-                (void)system_call_3(syscall(sigaction), (positive)signal,
-                                    (positive)action, 0);
-#else
                 (void)system_call_4(syscall(rt_sigaction), (positive)signal,
                                     (positive)action, 0, 8);
-#endif
         }
+#else
+        //      Darwin's handlers are not blocked, and a handler is reset by
+        //      the exec itself: the command starts with the defaults.
+#endif
 
         if (path && string_length(path) < sizeof path_line - 6)
         {
@@ -1780,7 +1820,7 @@ static p8 link_start_shell(struct link_session address_to s,
 
         system_close(slave);
         s->pid = child;
-        s->pidfd = link_pidfd_open(child);
+        s->pidfd = link_child_watch((positive)child);
         s->terminal = master;
         link_stream_set(s->reads, master, LINK_KEY_OUTPUT,
                         WATERLINK_FRAME_DURABLE);
@@ -1837,7 +1877,7 @@ static p8 link_start_command(struct link_session address_to s,
         link_nonblocking(out[0]);
         link_nonblocking(err[0]);
         s->pid = child;
-        s->pidfd = link_pidfd_open(child);
+        s->pidfd = link_child_watch((positive)child);
         link_stream_set(s->reads, out[0], LINK_KEY_OUTPUT,
                         WATERLINK_FRAME_DURABLE);
         link_stream_set(s->reads + 1, err[0], LINK_KEY_ERROR,
@@ -2273,6 +2313,48 @@ static fn link_watch(system_poll_descriptor address_to watch,
 }
 
 /*
+        The descriptor wait the listener and the client make: ppoll on Linux,
+        and on Darwin poll, which takes the same pollfd layout and events
+        (POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, as the SYSTEM_POLL names
+        spell them). A timeout is rounded up to the millisecond, so a timer
+        never fires before its time; a limit longer than poll takes (about 24
+        days) is clamped to that, and the caller wakes and waits again.
+*/
+static bipolar link_poll_wait(system_poll_descriptor address_to watch,
+                              positive count, timespec address_to limit)
+{
+#if defined(MACOS)
+        p64 milliseconds = limit->tv_sec > 2000000
+                               ? 0x7fffffffull
+                               : limit->tv_sec * 1000 +
+                                     (limit->tv_nsec + 999999) / 1000000;
+
+        if (milliseconds > 0x7fffffffull)
+                milliseconds = 0x7fffffffull;
+        return poll((struct pollfd address_to)watch, (unsigned int)count,
+                    (int)milliseconds);
+#else
+        return system_poll_wait(watch, count, limit, null);
+#endif
+}
+
+/*      One descriptor's readiness, for the paths that wait on a single one (a
+        pipe's first byte, a child's end, a signal): the answer
+        descriptor_wait_readable gives, a count, or -9 for a descriptor that
+        is not open, which a readiness probe must not take for readable. */
+static bipolar link_wait_readable(bipolar handle, timespec address_to limit)
+{
+#if defined(MACOS)
+        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_READ, 0};
+        bipolar ready = link_poll_wait(address_of waited, 1, limit);
+
+        return ready > 0 && (waited.returned & SYSTEM_POLL_INVALID) ? -9 : ready;
+#else
+        return descriptor_wait_readable(handle, limit, null);
+#endif
+}
+
+/*
         Until something is ready or wake comes, whichever is first. Account
         for the work since the turn began before sleeping: a busy turn must
         not add its processing time to an already absolute timer.
@@ -2289,7 +2371,7 @@ static fn link_wait(system_poll_descriptor address_to watch,
                 wake = now;
         limit.tv_sec = (wake - now) / 1000000;
         limit.tv_nsec = (wake - now) % 1000000 * 1000;
-        if (system_poll_wait(watch, count, address_of limit, null) <= 0 || !quiet)
+        if (link_poll_wait(watch, count, address_of limit) <= 0 || !quiet)
                 return;
         for (positive at = 0; at < count; at++)
                 if (watch[at].returned && quiet[at])
@@ -2550,8 +2632,12 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                     !s->exited &&
                     (payload[1] == 1 || payload[1] == 2 || payload[1] == 3 ||
                      payload[1] == 9 || payload[1] == 15))
+#if defined(MACOS)
+                        (void)kill((pid_t)-s->pid, (int)payload[1]);
+#else
                         (void)system_call_2(syscall(kill), (positive)-s->pid,
                                             payload[1]);
+#endif
                 break;
         default:
                 break;
@@ -3248,6 +3334,101 @@ static bipolar link_socket_open(p16 port, p8 any)
         else a resize is no reason to stop: a terminal's `link serve` or
         `link pair` was ended by it, and SIGWINCH's own default is to be
         ignored, which is what it is left to be. */
+#if defined(MACOS)
+/*      Darwin has no signalfd, so the signals are caught instead: a handler
+        writes the number of the signal into a pipe, and the pipe's read end is
+        what the wait watches, as the signalfd was. Each is a handler, not a
+        blocked signal, so that a command which execs has the defaults back.
+        Both ends are nonblocking: a read finds nothing, and a handler never
+        waits on a full pipe. The pipe lasts until link_signals_close. */
+static int link_signal_pipe_read = -1;
+static volatile int link_signal_pipe_write = -1;
+
+static void link_signal_note(int number)
+{
+        unsigned char byte = (unsigned char)number;
+
+        if (link_signal_pipe_write >= 0)
+                (void)write(link_signal_pipe_write, address_of byte, 1);
+}
+
+static fn link_signal_catch(int number)
+{
+        struct sigaction action;
+
+        memory_zero(address_of action, sizeof action);
+        action.sa_handler = link_signal_note;
+        sigemptyset(address_of action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        (void)sigaction(number, address_of action, null);
+}
+
+static bipolar link_signals_open(p8 resize)
+{
+        int ends[2];
+
+        if (link_signal_pipe_read < 0)
+        {
+                if (pipe(ends) < 0)
+                        return -1;
+                (void)fcntl(ends[0], F_SETFL, O_NONBLOCK);
+                (void)fcntl(ends[1], F_SETFL, O_NONBLOCK);
+                (void)fcntl(ends[0], F_SETFD, FD_CLOEXEC);
+                (void)fcntl(ends[1], F_SETFD, FD_CLOEXEC);
+                link_signal_pipe_read = ends[0];
+                link_signal_pipe_write = ends[1];
+        }
+        //      The same set the signalfd took on Linux: the hangup, the
+        //      interrupt and the terminate, the child's end (read and dropped),
+        //      and a broken pipe, which is a write that failed, not a death.
+        link_signal_catch(SIGHUP);
+        link_signal_catch(SIGINT);
+        link_signal_catch(SIGTERM);
+        link_signal_catch(SIGCHLD);
+        link_signal_catch(SIGPIPE);
+        if (resize)
+                link_signal_catch(SIGWINCH);
+        return link_signal_pipe_read;
+}
+
+static fn link_signals_close(bipolar handle)
+{
+        int reader = link_signal_pipe_read;
+        int writer = link_signal_pipe_write;
+
+        if (handle < 0 || reader < 0 || handle != reader)
+                return;
+        //      The writer goes first, so a handler that runs now writes nothing;
+        //      then the dispositions go back to the defaults, and the pipe.
+        link_signal_pipe_write = -1;
+        link_signal_pipe_read = -1;
+        (void)signal(SIGHUP, SIG_DFL);
+        (void)signal(SIGINT, SIG_DFL);
+        (void)signal(SIGTERM, SIG_DFL);
+        (void)signal(SIGCHLD, SIG_DFL);
+        (void)signal(SIGPIPE, SIG_DFL);
+        (void)signal(SIGWINCH, SIG_DFL);
+        system_close(reader);
+        if (writer >= 0)
+                system_close(writer);
+}
+
+static fn link_signals_take(bipolar handle, b32 address_to last)
+{
+        p8 information[128];
+        bipolar got;
+
+        //      One byte a signal, so a read of 128 is 128 of them, and it is
+        //      read again while it is full.
+        do
+        {
+                got = system_read_once(handle, information, sizeof information);
+                for (positive at = 0; got > 0 && at < (positive)got; at++)
+                        if (information[at] != SIGCHLD && information[at] != SIGPIPE)
+                                address_to last = (b32)information[at];
+        } while (got == (bipolar)sizeof information);
+}
+#else
 static bipolar link_signals_open(p8 resize)
 {
         positive blocked = 1ul << (1 - 1) | 1ul << (2 - 1) | 1ul << (15 - 1) |
@@ -3255,55 +3436,18 @@ static bipolar link_signals_open(p8 resize)
                            (resize ? 1ul << (28 - 1) : 0);
 
         (void)system_signal_mask(0, address_of blocked, null, 8);
-#ifdef MACOS
-        //      Darwin has no signalfd. A kqueue with EVFILT_SIGNAL for each
-        //      blocked signal does the same job: it is readable while a signal
-        //      is waiting, and each event names the signal. EV_CLEAR makes each
-        //      delivery one event rather than a count to drain.
-        link_kevent changes[32];
-        positive count = 0;
-        bipolar queue = system_call(syscall(kqueue));
-
-        if (queue < 0)
-                return -1;
-        for (positive signal = 1; signal < 32; signal++)
-                if (blocked & (1ul << (signal - 1)))
-                {
-                        changes[count] = (link_kevent){signal, LINK_EVFILT_SIGNAL,
-                                                       LINK_EV_ADD | LINK_EV_CLEAR,
-                                                       0, 0, 0};
-                        count++;
-                }
-        if (system_call_6(syscall(kevent), (positive)queue, (positive)changes,
-                          count, 0, 0, 0) != 0)
-        {
-                system_close(queue);
-                return -1;
-        }
-        (void)system_call_3(syscall(fcntl), (positive)queue, 2, 1); // F_SETFD, FD_CLOEXEC
-        return queue;
-#else
         return system_call_4(syscall(signalfd4), (positive)(bipolar)-1,
                              (positive)address_of blocked, 8,
                              O_CLOEXEC | O_NONBLOCK);
-#endif
+}
+
+static fn link_signals_close(bipolar handle)
+{
+        system_close(handle);
 }
 
 static fn link_signals_take(bipolar handle, b32 address_to last)
 {
-#ifdef MACOS
-        link_kevent events[16];
-        timespec none = {0, 0};
-        bipolar got;
-
-        //      Each event is one signal; a zero timeout is a read that does not wait.
-        while ((got = system_call_6(syscall(kevent), (positive)handle, 0, 0,
-                                    (positive)events, 16,
-                                    (positive)address_of none)) > 0)
-                for (positive at = 0; at < (positive)got; at++)
-                        if (events[at].ident != 17 && events[at].ident != 13)
-                                address_to last = (b32)events[at].ident;
-#else
         p8 information[128];
 
         while (system_read_once(handle, information, sizeof information) ==
@@ -3315,8 +3459,8 @@ static fn link_signals_take(bipolar handle, b32 address_to last)
                 if (signal != 17 && signal != 13)
                         address_to last = (b32)signal;
         }
-#endif
 }
+#endif
 
 /*
         The loop both ends run, in three parts: a turn of every session --
