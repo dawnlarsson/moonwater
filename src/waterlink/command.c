@@ -568,7 +568,7 @@ static p8 link_wait_stopped(void)
                         return true;
                 if (now >= until)
                         return false;
-                pid = system_call_2(syscall(pidfd_open), (positive)owner, 0);
+                pid = link_pidfd_open((bipolar)owner);
                 if (pid < 0)
                 {
                         host_pause(50000000);

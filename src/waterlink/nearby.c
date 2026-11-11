@@ -254,14 +254,31 @@ static fn link_peers_unlock(bipolar handle)
 */
 fn link_machine_name(p8 address_to name)
 {
+#ifdef MACOS
+        p8 host[256];
+        p32 mib[2] = {1, 10}; // CTL_KERN, KERN_HOSTNAME
+        p64 hostlen = sizeof host;
+#else
         p8 uts[6 * 65];
+#endif
         positive used;
 
         memory_zero(name, WATERLINK_NAME_MAX);
+#ifdef MACOS
+        //      Darwin has no uname the kernel takes. The nodename uname
+        //      reports is the kernel's hostname, which sysctl gives directly.
+        memory_zero(host, sizeof host);
+        if (system_call_6(syscall(sysctl), (positive)mib, 2, (positive)host,
+                          (positive)address_of hostlen, 0, 0) >= 0)
+                for (positive at = 0;
+                     at < WATERLINK_NAME_MAX - 1 && host[at]; at++)
+                        name[at] = byte_to_lower(host[at]);
+#else
         if (system_call_1(syscall(uname), (positive)uts) >= 0)
                 for (positive at = 0;
                      at < WATERLINK_NAME_MAX - 1 && uts[65 + at]; at++)
                         name[at] = byte_to_lower(uts[65 + at]);
+#endif
         used = string_span_of_set((string_address)name,
                                   "abcdefghijklmnopqrstuvwxyz0123456789-_");
         memory_zero(name + used, WATERLINK_NAME_MAX - used);
@@ -958,10 +975,18 @@ static struct
 static COLD fn link_mdns_filter_build(net_filter address_to filter)
 {
         static const p32 plain[] = {
+#ifdef MACOS
+            //      Darwin has poll where Linux has ppoll, no clock system call
+            //      (clock_gettime is a library call there), and neither
+            //      rt_sigreturn nor restart_syscall.
+            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(poll),
+            (p32)syscall(munmap), (p32)syscall(madvise), (p32)syscall(exit),
+#else
             (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
             (p32)syscall(clock_gettime), (p32)syscall(munmap), (p32)syscall(madvise),
             (p32)syscall(exit_group), (p32)syscall(exit), (p32)syscall(rt_sigreturn),
             (p32)syscall(restart_syscall),
+#endif
 #ifdef NET_APART_RISCV_HWPROBE
             NET_APART_RISCV_HWPROBE,
 #endif
