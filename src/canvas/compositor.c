@@ -5243,7 +5243,6 @@ static void compositor_stretch(int row)
                 memory_copy(pixels + line * stride, pixels + (drawn_h - 1) * stride, (positive)width * 4);
 }
 
-static int compositor_row_scale(int row);
 static int compositor_output_scale(int at);
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
@@ -6642,28 +6641,16 @@ static void compositor_direct_unpatch(void)
 }
 
 // The tabs written over a row's buffer, what they covered kept, and the program told the rectangle.
+static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned int count, int rect[4]);
+
 static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
 {
-        int rect[4] = {compositor.width, compositor.height, 0, 0};
+        int rect[4];
         unsigned int *pixels = compositor_buffer(row, which);
         struct windows *table = compositor.table;
 
         compositor_runs_forget(row);
-        for (unsigned int at = 0; at < count; at++)
-        {
-                int x, y, width, height;
-
-                compositor_outline(&tabs[at], &x, &y, &width, &height);
-                rect[0] = x < rect[0] ? x : rect[0];
-                rect[1] = y < rect[1] ? y : rect[1];
-                rect[2] = x + width > rect[2] ? x + width : rect[2];
-                rect[3] = y + height > rect[3] ? y + height : rect[3];
-        }
-        rect[0] = rect[0] < 0 ? 0 : rect[0];
-        rect[1] = rect[1] < 0 ? 0 : rect[1];
-        rect[2] = rect[2] > compositor.width ? compositor.width : rect[2];
-        rect[3] = rect[3] > compositor.height ? compositor.height : rect[3];
-        if (rect[2] <= rect[0] || rect[3] <= rect[1])
+        if (!compositor_tabs_rect(tabs, count, rect))
                 return;
 
         if (!compositor.under[which])
@@ -11316,8 +11303,6 @@ static void compositor_input_settings_set(const char *shake, const char *shake_d
         none is given its memory, and when a band moved, came or went a window that fills a screen's room fills the
         room the bands leave now.
 */
-static void compositor_room_follow(void);
-static void compositor_band_room(void);
 
 // Where each band is, a rectangle each and the rest none: what a change of the settings is held against.
 static void compositor_bands_where(int (*rects)[4])
@@ -11991,8 +11976,6 @@ static void compositor_keys_release(void)
                         compositor_post(to, WINDOW_EVENT_KEY, compositor_modifiers(), (int)code, 0);
         memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
 }
-
-static void compositor_osk_sync(void);
 
 // The keys to a window, or to none; both are knocked on, and read focus in the table.
 static void compositor_focus(int row)
@@ -13621,12 +13604,11 @@ static const char *compositor_remember_path = SETTING_WINDOWS_REMEMBER_PATH;
 // Whether windows are remembered: `canvas windows remember`, on unless it keeps off.
 static int compositor_remembering(void)
 {
-        const struct settings_row *row = setting_by_path((string_address)SETTING_WINDOWS_REMEMBER_PATH);
         char word[16];
         long value = 0;
 
         compositor_word(compositor_remember_path, word, sizeof(word));
-        return !(row && setting_kept(row, (string_address)word, &value) && value == 1);
+        return !(compositor_setting_kept(SETTING_WINDOWS_REMEMBER_PATH, word, &value) && value == 1);
 }
 
 static void compositor_places_read(struct places *places)
