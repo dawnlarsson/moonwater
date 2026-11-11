@@ -66,7 +66,8 @@ is_safe() {
 # Multiple matching lines are still joined on purpose -- that is how
 # flags accumulates across profiles.
 key() {
-        echo $(grep "^#> $1 " artifacts/.config 2>/dev/null | sed "s/^#> $1 //")
+        # set -f in a subshell: a flag such as -DX=* must not glob against the working directory.
+        (set -f; echo $(grep "^#> $1 " artifacts/.config 2>/dev/null | sed "s/^#> $1 //"))
 }
 
 # For scalars like compiler or kernel_image, where two profiles both setting
