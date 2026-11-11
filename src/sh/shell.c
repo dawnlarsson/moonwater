@@ -891,63 +891,37 @@ static bipolar file_exec_path_try(string_address address_to words);
 #include "gzip.c"
 #include "xz.c"
 #include "zstd.c"
+/* The size optimisation of an include, as one pair: on x86-64 the include sits between the push and the pop, elsewhere
+   both are nothing. */
 #if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
+#define SHELL_OPTIMIZE_OS_PUSH _Pragma("GCC push_options") _Pragma("GCC optimize(\"Os\")")
+#define SHELL_OPTIMIZE_OS_POP _Pragma("GCC pop_options")
+#else
+#define SHELL_OPTIMIZE_OS_PUSH
+#define SHELL_OPTIMIZE_OS_POP
 #endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "tar.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "snapshot.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "storage.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #include "text.c"
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "checksum.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "awk.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "tools.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "pty.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 
 /*
         Before process_tools, because stdbuf has to find its preload library
@@ -958,50 +932,25 @@ static bipolar file_exec_path_try(string_address address_to words);
         nothing of the shell but file.c's environment, so it can come this
         early and be the one place that says where a root is.
 */
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/terminfo.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 /* moonwater security's switches as a program asks them (host.c says how
    the answer is read): bowl asks packages before a bowl's programs may run
    the distribution's package manager, and the root check asks sudo. */
 static bool security_switch_on(string_address name);
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../bowl.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "process_tools.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "monitor.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "net.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 fn shell_child_death(bipolar child, positive raw, bool foreground);
 static fn shell_parser_source_fork_prepare();
 static bool floodlight_descendants_present();
@@ -1009,63 +958,28 @@ static bool floodlight_descendants_blocking();
 static fn job_child_watch();
 static bool floodlight_parent_supervised;
 #include "expand.c"
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/window.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "registry.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/term.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "host.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/screen.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #ifndef SHELL_UTILITY_PROGRAM
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/font.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/compositor.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 // The sound server: a process of its own, and plain C that is mostly loops over floats, which the size optimisation above would not vectorise.
 #define AUDIO_BOARD 1 // the board (window.c) is in this program: the audio service writes its sound card
 #include "../audio/service.c"
@@ -1075,54 +989,29 @@ static bool floodlight_parent_supervised;
 #include "../dbus/service.c"
 #include "../canvas/ui/features.h"
 #if MOONWATER_UI_ANY
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/ui.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
+SHELL_OPTIMIZE_OS_POP
 #endif
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/terminal.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/klog.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/battery.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #endif
 #if MOONWATER_UI_SETTINGS
 #include "../canvas/ui/gallery.c"
 #include "../canvas/ui/settings.c"
 #endif
 #if MOONWATER_UI_LAUNCHER
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/launcher.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #endif
 #if MOONWATER_UI_IDENTIFY
 #include "../canvas/ui/identify.c"
@@ -1137,42 +1026,22 @@ static bool floodlight_parent_supervised;
 #include "../canvas/ui/osk.c"
 #endif
 #if MOONWATER_UI_EDITOR
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/editor.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #endif
 #if MOONWATER_UI_TASKBAR
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/taskbar.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
+SHELL_OPTIMIZE_OS_POP
 #endif
 #endif
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_PUSH
 #include "edit.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
-#if defined(__x86_64__)
-#pragma GCC push_options
-#pragma GCC optimize("Os")
-#endif
+SHELL_OPTIMIZE_OS_POP
+SHELL_OPTIMIZE_OS_PUSH
 #include "system.c"
-#if defined(__x86_64__)
-#pragma GCC pop_options
-#endif
+SHELL_OPTIMIZE_OS_POP
 #define PROMPT TERM_RESET TERM_BOLD " $ " TERM_RESET
 
 static positive shell_syntax_generation HOT_STATE;
