@@ -79,6 +79,15 @@ if [ -f "$manifest" ]; then
                         continue
                 fi
 
+                # The manifest is read back here before anything is claimed again: an entry that
+                # climbs out of linux/ is not restored, and is dropped from the manifest.
+                case "$target" in
+                /* | *..*)
+                        echo "replace: ignoring a manifest entry outside linux/: $target" >&2
+                        continue
+                        ;;
+                esac
+
                 original="linux/$target.original"
 
                 if [ -f "$original" ]; then
