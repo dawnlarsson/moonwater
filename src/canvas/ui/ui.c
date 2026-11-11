@@ -9743,13 +9743,6 @@ static fn ui_spring_go(struct ui_spring address_to s, b64 scale, b64 nudge)
         s->live = 1; // the first frame says whether any of it is past rest
 }
 
-// A channel's speed from the first frame (Q30 a second): the release's, so the spring runs on from it.
-static fn ui_spring_speed(struct ui_spring address_to s, int k, b64 v)
-{
-        s->speed[k] = v;
-        s->live = 1;
-}
-
 static fn ui_spring_stop(struct ui_spring address_to s)
 {
         s->live = 0;
@@ -10289,13 +10282,6 @@ static positive ui_kit_time(void)
 static positive ui_press_now(void)
 {
         return ui_kit.stamp ? (positive)ui_kit.stamp : (positive)ui_kit.now;
-}
-
-// The same for the wheel and the hand's timers, which read the kit's clock when there is no stamp (ui_kit_clock, a check's or the monotonic).
-static b64 ui_kit_clock(void);
-static b64 ui_event_clock(void)
-{
-        return ui_kit.stamp ? ui_kit.stamp : ui_kit_clock();
 }
 
 // The kit's clock, ns: the monotonic clock, or a check's (ui_kit.test_clock). Every kit read of the time is this one.
