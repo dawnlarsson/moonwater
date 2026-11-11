@@ -2226,7 +2226,8 @@ static b32 terminal_size_write(unsigned int size)
 
         // The directory is made if it is not there; a directory that is there is the answer it should be.
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_DIR, 0755, 0, 0, 0);
-        handle = system_open_at(AT_FDCWD, (string_address)TERMINAL_SIZE_TEMP, FILE_WRITE | O_CLOEXEC);
+        //      Made with 0644: an open that creates a file with no mode takes whatever the mode argument register holds.
+        handle = system_open_at_mode(AT_FDCWD, (string_address)TERMINAL_SIZE_TEMP, FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
         if (handle < 0)
                 return false;
 
@@ -4013,7 +4014,7 @@ static int terminal_start(void)
 
         // The first picture is committed: whoever is starting windows in an order may start the next.
         if (terminal_ready_path)
-                system_close(system_open_at(AT_FDCWD, terminal_ready_path, FILE_WRITE | O_CLOEXEC));
+                system_close(system_open_at_mode(AT_FDCWD, terminal_ready_path, FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644));
 
         terminal.dirty = true;
         terminal.phase = TERMINAL_RUNNING;
