@@ -81,9 +81,9 @@
 #define SETTING_NUMBER 1u // a whole number from low to high, and the words of choices (off) besides
 #define SETTING_COLOUR 2u // rrggbb, kept as #rrggbb
 
-// Who takes a changed value at once.
-#define SETTING_LIVE_NONE 0u
-#define SETTING_LIVE_COMPOSITOR 1u // the compositor watches /root and reads the file again
+// Who takes a changed value at once. Zero is the common case, the compositor, so a row it takes needs no initialiser.
+#define SETTING_LIVE_COMPOSITOR 0u // the compositor watches /root and reads the file again
+#define SETTING_LIVE_NONE 1u       // the compositor does not watch the row's file; a row says it so
 
 // What the files of the plain rows are called, in /root.
 #define SETTING_BACKGROUND_PATH "/root/canvas.background"
@@ -224,13 +224,13 @@ static const struct settings_row settings_rows[] = {
     //  What the system's own windows say, in which language: one file of languages/ read by every window of the kit, taken
     //  from the window table so a change reaches them at once. Bare, the verb adds what is installed and which are machine-made.
     SETTING_PLAIN_ROW(null, "Language", SETTINGS_CHOICE, SETTINGS_LANGUAGE, ("language"), "language ", SETTINGS_LANGUAGE_CODES,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_LANGUAGE_PATH, .standard = "en", .say = "language", .need = "the language",
+                      .path = SETTING_LANGUAGE_PATH, .standard = "en", .say = "language", .need = "the language",
                       .refusal = "language is one of " SETTINGS_LANGUAGE_CODES ", not %s\n",
                       .usage = "language [CODE|default]",
                       .help = "the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]"),
     SETTING_PLAIN_ROW("Canvas", "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
-                      .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
+                      .type = SETTING_COLOUR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
                       .need = "how Canvas draws", .refusal = "background is a colour like 1e1e1e, or default, not %s\n",
                       .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
@@ -238,68 +238,68 @@ static const struct settings_row settings_rows[] = {
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_THEME_PATH, .standard = "dark", .reset = "dark",
+                      .path = SETTING_THEME_PATH, .standard = "dark", .reset = "dark",
                       .need = "how Canvas draws", .refusal = "theme is light, dark or auto, not %s\n",
                       .usage = "canvas theme [light|dark|auto]",
                       .help = "the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]"),
     SETTING_PLAIN_ROW(null, "Accent", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "theme", "accent"), "accent ",
                       "white amber blue green violet rose graphite",
-                      .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCENT_PATH, .standard = "#ffffff",
+                      .type = SETTING_COLOUR, .path = SETTING_ACCENT_PATH, .standard = "#ffffff",
                       .reset = "reset", .need = "how Canvas draws", .refusal = "accent is a colour like ff8800, or reset, not %s\n",
                       .usage = "canvas theme accent [COLOUR|reset]",
                       .help = "what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]"),
     {null, "Accent colour (rrggbb or reset)", SETTINGS_FIELD, 0, 0, {"canvas", "theme", "accent"}, "accent ", null,
      {"canvas", "theme", "accent"}, null, 0, .how = SETTING_ALIAS},
     SETTING_PLAIN_ROW(null, "Motion", SETTINGS_CHOICE, 0, ("canvas", "motion"), "motion ", "full reduced",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_MOTION_PATH, .standard = "full", .reset = "full",
+                      .path = SETTING_MOTION_PATH, .standard = "full", .reset = "full",
                       .need = "how Canvas draws", .refusal = "motion is full or reduced, not %s\n",
                       .usage = "canvas motion [full|reduced]",
                       .help = "reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]"),
     //  The caret of every text field and the terminal (ui.c's ui_caret_wave): how it blinks, and how wide it is. Off is solid.
     SETTING_PLAIN_ROW(null, "Caret blink speed", SETTINGS_CHOICE, 0, ("canvas", "caret", "blink"), "blink ", "slow normal fast off",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_BLINK_PATH, .standard = "normal", .reset = "normal",
+                      .path = SETTING_CARET_BLINK_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "caret blink is slow, normal, fast or off, not %s\n",
                       .usage = "canvas caret blink [slow|normal|fast|off]",
                       .help = "how the caret blinks, or off for a solid caret [normal]"),
     SETTING_PLAIN_ROW(null, "Caret thickness", SETTINGS_CHOICE, 0, ("canvas", "caret", "thickness"), "thickness ", "thin normal thick",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_THICKNESS_PATH, .standard = "normal", .reset = "normal",
+                      .path = SETTING_CARET_THICKNESS_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "caret thickness is thin, normal or thick, not %s\n",
                       .usage = "canvas caret thickness [thin|normal|thick]",
                       .help = "how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]"),
     //  The text of every window Canvas draws (ui.c's ui_em): its size as a percent of what each role says. A list's rows grow
     //  with it above 100, and a label wider than before makes its button wider; the terminal keeps the size of its own.
     SETTING_PLAIN_ROW(null, "Text size (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "text", "scale"), "scale ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TEXT_SCALE_PATH, .standard = "100",
+                      .type = SETTING_NUMBER, .path = SETTING_TEXT_SCALE_PATH, .standard = "100",
                       .unit = "percent", .low = 50, .high = 300, .need = "how Canvas draws",
                       .usage = "canvas text scale [PERCENT|default]",
                       .help = "how large the text of the windows Canvas draws is, 50 to 300 percent [100]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
-                      .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
+                      .live = SETTING_LIVE_NONE, .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas windows remember [on|off]",
                       .help = "a window opens where the hand last put it, kept across boots [on]"),
     //  The clipboard, an OS service of the compositor's (.github/SECURITY.md): off empties both selections and the
     //  history and refuses every copy; the history is copies kept in the compositor's memory and never on a disk, none
     //  by default, since a clipboard that remembers is a clipboard that leaks what was copied an hour ago.
     SETTING_PLAIN_ROW(null, "Clipboard", SETTINGS_SWITCH, 0, ("canvas", "clipboard"), "clipboard ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_CLIPBOARD_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
 #ifndef SHELL_NO_GPU
     //  Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
     //  has none. Alpha: off by default, so every pixel stays on the processor until the user turns it on. Not in the image
     //  when the build says CONFIG_MOONWATER_GPU=n.
     SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_GPU_PATH, .standard = "off", .need = "how Canvas draws",
+                      .path = SETTING_GPU_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "canvas gpu [on|off]",
                       .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]"),
 #endif
     SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "history"), "history ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_HISTORY_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_CLIPBOARD_HISTORY_PATH,
                       .standard = "0", .unit = "copies", .low = 0, .high = 32, .need = "how Canvas draws",
                       .usage = "canvas clipboard history [N|default]",
                       .help = "copies the compositor keeps in memory, never on a disk, 0 to 32 [0]"),
     SETTING_PLAIN_ROW(null, "Clipboard limit (MiB)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "limit"), "limit ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_LIMIT_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_CLIPBOARD_LIMIT_PATH,
                       .standard = "16", .unit = "MiB", .low = 1, .high = 16, .need = "how Canvas draws",
                       .usage = "canvas clipboard limit [MIB|default]",
                       .help = "the most one copy may be, 1 to 16 MiB [16]"),
@@ -326,71 +326,71 @@ static const struct settings_row settings_rows[] = {
     //  The keyboard on the screen (src/canvas/compositor.c, the osk window): shown while a text field has the keys and there is no
     //  keyboard to type on (auto), never (off), or whenever a field has them (on).
     SETTING_PLAIN_ROW(null, "On-screen keyboard", SETTINGS_CHOICE, 0, ("keyboard", "onscreen"), "onscreen ", "auto off on",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ONSCREEN_PATH, .standard = "auto", .reset = "auto",
+                      .path = SETTING_ONSCREEN_PATH, .standard = "auto", .reset = "auto",
                       .refusal = "the on-screen keyboard is auto, off or on, not %s\n",
                       .usage = "keyboard onscreen [auto|off|on]",
                       .help = "a keyboard on the screen while a text field has the keys: auto when no keyboard is plugged in, off, or on [auto]"),
     SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_SLIDER, 0, ("keyboard", "repeat", "delay"), "delay ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,
                       .usage = "keyboard repeat delay [MS|default]",
                       .help = "how long a key is held before it repeats, 100 to 2000 ms [250]"),
     SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "rate"), "rate ", "off",
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_RATE_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_REPEAT_RATE_PATH,
                       .standard = "30", .unit = "per second", .low = 1, .high = 100,
                       .usage = "keyboard repeat rate [PER-SECOND|off|default]",
                       .help = "repeats a second of a held key, 1 to 100, or none [30]"),
     SETTING_PLAIN_ROW(null, "Mouse sensitivity (percent, or default)", SETTINGS_SLIDER, 0, ("mouse", "sensitivity"), "sensitivity ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,
                       .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]"),
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
+                      .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
     //  The wheel's glide (ui_wheel_turn, every region the wheel turns): on, a notch runs to its step (two and a half rows) over a
     //  short time, starting at once and easing out; off, a notch moves a whole step at once.
     SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
                       .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"),
     SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor look is light, dark or auto, not %s\n"),
     SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_SHAKE_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
     SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_DELAY_PATH,
+                      .type = SETTING_NUMBER, .path = SETTING_SHAKE_DELAY_PATH,
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
     //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
     //  pointer is always predicted, so it has no row.
     SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas predict touch [on|off]",
                       .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]"),
     //  On by default (the owner's call): a finger hides what it presses, and the mark says where the screen read it. It
     //  is drawn for a touch screen's fingers alone, never for a mouse, a pad or a pen, and costs nothing with no finger
     //  down or fading.
     SETTING_PLAIN_ROW(null, "Show touch area", SETTINGS_SWITCH, 0, ("canvas", "touch"), "touch ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
     //  The screen's side edges (ui/touch.h, compositor.c): a swipe in from the left edge runs the window switcher or opens the
     //  launcher, one in from the right runs the switcher or opens the volume popup. Off by default: a swipe from a side is then
     //  the window's, as a touch.
     SETTING_PLAIN_ROW(null, "Left edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "left"), "left ", "off windows launcher",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_LEFT_PATH, .standard = "off", .reset = "off",
+                      .path = SETTING_TOUCH_LEFT_PATH, .standard = "off", .reset = "off",
                       .need = "how Canvas draws", .refusal = "the left edge is off, windows or launcher, not %s\n",
                       .usage = "canvas touch left [off|windows|launcher]",
                       .help = "a swipe in from the left edge runs the window switcher, or opens the launcher [off]"),
     SETTING_PLAIN_ROW(null, "Right edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "right"), "right ", "off windows volume",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_RIGHT_PATH, .standard = "off", .reset = "off",
+                      .path = SETTING_TOUCH_RIGHT_PATH, .standard = "off", .reset = "off",
                       .need = "how Canvas draws", .refusal = "the right edge is off, windows or volume, not %s\n",
                       .usage = "canvas touch right [off|windows|volume]",
                       .help = "a swipe in from the right edge runs the window switcher, or opens the volume popup [off]"),
@@ -399,23 +399,23 @@ static const struct settings_row settings_rows[] = {
     //  scales a trackpad's notches and streams (compositor_pad_pct, the speed row that was in Input); momentum is the coast a
     //  release carries; the rubber band stretches past an end and springs home.
     SETTING_PLAIN_ROW("Scrolling", "Natural direction", SETTINGS_SWITCH, 0, ("canvas", "scroll", "natural"), "natural ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_NATURAL_PATH, .standard = "off", .need = "how Canvas draws",
+                      .path = SETTING_SCROLL_NATURAL_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "canvas scroll natural [on|off]",
                       .help = "a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]"),
     //  A percent of the standard distance, 25 to 400: slow, normal and fast are the words of 60, 100 and 160 (setting_parse keeps
     //  them as the number), so a file that holds a word, as the row once kept, is read as its number.
     SETTING_PLAIN_ROW(null, "Scroll speed", SETTINGS_SLIDER, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "100",
+                      .type = SETTING_NUMBER, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "100",
                       .unit = "percent", .low = 25, .high = 400, .need = "how Canvas draws",
                       .refusal = "trackpad speed is a number from 25 to 400 percent, slow, normal, fast or default, not %s\n",
                       .usage = "canvas trackpad speed [PERCENT|slow|normal|fast|default]",
                       .help = "how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]"),
     SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll momentum [on|off]",
                       .help = "a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]"),
     SETTING_PLAIN_ROW(null, "Rubber band", SETTINGS_SWITCH, 0, ("canvas", "scroll", "rubber"), "rubber ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_RUBBER_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_SCROLL_RUBBER_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll rubber [on|off]",
                       .help = "past the top or the bottom the content stretches and springs back; off, it stops at the end [on]"),
     //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
@@ -424,41 +424,41 @@ static const struct settings_row settings_rows[] = {
     //  back to 100 (a file that said default would be read by the server as no word at all). The card is a name from the page the
     //  server gives it or default for the automatic choice, so its verb is written by hand (host.c).
     SETTING_PLAIN_ROW("Sound", "Volume (percent, or default)", SETTINGS_SLIDER, 0, ("audio", "volume"), "volume ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_AUDIO_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
                       .low = 0, .high = 100, .usage = "audio volume [PERCENT|default]",
                       .help = "the volume of everything that plays, 0 to 100 percent [100]"),
     SETTING_PLAIN_ROW(null, "Mute", SETTINGS_SWITCH, 0, ("audio", "mute"), "mute ", null,
-                      .path = SETTING_AUDIO_MUTE_PATH, .standard = "off", .usage = "audio mute [on|off]",
+                      .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_MUTE_PATH, .standard = "off", .usage = "audio mute [on|off]",
                       .help = "silence everything that plays, and keep the volume [off]"),
     {null, "Output device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "device"}, "device ", null, {"audio", "device"}, null, 0,
      .usage = "audio device [NAME|default]",
      .help = "the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]"},
     SETTING_PLAIN_ROW(null, "Sound server", SETTINGS_SWITCH, 0, ("audio", "server"), "server ", null,
-                      .path = SETTING_AUDIO_SERVER_PATH, .standard = "on", .usage = "audio server [on|off]",
+                      .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_SERVER_PATH, .standard = "on", .usage = "audio server [on|off]",
                       .help = "the server programs play their sound through; off keeps it from starting with the desktop [on]"),
     //  Recording: the person's switch for every program that records (off ends the recordings there are and refuses new ones),
     //  the microphone they are given (a name from the server's page, or default for the first), and that microphone's volume and
     //  mute, which the mixer's input strip and the microphone key change too. The microphone's verb is written by hand (host.c) as
     //  the sound card's is.
     SETTING_PLAIN_ROW(null, "Allow recording", SETTINGS_SWITCH, 0, ("audio", "capture"), "capture ", null,
-                      .path = SETTING_AUDIO_CAPTURE_PATH, .standard = "on", .usage = "audio capture [on|off]",
+                      .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_CAPTURE_PATH, .standard = "on", .usage = "audio capture [on|off]",
                       .help = "let programs record from the microphone; off ends every recording and refuses new ones [on]"),
     {null, "Input device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "source"}, "source ", null, {"audio", "source"}, null, 0,
      .usage = "audio source [NAME|default]",
      .help = "the microphone programs record from, by the name bare audio lists; default picks the first [default]"},
     SETTING_PLAIN_ROW(null, "Input volume (percent, or default)", SETTINGS_SLIDER, 0, ("audio", "input", "volume"), "volume ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_AUDIO_SOURCE_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_SOURCE_VOLUME_PATH, .standard = "100", .reset = "100", .unit = "percent",
                       .low = 0, .high = 100, .usage = "audio input volume [PERCENT|default]",
                       .help = "the volume of the microphone, 0 to 100 percent [100]"),
     SETTING_PLAIN_ROW(null, "Input mute", SETTINGS_SWITCH, 0, ("audio", "input", "mute"), "mute ", null,
-                      .path = SETTING_AUDIO_SOURCE_MUTE_PATH, .standard = "off", .usage = "audio input mute [on|off]",
+                      .live = SETTING_LIVE_NONE, .path = SETTING_AUDIO_SOURCE_MUTE_PATH, .standard = "off", .usage = "audio input mute [on|off]",
                       .help = "silence the microphone, and keep its volume [off]"),
     SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
+                      .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",
                       .usage = "taskbar position [bottom|top|left|right]", .help = "the edge of the screen the taskbar sits on [bottom]"),
     SETTING_PLAIN_ROW(null, "Taskbar display", SETTINGS_CHOICE, 0, ("taskbar", "display"), "display ", "primary all",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
+                      .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
                       .usage = "taskbar display [primary|all]", .help = "the screens the taskbar is on: the primary, or all, each listing its windows [primary]"),
     //  The taskbar's own size, on top of its screen's scale: how thick the band is and how large everything in it is drawn (its tabs'
@@ -466,32 +466,32 @@ static const struct settings_row settings_rows[] = {
     //  it, at that scale (the gap between the tabs is fixed). Each is a slider in the window and any number in range to the verb. The compositor takes both from their files (compositor_taskbar_settings_read), a missing file or a
     //  word that is none being the standard.
     SETTING_PLAIN_ROW(null, "Taskbar scale (percent)", SETTINGS_SLIDER, 0, ("taskbar", "scale"), "scale ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_SCALE_PATH, .standard = "100",
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_SCALE_PATH, .standard = "100",
                       .unit = "percent", .low = 50, .high = 200, .need = "how Canvas draws",
                       .usage = "taskbar scale [PERCENT|default]",
                       .help = "how large the taskbar and what it shows are, 50 to 200 percent of the screen scale [100]"),
     SETTING_PLAIN_ROW(null, "Taskbar padding (pixels)", SETTINGS_SLIDER, 0, ("taskbar", "padding"), "padding ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "6",
+                      .type = SETTING_NUMBER, .path = SETTING_TASKBAR_PADDING_PATH, .standard = "6",
                       .unit = "px", .low = 0, .high = 24, .need = "how Canvas draws",
                       .usage = "taskbar padding [PX|default]",
                       .help = "the room round the text inside each taskbar tab, 0 to 24 pixels at the taskbar scale [6]"),
     //  Off by default: the launcher opens from its key alone. On, the band has a tab with the launcher's mark at its leading end (the
     //  left of a bottom or top band, the top of a side one) that opens and closes the launcher beside it.
     SETTING_PLAIN_ROW(null, "Taskbar launcher button", SETTINGS_SWITCH, 0, ("taskbar", "launcher"), "launcher ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off", .need = "how Canvas draws",
+                      .path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "taskbar launcher [on|off]",
                       .help = "a tab with the launcher mark at the start of the taskbar that opens the launcher beside it and puts it away again [off]"),
     //  On, which is the default, the band slides off its edge while a window is fullscreen (compositor.c takes it from its file,
     //  and a missing file or a file that says default is on) and comes back when none is. Off, the band stays where it is.
     SETTING_PLAIN_ROW(null, "Taskbar hides for fullscreen", SETTINGS_SWITCH, 0, ("taskbar", "fullscreen"), "fullscreen ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_FULLSCREEN_PATH, .standard = "on", .need = "how Canvas draws",
+                      .path = SETTING_TASKBAR_FULLSCREEN_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "taskbar fullscreen [on|off]",
                       .help = "the taskbar slides away while a window is fullscreen, and comes back when none is [on]"),
     //  The letters' tops toward the middle by default: a side band is then the bottom band stood on its end, its titles
     //  facing the round corners of its tabs as the bottom band's do. Flipping the default is this row's standard, its
     //  help and the README's line; the compositor takes the standard from here, and a file that says default follows it.
     SETTING_PLAIN_ROW(null, "Side taskbar text faces", SETTINGS_CHOICE, 0, ("taskbar", "text"), "text ", "center edge",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TEXT_PATH, .standard = "center",
+                      .path = SETTING_TASKBAR_TEXT_PATH, .standard = "center",
                       .need = "how Canvas draws", .refusal = "taskbar text is center or edge, not %s\n",
                       .usage = "taskbar text [center|edge]",
                       .help = "on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]"),
@@ -500,7 +500,7 @@ static const struct settings_row settings_rows[] = {
      SETTINGS_LINE, {"taskbar", "tray"}, "tray ", null, {"taskbar", "tray"}, null, 0,
      .usage = "taskbar tray [FORMAT|default]",
      .help = "what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]",
-     .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TRAY_PATH},
+     .path = SETTING_TASKBAR_TRAY_PATH},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0,
@@ -508,13 +508,13 @@ static const struct settings_row settings_rows[] = {
     //  The hours a clock is read in: the tray's (when its format is the standard one) and, to a bowl's GNOME programs, the
     //  portal's clock-format. A tray format of the person's own says its hours itself.
     SETTING_PLAIN_ROW(null, "Clock format", SETTINGS_CHOICE, 0, ("time", "format"), "format ", "24h 12h",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLOCK_FORMAT_PATH, .standard = "24h", .need = "how Canvas draws",
+                      .path = SETTING_CLOCK_FORMAT_PATH, .standard = "24h", .need = "how Canvas draws",
                       .refusal = "clock format is 24h or 12h, not %s\n", .usage = "time format [24h|12h]",
                       .help = "the hours the clock is read in, on the tray and in GNOME programs [24h]"),
     //  The date the standard tray says beside the clock, in the order a person reads it: year first (2026-11-04), day first
     //  (04.11.2026) or month first (11/04/2026). A tray format of the person's own says its date itself with {date.*}.
     SETTING_PLAIN_ROW(null, "Date format", SETTINGS_CHOICE, 0, ("time", "date"), "date ", "off ymd dmy mdy",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_DATE_FORMAT_PATH, .standard = "off", .need = "how Canvas draws",
+                      .path = SETTING_DATE_FORMAT_PATH, .standard = "off", .need = "how Canvas draws",
                       .refusal = "date format is off, ymd, dmy or mdy, not %s\n", .usage = "time date [off|ymd|dmy|mdy]",
                       .help = "the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]"),
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
