@@ -12108,6 +12108,8 @@ static void compositor_word(const char *path, char *word, unsigned int room)
         always was). Read when the compositor starts and again when a file of them is written; a word it
         does not know is the default, as if nothing were kept. What changed is drawn at once.
 */
+static p8 compositor_setting_kept(const char *path, const char *word, long *value);
+
 static void compositor_look_read(void)
 {
         char word[16];
@@ -12299,7 +12301,6 @@ static unsigned int compositor_ink_role(int role)
         return compositor_chrome_now()->roles.role[role];
 }
 
-static p8 compositor_setting_kept(const char *path, const char *word, long *value);
 
 // The wheel's glide (ui_wheel_turn), as the table keeps it: a change knocks every window, as a theme change does.
 static void compositor_wheel_publish(unsigned int off)
