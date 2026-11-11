@@ -72154,11 +72154,11 @@ static fn byte_reader_rows(void)
                                                            ? want | (p64)bytes[at + i] << 8 * i
                                                            : want << 8 | bytes[at + i];
                                         got = operation == 0 ? byte_reader_u8(&reader)
-                                              : operation == 1 ? byte_reader_u16(&reader)
+                                              : operation == 1 ? (p16)byte_reader_uint(&reader, 2, true)
                                               : operation == 2 ? byte_reader_u24(&reader)
-                                              : operation == 3 ? byte_reader_u32(&reader)
-                                              : operation == 10 ? byte_reader_u16le(&reader)
-                                                                : byte_reader_u32le(&reader);
+                                              : operation == 3 ? (p32)byte_reader_uint(&reader, 4, true)
+                                              : operation == 10 ? (p16)byte_reader_uint(&reader, 2, false)
+                                                                : (p32)byte_reader_uint(&reader, 4, false);
                                         values &= got == want;
                                         if (fits)
                                                 at += width;

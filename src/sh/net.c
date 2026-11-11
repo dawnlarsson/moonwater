@@ -2256,15 +2256,15 @@ static bool net_arp_claims(const p8 address_to packet, positive size,
                            const p8 address_to hardware, p32 address)
 {
         byte_reader reader = byte_reader_open(packet, size);
-        p16 medium = byte_reader_u16(address_of reader);
-        p16 protocol = byte_reader_u16(address_of reader);
+        p16 medium = (p16)byte_reader_uint(address_of reader, 2, true);
+        p16 protocol = (p16)byte_reader_uint(address_of reader, 2, true);
         p8 hardware_length = byte_reader_u8(address_of reader);
         p8 protocol_length = byte_reader_u8(address_of reader);
-        p16 operation = byte_reader_u16(address_of reader);
+        p16 operation = (p16)byte_reader_uint(address_of reader, 2, true);
         const p8 address_to sender = byte_reader_take(address_of reader, 6);
-        p32 sender_address = byte_reader_u32(address_of reader);
+        p32 sender_address = (p32)byte_reader_uint(address_of reader, 4, true);
         p32 target_address = byte_reader_skip(address_of reader, 6)
-                                 ? byte_reader_u32(address_of reader)
+                                 ? (p32)byte_reader_uint(address_of reader, 4, true)
                                  : 0;
 
         return byte_reader_ok(address_of reader) && medium == 1 &&

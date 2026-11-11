@@ -75099,7 +75099,7 @@ int main(void)
                         if (byte_reader_ok(&window) && window.left)
                                 assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
                 } else if (kind == 3) {
-                        (void)byte_reader_u32(&reader);
+                        (void)(p32)byte_reader_uint(&reader, 4, true);
                 } else {
                         (void)byte_reader_u8(&reader);
                 }
@@ -76564,8 +76564,8 @@ int main(void) {
 NET_DEPENDENCY_PRIMITIVES = frozenset("""
 array_count array_store_release array_store_reserve
 byte_reader_dead byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
-byte_reader_skip byte_reader_take byte_reader_u16 byte_reader_u16le
-byte_reader_u24 byte_reader_u32 byte_reader_u32le byte_reader_u8 byte_reader_vector16
+byte_reader_skip byte_reader_take byte_reader_uint
+byte_reader_u24 byte_reader_u8 byte_reader_vector16
 byte_reader_vector24 byte_reader_vector8 byte_reader_window
 byte_store_append_exact byte_store_release byte_store_reserve
 memory_checked memory_compare memory_compare_ascii_case memory_copy memory_copy_apart

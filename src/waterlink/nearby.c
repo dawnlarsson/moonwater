@@ -1435,7 +1435,7 @@ static p32 link_nearby_local(p8 address_to control, positive length,
             byte_reader_left(&data) < 12)
                 return 0;
         (void)byte_reader_skip(&data, 4);
-        return byte_reader_u32(&data);
+        return (p32)byte_reader_uint(&data, 4, true);
 }
 #endif
 

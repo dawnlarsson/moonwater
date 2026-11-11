@@ -4893,7 +4893,7 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
                 if ((tag & 3) == 0)
                         size = byte_reader_u8(&packet);
                 else if ((tag & 3) == 1)
-                        size = byte_reader_u16(&packet);
+                        size = (p16)byte_reader_uint(&packet, 2, true);
                 else
                         return false;
         }
@@ -4909,7 +4909,7 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
         into->hash = byte_reader_u8(&body);
         if (into->hash != 8 && into->hash != 10)
                 return false;
-        into->hashed_length = byte_reader_u16(&body);
+        into->hashed_length = (p16)byte_reader_uint(&body, 2, true);
         hashed = byte_reader_window(&body, into->hashed_length);
         if (!byte_reader_ok(&body))
                 return false;
@@ -4933,7 +4933,7 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
                 kind = byte_reader_u8(&field);
                 if (kind == 2 && span == 5 && !created)
                 {
-                        into->created = byte_reader_u32(&field);
+                        into->created = (p32)byte_reader_uint(&field, 4, true);
                         created = true;
                 }
                 else if (kind == 33 && span == 22 && !listed &&
@@ -4957,11 +4957,11 @@ static bool bowl_signature_read(const p8 address_to bytes, positive length,
                 return false;
 
         // The unhashed area is an attacker's and is not read.
-        unhashed = byte_reader_u16(&body);
+        unhashed = (p16)byte_reader_uint(&body, 2, true);
         (void)byte_reader_skip(&body, unhashed);
         into->left[0] = byte_reader_u8(&body);
         into->left[1] = byte_reader_u8(&body);
-        bits = byte_reader_u16(&body);
+        bits = (p16)byte_reader_uint(&body, 2, true);
         into->mpi_length = (bits + 7) / 8;
         into->mpi = byte_reader_take(&body, into->mpi_length);
         // The count is the integer's own width, so one integer has one spelling.

@@ -6966,7 +6966,7 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                         continue;
                 //      The OUI and data type, read once: each test below is of
                 //      the same four bytes.
-                type = byte_reader_u32(&element);
+                type = (p32)byte_reader_uint(&element, 4, true);
                 //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
                 //      byte, then a CCMP key of sixteen bytes.
                 if (span == 4 + 2 + 16 && type == 0x000fac01 && !found)
@@ -6986,7 +6986,7 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                 //      key starts at, and a BIP-CMAC-128 key of sixteen bytes.
                 else if (span == 4 + 2 + 6 + 16 && type == 0x000fac09 && !what->igtk_id)
                 {
-                        p16 key_id = byte_reader_u16le(&element);
+                        p16 key_id = (p16)byte_reader_uint(&element, 2, false);
 
                         if (key_id == 4 || key_id == 5)
                         {
@@ -8456,7 +8456,7 @@ static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
                                      wifi_sae_frame address_to out)
 {
         byte_reader reader = byte_reader_open(frame, size);
-        p16 control = byte_reader_u16le(&reader);
+        p16 control = (p16)byte_reader_uint(&reader, 2, false);
         const p8 address_to transmitter;
         const p8 address_to network;
         p16 algorithm;
@@ -8466,9 +8466,9 @@ static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
         transmitter = byte_reader_take(&reader, 6);
         network = byte_reader_take(&reader, 6);
         (void)byte_reader_skip(&reader, 2);
-        algorithm = byte_reader_u16le(&reader);
-        out->transaction = byte_reader_u16le(&reader);
-        out->status = byte_reader_u16le(&reader);
+        algorithm = (p16)byte_reader_uint(&reader, 2, false);
+        out->transaction = (p16)byte_reader_uint(&reader, 2, false);
+        out->status = (p16)byte_reader_uint(&reader, 2, false);
         //      A management frame of the authentication subtype, not
         //      protected, from the access point and in its network.
         if (!byte_reader_ok(&reader) || (control & 0x40ff) != 0x00b0 || algorithm != 3 ||
@@ -8477,7 +8477,7 @@ static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
         if (out->transaction == 1 &&
             (out->status == 0 || out->status == WIFI_SAE_H2E_STATUS))
         {
-                out->group = byte_reader_u16le(&reader);
+                out->group = (p16)byte_reader_uint(&reader, 2, false);
                 if (out->group != WIFI_SAE_GROUP)
                         return byte_reader_ok(&reader);
                 out->scalar = byte_reader_take(&reader, 32);
@@ -8491,7 +8491,7 @@ static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
         }
         if (out->transaction == 1 && out->status == WIFI_SAE_TOKEN_STATUS)
         {
-                out->group = byte_reader_u16le(&reader);
+                out->group = (p16)byte_reader_uint(&reader, 2, false);
                 if (h2e)
                 {
                         byte_reader container;
@@ -8511,7 +8511,7 @@ static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
         }
         if (out->transaction == 2 && !out->status)
         {
-                out->send_confirm = byte_reader_u16le(&reader);
+                out->send_confirm = (p16)byte_reader_uint(&reader, 2, false);
                 out->confirm = byte_reader_take(&reader, 32);
                 return byte_reader_ok(&reader) && byte_reader_end(&reader);
         }
@@ -8835,13 +8835,13 @@ static COLD bool wifi_assoc_status_read(const p8 address_to frame, positive size
                                         const p8 address_to bssid, p16 address_to status)
 {
         byte_reader reader = byte_reader_open(frame, size);
-        p16 control = byte_reader_u16le(&reader);
+        p16 control = (p16)byte_reader_uint(&reader, 2, false);
         const p8 address_to transmitter;
 
         (void)byte_reader_skip(&reader, 2 + 6);
         transmitter = byte_reader_take(&reader, 6);
         (void)byte_reader_skip(&reader, 6 + 2 + 2);
-        address_to status = byte_reader_u16le(&reader);
+        address_to status = (p16)byte_reader_uint(&reader, 2, false);
         return byte_reader_ok(&reader) &&
                ((control & 0x40ff) == 0x0010 || (control & 0x40ff) == 0x0030) &&
                !memory_compare(transmitter, bssid, 6);
@@ -10360,17 +10360,17 @@ static p8 radio_rsn_security(p8 address_to element, positive length,
         //      and the key management suites, each a count and that many
         //      four byte suites, then the capabilities.
         (void)byte_reader_skip(&reader, 2);
-        group = byte_reader_u32(&reader);
-        count = byte_reader_u16le(&reader);
+        group = (p32)byte_reader_uint(&reader, 4, true);
+        count = (p16)byte_reader_uint(&reader, 2, false);
         pairwise = byte_reader_window(&reader, 4 * count);
-        count = byte_reader_u16le(&reader);
+        count = (p16)byte_reader_uint(&reader, 2, false);
         if (!byte_reader_ok(&reader))
                 return RADIO_WPA2;
         caps->group = radio_cipher_bit(group);
         caps->pairwise = 0;
         caps->akms = 0;
         while (byte_reader_left(&pairwise) >= 4)
-                caps->pairwise |= radio_cipher_bit(byte_reader_u32(&pairwise));
+                caps->pairwise |= radio_cipher_bit((p32)byte_reader_uint(&pairwise, 4, true));
         for (which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
         {
                 p32 oui = byte_reader_u24(&reader);
@@ -10398,7 +10398,7 @@ static p8 radio_rsn_security(p8 address_to element, positive length,
                 }
         }
         if (which == count && byte_reader_left(&reader) >= 2)
-                capabilities = byte_reader_u16le(&reader);
+                capabilities = (p16)byte_reader_uint(&reader, 2, false);
         caps->pmf = (p8)((capabilities & 0x0080 ? WIFI_PMF_CAPABLE : 0) |
                          (capabilities & 0x0040 ? WIFI_PMF_REQUIRED : 0));
 
@@ -10451,7 +10451,7 @@ static p8 radio_ies_security(p8 address_to elements, positive size, p16 capabili
                         extension = true;
                         h2e = span && (byte_reader_u8(&data) & 0x20) ? 1 : 0;
                 }
-                else if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
+                else if (id == 221 && span >= 4 && (p32)byte_reader_uint(&data, 4, true) == 0x0050f201)
                         wpa = true;
         }
         if (rsn)

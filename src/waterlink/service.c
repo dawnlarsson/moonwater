@@ -1353,13 +1353,13 @@ static p8 link_control_find(p8 address_to control, positive length,
 
         while (byte_reader_left(&reader) >= 16)
         {
-                p64 size = byte_reader_u32le(&reader);
+                p64 size = (p32)byte_reader_uint(&reader, 4, false);
                 b32 has_level;
                 b32 has_type;
 
-                size |= (p64)byte_reader_u32le(&reader) << 32;
-                has_level = byte_reader_u32le(&reader);
-                has_type = byte_reader_u32le(&reader);
+                size |= (p64)(p32)byte_reader_uint(&reader, 4, false) << 32;
+                has_level = (p32)byte_reader_uint(&reader, 4, false);
+                has_type = (p32)byte_reader_uint(&reader, 4, false);
                 if (size < 16 || size - 16 > byte_reader_left(&reader))
                         break;
                 *data = byte_reader_window(&reader, (positive)size - 16);
@@ -1384,7 +1384,7 @@ static b32 link_control_int(p8 address_to control, positive length,
         return link_control_find(control, length, room, level, type,
                                  address_of data) &&
                        byte_reader_left(&data) >= 4
-                       ? (b32)byte_reader_u32le(&data)
+                       ? (b32)(p32)byte_reader_uint(&data, 4, false)
                        : -1;
 }
 

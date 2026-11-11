@@ -820,8 +820,8 @@ static COLD bool netlink_attributes(p8 address_to bytes, positive length,
 
         while (byte_reader_left(&reader) >= sizeof(netlink_attribute))
         {
-                positive whole = byte_reader_u16le(&reader);
-                p16 kind = byte_reader_u16le(&reader);
+                positive whole = (p16)byte_reader_uint(&reader, 2, false);
+                p16 kind = (p16)byte_reader_uint(&reader, 2, false);
                 byte_reader value;
 
                 if (whole < sizeof(netlink_attribute))
@@ -1666,8 +1666,8 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
                         //      The type and class, the time to live, and the
                         //      data behind its length.
-                        kind = byte_reader_u16(&tail);
-                        class = byte_reader_u16(&tail);
+                        kind = (p16)byte_reader_uint(&tail, 2, true);
+                        class = (p16)byte_reader_uint(&tail, 2, true);
                         (void)byte_reader_skip(&tail, 4);
                         data = byte_reader_vector16(&tail);
                         if (owner_length < 0 || !byte_reader_ok(&tail))
@@ -1687,7 +1687,7 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
                                 if (data_length != 4)
                                         return DNS_MALFORMED;
                                 if (!has_address)
-                                        address = byte_reader_u32(&value);
+                                        address = (p32)byte_reader_uint(&value, 4, true);
                                 has_address = true;
                         }
                         else if (class == DNS_CLASS_IN && is_wanted &&
@@ -1749,12 +1749,12 @@ static COLD bool dns_reply_identity(
     p8 address_to request, positive question_length, bool folded)
 {
         byte_reader reader = byte_reader_open(reply, size);
-        p16 asked = byte_reader_u16(&reader);
+        p16 asked = (p16)byte_reader_uint(&reader, 2, true);
         p16 questions;
         const p8 address_to question;
 
         (void)byte_reader_skip(&reader, 2);
-        questions = byte_reader_u16(&reader);
+        questions = (p16)byte_reader_uint(&reader, 2, true);
         (void)byte_reader_skip(&reader, 6);
         question = byte_reader_take(&reader, question_length);
         return byte_reader_ok(&reader) && asked == id && questions == 1 &&
@@ -1819,11 +1819,11 @@ static COLD bipolar dns_reply_result(
                 byte_reader header = byte_reader_open(reply, available);
 
                 (void)byte_reader_skip(&header, 2);
-                flags = byte_reader_u16(&header);
+                flags = (p16)byte_reader_uint(&header, 2, true);
                 (void)byte_reader_skip(&header, 2);
-                answers = byte_reader_u16(&header);
-                authorities = byte_reader_u16(&header);
-                additional = byte_reader_u16(&header);
+                answers = (p16)byte_reader_uint(&header, 2, true);
+                authorities = (p16)byte_reader_uint(&header, 2, true);
+                additional = (p16)byte_reader_uint(&header, 2, true);
         }
         /* This resolver sends only standard QUERY requests.  A response with
            another opcode is not an answer to the transaction merely because
@@ -10008,7 +10008,7 @@ static COLD bool tls_entry_status(const p8 address_to bytes, positive length,
         address_to response_length = 0;
         if (!length)
                 return true;
-        if (!asked || byte_reader_u16(&reader) != 5)
+        if (!asked || (p16)byte_reader_uint(&reader, 2, true) != 5)
                 return false;
         status = byte_reader_vector16(&reader);
         if (!byte_reader_end(&reader) || byte_reader_u8(&status) != 1)
@@ -10533,7 +10533,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
         if (length < 44 || byte_reader_u8(&message) != TLS_HS_SERVER_HELLO)
                 return TLS_FAIL;
         body = byte_reader_window(&message, byte_reader_u24(&message));
-        if (!byte_reader_end(&message) || byte_reader_u16(&body) != 0x0303)
+        if (!byte_reader_end(&message) || (p16)byte_reader_uint(&body, 2, true) != 0x0303)
                 return TLS_FAIL;
         hello_random = byte_reader_take(&body, 32);
         if (!hello_random)
@@ -10547,7 +10547,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
         session = byte_reader_u8(&body);
         if (session > 32 || !byte_reader_skip(&body, session))
                 return TLS_FAIL;
-        suite = byte_reader_u16(&body);
+        suite = (p16)byte_reader_uint(&body, 2, true);
         if (byte_reader_u8(&body) != 0 || !byte_reader_ok(&body))
                 return TLS_FAIL;
         //      The extensions, when there are any, fill what is left.
@@ -10560,7 +10560,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
 
         while (byte_reader_left(&extensions))
         {
-                positive id = byte_reader_u16(&extensions);
+                positive id = (p16)byte_reader_uint(&extensions, 2, true);
                 byte_reader data = byte_reader_vector16(&extensions);
                 positive bit = 8;
 
@@ -10582,13 +10582,13 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
 
                 if (id == 0x002b)
                 {
-                        if (byte_reader_u16(&data) != 0x0304 ||
+                        if ((p16)byte_reader_uint(&data, 2, true) != 0x0304 ||
                             !byte_reader_end(&data))
                                 return TLS_FAIL;
                 }
                 else if (id == 0x0033)
                 {
-                        positive named = byte_reader_u16(&data);
+                        positive named = (p16)byte_reader_uint(&data, 2, true);
                         positive klen = tls_share_length(named);
                         const p8 address_to share;
 
@@ -10600,7 +10600,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                         if (retry)
                                 klen = 0;
                         else if (klen > room ||
-                                 byte_reader_u16(&data) != klen)
+                                 (p16)byte_reader_uint(&data, 2, true) != klen)
                                 return TLS_FAIL;
                         share = byte_reader_take(&data, klen);
                         if (!share || !byte_reader_end(&data))
@@ -10616,7 +10616,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
 
                         if (!retry || byte_reader_left(&whole) < 3)
                                 return TLS_FAIL;
-                        inner = byte_reader_u16(&data);
+                        inner = (p16)byte_reader_uint(&data, 2, true);
                         if (inner != byte_reader_left(&data))
                                 return TLS_FAIL;
                         address_to cookie = byte_reader_here(&whole);
@@ -10942,7 +10942,7 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
 
         //      The message's own four-byte header, the scheme, the signature.
         (void)byte_reader_skip(&reader, 4);
-        scheme = byte_reader_u16(&reader);
+        scheme = (p16)byte_reader_uint(&reader, 2, true);
         signature = byte_reader_vector16(&reader);
         if (!byte_reader_end(&reader))
                 return TLS_FAIL;
@@ -11038,7 +11038,7 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
 
         while (byte_reader_left(&list))
         {
-                p16 kind = byte_reader_u16(&list);
+                p16 kind = (p16)byte_reader_uint(&list, 2, true);
 
                 (void)byte_reader_vector16(&list);
                 if (!byte_reader_ok(&list))
@@ -11064,7 +11064,7 @@ static COLD bool tls_alpn_named(const tls_conn address_to tls,
 
         while (byte_reader_left(&list))
         {
-                p16 kind = byte_reader_u16(&list);
+                p16 kind = (p16)byte_reader_uint(&list, 2, true);
                 byte_reader value = byte_reader_vector16(&list);
 
                 if (!byte_reader_ok(&list))
@@ -11315,10 +11315,10 @@ static COLD bool tls12_key_exchange(tls_conn address_to tls, p8 address_to body,
 
         if (byte_reader_u8(&reader) != 3)
                 return false;
-        group = byte_reader_u16(&reader);
+        group = (p16)byte_reader_uint(&reader, 2, true);
         point = byte_reader_vector8(&reader);
         params = byte_reader_left(&parameters) - byte_reader_left(&reader);
-        scheme = byte_reader_u16(&reader);
+        scheme = (p16)byte_reader_uint(&reader, 2, true);
         signature = byte_reader_vector16(&reader);
         if (!byte_reader_end(&reader) ||
             byte_reader_left(&point) != tls_share_length(group) ||
@@ -14142,8 +14142,8 @@ static COLD bool tls_ct_sct_read(byte_reader address_to reader, tls_ct_sct addre
         if (byte_reader_u8(reader) != 0)
                 return false;
         sct->id = byte_reader_take(reader, 32);
-        high = byte_reader_u32(reader);
-        sct->timestamp = (p64)high << 32 | byte_reader_u32(reader);
+        high = (p32)byte_reader_uint(reader, 4, true);
+        sct->timestamp = (p64)high << 32 | (p32)byte_reader_uint(reader, 4, true);
         extensions = byte_reader_vector16(reader);
         sct->extensions = byte_reader_here(address_of extensions);
         sct->extensions_length = byte_reader_left(address_of extensions);
@@ -14809,7 +14809,7 @@ static COLD bool tls_overlay_anchor_read(byte_reader address_to text,
 {
         p8 curve = byte_reader_u8(text);
         bool zero = !byte_reader_u8(text) && !byte_reader_u8(text) && !byte_reader_u8(text);
-        p32 exponent = byte_reader_u32le(text);
+        p32 exponent = (p32)byte_reader_uint(text, 4, false);
         const p8 address_to name = byte_reader_take(text, 32);
         positive length = byte_reader_left(text);
         const p8 address_to key = byte_reader_take(text, length);
@@ -14836,8 +14836,8 @@ static COLD bool tls_overlay_entries(const p8 address_to bytes, positive length,
 {
         byte_reader reader = byte_reader_open(bytes, length);
         const p8 address_to magic = byte_reader_take(address_of reader, 8);
-        p32 size = byte_reader_u32le(address_of reader);
-        bool zero = !byte_reader_u32le(address_of reader);
+        p32 size = (p32)byte_reader_uint(address_of reader, 4, false);
+        bool zero = !(p32)byte_reader_uint(address_of reader, 4, false);
         byte_reader entries = byte_reader_window(address_of reader, size);
 
         if (!magic || memory_compare(magic, TLS_OVERLAY_MAGIC, 8) || !zero ||
@@ -14847,9 +14847,9 @@ static COLD bool tls_overlay_entries(const p8 address_to bytes, positive length,
         {
                 p8 list = byte_reader_u8(address_of entries);
                 p8 kind = byte_reader_u8(address_of entries);
-                p16 id = byte_reader_u16le(address_of entries);
-                p16 text_length = byte_reader_u16le(address_of entries);
-                bool reserved = byte_reader_u16le(address_of entries) != 0;
+                p16 id = (p16)byte_reader_uint(address_of entries, 2, false);
+                p16 text_length = (p16)byte_reader_uint(address_of entries, 2, false);
+                bool reserved = (p16)byte_reader_uint(address_of entries, 2, false) != 0;
                 byte_reader text = byte_reader_window(address_of entries, text_length);
                 byte_reader padding = byte_reader_window(address_of entries,
                                                          (positive)(4 - text_length % 4) % 4);
@@ -15071,7 +15071,7 @@ static COLD bool nts_ke_complete(const p8 address_to data, positive length)
 
         while (byte_reader_left(&reader) >= 4)
         {
-                p16 type = byte_reader_u16(&reader);
+                p16 type = (p16)byte_reader_uint(&reader, 2, true);
 
                 (void)byte_reader_vector16(&reader);
                 if (!byte_reader_ok(&reader))
@@ -15101,7 +15101,7 @@ static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
         state->port = NTS_NTP_PORT;
         while (!done && byte_reader_left(&reader))
         {
-                p16 type = byte_reader_u16(&reader);
+                p16 type = (p16)byte_reader_uint(&reader, 2, true);
                 byte_reader body = byte_reader_vector16(&reader);
                 positive size = byte_reader_left(&body);
                 bool critical = (type & 0x8000) != 0;
@@ -15116,7 +15116,7 @@ static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
                         done = true;
                         break;
                 case 1:
-                        if (protocol || size != 2 || byte_reader_u16(&body))
+                        if (protocol || size != 2 || (p16)byte_reader_uint(&body, 2, true))
                                 return NTS_KE_MALFORMED;
                         protocol = true;
                         break;
@@ -15127,7 +15127,7 @@ static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
                         return NTS_KE_ERROR;
                 case 4:
                         if (algorithm || size != 2 ||
-                            byte_reader_u16(&body) != NTS_AEAD_SIV_CMAC_256)
+                            (p16)byte_reader_uint(&body, 2, true) != NTS_AEAD_SIV_CMAC_256)
                                 return NTS_KE_MALFORMED;
                         algorithm = true;
                         break;
@@ -15151,7 +15151,7 @@ static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
                 case 7:
                         if (ported || size != 2)
                                 return NTS_KE_MALFORMED;
-                        state->port = byte_reader_u16(&body);
+                        state->port = (p16)byte_reader_uint(&body, 2, true);
                         if (!state->port)
                                 return NTS_KE_MALFORMED;
                         ported = true;
@@ -15306,8 +15306,8 @@ static COLD fn nts_cookies_take(nts_state address_to state,
 
         while (byte_reader_left(&reader) >= 4)
         {
-                p16 type = byte_reader_u16(&reader);
-                positive size = byte_reader_u16(&reader);
+                p16 type = (p16)byte_reader_uint(&reader, 2, true);
+                positive size = (p16)byte_reader_uint(&reader, 2, true);
 
                 if (size < 4 || size % 4 || size - 4 > byte_reader_left(&reader))
                         return;
@@ -15348,7 +15348,7 @@ static COLD bipolar nts_reply(nts_exchange address_to exchange,
         (void)byte_reader_u8(&reader);
         stratum = byte_reader_u8(&reader);
         (void)byte_reader_skip(&reader, 10);
-        kiss = byte_reader_u32(&reader);
+        kiss = (p32)byte_reader_uint(&reader, 4, true);
         (void)byte_reader_skip(&reader, NTS_HEADER - 16);
         if (!byte_reader_ok(&reader))
                 return NTS_REPLY_IGNORE;
@@ -15356,8 +15356,8 @@ static COLD bipolar nts_reply(nts_exchange address_to exchange,
         while (byte_reader_left(&fields))
         {
                 positive at = length - byte_reader_left(&fields);
-                p16 type = byte_reader_u16(&fields);
-                positive size = byte_reader_u16(&fields);
+                p16 type = (p16)byte_reader_uint(&fields, 2, true);
+                positive size = (p16)byte_reader_uint(&fields, 2, true);
                 byte_reader body;
 
                 if (!byte_reader_ok(&fields) || size < 16 || size % 4 ||
@@ -15387,8 +15387,8 @@ static COLD bipolar nts_reply(nts_exchange address_to exchange,
                 return !stratum && kiss == NTS_KISS_NTSN ? NTS_REPLY_NAK
                                                           : NTS_REPLY_IGNORE;
         {
-                positive nonce_length = byte_reader_u16(&auth);
-                positive cipher_length = byte_reader_u16(&auth);
+                positive nonce_length = (p16)byte_reader_uint(&auth, 2, true);
+                positive cipher_length = (p16)byte_reader_uint(&auth, 2, true);
                 positive nonce_padded = (nonce_length + 3) & ~(positive)3;
                 positive cipher_padded = (cipher_length + 3) & ~(positive)3;
                 const p8 address_to nonce = byte_reader_take(&auth, nonce_padded);
@@ -17576,7 +17576,7 @@ typedef struct
 static COLD p32 dhcp_sum(byte_reader block, p32 sum)
 {
         while (byte_reader_left(&block) >= 2)
-                sum += byte_reader_u16(&block);
+                sum += (p16)byte_reader_uint(&block, 2, true);
         if (byte_reader_left(&block))
                 sum += (p32)byte_reader_u8(&block) << 8;
         while (sum >> 16)
@@ -17604,14 +17604,14 @@ static COLD bool dhcp_unframe(const p8 address_to frame, positive size,
         p16 checksum;
 
         (void)byte_reader_u8(&fields);           // type of service
-        total = byte_reader_u16(&fields);
-        (void)byte_reader_u16(&fields);          // identification
-        fragment = byte_reader_u16(&fields);
+        total = (p16)byte_reader_uint(&fields, 2, true);
+        (void)(p16)byte_reader_uint(&fields, 2, true);          // identification
+        fragment = (p16)byte_reader_uint(&fields, 2, true);
         (void)byte_reader_u8(&fields);           // time to live
         protocol = byte_reader_u8(&fields);
-        (void)byte_reader_u16(&fields);          // header checksum
-        source = byte_reader_u32(&fields);
-        destination = byte_reader_u32(&fields);
+        (void)(p16)byte_reader_uint(&fields, 2, true);          // header checksum
+        source = (p32)byte_reader_uint(&fields, 4, true);
+        destination = (p32)byte_reader_uint(&fields, 4, true);
         //      The reserved flag is not asked about, as the kernel does not.
         if (!byte_reader_ok(&fields) || lead >> 4 != 4 || header < 20 ||
             total < header + 8 || total > size || (fragment & 0x3fff) ||
@@ -17622,10 +17622,10 @@ static COLD bool dhcp_unframe(const p8 address_to frame, positive size,
         if (dhcp_sum(byte_reader_window(&datagram, header), 0) != 0xffff)
                 return false;
         udp = datagram;
-        from = byte_reader_u16(&datagram);
-        to = byte_reader_u16(&datagram);
-        length = byte_reader_u16(&datagram);
-        checksum = byte_reader_u16(&datagram);
+        from = (p16)byte_reader_uint(&datagram, 2, true);
+        to = (p16)byte_reader_uint(&datagram, 2, true);
+        length = (p16)byte_reader_uint(&datagram, 2, true);
+        checksum = (p16)byte_reader_uint(&datagram, 2, true);
         if (from != DHCP_SERVER_PORT || to != DHCP_CLIENT_PORT || length < 8 ||
             length > total - header)
                 return false;
@@ -17668,10 +17668,10 @@ static COLD bool dhcp_frame_vouched(const p8 address_to control,
 
         while (byte_reader_left(&messages) >= 16)
         {
-                positive low = byte_reader_u32le(&messages);
-                positive length = low | (positive)byte_reader_u32le(&messages) << 32;
-                p32 level = byte_reader_u32le(&messages);
-                p32 type = byte_reader_u32le(&messages);
+                positive low = (p32)byte_reader_uint(&messages, 4, false);
+                positive length = low | (positive)(p32)byte_reader_uint(&messages, 4, false) << 32;
+                p32 level = (p32)byte_reader_uint(&messages, 4, false);
+                p32 type = (p32)byte_reader_uint(&messages, 4, false);
                 byte_reader data;
 
                 if (length < 16)
@@ -17679,7 +17679,7 @@ static COLD bool dhcp_frame_vouched(const p8 address_to control,
                 data = byte_reader_window(&messages, length - 16);
                 if (level == DHCP_SOL_PACKET && type == DHCP_PACKET_AUXDATA)
                 {
-                        p32 status = byte_reader_u32le(&data);
+                        p32 status = (p32)byte_reader_uint(&data, 4, false);
 
                         return byte_reader_ok(&data) &&
                                (status & (DHCP_CHECKSUM_NOT_READY |

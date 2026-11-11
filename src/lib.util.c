@@ -2509,12 +2509,19 @@ static inline p8 byte_reader_u8(byte_reader address_to reader)
         return at ? at[0] : 0;
 }
 
-/* Big endian, as the wire protocols here write numbers. */
-static inline p16 byte_reader_u16(byte_reader address_to reader)
+/* A number of width bytes, most significant first when big: the wire protocols here write numbers big endian, and netlink and
+   802.11 write theirs little endian (every machine this runs on, which is why netlink's host order is the same thing). Zero
+   when the reader does not have them. Callers take the width's type, so a 16-bit number is cast to p16. */
+static inline unsigned int byte_reader_uint(byte_reader address_to reader, positive width, bool big)
 {
-        const p8 address_to at = byte_reader_take(reader, 2);
+        const p8 address_to at = byte_reader_take(reader, width);
+        unsigned int value = 0;
 
-        return at ? (p16)((p16)at[0] << 8 | at[1]) : 0;
+        if (!at)
+                return 0;
+        for (positive at_index = 0; at_index < width; at_index++)
+                value = value << 8 | at[big ? at_index : width - 1 - at_index];
+        return value;
 }
 
 static inline p32 byte_reader_u24(byte_reader address_to reader)
@@ -2522,33 +2529,6 @@ static inline p32 byte_reader_u24(byte_reader address_to reader)
         const p8 address_to at = byte_reader_take(reader, 3);
 
         return at ? (p32)at[0] << 16 | (p32)at[1] << 8 | at[2] : 0;
-}
-
-static inline p32 byte_reader_u32(byte_reader address_to reader)
-{
-        const p8 address_to at = byte_reader_take(reader, 4);
-
-        return at ? (p32)at[0] << 24 | (p32)at[1] << 16 | (p32)at[2] << 8 |
-                        at[3]
-                  : 0;
-}
-
-/* Little endian, as netlink and 802.11 write theirs -- and every machine this
-   runs on, which is why netlink's host order is the same thing. */
-static inline p16 byte_reader_u16le(byte_reader address_to reader)
-{
-        const p8 address_to at = byte_reader_take(reader, 2);
-
-        return at ? (p16)((p16)at[1] << 8 | at[0]) : 0;
-}
-
-static inline p32 byte_reader_u32le(byte_reader address_to reader)
-{
-        const p8 address_to at = byte_reader_take(reader, 4);
-
-        return at ? (p32)at[3] << 24 | (p32)at[2] << 16 | (p32)at[1] << 8 |
-                        at[0]
-                  : 0;
 }
 
 /* A reader on the next count bytes, past which this one then reads on. One
@@ -2569,7 +2549,7 @@ static inline byte_reader byte_reader_vector8(byte_reader address_to reader)
 
 static inline byte_reader byte_reader_vector16(byte_reader address_to reader)
 {
-        return byte_reader_window(reader, byte_reader_u16(reader));
+        return byte_reader_window(reader, (p16)byte_reader_uint(reader, 2, true));
 }
 
 static inline byte_reader byte_reader_vector24(byte_reader address_to reader)

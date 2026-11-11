@@ -382,8 +382,8 @@ p8 waterlink_mdns_read(const p8 address_to packet, positive length,
         if (length < 12 || length > WATERLINK_MDNS_MAX)
                 return false;
 
-        found->id = byte_reader_u16(&header);
-        flags = byte_reader_u16(&header);
+        found->id = (p16)byte_reader_uint(&header, 2, true);
+        flags = (p16)byte_reader_uint(&header, 2, true);
         found->response = (flags & DNS_FLAG_RESPONSE) != 0;
         /* Opcode and rcode are zero in both mDNS message directions.  RCODE
            is not spare query space: accepting a query with an error code
@@ -392,10 +392,10 @@ p8 waterlink_mdns_read(const p8 address_to packet, positive length,
         if (flags & (DNS_OPCODE_MASK | DNS_CODE_MASK))
                 goto refused;
 
-        questions = byte_reader_u16(&header);
-        records = byte_reader_u16(&header);
-        records += byte_reader_u16(&header);
-        records += byte_reader_u16(&header);
+        questions = (p16)byte_reader_uint(&header, 2, true);
+        records = (p16)byte_reader_uint(&header, 2, true);
+        records += (p16)byte_reader_uint(&header, 2, true);
+        records += (p16)byte_reader_uint(&header, 2, true);
 
         //      Each question is at least five bytes and each record eleven:
         //      a count the packet cannot hold is refused before any is read.
@@ -413,8 +413,8 @@ p8 waterlink_mdns_read(const p8 address_to packet, positive length,
                 p16 class;
 
                 //      The type and the class, after a name that was one.
-                type = byte_reader_u16(&tail);
-                class = byte_reader_u16(&tail);
+                type = (p16)byte_reader_uint(&tail, 2, true);
+                class = (p16)byte_reader_uint(&tail, 2, true);
                 if (!next || !byte_reader_ok(&tail))
                         goto refused;
                 if (!found->response && waterlink_is_service(name, name_length) &&
@@ -456,9 +456,9 @@ p8 waterlink_mdns_read(const p8 address_to packet, positive length,
 
                 //      The type, class and time to live, then the data
                 //      behind its length.
-                type = byte_reader_u16(&tail);
-                class = byte_reader_u16(&tail);
-                ttl = byte_reader_u32(&tail);
+                type = (p16)byte_reader_uint(&tail, 2, true);
+                class = (p16)byte_reader_uint(&tail, 2, true);
+                ttl = (p32)byte_reader_uint(&tail, 4, true);
                 data = byte_reader_vector16(&tail);
                 if (!next || !byte_reader_ok(&tail))
                         goto refused;
@@ -504,7 +504,7 @@ p8 waterlink_mdns_read(const p8 address_to packet, positive length,
 
                         //      Priority and weight, then the port.
                         (void)byte_reader_skip(&data, 4);
-                        port = byte_reader_u16(&data);
+                        port = (p16)byte_reader_uint(&data, 2, true);
 
                         /* An SRV RDATA ends in exactly one target name. Root
                            means the service is unavailable, and port zero is
