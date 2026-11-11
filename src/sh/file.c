@@ -28938,12 +28938,7 @@ static b32 file_split()
         }
 
         if (file_operand_count > 2)
-        {
-                string_format(log_error, "split: extra operand '%w'\n",
-                              writer_terminal_quoted_name, file_operand_at(2));
-                split_try_help(null);
-                return 1;
-        }
+                return file_extra_operand((string_address) "split", file_operand_at(2), 1);
 
         bool bytes = (taking.flags & FILE_FLAG('b')) != 0;
         bool line_bytes = (taking.flags & FILE_FLAG('C')) != 0;
@@ -40897,8 +40892,7 @@ static fn mv_one(string_address source, string_address destination)
                      mv_update_policy == 'F'))
                 {
                         mv_refused_after_rename();
-                        log_error("mv: cannot combine --backup with --exchange, -n, or --update=none-fail\n", 0);
-                        log_error("Try 'mv --help' for more information.\n", 0);
+                        file_usage((string_address)"mv", "cannot combine --backup with --exchange, -n, or --update=none-fail", 1);
                         mv_backup_state = 2;
                 }
                 else if (!file_backup_taken(mv_backup_taking, (string_address) "mv"))
@@ -45928,18 +45922,10 @@ static b32 file_seq()
         positive given = count - index;
 
         if (given < 1)
-        {
-                log_error("seq: missing operand\n", 0);
-                return seq_usage();
-        }
-
+                return file_need_operand((string_address) "seq");
         if (given > 3)
-        {
-                string_format(log_error, "seq: extra operand '%w'\n",
-                              writer_terminal_quoted_name,
-                              program_argument((b32)(index + 3)));
-                return seq_usage();
-        }
+                return file_extra_operand((string_address) "seq",
+                                          program_argument((b32)(index + 3)), 1);
 
         seq_format format = {.text = (string_address) ""};
 
