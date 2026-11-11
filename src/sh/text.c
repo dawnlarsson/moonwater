@@ -5063,7 +5063,7 @@ static bool join_output_add(string_address word)
                 if (!fine)
                         return false;
                 if (join_output_count == JOIN_OUTPUT_MAX)
-                        return join_complain("join: memory exhausted\n", null);
+                        return join_complain("join: too many -o fields, at most 32768\n", null);
                 join_outputs[join_output_count++] = output;
                 // A separator that ends the list ends it: 1.1, is 1.1.
                 if (!stop || !stop[1])
