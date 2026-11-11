@@ -117,8 +117,13 @@
         one. Bluetooth lists the devices kept, from moonwater bluetooth,
         with a last row that keeps another by its name and Delete twice to
         forget one: the command has no scan, no pairing and no connecting,
-        so the window has none either. Power asks the battery again and Time
-        the clock. The keys stay on the row of the name they were on when
+        so the window has none either. Waterlink's Pair a machine runs
+        moonwater link pair: its code is drawn large with the seconds left,
+        under the lines the command said (the other machine's command among
+        them), and its outcome is the command's last line; a press on the row
+        while it waits stops it. The linked machines are a list, each with
+        the words the command says of where it was last heard. Power asks the
+        battery again and Time the clock. The keys stay on the row of the name they were on when
         the list moves under them, and a reading that says what the last
         said draws nothing.
 
@@ -3237,13 +3242,116 @@ static positive settings_said_line(char address_to line, positive room, b32 last
         return size;
 }
 
+/*
+        The Pair a machine row's wait shows its code large, with the seconds left, in a card: the card's lines are the CLI's own words
+        (the line that says the code and what the other machine types, then its outcome once it has one). The code is read from the
+        CLI's first line, NAME CODE: on the other machine, ...; the seconds count the five minutes a code lasts, from when the verb
+        started. A press on the row while it waits stops the wait (settings_activate): the CLI closes the code and says why.
+*/
+#define SETTINGS_PAIR_SECONDS 300 // a code lasts five minutes: link pair waits that long, and two seconds more
+#define SETTINGS_PAIR_CODE 16
+#define SETTINGS_PAIR_SIZE 36     // the code's size in logical pixels, in the mono face
+#define SETTINGS_PAIR_TICK_NS 1000000000ull
+
+static b32 settings_pair_on;                                       // the card of a pairing's wait is up: its code is drawn large
+static char settings_pair_code[SETTINGS_PAIR_CODE];
+static positive settings_pair_due;                                 // when the seconds left are drawn next
+
+// Whether a row is a pairing: the action whose verb waits for another machine.
+static b32 settings_pair_row(int row)
+{
+        return row >= 0 && row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_ACTION && settings_waits(row);
+}
+
+// Whether the pairing row's verb is running and waiting now.
+static b32 settings_pair_waiting(int row)
+{
+        return settings.child > 0 && settings.job_sets && settings.job == row && settings_pair_row(row);
+}
+
+// The code, from the CLI's first line: NAME CODE: on the other machine, moonwater link NAME CODE (the name is before the first blank).
+static fn settings_pair_parse(const char address_to line, positive size)
+{
+        positive at = 0, made = 0;
+
+        while (at < size && line[at] != ' ')
+                at++;
+        while (at < size && line[at] == ' ')
+                at++;
+        while (at < size && line[at] != ' ' && line[at] != ':' && made + 1 < sizeof(settings_pair_code))
+                settings_pair_code[made++] = line[at++];
+        settings_pair_code[made] = 0;
+}
+
+// The pairing's card opens once the CLI has said its code: its first line is the one that says the other machine's command.
+static fn settings_pair_open(void)
+{
+        char line[SETTINGS_STATUS];
+        positive size = settings_said_line(line, sizeof(line), false);
+
+        settings_pair_parse(line, size);
+        settings_pair_on = true;
+        settings_pair_due = 0;
+        settings_card_open(settings_label(settings.job));
+}
+
+// The wait has ended: the card (if it is up) is made again from what the CLI said, its outcome among the lines.
+static fn settings_pair_end(void)
+{
+        settings_pair_on = false;
+        if (settings.page.card)
+        {
+                settings_card_fill();
+                ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
+                settings_layout();
+        }
+        ui_page_redraw(&settings.page);
+}
+
+// The seconds the code has left: SETTINGS_PAIR_SECONDS from the start of the verb, none once they are gone.
+static positive settings_pair_left(void)
+{
+        positive now = (positive)ui_kit.now, gone = now > settings.began ? (now - settings.began) / 1000000000ull : 0;
+
+        return gone < SETTINGS_PAIR_SECONDS ? SETTINGS_PAIR_SECONDS - gone : 0;
+}
+
+// The pairing's card: the code large at the top, its seconds left as m:ss under it, and the CLI's lines under those.
+static fn settings_pair_paint(struct ui address_to ui)
+{
+        char text[SETTINGS_PROBE], line[SETTINGS_PROBE];
+        positive left = settings_pair_left(), at = 0;
+        int edge = ui_px(ui, UI_PAD) + ui_dev(ui, UI_INSET), x = ui_rtl() ? ui->width - edge : edge;
+        int top = settings.card.y + ui_dev(ui, UI_LINES_PAD), baseline = top + ui_dev(ui, SETTINGS_PAIR_SIZE), y;
+        int count = settings.card_text.count;
+
+        ui_kit_start_at(ui, x, baseline, (string_address)settings_pair_code, UI_CODE, SETTINGS_PAIR_SIZE, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
+        at = positive_into((p8 address_to)text, left / 60);
+        text[at++] = ':';
+        at += positive_into_pair((p8 address_to)(text + at), left % 60);
+        text[at] = 0;
+        ui_kit_text_flipped(ui, edge, baseline + ui_dev(ui, 28), (string_address)text, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
+        y = baseline + ui_dev(ui, 28 + 24);
+        for (int each = 0; each < count; each++, y += ui_dev(ui, UI_LINE))
+        {
+                string_address text_line = (string_address)ui_lines_copy(&settings.card_text, each, line, sizeof(line));
+
+                ui_kit_text_flipped(ui, edge, ui_kit_baseline(ui, y, UI_BODY_MEDIUM), text_line, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
+        }
+}
+
 // A pairing shows its code while it waits, not when it ends: the first line the verb said is the status until then.
 static fn settings_waiting_say(void)
 {
         char line[SETTINGS_STATUS];
+        positive size = 0;
 
-        if (settings.child > 0 && settings.job_sets && settings_waits(settings.job) && settings_said_line(line, sizeof(line), false))
+        if (settings.child > 0 && settings.job_sets && settings_waits(settings.job) && (size = settings_said_line(line, sizeof(line), false)))
+        {
                 settings_say((string_address)line);
+                if (!settings_pair_on && settings_pair_row(settings.job) && settings_find(line, size, "on the other machine") < size)
+                        settings_pair_open();
+        }
 }
 
 /*
@@ -3273,6 +3381,9 @@ static fn settings_complete(b32 killed, positive status)
                         else
                                 settings_say((string_address)(wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
                 }
+                // The pairing's card, if it is up, is made again with the outcome the CLI said last.
+                if (settings_pair_on)
+                        settings_pair_end();
                 // What was done to a row of a list is seen at once in the list; any other change may move another row.
                 if (row == SETTINGS_JOB_ACT)
                         settings.feed_due = 0;
@@ -4120,6 +4231,12 @@ static fn settings_activate(int row, int way)
                         settings_edit_begin(row, "", false);
                 else
                         settings_run(row, "");
+                return;
+        }
+        // A press on a pairing's row while it waits stops the wait: SIGTERM, which the CLI answers by closing the code and saying so.
+        if (settings_pair_waiting(row))
+        {
+                system_call_2(syscall(kill), (positive)settings.child, SIGTERM);
                 return;
         }
         // A row the machine has none of takes no choice: its status says so, where a press on it would otherwise look dead.
@@ -5146,7 +5263,10 @@ static void settings_map_paint(struct ui address_to ui)
 // The card's lines, in place of the rows when the page is a card.
 static void settings_card_paint(struct ui address_to ui)
 {
-        ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), &settings.card_text);
+        if (settings_pair_on && settings.child > 0)
+                settings_pair_paint(ui);
+        else
+                ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), &settings.card_text);
 }
 
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
@@ -5372,6 +5492,19 @@ static positive settings_most(void)
 // 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
+        // A pairing's card counts its seconds: it is drawn again each second while it is up and its wait runs.
+        if (settings_pair_on && settings.page.card && settings.child > 0)
+        {
+                positive now = (positive)ui_kit.now;
+
+                if (now >= settings_pair_due)
+                {
+                        settings_pair_due = now + (positive)SETTINGS_PAIR_TICK_NS;
+                        ui_page_redraw(&settings.page);
+                }
+                if (timeout < 0 || (long)(settings_pair_due - now) < timeout)
+                        timeout = (long)(settings_pair_due - now);
+        }
         // The board, read once a second (settings_board_tick): when the rows' lines change, the page is laid out again.
         if (settings.list.ids)
         {
@@ -5447,7 +5580,8 @@ static fn settings_close(void)
         {
                 positive status = 0;
 
-                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
+                // A pairing is stopped as a press on its row stops it: the CLI closes the code it made, and it answers SIGTERM at once.
+                system_call_2(syscall(kill), (positive)settings.child, settings_pair_on ? SIGTERM : SIGKILL);
                 system_wait4_retry(settings.child, address_of status, 0, null);
         }
 }
