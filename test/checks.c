@@ -86297,6 +86297,27 @@ static fn replay(void)
         check("and the next counter after a full window is still new",
               waterlink_replay_new(address_of window,
                                    WATERLINK_REPLAY_WINDOW + 1));
+
+        //      The top at the largest counter there is. Every test of a
+        //      counter is on the counter and its block, never on top + 1, so
+        //      nothing wraps round to the bottom of the window: the last
+        //      counter is new once, the window below it still counts, and a
+        //      counter a window below the top is too old, not the next one up.
+        memory_zero(address_of window, sizeof window);
+        check("the largest counter is new",
+              waterlink_replay_new(address_of window, ~0ull));
+        check("and is not new twice",
+              !waterlink_replay_new(address_of window, ~0ull));
+        check("the counter below it is new",
+              waterlink_replay_new(address_of window, ~0ull - 1));
+        check("the oldest counter still in the window is new",
+              waterlink_replay_new(address_of window,
+                                   ~0ull - (WATERLINK_REPLAY_WINDOW - 1)));
+        check("one below the window at the top is refused, not wrapped in",
+              !waterlink_replay_new(address_of window,
+                                    ~0ull - WATERLINK_REPLAY_WINDOW));
+        check("counter zero is too old at the top",
+              !waterlink_replay_new(address_of window, 0));
 }
 
 static fn saturation(void)
@@ -91602,6 +91623,179 @@ static fn carried_is_atomic(void)
 }
 
 /*
+        A carried datagram's length is judged before its tag is read, and a
+        length that is not one of this link's is refused whatever the bytes
+        say. The oversized one is sealed properly: a close one block past a
+        whole datagram, under a tag that verifies, so only its length is
+        wrong, and a close would end the session if the length were not
+        checked. Every length that is not whole blocks is refused and changes
+        nothing, and the same keys still take a whole datagram afterwards.
+*/
+static fn carried_lengths(void)
+{
+        struct link_session address_to s = link_self.session;
+        struct link_session before;
+        struct waterlink_link link_before;
+        struct waterlink_datagram head = {WATERLINK_KIND_CLOSE, 0x10203040, 7};
+        crypto_aesgcm_key sealing_key;
+        p8 raw[16];
+        p8 datagram[WATERLINK_DATAGRAM + 64];
+        p8 copy[WATERLINK_DATAGRAM + 64];
+        p8 from[16];
+        positive oversized = WATERLINK_DATAGRAM + 16;
+        positive refused = 0;
+        positive unchanged = 0;
+        positive tried = 0;
+        positive length;
+        p64 now;
+
+        check("a session for length checks opens", link_session_open(s));
+        wls_seeded(raw, sizeof raw, 92);
+        link_keys_install(address_of s->now, raw, raw, head.receiver,
+                          0x50607080);
+        now = link_now();
+        crypto_aesgcm_prepare(address_of sealing_key, raw);
+        memory_copy(from, wls_loopback, sizeof from);
+        from[15] = 2;
+
+        memory_zero(datagram, sizeof datagram);
+        memory_copy(datagram, address_of head, sizeof head);
+        waterlink_seal_box(address_of sealing_key, datagram, 0, oversized - 32);
+        memory_copy(copy, datagram, oversized);
+        check("sec: the oversized close's tag verifies, so only its length is wrong",
+              waterlink_open_box(address_of sealing_key, copy, oversized - 32));
+
+        before = *s;
+        link_before = *s->link;
+        check("sec: an authenticated close longer than a datagram is refused",
+              !link_carried(datagram, oversized, from, 1234, now, null));
+        check("sec: refusing it changes no session, replay or link state",
+              !memory_compare(s, address_of before, sizeof before) &&
+                      !memory_compare(s->link, address_of link_before,
+                                      sizeof link_before));
+
+        for (length = 49; length < sizeof datagram; length++)
+        {
+                if (length % 16 == 0)
+                        continue;
+                tried++;
+                before = *s;
+                link_before = *s->link;
+                refused += !link_carried(datagram, length, from, 1234, now, null);
+                unchanged += !memory_compare(s, address_of before, sizeof before) &&
+                             !memory_compare(s->link, address_of link_before,
+                                             sizeof link_before);
+        }
+        check("sec: every carried length that is not whole blocks is refused",
+              tried > 0 && refused == tried);
+        check("sec: and every one of those refusals is state-atomic",
+              unchanged == tried);
+
+        head.kind = WATERLINK_KIND_CARRY;
+        head.counter = 1;
+        memory_copy(datagram, address_of head, sizeof head);
+        length = waterlink_seal(address_of sealing_key, datagram, 0);
+        check("sec: after all of them the same keys still take a whole datagram",
+              link_carried(datagram, length, from, 1234, now, null));
+
+        link_session_close(s);
+        crypto_forget(address_of sealing_key, sizeof sealing_key);
+}
+
+/*
+        A carried datagram that was accepted is a replay the second time,
+        whatever its tag says: its counter is spent once, and the refused copy
+        changes no state. An older counter not yet seen is still new, since
+        the window is not a strict count. A rekey gives the new keys a window
+        of their own, so the counter the old keys spent is new under the new
+        ones, and the old keys still refuse it.
+*/
+static fn carried_replay(void)
+{
+        struct link_session address_to s = link_self.session;
+        struct link_session before;
+        struct waterlink_link link_before;
+        struct waterlink_datagram head = {WATERLINK_KIND_CARRY, 0x10203040, 40};
+        struct waterlink_datagram next_head = {WATERLINK_KIND_CARRY, 0x11223344, 40};
+        crypto_aesgcm_key sealing_key;
+        crypto_aesgcm_key next_key;
+        p8 raw[16];
+        p8 raw_next[16];
+        p8 sealed[WATERLINK_DATAGRAM];
+        p8 datagram[WATERLINK_DATAGRAM];
+        p8 from[16];
+        positive length;
+        p64 now;
+
+        check("a session for replays opens", link_session_open(s));
+        wls_seeded(raw, sizeof raw, 93);
+        wls_seeded(raw_next, sizeof raw_next, 94);
+        link_keys_install(address_of s->now, raw, raw, head.receiver,
+                          0x50607080);
+        now = link_now();
+        crypto_aesgcm_prepare(address_of sealing_key, raw);
+        crypto_aesgcm_prepare(address_of next_key, raw_next);
+        memory_copy(from, wls_loopback, sizeof from);
+        from[15] = 2;
+
+        memory_copy(datagram, address_of head, sizeof head);
+        length = waterlink_seal(address_of sealing_key, datagram, 0);
+        memory_copy(sealed, datagram, length);
+        check("sec: a carried datagram is new the first time",
+              link_carried(datagram, length, from, 1234, now, null));
+
+        memory_copy(datagram, sealed, length);
+        before = *s;
+        link_before = *s->link;
+        check("sec: the same bytes again are a replay and are refused",
+              !link_carried(datagram, length, from, 1234, now, null));
+        check("sec: refusing the replay changes no session, replay or link state",
+              !memory_compare(s, address_of before, sizeof before) &&
+                      !memory_compare(s->link, address_of link_before,
+                                      sizeof link_before));
+
+        head.counter = 39;
+        memory_copy(datagram, address_of head, sizeof head);
+        length = waterlink_seal(address_of sealing_key, datagram, 0);
+        check("sec: an older counter not yet seen is still new",
+              link_carried(datagram, length, from, 1234, now, null));
+
+        memory_copy(datagram, address_of next_head, sizeof next_head);
+        link_keys_install(address_of s->next, raw_next, raw_next,
+                          next_head.receiver, 0x90a0b0c0);
+        length = waterlink_seal(address_of next_key, datagram, 0);
+        check("sec: the counter the old keys spent is new under the rekeyed keys",
+              link_carried(datagram, length, from, 1234, now, null));
+
+        head.counter = 40;
+        memory_copy(datagram, address_of head, sizeof head);
+        length = waterlink_seal(address_of sealing_key, datagram, 0);
+        check("sec: and the old keys still refuse the counter they spent",
+              !link_carried(datagram, length, from, 1234, now, null));
+
+        /*      The keys that rekey promoted leave their window behind in the
+                next slot. A second rekey must start that window empty, or
+                the counter the first next keys spent would still be marked
+                and this one refused. */
+        {
+                struct waterlink_datagram third = {WATERLINK_KIND_CARRY,
+                                                   0x55667788, 40};
+
+                link_keys_install(address_of s->next, raw_next, raw_next,
+                                  third.receiver, 0x90a0b0c0);
+                memory_copy(datagram, address_of third, sizeof third);
+                length = waterlink_seal(address_of next_key, datagram, 0);
+                check("sec: a second rekey starts an empty window, so the same "
+                      "counter is new under it",
+                      link_carried(datagram, length, from, 1234, now, null));
+        }
+
+        link_session_close(s);
+        crypto_forget(address_of sealing_key, sizeof sealing_key);
+        crypto_forget(address_of next_key, sizeof next_key);
+}
+
+/*
         The state file hears of a session once a second, and at once when it
         moves -- not at every datagram, which walked every peer seen and
         rewrote the file five times a second under any traffic.
@@ -96518,6 +96712,8 @@ b32 main(void)
         client_cookie(listener, port);
         initiator_answer();
         carried_is_atomic();
+        carried_lengths();
+        carried_replay();
         epochs_generated();
         seen_once_a_second();
         segment_runs(listener, port);
