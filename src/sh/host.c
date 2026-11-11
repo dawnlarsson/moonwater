@@ -20329,7 +20329,7 @@ static fn locale_clock_keep(void)
 
         if (now < locale_clock_next)
                 return;
-        locale_clock_next = now + (locale_clock_persist(false)
+        locale_clock_next = now + (locale_clock_persist(true)
                                        ? LOCALE_CLOCK_GOOD_EVERY
                                        : (p64)60 * SNTP_NANOSECONDS);
 }
@@ -20395,7 +20395,7 @@ static bipolar locale_ntp_take(string_address server,
         if (authenticated)
         {
                 locale_clock_authenticated();
-                (void)locale_clock_persist(false);
+                (void)locale_clock_persist(true);
         }
         return applied;
 }
