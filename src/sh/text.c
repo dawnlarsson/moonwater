@@ -1279,18 +1279,6 @@ static fn text_put_rest()
 }
 
 /*
-        byte_is_blank's complement, for string_span_max.
-
-        Not the library's own string_set_not_blanks, which leaves the
-        terminator out so that a run has somewhere to stop when the caller
-        gives no bound. Every line here is a length rather than a string and
-        may hold a NUL that is neither a blank nor an end, so the bound is the
-        only thing allowed to stop it.
-*/
-static const b8 text_set_inside[STRING_SET_BYTES] = {
-    [0 ... 8] = 1, [10 ... 31] = 1, [33 ... 255] = 1};
-
-/*
         Coreutils' numeric options accept leading white space and a plus, but
         not trailing bytes. string_digits_exact is the floor for the common
         plain spelling; this cold option parser adds the range contract it
