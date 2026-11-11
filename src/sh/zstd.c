@@ -7460,6 +7460,17 @@ static positive zstd_cli_number(string_address at, positive address_to value)
         return taken;
 }
 
+/* Up to n bytes from a descriptor: fewer only when it ends or a read fails. */
+static positive zstd_read_span(bipolar handle, p8 address_to into, positive n)
+{
+        positive got = 0;
+        bipolar k;
+
+        while (got < n && (k = system_read_retry((positive)handle, into + got, n - got)) > 0)
+                got += (positive)k;
+        return got;
+}
+
 /*
         zstd's own options, ahead of the shared ones.  -# is a whole number:
         a level, 0 the default; above 19 it needs --ultra.  -T# and
@@ -7502,14 +7513,7 @@ static bool zstd_cli_dictionary(string_address path)
                 string_format(log_error, "zstd: error 31 : cannot allocate dictionary \n");
                 return false;
         }
-        while (got < size)
-        {
-                bipolar const n = system_read_retry((positive)handle, bytes + got, size - got);
-
-                if (n <= 0)
-                        break;
-                got += (positive)n;
-        }
+        got = zstd_read_span(handle, bytes, size);
         system_close(handle);
         if (got != size)
         {
@@ -7832,18 +7836,9 @@ static bool zstd_train_load(string_address address_to paths, positive count,
 
                 if (handle < 0)
                         return false;
-                while (set->total + got < total && got < ZSTD_TRAIN_SAMPLE)
-                {
-                        positive const room = total - set->total - got < ZSTD_TRAIN_SAMPLE - got
-                                                  ? total - set->total - got
-                                                  : ZSTD_TRAIN_SAMPLE - got;
-                        bipolar const n = system_read_retry((positive)handle,
-                                                            set->bytes + set->total + got, room);
-
-                        if (n <= 0)
-                                break;
-                        got += (positive)n;
-                }
+                got = zstd_read_span(handle, set->bytes + set->total,
+                                     total - set->total < ZSTD_TRAIN_SAMPLE
+                                         ? total - set->total : ZSTD_TRAIN_SAMPLE);
                 system_close(handle);
                 if (got)
                 {
