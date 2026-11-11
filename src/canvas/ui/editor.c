@@ -181,6 +181,14 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
 
                         while (directory && path[directory - 1] != '/')
                                 directory--;
+                        // A name cut short to the path's room is another file's name, and a save under it would write that file: the
+                        // file is refused instead (the status says it could not be read).
+                        if (string_length((string_address)path) >= EDITOR_PATH || named_length >= (long)sizeof(named) - 1 ||
+                            (named_length > 0 && (named[0] == '/' ? named_length : (long)directory + named_length) >= EDITOR_PATH))
+                        {
+                                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_read_failed), sizeof(editor.status));
+                                return false;
+                        }
                         if (named_length > 0 && named[0] == '/')
                                 string_copy_bounded((string_address)tab->path, (string_address)named, EDITOR_PATH);
                         else if (named_length > 0 && directory + (positive)named_length < EDITOR_PATH)
