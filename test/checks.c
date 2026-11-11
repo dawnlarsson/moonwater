@@ -228161,7 +228161,7 @@ b32 main(void)
                 string_format(log, "  gpu bench: a tiny job back to back, median %p us (best %p); after half a second idle, median %p us (best %p)\n",
                               tiny[RUNS / 2] / 1000, tiny[0] / 1000, idle[IDLE_RUNS / 2] / 1000, idle[0] / 1000);
                 // The copy bench (wayland_host.c's card copy of a damage rectangle, against the processor's copy): a square of 64 to 1024 on a side, which
-                // is 4k to 1M pixels, at a pitch of 1024 pixels. Each is the processor's memory_copy_rect_u32 (the median of nine), the card's gpu_copy
+                // is 4k to 1M pixels, at a pitch of 1024 pixels. Each is the processor's memory_copy_rect_u32 (the median of nine), the card's gpu_blit
                 // (its job's wait included) back to back, the card awake, and after half a second idle (the clock ramps up from idle), the median of five.
                 // The card's copy is compared with the processor's, byte for byte, for each size: a row of its own.
                 {
@@ -228208,13 +228208,13 @@ b32 main(void)
                                         sva = gpu_va_bytes((const void address_to)src, bytes);
                                         began = clock_monotonic_nanoseconds();
                                         cpu_mark = thread_cpu_nanoseconds();
-                                        done = gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h);
+                                        done = gpu_blit(sva, COPY_PITCH, dva, COPY_PITCH, 0, 0, w, h);
                                         warm_cpu[run] = thread_cpu_nanoseconds() - cpu_mark;
                                         copy_warm[run] = clock_monotonic_nanoseconds() - began;
                                         check("gpu copy: the card copies a rectangle", done);
                                 }
                                 src = from + (unsigned long)(slot % 32) * (1u << 20), sva = gpu_va_bytes((const void address_to)src, bytes);
-                                gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h); // the card's copy: its destination is the rectangle of the source
+                                gpu_blit(sva, COPY_PITCH, dva, COPY_PITCH, 0, 0, w, h); // the card's copy: its destination is the rectangle of the source
                                 for (unsigned int row = 0; row < h; row++)
                                         same &= !memory_compare(into + row * COPY_PITCH, src + row * COPY_PITCH, 4 * w);
                                 check("gpu copy: the card's copy of the rectangle is the processor's, byte for byte", same);
@@ -228227,7 +228227,7 @@ b32 main(void)
                                         src = from + (unsigned long)(slot++ % 32) * (1u << 20);
                                         sva = gpu_va_bytes((const void address_to)src, bytes);
                                         began = clock_monotonic_nanoseconds();
-                                        gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h);
+                                        gpu_blit(sva, COPY_PITCH, dva, COPY_PITCH, 0, 0, w, h);
                                         copy_idle[run] = clock_monotonic_nanoseconds() - began;
                                 }
                                 gpu_bench_sort(copy_cpu, COPY_RUNS);

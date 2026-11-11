@@ -823,7 +823,7 @@ static unsigned long compositor_wl_picture_bytes(const struct wayland_picture *p
         A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
         being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
         or a dma-buf through its import, which is held for the buffer while it is the one the damage is copied from (compositor_wl.source), and it
-        writes the picture's buffer through a written map of it. The job is complete when gpu_copy returns (gpu_run waits), before the caller goes on
+        writes the picture's buffer through a written map of it. The job is complete when gpu_blit returns (gpu_run waits), before the caller goes on
         and before the client's buffer is released. Refused, with the processor's copy done instead: a rectangle under
         COMPOSITOR_WL_CARD_COPY_PIXELS, a blend, a card not up or busy, a pool cut under the read (the processor finds it, as before: its zeros are
         refused), and a mapping the kernel refuses.
@@ -877,7 +877,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va)
                 return 0;
-        if (gpu_copy(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, (unsigned int)w, (unsigned int)h))
+        if (gpu_blit(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h))
                 return 1;
         // A copy that hung is the card's hang as a present's is (compositor_gpu_job_failed): without it every damage copy would wait on the card; a late one is
         // only the processor's copy (the job stays pending, and the next copies find the card busy).

@@ -1835,30 +1835,19 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         return (a->op == 6 || !hand) && gpu_run(); // text and a box with changes of cover are the kernel by hand's alone
 }
 
-// A picture (src, sp pixels a row) scaled to w by h pixels at dst (dp a row), nearest, the card told by tables where each column and row comes from: the processor
-// has made the w entries of the columns' and then the h entries of the rows' at tab (a GPU address), each the source's index (the source cell whose centre
-// is the point's). The card divides nothing, and reads nothing but what the tables name: false if the card did not finish it (as gpu_run says).
-// One rectangle copied on the card, d[y * dp + x] = s[y * sp + x] for x below w and y below h, the pitches in pixels (op 0). gpu_run waits for the
-// job, so when this is true the destination is written: nothing that reads it, or releases the source, is run before.
-static b32 gpu_copy(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
+// One job moving a picture (src, sp pixels a row) into dst (dp a row) over w by h pixels, the card told by op. op 0 copies one rectangle,
+// d[y * dp + x] = s[y * sp + x] for x below w and y below h, the pitches in pixels; op 7 scales nearest, the card told by tables where each column and
+// row comes from: the processor has made the w entries of the columns' and then the h entries of the rows' at tab (a GPU address), each the source's
+// index (the source cell whose centre is the point's). The card divides nothing, and reads nothing but what the tables name. gpu_run waits for the
+// job, so when this is true the destination is written: nothing that reads it, or releases the source, is run before. false if the card did not finish it (as gpu_run says).
+static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int op, unsigned int w, unsigned int h)
 {
         struct gpu_args address_to a = GPU_ARGS;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!w || !h || !gpu_idle())
                 return false;
-        a->s = src, a->d = dst, a->g = 0, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = 0, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = 0;
-        return gpu_run();
-}
-
-static b32 gpu_scale(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int w, unsigned int h)
-{
-        struct gpu_args address_to a = GPU_ARGS;
-
-        gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || !gpu_idle())
-                return false;
-        a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = 7, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = GPU_VA + GPU_BASES_AT;
+        a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = op, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = op ? GPU_VA + GPU_BASES_AT : 0;
         return gpu_run();
 }
 

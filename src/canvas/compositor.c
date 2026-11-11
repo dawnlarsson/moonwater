@@ -167,9 +167,9 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
 }
 #define gpu_map(addr, size) gpu_map_as(addr, size, 0)
 #define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
-static b32 gpu_copy(positive src, unsigned int sp, positive dst, unsigned int dp, unsigned int w, unsigned int h)
+static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int op, unsigned int w, unsigned int h)
 {
-        (void)src, (void)sp, (void)dst, (void)dp, (void)w, (void)h;
+        (void)src, (void)sp, (void)dst, (void)dp, (void)tab, (void)op, (void)w, (void)h;
         return false;
 }
 #endif
@@ -8146,7 +8146,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         for (int y = 0; y < f->height; y++, fy += step_y)
                                 tables[f->width + y] = (unsigned int)(fy >> 24);
                 }
-                if (!gpu_scale(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, (unsigned int)f->width, (unsigned int)f->height))
+                if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, 7, (unsigned int)f->width, (unsigned int)f->height))
                 {
                         compositor_gpu_job_failed();
                         return compositor_gpu_job_why();
