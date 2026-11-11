@@ -21506,8 +21506,11 @@ static b32 host_splash(string_address address_to arguments, positive count)
                 return host_refuse("setting the splash needs root (CAP_SYS_ADMIN)\n");
         if (string_equals(word, "default"))
         {
-                (void)system_remove_at(AT_FDCWD, SPLASH_PATH_IMAGE, 0);
-                (void)system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+                bipolar gone = system_remove_at(AT_FDCWD, SPLASH_PATH_IMAGE, 0);
+
+                return_if(gone < 0 && gone != -ENOENT, host_fail("splash", gone));
+                gone = system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+                return_if(gone < 0 && gone != -ENOENT, host_fail("splash", gone));
                 host_say(log, host_label "splash: built-in picture kept; Canvas shows it the next time it starts\n");
                 return 0;
         }
@@ -21530,7 +21533,8 @@ static b32 host_splash(string_address address_to arguments, positive count)
         length = host_write_file(SPLASH_PATH_IMAGE, host_splash_bytes, (positive)length, 0644, true);
         if (length < 0)
                 return host_fail("splash", length);
-        (void)system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+        length = system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+        return_if(length < 0 && length != -ENOENT, host_fail("splash", length));
         host_say(log, host_label "splash: %p x %p picture kept from %s; Canvas shows it the next time it starts\n",
                  (positive)image.width, (positive)image.height, word);
         return 0;
