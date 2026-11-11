@@ -9075,7 +9075,9 @@ static bool text_files_take(string_address address_to name)
                         }
                 }
 
-                if (!ended && (!taken || !text_files_name.used))
+                //      A read error can end a name half read: that part is not a
+                //      file name, and the error is what is reported.
+                if (!ended && (!taken || !text_files_name.used || text_files_reader.failed))
                 {
                         if (text_files_reader.failed)
                         {
