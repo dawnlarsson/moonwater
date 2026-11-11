@@ -66,16 +66,6 @@ static void ctl_w_cvolume(struct wire_w *w, const unsigned long *volume, long ch
                 wire_w_be32(w, volume[i]);
 }
 
-static int ctl_r_bool(struct wire_r *r)
-{
-        if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
-        {
-                r->bad = 1;
-                return 0;
-        }
-        return r->p[r->at++] == '1';
-}
-
 // A string, passed over (the null string 'N' or one that ends in its null inside the answer).
 static void ctl_r_string(struct wire_r *r)
 {
@@ -395,7 +385,7 @@ static long ctl_get_input_now(struct ctl *c, unsigned long index, struct ctl_inp
                 ctl_r_fixed(&r, 'U', 8);
         ctl_r_string(&r);
         ctl_r_string(&r);
-        into->muted = ctl_r_bool(&r);
+        into->muted = wire_r_bool(&r);
         if (r.bad)
                 return CTL_FAILED;
         into->channels = count;

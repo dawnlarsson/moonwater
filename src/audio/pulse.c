@@ -421,16 +421,6 @@ static unsigned long pulse_r_u8(struct wire_r *r)
         return r->p[r->at++];
 }
 
-static int pulse_r_bool(struct wire_r *r)
-{
-        if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
-        {
-                r->bad = 1;
-                return 0;
-        }
-        return r->p[r->at++] == '1';
-}
-
 // A string of the tag structure: NULL for the null string (and *isnull set), else a pointer into the frame, whose limit is checked.
 static const char *pulse_r_string(struct wire_r *r, int *isnull)
 {
@@ -2028,7 +2018,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         sink_index = wire_r_u32(r);
         sink_name = pulse_r_string(r, &isnull);
         maxlength = wire_r_u32(r);
-        corked = pulse_r_bool(r);
+        corked = wire_r_bool(r);
         tlength = wire_r_u32(r);
         prebuf = wire_r_u32(r);
         minreq = wire_r_u32(r);
@@ -2036,35 +2026,35 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         volume_channels = pulse_r_cvolume(r, volume);
         if (c->version >= 12)
         {
-                pulse_r_bool(r); // no remap
-                pulse_r_bool(r); // no remix
-                pulse_r_bool(r); // fix format
-                pulse_r_bool(r); // fix rate
-                pulse_r_bool(r); // fix channels
-                no_move = pulse_r_bool(r);
-                variable = pulse_r_bool(r);
+                wire_r_bool(r); // no remap
+                wire_r_bool(r); // no remix
+                wire_r_bool(r); // fix format
+                wire_r_bool(r); // fix rate
+                wire_r_bool(r); // fix channels
+                no_move = wire_r_bool(r);
+                variable = wire_r_bool(r);
         }
         if (c->version >= 13)
         {
-                muted = pulse_r_bool(r);
-                adjust = pulse_r_bool(r);
+                muted = wire_r_bool(r);
+                adjust = wire_r_bool(r);
                 pulse_r_proplist(r, &props);
         }
         if (c->version >= 14)
         {
-                volume_set = pulse_r_bool(r);
-                early = pulse_r_bool(r);
+                volume_set = wire_r_bool(r);
+                early = wire_r_bool(r);
         }
         if (c->version >= 15)
         {
-                muted_set = pulse_r_bool(r);
-                pulse_r_bool(r); // don't inhibit auto suspend
-                pulse_r_bool(r); // fail on suspend
+                muted_set = wire_r_bool(r);
+                wire_r_bool(r); // don't inhibit auto suspend
+                wire_r_bool(r); // fail on suspend
         }
         if (c->version >= 17)
-                pulse_r_bool(r); // relative volume
+                wire_r_bool(r); // relative volume
         if (c->version >= 18)
-                pulse_r_bool(r); // passthrough
+                wire_r_bool(r); // passthrough
         if (c->version >= 21)
         {
                 unsigned long formats = pulse_r_u8(r);
@@ -2258,7 +2248,7 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
 
         if (command == PULSE_COMMAND_SET_SINK_MUTE || command == PULSE_COMMAND_SET_SOURCE_MUTE)
                 name = pulse_r_string(r, &isnull);
-        mute = pulse_r_bool(r);
+        mute = wire_r_bool(r);
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
         PULSE_NEED_AUTH();
@@ -2402,31 +2392,31 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
         source_index = wire_r_u32(r);
         source_name = pulse_r_string(r, &isnull);
         maxlength = wire_r_u32(r);
-        corked = pulse_r_bool(r);
+        corked = wire_r_bool(r);
         fragsize = wire_r_u32(r);
         if (c->version >= 12)
         {
-                pulse_r_bool(r); // no remap
-                pulse_r_bool(r); // no remix
-                pulse_r_bool(r); // fix format
-                pulse_r_bool(r); // fix rate
-                pulse_r_bool(r); // fix channels
-                no_move = pulse_r_bool(r);
-                variable = pulse_r_bool(r);
+                wire_r_bool(r); // no remap
+                wire_r_bool(r); // no remix
+                wire_r_bool(r); // fix format
+                wire_r_bool(r); // fix rate
+                wire_r_bool(r); // fix channels
+                no_move = wire_r_bool(r);
+                variable = wire_r_bool(r);
         }
         if (c->version >= 13)
         {
-                peak = pulse_r_bool(r);
-                adjust = pulse_r_bool(r);
+                peak = wire_r_bool(r);
+                adjust = wire_r_bool(r);
                 pulse_r_proplist(r, &props);
                 direct = wire_r_u32(r);
         }
         if (c->version >= 14)
-                early = pulse_r_bool(r);
+                early = wire_r_bool(r);
         if (c->version >= 15)
         {
-                pulse_r_bool(r); // don't inhibit auto suspend
-                pulse_r_bool(r); // fail on suspend
+                wire_r_bool(r); // don't inhibit auto suspend
+                wire_r_bool(r); // fail on suspend
         }
         if (c->version >= 22)
         {
@@ -2441,11 +2431,11 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
                         pulse_r_proplist(r, &ignored);
                 }
                 volume_channels = pulse_r_cvolume(r, volume);
-                muted = pulse_r_bool(r);
-                volume_set = pulse_r_bool(r);
-                muted_set = pulse_r_bool(r);
-                pulse_r_bool(r); // relative volume
-                pulse_r_bool(r); // passthrough
+                muted = wire_r_bool(r);
+                volume_set = wire_r_bool(r);
+                muted_set = wire_r_bool(r);
+                wire_r_bool(r); // relative volume
+                wire_r_bool(r); // passthrough
         }
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
@@ -2575,7 +2565,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 return pulse_ack(p, c, tag);
         case PULSE_COMMAND_CORK_RECORD_STREAM:
         {
-                int cork = pulse_r_bool(r);
+                int cork = wire_r_bool(r);
 
                 if (!pulse_r_eof(r))
                         return PULSE_DEAD;
@@ -2673,9 +2663,9 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 int adjust = 0, early = 0;
 
                 if (c->version >= 13)
-                        adjust = pulse_r_bool(r);
+                        adjust = wire_r_bool(r);
                 if (c->version >= 14)
-                        early = pulse_r_bool(r);
+                        early = wire_r_bool(r);
                 if (!pulse_r_eof(r))
                         return PULSE_DEAD;
                 if (!rec)
@@ -3124,7 +3114,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 return pulse_ack(p, c, tag);
         case PULSE_COMMAND_CORK_PLAYBACK_STREAM:
         {
-                int cork = pulse_r_bool(r);
+                int cork = wire_r_bool(r);
 
                 if (!pulse_r_eof(r))
                         return PULSE_DEAD;
@@ -3254,9 +3244,9 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 int adjust = 0, early = 0;
 
                 if (c->version >= 13)
-                        adjust = pulse_r_bool(r);
+                        adjust = wire_r_bool(r);
                 if (c->version >= 14)
-                        early = pulse_r_bool(r);
+                        early = wire_r_bool(r);
                 if (!pulse_r_eof(r))
                         return PULSE_DEAD;
                 if (!s)
@@ -3890,7 +3880,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
 
-                pulse_r_bool(&r);
+                wire_r_bool(&r);
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
                 PULSE_NEED_AUTH();

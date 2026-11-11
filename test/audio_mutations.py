@@ -307,7 +307,7 @@ M = [
     ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
     ("control", "the device named by nothing", "wire_w_u32(&w, CTL_NONE);\n        wire_w_string(&w, name);\n        ctl_w_cvolume(&w, both, 2);", "wire_w_u32(&w, CTL_NONE);\n        wire_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
     ("control", "the timeout of the connection ignored", "c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "c->deadline = ctl_now(c) + CTL_TIMEOUT_MS;"),
-    ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
+    ("control", "a stream's mute misread", "into->muted = wire_r_bool(&r);", "into->muted = 0, (void)wire_r_bool(&r);"),
     # ---- bowl.c (the sound server a bowl's program is offered, checked by the bowl_session harness) ----
     ("bowl", "the sound server offered with no socket", "return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;", "return true;"),
     ("bowl", "the sound server offered over the program's own", "if (offer_sound && !have_sound)\n                mixed[n++]", "if (offer_sound)\n                mixed[n++]"),

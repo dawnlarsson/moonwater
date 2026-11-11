@@ -56,6 +56,16 @@ static unsigned long wire_r_u32(struct wire_r *r)
         return v;
 }
 
+static int wire_r_bool(struct wire_r *r)
+{
+        if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
+        {
+                r->bad = 1;
+                return 0;
+        }
+        return r->p[r->at++] == '1';
+}
+
 static long wire_len(const char *s)
 {
         return (long)string_length(s);
