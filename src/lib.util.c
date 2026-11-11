@@ -10124,13 +10124,6 @@ pub fn parallel_stop(void)
                 parallel_run_stop(run);
 }
 
-pub bool parallel_stopped(void)
-{
-        parallel_run address_to run = thread_self()->run;
-
-        return run && atomic_load(address_of run->stop) != 0;
-}
-
 pub p8 address_to parallel_reserve(parallel_output address_to output,
                                    positive length)
 {

@@ -57965,7 +57965,7 @@ static p8 tree_probe_sink(address_any context, address_any node, address_any dat
                 return true;
         }
 
-        if (parallel_stopped())
+        if (thread_self()->run && atomic_load(address_of thread_self()->run->stop) != 0)
                 stream->after_stop++;
 
         tree_hash(stream, data, length);
