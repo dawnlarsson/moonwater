@@ -233,10 +233,39 @@ static int taskbar_text(int high, int pad, int characters)
         return wanted < high ? high : wanted;
 }
 
-// The standard tray's items along the edge: the clock, and the battery, the volume, the microphone and the notices dot that are there.
+/*
+        The standard tray's cells, each written once, from the tray's start along the edge to its far end: the slot it answers to,
+        what says it is there now, and what draws it (taskbar_draw's names: the view, the layout lay, the cell's rectangle x, y, width
+        and height, the ink and ground, the clock and the battery's text). The slots are the places along the edge (taskbar_tray_before),
+        the tray's length (taskbar_tray_items) and the drawing of the cells (taskbar_draw) all at once.
+*/
+#define TASKBAR_TRAY_CELLS(CELL)                                                                                          \
+        CELL(TASKBAR_NOTICES, taskbar.notices_item, taskbar_notices_cell(view, &lay, x, y, width, height))              \
+        CELL(TASKBAR_MIC, taskbar.mic_item, taskbar_mic_cell(view, &lay, x, y, width, height))                          \
+        CELL(TASKBAR_VOLUME, taskbar.volume_item, taskbar_volume_cell(view, &lay, x, y, width, height, ink, ground))    \
+        CELL(-4, taskbar.battery_item, taskbar_say(view, &lay, x, y, width, height, text, ink, ground))                 \
+        CELL(-3, 1, taskbar_say(view, &lay, x, y, width, height, clock, ink, ground))
+
+// The standard tray's items along the edge: the cells of the table that are there now.
 static int taskbar_tray_items(void)
 {
-        return 1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) + (taskbar.notices_item ? 1 : 0);
+        int items = 0;
+
+#define TASKBAR_CELL(slot, shown, paint) items += (shown) != 0;
+        TASKBAR_TRAY_CELLS(TASKBAR_CELL)
+#undef TASKBAR_CELL
+        return items;
+}
+
+// How many of the tray's cells are there before the one in this slot, from the tray's start; -1 when that cell is not there now (or none is).
+static int taskbar_tray_before(int which)
+{
+        int before = 0;
+
+#define TASKBAR_CELL(slot, shown, paint) if (which != (slot)) before += (shown) != 0; else return (shown) ? before : -1;
+        TASKBAR_TRAY_CELLS(TASKBAR_CELL)
+#undef TASKBAR_CELL
+        return -1;
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
@@ -342,7 +371,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
-        int text = lay->item, at, notice = taskbar.notices_item ? text : 0;
+        int text = lay->item, at;
 
         if (which >= 0)
         {
@@ -361,38 +390,14 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         }
         else if (which == -2)
                 *along = lay->tray_at, *length = lay->tray;
-        else if (which == -3)
-        {
-                if (taskbar.tray_custom)
-                        return 0;
-                *along = lay->tray_at + notice + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
-        }
-        else if (which == -4)
-        {
-                if (!taskbar.battery_item || taskbar.tray_custom)
-                        return 0;
-                *along = lay->tray_at + notice + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
-        }
-        else if (which == TASKBAR_VOLUME)
-        {
-                if (!taskbar.volume_item || taskbar.tray_custom)
-                        return 0;
-                *along = lay->tray_at + notice + (taskbar.mic_item ? text : 0), *length = text;
-        }
-        else if (which == TASKBAR_MIC)
-        {
-                if (!taskbar.mic_item || taskbar.tray_custom)
-                        return 0;
-                *along = lay->tray_at + notice, *length = text;
-        }
-        else if (which == TASKBAR_NOTICES)
-        {
-                if (!taskbar.notices_item || taskbar.tray_custom)
-                        return 0;
-                *along = lay->tray_at, *length = text;
-        }
         else
-                return 0;
+        {
+                int before = taskbar.tray_custom ? -1 : taskbar_tray_before(which);
+
+                if (before < 0)
+                        return 0;
+                *along = lay->tray_at + before * text, *length = text;
+        }
         // Along a bottom or top band, reading from the right, the band is the same band turned over its length: the launcher's
         // button at its right end, the tabs in the order the windows showed from the right, the tray at its left end.
         if (!lay->vertical && language_rtl())
@@ -592,6 +597,24 @@ static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by,
                                 int height, const char *text, unsigned int ink, unsigned int ground)
 {
         ui_cell_turned(taskbar_cell(view, bw), x - bx, y - by, width, height, text, taskbar_turn(view->position), ink, ground);
+}
+
+// One line of text in a slot of the band: upright on a bottom or top band, turned on a side one.
+static void taskbar_say(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height,
+                        const char *text, unsigned int ink, unsigned int ground)
+{
+        if (lay->vertical)
+                taskbar_text_turned(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+        else
+                taskbar_text_line(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+}
+
+// The kit's drawing state over the band's own pixels, recording into the frame's scene when there is one: what the cells that are drawn with the kit's painters stand on.
+static void taskbar_ui(struct ui *ui, const struct taskbar_view *view, const struct taskbar_layout *lay)
+{
+        memory_zero(ui, sizeof(*ui));
+        ui->pixels = view->pixels, ui->pitch = (unsigned long)lay->bw, ui->width = lay->bw, ui->height = lay->bh, ui->top = 0, ui->bottom = lay->bh;
+        ui->scale = taskbar_scaled(view->scale), ui->scene = view->scene;
 }
 
 /*
@@ -951,9 +974,7 @@ static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct
         taskbar_launcher_grid(side, &step, &dot, &span);
         left = x - lay->bx + (width - span) / 2;
         top = y - lay->by + (height - span) / 2;
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
-        ui.scene = view->scene;
+        taskbar_ui(&ui, view, lay);
         for (int row = 0; row < 3; row++)
                 for (int column = 0; column < 3; column++)
                 {
@@ -990,15 +1011,10 @@ static void taskbar_volume_cell(const struct taskbar_view *view, const struct ta
                 text[at++] = '%', text[at] = 0;
                 if (taskbar.volume_muted)
                         text[0] = '-', text[1] = '-', text[2] = 0;
-                if (lay->vertical)
-                        taskbar_text_turned(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
-                else
-                        taskbar_text_line(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+                taskbar_say(view, lay, x, y, width, height, text, ink, ground);
                 return;
         }
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
-        ui.scene = view->scene;
+        taskbar_ui(&ui, view, lay);
         ui_speaker(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, waves, taskbar.volume_muted, ink | 0xff000000u);
 }
 
@@ -1011,9 +1027,7 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
         struct ui ui;
         int size = (width < height ? width : height) * 70 / 100;
 
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
-        ui.scene = view->scene;
+        taskbar_ui(&ui, view, lay);
         ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, compositor_ink_role(UI_ERROR) | 0xff000000u);
 }
 
@@ -1027,9 +1041,7 @@ static void taskbar_notices_cell(const struct taskbar_view *view, const struct t
         unsigned int colour = compositor_ink_role(taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? UI_ERROR : UI_WARNING);
         int size;
 
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = taskbar_scaled(view->scale);
-        ui.scene = view->scene;
+        taskbar_ui(&ui, view, lay);
         size = ui_px(&ui, UI_DOT);
         ui_kit_dot(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, colour | 0xff000000u);
 }
@@ -1089,12 +1101,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         ink = taskbar_ink_on(ground, view->marks[at]);
 
                         // A band on a side writes its titles turned, a bottom or top one upright.
-                        if (lay.vertical)
-                                taskbar_text_turned(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
-                                                    ink, ground);
-                        else
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
-                                                  ink, ground);
+                        taskbar_say(view, &lay, x, y, width, height, view->titles[at], ink, ground);
                 }
         }
 
@@ -1120,47 +1127,13 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                 ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width, height, -2, 0);
                 ink = window_contrast(ground);
-                // A format of the person's is one text over the whole tray.
+                // A format of the person's is one text over the whole tray, and has none of the cells: taskbar_slot answers 0 for them.
                 if (taskbar.tray_custom)
-                {
-                        if (lay.vertical)
-                                taskbar_text_turned(view, lay.bx, lay.by, lay.bw, x, y, width, height, taskbar.tray_text, ink, ground);
-                        else
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, taskbar.tray_text, ink, ground);
-                }
-                // The clock has the tray's far slot, past the battery's when one is shown; a side band writes both
-                // turned, as its titles.
-                else
-                {
-                        int cx, cy, cw, ch;
-
-                        if (taskbar_slot(view, -3, &cx, &cy, &cw, &ch))
-                        {
-                                if (lay.vertical)
-                                        taskbar_text_turned(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
-                                else
-                                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
-                        }
-                }
-                if (taskbar.battery_item && !taskbar.tray_custom)
-                {
-                        int ax, ay, aw, ah;
-
-                        taskbar_battery_text(text, taskbar.battery_charging, taskbar.battery_percent);
-                        if (taskbar_slot(view, -4, &ax, &ay, &aw, &ah))
-                        {
-                                if (lay.vertical)
-                                        taskbar_text_turned(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
-                                else
-                                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
-                        }
-                }
-                if (taskbar_slot(view, TASKBAR_VOLUME, &x, &y, &width, &height))
-                        taskbar_volume_cell(view, &lay, x, y, width, height, ink, ground);
-                if (taskbar_slot(view, TASKBAR_MIC, &x, &y, &width, &height))
-                        taskbar_mic_cell(view, &lay, x, y, width, height);
-                if (taskbar_slot(view, TASKBAR_NOTICES, &x, &y, &width, &height))
-                        taskbar_notices_cell(view, &lay, x, y, width, height);
+                        taskbar_say(view, &lay, x, y, width, height, taskbar.tray_text, ink, ground);
+                taskbar_battery_text(text, taskbar.battery_charging, taskbar.battery_percent);
+#define TASKBAR_CELL(slot, shown, paint) { if (taskbar_slot(view, slot, &x, &y, &width, &height)) paint; }
+                TASKBAR_TRAY_CELLS(TASKBAR_CELL)
+#undef TASKBAR_CELL
         }
         return 1;
 }
@@ -1410,15 +1383,5 @@ static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *
 */
 static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 {
-        struct taskbar_layout lay;
-        int along, length;
-
-        taskbar_layout(view, &lay);
-        if (!taskbar_along(&lay, TASKBAR_LAUNCHER, &along, &length))
-                return 0;
-        if (lay.vertical)
-                *x = lay.bx, *y = along, *width = lay.bw, *height = length;
-        else
-                *x = along, *y = lay.by, *width = length, *height = lay.bh;
-        return 1;
+        return taskbar_cell_anchor(view, TASKBAR_LAUNCHER, x, y, width, height);
 }
