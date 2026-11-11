@@ -1576,22 +1576,30 @@ static b32 link_pair_wait(link_pair_made address_to made, string_address namespa
         if (tty && shown)
                 host_say(log, "\n");
         link_before_restore(before);
+        //      Five ways a wait ends, and each says which, with its own next
+        //      step: used (above), refused (a machine had the code and was
+        //      already linked), stopped, cancelled, or expired.
         if (closed)
-                return host_refuse("no answer: a machine used the code, but it is "
-                                   "already linked, and keeps what it may do: "
-                                   "moonwater link shows it\n");
+                return host_refuse("refused: a machine used the code, but it is "
+                                   "already linked, and keeps what it may do  "
+                                   "next: moonwater link shows it\n");
         link_pair_close(made->mark);
         if (stopped)
-                return host_refuse("no answer: stopped, and the code no longer "
-                                   "works: moonwater link pair makes another\n");
+                return host_refuse("no answer: stopped before a machine used the "
+                                   "code, and the code no longer works  next: "
+                                   "moonwater link pair makes another\n");
         if (!live && link_boot_seconds() < made->expires)
-                return host_refuse("no answer: moonwater link cancel ended the wait, "
-                                   "and the code no longer works\n");
-        return host_refuse("expired: nobody used the code in %p seconds, so the "
-                           "machines were not linked. Both need to be on one "
-                           "network, and the code typed as it was printed; "
-                           "moonwater link doctor says what this machine can "
-                           "reach\n",
+                return host_refuse("no answer: moonwater link cancel ended the wait "
+                                   "before a machine used the code, and the code "
+                                   "no longer works  next: moonwater link pair "
+                                   "makes another\n");
+        //      This machine keeps no record of a try it refused, so the one
+        //      thing an expiry can say is that nobody got the code through.
+        return host_refuse("expired: nobody used the code in %p seconds, so no "
+                           "machine was linked. This machine keeps no record of a "
+                           "try it refused, so it cannot say whether one came  "
+                           "next: moonwater link pair, and type the code as it is "
+                           "printed\n",
                            (positive)link_pair_seconds());
 }
 
@@ -1723,6 +1731,11 @@ static b32 link_pair_here(string_address expect)
                               address_of before);
 }
 
+/*      Said by each refusal that comes before anything is sent: the other
+        machine is not reached, so a person is not left to wonder whether it
+        was. */
+#define LINK_UNSENT "nothing was sent, so the other machine was not reached"
+
 static b32 link_pair_there(string_address typed_name, string_address typed)
 {
         p8 code[LINK_CODE_LENGTH + 1];
@@ -1739,32 +1752,35 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
         //      says nothing of what was wrong with them.
         if (string_length(typed_name) >= WATERLINK_NAME_MAX)
                 return host_refuse("unknown name: %s is not a machine name; "
-                                   "letters, digits, . - _, up to 31\n", typed_name);
+                                   "letters, digits, . - _, up to 31; " LINK_UNSENT "\n",
+                                   typed_name);
         link_fold_name(typed_name, name);
         if (!link_name_good((string_address)name))
                 return host_refuse("unknown name: %s is not a machine name; "
                                    "letters, digits, . - _, up to 31, and not one "
-                                   "of the words link uses\n", typed_name);
+                                   "of the words link uses; " LINK_UNSENT "\n",
+                                   typed_name);
         link_machine_name(own);
         if (string_equals((string_address)own, (string_address)name))
-                return host_refuse("%s is this machine's own name\n",
+                return host_refuse("%s is this machine's own name; " LINK_UNSENT "\n",
                                    (string_address)name);
         if (symbols != LINK_CODE_LENGTH)
                 return host_refuse("wrong code length: %s has %p symbols, and a code "
                                    "has %p, as moonwater link pair prints it: "
-                                   "abc-def\n",
+                                   "abc-def; " LINK_UNSENT "\n",
                                    typed, (positive)symbols,
                                    (positive)LINK_CODE_LENGTH);
         if (!link_code_clean(typed, code))
                 return host_refuse("code not accepted: %s has a character that no "
                                    "code uses; a code is letters and digits, and "
-                                   "no u. Copy it again from moonwater link pair\n",
+                                   "no u. Copy it again from moonwater link pair; "
+                                   LINK_UNSENT "\n",
                                    typed);
         host_read_word(LINK_TRANSPORT_PATH, transport, sizeof transport);
         if (!string_equals((string_address)transport, "modem") && !link_has_route())
                 return host_refuse("peer not reachable: this machine has no route to "
                                    "a network, so %s cannot be reached from here; "
-                                   "moonwater link doctor says why\n",
+                                   LINK_UNSENT ". moonwater link doctor says why\n",
                                    (string_address)name);
 
         refused = link_pair_start((string_address)name, code, null,
