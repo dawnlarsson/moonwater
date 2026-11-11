@@ -9066,8 +9066,11 @@ static int ui_run_flagged(struct ui address_to ui, const font_face address_to co
 
         if (!alpha || !ui->scratch)
                 return width;
+        // The rows the scratch holds are at the scale it was mapped at: a remap that failed (ui_scratch_fit) leaves the older, smaller one.
+        int held = ui->scratch_scale && ui->scratch_scale < ui->scale ? ui->scratch_scale : ui->scale;
+
         wide = wide > ui->scratch_width ? ui->scratch_width : wide;
-        rows = rows > UI_SCRATCH_ROWS * ui->scale / 100 ? UI_SCRATCH_ROWS * ui->scale / 100 : rows;
+        rows = rows > UI_SCRATCH_ROWS * held / 100 ? UI_SCRATCH_ROWS * held / 100 : rows;
         if (ui->band_bottom > ui->band_top && (top + rows <= ui->band_top || top >= ui->band_bottom))
                 return width;
 
