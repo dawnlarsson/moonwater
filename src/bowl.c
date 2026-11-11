@@ -3815,9 +3815,15 @@ static bipolar bowl_reset_walk(string_address path, positive how,
         return failed;
 }
 
+/*
+        A bowl root is emptied without crossing a mount point: a mount below
+        it is another filesystem (an operator's bind of /home or of a data
+        partition, say), and a walk that crossed it deleted that filesystem's
+        contents. The mount point and what is on it are left where they are.
+*/
 static b32 bowl_reset_root(string_address root)
 {
-        bipolar failed = bowl_reset_walk(root, 0, null);
+        bipolar failed = bowl_reset_walk(root, BOWL_RESET_ONE_MOUNT, null);
 
         return_if(failed < 0, bowl_fail(root, failed));
         return 0;
