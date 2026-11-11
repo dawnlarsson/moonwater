@@ -19,13 +19,14 @@ while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
         shift
 done
 shift
+[ -n "$root" ] && [ -n "$name" ] || { echo "usage: sh test/wayland_trial.sh COMPOSITOR ROOT NAME PROBE.py PROBE_ARGS... -- COMMAND..." >&2; exit 2; }
 dir=${TRIAL_DIR:-/tmp}
 size=${TRIAL_SIZE:-1280x800}
 mkdir -p "$dir/bin"
 ln -sf "$compositor" "$dir/bin/compositor"
-mount -t proc proc /proc
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /root
+mount -t proc proc /proc || exit 1
+mount -t tmpfs tmpfs /run || exit 1
+mount -t tmpfs tmpfs /root || exit 1
 mkdir -p /run/moonwater /run/user/0
 chmod 700 /run/user/0
 [ -z "$TRIAL_DISPLAYS" ] || echo "$TRIAL_DISPLAYS" > /root/canvas.displays

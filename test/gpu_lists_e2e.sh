@@ -38,8 +38,8 @@ session()
         mode=$1
         work=$2
         fonts=$3
-        mount -t tmpfs tmpfs /run
-        mount -t tmpfs tmpfs /root
+        mount -t tmpfs tmpfs /run || return 1
+        mount -t tmpfs tmpfs /root || return 1
         # the terminal's shell is on a pty: a devpts of this namespace, its ptmx over /dev/ptmx (the host's ptmx would name the host's pts)
         mkdir -p /dev/pts && mount -t devpts -o newinstance,ptmxmode=0666 devpts /dev/pts && mount --bind /dev/pts/ptmx /dev/ptmx || echo "no pty for the terminal" >&2
         # the kit's faces are /usr/share/fonts/inter and ibm-plex-mono (ui.c); a machine without them loads none, and an app with no font exits. The

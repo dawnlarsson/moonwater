@@ -19,8 +19,8 @@ session()
         mode=$1
         work=$2
         fonts=$3
-        mount -t tmpfs tmpfs /run
-        mount -t tmpfs tmpfs /root
+        mount -t tmpfs tmpfs /run || return 1
+        mount -t tmpfs tmpfs /root || return 1
         mkdir -p /dev/pts && mount -t devpts -o newinstance,ptmxmode=0666 devpts /dev/pts && mount --bind /dev/pts/ptmx /dev/ptmx || echo "no pty for the terminal" >&2
         mount --bind "$fonts" /usr/share/fonts || return 1
         mkdir -p /run/moonwater

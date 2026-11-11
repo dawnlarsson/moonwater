@@ -18,9 +18,9 @@ if [ -z "${WAYLAND_E2E_EXTRA+x}" ] && [ -c /dev/dri/renderD128 ]; then extra=-G;
 failures=0
 mkdir -p "$work/bin"
 ln -sf "$compositor" "$work/bin/compositor"
-mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /run || exit 1
 # The compositor watches /root for the settings; a private one is the screen's scale to change (the rows of wayland_scale.py).
-mount -t tmpfs tmpfs /root
+mount -t tmpfs tmpfs /root || exit 1
 mkdir -p /run/moonwater
 export WAYLAND_DISPLAY=/run/moonwater/wayland-0 XDG_RUNTIME_DIR=/run
 

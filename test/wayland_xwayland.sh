@@ -13,12 +13,13 @@ compositor=$1
 xroot=$2
 xclient=$3
 work=$4
+[ -n "$xroot" ] && [ -n "$work" ] || { echo "usage: sh test/wayland_xwayland.sh COMPOSITOR XROOT XCLIENT WORKDIR" >&2; exit 2; }
 here=$(dirname "$0")
 failures=0
 mount --make-rprivate / 2> /dev/null
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /root
-mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run || exit 1
+mount -t tmpfs tmpfs /root || exit 1
+mount -t tmpfs tmpfs /tmp || exit 1
 mkdir -p /run/moonwater "$work/bin"
 ln -sf "$compositor" "$work/bin/compositor"
 export WAYLAND_DISPLAY=/run/moonwater/wayland-0 XDG_RUNTIME_DIR=/run

@@ -11,8 +11,8 @@ work=${2:-$(mktemp -d)}
 failures=0
 mkdir -p "$work/bin"
 ln -sf "$shell" "$work/bin/sessionbus"
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /root
+mount -t tmpfs tmpfs /run || exit 1
+mount -t tmpfs tmpfs /root || exit 1
 mkdir -p /run/moonwater
 address=unix:path=/run/moonwater/bus
 
