@@ -788,6 +788,9 @@ if [ "$do_clean" -eq 1 ] && [ -n "$host" ]; then
         exit 0
 fi
 if [ "$do_clean" -eq 1 ]; then
+        # The paths below are relative: run from another directory, this would
+        # remove that directory's own linux/ or dist/. Clean this tree instead.
+        cd -- "$here" || die "cannot enter $here to clean it"
         say "Removing build output"
         rm -rf dist fs linux \
                 artifacts/merge.config artifacts/.config artifacts/info \
