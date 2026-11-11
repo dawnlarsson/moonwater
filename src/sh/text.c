@@ -21965,10 +21965,6 @@ static bool cut_pieces_run(cut_pieces address_to run)
         return true;
 }
 
-// The one record cut makes of its input when the field delimiter ends
-// records too.
-static byte_store cut_record;
-
 /*
         A line that is not whole in the read, cut as it streams past rather
         than gathered first: GNU cut holds nothing of a line but, where -s
@@ -22710,8 +22706,6 @@ static b32 text_cut()
                 return text_done(text_status);
         }
 
-        bool whole_record = by_field && !whitespace && delimiter == text_delimiter;
-
         b32 inputs = text_input_count();
         bool spans = by_character &&
                      !(text_list_single && (!complement || !separator)) &&
@@ -22726,8 +22720,7 @@ static b32 text_cut()
         positive mb_charset = text_charset();
         bool characters = (flags & FILE_FLAG('c')) && mb_charset != TEXT_CHARSET_BYTES;
         // Fields by one byte with nothing else asked go a read at a time.
-        bool whole_lines = by_field && !whitespace && !separator && !trimmed &&
-                           delimiter != text_delimiter;
+        bool whole_lines = by_field && !whitespace && !separator && !trimmed;
         /*
                 A complement that leaves no field at all: GNU finds its
                 selection spent before the first field and writes only the
@@ -22735,7 +22728,7 @@ static b32 text_cut()
                 anywhere, which it copies through whole as it would any
                 undelimited lines. Under -s nothing at all is written.
         */
-        bool nothing_selected = by_field && !whitespace && !whole_record &&
+        bool nothing_selected = by_field && !whitespace &&
                                 complement && text_list_ranges_count &&
                                 text_list_ranges[0].first == 1 &&
                                 text_list_open;
@@ -22745,7 +22738,7 @@ static b32 text_cut()
                                    text_list_ranges[i - 1].last + 1;
         positive chunk_fills = 0;
         bool chunk_delimited = false;
-        text_line_stream_ok = !whole_record && !nothing_selected &&
+        text_line_stream_ok = !nothing_selected &&
                               (by_field ? !whitespace && !trimmed && !by_blanks
                                         : !characters);
         text_line_stream_now = false;
@@ -22769,12 +22762,9 @@ static b32 text_cut()
                 if (!text_open(text_file_name(i)))
                         continue;
 
-                bool record_taken = false;
-                bool record_ended = false;
-
                 //      The pooled walk counts characters as UTF-8 only, so a
                 //      GB18030 or EUC-JP -c stays on the serial walk.
-                if ((whole_lines || bytes_lines) && !whole_record &&
+                if ((whole_lines || bytes_lines) &&
                     !(characters && mb_charset != TEXT_CHARSET_UTF8))
                 {
                         cut_pieces pieces = {.by_field = whole_lines,
@@ -22789,39 +22779,6 @@ static b32 text_cut()
                 {
                         p8 address_to line = null;
                         positive line_length = 0;
-
-                        if (whole_record)
-                        {
-                                if (record_taken)
-                                        break;
-
-                                record_taken = true;
-                                cut_record.used = 0;
-
-                                while (text_fill())
-                                {
-                                        positive left = text_input.filled - text_input.position;
-
-                                        if (!byte_store_reserve(address_of cut_record,
-                                                                cut_record.used + left, 1 << 16))
-                                        {
-                                                return text_done(string_diagnostic(&text_diagnostic, 1, null,
-                                                                                   "memory exhausted"));
-                                        }
-
-                                        memory_copy(cut_record.bytes + cut_record.used,
-                                                    text_input.buffer + text_input.position, left);
-                                        cut_record.used += left;
-                                        text_input.position = text_input.filled;
-                                }
-
-                                if (!cut_record.used)
-                                        break;
-
-                                line = cut_record.bytes;
-                                record_ended = line[cut_record.used - 1] == delimiter;
-                                line_length = cut_record.used - record_ended;
-                        }
 
                         if (whole_lines && text_fill())
                         {
@@ -22870,8 +22827,7 @@ static b32 text_cut()
                                 that; the whole-line walks below keep every
                                 line that is.
                         */
-                        if (!whole_record &&
-                            !text_line_view(address_of line,
+                        if (!text_line_view(address_of line,
                                             address_of line_length,
                                             null, 0, null))
                         {
@@ -23152,21 +23108,6 @@ static b32 text_cut()
                                 }
 
                                 bool split = memory_first_of(line, delimiter, line_length) != null;
-
-                                //      The terminator that ended a whole-input
-                                //      record parts no fields, yet GNU reads the
-                                //      record as delimited all the same: under
-                                //      -s it is written when its one field is
-                                //      selected and dropped, terminator and all,
-                                //      when it is not.
-                                if (record_ended && !split)
-                                {
-                                        if (only_delimited &&
-                                            text_list_has(1) == complement)
-                                                continue;
-
-                                        split = true;
-                                }
 
                                 // A line with no delimiter is one whole field,
                                 // and is printed unchanged unless -s says not
