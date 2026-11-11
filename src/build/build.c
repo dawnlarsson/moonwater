@@ -2782,12 +2782,6 @@ static string_address build_temporary_directory(string_address tag)
         return null;
 }
 
-//      Removing a tree is our rm, called rather than spawned. If ours is
-//      wrong the build leaves debris, which is the point of using it.
-static fn build_remove_tree(string_address path)
-{
-        build_tool("rm", "-rf", path, null);
-}
 
 //      Zeroes from where the region's content ended to where the page it
 //      occupies does. Every spark region is a whole number of pages.
@@ -3088,7 +3082,9 @@ static b32 build_spark(string_address source, string_address output,
         work = build_temporary_directory("spark");
 
         return_if(!work, build_die("spark: cannot make a working directory"));
-        scope_exit(build_remove_tree(work));
+        //      Removing a tree is our rm, called rather than spawned. If ours is
+        //      wrong the build leaves debris, which is the point of using it.
+        scope_exit(build_tool("rm", "-rf", (string_address)(work), null));
 
         elf = build_join(work, "/image.elf", null);
         text_binary = build_join(work, "/text.bin", null);
@@ -3745,7 +3741,7 @@ static b32 build_floor(string_address arch)
         work = build_temporary_directory("floor");
 
         return_if(!work, build_die("floor: cannot make a working directory"));
-        scope_exit(build_remove_tree(work));
+        scope_exit(build_tool("rm", "-rf", (string_address)(work), null));
 
         object = build_join(work, "/floor.o", null);
 
@@ -4272,14 +4268,6 @@ static bool build_switch_find(string_address want, bool fallback)
         return fallback;
 }
 
-//      kind is "TOOL_" or "BUILTIN_", key the upper-case name.
-static bool build_switch_on(string_address kind, string_address key)
-{
-        return build_switch_find(build_join(kind, key, null),
-                                 word_is(kind, "TOOL_")
-                                     ? build_moon_tools_all
-                                     : build_moon_builtins_all);
-}
 
 /*
         The SYSTEM tools the kernel and init reach by absolute path: /init
@@ -4520,7 +4508,8 @@ static bool build_category_on(string_address category)
 static bool build_tool_switched(build_tool_entry address_to one)
 {
         return build_tool_fixed(one->name) ||
-               build_switch_on("TOOL_", build_upper(one->name));
+               //      kind is "TOOL_" or "BUILTIN_", key the upper-case name.
+               build_switch_find(build_join("TOOL_", ((string_address)(build_upper(one->name))), null), word_is("TOOL_", "TOOL_") ? build_moon_tools_all : build_moon_builtins_all);
 }
 
 //      Whether a tools.inc row is in the program being built.
@@ -4591,7 +4580,7 @@ static string_address build_config_header(string_address from,
                         build_builtin_entry address_to one =
                                 address_of build_builtin_table[at];
 
-                        if (build_switch_on("BUILTIN_", one->key))
+                        if (build_switch_find(build_join("BUILTIN_", ((string_address)(one->key)), null), word_is("BUILTIN_", "TOOL_") ? build_moon_tools_all : build_moon_builtins_all))
                                 builtins++;
                         else
                                 text = build_join(text,

@@ -2409,10 +2409,6 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
         bowl_quiet = false;
 }
 
-static fn bowl_hosts_write(string_address name)
-{
-        bowl_hosts_write_in("", name, false);
-}
 
 static fn bowl_session_hosts(void)
 {
@@ -2426,7 +2422,7 @@ static fn bowl_session_hosts(void)
         if (got > 0 && name[got - 1] == '\n')
                 got--;
         name[got > 0 ? got : 0] = end;
-        bowl_hosts_write(name);
+        bowl_hosts_write_in("", name, false);
 }
 
 /*
@@ -8720,11 +8716,6 @@ static bool __attribute__((__noinline__)) bowl_bin_taken(string_address name)
         names appended to /root/desktop, the machine's choice of desktop, and a
         remove took that file away. A FIFO there is opened without waiting.
 */
-static bipolar bowl_profile_state(string_address root)
-{
-        return bowl_open_in_root(root, BOWL_PROFILE_STATE,
-                                 FILE_READ | O_DIRECTORY | O_CLOEXEC);
-}
 
 /* Opened to add to, never to start over: an install run again finds every
    launcher already there, notes nothing, and would leave a truncated marker
@@ -8732,7 +8723,7 @@ static bipolar bowl_profile_state(string_address root)
 static bipolar bowl_profile_marker_open(string_address root, string_address name,
                                         positive opening)
 {
-        bipolar state = bowl_profile_state(root);
+        bipolar state = bowl_open_in_root(root, BOWL_PROFILE_STATE, FILE_READ | O_DIRECTORY | O_CLOEXEC);
         bipolar marker;
 
         if (state < 0)
@@ -8756,7 +8747,7 @@ static bool bowl_profile_marked(string_address root, string_address name)
 
 static fn bowl_profile_forget(string_address root, string_address name)
 {
-        bipolar state = bowl_profile_state(root);
+        bipolar state = bowl_open_in_root(root, BOWL_PROFILE_STATE, FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
         if (state < 0)
                 return;

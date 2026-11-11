@@ -3,11 +3,6 @@
 #include "../src/moonwater/spark.c"
 #include "../src/sh/shell.c"
 
-PURE bool shell_onecmd_on()
-{
-        return shell_extra_on(SHELL_EXTRA_ONECMD);
-}
-
 //      Whether the lines the reader hands over are remembered: a person's
 //      at a terminal, and a script's once it has said set -o history.
 PURE bool shell_history_recording()
@@ -260,7 +255,7 @@ static positive shell_run_complete_lines(p8 address_to text, positive length,
                 }
                 at = (positive)(newline - text) + 1;
 
-                if (!command_string && shell_onecmd_on() &&
+                if (!command_string && shell_extra_on(SHELL_EXTRA_ONECMD) &&
                     !shell_reading_more())
                         return at;
         }
@@ -1446,7 +1441,7 @@ b32 main()
 
                 at = shell_run_complete_lines(shell_buffer, total, false);
 
-                if (at && shell_onecmd_on() && !shell_reading_more())
+                if (at && shell_extra_on(SHELL_EXTRA_ONECMD) && !shell_reading_more())
                 {
                         held = 0;
                         break;

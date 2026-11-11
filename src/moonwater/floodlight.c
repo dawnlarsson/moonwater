@@ -422,12 +422,6 @@ static u32 fold_wide(u32 hash, const void *from, unsigned int bytes)
         return fold((u32)(a >> 32) ^ (u32)a, at, bytes % 8);
 }
 
-/* A row's seal covers everything about it except the seal itself. */
-static u32 seal_of(const struct light *row)
-{
-        return fold(secret ^ 2166136261u, row,
-                    offsetof(struct light, seal));
-}
 
 /*
  * The built-in answers are const and the kernel write-protects .rodata -- when
@@ -468,10 +462,6 @@ static char shown[REPORT] __aligned(8);
 static unsigned int shown_len;
 static u32 shown_sum;
 
-static u32 shown_seal(void)
-{
-        return fold_wide(secret ^ shown_len, shown, shown_len);
-}
 
 /*
  * The one buffer a line is parsed in, with floodlight's own redzone either
@@ -565,7 +555,8 @@ static bool intact(void)
         for (i = 0; i < CHANGES; i++) {
                 if (likely(!changed[i].subject[0]))
                         continue;
-                if (likely(seal_of(&changed[i]) == changed[i].seal))
+                /* A row's seal covers everything about it except the seal itself. */
+                if (likely(fold(secret ^ 2166136261u, (const struct light *)(&changed[i]), offsetof(struct light, seal)) == changed[i].seal))
                         continue;
 
                 compromised = true;
@@ -579,7 +570,7 @@ static bool intact(void)
                 return false;
         }
 
-        if (shown_len && unlikely(shown_len > REPORT || shown_seal() != shown_sum)) {
+        if (shown_len && unlikely(shown_len > REPORT || fold_wide(secret ^ shown_len, shown, shown_len) != shown_sum)) {
                 compromised = true;
                 pr_alert("floodlight: the kept report has been altered in memory; refusing to answer further\n");
                 return false;
@@ -818,7 +809,7 @@ static int floodlight_show(struct seq_file *seq, void *unused)
             seq->count <= REPORT) {
                 memcpy(shown, seq->buf, seq->count);
                 shown_len = seq->count;
-                shown_sum = shown_seal();
+                shown_sum = fold_wide(secret ^ shown_len, shown, shown_len);
         }
 
         mutex_unlock(&lock);
@@ -1129,7 +1120,7 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
          * could say the change was somebody else's, at some other time. */
         row->who = from_kuid(&init_user_ns, current_uid());
         row->when = ktime_get_real_seconds();
-        row->seal = seal_of(row);
+        row->seal = fold(secret ^ 2166136261u, (const struct light *)(row), offsetof(struct light, seal));
 
         /*
          * Said out loud. This machine draws its kernel log on its own screen,
