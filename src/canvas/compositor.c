@@ -17262,7 +17262,7 @@ static int compositor_report(positive now, positive stamp)
                 if (compositor_wl_hold_counts(dx, dy, now))
                         return moved;
 #endif
-                gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now - compositor.stamp), compositor.flat,
+                gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now > compositor.stamp ? now - compositor.stamp : 0), compositor.flat,
                                               compositor.sensitivity);
                 compositor.stamp = now;
                 compositor.real_x = compositor_counts(compositor.real_x, compositor_accel(dx, &compositor.accel_x, gain));
