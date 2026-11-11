@@ -3783,13 +3783,6 @@ static fn login_who_line(string_address user, p8 state, string_address line,
         text_put_character('\n');
 }
 
-static fn login_who_heading()
-{
-        login_who_line("NAME", ' ', "LINE", "TIME",
-                       login_who.idle && !login_who.short_output ? "IDLE" : "",
-                       !login_who.short_output ? "PID" : "", "COMMENT",
-                       login_who.exit ? "EXIT" : "");
-}
 
 static bool login_who_visit(login_record address_to record)
 {
@@ -3986,7 +3979,7 @@ static b32 tools_who()
                                     : tty;
 
         if (login_who.heading && !login_who.count)
-                login_who_heading();
+                login_who_line("NAME", ' ', "LINE", "TIME", login_who.idle && !login_who.short_output ? "IDLE" : "", !login_who.short_output ? "PID" : "", "COMMENT", login_who.exit ? "EXIT" : "");
 
         string_address path = file_operand_count == 1
                                   ? file_operand_at(0)
@@ -6252,10 +6245,6 @@ static fn numfmt_record(p8 address_to bytes, positive length)
 
 /* The shared field list is walked once per field spelling, and each -f
    starts a fresh one. */
-static bool numfmt_hint()
-{
-        return string_report(writer_stderr, false, TOOLS_TRY("numfmt"));
-}
 
 /* The reference's complaint about a word that is not one of a fixed set:
    the word, then the set one to a line, then where to look. */
@@ -6271,7 +6260,7 @@ static bool numfmt_word_refuse(string_address option, string_address value,
         for (positive at = 0; at < count; at++)
                 string_format(writer_stderr, "  - '%w'\n", writer_terminal_quoted_name, words[at]);
 
-        return numfmt_hint();
+        return (bool)(string_report(writer_stderr, false, TOOLS_TRY("numfmt")));
 }
 
 /*
@@ -22620,11 +22609,6 @@ static const argument_option ul_lsfd_options[] = {
     {null},
 };
 
-static fn ul_lsfd_release()
-{
-        array_store_release(ul_lsfd_entries, ul_lsfd_entry_room,
-                            ul_lsfd_entry_count);
-}
 
 /* Consume each fdinfo record once. Even a malformed first occurrence owns
    its field; a later duplicate must not silently replace it. */
@@ -22845,7 +22829,7 @@ static string_address ul_lsfd_field(address_any row, p8 column,
 
 static b32 util_linux_lsfd()
 {
-        ul_lsfd_release();
+        array_store_release(ul_lsfd_entries, ul_lsfd_entry_room, ul_lsfd_entry_count);
         ul_taking("lsfd", ul_lsfd_options, "[options]");
         tools_refuse(taking.first != (positive)program_argument_count(), "lsfd", "unexpected operand");
         if ((taking.flags & FILE_FLAG('J')) &&
@@ -22874,7 +22858,7 @@ static b32 util_linux_lsfd()
                 requires |= ul_lsfd_columns[columns[at]].requires;
 
         text_begin("lsfd");
-        scope_exit(ul_lsfd_release());
+        scope_exit(array_store_release(ul_lsfd_entries, ul_lsfd_entry_room, ul_lsfd_entry_count));
         utility_arena.used = 0;
 
         /* ps_pid_list borrows the text arena; these are not independent mmap
@@ -26254,7 +26238,7 @@ static fn ul_wipefs_parsable(ul_wipefs_work address_to work,
 
                         if (field)
                                 log(",", 1);
-                        storage_write_hex_escaped(log, value, true, false);
+                        writer_hex_escaped(log, (string_address)(value), string_length(((string_address)(value))), HEX_CONTROL | HEX_TAB | HEX_SLASH | HEX_HIGH | (true ? HEX_SPACE : 0) | (false ? HEX_QUOTE : 0));
                 }
                 log("\n", 1);
         }

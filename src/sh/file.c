@@ -1011,20 +1011,7 @@ static bipolar identity_visit(identity_table address_to t, p64 inode, p64 device
         return 0;
 }
 
-static bipolar identity_visit_facts(identity_table address_to t, file_facts address_to facts,
-                                    string_address name, positive cap, positive names_cap)
-{
-        return identity_visit(t, facts->inode,
-                              file_device_key(facts->device_major, facts->device_minor), name,
-                              cap, names_cap);
-}
 
-static identity_slot address_to identity_find_facts(identity_table address_to t,
-                                                    file_facts address_to facts)
-{
-        return identity_find(t, facts->inode,
-                             file_device_key(facts->device_major, facts->device_minor));
-}
 
 static fn identity_clear(identity_table address_to t)
 {
@@ -1122,10 +1109,6 @@ static bool file_made_seen(string_address name, file_facts address_to facts)
         return file_set_seen(file_made_buckets, name, facts);
 }
 
-static fn file_made_record(string_address name, file_facts address_to facts)
-{
-        file_set_record(address_of file_made_buckets, name, facts);
-}
 
 /* GNU's remember_copied: a file with more than one name that a move
    across devices or a copy keeping links has already copied, by the
@@ -1259,7 +1242,7 @@ static fn file_made_now(bipolar directory, string_address name)
 
         if (file_made_on && file_look(directory, name, AT_SYMLINK_NOFOLLOW,
                                       address_of facts))
-                file_made_record(name, address_of facts);
+                file_set_record(address_of file_made_buckets, name, address_of facts);
 }
 
 static bipolar file_parent_open(string_address path, p8 address_to leaf)
@@ -2377,10 +2360,6 @@ bool file_resolve(string_address path, p8 address_to into, bool follow)
         return file_resolve_as(path, into, follow, 0);
 }
 
-bool file_real(string_address path, p8 address_to into)
-{
-        return file_resolve(path, into, true);
-}
 
 // Reading a small file whole is shared Linux assembly in lib.c.
 
@@ -5132,17 +5111,11 @@ pd_done:
         return ok;
 }
 
-static bool file_moment_read_from(string_address text, b64 now, positive fraction,
-                                  b64 address_to out,
-                                  positive address_to nanoseconds)
-{
-        return pd_parse(text, now, fraction, false, out, nanoseconds);
-}
 
 bool file_moment_read_exact(string_address text, b64 now, b64 address_to out,
                             positive address_to nanoseconds)
 {
-        return file_moment_read_from(text, now, 0, out, nanoseconds);
+        return pd_parse(text, now, 0, false, out, nanoseconds);
 }
 
 // Walking directories ---------------------------------------
@@ -7298,12 +7271,6 @@ static bipolar file_copy_range_once(bipolar in, p64 address_to in_offset,
    destination offset, so the caller positions that descriptor before entering
    this loop. Keeping the source offset explicit means sparse extents never
    disturb the descriptor position used to discover the next hole. */
-static bipolar file_send_range_once(bipolar in, p64 address_to in_offset,
-                                    bipolar out, positive length)
-{
-        return system_call_4(syscall(sendfile), (positive)out, (positive)in,
-                             (positive)in_offset, length);
-}
 
 /* Regular copies use the kernel path below. The buffer exists only for a
    filesystem, kernel or seccomp policy that cannot perform range copies. */
@@ -7403,7 +7370,7 @@ static inline bool file_copy_stream(
                         positive ask = !bounded || length > FILE_KERNEL_COPY_SIZE
                             ? FILE_KERNEL_COPY_SIZE : (positive)length;
                         bipolar copied = stage
-                            ? file_send_range_once(in, offsets, out, ask)
+                            ? (bipolar)(system_call_4(syscall(sendfile), (positive)((bipolar)(out)), (positive)((bipolar)(in)), (positive)((p64 *)(offsets)), (positive)(ask)))
                             : file_copy_range_once(in, offsets, out,
                                                    offsets ? offsets + 1 : null, ask);
                         if (copied > 0)
@@ -13424,14 +13391,6 @@ static const argument_option ls_options[] = {
     {null},
 };
 
-// -I and --hide are the two options ls takes more than once.
-// One word among several spellings, or a complaint listing them the way the
-// reference lists them: each answer once, its synonyms beside it.
-static b32 ls_word_among(string_address option, string_address value,
-                         const file_word address_to words, positive count)
-{
-        return file_word_choose(ls_program, option, value, words, count, false);
-}
 
 static const file_word ls_when_words[] = {
     {"always", 'a'}, {"yes", 'a'}, {"force", 'a'},
@@ -13578,9 +13537,10 @@ static bool ls_option_word(p8 letter, string_address value)
                 if (ls_option_words[i].letter != letter)
                         continue;
 
-                b32 word = ls_word_among(ls_option_words[i].option, value,
-                                         ls_option_words[i].words,
-                                         ls_option_words[i].count);
+                // -I and --hide are the two options ls takes more than once.
+                // One word among several spellings, or a complaint listing them the way the
+                // reference lists them: each answer once, its synonyms beside it.
+                b32 word = file_word_choose(ls_program, ls_option_words[i].option, value, ls_option_words[i].words, ls_option_words[i].count, false);
 
                 if (word < 0)
                         return false;
@@ -20544,7 +20504,7 @@ static bool du_tree_seen(p32 major, p32 minor, p64 inode, p32 links, bool direct
         facts.device_minor = minor;
         facts.inode = inode;
 
-        bipolar seen = identity_visit_facts(address_of du_seen, address_of facts, null, 0, 0);
+        bipolar seen = identity_visit(address_of du_seen, ((file_facts *)(address_of facts))->inode, file_device_key(((file_facts *)(address_of facts))->device_major, ((file_facts *)(address_of facts))->device_minor), null, 0, 0);
 
         if (seen < 0)
         {
@@ -21598,10 +21558,6 @@ static fn df_field_add(p8 field, string_address heading)
         df_shown[df_shown_count++] = field;
 }
 
-static bool df_field_used(p8 field)
-{
-        return array_any(at, df_shown_count, df_shown[at] == field);
-}
 
 static bool df_refused(string_address message, string_address word)
 {
@@ -21637,7 +21593,7 @@ static bool df_output_read(string_address list)
                         return df_refused((string_address) "df: option --output: field '%w' unknown\n",
                                           whole);
                 }
-                if (df_field_used(field))
+                if ((bool)(array_any(at, df_shown_count, df_shown[at] == ((p8)(field)))))
                         return df_refused(
                             (string_address) "df: option --output: field '%w' used more than once\n",
                             df_fields[field].word);
@@ -22480,7 +22436,7 @@ static b32 file_df()
                 for the mount, when there is no Filesystem column to say it.
         */
         file_mount_facts sum;
-        string_address sum_where = df_field_used(DF_SOURCE) ? (string_address) "-"
+        string_address sum_where = (bool)(array_any(at, df_shown_count, df_shown[at] == ((p8)(DF_SOURCE)))) ? (string_address) "-"
                                                             : (string_address) "total";
 
         memory_fill(address_of sum, 0, sizeof(sum));
@@ -22832,18 +22788,6 @@ static fn chmod_one(bipolar directory, string_address name, string_address shown
         record, and the sink says it in walk order.  There is no depth limit.
 */
 
-//      An outcome and the whole path it is about, written straight into the
-//      node's output.
-static bool chmod_tree_put(parallel_output address_to output,
-                           chmod_outcome address_to out,
-                           file_change_tree_node address_to node,
-                           string_address name, positive name_length)
-{
-        return file_tree_put(output, out, sizeof(chmod_outcome),
-                             address_of out->path_bytes,
-                             (string_address)node->path, node->length,
-                             name, name_length);
-}
 
 static fn chmod_tree_enter(address_any context, address_any node_address,
                            bipolar directory, parallel_output address_to output)
@@ -22864,8 +22808,9 @@ static fn chmod_tree_enter(address_any context, address_any node_address,
                 memory_fill(address_of outcome, 0, sizeof(outcome));
                 outcome.kind = CHMOD_UNREAD;
                 outcome.error = (b32)directory;
-                if (!chmod_tree_put(output, address_of outcome, node,
-                                    (string_address)"", 0))
+                //      An outcome and the whole path it is about, written straight into the
+                //      node's output.
+                if (!file_tree_put(output, (chmod_outcome *)(address_of outcome), sizeof(chmod_outcome), address_of ((chmod_outcome *)(address_of outcome))->path_bytes, (string_address)((file_change_tree_node *)(node))->path, ((file_change_tree_node *)(node))->length, (string_address)"", 0))
                         parallel_stop();
                 return;
         }
@@ -22911,7 +22856,7 @@ static fn chmod_tree_enter(address_any context, address_any node_address,
                              node->trusted, address_of outcome);
 
                 if (chmod_outcome_heard(address_of outcome) &&
-                    !chmod_tree_put(output, address_of outcome, node, name, name_length))
+                    !file_tree_put(output, (chmod_outcome *)(address_of outcome), sizeof(chmod_outcome), address_of ((chmod_outcome *)(address_of outcome))->path_bytes, (string_address)((file_change_tree_node *)(node))->path, ((file_change_tree_node *)(node))->length, name, name_length))
                 {
                         parallel_stop();
                         return;
@@ -23272,12 +23217,6 @@ static fn chown_old_spec(file_facts address_to was, p8 address_to into)
                    chown_has_new_group ? (string_address)group : null, into);
 }
 
-static fn chown_new_spec(p8 address_to into)
-{
-        chown_join(chown_has_new_user ? (string_address)chown_new_user : null,
-                   chown_has_new_group ? (string_address)chown_new_group : null,
-                   into);
-}
 
 static string_address chown_noun(void)
 {
@@ -23297,7 +23236,7 @@ static fn chown_said(string_address shown, file_facts address_to was, bool chang
         bool named = chown_has_new_user || chown_has_new_group;
 
         chown_old_spec(was, before);
-        chown_new_spec(after);
+        chown_join(chown_has_new_user ? (string_address)chown_new_user : null, chown_has_new_group ? (string_address)chown_new_group : null, after);
         if (!changed)
         {
                 if (!named)
@@ -23330,7 +23269,7 @@ static fn chown_said_failed(string_address shown, file_facts address_to was)
                               writer_shell_quoted_name, shown);
                 return;
         }
-        chown_new_spec(after);
+        chown_join(chown_has_new_user ? (string_address)chown_new_user : null, chown_has_new_group ? (string_address)chown_new_group : null, after);
         if (!was)
         {
                 string_format(log, "failed to change %s of %w to %s\n",
@@ -24721,7 +24660,7 @@ static COLD bool ln_make(string_address target, string_address name)
                 return file_backup_did ? ln_unbackup(name) : false;
         }
         if (!ln_symbolic)
-                file_made_record(name, address_of source);
+                file_set_record(address_of file_made_buckets, name, address_of source);
 
         if (ln_loud)
         {
@@ -25236,7 +25175,7 @@ static bool namei_walk(string_address path, string_address base,
                 if (memory_is_word(path + start, part, ".."))
                 {
                         p8 actual[FILE_PATH_MAX];
-                        if (!file_real(candidate, actual))
+                        if (!file_resolve(candidate, actual, true))
                                 return false;
                         string_copy_max_end(current, actual, FILE_PATH_MAX - 1);
                 }
@@ -25467,7 +25406,7 @@ static bool whereis_add_directory(positive kind, string_address path)
         //      The reference asks whether it may read the directory before
         //      it asks what the directory is, and passes over one it may not.
         if (!path || system_access_at(AT_FDCWD, path, 4) < 0 ||
-            !file_real(path, resolved) ||
+            !file_resolve(path, resolved, true) ||
             !file_look(AT_FDCWD, resolved, 0, address_of facts) ||
             (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
                 return true; // Search-list holes and races are not errors.
@@ -26878,13 +26817,6 @@ static const argument_option file_node_arguments[] = {
     {null},
 };
 
-//      A mode outside the nine permission bits is read here and refused by
-//      the caller, which is where the reference's own sentence about it goes.
-static bool file_node_mode(string_address specification,
-                           positive address_to mode)
-{
-        return file_mode_masked(specification, 0666, false, file_umask(), mode, null);
-}
 
 static b32 file_make_node(string_address program, string_address path,
                           positive kind, positive device, positive mode,
@@ -26982,7 +26914,9 @@ static bool file_node_mode_taken(string_address program, file_taking address_to 
         if (!given)
                 return true;
 
-        if (!file_node_mode(file_option_value(taking, 'm'), mode))
+        //      A mode outside the nine permission bits is read here and refused by
+        //      the caller, which is where the reference's own sentence about it goes.
+        if (!file_mode_masked(file_option_value(taking, 'm'), 0666, false, file_umask(), mode, null))
                 return string_report(log_error, false, "%s: invalid mode\n", program);
 
         if (address_to mode & ~(positive)0777)
@@ -37121,24 +37055,7 @@ static string_address cp_top_destination;
 //      otherwise be the only stop for.
 static bool cp_into_self;
 
-//      GNU's table outlives the command-line source that filled it: what one
-//      source made first is a name to be left alone in the walk of the next,
-//      so cp -r a dir dir stops at dir/a, which the copy of a made, when it
-//      meets it in the walk of dir.
-static bool cp_holds(p64 address_to inodes, p32 address_to majors,
-                     p32 address_to minors, positive count,
-                     file_facts address_to facts)
-{
-        return array_any(at, count,
-                         inodes[at] == facts->inode &&
-                         majors[at] == facts->device_major &&
-                         minors[at] == facts->device_minor);
-}
 
-static bool cp_created_names(positive inode)
-{
-        return array_any(at, cp_created_count, cp_created_inode[at] == inode);
-}
 
 static fn cp_tree_enter(address_any context, address_any node_address,
                         bipolar directory, parallel_output address_to output)
@@ -37220,7 +37137,7 @@ static fn cp_tree_enter(address_any context, address_any node_address,
                                 said = cp_tree_put(output, CP_TREE_FILE, 0, node,
                                                    name, name_length);
                 }
-                else if (record->d_type == DT_DIR && cp_created_names(record->d_ino))
+                else if (record->d_type == DT_DIR && (bool)(array_any(at, cp_created_count, cp_created_inode[at] == ((positive)(record->d_ino)))))
                 {
                         //      Maybe the directory being made: the serial walk
                         //      looks it up by identity and says so.
@@ -38627,8 +38544,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                               writer_shell_quoted_name, source_shown);
         }
         if (!moving && !named &&
-            cp_holds(cp_created_inode, cp_created_major, cp_created_minor,
-                     cp_created_count, address_of facts))
+            //      GNU's table outlives the command-line source that filled it: what one
+            //      source made first is a name to be left alone in the walk of the next,
+            //      so cp -r a dir dir stops at dir/a, which the copy of a made, when it
+            //      meets it in the walk of dir.
+            (bool)(array_any(at, (positive)(cp_created_count), ((p64 *)(cp_created_inode))[at] == ((file_facts *)(address_of facts))->inode && ((p32 *)(cp_created_major))[at] == ((file_facts *)(address_of facts))->device_major && ((p32 *)(cp_created_minor))[at] == ((file_facts *)(address_of facts))->device_minor)))
         {
                 //      Said once: the walks that read a directory's names
                 //      apart from the copy can meet it again before they
@@ -38641,9 +38561,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                      writer_shell_quoted_name, cp_top_source,
                                      writer_shell_quoted_name, cp_top_destination);
         }
-        if (!moving && cp_holds(cp_ancestor_inode, cp_ancestor_major,
-                                cp_ancestor_minor, cp_ancestor_count,
-                                address_of facts))
+        if (!moving && (bool)(array_any(at, (positive)(cp_ancestor_count), ((p64 *)(cp_ancestor_inode))[at] == ((file_facts *)(address_of facts))->inode && ((p32 *)(cp_ancestor_major))[at] == ((file_facts *)(address_of facts))->device_major && ((p32 *)(cp_ancestor_minor))[at] == ((file_facts *)(address_of facts))->device_minor)))
                 return string_report(log_error, false,
                                      "cp: cannot copy cyclic symbolic link %w\n",
                                      writer_shell_quoted_name, source_shown);
@@ -43258,11 +43176,7 @@ static b32 file_touch()
                 {
                         b64 seconds;
                         positive fraction;
-                        if (!file_moment_read_from(written,
-                                                   from ? (b64)times[at] : now,
-                                                   from ? times[at + 1] : now_ns,
-                                                   address_of seconds,
-                                                   address_of fraction))
+                        if (!pd_parse(written, from ? (b64)times[at] : now, from ? times[at + 1] : now_ns, false, address_of seconds, address_of fraction))
                                 return string_report(log_error, 1, "touch: invalid date format '%w'\n", writer_terminal_quoted_name, written);
                         times[at] = (p64)seconds;
                         times[at + 1] = fraction;
@@ -53364,18 +53278,6 @@ static positive xargs_posix_argument_max()
         return arg_max;
 }
 
-static fn xargs_show_limits(positive env_bytes, positive posix, positive usable,
-                            positive using)
-{
-        string_format(log_error,
-                      "Your environment variables take up %p bytes\n"
-                      "POSIX upper limit on argument length (this system): %p\n"
-                      "POSIX smallest allowable upper limit on argument length (all systems): %p\n"
-                      "Maximum length of command we could actually use: %p\n"
-                      "Size of command buffer we are actually using: %p\n"
-                      "Maximum parallelism (--max-procs must be no greater): 2147483647\n",
-                      env_bytes, posix, (positive)4096, usable, using);
-}
 
 static b32 file_xargs()
 {
@@ -53529,7 +53431,7 @@ static b32 file_xargs()
         }
 
         if (taking.flags & FILE_FLAG('M'))
-                xargs_show_limits(env_bytes, posix, usable, xargs_most_bytes);
+                string_format(log_error, "Your environment variables take up %p bytes\n" "POSIX upper limit on argument length (this system): %p\n" "POSIX smallest allowable upper limit on argument length (all systems): %p\n" "Maximum length of command we could actually use: %p\n" "Size of command buffer we are actually using: %p\n" "Maximum parallelism (--max-procs must be no greater): 2147483647\n", (positive)(env_bytes), (positive)(posix), (positive)4096, (positive)(usable), (positive)(xargs_most_bytes));
 
         string_address from = file_option_value(address_of taking, 'a');
 

@@ -802,15 +802,6 @@ static bool text_reader_attach(text_reader address_to reader,
         return true;
 }
 
-static bool text_reader_open_at(text_reader address_to reader,
-                                bipolar directory, string_address path,
-                                string_address shown)
-{
-        return text_reader_attach(
-            reader,
-            system_open_at(directory, path, FILE_READ | O_CLOEXEC),
-            shown);
-}
 
 static HOT bool text_reader_open(text_reader address_to reader, string_address path)
 {
@@ -822,7 +813,7 @@ static HOT bool text_reader_open(text_reader address_to reader, string_address p
                 reader->handle = 0;
         }
         else
-                opened = text_reader_open_at(reader, AT_FDCWD, path, path);
+                opened = text_reader_attach(reader, system_open_at(((bipolar)(AT_FDCWD)), ((string_address)(path)), FILE_READ | O_CLOEXEC), path);
 
         if (opened && !text_out_stdio_size)
                 text_out_stdio_size = text_stdio_buffer(text_out_handle);
@@ -921,7 +912,7 @@ static bool text_open_named(string_address path)
         if (!path)
                 return text_open(path);
 
-        if (text_reader_open_at(address_of text_input, AT_FDCWD, path, path))
+        if (text_reader_attach(address_of text_input, system_open_at(((bipolar)(AT_FDCWD)), ((string_address)(path)), FILE_READ | O_CLOEXEC), path))
                 return true;
 
         text_status = text_status ? text_status : 1;
@@ -1804,10 +1795,6 @@ static fn text_banner_named(string_address name)
         text_put_string(" <==\n");
 }
 
-static fn text_banner(b32 which)
-{
-        text_banner_named(text_file_name(which));
-}
 
 /*
         The power-of-two encodings.
@@ -2928,11 +2915,6 @@ static inline big_v8 big_v8_permute(big_v8 a, big_v8 b, big_v8 index)
         return lanes8_permute(a, b, index);
 }
 
-// Eight pieces of 32 bits of a limb array, from the piece at, as lanes.
-static inline big_v8 big_v8_pieces(const p64 address_to limbs, positive at)
-{
-        return lanes8_load_pieces((const p32 address_to)limbs + at);
-}
 
 typedef struct
 {
@@ -3167,12 +3149,13 @@ static void big_nttv_residues(p64 address_to out, p64 address_to spare, const p6
         positive at = 0;
 
         for (; at + 8 <= pieces_a; at += 8)
-                big_v8_store(out + at, big_v8_montgomery(big_v8_pieces(a, at), square, c.prime, c.inverse));
+                // Eight pieces of 32 bits of a limb array, from the piece at, as lanes.
+                big_v8_store(out + at, big_v8_montgomery((big_v8)(lanes8_load_pieces((const p32 address_to)((const p64 *)(a)) + ((positive)(at)))), square, c.prime, c.inverse));
         for (; at < pieces_a; at++)
                 out[at] = big_nttv_multiply32(((const p32 address_to)a)[at], p->square, p->prime, p->inverse);
         memory_fill(out + pieces_a, 0, (length - pieces_a) * sizeof(p64));
         for (at = 0; at + 8 <= pieces_b; at += 8)
-                big_v8_store(spare + at, big_v8_montgomery(big_v8_pieces(b, at), square, c.prime, c.inverse));
+                big_v8_store(spare + at, big_v8_montgomery((big_v8)(lanes8_load_pieces((const p32 address_to)((const p64 *)(b)) + ((positive)(at)))), square, c.prime, c.inverse));
         for (; at < pieces_b; at++)
                 spare[at] = big_nttv_multiply32(((const p32 address_to)b)[at], p->square, p->prime, p->inverse);
         memory_fill(spare + pieces_b, 0, (length - pieces_b) * sizeof(p64));
@@ -10397,7 +10380,7 @@ static inline INLINE b32 text_head_tail(bool tail)
                         continue;
 
                 if (headers)
-                        text_banner(i);
+                        text_banner_named(text_file_name(((b32)(i))));
 
                 if (!tail)
                 {
@@ -11008,10 +10991,6 @@ static bipolar tail_watch(bipolar notify, string_address path, p32 mask)
                              (positive)path, mask);
 }
 
-static fn tail_unwatch(bipolar notify, bipolar watch)
-{
-        system_call_2(syscall(inotify_rm_watch), (positive)notify, (positive)watch);
-}
 
 // check_fspec: copy what one watched file has gained, its header first
 // when another file spoke last.
@@ -11354,7 +11333,7 @@ static b32 tail_notified(bipolar notify, bool headers)
                         {
                                 if (f->watch >= 0)
                                 {
-                                        tail_unwatch(notify, f->watch);
+                                        system_call_2(syscall(inotify_rm_watch), (positive)((bipolar)(notify)), (positive)((bipolar)(f->watch)));
                                         tail_unlist(f->watch);
                                 }
 
@@ -11394,7 +11373,7 @@ static b32 tail_notified(bipolar notify, bool headers)
                         if ((happened & TAIL_IN_DELETE_SELF) ||
                             (!tail_retry && (happened & TAIL_IN_MOVE_SELF)))
                         {
-                                tail_unwatch(notify, f->watch);
+                                system_call_2(syscall(inotify_rm_watch), (positive)((bipolar)(notify)), (positive)((bipolar)(f->watch)));
                                 tail_unlist(f->watch);
                         }
 
@@ -32437,18 +32416,7 @@ static inline INLINE fn sed_stdio(positive length)
                 sed_stdio_follow(length, true);
 }
 
-// = prints its number and delimiter through one unchecked printf.
-static COLD fn sed_stdio_number(positive number)
-{
-        sed_stdio_follow(positive_digits(number) + 1, false);
-}
 
-// A checked write of a whole string and its delimiter, whose length is only
-// worth taking while the model is followed.
-static COLD fn sed_stdio_line(string_address line)
-{
-        sed_stdio_follow(string_length(line) + 1, true);
-}
 
 static fn sed_write_diagnostic(bipolar reason, positive buffer)
 {
@@ -32653,10 +32621,6 @@ static p8 sed_case_apply(sed_context address_to ctx, p8 value)
         return value;
 }
 
-static bool sed_case_byte(sed_context address_to ctx, positive address_to have, p8 value)
-{
-        return sed_work_byte(ctx, have, sed_case_apply(ctx, value));
-}
 
 /*
         A piece of the match or a group under \U or \L or the one-character
@@ -34369,8 +34333,7 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
                                                              : next == 'r' ? '\r'
                                                                            : next;
 
-                                                if (!sed_case_byte(ctx, address_of have,
-                                                                   escaped))
+                                                if (!sed_work_byte(ctx, address_of have, sed_case_apply(((sed_context *)(ctx)), ((p8)(escaped)))))
                                                         return false;
 
                                                 continue;
@@ -34391,7 +34354,7 @@ static inline INLINE bool sed_substitute_in(sed_context address_to ctx,
                                 }
                                 else
                                 {
-                                        if (!sed_case_byte(ctx, address_of have, character))
+                                        if (!sed_work_byte(ctx, address_of have, sed_case_apply(((sed_context *)(ctx)), ((p8)(character)))))
                                                 return false;
                                         continue;
                                 }
@@ -35728,7 +35691,8 @@ static b32 text_sed()
                                 case '=':
                                         sed_output_start();
                                         if (unlikely(sed_output_state & SED_OUTPUT_MODELLING))
-                                                sed_stdio_number(sed_number);
+                                                // = prints its number and delimiter through one unchecked printf.
+                                                sed_stdio_follow(positive_digits(((positive)(sed_number))) + 1, false);
                                         positive_to_string(text_put, sed_number);
                                         text_put_character(text_delimiter);
                                         break;
@@ -35817,7 +35781,9 @@ static b32 text_sed()
                                         {
                                                 sed_output_start();
                                                 if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                                        sed_stdio_line(sed_text + command->text);
+                                                        // A checked write of a whole string and its delimiter, whose length is only
+                                                        // worth taking while the model is followed.
+                                                        sed_stdio_follow(string_length(((string_address)(sed_text + command->text))) + 1, true);
                                                 text_put_string(sed_text + command->text);
                                                 text_put_character(text_delimiter);
                                         }
@@ -35857,7 +35823,7 @@ cycle_done:
 
                                 sed_output_start();
                                 if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                        sed_stdio_line(sed_text + sed_append_which[c]);
+                                        sed_stdio_follow(string_length(((string_address)(sed_text + sed_append_which[c]))) + 1, true);
                                 text_put_string(sed_text + sed_append_which[c]);
                                 text_put_character('\n');
                         }

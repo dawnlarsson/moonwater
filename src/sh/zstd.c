@@ -3577,10 +3577,6 @@ static __attribute__((always_inline)) inline fn zstd_cstate_encode(zstd_bout add
         st->value = st->ct->state[idx];
 }
 
-static fn zstd_cstate_flush(zstd_bout address_to b, zstd_cstate address_to st)
-{
-        zstd_bout_add(b, st->value, st->ct->log);
-}
 
 static positive zstd_write_norm(p8 address_to dst, const bipolar address_to norm,
                                  positive max_sym, p8 log)
@@ -3839,8 +3835,8 @@ static positive zstd_pack_weights(p8 address_to dst, p8 address_to weight,
                 zstd_cstate_encode(address_of b, address_of state[at & 1],
                                     weight[at]);
         }
-        zstd_cstate_flush(address_of b, address_of state[1]);
-        zstd_cstate_flush(address_of b, address_of state[0]);
+        zstd_bout_add((zstd_bout *)(address_of b), ((zstd_cstate *)(address_of state[1]))->value, ((zstd_cstate *)(address_of state[1]))->ct->log);
+        zstd_bout_add((zstd_bout *)(address_of b), ((zstd_cstate *)(address_of state[0]))->value, ((zstd_cstate *)(address_of state[0]))->ct->log);
         if (!zstd_bout_close(address_of b) || head + b.n >= 128)
                 return 0;
         dst[0] = (p8)(head + b.n);

@@ -1721,20 +1721,12 @@ static positive storage_show_tag(string_address tag, positive length)
 /* One storage-family escaping engine.  blkid leaves spaces literal and quotes
    them; findmnt --raw must instead escape spaces, while quotes need no special
    treatment there. */
-static fn storage_write_hex_escaped(writer output, string_address value,
-                                    bool escape_space, bool escape_quote)
-{
-        writer_hex_escaped(output, value, string_length(value),
-                           HEX_CONTROL | HEX_TAB | HEX_SLASH | HEX_HIGH |
-                           (escape_space ? HEX_SPACE : 0) |
-                           (escape_quote ? HEX_QUOTE : 0));
-}
 
 static fn storage_output_field(writer output, string_address name,
                                string_address value, bool exported)
 {
         string_format(output, exported ? "%s=" : " %s=\"", name);
-        storage_write_hex_escaped(output, value, false, true);
+        writer_hex_escaped(output, (string_address)(value), string_length(((string_address)(value))), HEX_CONTROL | HEX_TAB | HEX_SLASH | HEX_HIGH | (false ? HEX_SPACE : 0) | (true ? HEX_QUOTE : 0));
         output(exported ? "\n" : "\"", 1);
 }
 

@@ -483,11 +483,6 @@ typedef struct
 static tar_pax_state tar_pax_global;
 static tar_pax_state tar_pax_local;
 
-/* A plain decimal that fits a signed 64 bit size. */
-static bool tar_pax_wide(p8 address_to text, positive length, p64 address_to into)
-{
-        return memory_digits_whole(text, length, (positive)bipolar_max, into);
-}
 
 /* What a pax header said of a sparse member: 1 the map is in its records
    (versions 0.0 and 0.1), 2 the map is text at the front of the data (1.0). */
@@ -581,11 +576,6 @@ static fn tar_pax_clear(tar_pax_state address_to state)
 
 /* A pax id is plain decimal.  One that is not, or that does not fit, is
    ignored rather than refusing the archive. */
-static bool tar_pax_number(p8 address_to text, positive length,
-                           p64 address_to into)
-{
-        return memory_digits_whole(text, length, 0xffffffffull, into);
-}
 
 /* Seconds since the epoch, perhaps negative, with a fraction whose first
    nine digits become nanoseconds: -1.25 is two seconds before the epoch
@@ -737,8 +727,7 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                                       !memory_compare(mark + 1, "gid", 3)))
                 {
                         p64 number = 0;
-                        bool good = tar_pax_number(equal + 1, value,
-                                                   address_of number);
+                        bool good = memory_digits_whole((p8 *)(equal + 1), value, 0xffffffffull, (p64 *)(address_of number));
 
                         if (mark[1] == 'u')
                         {
@@ -777,8 +766,8 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         p64 number = 0;
                         string_address name = mark + 12;
                         positive name_length = key - 11;
-                        bool numeric = tar_pax_wide(equal + 1, value,
-                                                      address_of number);
+                        /* A plain decimal that fits a signed 64 bit size. */
+                        bool numeric = memory_digits_whole((p8 *)(equal + 1), value, (positive)bipolar_max, (p64 *)(address_of number));
 
                         if (name_length == 4 && !memory_compare(name, "name", 4))
                         {
@@ -823,8 +812,7 @@ static bool tar_pax_apply(tar_pax_state address_to state,
 
                                         while (stop < value && equal[1 + stop] != ',')
                                                 stop++;
-                                        if (!tar_pax_wide(equal + 1 + walk, stop - walk,
-                                                            address_of got))
+                                        if (!memory_digits_whole((p8 *)(equal + 1 + walk), stop - walk, (positive)bipolar_max, (p64 *)(address_of got)))
                                         {
                                                 tar_psp_bad = true;
                                                 break;
@@ -6305,7 +6293,7 @@ static string_address tar_seen_name(file_facts address_to facts)
 
         if (facts->hard_links < 2)
                 return null;
-        slot = identity_find_facts(address_of tar_seen_table, facts);
+        slot = identity_find(address_of tar_seen_table, ((file_facts *)(facts))->inode, file_device_key(((file_facts *)(facts))->device_major, ((file_facts *)(facts))->device_minor));
         return slot ? (string_address)(tar_seen_table.names + slot->name_at) : null;
 }
 
@@ -6313,8 +6301,7 @@ static fn tar_seen_store(file_facts address_to facts, string_address member)
 {
         if (facts->hard_links < 2 || string_length(member) >= TAR_PATH)
                 return;
-        identity_visit_facts(address_of tar_seen_table, facts, member, TAR_SEEN_LIMIT,
-                             TAR_SEEN_NAMES_LIMIT);
+        identity_visit(address_of tar_seen_table, ((file_facts *)(facts))->inode, file_device_key(((file_facts *)(facts))->device_major, ((file_facts *)(facts))->device_minor), member, TAR_SEEN_LIMIT, TAR_SEEN_NAMES_LIMIT);
 }
 
 /*
@@ -6868,11 +6855,6 @@ dereferenced:;
         return tar_status;
 }
 
-static b32 tar_add_path(bipolar archive, string_address path, bool verbose)
-{
-        return tar_add_named(archive, AT_FDCWD, path, path, verbose, true,
-                             DT_UNKNOWN);
-}
 
 static b32 tar_write_archive(struct tar_options address_to options)
 {
@@ -7045,8 +7027,7 @@ static b32 tar_write_archive(struct tar_options address_to options)
         }
 
         for (at = options->first; at < count && !tar_create_fatal; at++)
-                tar_add_path(handle, tar_words[at],
-                             options->verbose == 1);
+                tar_add_named(handle, AT_FDCWD, tar_words[at], tar_words[at], options->verbose == 1, true, DT_UNKNOWN);
 
         memory_fill(tar_block, 0, TAR_BLOCK);
         if (!tar_create_fatal)
