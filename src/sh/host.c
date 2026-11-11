@@ -22603,17 +22603,41 @@ static p8 name_unsaved[NAME_ROOM];
    saved at the end: false when /root would not take it. */
 static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
+        bool held;
+        bool saved;
+
         host_read_word(NAME_PATH, into, room);
         address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
                 return true;
 
+        /*      The roll is made under the host lock, and the file is read again
+                there: a take's restore and the machine process's, both at boot,
+                that found no name each rolled one and saved it, and the kernel was
+                given whichever applied last, so /root and the machine's name
+                disagreed until the next boot. A lock that cannot be had is no
+                reason not to roll. */
+        held = host_acquire();
+        if (held)
+        {
+                host_read_word(NAME_PATH, into, room);
+                address_to rolled = !name_valid(into);
+                if (!address_to rolled)
+                {
+                        host_release();
+                        return true;
+                }
+        }
+
         if (name_unsaved[0])
                 string_copy_bounded(into, (string_address)name_unsaved, room);
         else
                 name_roll(into, room);
-        if (radio_write_word(NAME_PATH, into) >= 0)
+        saved = radio_write_word(NAME_PATH, into) >= 0;
+        if (held)
+                host_release();
+        if (saved)
         {
                 name_unsaved[0] = 0;
                 return true;
