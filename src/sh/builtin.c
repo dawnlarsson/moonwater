@@ -20518,7 +20518,7 @@ static const string_address shell_tool_own_meta[] = {
     "pipesz", "pivot_root", "prlimit", "renice", "rename", "resizepart",
     "rfkill", "scriptreplay", "setpgid", "setpriv", "setsid", "swaplabel",
     "taskset", "uclampset", "unshare", "utmpdump", "waitpid", "wall",
-    "whereis", "wipefs", "write", "moonwater", "init", "bowl", null};
+    "whereis", "wipefs", "write", "mkfs", "moonwater", "init", "bowl", null};
 
 static b32 shell_tool_meta(positive which, string_address address_to arguments,
                            positive count)

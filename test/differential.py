@@ -27997,7 +27997,7 @@ UL_UPSTREAM = ("addpart agetty bits blkdiscard blkid blkpr blkzone blockdev cal 
 UL_SUPPORTED = ("addpart bits blkid blockdev cal choom chrt col colcrt colrm column copyfilerange coresched "
                 "ctrlaltdel delpart dmesg exch fadvise fallocate fincore findfs findmnt flock getino getopt "
                 "hardlink hexdump ionice ipcmk ipcrm ipcs isosize kill last line logger look lsblk lsclocks lscpu "
-                "lsfd lsipc lslocks lsmem lsns mcookie mesg mkswap mount mountpoint namei nologin nsenter pipesz "
+                "lsfd lsipc lslocks lsmem lsns mcookie mesg mkfs mkswap mount mountpoint namei nologin nsenter pipesz "
                 "pivot_root prlimit rename renice resizepart rev rfkill script scriptreplay setarch setpgid "
                 "setpriv setsid swaplabel taskset uclampset ul umount unshare utmpdump uuidgen uuidparse waitpid "
                 "wall whereis wipefs write").split()
@@ -99897,7 +99897,7 @@ REASONS = {
  "r316": "unmounting happens in this namespace; another task's is refused",
  "r317": "automatic subid mapping, binfmt mounting, the namespace owner, capability retention and the child signal relays are refused",
  "r318": "automatic subid mapping is refused: this build maps only the ranges named outright",
- "r319": "signatures are listed, never erased: every mutating mode, the backup directory and device locking are refused",
+ "r319": "signatures are listed; -a and -o erase only a block device nothing on the running system depends on, or a regular file with -F (a moonwater flag, GNU has none): -a and -o on a fixture image without -F are refused where GNU erases; the backup directory, -f and device locking are refused",
  "r32": "gawk's --bignum; numbers are doubles here, refused with usage",
  "r323": "-m with a symbolic clause that names the sticky bit gives 1777 here where the reference gives 1755: the shared mode parser and the numeric path agree with it -- chmod o+t on 0777 and mkdir -m 1777 both answer 1777 on either side -- and only mkdir's symbolic clause differs, at every umask and on both file systems.",
  "r325": "the reference names itself in these diagnostics by the path it was run from, which a farm of links cannot match, and du writes one line per byte of a character that is not an option where this writes one per character",

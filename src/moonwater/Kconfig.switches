@@ -236,6 +236,10 @@ config MOONWATER_TOOL_MKFIFO
     bool "mkfifo"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_MKFS
+    bool "mkfs"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_MKNOD
     bool "mknod"
     default MOONWATER_TOOLS_ALL

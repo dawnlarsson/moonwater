@@ -1649,6 +1649,121 @@ static bool storage_each_device(storage_visitor visit, address_any context)
                                        address_of request);
 }
 
+/*
+        Whether a tool may erase a block device, and why it may not.
+
+        The device and each of its partitions are matched against the mount
+        table by major:minor, the numbers the kernel keeps, so a mount whose
+        source is spelled some other way still counts. A mount on / or /boot
+        is the disk the system boots from. A partition carrying moonwater's
+        own labels is refused too: it is an install even when nothing has
+        mounted it yet. Partitions are the children of the disk's sysfs
+        directory that carry a partition attribute, which names them whatever
+        the device path was. A tool that opens the device exclusively is
+        refused by the kernel as well while anything on it is mounted.
+*/
+typedef struct
+{
+        p8 device[64];
+        storage_mount_table mounts;
+        string_address reason;
+} storage_guard;
+
+/* The major:minor of a block device, as the mount table spells it. */
+static bool storage_guard_numbers(string_address path, p8 address_to text,
+                                  positive room)
+{
+        file_facts facts;
+        positive used;
+
+        if (!file_look(AT_FDCWD, path, 0, address_of facts) ||
+            (facts.mode & MODE_FORMAT) != MODE_BLOCK)
+                return false;
+        used = positive_into_string(text, facts.rdev_major);
+        text[used++] = ':';
+        used += positive_into_string(text + used, facts.rdev_minor);
+        text[used] = end;
+        return used < room;
+}
+
+static bool storage_guard_check(storage_guard address_to guard,
+                                string_address path, p8 address_to numbers)
+{
+        storage_identity identity;
+
+        for (positive at = 0; at < guard->mounts.count; at++)
+        {
+                storage_mount address_to mount = guard->mounts.entry + at;
+
+                if (!string_equals(mount->device, (string_address)numbers))
+                        continue;
+                guard->reason = string_equals(mount->target, "/") ||
+                                string_equals(mount->target, "/boot")
+                    ? (string_address)"is the disk the running system boots from"
+                    : (string_address)"something on it is mounted";
+                return false;
+        }
+
+        /* Moonwater's partition labels, HOST_SYSTEM_NAME and HOST_DATA_NAME
+           in host.c, which is compiled after this file. */
+        storage_probe_device(path, address_of identity);
+        if (string_equals(identity.partlabel, "moonwater-boot") ||
+            string_equals(identity.partlabel, "moonwater-data"))
+        {
+                guard->reason = (string_address)"holds a moonwater partition";
+                return false;
+        }
+        return true;
+}
+
+static bool storage_guard_partition(string_address path, address_any opaque)
+{
+        storage_guard address_to guard = (storage_guard address_to)opaque;
+        string_address name = string_last_of(path, '/');
+        p8 sysfs[256];
+        p8 numbers[64];
+        positive used = sizeof("/sys/dev/block/") - 1;
+        positive disk = string_length((string_address)guard->device);
+        positive leaf;
+
+        name = name ? name + 1 : path;
+        leaf = string_length(name);
+        if (used + disk + 1 + leaf + sizeof("/partition") > sizeof(sysfs))
+                return true;
+
+        memory_copy(sysfs, "/sys/dev/block/", used);
+        memory_copy(sysfs + used, guard->device, disk);
+        used += disk;
+        sysfs[used++] = '/';
+        memory_copy(sysfs + used, name, leaf);
+        used += leaf;
+        memory_copy(sysfs + used, "/partition", sizeof("/partition"));
+        if (system_access_at(AT_FDCWD, sysfs, 0) < 0)
+                return true;
+        if (!storage_guard_numbers(path, numbers, sizeof(numbers)))
+                return true;
+        return storage_guard_check(guard, path, numbers);
+}
+
+/* Null when the device may be written, else the reason in words. */
+static string_address storage_device_refusal(string_address path)
+{
+        storage_guard guard;
+        bool refused;
+
+        memory_zero(address_of guard, sizeof(guard));
+        if (!storage_guard_numbers(path, guard.device, sizeof(guard.device)))
+                return (string_address)"is not a block device";
+        if (!storage_mount_table_load(address_of guard.mounts, null))
+                return (string_address)"the mount table cannot be read";
+
+        refused = !storage_guard_check(address_of guard, path, guard.device) ||
+                  storage_each_block_path(storage_guard_partition,
+                                          address_of guard);
+        storage_mount_table_release(address_of guard.mounts);
+        return refused ? guard.reason : null;
+}
+
 typedef struct
 {
         storage_selector selector;

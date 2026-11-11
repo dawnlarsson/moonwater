@@ -26234,6 +26234,27 @@ static fn ul_wipefs_parsable(ul_wipefs_work address_to work,
         }
 }
 
+/*      The line util-linux prints for each signature it erases, or would
+        erase under --no-act: where it was, what it was, and the bytes it held. */
+static fn ul_wipefs_report(ul_wipefs_row address_to row)
+{
+        p8 where[2 * sizeof(positive) + 1];
+
+        storage_hex_padded(where, (positive)row->offset, 8, false);
+        string_format(
+            log,
+            "%s: %p bytes were erased at offset 0x%s (%s):",
+            row->path, (positive)row->length, where,
+            row->type);
+        for (positive byte = 0; byte < row->length; byte++)
+        {
+                p8 pair[3] = {' '};
+                memory_into_hex(pair + 1, row->magic + byte, 1);
+                log(pair, sizeof(pair));
+        }
+        log("\n", 1);
+}
+
 static fn ul_wipefs_no_act(ul_wipefs_work address_to work,
                            bool all, bool have_offset, p64 offset,
                            bool quiet, positive first, positive count)
@@ -26251,23 +26272,8 @@ static fn ul_wipefs_no_act(ul_wipefs_work address_to work,
                             (!all && (!have_offset || row->offset != offset)))
                                 continue;
                         found = true;
-                        if (quiet)
-                                continue;
-
-                        p8 where[2 * sizeof(positive) + 1];
-                        storage_hex_padded(where, (positive)row->offset, 8, false);
-                        string_format(
-                            log,
-                            "%s: %p bytes were erased at offset 0x%s (%s):",
-                            row->path, (positive)row->length, where,
-                            row->type);
-                        for (positive byte = 0; byte < row->length; byte++)
-                        {
-                                p8 pair[3] = {' '};
-                                memory_into_hex(pair + 1, row->magic + byte, 1);
-                                log(pair, sizeof(pair));
-                        }
-                        log("\n", 1);
+                        if (!quiet)
+                                ul_wipefs_report(row);
                 }
 
                 if (have_offset && !found)
@@ -26283,8 +26289,88 @@ static fn ul_wipefs_no_act(ul_wipefs_work address_to work,
         }
 }
 
+static p8 ul_wipefs_zeros[10];
+
+/*      Erases the signatures one device holds, or only the one at the offset
+        asked for. The device is opened exclusively and read through that same
+        descriptor, so what is erased is what was listed. A device nothing on
+        the running system depends on is erased; one that is refused is said
+        so and left alone. A regular file is erased only with -F. */
+static b32 ul_wipefs_wipe_one(ul_wipefs_work address_to work,
+                              string_address path, bool all, bool have_offset,
+                              p64 offset, bool quiet, bool image)
+{
+        file_facts facts;
+        bool found = false;
+        bool failed = false;
+        string_address refusal;
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+
+        if (handle < 0)
+                return string_report(log_error, 1, "wipefs: cannot open %s: %s\n",
+                                     path, file_reason(handle));
+        if (!file_look(handle, "", AT_EMPTY_PATH, address_of facts))
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "wipefs: %s: cannot read its type\n", path);
+        }
+
+        if ((facts.mode & MODE_FORMAT) == MODE_BLOCK)
+                refusal = storage_device_refusal(path);
+        else if ((facts.mode & MODE_FORMAT) == MODE_FILE && image)
+                refusal = null;
+        else
+                refusal = (string_address)"is not a block device; -F erases a regular file";
+        if (refusal)
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "wipefs: %s: %s\n", path, refusal);
+        }
+
+        (void)storage_each_signature_handle(handle, path, ul_wipefs_collect,
+                                            address_of work);
+        if (work->failed)
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "wipefs: %s: too many signatures\n", path);
+        }
+
+        for (positive at = 0; at < work->count && !failed; at++)
+        {
+                ul_wipefs_row address_to row = work->rows + at;
+
+                if (!all && (!have_offset || row->offset != offset))
+                        continue;
+                found = true;
+                if (storage_format_write(handle, ul_wipefs_zeros, row->length,
+                                         row->offset) < 0)
+                        failed = true;
+                else if (!quiet)
+                        ul_wipefs_report(row);
+        }
+
+        if (have_offset && !found && !failed)
+        {
+                p8 where[2 * sizeof(positive) + 1];
+                positive digits = positive_into_base(
+                    where, (positive)offset, 16, false);
+                where[digits] = end;
+                string_format(log_error,
+                              "wipefs: %s: offset 0x%s not found\n",
+                              path, where);
+                failed = true;
+        }
+        if (!failed && system_call_1(syscall(fsync), (positive)handle) < 0)
+                failed = true;
+        if (failed)
+                string_format(log_error, "wipefs: %s: write failed\n", path);
+        system_close(handle);
+        return failed;
+}
+
 static const argument_option ul_wipefs_options[] = {
-    {"all", 'a'}, {"backup", 'b', ARGUMENT_OPTIONAL}, {"force", 'f'}, {"noheadings", 'i'},
+    {"all", 'a'}, {"backup", 'b', ARGUMENT_OPTIONAL}, {"force", 'f'}, {"file", 'F'}, {"noheadings", 'i'},
     {"json", 'J'}, {"no-act", 'n'}, {"offset", 'o', ARGUMENT_REQUIRED},
     {"output", 'O', ARGUMENT_REQUIRED}, {"parsable", 'p'}, {"quiet", 'q'},
     {"types", 't', ARGUMENT_REQUIRED}, {"lock", 'k', ARGUMENT_LONG_OPTIONAL | ARGUMENT_LONG_ONLY},
@@ -26304,8 +26390,9 @@ static b32 util_linux_wipefs()
 
         bool all = (taking.flags & FILE_FLAG('a')) != 0;
         bool no_act = (taking.flags & FILE_FLAG('n')) != 0;
+        bool image = (taking.flags & FILE_FLAG('F')) != 0;
         string_address offset_text = file_option_value(address_of taking, 'o');
-        tools_refuse((all || offset_text) && !no_act, "wipefs", "mutation is not supported; use --no-act");
+        bool wipe = (all || offset_text) && !no_act;
         tools_refuse(all && offset_text, "wipefs", "--all and --offset conflict");
 
         positive count = (positive)program_argument_count();
@@ -26329,7 +26416,18 @@ static b32 util_linux_wipefs()
         for (positive operand = taking.first; operand < count; operand++)
         {
                 string_address path = program_argument((b32)operand);
-                bipolar got = storage_each_signature(
+                bipolar got;
+
+                if (wipe)
+                {
+                        work.count = 0;
+                        work.failed = false;
+                        status |= ul_wipefs_wipe_one(
+                            address_of work, path, all, !!offset_text, offset,
+                            (taking.flags & FILE_FLAG('q')) != 0, image);
+                        continue;
+                }
+                got = storage_each_signature(
                     path, ul_wipefs_collect, address_of work);
                 if (got < 0)
                 {
@@ -26342,6 +26440,11 @@ static b32 util_linux_wipefs()
                 tools_refuse(work.failed, "wipefs", "too many signatures");
         }
 
+        if (wipe)
+        {
+                log_flush();
+                return status;
+        }
         if (all || offset_text)
                 ul_wipefs_no_act(address_of work, all, !!offset_text,
                                  offset,
@@ -26379,6 +26482,138 @@ static b32 util_linux_wipefs()
 
         log_flush();
         return status;
+}
+
+// mkfs: one ext4 over a whole device ------------------------------
+
+/*      The ext4 layout and writer are storage.c's; this asks for them and
+        says what was written. The device is opened exclusively and checked
+        against the running system before anything is written, and an existing
+        filesystem or partition table is refused unless -f says to overwrite it.
+        A regular file is refused: the size comes from the kernel. */
+
+typedef struct
+{
+        bool any;
+        p8 type[STORAGE_TYPE_ROOM];
+} ul_mkfs_seen;
+
+static bool ul_mkfs_signature(storage_signature address_to signature,
+                              address_any opaque)
+{
+        ul_mkfs_seen address_to seen = (ul_mkfs_seen address_to)opaque;
+
+        seen->any = true;
+        memory_copy(seen->type, signature->identity.type, sizeof(seen->type));
+        return false;
+}
+
+static const argument_option ul_mkfs_options[] = {
+    {"type", 't', ARGUMENT_REQUIRED}, {"label", 'L', ARGUMENT_REQUIRED},
+    {"force", 'f'}, {"help", 'h'}, {"version", 'V'}, {null},
+};
+
+static b32 util_linux_mkfs()
+{
+        ul_taking("mkfs", ul_mkfs_options, "[options] device");
+        string_address type = file_option_value(address_of taking, 't');
+        string_address label = file_option_value(address_of taking, 'L');
+        bool force = (taking.flags & FILE_FLAG('f')) != 0;
+        positive count = (positive)program_argument_count();
+
+        tools_refuse(!type || !string_equals(type, "ext4"), "mkfs", "only -t ext4 is supported");
+        tools_refuse(label && string_length(label) > 16, "mkfs", "label is longer than 16 bytes");
+        tools_refuse(taking.first + 1 != count, "mkfs", "expected one device");
+
+        string_address path = program_argument((b32)taking.first);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+        if (handle < 0)
+                return string_report(log_error, 1, "mkfs: cannot open %s: %s\n",
+                                     path, file_reason(handle));
+
+        string_address refusal = storage_device_refusal(path);
+        if (refusal)
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "mkfs: %s: %s\n", path, refusal);
+        }
+
+        p64 bytes = 0;
+        if (system_control(handle, UL_BLKGETSIZE64, address_of bytes) < 0)
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "mkfs: %s: cannot read its size\n", path);
+        }
+
+        if (!force)
+        {
+                ul_mkfs_seen seen = {0};
+                p8 head[1024];
+                positive have;
+
+                (void)storage_each_signature_handle(handle, path, ul_mkfs_signature,
+                                                    address_of seen);
+                if (seen.any)
+                {
+                        system_close(handle);
+                        return string_report(log_error, 1, "mkfs: %s holds a %s signature; -f writes over it\n",
+                                             path, seen.type);
+                }
+                have = storage_read(handle, head, sizeof(head), 0);
+                if (storage_bytes(head, have, 510, (p8 address_to)"\x55\xaa", 2) ||
+                    storage_bytes(head, have, 512, (p8 address_to)"EFI PART", 8))
+                {
+                        system_close(handle);
+                        return string_report(log_error, 1, "mkfs: %s holds a partition table; -f writes over it\n", path);
+                }
+        }
+
+        storage_ext4_plan plan;
+        if (!storage_ext4_layout(address_of plan, bytes))
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "mkfs: %s has no ext4 layout: it takes 64 MiB to 16 TiB\n", path);
+        }
+
+        storage_format_identity identity;
+        file_random_state random;
+        tools_uuid uuid;
+        tools_uuid seed;
+
+        memory_zero(address_of identity, sizeof(identity));
+        if (file_random_seed(address_of random) < 0)
+        {
+                system_close(handle);
+                return string_report(log_error, 1, "mkfs: no random source\n");
+        }
+        tools_uuid_random_bytes(address_of random, address_of uuid);
+        tools_uuid_version(uuid.bytes, 6, 4);
+        tools_uuid_random_bytes(address_of random, address_of seed);
+        memory_copy(identity.uuid, uuid.bytes, sizeof(uuid.bytes));
+        memory_copy(identity.hash_seed, seed.bytes, sizeof(seed.bytes));
+        identity.time = (p32)(system_clock_ns(0) / 1000000000);
+        identity.label = label;
+
+        bool bad = storage_format_ext4(handle, 0, bytes, address_of identity) < 0;
+        if (!bad)
+                bad = system_call_1(syscall(fsync), (positive)handle) < 0;
+        system_close(handle);
+        if (bad)
+                return string_report(log_error, 1, "mkfs: %s: the write failed; the filesystem is not whole\n", path);
+
+        positive blocks = (positive)plan.blocks;
+        positive inodes = (positive)plan.groups * plan.inodes_per_group;
+        p8 text[37];
+
+        storage_uuid_bytes(text, identity.uuid);
+        string_format(log, "Creating filesystem with %p 4k blocks and %p inodes\n",
+                      blocks, inodes);
+        string_format(log, "Filesystem UUID: %s\n", text);
+        string_format(log, "Filesystem size: %s (%p bytes)\n",
+                      ul_lscpu_cache_size(blocks * 4096, false, true), blocks * 4096);
+        log_flush();
+        return 0;
 }
 
 // Linux swap header creation and labels ---------------------------
