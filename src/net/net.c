@@ -14429,7 +14429,7 @@ typedef struct
         p8 name[32];
         p8 signer[32];
         p64 next_update;
-        p64 fetched;
+        p64 fetched; // when it was fetched, in monotonic seconds: a failed fetch's retry is an age, which a step of the wall clock must not change
         positive age;
         bool used;
         bool failed;
@@ -14450,6 +14450,7 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
 {
         p8 name[32];
         p64 at = tls_date_seconds(now);
+        p64 quiet = clock_monotonic_nanoseconds() / 1000000000ull;
         byte_store fetched = {null, 0, 0};
         tls_crl_held address_to slot = null;
         positive seconds;
@@ -14463,7 +14464,7 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
 
                 if (!held->used || memory_compare(held->name, name, 32))
                         continue;
-                if (held->failed ? held->fetched + TLS_CRL_RETRY > at
+                if (held->failed ? held->fetched + TLS_CRL_RETRY > quiet
                                  : !held->next_update ||
                                        tls_date_seconds(held->next_update) +
                                                TLS_REVOCATION_SKEW >= at)
@@ -14512,7 +14513,7 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
         }
         slot->crl = fetched;
         memory_copy(slot->name, name, 32);
-        slot->fetched = at;
+        slot->fetched = quiet;
         slot->age = ++tls_crl_clock;
         slot->used = true;
         slot->failed = !got;

@@ -82584,7 +82584,8 @@ static p8 revocation_hold(string_address url, string_address hex, p64 when)
         if (length)
                 slot->crl.used = crypto_hex_into(slot->crl.bytes, slot->crl.room, hex);
         crypto_sha256_of((p8 address_to)url, string_length(url), slot->name);
-        slot->fetched = tls_date_seconds(when);
+        (void)when; // the fetch is stamped on the monotonic clock, as tls_crl_get stamps it: a failed hold is an age from now
+        slot->fetched = clock_monotonic_nanoseconds() / 1000000000ull;
         slot->age = ++tls_crl_clock;
         slot->used = true;
         slot->failed = !length;
