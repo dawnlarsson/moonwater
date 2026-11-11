@@ -170886,11 +170886,12 @@ static void check_compositor_pointer(void) {
         for(int step=0;step<12;step++){found+=compositor_shake(&shake,8,now);now+=10000000ull;}
         ck_ok(found==0); /* a hand going the one way */
     }
-    /* The cursors: the arrow is 55 white and 46 black pixels, the resize shapes 25 and 40 or 48, the hand
-       99 and 48, each at its scale squared; the hotspot is the corner of the arrow and the middle of the
-       others (the hand's is its glyph's origin), and what is drawn stays inside the damage. */
+    /* The cursors: the arrow is 109 white and 59 black pixels, the horizontal and vertical resize 81 and 56, the
+       diagonal resize 63 and 46, the hand 139 and 84, each at its scale squared; the hotspot is the corner of the
+       arrow and the middle of the others (the hand's is the middle of its fingertip), and what is drawn stays
+       inside the damage. */
     {
-        static const int white[CP_SHAPES]={60,42,42,50,50,23,37,111,209,77,31},black[CP_SHAPES]={46,62,62,80,80,64,68,120,73,60,116};
+        static const int white[CP_SHAPES]={109,81,81,63,63,33,28,169,139,64,209},black[CP_SHAPES]={59,56,56,46,46,64,88,100,84,143,104};
         static u32 plane[64*64];
         for(unsigned shape=0;shape<CP_SHAPES;shape++)
             for(int scale=1;scale<=2;scale++) {
@@ -170922,7 +170923,7 @@ static void check_compositor_pointer(void) {
         int left,top;
         compositor_cursor_cell(&left,&top,100,50,CP_ARROW,3);ck_ok(left==100&&top==50);
         compositor_cursor_cell(&left,&top,100,50,CP_RESIZE_H,2);ck_ok(left==70&&top==20);
-        compositor_cursor_cell(&left,&top,100,50,CP_HAND,2);ck_ok(left==76&&top==50);
+        compositor_cursor_cell(&left,&top,100,50,CP_HAND,2);ck_ok(left==92&&top==50);
         compositor_cursor_cell(&left,&top,100,50,77,2);ck_ok(left==100&&top==50);
         ck_ok(compositor_cursor_fit(1)==1&&compositor_cursor_fit(2)==2&&compositor_cursor_fit(3)==2&&compositor_cursor_fit(9)==2);
         ck_ok(compositor_cursor_by_edges[0]==CP_ARROW&&compositor_cursor_by_edges[CP_EDGE_LEFT]==CP_RESIZE_H&&
@@ -170934,7 +170935,7 @@ static void check_compositor_pointer(void) {
               compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
         /* The click hand is hand-drawn with its index finger up: the pointer is the fingertip, the top row of the finger. */
-        ck_ok(compositor_cursor_hot[CP_HAND][0]==10&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(0,CP_HAND,0,10)==2);
+        ck_ok(compositor_cursor_hot[CP_HAND][0]==4&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(0,CP_HAND,0,4)==2);
     }
 }
 
