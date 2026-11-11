@@ -2073,11 +2073,11 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
 
         // A shell at its prompt has no use for the pointer's motion, and each report of it is a wakeup: asked for
         // only while a program has a mouse mode (the loop says when that changes).
-        __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->hover_off[((const struct window_row *)(&terminal.own))->row], false ? 0u : 1u, __ATOMIC_RELEASE);
+        __atomic_store_n(&terminal.own.table->hover_off[terminal.own.row], 1u, __ATOMIC_RELEASE);
         terminal.hovering = false;
 
         // A pinch zooms the text (terminal_pinch), and is not sent to the program as a wheel with Ctrl.
-        __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->pinch_wanted[((const struct window_row *)(&terminal.own))->row], true ? 1u : 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&terminal.own.table->pinch_wanted[terminal.own.row], 1u, __ATOMIC_RELEASE);
 
         // The primary screen is where it opens, its shares of that screen, and no larger than a window may be.
         table = terminal.own.table;
@@ -2202,17 +2202,26 @@ static unsigned int terminal_step_index(unsigned int size)
         return at;
 }
 
+static positive terminal_decimal(p8 address_to text, unsigned int value)
+{
+        p8 digits[10];
+        positive count = 0, length = 0;
+
+        do
+                digits[count++] = (p8)('0' + value % 10);
+        while ((value /= 10) && count < sizeof(digits));
+        while (count)
+                text[length++] = digits[--count];
+        return length;
+}
+
 static b32 terminal_size_write(unsigned int size)
 {
-        p8 text[4];
-        unsigned int digits[3], count = 0, length = 0;
+        p8 text[12];
+        positive length = terminal_decimal(text, size);
         bipolar handle;
         b32 wrote;
 
-        for (unsigned int value = size; value || !count; value /= 10)
-                digits[count++] = value % 10;
-        while (count)
-                text[length++] = (p8)('0' + digits[--count]);
         text[length++] = '\n';
 
         // The directory is made if it is not there; a directory that is there is the answer it should be.
@@ -2246,19 +2255,6 @@ static void terminal_text_set(b32 master, unsigned int size)
         // Every glyph is another size: neither buffer holds a cell that can be kept, even where the grid is.
         terminal.valid[0] = terminal.valid[1] = 0;
         terminal_configure(master, terminal.width, terminal.height);
-}
-
-static positive terminal_decimal(p8 address_to text, unsigned int value)
-{
-        p8 digits[10];
-        positive count = 0, length = 0;
-
-        do
-                digits[count++] = (p8)('0' + value % 10);
-        while ((value /= 10) && count < sizeof(digits));
-        while (count)
-                text[length++] = digits[--count];
-        return length;
 }
 
 static void terminal_text_said(b32 reading)
@@ -2519,8 +2515,7 @@ static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int
 
         while (line != window->head)
         {
-                unsigned int slot = line % window->history, length = window_lengths(window)[slot];
-                unsigned int folds = length ? ((length < window->stride ? length : window->stride) + COLUMNS - 1) / COLUMNS : 1;
+                unsigned int folds = terminal_line_rows(line);
 
                 for (unsigned int fold = skip; fold < folds; fold++, at++)
                         if (at == row)
@@ -2630,6 +2625,15 @@ static void terminal_select_span_of(int kind, unsigned int line, unsigned int co
         *start = *finish = terminal_place(line, column);
 }
 
+// The columns a box selection covers: from the left one of its two ends to the right one, stop being past it.
+static void terminal_box_columns(unsigned int address_to start, unsigned int address_to stop)
+{
+        unsigned int anchor = TERMINAL_COLUMN_OF(terminal.sel_anchor), active = TERMINAL_COLUMN_OF(terminal.sel_active);
+
+        address_to start = anchor < active ? anchor : active;
+        address_to stop = (anchor < active ? active : anchor) + 1;
+}
+
 // The marked cells of a row of the frame: the part of line from column from (used of it written) the selection covers.
 static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from)
 {
@@ -2641,14 +2645,7 @@ static void terminal_select_mark(struct window_cell address_to out, unsigned int
         if (line - first_line > last_line - first_line)
                 return;
         if (terminal.select_box)
-        {
-                unsigned int left = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_anchor)
-                                                                                                 : TERMINAL_COLUMN_OF(terminal.sel_active);
-                unsigned int right = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_active)
-                                                                                                  : TERMINAL_COLUMN_OF(terminal.sel_anchor);
-
-                start = left, stop = right + 1;
-        }
+                terminal_box_columns(&start, &stop);
         else
         {
                 start = line == first_line ? first_column : 0;
@@ -2675,10 +2672,7 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
 
                 stored = stored < window->stride ? stored : window->stride;
                 if (terminal.select_box)
-                {
-                        start = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_anchor) : TERMINAL_COLUMN_OF(terminal.sel_active);
-                        stop = (TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_active) : TERMINAL_COLUMN_OF(terminal.sel_anchor)) + 1;
-                }
+                        terminal_box_columns(&start, &stop);
                 else
                 {
                         start = line == first_line ? first_column : 0;
@@ -2776,8 +2770,7 @@ static int terminal_op_where(struct ui address_to ui, void address_to self, p64 
         line = terminal_top(terminal.view, &skip);
         while (line != window->head)
         {
-                unsigned int slot = line % window->history, length = window_lengths(window)[slot];
-                unsigned int folds = length ? ((length < window->stride ? length : window->stride) + COLUMNS - 1) / COLUMNS : 1;
+                unsigned int folds = terminal_line_rows(line);
                 unsigned int at_fold = want_column / COLUMNS < folds ? want_column / COLUMNS : folds - 1;
 
                 for (unsigned int fold = skip; fold < folds; fold++, row++)
@@ -3766,7 +3759,7 @@ static long terminal_tick(long timeout, long address_to other)
         if (!terminal.reading && (mouse_mode != 0) != terminal.hovering)
         {
                 terminal.hovering = mouse_mode != 0;
-                __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->hover_off[((const struct window_row *)(&terminal.own))->row], ((unsigned int)(terminal.hovering)) ? 0u : 1u, __ATOMIC_RELEASE);
+                __atomic_store_n(&terminal.own.table->hover_off[terminal.own.row], terminal.hovering ? 0u : 1u, __ATOMIC_RELEASE);
         }
 
         // The title is read when the far end has said something, at most once a frame period; a title a program sets is read as it is set.
