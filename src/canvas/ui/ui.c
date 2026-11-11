@@ -13035,7 +13035,7 @@ static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
 // app for each item (name(i), marked(i)). The app keeps its files; the kit keeps the strip's items and marks.
 static fn ui_tabs_fill(struct ui_control address_to c, int count, int at, const char address_to (*name)(int item), b32 (*marked)(int item))
 {
-        c->count = count < UI_ITEMS ? count : UI_ITEMS;
+        c->count = count < 0 ? 0 : count < UI_ITEMS ? count : UI_ITEMS;
         c->at = at;
         c->marks = 0;
         for (int item = 0; item < c->count; item++)
