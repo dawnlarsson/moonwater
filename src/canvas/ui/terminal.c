@@ -2092,18 +2092,14 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
         address_to columns = address_to columns >= 20 ? address_to columns : min(20u, terminal_columns(display_w));
         address_to rows = address_to rows >= 4 ? address_to rows : min(4u, terminal_rows(display_h));
 
-        // A grid asked for (-g) is that many cells in the middle of the output, and not a share of it.
+        // A grid asked for (-g) is that many cells in the middle of the output, and not a share of it, and never more cells than
+        // the output holds: the pixels are made from the cells, and a count big enough to wrap them passed the output's test.
         if (cells[0] && cells[1])
         {
-                address_to columns = cells[0];
-                address_to rows = cells[1];
+                address_to columns = cells[0] < terminal_columns(display_w) ? cells[0] : terminal_columns(display_w);
+                address_to rows = cells[1] < terminal_rows(display_h) ? cells[1] : terminal_rows(display_h);
         }
 
-        pixels_w = terminal_pixels(address_to columns, address_to rows, &pixels_h);
-        if (pixels_w > display_w)
-                address_to columns = terminal_columns(display_w);
-        if (pixels_h > display_h)
-                address_to rows = terminal_rows(display_h);
         pixels_w = terminal_pixels(address_to columns, address_to rows, &pixels_h);
         terminal.width = pixels_w < display_w ? pixels_w : display_w;
         terminal.height = pixels_h < display_h ? pixels_h : display_h;
