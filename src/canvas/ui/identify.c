@@ -47,6 +47,7 @@ static struct identify
         unsigned int number;   // the number drawn: the screen's, from windows_screen_numbers
         char text[2];          // number as one digit, which is all eight screens need, and its null
         struct identify_badge badge;
+        struct ui_view view;   // the badge's picture: a column the window's size, its figure centred in it
         int width, height;     // the badge's size, the picture's
         unsigned int ground;   // the window's ground, as the compositor gives it (ui_app_run reads it)
         struct ui_buffers buffers; // the badge's two buffers (the kit's): its picture is drawn whole each frame
@@ -115,13 +116,12 @@ static void identify_badge_fit(struct ui address_to ui, int width, int height, s
 // width by height, drawn at stride pixels a row into pixels.
 static void identify_paint(struct ui address_to ui, unsigned int address_to pixels, int stride, int width, int height)
 {
-        int wide, baseline;
-
         ui_begin(ui, pixels, stride, width, height);
-        ui_fill(ui, 0, 0, width, height, IDENTIFY_PAPER);
-        wide = ui_run(ui, 0, 0, identify.text, identify.badge.size, true, IDENTIFY_INK, 0, 0, width);
-        baseline = height / 2 + identify.badge.em * IDENTIFY_DIGIT / 100;
-        ui_run(ui, (width - wide) / 2, baseline, identify.text, identify.badge.size, true, IDENTIFY_INK, 255, 0, width);
+        ui_view_begin(&identify.view, ui, width, -height);
+        ui_col(.class = "badge", .paint = IDENTIFY_PAPER, .grow = 1)
+                ui_text(identify.text, .class = "figure", .size = identify.badge.size, .ink = IDENTIFY_INK | 0xff000000u, .drop = IDENTIFY_DIGIT, .grow = 1);
+        ui_view_end(&identify.view);
+        ui_view_draw(ui, &identify.view, false);
 }
 
 // The badge's picture, drawn whole into the buffer the kit gives (the badge has no rows to draw apart).

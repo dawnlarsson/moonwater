@@ -11480,16 +11480,23 @@ static const struct ui_type
 } ui_types[] = {{22, 28, 1, 0}, {16, 24, 1, 0}, {14, 20, 1, 0}, {16, 24, 0, 0}, {14, 20, 0, 0},
                 {14, 20, 1, 0}, {12, 16, 0, 0}, {12, 16, 0, 1}, {13, 21, 0, 1}, {15, 20, 0, 0}};
 
-// Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke, cut at high (device
-// pixels: the window's width, or a control's right edge); its width.
-static int ui_kit_text_between(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
-                               unsigned int stroke, int low, int high)
+// The same at a size of its own, in points: a view's text whose class does not size it (the badge's figure) is drawn at this.
+static int ui_kit_text_between_at(struct ui address_to ui, int x, int baseline, string_address text, int type, int size, unsigned int argb,
+                                  unsigned int stroke, int low, int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular,
                                                ui->regular};
 
-        return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, low, high, stroke);
+        return ui_run_in(ui, faces, x, baseline, text, size, argb & 0xffffffu, argb >> 24, low, high, stroke);
+}
+
+// Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke, cut at high (device
+// pixels: the window's width, or a control's right edge); its width.
+static int ui_kit_text_between(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
+                               unsigned int stroke, int low, int high)
+{
+        return ui_kit_text_between_at(ui, x, baseline, text, type, ui_types[type].size, argb, stroke, low, high);
 }
 
 
@@ -11506,17 +11513,23 @@ static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom)
         is not measured either. A repaint of a row of a list was measuring every other row's every word.
 */
 // The same, cut between low and high (device pixels): a control's text is cut at its own box, not at the window's edges.
-static fn ui_kit_text_in(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
-                         int low, int high)
+static fn ui_kit_text_in_at(struct ui address_to ui, int x, int baseline, string_address text, int type, int size, unsigned int argb,
+                            unsigned int stroke, int low, int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
-        font_metrics metrics = font_metrics_at(face, ui_em(ui, t->size));
+        font_metrics metrics = font_metrics_at(face, ui_em(ui, size));
         int rows = metrics.cell_height + 4 * ui->scale / 100, top = baseline - metrics.baseline - 2 * ui->scale / 100;
 
         rows = rows > UI_SCRATCH_ROWS * ui->scale / 100 ? UI_SCRATCH_ROWS * ui->scale / 100 : rows;
         if (ui_rows_seen(ui, top, top + rows))
-                ui_kit_text_between(ui, x, baseline, text, type, argb, stroke, low, high);
+                ui_kit_text_between_at(ui, x, baseline, text, type, size, argb, stroke, low, high);
+}
+
+static fn ui_kit_text_in(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                         int low, int high)
+{
+        ui_kit_text_in_at(ui, x, baseline, text, type, ui_types[type].size, argb, stroke, low, high);
 }
 
 static fn ui_kit_text_clip(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
@@ -11530,13 +11543,18 @@ static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_addre
         ui_kit_text_clip(ui, x, baseline, text, type, argb, stroke, ui->width);
 }
 
-static int ui_kit_measure(struct ui address_to ui, string_address text, int type)
+static int ui_kit_measure_at(struct ui address_to ui, string_address text, int type, int size)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular,
                                                ui->regular};
 
-        return ui_run_in(ui, faces, 0, 0, text, t->size, 0, 0, 0, ui->width, 0);
+        return ui_run_in(ui, faces, 0, 0, text, size, 0, 0, 0, ui->width, 0);
+}
+
+static int ui_kit_measure(struct ui address_to ui, string_address text, int type)
+{
+        return ui_kit_measure_at(ui, text, type, ui_types[type].size);
 }
 
 // A run laid out as if the window read from the left, with its left end at x in the container [left, left + span), mirrored in
@@ -11555,10 +11573,16 @@ static int ui_kit_text_flipped(struct ui address_to ui, int x, int baseline, str
 
 // A run that starts at `edge` (device pixels): its left end there reading from the left, its right end reading from the right,
 // cut between low and high. The run is the font engine's, whole in either direction; only the place of its box is the layout's.
+static fn ui_kit_start_at(struct ui address_to ui, int edge, int baseline, string_address text, int type, int size, unsigned int argb,
+                          unsigned int stroke, int low, int high)
+{
+        ui_kit_text_in_at(ui, ui_rtl() ? edge - ui_kit_measure_at(ui, text, type, size) : edge, baseline, text, type, size, argb, stroke, low, high);
+}
+
 static fn ui_kit_start(struct ui address_to ui, int edge, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
                        int low, int high)
 {
-        ui_kit_text_in(ui, ui_rtl() ? edge - ui_kit_measure(ui, text, type) : edge, baseline, text, type, argb, stroke, low, high);
+        ui_kit_start_at(ui, edge, baseline, text, type, ui_types[type].size, argb, stroke, low, high);
 }
 
 // The baseline of a role's line box whose top is top (device pixels): the line's half-leading above the face's ascent.
@@ -16406,6 +16430,10 @@ struct ui_props
         int grow, shrink;                 // the weights on the parent's main axis; 0: the class's
         int min_w, min_h, max_w, max_h;   // the limits, logical pixels
         b32 hidden;                       // a leaf that is not there (display: none): a host's rectangle is empty
+        unsigned int paint;               // a box's fill in this colour (ARGB, fixed; 0: the class's role)
+        unsigned int ink;                 // a text's colour (ARGB, fixed; 0: the class's role)
+        int size;                         // a text's size in points (0: its type's)
+        int drop;                         // a text's baseline: the middle of its box plus this many hundredths of its size (0: centred)
         const char address_to text;       // a text's words, a button's label
         const char address_to says;       // a button that is not undone: what its next press does, said while it is armed
         b32 (*on)(int value);             // a button's act: false ends the window
@@ -16439,6 +16467,8 @@ static const struct ui_class ui_classes[] = {
         {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         // Text.
+        {"badge", .align = UI_CENTER},                                                   // a column's children in the middle of its width
+        {"figure", .type = UI_ROLE(UI_LABEL_LARGE)},                                     // a bold text, sized by the element
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
         {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
         {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)}, // a status bar's words
@@ -16458,6 +16488,8 @@ struct ui_item
         unsigned char kind;
         int button;                       // a button's place among the view's buttons, -1 for none
         struct ui_class look;             // the classes of the element, merged
+        unsigned int paint, ink;          // the fixed colours (ui_props): a box's fill, a text's ink; 0 for the class's roles
+        int size, drop;                   // a text's size in points and its baseline (ui_props)
         const char address_to text;
         struct ui_rect address_to host;
 };
@@ -16657,7 +16689,7 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         type = look.type ? look.type - 1 : kind == UI_ITEM_BUTTON ? UI_LABEL_LARGE : UI_BODY_MEDIUM;
         if (kind == UI_ITEM_TEXT && p->text)
         {
-                n->content[0] = fixed[0] ? 0 : ui_kit_measure(ui, (string_address)p->text, type);
+                n->content[0] = fixed[0] ? 0 : ui_kit_measure_at(ui, (string_address)p->text, type, p->size ? p->size : ui_types[type].size);
                 n->content[1] = ui_dev(ui, ui_types[type].line);
         }
         else if (kind == UI_ITEM_BUTTON && p->text)
@@ -16666,6 +16698,7 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
                 n->content[1] = ui_px(ui, 36);
         }
         item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = -1;
+        item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop;
         if (kind == UI_ITEM_BUTTON && item != &v->discard && v->group.count < UI_BUTTONS_MOST)
         {
                 item->button = v->group.count;
@@ -16792,14 +16825,22 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                 const struct ui_item address_to item = &v->item[at];
                 int type = item->look.type ? item->look.type - 1 : UI_BODY_MEDIUM;
 
-                if (item->kind == UI_ITEM_BOX && item->look.fill && item->look.radius)
+                if (item->kind == UI_ITEM_BOX && item->paint)
+                        ui_fill(ui, n->x, n->y, n->w, n->h, item->paint);
+                else if (item->kind == UI_ITEM_BOX && item->look.fill && item->look.radius)
                         ui_round(ui, n->x, n->y, n->w, n->h, ui_px(ui, item->look.radius), ui_role(item->look.fill - 1) | 0xff000000u);
                 else if (item->kind == UI_ITEM_BOX && item->look.fill)
                         ui_fill(ui, n->x, n->y, n->w, n->h, ui_role(item->look.fill - 1) | 0xff000000u);
                 else if (item->kind == UI_ITEM_TEXT && item->text)
-                        ui_kit_start(ui, ui_rtl() ? n->x + n->w : n->x, ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type),
-                                     (string_address)item->text, type, ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE), 0, n->x,
-                                     n->x + n->w);
+                {
+                        int size = item->size ? item->size : ui_types[type].size;
+                        int baseline = item->drop ? n->y + n->h / 2 + size * ui->scale / 100 * item->drop / 100
+                                                  : ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type);
+                        unsigned int argb = item->ink ? item->ink : ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE);
+
+                        ui_kit_start_at(ui, ui_rtl() ? n->x + n->w : n->x, baseline, (string_address)item->text, type, size, argb, 0, n->x,
+                                        n->x + n->w);
+                }
         }
         ui_buttons_draw(ui, &v->group, keys);
 }
