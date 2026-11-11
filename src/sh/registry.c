@@ -180,7 +180,6 @@ struct settings_row
         const char address_to set[SETTING_WORDS];  // what changes it; the value goes after
         const char address_to choices;          // a choice's words, or a step's two, a space between
         char stop;                              // a value ends here as well as at a blank, a comma, a semicolon or a bracket
-        const char address_to marker;           // a line that has this says the value is auto, whatever the word after the key
         // The command and its pages.
         const char address_to usage; // the row of the pages: the words after moonwater, as typed; none when another row's says it
         const char address_to help;  // and what it says of it
@@ -216,11 +215,11 @@ struct settings_row
 #define SETTING_UNWRAP(...) __VA_ARGS__
 // A plain row: group, label, window kind and flags, verb words in brackets, key, choices, then the rest by name.
 #define SETTING_PLAIN_ROW(section_, label_, kind_, flags_, verb_, key_, choices_, ...)                                \
-        {section_, label_, kind_, 0, flags_, {SETTING_UNWRAP verb_}, key_, null, {SETTING_UNWRAP verb_}, choices_, 0, null, \
+        {section_, label_, kind_, 0, flags_, {SETTING_UNWRAP verb_}, key_, null, {SETTING_UNWRAP verb_}, choices_, 0, \
          .how = SETTING_PLAIN, __VA_ARGS__}
 
 static const struct settings_row settings_rows[] = {
-    {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0, null,
+    {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
     //  What the system's own windows say, in which language: one file of languages/ read by every window of the kit, taken
     //  from the window table so a change reaches them at once. Bare, the verb adds what is installed and which are machine-made.
@@ -235,7 +234,7 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "background is a colour like 1e1e1e, or default, not %s\n",
                       .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
-     {"canvas", "background"}, null, 0, null, .how = SETTING_ALIAS},
+     {"canvas", "background"}, null, 0, .how = SETTING_ALIAS},
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
@@ -250,7 +249,7 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas theme accent [COLOUR|reset]",
                       .help = "what the controls fill with, rrggbb; the text on it is picked to be read [ffffff]"),
     {null, "Accent colour (rrggbb or reset)", SETTINGS_FIELD, 0, 0, {"canvas", "theme", "accent"}, "accent ", null,
-     {"canvas", "theme", "accent"}, null, 0, null, .how = SETTING_ALIAS},
+     {"canvas", "theme", "accent"}, null, 0, .how = SETTING_ALIAS},
     SETTING_PLAIN_ROW(null, "Motion", SETTINGS_CHOICE, 0, ("canvas", "motion"), "motion ", "full reduced",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_MOTION_PATH, .standard = "full", .reset = "full",
                       .need = "how Canvas draws", .refusal = "motion is full or reduced, not %s\n",
@@ -306,23 +305,23 @@ static const struct settings_row settings_rows[] = {
                       .help = "the most one copy may be, 1 to 16 MiB [16]"),
     //  The Display group: the map above these rows (settings.c) shows the screens; the rows are for the screen chosen on it.
     //  The rotation and refresh are the table's, and each change is `canvas display NAME ...` run with the screen's name.
-    {"Display", "Screen", SETTINGS_CHOICE, 0, 0, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+    {"Display", "Screen", SETTINGS_CHOICE, 0, 0, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "the screen the rows under the map are for", .output = SETTINGS_OUT_SCREEN},
-    {null, "Rotation", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+    {null, "Rotation", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "which way up the screen is", .output = SETTINGS_OUT_TURN},
-    {null, "Turned by the screen", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, null,
+    {null, "Turned by the screen", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0,
      .help = "who turns the picture: the screen itself, or Moonwater (slower)", .output = SETTINGS_OUT_NOTE},
-    {null, "Refresh rate", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+    {null, "Refresh rate", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "how many times a second the screen is drawn: the rates it supports, the best marked", .output = SETTINGS_OUT_REFRESH},
-    {null, "Scale of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+    {null, "Scale of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
-    {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
+    {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
-    {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null,
+    {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0,
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
-    {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0, null,
+    {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0,
      .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it ar il ir [us]"},
     //  The keyboard on the screen (src/canvas/compositor.c, the osk window): shown while a text field has the keys and there is no
     //  keyboard to type on (auto), never (off), or whenever a field has them (on).
@@ -431,7 +430,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mute", SETTINGS_SWITCH, 0, ("audio", "mute"), "mute ", null,
                       .path = SETTING_AUDIO_MUTE_PATH, .standard = "off", .usage = "audio mute [on|off]",
                       .help = "silence everything that plays, and keep the volume [off]"),
-    {null, "Output device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "device"}, "device ", null, {"audio", "device"}, null, 0, null,
+    {null, "Output device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "device"}, "device ", null, {"audio", "device"}, null, 0,
      .usage = "audio device [NAME|default]",
      .help = "the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]"},
     SETTING_PLAIN_ROW(null, "Sound server", SETTINGS_SWITCH, 0, ("audio", "server"), "server ", null,
@@ -444,7 +443,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Allow recording", SETTINGS_SWITCH, 0, ("audio", "capture"), "capture ", null,
                       .path = SETTING_AUDIO_CAPTURE_PATH, .standard = "on", .usage = "audio capture [on|off]",
                       .help = "let programs record from the microphone; off ends every recording and refuses new ones [on]"),
-    {null, "Input device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "source"}, "source ", null, {"audio", "source"}, null, 0, null,
+    {null, "Input device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "source"}, "source ", null, {"audio", "source"}, null, 0,
      .usage = "audio source [NAME|default]",
      .help = "the microphone programs record from, by the name bare audio lists; default picks the first [default]"},
     SETTING_PLAIN_ROW(null, "Input volume (percent, or default)", SETTINGS_SLIDER, 0, ("audio", "input", "volume"), "volume ", null,
@@ -498,13 +497,13 @@ static const struct settings_row settings_rows[] = {
                       .help = "on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]"),
     //  A special row (host.c locale_taskbar_tray) whose file the compositor watches: the whole line is the format.
     {null, "Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)", SETTINGS_FIELD, 0,
-     SETTINGS_LINE, {"taskbar", "tray"}, "tray ", null, {"taskbar", "tray"}, null, 0, null,
+     SETTINGS_LINE, {"taskbar", "tray"}, "tray ", null, {"taskbar", "tray"}, null, 0,
      .usage = "taskbar tray [FORMAT|default]",
      .help = "what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]",
      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TRAY_PATH},
-    {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
+    {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
-    {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null,
+    {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0,
      .usage = "timezone [ZONE|list]", .help = "IANA name, country, +1 or POSIX; manual"},
     //  The hours a clock is read in: the tray's (when its format is the standard one) and, to a bowl's GNOME programs, the
     //  portal's clock-format. A tray format of the person's own says its hours itself.
@@ -519,75 +518,75 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "date format is off, ymd, dmy or mdy, not %s\n", .usage = "time date [off|ymd|dmy|mdy]",
                       .help = "the date beside the clock on the tray, year first, day first or month first, and in GNOME programs [off]"),
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
-     null, .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
-    {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null,
+     .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
+    {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0,
      .usage = "ntp server [NAME|auto]", .help = "who is asked first: a name or address [auto]"},
-    {null, "Keep the lowest-delay sample", SETTINGS_SWITCH, 0, 0, {"ntp", "sampling"}, "ntp sampling ", null, {"ntp", "sampling"}, null, 0, null,
+    {null, "Keep the lowest-delay sample", SETTINGS_SWITCH, 0, 0, {"ntp", "sampling"}, "ntp sampling ", null, {"ntp", "sampling"}, null, 0,
      .usage = "ntp sampling [on|off]", .help = "keep the lowest-delay sample of five [on]"},
-    {null, "Authenticated time (NTS)", SETTINGS_CHOICE, 0, 0, {"ntp", "nts"}, "ntp nts ", null, {"ntp", "nts"}, "on off only", 0, null,
+    {null, "Authenticated time (NTS)", SETTINGS_CHOICE, 0, 0, {"ntp", "nts"}, "ntp nts ", null, {"ntp", "nts"}, "on off only", 0,
      .usage = "ntp nts [on|off|only]", .help = "authenticated time (RFC 8915) first; only refuses plain [on]"},
     {null, "NTS servers (or default)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"ntp", "nts"}, "servers ", null,
-     {"ntp", "nts", "servers"}, null, ';', null,
+     {"ntp", "nts", "servers"}, null, ';',
      .usage = "ntp nts servers [NAME[:PORT]...|default]", .help = "who is asked for it, up to four"},
-    {"Network", "Wired", SETTINGS_SWITCH, 0, 0, {"wired"}, "wired ", null, {"wired"}, null, 0, null,
+    {"Network", "Wired", SETTINGS_SWITCH, 0, 0, {"wired"}, "wired ", null, {"wired"}, null, 0,
      .usage = "wired [on|off]", .help = "the wired links; off keeps them down"},
-    {null, "Airplane mode", SETTINGS_SWITCH, 0, 0, {"airplane"}, "airplane ", null, {"airplane"}, null, 0, null,
+    {null, "Airplane mode", SETTINGS_SWITCH, 0, 0, {"airplane"}, "airplane ", null, {"airplane"}, null, 0,
      .usage = "airplane [on|off]", .help = "every radio at once"},
     {null, "The internet prefers", SETTINGS_CHOICE, 0, 0, {"priority"}, "internet prefers ", null,
-     {"priority", "internet"}, "wired wifi", 0, null,
+     {"priority", "internet"}, "wired wifi", 0,
      .usage = "priority [internet [wired|wifi]]", .help = "which link wins when both are up [wired]"},
-    {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0, null,
+    {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0,
      .usage = "dns tls [on|off|only]", .help = "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]"},
-    {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(', null,
+    {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(',
      .usage = "dns [ADDRESS...|auto]", .help = "up to three servers names are asked of, or the network gives them [auto]"},
     //  Waterlink, the machines linked to this one (moonwater link, src/waterlink): this machine's name, the one switch of the
     //  listener, a code shown for another machine to type, the other machine's name and code typed here, and how the machines
     //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status).
-    {"Waterlink", "This machine", SETTINGS_INFO, 0, SETTINGS_LINE, {"name"}, "", null, {null}, null, 0, null,
+    {"Waterlink", "This machine", SETTINGS_INFO, 0, SETTINGS_LINE, {"name"}, "", null, {null}, null, 0,
      .help = "the name the other machines know this one by: moonwater name NEW changes it"},
-    {null, "Waterlink", SETTINGS_SWITCH, 0, 0, {"link"}, "link ", null, {"link"}, null, 0, null,
+    {null, "Waterlink", SETTINGS_SWITCH, 0, 0, {"link"}, "link ", null, {"link"}, null, 0,
      .help = "the listener: linked machines reach this one, and it them, while it is on [off]"},
-    {null, "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0, null,
+    {null, "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0,
      .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name"},
     {null, "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
-     {"link"}, null, 0, null,
+     {"link"}, null, 0,
      .help = "the other machine's name and the code it shows, which pair the two of them"},
-    {null, "Connect over", SETTINGS_CHOICE, 0, SETTINGS_TRANSPORT, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network modem", 0, null,
+    {null, "Connect over", SETTINGS_CHOICE, 0, SETTINGS_TRANSPORT, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network modem", 0,
      .help = "network: over the network, as linked machines always have [network]; modem: the audio modem, through the sound card"},
-    {null, "Audio modem", SETTINGS_INFO, 0, SETTINGS_LINE, {"link", "transport"}, "audio modem ", null, {null}, null, 0, null,
+    {null, "Audio modem", SETTINGS_INFO, 0, SETTINGS_LINE, {"link", "transport"}, "audio modem ", null, {null}, null, 0,
      .help = "the sound card as a link to another machine: it needs a sound card open on the sound server, and says why when it has none"},
-    {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null,
+    {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0,
      .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range [off]"},
-    {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,
+    {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0,
      .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices [off]"},
     //  Internet sharing over Bluetooth: the machine's connection, offered to the devices that pair with it. Its verb (host.c's
     //  radio_share) starts and stops the sharing, so the row is not a plain one; the word it reads is the verb's own output.
-    {null, "Internet sharing over Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth", "share"}, "share ", null, {"bluetooth", "share"}, null, 0, null,
+    {null, "Internet sharing over Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth", "share"}, "share ", null, {"bluetooth", "share"}, null, 0,
      .usage = "bluetooth share [on|off]",
      .help = "the machine's internet, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]"},
     // The Devices group: the devices the system sees are a list under this row (the feed device list, settings.c), and a press
     // on one allows or blocks it. The row says what device lock says: whether a new device waits for its allow.
-    {"Devices", "New devices", SETTINGS_CHOICE, 0, 0, {"device"}, "device ", null, {"device"}, "unlock lock", 0, null,
+    {"Devices", "New devices", SETTINGS_CHOICE, 0, 0, {"device"}, "device ", null, {"device"}, "unlock lock", 0,
      .usage = "device [lock|unlock]", .help = "unlock lets a new device in; lock holds it until it is allowed [unlock]"},
-    {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
-    {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0, null,
+    {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';'},
+    {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0,
      .usage = "battery [NAME|auto|none]", .help = "which battery the Battery row reads: auto is the first present one, none is no battery [auto]"},
     {null, "Power profile", SETTINGS_CHOICE, 1, 0, {"power"}, "power ", "profile ", {"power"},
-     "balanced performance powersave", 0, null,
+     "balanced performance powersave", 0,
      .usage = "power [performance|balanced|powersave]", .help = "profile and CPU governor, kept across boots"},
-    {null, "Boost", SETTINGS_SWITCH, 1, 0, {"cpu"}, "boost ", null, {"cpu", "boost"}, null, 0, null,
+    {null, "Boost", SETTINGS_SWITCH, 1, 0, {"cpu"}, "boost ", null, {"cpu", "boost"}, null, 0,
      .usage = "cpu [boost|smt on|off]", .help = "turbo and SMT, kept across boots"},
-    {null, "Simultaneous threads (SMT)", SETTINGS_SWITCH, 1, 0, {"cpu"}, "smt ", null, {"cpu", "smt"}, null, 0, null},
+    {null, "Simultaneous threads (SMT)", SETTINGS_SWITCH, 1, 0, {"cpu"}, "smt ", null, {"cpu", "smt"}, null, 0},
     {null, "Charge limit (20 to 100, or off)", SETTINGS_FIELD, 1, 0, {"charge"}, "charging stops at ", null,
-     {"charge", "limit"}, null, '%', null,
+     {"charge", "limit"}, null, '%',
      .usage = "charge [limit N|limit off]", .help = "where the battery stops charging, 20 to 100"},
     {"Boot", "Start the desktop", SETTINGS_SWITCH, 1, 0, {"bind", "init", "canvas"}, "init canvas ", null, {"bind", "init", "canvas"},
-     null, 0, null, .usage = "bind init canvas [on|off]", .help = "start Canvas at boot [on]"},
+     null, 0, .usage = "bind init canvas [on|off]", .help = "start Canvas at boot [on]"},
     {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
-     0, null, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
+     0, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
     //  The kernel's own notices (the feeder puts the errors and warnings of the kernel's log under the key system notices): no verb of its
     //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
-    {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, null, .output = SETTINGS_OUT_NOTICES,
+    {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
      .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
 };
 

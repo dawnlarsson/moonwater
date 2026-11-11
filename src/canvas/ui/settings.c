@@ -487,8 +487,6 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
                         stop = stop - start >= room ? start + room - 1 : stop;
                         memory_copy(value, line + start, stop - start);
                         value[stop - start] = 0;
-                        if (row->marker && settings_find(line, size, row->marker) < size)
-                                string_copy_bounded((string_address)value, (string_address) "auto", room);
                         found = 1;
                 }
         }
