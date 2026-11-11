@@ -8499,6 +8499,8 @@ static const struct ui_class ui_classes[] = {
         {"scroll", .scroll = 1, .shrink = 1},                                            // overflow: auto
         {"keys", .pad = {UI_PAD, UI_PAD, UI_PAD, UI_PAD}, .gap = UI_KEY_GAP, .grow = 1}, // the on-screen keyboard's rows, in from the margin, filling the window
         {"keyrow", .gap = UI_KEY_GAP, .grow = 1},                                        // one of them: its keys weighted by span, sharing the rows' height
+        {"middle", .justify = UI_CENTER},                                                // the children in the middle of the room along the main axis
+        {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         // Text.
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},

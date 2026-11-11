@@ -55,7 +55,6 @@
 #define MIXER_QUICK_WIDTH(n) (2 * UI_STRIP_PAD + (n) * UI_STRIP_W + ((n) > 1 ? UI_STRIP_GAP : 0)) // the popup: n strips wide,
 #define MIXER_QUICK_W MIXER_QUICK_WIDTH(1)                                                      // one for the output,
 #define MIXER_QUICK_H 380                                                                       // this tall, the last of it the Mixer row
-#define MIXER_TABS (UI_TABS_H + 16)                                                             // the tabs of the full window and their room
 
 struct mixer_group
 {
@@ -74,6 +73,7 @@ struct mixer_big
         char sink[64];                      // the output device as programs name it, for its volume
         char source[64];                    // and the microphone
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
+        struct ui_view view;                // the window as a tree: Allow, on the Recording page with recording turned off, and the popup's Mixer row
 };
 
 static struct
@@ -91,9 +91,8 @@ static struct
         // The tray's popup (-q), and where it opens (-a).
         b32 quick, beside;
         struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
-        struct ui_buttons row;   // its Mixer row
-        struct ui_buttons allow; // Allow, on the Recording page with recording turned off
-        struct ui_control tabs;  // the two pages
+        struct ui_rect tabs_box, strips_box; // what the tree gave the tabs and the strips
+        struct ui_control tabs;              // the two pages
         const char address_to capture_path;
         string_address font;     // the face this is drawn in (-f), which the mixer it starts is drawn in too
 } mixer;
@@ -197,9 +196,9 @@ static fn mixer_list(b64 now)
         // The Allow button has the keys when it appears: nothing else is on the page to have them. Once recording is on it lets them
         // go (a press on it left them with it), or the strips never show their focus again.
         if (off && !mixer.capture_off)
-                mixer.allow.keys = 1;
-        else if (!off)
-                mixer.allow.keys = 0;
+                big->view.group.keys = 1;
+        else if (!off && mixer.capture_off)
+                big->view.group.keys = 0;
         mixer.capture_off = off;
         if (mixer.have && !mixer.recording)
         {
@@ -367,84 +366,6 @@ static fn mixer_page(b32 recording)
         mixer.dirty = true;
 }
 
-// Recording turned on, where the server reads it; its page follows within a moment.
-static fn mixer_allow(void)
-{
-        compositor_volume_write(mixer.capture_path, "on\n");
-        mixer.dirty = true;
-}
-
-// The two pages as the kit's segmented tabs along the top of the window.
-static fn mixer_tabs_layout(struct ui address_to ui)
-{
-        struct ui_control address_to c = &mixer.tabs;
-
-        if (c->kind != UI_TABS)
-                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = UI_STRIP_PAD, c->y = (MIXER_TABS - UI_TABS_H) / 2, c->w = mixer.width * 100 / ui->scale - 2 * UI_STRIP_PAD, c->h = UI_TABS_H;
-        c->count = 2;
-        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
-        c->at = mixer.recording;
-}
-
-static fn mixer_dirty(void)
-{
-        mixer.dirty = true;
-}
-
-static fn mixer_draw(unsigned int address_to pixels)
-{
-        struct ui address_to ui = &mixer.ui;
-        struct ui_strips address_to strips = &mixer.big->strips;
-        const struct audio_state address_to page = &mixer.big->copy;
-        int row = mixer.quick ? ui_px(ui, UI_ROW) : 0, top = mixer.quick ? 0 : ui_px(ui, MIXER_TABS), button = ui_px(ui, UI_BUTTONS_W);
-
-        ui_begin(ui, pixels, mixer.own.table->stride, mixer.width, mixer.height);
-        ui_strips_place(ui, strips, 0, top, mixer.width, mixer.height - row - top);
-        if (!mixer.have)
-        {
-                ui_strips_message(ui, strips, WORDS(mixer_off), false);
-                return;
-        }
-        if (top)
-        {
-                mixer_tabs_layout(ui);
-                ui_control_draw(ui, &mixer.tabs);
-        }
-        ui_strips_draw(ui, strips, mixer.focused && !mixer.row.keys && !mixer.allow.keys);
-        if (mixer.quick)
-        {
-                ui_buttons_set(&mixer.row, 0, language_of("Mixer"), null);
-                ui_buttons_place(ui, &mixer.row, (mixer.width - button) / 2, mixer.height - row, button);
-                ui_buttons_draw(ui, &mixer.row, mixer.focused);
-        }
-        // What there is to say instead of strips or beside them.
-        if (mixer.capture_off)
-        {
-                ui_strips_message(ui, strips, WORDS(mixer_recording_off), false);
-                ui_buttons_set(&mixer.allow, 0, WORDS(mixer_allow), null);
-                ui_buttons_place(ui, &mixer.allow, (mixer.width - button) / 2, strips->y + strips->h / 2, button);
-                ui_buttons_draw(ui, &mixer.allow, mixer.focused);
-        }
-        else if (mixer.recording && !page->input[0] && !strips->count)
-                ui_strips_message(ui, strips, WORDS(mixer_no_mic), false);
-        else if (mixer.recording && strips->count <= 1)
-                ui_strips_message(ui, strips, WORDS(mixer_nobody), true);
-        else if (!mixer.recording && !mixer.quick && strips->count <= 1)
-                ui_strips_message(ui, strips, WORDS(mixer_empty), true);
-}
-
-// One picture, into the buffer the compositor is not reading; false when there is none yet.
-static void mixer_draw_whole(unsigned int address_to pixels)
-{
-        mixer_draw(pixels);
-}
-
-static b32 mixer_frame(void)
-{
-        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole, null);
-}
-
 // Another program started apart: in a session of its own and a process nobody waits for, its input and output nowhere, as the machine
 // script starts what is on the desktop (the launcher starts its programs the same way).
 static b32 mixer_start(string_address address_to words, positive count)
@@ -471,22 +392,102 @@ static b32 mixer_start(string_address address_to words, positive count)
         return true;
 }
 
-// The Mixer row: the whole mixer started, in the face this one is drawn in.
-static b32 mixer_start_full(void)
+// A button of the window acted. Allow (0): recording is turned on, where the server reads it; its page follows within a moment. The Mixer row (1):
+// the whole mixer is started, in the face this one is drawn in, and the popup goes (false) once it has.
+static b32 mixer_act(int which)
 {
         string_address face = mixer.font ? mixer.font : (string_address)UI_FONT_REGULAR;
         string_address words[5] = {(string_address) "/mixer", (string_address) "-f", face, null, null};
 
+        if (!which)
+        {
+                compositor_volume_write(mixer.capture_path, "on\n");
+                mixer.dirty = true;
+                return true;
+        }
         if (mixer.recording)
                 words[1] = (string_address) "-i", words[2] = (string_address) "-f", words[3] = face;
-        return mixer_start(words, mixer.recording ? 4 : 3);
+        return !mixer_start(words, mixer.recording ? 4 : 3);
+}
+
+// The window as a tree, every size and place the tree's: the tabs' band (the full window), the strips' area, and the Mixer row at the foot of the
+// popup. With recording off the strips have no height: the line that says so is above Allow, the two in the middle. The tabs and strips are put there.
+static fn mixer_layout(void)
+{
+        struct ui address_to ui = &mixer.ui;
+        struct ui_control address_to c = &mixer.tabs;
+
+        ui_view_begin(&mixer.big->view, ui, mixer.width, -mixer.height);
+        ui_host(&mixer.tabs_box, .class = "tabs", .hidden = mixer.quick);
+        ui_col(.class = "middle", .grow = 1)
+        {
+                ui_host(&mixer.strips_box, .grow = !mixer.capture_off);
+                if (mixer.capture_off)
+                        ui_row(.class = "foot.middle")
+                                ui_button(WORDS(mixer_allow), .class = "action.outlined", .on = mixer_act);
+        }
+        if (mixer.quick)
+                ui_row(.class = "foot.middle")
+                        ui_button(language_of("Mixer"), .class = "action.outlined", .on = mixer_act, .arg = 1);
+        ui_view_end(&mixer.big->view);
+        ui_strips_place(ui, &mixer.big->strips, mixer.strips_box.x, mixer.strips_box.y, mixer.strips_box.w, mixer.strips_box.h);
+        if (c->kind != UI_TABS)
+                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
+        c->x = mixer.tabs_box.x * 100 / ui->scale, c->y = mixer.tabs_box.y * 100 / ui->scale, c->w = mixer.tabs_box.w * 100 / ui->scale, c->h = UI_TABS_H;
+        c->count = 2;
+        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
+        c->at = mixer.recording;
+}
+
+static fn mixer_dirty(void)
+{
+        mixer.dirty = true;
+}
+
+static fn mixer_draw(unsigned int address_to pixels)
+{
+        struct ui address_to ui = &mixer.ui;
+        struct ui_strips address_to strips = &mixer.big->strips;
+        const struct audio_state address_to page = &mixer.big->copy;
+
+        ui_begin(ui, pixels, mixer.own.table->stride, mixer.width, mixer.height);
+        mixer_layout();
+        if (!mixer.have)
+        {
+                ui_strips_message(ui, strips, WORDS(mixer_off), false);
+                return;
+        }
+        if (!mixer.quick)
+                ui_control_draw(ui, &mixer.tabs);
+        ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys);
+        ui_view_draw(ui, &mixer.big->view, mixer.focused);
+        // What there is to say instead of strips or beside them.
+        if (mixer.capture_off)
+                ui_strips_message(ui, strips, WORDS(mixer_recording_off), false);
+        else if (mixer.recording && !page->input[0] && !strips->count)
+                ui_strips_message(ui, strips, WORDS(mixer_no_mic), false);
+        else if (mixer.recording && strips->count <= 1)
+                ui_strips_message(ui, strips, WORDS(mixer_nobody), true);
+        else if (!mixer.recording && !mixer.quick && strips->count <= 1)
+                ui_strips_message(ui, strips, WORDS(mixer_empty), true);
+}
+
+// One picture, into the buffer the compositor is not reading; false when there is none yet.
+static void mixer_draw_whole(unsigned int address_to pixels)
+{
+        mixer_draw(pixels);
+}
+
+static b32 mixer_frame(void)
+{
+        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole, null);
 }
 
 static b32 mixer_event(const struct window_event address_to event)
 {
         struct ui address_to ui = &mixer.ui;
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
-        p32 bits, allow, row;
+        p32 bits, asks;
 
         if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE)
                 return false;
@@ -497,28 +498,23 @@ static b32 mixer_event(const struct window_event address_to event)
                 mixer_page(event->a == UI_KEY_TAB ? !mixer.recording : event->a == UI_KEY_PAGE_DOWN);
                 return true;
         }
+        mixer_layout();
         if (!mixer.quick && mixer.have)
         {
-                p32 tabs;
+                p32 tabs = ui_tabs_pointer(ui, &mixer.tabs, event, ui_kit.pointer_x, ui_kit.pointer_y);
 
-                mixer_tabs_layout(ui);
-                tabs = ui_tabs_pointer(ui, &mixer.tabs, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (tabs & UI_TABS_CHOSEN)
                         mixer_page(mixer.tabs.at == 1);
                 mixer.dirty |= (tabs & UI_TABS_DRAW) != 0;
                 if (tabs & UI_TABS_TAKEN)
                         return true;
         }
-        // The buttons of the window: Allow (recording is off), and the popup's Mixer row.
-        allow = mixer.capture_off ? ui_buttons_event(ui, &mixer.allow, event, ui_kit.pointer_x, ui_kit.pointer_y) : 0;
-        if (allow & UI_BUTTONS_FIRED)
-                mixer_allow();
-        row = mixer.quick && !(allow & UI_BUTTONS_TAKEN) ? ui_buttons_event(ui, &mixer.row, event, ui_kit.pointer_x, ui_kit.pointer_y) : 0;
-        if (row & UI_BUTTONS_FIRED)
-                return !mixer_start_full();
-        if ((allow | row) & UI_BUTTONS_DRAW)
-                mixer.dirty = true;
-        if ((allow | row) & UI_BUTTONS_TAKEN)
+        // The buttons of the window: Allow (recording is off), and the popup's Mixer row; not asked while a strip's control is held (the kit hands its release to whoever asks first).
+        asks = ui_kit_held >= mixer.big->strips.control && ui_kit_held < mixer.big->strips.control + 2 * mixer.big->strips.count ? 0 : ui_view_event(ui, &mixer.big->view, event);
+        if (asks & UI_VIEW_QUIT)
+                return false;
+        mixer.dirty |= (asks & UI_VIEW_DRAW) != 0;
+        if (asks & UI_VIEW_TAKEN)
                 return true;
         bits = ui_strips_event(ui, &mixer.big->strips, event);
         if (bits & UI_STRIPS_VOLUME)

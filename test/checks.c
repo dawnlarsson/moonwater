@@ -153836,7 +153836,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.ui.opaque = 1;
                 mixer_draw(pixels);
                 {
-                        struct ui_control address_to open = &mixer.row.button[0];
+                        struct ui_control address_to open = &mixer.big->view.group.button[0];
                         int ink = 0;
 
                         check("mixer popup: the Mixer row is under the strip, in the last row of the window, a button of the kit's buttons",
@@ -153856,7 +153856,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer popup: Enter with the keys on the strip mutes it, and starts nothing", mixer_event(&move) && !file_text(started_path, said, sizeof(said)) && s->item[0].muted);
                 mixer_flush();
                 move = strips_key(UI_KEY_TAB, WINDOW_KEY_SHIFT);
-                check("mixer popup: Shift-Tab puts the keys on the row", mixer_event(&move) && mixer.row.keys == 1);
+                check("mixer popup: Shift-Tab puts the keys on the row", mixer_event(&move) && mixer.big->view.group.keys == 1);
                 move = strips_key(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
                 check("mixer popup: and a held key is nothing on it", mixer_event(&move) && !file_text(started_path, said, sizeof(said)));
                 move = strips_key(UI_KEY_ENTER, 0);
@@ -153865,7 +153865,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer popup: it is started in the face the popup has, as /mixer", got >= 23 && !memory_compare(said, "/mixer -f /fonts/ui.ttf", 23));
                 move = strips_key(UI_KEY_TAB, 0);
                 mixer_event(&move);
-                check("mixer popup: and Tab, past the row, gives the keys back to the strip", !mixer.row.keys);
+                check("mixer popup: and Tab, past the row, gives the keys back to the strip", !mixer.big->view.group.keys);
 
                 // The pointer: a press on the row is the row's, a release on it starts the mixer; a press on the slider is the strip's.
                 system_remove_at(AT_FDCWD, started_path, 0);
@@ -153874,14 +153874,14 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                 ui_kit_held = null;
                 mixer_moved(&move);
-                check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.row.keys == 1 && !file_text(started_path, said, sizeof(said)));
+                check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.big->view.group.keys == 1 && !file_text(started_path, said, sizeof(said)));
                 check("mixer popup: its release there starts the mixer and ends the popup", !mixer_event(&lift) && mixer_waits(started_path, said, sizeof(said)) >= 23);
                 system_remove_at(AT_FDCWD, started_path, 0);
-                mixer.row.keys = 0;
+                mixer.big->view.group.keys = 0;
                 ui_kit_held = null;
                 move = (struct window_event){WINDOW_EVENT_MOTION, 0, s->control[0].x + s->control[0].w / 2, s->control[0].y + 40};
                 mixer_moved(&move);
-                check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.row.keys &&
+                check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.big->view.group.keys &&
                                                                                                       s->item[0].percent > 70);
                 mixer_event(&lift);
                 check("mixer popup: and so is the release: nothing is started", ui_kit_held == null && file_text(started_path, said, sizeof(said)) == 0);
@@ -154025,7 +154025,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         int x, y;
 
                         mixer.ui.pixels = pixels;
-                        mixer_tabs_layout(&mixer.ui);
+                        mixer_layout();
                         x = ui_tab_left(&mixer.ui, &mixer.tabs, 0) + ui_tab_width(&mixer.ui, &mixer.tabs, 0) / 2, y = mixer.tabs.y + UI_TABS_H / 2;
                         move = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
                         press = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
@@ -154050,10 +154050,10 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 {
                         int tabs = 0, disc = 0;
 
-                        for (int py = 0; py < ui_px(&mixer.ui, MIXER_TABS); py++)
+                        for (int py = 0; py < mixer.strips_box.y; py++)
                                 for (int px = 0; px < 640; px++)
                                         tabs += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
-                        for (int py = ui_px(&mixer.ui, MIXER_TABS) + 16; py < ui_px(&mixer.ui, MIXER_TABS) + 16 + UI_STRIP_FACE; py++)
+                        for (int py = mixer.strips_box.y + 16; py < mixer.strips_box.y + 16 + UI_STRIP_FACE; py++)
                                 for (int px = UI_STRIP_PAD; px < UI_STRIP_PAD + UI_STRIP_W; px++)
                                         disc += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
                         check("mixer pages: the two tabs are drawn along the top, and the microphone's disc below them", tabs > 500 && disc > 200);
@@ -154065,17 +154065,17 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
                 check_mixer_poll_at(mixer_t0 + 1000000000ll);
-                check("mixer recording off: no strips, and the Allow button has the keys", mixer.capture_off && s->count == 0 && mixer.allow.keys == 1);
+                check("mixer recording off: no strips, and the Allow button has the keys", mixer.capture_off && s->count == 0 && mixer.big->view.group.keys == 1);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer_draw(pixels);
                 {
-                        struct ui_control address_to allow = &mixer.allow.button[0];
+                        struct ui_control address_to allow = &mixer.big->view.group.button[0];
                         int said_ink = 0, button_ink = 0;
 
                         for (int py = 0; py < allow->y - 4; py++)
                                 for (int px = 100; px < 540; px++)
-                                        said_ink += py > ui_px(&mixer.ui, MIXER_TABS) && (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                                        said_ink += py > mixer.tabs_box.y + mixer.tabs_box.h && (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
                         for (int py = allow->y; py < allow->y + allow->h; py++)
                                 for (int px = allow->x; px < allow->x + allow->w; px++)
                                         button_ink += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
@@ -154112,7 +154112,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 {
                         int ink = 0, middle = 0;
 
-                        for (int py = ui_px(&mixer.ui, MIXER_TABS); py < 400; py++)
+                        for (int py = mixer.strips_box.y; py < 400; py++)
                                 for (int px = 0; px < 640; px++)
                                         if ((pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu))
                                         {
@@ -154133,7 +154133,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 {
                         int beside = 0;
 
-                        for (int py = ui_px(&mixer.ui, MIXER_TABS) + 100; py < 400; py++)
+                        for (int py = mixer.strips_box.y + 100; py < 400; py++)
                                 for (int px = UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP; px < 640; px++)
                                         beside += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
                         check("mixer recording: with nothing recording there is the microphone's strip and a line beside it", s->count == 1 && s->item[0].master == 2 && beside > 100);
@@ -154149,7 +154149,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check_mixer_poll_at(mixer_t0 + 1300000000ll);
                 mixer.quick = true;
                 mixer.width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(3)), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
-                mixer.row.keys = 1;
+                mixer.big->view.group.keys = 1;
                 system_remove_at(AT_FDCWD, started_path, 0);
                 e = strips_key(UI_KEY_ENTER, 0);
                 check("mixer popup recording: the Mixer row starts the whole mixer on this page (-i) and ends the popup", !mixer_event(&e) &&
@@ -154157,7 +154157,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                                                                                                                               !memory_compare(said, "/mixer -i -f /fonts/ui.ttf", 26));
                 system_remove_at(AT_FDCWD, started_path, 0);
                 mixer.quick = false;
-                mixer.row.keys = 0;
+                mixer.big->view.group.keys = 0;
                 mixer.recording = false;
                 mixer.width = 640, mixer.height = 400;
         }

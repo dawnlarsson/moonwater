@@ -106,7 +106,7 @@ M = [
     (X, "a record stream's volume sent as a playing stream's", "mixer.recording ? ctl_set_output_volume(&big->ctl, number, volume) : ctl_set_input_volume(&big->ctl, number, volume)", "ctl_set_input_volume(&big->ctl, number, volume)"),
     (X, "a record stream's mute sent as a playing stream's", "mixer.recording ? ctl_set_output_mute(&big->ctl, number, strip->muted) : ctl_set_input_mute(&big->ctl, number, strip->muted)", "ctl_set_input_mute(&big->ctl, number, strip->muted)"),
     (X, "a page change that does not send first", "        mixer_flush();\n        mixer.recording = recording;", "        mixer.recording = recording;"),
-    (X, "Allow does not have the keys", "mixer.allow.keys = 1;", "mixer.allow.keys = 0;"),
+    (X, "Allow does not have the keys", "big->view.group.keys = 1;", "big->view.group.keys = 0;"),
     (X, "Allow turns recording off", "compositor_volume_write(mixer.capture_path, \"on\\n\");", "compositor_volume_write(mixer.capture_path, \"off\\n\");"),
     (X, "the Mixer row starts the output page from Recording", "        if (mixer.recording)\n                words[1] = (string_address) \"-i\", words[2] = (string_address) \"-f\", words[3] = face;", "        if (0)\n                words[1] = (string_address) \"-i\", words[2] = (string_address) \"-f\", words[3] = face;"),
     (X, "the tabs not drawn", "ui_control_draw(ui, &mixer.tabs);", "(void)0;"),
