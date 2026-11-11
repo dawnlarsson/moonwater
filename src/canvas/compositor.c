@@ -1286,6 +1286,9 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
+        // The record's pitch is 16 bits (compositor_gpu_frame's op[0]): a wider picture is left to the processor.
+        if (f->pitch > 65535)
+                return g->why = COMPOSITOR_GPU_WHY_ALIGN, false;
         if (g->count + 40 > g->room - 400)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
