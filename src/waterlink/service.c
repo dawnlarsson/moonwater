@@ -1529,12 +1529,6 @@ static fn link_session_say(struct link_session address_to s, p32 kind)
 /*      A frame whose payload is made already, its type byte first: the link
         copies it into its slot, and that is the only copy a read's bytes
         make. */
-static p8 link_post_framed(struct link_session address_to s, p8 key,
-                             p8 flags, p8 address_to payload, positive length)
-{
-        return waterlink_post(s->link, key, flags, payload, (p16)length,
-                              link_self.now);
-}
 
 static p8 link_post(struct link_session address_to s, p8 key, p8 flags,
                       p8 type, p8 address_to data, positive length)
@@ -1546,7 +1540,7 @@ static p8 link_post(struct link_session address_to s, p8 key, p8 flags,
         payload[0] = type;
         if (length)
                 memory_copy(payload + 1, data, length);
-        return link_post_framed(s, key, flags, payload, length + 1);
+        return waterlink_post(((struct link_session *)(s))->link, key, flags, (p8 *)(payload), (p16)((positive)(length + 1)), link_self.now);
 }
 
 /*
@@ -2008,10 +2002,6 @@ static bipolar link_part_open(string_address target, positive length,
 static p8 push_block[PUSH_BLOCK];
 static p8 push_frame[PUSH_FRAME_MAX];
 
-static p8 push_dictionary_load(void)
-{
-        return zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE);
-}
 
 /* Reads n bytes, or fewer only at the end of the file: what it read, or a negative error. */
 static bipolar push_fill(bipolar handle, p8 address_to into, positive n)
@@ -2041,7 +2031,7 @@ static p8 push_put(bipolar handle, p8 address_to from, positive n)
 /* Packs input into output from its present offset to its end. False when a read, the encoder or a write fails. */
 static p8 push_pack(bipolar input, bipolar output)
 {
-        if (!push_dictionary_load())
+        if (!(p8)(zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE)))
                 return false;
         for (;;)
         {
@@ -2072,7 +2062,7 @@ static p8 push_pack(bipolar input, bipolar output)
 /* Unpacks input into output from its present offset to its end. False when the input ends inside a frame, or a frame does not decode with this dictionary. */
 static p8 push_unpack(bipolar input, bipolar output)
 {
-        if (!push_dictionary_load())
+        if (!(p8)(zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE)))
                 return false;
         for (;;)
         {
@@ -2391,11 +2381,6 @@ static fn link_watch(system_poll_descriptor address_to watch,
         longer than poll takes (about 24 days) is clamped to that: the caller
         wakes and waits again.
 */
-static bipolar link_poll_wait(system_poll_descriptor address_to watch,
-                              positive count, timespec address_to limit)
-{
-        return system_poll_wait(watch, count, limit, null);
-}
 
 /*      One descriptor's readiness, for the paths that wait on a single one (a
         pipe's first byte, a child's end, a signal): the answer
@@ -2423,7 +2408,7 @@ static fn link_wait(system_poll_descriptor address_to watch,
                 wake = now;
         limit.tv_sec = (wake - now) / 1000000;
         limit.tv_nsec = (wake - now) % 1000000 * 1000;
-        if (link_poll_wait(watch, count, address_of limit) <= 0 || !quiet)
+        if (system_poll_wait(watch, count, address_of limit, null) <= 0 || !quiet)
                 return;
         for (positive at = 0; at < count; at++)
                 if (watch[at].returned && quiet[at])
@@ -2490,13 +2475,7 @@ static fn link_stream_read(struct link_session address_to s,
                                                   : LINK_CHUNK;
 
                         link_read_buffer[at] = LINK_DATA;
-                        (void)link_post_framed(
-                                s, stream->key,
-                                (positive)got > LINK_CHUNK
-                                        ? (p8)(stream->flags &
-                                               ~WATERLINK_FRAME_URGENT)
-                                        : stream->flags,
-                                link_read_buffer + at, length + 1);
+                        (void)waterlink_post(((struct link_session *)(s))->link, stream->key, (positive)got > LINK_CHUNK ? (p8)(stream->flags & ~WATERLINK_FRAME_URGENT) : stream->flags, (p8 *)(link_read_buffer + at), (p16)((positive)(length + 1)), link_self.now);
                 }
                 //      Less than was asked for is all there was: another
                 //      read now would only say "not now".

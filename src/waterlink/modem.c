@@ -1026,10 +1026,6 @@ static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const b1
 
 /* Plays count samples through the file's stream on the left channel: the right is silent, so the file's stream is the left alone.
    Answers 0, or -1 when the connection failed. */
-static bipolar modem_send_pcm(unsigned long channel, const b16 address_to pcm, positive count)
-{
-        return modem_play_samples(&modem_ctl, channel, pcm, 0, count);
-}
 
 /*
         The count a send goes on from, kept in one record of LINK_MODEM_SEQ_PATH: the key's fingerprint (an HMAC of a fixed
@@ -1252,7 +1248,7 @@ static b32 modem_send_file(string_address path)
                         ctl_disconnect(&modem_ctl);
                         return host_refuse("a datagram of %s did not fit its frames: the send is stopped after %p bytes\n", path, (positive)sent_bytes);
                 }
-                if (modem_send_pcm(channel, modem_pcm, (positive)samples) < 0)
+                if (modem_play_samples(&modem_ctl, channel, modem_pcm, 0, (positive)samples) < 0)
                 {
                         ctl_disconnect(&modem_ctl);
                         return host_refuse("the connection to the sound server broke after %p bytes: the receiver has what came before\n", (positive)sent_bytes);

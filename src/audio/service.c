@@ -351,10 +351,6 @@ static void audio_device_name(char *to, long room, const char *prefix, const str
         to[at] = 0;
 }
 
-static void audio_sink_name(char *to, long room, const struct audio_card *card, long device)
-{
-        audio_device_name(to, room, "alsa_output.", card, device);
-}
 
 // The text of from, at most room - 1 bytes of it, and a zero byte after. Kept as a byte loop on purpose: the library's bounded length and
 // copy (string_length_max, then memory_copy) measured slower for a name of 36 bytes (129 to 172 ticks against 86), so the C stays.
@@ -446,7 +442,7 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
                         }
                         automatic = audio_output_rank(&jacks, audio_is_hdmi(cards[i].device[d].name), cards[i].device[d].device, usb);
                         why = automatic == 6 ? AUDIO_STATE_WHY_ANALOG : automatic == 5 ? AUDIO_STATE_WHY_DISPLAY : automatic == 4 ? AUDIO_STATE_WHY_HDMI : AUDIO_STATE_WHY_NOTHING;
-                        audio_sink_name(listed, sizeof(listed), cards + i, cards[i].device[d].device);
+                        audio_device_name(listed, sizeof(listed), "alsa_output.", cards + i, cards[i].device[d].device);
                         if (at < AUDIO_STATE_DEVICES)
                         {
                                 audio_copy_text(audio_service.devices[at].name, sizeof(audio_service.devices[at].name), listed);
@@ -474,7 +470,7 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
         // A choice of the person's that is not there (the card is unplugged) is not a reason for no sound: the first is used.
         *card_out = cards[best].number;
         *device_out = cards[best].device[best_device].device;
-        audio_sink_name(name, name_room, cards + best, *device_out);
+        audio_device_name(name, name_room, "alsa_output.", cards + best, *device_out);
         audio_describe(description, description_room, cards[best].name, cards[best].device[best_device].name);
         return 1;
 }
