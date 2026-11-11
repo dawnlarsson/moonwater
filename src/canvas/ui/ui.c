@@ -18340,6 +18340,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         container, other the warning container, free room the outline (a track of nothing), and a disk with no table the info container.
 */
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
+#define UI_STRIP_MOST 33 // the most segments a strip takes: the host's partitions and the free room round them (settings' SETTINGS_SEGMENTS)
 #define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
 
 // A strip role's colour in a table of them by role: a role past the free room takes the last entry, the info container's.
@@ -18358,17 +18359,17 @@ static const int ui_strip_ink_colours[] = {[UI_STRIP_EFI] = UI_ON_PRIMARY, [UI_S
 static fn ui_strip(struct ui address_to ui, int left, int top, int width, int height, const struct ui_row address_to row)
 {
         unsigned long long total = 0, run = 0;
-        int cursor = left, gap = ui_dev(ui, UI_SEGMENT_GAP);
+        int cursor = left, gap = ui_dev(ui, UI_SEGMENT_GAP), count = row->strip_count < 0 ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
 
-        for (int at = 0; at < row->strip_count; at++)
+        for (int at = 0; at < count; at++)
                 total += row->strip_bytes[at];
-        for (int at = 0; at < row->strip_count && total; at++)
+        for (int at = 0; at < count && total; at++)
         {
                 // The end is the share of every byte so far, not this segment's share from the left: each segment starts where the last ended.
                 run += row->strip_bytes[at];
-                int stop = at + 1 == row->strip_count ? left + width
+                int stop = at + 1 == count ? left + width
                            : left + (int)(run * (unsigned long long)width / total);
-                int from = cursor + (at ? gap / 2 : 0), to = stop - (at + 1 < row->strip_count ? gap / 2 : 0);
+                int from = cursor + (at ? gap / 2 : 0), to = stop - (at + 1 < count ? gap / 2 : 0);
 
                 if (to > from)
                 {
