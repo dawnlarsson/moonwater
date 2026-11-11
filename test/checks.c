@@ -127396,7 +127396,7 @@ static void check_compositor_look(void)
             fill += plane[at] == 0u;
             other += plane[at] != 0xffffffu && plane[at] != 0u && plane[at] != 0x555555u;
         }
-        check("look: a dark arrow's outline is white and its fill black", edge == 4 * 46 && fill == 4 * 55 && other == 0);
+        check("look: a dark arrow's outline is white and its fill black", edge == 4 * 60 && fill == 4 * 46 && other == 0);
     }
 
     compositor.scale = 200;
@@ -127410,7 +127410,7 @@ static void check_compositor_look(void)
     compositor.cursor.handle[0] = 7;
     check("look: a plane is too small for a size of 4, which is drawn", compositor_cursor_in_scene());
     compositor.cursor.size = 3;
-    check("look: and a size of 3 stays on it", !compositor_cursor_in_scene());
+    check("look: and a size of 3 is drawn, its 32 pixel cell being larger than the plane", compositor_cursor_in_scene());
     compositor.cursor.handle[0] = 0;
     compositor.cursor.soft = 1;
     check("look: with no plane the pointer is drawn", compositor_cursor_in_scene());
@@ -170313,10 +170313,10 @@ static void check_compositor_pointer(void) {
        99 and 48, each at its scale squared; the hotspot is the corner of the arrow and the middle of the
        others (the hand's is its glyph's origin), and what is drawn stays inside the damage. */
     {
-        static const int white[CP_SHAPES]={55,25,25,25,25,19,21,45,99,53,73},black[CP_SHAPES]={46,40,40,48,48,44,48,64,48,64,72};
+        static const int white[CP_SHAPES]={60,42,42,50,50,23,37,111,209,77,31},black[CP_SHAPES]={46,62,62,80,80,64,68,120,73,60,116};
         static u32 plane[64*64];
         for(unsigned shape=0;shape<CP_SHAPES;shape++)
-            for(int scale=1;scale<=3;scale++) {
+            for(int scale=1;scale<=2;scale++) {
                 struct compositor_target t={plane,64,64,64,0,0,64,64};
                 memset(plane,0,sizeof(plane));
                 compositor_cursor_draw(&t,compositor_cursor_hot[shape][0]*scale,compositor_cursor_hot[shape][1]*scale,
@@ -170344,10 +170344,10 @@ static void check_compositor_pointer(void) {
         }
         int left,top;
         compositor_cursor_cell(&left,&top,100,50,CP_ARROW,3);ck_ok(left==100&&top==50);
-        compositor_cursor_cell(&left,&top,100,50,CP_RESIZE_H,2);ck_ok(left==86&&top==36);
-        compositor_cursor_cell(&left,&top,100,50,CP_HAND,2);ck_ok(left==100&&top==48);
+        compositor_cursor_cell(&left,&top,100,50,CP_RESIZE_H,2);ck_ok(left==70&&top==20);
+        compositor_cursor_cell(&left,&top,100,50,CP_HAND,2);ck_ok(left==76&&top==50);
         compositor_cursor_cell(&left,&top,100,50,77,2);ck_ok(left==100&&top==50);
-        ck_ok(compositor_cursor_fit(1)==1&&compositor_cursor_fit(2)==2&&compositor_cursor_fit(3)==3&&compositor_cursor_fit(9)==3);
+        ck_ok(compositor_cursor_fit(1)==1&&compositor_cursor_fit(2)==2&&compositor_cursor_fit(3)==2&&compositor_cursor_fit(9)==2);
         ck_ok(compositor_cursor_by_edges[0]==CP_ARROW&&compositor_cursor_by_edges[CP_EDGE_LEFT]==CP_RESIZE_H&&
               compositor_cursor_by_edges[CP_EDGE_RIGHT]==CP_RESIZE_H&&compositor_cursor_by_edges[CP_EDGE_TOP]==CP_RESIZE_V&&
               compositor_cursor_by_edges[CP_EDGE_BOTTOM]==CP_RESIZE_V&&
@@ -170356,30 +170356,8 @@ static void check_compositor_pointer(void) {
               compositor_cursor_by_edges[CP_EDGE_TOP|CP_EDGE_RIGHT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
-        /* The click hand is a classic cursor font's, pixel for pixel: its glyph 60 (hand2, 14 rows, origin at its
-           top left) is the edge, its mask 61 (16 rows, origin one row down) less the glyph is the fill, and the
-           pointer is the glyph's origin: row 1 of the cell, column 0. The rows below are the font's own words
-           (the first pixel the high bit); the hand drawn by eye that this replaced, another silhouette with its
-           pointer at 7,7, differed from them in 183 of the 320 pixels. */
-        {
-            static const unsigned short font_glyph[14]={0x7f80,0x8040,0x7e20,0x1010,0x0e10,0x1010,0x0e28,0x1044,0x0c82,0x0304,0x0248,0x0110,0x00a0,0x0040},
-                                        font_mask[16]={0x7f80,0xffc0,0xffe0,0xfff0,0x7ff8,0x1ff8,0x3ff8,0x1ffc,0x3ffe,0x1fff,0x0ffe,0x07fc,0x03f8,0x01f0,0x00e0,0x0040};
-            int differ=0,edge_rows=0,sil_rows=0;
-#define CP_LIT(rows,x,y) ((rows)[y]&((x)<8?0x80u>>(x):0x8000u>>((x)-8)))
-            for(int y=0;y<CP_CURSOR_H;y++) {
-                int e_any=0,s_any=0;
-                for(int x=0;x<CP_CURSOR_W;x++) {
-                    int g=y>=1&&y<15&&(font_glyph[y-1]>>(15-x)&1),m=y<16&&(font_mask[y]>>(15-x)&1);
-                    int e=!!CP_LIT(compositor_cursor_edge[CP_HAND],x,y),f=!!CP_LIT(compositor_cursor_fill[CP_HAND],x,y);
-                    differ+=e!=g||f!=(m&&!g);
-                    e_any|=e;s_any|=e|f;
-                }
-                edge_rows+=e_any;sil_rows+=s_any;
-            }
-#undef CP_LIT
-            ck_ok(differ==0&&edge_rows==14&&sil_rows==16);
-            ck_ok(compositor_cursor_hot[CP_HAND][0]==0&&compositor_cursor_hot[CP_HAND][1]==1);
-        }
+        /* The click hand is hand-drawn with its index finger up: the pointer is the fingertip, the top row of the finger. */
+        ck_ok(compositor_cursor_hot[CP_HAND][0]==12&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(CP_HAND,0,12)==2);
     }
 }
 
