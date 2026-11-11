@@ -24586,6 +24586,10 @@ static COLD bool ln_make(string_address target, string_address name)
            for, and the destination it leaves is replaced like any other. */
         bool make_backup = file_backup_kind &&
                            (ln_selected.collision != 'i' || destination_exists);
+        /* One operand's backup is not the next one's: without -v nothing else
+           clears the flag, and a stale one let a later failure rename the
+           earlier operand's backup over this operand's name. */
+        file_backup_did = false;
         file_backup_left = false;
         if (make_backup &&
             !file_backup_made_at(
