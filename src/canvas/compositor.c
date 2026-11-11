@@ -6718,8 +6718,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 
 /*
         The splash (splash.c): the picture Canvas shows on the desktop's background while the desktop loads. It is read
-        when the compositor starts, from SPLASH_PATH_IMAGE, which moonwater splash keeps; a file that is off, missing or
-        does not parse is no picture and the desktop is drawn as it always was, a bad one logged. The picture is drawn
+        when the compositor starts, from SPLASH_PATH_IMAGE, which moonwater splash keeps; a file that is missing or does
+        not parse is the built-in picture (compositor_splash_default), a bad one logged, and off is no picture at all. The picture is drawn
         centred on the ground in each present while the splash is up, and the taskbar and the windows are not drawn. It
         ends at the desktop's first window, or at COMPOSITOR_SPLASH_HOLD_NS, whichever comes first.
 */
@@ -6771,7 +6771,7 @@ static int compositor_splash_load(void)
                 reason = splash_parse(compositor_splash_bytes, (unsigned long)length, &image);
         if (reason)
         {
-                string_format(log, "compositor: splash: %s does not parse (%s)\n", (string_address)SPLASH_PATH_IMAGE, (string_address)reason);
+                string_format(log, "compositor: splash: %s does not parse (%s), so the built-in picture is shown\n", (string_address)SPLASH_PATH_IMAGE, (string_address)reason);
                 log_flush();
                 return 0;
         }
@@ -6784,6 +6784,41 @@ static int compositor_splash_load(void)
         compositor_splash.width = image.width;
         compositor_splash.height = image.height;
         return 1;
+}
+
+/*
+        The built-in picture: a moon over water, drawn in code. It is a placeholder for the owner's own art, which
+        moonwater splash FILE replaces. It is COMPOSITOR_SPLASH_W by COMPOSITOR_SPLASH_H pixels, and its ground is 0,
+        which is not drawn, so the desktop's ground shows round the moon and the water.
+*/
+#define COMPOSITOR_SPLASH_W 160
+#define COMPOSITOR_SPLASH_H 96
+
+static void compositor_splash_default(void)
+{
+        const unsigned int moon = 0xffe6e6e6u, water = 0xff3d7fb8u;
+        const int w = COMPOSITOR_SPLASH_W, h = COMPOSITOR_SPLASH_H;
+
+        for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                        // A disc of radius 22 at (50, 40), with the part under a disc of radius 20 at (60, 34) taken away: a crescent.
+                        int dx = x - 50, dy = y - 40, ex = x - 60, ey = y - 34;
+
+                        compositor_splash.pixels[y * w + x] = dx * dx + dy * dy <= 22 * 22 && ex * ex + ey * ey > 20 * 20 ? moon : 0;
+                }
+        // Three bands of water, each a triangle wave across the width, three pixels thick.
+        for (int band = 0; band < 3; band++)
+                for (int x = 0; x < w; x++)
+                {
+                        int phase = (x * 2) % 32, wave = phase < 16 ? phase : 32 - phase;
+                        int top = 62 + band * 11 + wave / 4;
+
+                        for (int y = top; y < top + 3 && y < h; y++)
+                                compositor_splash.pixels[y * w + x] = water;
+                }
+        compositor_splash.width = (unsigned int)w;
+        compositor_splash.height = (unsigned int)h;
 }
 
 // The splash at the compositor's start: up when it is not off and there is a picture to show.
@@ -6807,7 +6842,7 @@ static void compositor_splash_start(unsigned long long now)
                 return;
         compositor_splash.until = now + COMPOSITOR_SPLASH_HOLD_NS;
         if (!compositor_splash_load())
-                return;
+                compositor_splash_default();
         compositor_splash.up = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
