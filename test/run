@@ -6385,7 +6385,7 @@ probe=$work/probe
 
 [ -x "$probe" ] || { echo "no probe at $probe" >&2; exit 1; }
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting probe
@@ -6587,7 +6587,7 @@ esac
 #       checks.c has a stray /* at line 19527, so its compiles here drop -Wcomment and keep everything else.
 lane_wayland()
 (
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         wayland_status=0
         wayland_compilers=${CC:-gcc}
@@ -6834,7 +6834,7 @@ lane_wayland()
 #       same. Needs a render node (renderD128): without one the card composes nothing and the lane says so and passes.
 lane_gpulists()
 (
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         if [ ! -c /dev/dri/renderD128 ]; then
                 echo "gpulists: no render node here, the card composes nothing: skipped"
@@ -6899,7 +6899,7 @@ lane_gpuanim()
 #       with Shift and Enter, digits off the numbers page, and a held Back that empties a line. No render node is needed.
 lane_osk()
 (
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
                 note "osk: the shell binary did not build"
@@ -6920,7 +6920,7 @@ lane_osk()
 
 lane_audio()
 (
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         audio_status=0
         audio_compilers=${CC:-gcc}
@@ -7047,7 +7047,7 @@ lane_audio()
 #       called, and a bus that is as it was after noise.
 lane_dbus()
 (
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         dbus_status=0
         dbus_compilers=${CC:-gcc}
@@ -10111,7 +10111,7 @@ lane_awk()
 lane_term()
 (
 compiler=${CC:-gcc}
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 test_group_width=12
@@ -12209,7 +12209,7 @@ lane_edit()
 need_shell || exit 1
 
 compiler=${CC:-gcc}
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 test_group_width=12
@@ -14717,7 +14717,7 @@ counted
 
 lane_kit()
 (
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting kit 10 24
@@ -15816,7 +15816,7 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 counting wifi 10 24
 
@@ -15947,7 +15947,7 @@ case $seconds$seed$injecting in
 *[!0-9]*) echo "  ring0        NOT RUN -- the seconds, seed and failure rate are counts"; exit 2 ;;
 esac
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 counting ring0 8 32
 
@@ -16131,7 +16131,7 @@ hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu
 locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff want_max=65530 want_uinput=none want_event=600:0 ;;
 esac
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting tier 12 40
@@ -16260,7 +16260,7 @@ if [ ! -f /usr/include/drm/drm.h ]; then
         exit 2
 fi
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting input 12 40
@@ -16482,7 +16482,7 @@ if ! qemu-system-x86_64 -audiodev help 2>&1 | grep -q '^wav'; then
         exit 2
 fi
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting sound 8 50
@@ -16692,7 +16692,7 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting boot
@@ -17850,7 +17850,7 @@ fi
 #       host's verdicts on its disks there when the lane ends, for a row that
 #       went red once in five runs (MOONWATER_CUT_SHOW is the power cuts'
 #       own). The disks and the image copies are left behind.
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
 trap '[ -z "${MOONWATER_INSTALL_KEEP:-}" ] ||
         find "$work" -maxdepth 1 -type f ! -name "*.img" ! -name "*.keep" ! -name "*.fd" ! -name "*.efi" \
                 -exec cp {} "$MOONWATER_INSTALL_KEEP"/ \; 2> /dev/null
@@ -28185,7 +28185,7 @@ bench_c()
 bench_shell()
 (
         set -e
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
         subject=${1:-${MOONWATER_SHELL:-}}
@@ -28442,7 +28442,7 @@ PY
 bench_tools()
 (
         set -e
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
         subject=${1:-${MOONWATER_TOOLS:-}}
 
@@ -28672,7 +28672,7 @@ PY
 bench_grep_sets()
 (
         set -e
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
         subject=${1:-${MOONWATER_TOOLS:-}}
 
@@ -28824,7 +28824,7 @@ PY
 bench_awk()
 (
         set -e
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
         subject=${1:-${MOONWATER_TOOLS:-}}
 
@@ -29018,7 +29018,7 @@ PY
 bench_find()
 (
         set -e
-        work=$(mktemp -d)
+        work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
         subject=${1:-${MOONWATER_TOOLS:-}}
 
@@ -29271,7 +29271,7 @@ PY
 
 one()
 {
-        log=$(mktemp -u)
+        log=$(mktemp)
         qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none \
                 -serial "file:$log" \
