@@ -1609,10 +1609,6 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
         return complete;
 }
 
-static _Bool desktop_commit(void)
-{
-        return desktop_commit_known(null, 0);
-}
 
 /*
         Every output filled with the ground and handed to the driver.
@@ -1655,7 +1651,7 @@ static void desktop_recompose(void)
 static void desktop_redraw(void)
 {
         desktop_recompose();
-        desktop_commit();
+        desktop_commit_known(null, 0);
 }
 
 /*
@@ -2621,10 +2617,6 @@ static COLD void canvas_probe(struct work_struct *work)
         schedule_delayed_work(&canvas_probe_work, msecs_to_jiffies(CANVAS_RETRY_MS));
 }
 
-static void __maybe_unused canvas_start_probing(void)
-{
-        schedule_delayed_work(&canvas_probe_work, 0);
-}
 
 /*
         Canvas, off and on, from userspace.
@@ -3971,7 +3963,7 @@ void canvas_boot(void)
         }
 
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
-        canvas_start_probing();
+        schedule_delayed_work(&canvas_probe_work, 0);
 #endif
 }
 

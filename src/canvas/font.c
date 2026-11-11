@@ -1017,14 +1017,10 @@ p32 font_glyph(const font_face address_to face, p32 code)
 /*
         Advances and kerning.
 */
-static p32 font_advance_units(const font_face address_to face, p32 glyph)
-{
-        return font_u16(face, face->hmtx + 4 * (positive)(glyph < face->metrics ? glyph : face->metrics - 1));
-}
 
 __attribute__((used)) b32 font_advance(const font_face address_to face, p32 glyph, p32 size)
 {
-        return font_fixed(face, font_advance_units(face, glyph), size);
+        return font_fixed(face, font_u16(face, ((const font_face *)(face))->hmtx + 4 * (positive)(((p32)(glyph)) < ((const font_face *)(face))->metrics ? ((p32)(glyph)) : ((const font_face *)(face))->metrics - 1)), size);
 }
 
 static p32 font_bits(p32 format)
@@ -5031,7 +5027,7 @@ static p32 font_shape_unit(font_engine address_to e, const font_face address_to 
         //      Advances, then GPOS.
         for (p32 i = 0; i < s.len; i++)
         {
-                s.shift[i].advance = (b32)font_advance_units(face, s.info[i].glyph);
+                s.shift[i].advance = (b32)font_u16(face, ((const font_face *)(face))->hmtx + 4 * (positive)(((p32)(s.info[i].glyph)) < ((const font_face *)(face))->metrics ? ((p32)(s.info[i].glyph)) : ((const font_face *)(face))->metrics - 1));
                 s.shift[i].x = s.shift[i].y = 0;
                 s.shift[i].chain = 0;
                 s.shift[i].attach = 0;

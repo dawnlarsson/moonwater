@@ -4475,7 +4475,7 @@ fn regrid(b32 master)
         if (master >= 0)
         {
                 window_damage(window, 0, ROWS);
-                window_flush(window);
+                __atomic_store_n(&((struct window *)(window))->sequence, ((struct window *)(window))->sequence + 1, __ATOMIC_RELEASE);
 
                 // That damage was consumed by the synchronous commit. Keep
                 // later input in this same loop iteration visible, but do not

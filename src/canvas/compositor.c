@@ -520,11 +520,6 @@ static unsigned int compositor_panel_mark(const struct compositor_frame *frame)
 /*
         One tab, its rectangle x, y, width, height: drawn with the taskbar's ink.
 */
-static void compositor_panel_tab(const struct compositor_target *t, int slot, unsigned int mark, int x, int y,
-                                 int width, int height)
-{
-        compositor_fill(t, x, y, width, height, taskbar_tab_ink(slot, mark));
-}
 
 /*
         A window's corners are quarters of a circle: the line's outside at
@@ -784,7 +779,7 @@ static void compositor_contents(const struct compositor_target *t, const struct 
         if (!frame->builtin && !frame->pixels)
                 return;
         if (frame->builtin)
-                compositor_panel_tab(t, frame->slot, compositor_panel_mark(frame), frame->x, frame->y, frame->width, frame->height);
+                compositor_fill(t, frame->x, frame->y, frame->width, frame->height, taskbar_tab_ink(((int)(frame->slot)), ((unsigned int)(compositor_panel_mark(frame)))));
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
                                        frame->source_w, frame->source_h);
@@ -14229,11 +14224,6 @@ static void compositor_minimize_row(int row)
         compositor_tabs_changed();
 }
 
-// Alt-F9: the window with the keys is put away, and the keys go to the one under it.
-static void compositor_minimize_focused(void)
-{
-        compositor_minimize_row(compositor.focus);
-}
 
 /*
         The on-screen keyboard: the window that asks WINDOW_KEYBOARD (osk.c), shown while the focused window has a text field with
@@ -15232,11 +15222,6 @@ static void compositor_script_say(const char *name)
         system_close(handle);
 }
 
-// A chord pressed: said to the script, which runs what it is bound to.
-static void compositor_key_fire(unsigned int which)
-{
-        compositor_script_say(compositor_keys.chord[which]);
-}
 
 /*
         The sound server's master volume on the desktop: the keys (mute, volume down and volume up, five percent a press and a
@@ -15883,7 +15868,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         if (chord == WINDOW_KEY_ALT && code == CK_KEY_F9 && !compositor.cycle)
         {
                 if (value == 1)
-                        compositor_minimize_focused();
+                        // Alt-F9: the window with the keys is put away, and the keys go to the one under it.
+                        compositor_minimize_row(compositor.focus);
                 return;
         }
 
@@ -15904,7 +15890,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_keys.modifiers[at])
                 {
                         if (value == 1)
-                                compositor_key_fire(at);
+                                // A chord pressed: said to the script, which runs what it is bound to.
+                                compositor_script_say(compositor_keys.chord[((unsigned int)(at))]);
                         return;
                 }
 
@@ -16162,7 +16149,7 @@ static void compositor_motion(void)
         }
 
         // A held button keeps the pointer with the window it went down on. Otherwise a window is told of the motion
-        // over it only when it wants the motion (windows_hover): each report of it wakes the program.
+        // over it only when it wants the motion (the window hover_off flag): each report of it wakes the program.
         compositor_shared_hover(under);
         compositor.hover = under;
         if (compositor.grab >= 0)
@@ -18039,7 +18026,7 @@ static void compositor_touch_right(void)
 */
 /*
         A pinch goes to the window its begin lands on (the window under the focal point then), and its updates and end go to that
-        window, wherever the middle has gone. A window that takes pinches (windows_pinch) is sent WINDOW_EVENT_PINCH; any other is
+        window, wherever the middle has gone. A window that takes pinches (the window pinch_wanted flag) is sent WINDOW_EVENT_PINCH; any other is
         sent Ctrl with a wheel of a notch for each quarter the scale has moved from the last notch (compositor_pinch_legacy), up for
         a bigger scale, down for a smaller, and no notch under 1/16 of the scale it began at.
 */

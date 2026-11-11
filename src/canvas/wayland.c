@@ -936,10 +936,6 @@ static inline long wayland_percent120(long percent)
         return (wayland_max(25, wayland_min(percent, 800)) * WAYLAND_UNIT + 50) / 100;
 }
 
-static inline long wayland_percent_whole(long percent)
-{
-        return wayland_max(1, (wayland_min(percent, 800) + 99) / 100);
-}
 
 // Units to pixels at a scale in 120ths, rounded to the nearest (a half away from zero), exact at a whole scale.
 static inline long wayland_pixels(long units, long scale120)
@@ -1163,7 +1159,7 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         if (o->version >= 2)
         {
                 e = wayland_begin(c, o->id, WLE_wl_output_scale);
-                wayland_word(&e, (unsigned long)wayland_percent_whole(screen->scale));
+                wayland_word(&e, (unsigned long)wayland_max(1, (wayland_min(((long)(screen->scale)), 800) + 99) / 100));
                 wayland_end(&e);
         }
         if (o->version >= 4)
@@ -2237,7 +2233,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
 */
 static void wayland_scale_tell(struct wayland_client *c, struct wayland_surface *s, long percent)
 {
-        long scale120 = wayland_percent120(percent), whole = wayland_percent_whole(percent), slot;
+        long scale120 = wayland_percent120(percent), whole = wayland_max(1, (wayland_min(((long)(percent)), 800) + 99) / 100), slot;
         struct wayland_event e;
 
         if (s->told120 == scale120 && s->told_whole == whole)

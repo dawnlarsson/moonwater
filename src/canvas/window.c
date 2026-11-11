@@ -702,7 +702,7 @@ struct windows_issue
         A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/touch.h).
         a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
         two, in the window's own pixels (window_pinch_pack). The flags are WINDOW_PINCH_BEGIN, WINDOW_PINCH_END, or neither for an
-        update. A program that has said it takes pinches (windows_pinch) is sent these; any other is sent Ctrl with a wheel of a notch
+        update. A program that has said it takes pinches (the window pinch_wanted flag) is sent these; any other is sent Ctrl with a wheel of a notch
         each time the scale has moved a quarter from the last notch sent (the zoom a browser or GTK program takes from a trackpad).
 */
 #define WINDOW_EVENT_PINCH 6u
@@ -970,7 +970,7 @@ struct windows
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];
         unsigned int osk_flags[WINDOWS][WINDOWS_OSK];
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
-        unsigned int pinch_wanted[WINDOWS]; // the program's: 1 when it takes WINDOW_EVENT_PINCH (windows_pinch); 0 sends a pinch as Ctrl and a wheel
+        unsigned int pinch_wanted[WINDOWS]; // the program's: 1 when it takes WINDOW_EVENT_PINCH (the window pinch_wanted flag); 0 sends a pinch as Ctrl and a wheel
         /*
                 The compositor's, for a window it shows straight from its buffers (scanned out, with no
                 copy): pinned is 1 while it does, and a program then never gives a buffer's pages back,
@@ -3019,10 +3019,6 @@ struct window_poll
         of it, and the release keeps it from being seen before the cells,
         damage rows or pixels it announces.
 */
-static void window_flush(struct window *window)
-{
-        __atomic_store_n(&window->sequence, window->sequence + 1, __ATOMIC_RELEASE);
-}
 
 /*
         A window of cells given more columns than its lines are apart.
@@ -4449,19 +4445,11 @@ static void windows_clip_free(unsigned char *bytes, unsigned long length)
         held or pressed over it needs; every report of the motion is a wakeup
         for the program otherwise. A program that never says is sent all of it.
 */
-static void windows_hover(const struct window_row *own, unsigned int wanted)
-{
-        __atomic_store_n(&own->table->hover_off[own->row], wanted ? 0u : 1u, __ATOMIC_RELEASE);
-}
 
 /*
         Whether the window takes WINDOW_EVENT_PINCH. One that does not is sent a pinch as Ctrl and a wheel (compositor_pinch_legacy),
         so a program that handles a wheel with Ctrl zooms with a pinch without knowing one.
 */
-static void windows_pinch(const struct window_row *own, unsigned int wanted)
-{
-        __atomic_store_n(&own->table->pinch_wanted[own->row], wanted ? 1u : 0u, __ATOMIC_RELEASE);
-}
 
 /*
         A colour as the settings keep it: #rrggbb or rrggbb, or the three digits of either that stand
