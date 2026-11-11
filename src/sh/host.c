@@ -5580,12 +5580,7 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
                 string_address word = arguments[3];
                 positive value = 0, digit = 0;
 
-                for (; word[digit] && digit < 3; digit++)
-                {
-                        if (word[digit] < '0' || word[digit] > '9')
-                                return host_usage();
-                        value = value * 10 + (positive)(word[digit] - '0');
-                }
+                value = string_digits_max(word, 3, address_of digit);
                 if (!digit || word[digit] || value < 1 || value > 10)
                         return host_usage();
                 seconds = value;
@@ -13264,8 +13259,7 @@ static positive radio_share_pid(void)
 
         if (host_read_word(NET_BLUETOOTH_SHARE_PID, text, sizeof(text)) < 0)
                 return 0;
-        for (positive at = 0; at < 10 && text[at] >= '0' && text[at] <= '9'; at++)
-                pid = pid * 10 + (positive)(text[at] - '0');
+        pid = string_digits_max(text, 10, null);
         return pid > 1 ? pid : 0;
 }
 
@@ -17208,11 +17202,7 @@ typedef struct
 
 static unsigned long long usb_decimal(p8 address_to text)
 {
-        unsigned long long value = 0;
-
-        for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
-                value = value * 10 + (unsigned long long)(text[at] - '0');
-        return value;
+        return string_digits(text, null);
 }
 
 static fn usb_list_segment(unsigned long long start, unsigned long long bytes, unsigned int role, string_address name)
@@ -20277,16 +20267,11 @@ static p64 locale_clock_next;
 static bool locale_clock_number(string_address text, positive address_to at,
                                 p64 address_to value)
 {
-        p64 number = 0;
-        positive from = address_to at;
+        positive digits = 0;
+        p64 number = string_digits_max(text + address_to at, 12, address_of digits);
 
-        while (text[address_to at] >= '0' && text[address_to at] <= '9' &&
-               address_to at - from < 12)
-        {
-                number = number * 10 + (p64)(text[address_to at] - '0');
-                address_to at += 1;
-        }
-        if (address_to at == from)
+        address_to at += digits;
+        if (!digits)
                 return false;
         address_to value = number;
         return true;
@@ -20566,12 +20551,11 @@ static bool locale_nts_entry(string_address entry, p8 address_to host,
         {
                 if (colon + 1 == length || length - colon > 6)
                         return false;
-                for (positive at = colon + 1; at < length; at++)
-                {
-                        if (!byte_is_digit((p8)entry[at]))
-                                return false;
-                        number = number * 10 + (positive)(entry[at] - '0');
-                }
+                positive used = 0;
+
+                number = string_digits_max(entry + colon + 1, length - colon - 1, address_of used);
+                if (used != length - colon - 1)
+                        return false;
                 if (!number || number > 65535)
                         return false;
         }
@@ -22816,20 +22800,14 @@ static b32 host_power_number(string_address path, positive address_to value)
 {
         p8 text[32];
         bipolar got = host_read_kernel(path, text, sizeof(text));
-        positive number = 0;
-        b32 started = false;
+        bipolar at = 0;
 
         if (got <= 0)
                 return false;
-        for (bipolar at = 0; at < got; at++)
-        {
-                if (text[at] >= '0' && text[at] <= '9')
-                        number = number * 10 + (positive)(text[at] - '0'), started = true;
-                else if (started)
-                        break;
-        }
-        *value = number;
-        return started;
+        while (at < got && (text[at] < '0' || text[at] > '9'))
+                at++;
+        *value = string_digits_max(text + at, got - at, null);
+        return at < got;
 }
 
 // The starred line of a dpm table (a level, then a star on the one in use): its text, copied out.

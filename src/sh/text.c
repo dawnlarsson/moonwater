@@ -41508,8 +41508,7 @@ static bool sort_address_space(positive address_to free)
                                 at += 7;
                                 while (text[at] == ' ' || text[at] == '\t')
                                         at++;
-                                while (byte_is_digit(text[at]))
-                                        mapped = mapped * 10 + (positive)(text[at++] - '0');
+                                mapped = string_digits(text + at, null);
                                 mapped *= 1024;
                         }
                 }
@@ -44247,10 +44246,8 @@ static positive expr_pieces_read(p32 address_to into, string_address digits, pos
         for (positive piece = 0; piece < count; piece++)
         {
                 positive take = at < EXPR_PIECE_DIGITS ? at : EXPR_PIECE_DIGITS;
-                p32 value = 0;
+                p32 value = (p32)string_digits_max(digits + at - take, take, null);
 
-                for (positive k = at - take; k < at; k++)
-                        value = value * 10 + (p32)(digits[k] - '0');
                 into[piece] = value;
                 at -= take;
         }

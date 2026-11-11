@@ -46086,11 +46086,7 @@ static b32 file_seq()
                 string_address last = program_argument((b32)(index + given - 1));
                 string_address step_text = seq_trim_zeros(
                     given == 3 ? program_argument((b32)(index + 1)) : (string_address) "1");
-                positive step = 0;
-
-                if (string_length(step_text) <= 3)
-                        for (positive at = 0; step_text[at]; at++)
-                                step = step * 10 + (positive)(step_text[at] - '0');
+                positive step = string_length(step_text) <= 3 ? string_digits(step_text, null) : 0;
 
                 if (step && step <= 200 &&
                     (!seq_digits_fit(seq_trim_zeros(first)) ||
@@ -46141,10 +46137,7 @@ static b32 file_seq()
             seq_wide_order(step.value, seq_wide_from(200)) <= 0)
         {
                 string_address step_text = seq_wide_integer_text(step.value, 0);
-                positive stride = 0;
-
-                for (positive at = 0; step_text && step_text[at]; at++)
-                        stride = stride * 10 + (positive)(step_text[at] - '0');
+                positive stride = step_text ? string_digits(step_text, null) : 0;
 
                 string_address start = seq_all_digits(program_argument((b32)index)) && given > 1
                                            ? program_argument((b32)index)
