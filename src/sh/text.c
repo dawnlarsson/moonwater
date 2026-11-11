@@ -16089,7 +16089,10 @@ static fn pr_print_files(positive number_of_files, string_address address_to nam
         if (pr_first_page > 1)
         {
                 if (!pr_skip_to_page(pr_first_page))
+                {
+                        pr_release_streams();
                         return;
+                }
                 pr_page_number = pr_first_page;
         }
         else
