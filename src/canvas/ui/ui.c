@@ -8836,8 +8836,8 @@ static int ui_view_end(struct ui_view address_to v)
         {
                 // What an armed button will do is said in the row of the buttons, from its start to the first of them.
                 const struct ui_node address_to row = &v->tree.node[v->tree.node[first].parent];
-                int gap = ui_px(ui, UI_GAP2), start = row->x + row->pad[ui_rtl()], end = row->x + row->w - row->pad[!ui_rtl()];
-                int from = ui_rtl() ? high + gap : start, to = ui_rtl() ? end : low - gap;
+                int gap = ui_px(ui, UI_GAP2), start = row->x + row->pad[ui_rtl()], row_end = row->x + row->w - row->pad[!ui_rtl()];
+                int from = ui_rtl() ? high + gap : start, to = ui_rtl() ? row_end : low - gap;
                 struct ui_control address_to line = &v->group.line;
 
                 line->kind = UI_HEADING, line->variant = UI_BODY_MEDIUM, line->role = UI_ON_SURFACE_VARIANT;
