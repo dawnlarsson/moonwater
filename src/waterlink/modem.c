@@ -11,15 +11,16 @@
           - the transmitter sends only when the operator starts a session;
           - the cable is galvanically isolated at both ends.
 
-        Modulation: multi-tone FSK at MODEM_RATE (96 kHz), 16-bit. Each channel of the card is a mono stream of its own: the link
+        Modulation: multi-tone FSK at MODEM_RATE (48 kHz), 16-bit. Each channel of the card is a mono stream of its own: the link
         carries one on each (see the end of this file). A symbol
         is MODEM_SYM samples. It carries one of MODEM_TONES tones, tone c being c
         whole cycles in the symbol window, so the tones are orthogonal and the
         receiver needs only the sample offset, not a clock. The default is 40
-        samples and 8 tones: 2400 baud, 3 bits a symbol, 7200 bit/s raw, with the
-        top tone at 19.2 kHz, which ordinary audio gear passes. The 16-tone
-        option (MODEM_TONES 16, at the same rate) carries 9600 bit/s, and its top
-        tone is 38.4 kHz: it needs a cable and a card that pass that.
+        samples and 16 tones at 48 kHz: 1200 baud, 4 bits a symbol, 4800 bit/s raw, with the
+        top tone at 19.2 kHz, which ordinary audio gear passes. Every sound card runs at 48 kHz, so the default needs no setting
+        and no particular card. The faster option (-DMODEM_RATE=96000, which brings 8 tones with it) is 2400 baud, 3 bits a
+        symbol, 7200 bit/s raw, with the same top tone: it needs a card that runs at 96 kHz. The tone tables depend on the
+        samples per symbol, not on the rate, so a frame's samples are the same at either rate for the same tone count.
 
         A frame: lead-in (MODEM_PRE bytes of 0x55), sync A7 3D 69 C5 (the wire
         version: version 1 frames, with a 32-byte tag, had 5A C3 96 3C), LEN
@@ -49,17 +50,21 @@
 /* ---- configuration ----------------------------------------------------- */
 
 #ifndef MODEM_RATE
-#define MODEM_RATE 96000 /* the card's rate, both ways: the card must run at it, and a card at another rate is refused */
+#define MODEM_RATE 48000 /* the card's rate, both ways: the card must run at it, and a card at another rate is refused (the faster option is 96000) */
 #endif
 #ifndef MODEM_SYM
 #define MODEM_SYM 40 /* samples per symbol: the baud rate is MODEM_RATE / MODEM_SYM */
 #endif
-/* Tones per symbol: a power of two below MODEM_SYM / 2. The default, 8, puts the top tone at 19.2 kHz at 96 kHz, which ordinary
-   audio gear passes. The 16-tone option (-DMODEM_TONES=16, off by default) carries 9600 bit/s at the same rate, and its top
-   tone is 38.4 kHz: build it only for a cable and a card that pass 38.4 kHz. The top tone of any setting is
-   MODEM_TONES * MODEM_RATE / MODEM_SYM. */
+/* Tones per symbol: a power of two below MODEM_SYM / 2. The default, 16 at 48 kHz, puts the top tone at 19.2 kHz, which ordinary
+   audio gear passes and which is the same top tone as 8 tones at 96 kHz (the faster option, -DMODEM_RATE=96000, which takes 8
+   tones unless MODEM_TONES says otherwise: 16 at 96 kHz would put the top tone at 38.4 kHz, for a cable and a card that pass
+   it). The top tone of any setting is MODEM_TONES * MODEM_RATE / MODEM_SYM. */
 #ifndef MODEM_TONES
+#if MODEM_RATE >= 96000
 #define MODEM_TONES 8
+#else
+#define MODEM_TONES 16
+#endif
 #endif
 
 #define MODEM_SYM_BITS ((MODEM_TONES) == 2 ? 1 : (MODEM_TONES) == 4 ? 2 \
@@ -73,7 +78,7 @@
 #define MODEM_MAC 32 /* HMAC-SHA256's output */
 #define MODEM_TAG 16 /* a frame's tag: HMAC-SHA256 truncated to its first 16 bytes (a 128-bit tag), 16 bytes a frame less than 32 */
 #define MODEM_KEY_MIN 16
-#define MODEM_MAX_SAMPLES (1u << 20) /* about 10.9 seconds at 96 kHz: the most one decode call reads */
+#define MODEM_MAX_SAMPLES (1u << 20) /* about 21.8 seconds at 48 kHz: the most one decode call reads */
 #define MODEM_WINDOW 1024u
 #define MODEM_REFUSE_LIMIT 8u
 #define MODEM_LEAD 400 /* silence before and after a frame, in samples */
@@ -1310,7 +1315,7 @@ static b32 modem_send_file(string_address path)
 
 #define MODEM_QUEUE 8          /* datagrams waiting to be played: about twenty seconds of the modem's time */
 #define MODEM_LEAD_US 500000   /* the most sound queued ahead of the sound server's clock: half a second */
-#define MODEM_IN_SAMPLES 65536 /* captured samples held for a channel: 0.68 seconds at 96 kHz, twice the longest frame */
+#define MODEM_IN_SAMPLES 65536 /* captured samples held for a channel: 1.4 seconds at 48 kHz, twice the longest frame (23520 samples at 16 tones; 31080 at 96 kHz and 8) */
 #define MODEM_IN_STEP 8192     /* new captured samples in a channel that bring its window to a search */
 #define MODEM_IN_POLL_US 20000 /* how often a listening modem looks at its capture, when nothing else wakes it */
 #define MODEM_CHECK_US 1000000 /* how often the transport setting is read */

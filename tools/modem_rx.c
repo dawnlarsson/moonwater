@@ -12,8 +12,8 @@
 
         (-lz: the system's zlib, which inflates a send that was compressed on the box.)
 
-        Use: record the box's output as MODEM_RATE Hz (96000), 16-bit, mono, little-endian PCM (any tool that writes raw PCM; on macOS,
-        sox or ffmpeg with -f s16le -ar 96000 -ac 1), then
+        Use: record the box's output as MODEM_RATE Hz (48000), 16-bit, mono, little-endian PCM (any tool that writes raw PCM; on macOS,
+        sox or ffmpeg with -f s16le -ar 48000 -ac 1), then
 
                 modem_rx --key modem.key -o received.bin capture.raw
                 modem_rx --key modem.key -o received.bin -        (PCM on stdin)

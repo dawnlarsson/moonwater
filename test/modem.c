@@ -21,7 +21,7 @@
 #include <time.h>
 
 /* sha256 of the samples of the golden frame: payload "golden frame", seq 42, the test key. Pins the wire format of each
-   configuration that has a pin: the default (40 samples, 8 tones at 96 kHz) and the 16-tone option. */
+   configuration that has a pin: the default (40 samples, 16 tones at 48 kHz) and the faster option (8 tones at 96 kHz). The samples do not depend on the rate. */
 #if MODEM_SYM == 40 && MODEM_TONES == 8
 #define MODEM_GOLDEN "8ae2b67add424fe852b915d1204acb5ae218df2acdb4e57ba8ac14bf0fc8f2c2"
 #elif MODEM_SYM == 40 && MODEM_TONES == 16
@@ -385,11 +385,11 @@ static void test_noise(void)
 		printf("      snr %4.0f dB: %2d of 50 frames (32 bytes) decode\n", snrs[i], ok);
 	}
 #if MODEM_SYM == 40 && MODEM_TONES == 8
-	/* The default configuration's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 5 of 50. */
+	/* The 8-tone option's margins, measured with the seeds above: 0 dB decodes every frame, -3 dB 5 of 50. */
 	check(decoded[3] == 50, "at 0 dB every frame decodes");
 	check(decoded[4] >= 5, "at -3 dB at least 5 of 50 frames decode");
 #elif MODEM_SYM == 40 && MODEM_TONES == 16
-	/* The 16-tone option's margins, measured with the same seeds: 3 dB decodes every frame, 0 dB most. */
+	/* The default's (16 tones) margins, measured with the same seeds: 3 dB decodes every frame, 0 dB most. */
 	check(decoded[2] == 50, "at 3 dB every frame decodes");
 	check(decoded[3] >= 45, "at 0 dB at least 45 of 50 frames decode");
 #else
