@@ -1121,16 +1121,15 @@ AUDIO_API void pulse_sink_reconfigure(struct pulse *p, long slot, const char *na
 // A name that is all digits is a number, as PulseAudio reads it: `pactl set-sink-volume 0 30%` names its sink 0. -1 when it is not one.
 static long pulse_number(const char *name)
 {
-        long value = 0;
+        string_address tail;
+        long value;
 
-        if (!name || !name[0])
+        if (!name || name[0] < '0' || name[0] > '9')
                 return -1;
-        for (; *name; name++)
-        {
-                if (*name < '0' || *name > '9' || value > 100000)
-                        return -1;
-                value = value * 10 + (*name - '0');
-        }
+        value = string_to_number((string_address)name, address_of tail, 10);
+        // A digit after a number past 100000 is refused, as it always was: the number before the last digit is what is tested.
+        if (*tail || value / 10 > 100000)
+                return -1;
         return value;
 }
 

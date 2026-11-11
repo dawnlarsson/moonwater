@@ -6930,16 +6930,15 @@ static string_address build_boot_setting(string_address name,
 static string_address build_ram(string_address text)
 {
         static p8 value[8];
-        positive digits = 0;
-        positive gigs = 0;
+        string_address rest;
+        positive gigs, digits;
 
-        while (text[digits] >= '0' && text[digits] <= '9' && digits < 5)
-                gigs = gigs * 10 + (positive)(text[digits++] - '0');
-
-        if (text[digits] == 'G' || text[digits] == 'g')
-                digits++;
-
-        if (!gigs || gigs > 4096 || text[digits] || text[0] == '0')
+        if (text[0] < '1' || text[0] > '9')
+                return null;
+        gigs = string_to_number(text, address_of rest, 10);
+        if (rest[0] == 'G' || rest[0] == 'g')
+                rest++;
+        if (gigs > 4096 || rest[0])
                 return null;
 
         digits = positive_into(value, gigs);
