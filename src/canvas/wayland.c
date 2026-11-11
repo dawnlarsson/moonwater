@@ -87,6 +87,7 @@
 #define WAYLAND_SEATS 8         // pointers, keyboards and touches, one client holds
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
 #define WAYLAND_TOKENS 16       // xdg-activation tokens pending or given out, over every client
+#define WAYLAND_TOKENS_PER_CLIENT 4 // of those, the most one client may hold: a client that never commits its tokens cannot take them all
 #define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
 #define WAYLAND_SOURCES 8       // data sources (and primary selection sources) one client holds
@@ -6010,8 +6011,17 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 if (op == WLQ_xdg_activation_v1_get_activation_token)
                 {
                         at = wayland_token_free();
+                        if (at >= 0)
+                        {
+                                long held = 0;
+
+                                for (int each = 0; each < WAYLAND_TOKENS; each++)
+                                        held += wayland.token[each].live && wayland.token[each].client == c->slot;
+                                if (held >= WAYLAND_TOKENS_PER_CLIENT)
+                                        at = -1;
+                        }
                         if (at < 0)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many activation tokens");
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "this client holds its share of activation tokens, or every token is in use");
                         wayland.token[at].live = 1;
                         wayland.token[at].committed = 0;
                         wayland.token[at].client = c->slot;
