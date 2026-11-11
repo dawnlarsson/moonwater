@@ -2565,7 +2565,7 @@ static unsigned int compositor_keymap_compose(unsigned int accent, unsigned int 
         for (unsigned int row = 0; row < sizeof(compositor_composed) / sizeof(compositor_composed[0]); row++)
                 if (compositor_composed[row].accent == accent)
                         for (unsigned int at = 0; compositor_composed[row].bases[at]; at++)
-                                if (compositor_composed[row].bases[at] == (char)c)
+                                if (c < 128 && compositor_composed[row].bases[at] == (char)c)
                                         return compositor_composed[row].made[at];
         return 0;
 }
