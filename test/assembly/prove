@@ -28,7 +28,9 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/../.." && pwd)
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/prove.XXXXXX") || exit 1
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Deliberately compile the pure library. Compiler-owned call-site
 # specializations live in lib.util.c and are not instructions emitted
