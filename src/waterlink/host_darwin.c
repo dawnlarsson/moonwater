@@ -119,6 +119,7 @@ enum
         LINK_LEAF_STATE,
         LINK_LEAF_STAMPS,
         LINK_LEAF_PEERS_LOCK,
+        LINK_LEAF_PLACES,
         LINK_LEAF_MACHINE,
         LINK_LEAF_COUNT
 };
@@ -129,6 +130,7 @@ static const string_address link_leaf_names[LINK_LEAF_COUNT] = {
     "link.modem",    "link.modem.seq",    "link.modem.rx",
     "link.modem.gz", "link.modem.streams", "link.lock",
     "link.state",    "link.stamps",       "link.peers.lock",
+    "link.places",
     "main.moonwater.sh",
 };
 

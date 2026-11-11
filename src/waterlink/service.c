@@ -106,6 +106,7 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_SWITCH_PATH link_state_path(LINK_LEAF_SWITCH)
 #define LINK_KEY_PATH link_state_path(LINK_LEAF_KEY)
 #define LINK_PEERS_PATH link_state_path(LINK_LEAF_PEERS)
+#define LINK_PLACES_PATH link_state_path(LINK_LEAF_PLACES)
 #define LINK_GROUPS_PATH link_state_path(LINK_LEAF_GROUPS)
 #define LINK_PORT_PATH link_state_path(LINK_LEAF_PORT)
 #define LINK_TRANSPORT_PATH link_state_path(LINK_LEAF_TRANSPORT)
@@ -121,6 +122,7 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_SWITCH_PATH "/root/link"
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
+#define LINK_PLACES_PATH "/root/link.places"
 #define LINK_GROUPS_PATH "/root/link.groups"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_TRANSPORT_PATH "/root/link.transport"
@@ -222,6 +224,18 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 
 #define LINK_EXIT_BUSY 3
 #define LINK_FAILED 255
+
+/*
+        Why a link did not come up, the same numbers for the CLI and the UI.
+        They are stable: a script may match the words, and a new reason takes
+        a new number at the end. A machine that does not know this key, or is
+        off, is silence on the wire, so it is NO_REPLY and not a key error.
+*/
+#define LINK_REASON_LINKED 0
+#define LINK_REASON_NO_ROUTE 1
+#define LINK_REASON_NO_REPLY 2
+#define LINK_REASON_BAD_KEY 3
+#define LINK_REASON_CODE_REFUSED 4
 
 /*      The most full datagrams one segment send carries. The run goes to the
         kernel as one UDP datagram before it is cut, and that datagram's
@@ -550,6 +564,174 @@ static struct waterlink_peer address_to link_peer_keyed(link_peers address_to pe
         return null;
 }
 
+/*
+        The places a peer was heard at, besides the one its record names. A
+        record names the last place the listener heard it from; a machine that
+        moved, or whose lease changed, is found at another, and the one before
+        is worth a try when the named place does not answer. A place is the
+        address and port a packet that opened from the peer came from, after
+        its tag was checked, so nothing a stranger sends writes one. Kept in
+        /root/link.places, root's alone, and written only when a peer shows a
+        place it had not been seen at, so the file changes when a machine
+        moves and not with every datagram. An address is a cache here too:
+        a place that does not answer is passed over, never believed.
+*/
+#define LINK_PLACES_MAX 128
+#define LINK_PLACES_PER_PEER 4
+#define LINK_PLACE_ATTEMPTS 3 // a second and later place, in initiations
+
+struct link_place {
+        p8 key[32];
+        p8 address[16];
+        p16 port;
+        p16 reserved; // zero, so the record is whole words
+        p32 seen;     // seconds of this machine's clock, when it was heard
+};
+
+_Static_assert(sizeof(struct link_place) == 56,
+               "a link place record is 56 bytes");
+
+typedef struct
+{
+        struct link_place place[LINK_PLACES_MAX];
+        positive count;
+} link_places;
+
+static fn link_places_load(link_places address_to places)
+{
+        positive got = 0;
+
+        memory_zero(places, sizeof(address_to places));
+        if (link_read_private_records(LINK_PLACES_PATH,
+                                      (p8 address_to)places->place,
+                                      sizeof(places->place),
+                                      sizeof(struct link_place),
+                                      address_of got) < 0)
+                return;
+        places->count = got / sizeof(struct link_place);
+}
+
+static bipolar link_places_save(link_places address_to places)
+{
+        return link_file_replace(LINK_PLACES_PATH, places->place,
+                                 places->count * sizeof(struct link_place),
+                                 true);
+}
+
+/* Removes the record at at: the last record takes its place, so the order is
+   not kept. Returns the count left. */
+static positive link_places_drop(link_places address_to places, positive at)
+{
+        places->count--;
+        if (at != places->count)
+                memory_copy(places->place + at, places->place + places->count,
+                            sizeof(struct link_place));
+        return places->count;
+}
+
+/* Keeps a place its peer was heard at: the newest of the peer's, and the
+   oldest of the file's dropped to make room. A place is never kept twice. */
+static fn link_place_learn(p8 address_to key, p8 address_to address, p16 port)
+{
+        link_places places;
+        positive at;
+        positive oldest;
+        positive mine = 0;
+        p32 now = (p32)(system_clock_ns(0) / 1000000000ull);
+
+        link_places_load(address_of places);
+        for (at = 0; at < places.count; at++)
+                if (crypto_same(places.place[at].key, key, 32) &&
+                    places.place[at].port == port &&
+                    !memory_compare(places.place[at].address, address, 16))
+                        break;
+        if (at < places.count)
+        {
+                places.place[at].seen = now;
+        }
+        else
+        {
+                for (positive look = 0; look < places.count; look++)
+                        if (crypto_same(places.place[look].key, key, 32))
+                                mine++;
+                if (mine >= LINK_PLACES_PER_PEER)
+                {
+                        oldest = places.count;
+                        for (positive look = 0; look < places.count; look++)
+                                if (crypto_same(places.place[look].key, key, 32) &&
+                                    (oldest == places.count ||
+                                     places.place[look].seen < places.place[oldest].seen))
+                                        oldest = look;
+                        (void)link_places_drop(address_of places, oldest);
+                }
+                if (places.count == LINK_PLACES_MAX)
+                {
+                        oldest = 0;
+                        for (positive look = 1; look < places.count; look++)
+                                if (places.place[look].seen < places.place[oldest].seen)
+                                        oldest = look;
+                        link_places_drop(address_of places, oldest);
+                }
+                at = places.count++;
+                memory_copy(places.place[at].key, key, 32);
+                memory_copy(places.place[at].address, address, 16);
+                places.place[at].port = port;
+                places.place[at].reserved = 0;
+                places.place[at].seen = now;
+        }
+        (void)link_places_save(address_of places);
+        crypto_forget(address_of places, sizeof places);
+}
+
+static p8 link_place_known(struct link_place address_to tried, positive count,
+                           struct link_place address_to place)
+{
+        for (positive at = 0; at < count; at++)
+                if (tried[at].port == place->port &&
+                    !memory_compare(tried[at].address, place->address, 16))
+                        return true;
+        return false;
+}
+
+/*
+        The places to try for a peer, in order: the one its record names
+        first, then the ones it was heard at, newest first, each at most once,
+        up to LINK_PLACES_PER_PEER. Returns how many were put in into.
+*/
+static positive link_places_for(p8 address_to key, p8 address_to first,
+                                p16 first_port, struct link_place address_to into)
+{
+        link_places places;
+        positive count = 1;
+
+        memory_zero(into, sizeof(struct link_place) * LINK_PLACES_PER_PEER);
+        memory_copy(into[0].key, key, 32);
+        memory_copy(into[0].address, first, 16);
+        into[0].port = first_port;
+        link_places_load(address_of places);
+        while (count < LINK_PLACES_PER_PEER)
+        {
+                positive best = places.count;
+
+                for (positive at = 0; at < places.count; at++)
+                {
+                        struct link_place address_to kept = places.place + at;
+
+                        if (!crypto_same(kept->key, key, 32) ||
+                            link_place_known(into, count, kept))
+                                continue;
+                        if (best == places.count ||
+                            kept->seen > places.place[best].seen)
+                                best = at;
+                }
+                if (best == places.count)
+                        break;
+                into[count++] = places.place[best];
+        }
+        crypto_forget(address_of places, sizeof places);
+        return count;
+}
+
 static p16 link_port(void)
 {
         p8 word[16];
@@ -748,6 +930,7 @@ struct link_stream {
 struct link_session {
         p8 used;
         p8 finished;
+        p8 dialed; // this machine dialled it: the keeper dials it again when it drops
         p8 kind;
         p8 name[WATERLINK_NAME_MAX];
         p8 peer[32];
@@ -2769,6 +2952,73 @@ static fn link_session_watch(struct link_session address_to s,
                    s->exited ? 0 : SYSTEM_POLL_READ, address_of s->pid_quiet);
 }
 
+/*
+        The keeper's table (see link_keep_turn, which dials): the peers it
+        keeps, paired by a code or linked while this listener ran, with the
+        wait after a dial that failed. It lives in the listener and nowhere
+        else, so a restart forgets what it linked and only a code or a session
+        makes a peer kept again.
+*/
+#define LINK_KEEP_TRIES 4
+#define LINK_KEEP_FIRST 2000000ull   // the first wait after a dial that failed
+#define LINK_KEEP_LAST 300000000ull  // the longest one
+#define LINK_KEEP_LOOK 2000000ull    // how often the peers are read
+
+struct link_keep_entry
+{
+        p8 key[32];
+        p8 used;
+        p8 linked; // a session came up with it while this listener ran
+        p8 place;  // which of the peer's places the next dial takes; the next after a failure
+        p64 next;  // when a dial is next due, in microseconds; 0 for now
+        p64 wait;  // the wait after the last dial that failed; 0 for none
+};
+
+static struct link_keep_entry link_keep[LINK_PEERS_MAX];
+static struct link_session address_to link_keep_dial; // the dial in progress
+static p8 link_keep_rekey;                             // ... and it is a rekey
+static p64 link_keep_looked;
+
+static struct link_keep_entry address_to link_keep_for(p8 address_to key,
+                                                       p8 create)
+{
+        struct link_keep_entry address_to free_slot = null;
+
+        for (positive at = 0; at < LINK_PEERS_MAX; at++)
+        {
+                struct link_keep_entry address_to entry = link_keep + at;
+
+                if (entry->used && crypto_same(entry->key, key, 32))
+                        return entry;
+                if (!entry->used && !free_slot)
+                        free_slot = entry;
+        }
+        if (!create || !free_slot)
+                return null;
+        memory_zero(free_slot, sizeof(address_to free_slot));
+        memory_copy(free_slot->key, key, 32);
+        free_slot->used = true;
+        return free_slot;
+}
+
+/* A session with this peer came up: the peer is linked, and kept. */
+static fn link_keep_linked(p8 address_to key)
+{
+        struct link_keep_entry address_to entry = link_keep_for(key, true);
+
+        if (entry)
+                entry->linked = true;
+}
+
+/* A greeting from a kept peer: it is dialled now, not when its wait ends. */
+static fn link_keep_heard(p8 address_to key)
+{
+        struct link_keep_entry address_to entry = link_keep_for(key, false);
+
+        if (entry)
+                entry->next = 0;
+}
+
 #include "nearby.c"
 
 // The handshake, at the machine's end -----------------------------------------
@@ -2976,10 +3226,17 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         crypto_forget(send, sizeof send);
         crypto_forget(receive, sizeof receive);
 
-        s->moved |= memory_compare(s->address, address, 16) || s->port != port;
+        //      A place not heard from before is kept for the peer's fallbacks;
+        //      a rekey from the place it is at is not.
+        if (memory_compare(s->address, address, 16) || s->port != port)
+        {
+                s->moved = true;
+                link_place_learn(who, address, port);
+        }
         memory_copy(s->address, address, 16);
         s->port = port;
         s->heard = now;
+        link_keep_linked(who);
         (void)link_send_to(answer, WATERLINK_DATAGRAM, address, port);
         link_self.state_dirty = true;
 forget:
@@ -3095,6 +3352,8 @@ static p8 link_carried(p8 address_to datagram, positive length,
         link_self.state_dirty |= moved;
         if (!link_self.heard_modem)
         {
+                if (moved)
+                        link_place_learn(s->peer, address, port);
                 memory_copy(s->address, address, 16);
                 s->port = port;
         }
@@ -3729,29 +3988,29 @@ static fn link_datagram(p8 address_to datagram, positive length,
         if (head.kind == WATERLINK_KIND_CARRY || head.kind == WATERLINK_KIND_CLOSE)
                 (void)link_carried(datagram, length, address, port, now,
                                    link_hear);
-        else if (!link_self.server)
+        /* An answer or a cookie is for the initiation this machine has out,
+           if it has one: a client run's, or the listener's keeper's. With none
+           out they are ignored, as they were. */
+        else if (head.kind == WATERLINK_KIND_RESPOND)
         {
-                if (head.kind == WATERLINK_KIND_RESPOND)
-                {
-                        p8 pending = link_client.ours != 0;
-                        struct link_session address_to s = link_self.session;
+                p8 pending = link_client.ours != 0;
+                struct link_session address_to s = link_client.session;
 
-                        link_client_answered(datagram, length);
-                        //      The answer proved the keys and says where the
-                        //      peer is now: the session is heard and moved there.
-                        if (pending && !link_client.ours)
-                        {
-                                s->moved |= memory_compare(s->address, address, 16) ||
-                                            s->port != port;
-                                memory_copy(s->address, address, 16);
-                                s->port = port;
-                                s->heard = now;
-                        }
+                link_client_answered(datagram, length);
+                //      The answer proved the keys and says where the
+                //      peer is now: the session is heard and moved there.
+                if (pending && !link_client.ours)
+                {
+                        s->moved |= memory_compare(s->address, address, 16) ||
+                                    s->port != port;
+                        memory_copy(s->address, address, 16);
+                        s->port = port;
+                        s->heard = now;
                 }
-                else if (head.kind == WATERLINK_KIND_COOKIE)
-                        link_client_cookie(datagram, length, now);
         }
-        else if (head.kind == WATERLINK_KIND_INITIATE)
+        else if (head.kind == WATERLINK_KIND_COOKIE)
+                link_client_cookie(datagram, length, now);
+        else if (link_self.server && head.kind == WATERLINK_KIND_INITIATE)
                 link_server_initiation(datagram, length, address, port, now);
 }
 
@@ -3801,6 +4060,8 @@ static fn link_modem_heard(p8 address_to datagram, positive length, p64 now)
         `moonwater link serve`: the listener in the foreground. `link on` and
         the machine process start exactly this, detached.
 */
+static p64 link_keep_turn(p64 now);
+
 static b32 link_serve(string_address ready_text)
 {
         system_poll_descriptor watch[3 + LINK_SESSIONS * 5];
@@ -3866,6 +4127,12 @@ static b32 link_serve(string_address ready_text)
                         break;
 
                 wake = link_sessions_turn(now);
+                {
+                        p64 keep = link_keep_turn(now);
+
+                        if (keep < wake)
+                                wake = keep;
+                }
                 link_reap();
                 link_state_write(now);
                 due = link_nearby_tick(now);
@@ -3919,9 +4186,57 @@ typedef struct
         positive tries;   // initiations sent: they alternate between the known addresses
         positive retries; // tries made while the up link was quiet
         p64 gap;          // the wait before the next of those, doubled each time
+        positive sent;      // initiations that left, for the reason a link fails
+        bipolar send_error; // the last send's error, or 0
+        p8 unverified;      // an answer to our initiation that did not verify
+        struct link_session address_to session; // the session its keys are for
 } link_client_state;
 
 static link_client_state link_client;
+
+/* Why the client's link failed, as the words the CLI and the UI print. The
+   order is the order of the reason codes. */
+static string_address link_reason_text(positive reason)
+{
+        static const string_address texts[] = {
+            "linked",
+            "no route to the address",
+            "no reply on the link port (it is off, unreachable, or does not know this machine's key)",
+            "reply but bad key: the machine there is not the one paired",
+            "code refused: it was used already, or by another machine",
+        };
+
+        return reason < array_count(texts) ? texts[reason] : "unknown reason";
+}
+
+/* The reason a client's failure is, from what it heard: an answer that did
+   not verify is a key; nothing sent with a route error is no route; anything
+   else is silence. */
+static positive link_client_reason(void)
+{
+        if (link_client.unverified)
+                return LINK_REASON_BAD_KEY;
+        if (!link_client.sent && link_client.send_error &&
+            link_client.send_error != -EAGAIN)
+                return LINK_REASON_NO_ROUTE;
+        return LINK_REASON_NO_REPLY;
+}
+
+/*
+        The next place to try: its address and port, and a fresh start there,
+        an initiation at once. A cookie is the place's own, and is not sent
+        to another, so it is forgotten with the place it came from.
+*/
+static fn link_client_place(struct link_session address_to s,
+                            struct link_place address_to place)
+{
+        memory_copy(s->address, place->address, 16);
+        s->port = place->port;
+        link_client.attempts = 0;
+        link_client.ours = 0;
+        link_client.cookie_at = 0;
+        link_client.cookied = false;
+}
 
 /*      The client's terminal goes raw as the line editor's does, and back:
         edit.c's pair, which the shell includes after this. */
@@ -3996,8 +4311,16 @@ static p8 link_client_initiate(struct link_session address_to s, p64 now)
                         waterlink_mac2(link_client.cookie, datagram);
                 memory_copy(link_client.mac1,
                             datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
-                sent = link_send_to(datagram, WATERLINK_DATAGRAM, target,
-                                    port) >= 0;
+                {
+                        bipolar wrote = link_send_to(datagram, WATERLINK_DATAGRAM,
+                                                     target, port);
+
+                        sent = wrote >= 0;
+                        if (sent)
+                                link_client.sent++;
+                        else
+                                link_client.send_error = wrote;
+                }
         }
         crypto_forget(ephemeral, sizeof ephemeral);
         if (!sent)
@@ -4033,6 +4356,9 @@ static p8 link_client_answer(struct link_session address_to s,
         if (!waterlink_answered(address_of candidate, address_of link_self.me,
                                 datagram, address_of theirs))
         {
+                //      Addressed to this key and answering this initiation,
+                //      yet not made by the key the peer record names.
+                link_client.unverified = true;
                 crypto_forget(address_of candidate, sizeof candidate);
                 return false;
         }
@@ -4042,6 +4368,7 @@ static p8 link_client_answer(struct link_session address_to s,
         if (s->now.live)
                 s->before = s->now;
         link_keys_install(address_of s->now, send, receive, ours, theirs);
+        link_keep_linked(s->peer);
         crypto_forget(send, sizeof send);
         crypto_forget(receive, sizeof receive);
         return true;
@@ -4050,7 +4377,7 @@ static p8 link_client_answer(struct link_session address_to s,
 static fn link_client_answered(p8 address_to datagram, positive length)
 {
         if (link_client.ours &&
-            link_client_answer(link_self.session, address_of link_client.noise,
+            link_client_answer(link_client.session, address_of link_client.noise,
                                link_client.ours, datagram, length))
                 link_client.ours = 0;
 }
@@ -4062,7 +4389,7 @@ static fn link_client_answered(p8 address_to datagram, positive length)
 static fn link_client_cookie(p8 address_to datagram, positive length, p64 now)
 {
         if (!link_client.ours ||
-            !waterlink_cookie_take(link_self.session->peer, link_client.mac1,
+            !waterlink_cookie_take(link_client.session->peer, link_client.mac1,
                                    datagram, length, link_client.cookie))
                 return;
         link_client.cookie_at = now ? now : 1;
@@ -4090,6 +4417,256 @@ static p64 link_rekey_after(void)
 static p8 link_modem_in_use(void);
 static b32 modem_send_file(string_address path);
 
+/*
+        The keeper, in the listener: a link that drops is dialled again on
+        its own, with no new code. It keeps the peers paired by a code and
+        the peers a session came up with while this listener ran (link_keep).
+        A dial is a session under a conversation of its own, with the client
+        run's initiation, once a second and LINK_KEEP_TRIES at most; one not
+        answered is closed, and the next dial waits, doubling from two seconds
+        to five minutes. A greeting from a kept peer makes it due at once. A
+        session that is up is dialled again before its keys run out, as a
+        client run dials. One dial is in progress at a time, and no peer is
+        dialled while a session with it is up or being made, either way; two
+        machines that dial at once keep two sessions, which is harmless.
+*/
+
+/* Whether a session with this peer is up, or being made, in either direction. */
+static p8 link_keep_has(p8 address_to key)
+{
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+
+                if (s->used && crypto_same(s->peer, key, 32))
+                        return true;
+        }
+        return false;
+}
+
+/*
+        A peer's record names the place that answered, when it is not the one
+        it names: the record's place goes to the peer's places, and the one
+        that worked is the record's, so the next connect tries it first.
+*/
+static fn link_peer_moved(p8 address_to key, p8 address_to address, p16 port)
+{
+        link_peers peers;
+        struct waterlink_peer address_to peer;
+        bipolar lock = link_peers_lock();
+
+        link_peers_load(address_of peers);
+        peer = link_peer_keyed(address_of peers, key);
+        if (peer && (peer->port != port ||
+                     memory_compare(peer->address, address, 16)))
+        {
+                link_place_learn(peer->key, peer->address, peer->port);
+                memory_copy(peer->address, address, 16);
+                peer->port = port;
+                (void)link_peers_save(address_of peers);
+        }
+        link_peers_unlock(lock);
+}
+
+/* The peers the keeper keeps, as the file has them now. */
+static fn link_keep_look(void)
+{
+        link_peers peers;
+
+        link_peers_load(address_of peers);
+        for (positive at = 0; at < LINK_PEERS_MAX; at++)
+        {
+                struct link_keep_entry address_to entry = link_keep + at;
+
+                if (entry->used && !link_peer_keyed(address_of peers, entry->key))
+                        entry->used = false;
+        }
+        for (positive at = 0; at < peers.count; at++)
+                if (peers.peer[at].group)
+                        (void)link_keep_for(peers.peer[at].key, true);
+}
+
+/* The dial in progress has its answer: a dial that was not a rekey makes its
+   peer one that is up, and the peer is dialled again when it drops -- not
+   sooner than LINK_KEEP_FIRST after this, so a peer that drops at once is not
+   dialled in a loop. */
+static fn link_keep_made(p64 now)
+{
+        if (!link_keep_rekey)
+        {
+                struct link_keep_entry address_to entry =
+                        link_keep_for(link_keep_dial->peer, false);
+
+                if (entry)
+                {
+                        if (entry->place)
+                                link_peer_moved(link_keep_dial->peer,
+                                                link_keep_dial->address,
+                                                link_keep_dial->port);
+                        entry->place = 0;
+                        entry->wait = 0;
+                        entry->next = now + LINK_KEEP_FIRST;
+                }
+        }
+        link_keep_dial = null;
+        link_keep_rekey = false;
+}
+
+/* The dial in progress has failed: its session is closed and the peer waits
+   longer, unless it was a rekey, which ends and leaves its session as it is
+   until its keys run out. */
+static fn link_keep_fail(p64 now)
+{
+        struct link_session address_to s = link_keep_dial;
+        struct link_keep_entry address_to entry;
+
+        link_keep_dial = null;
+        link_client.ours = 0;
+        if (link_keep_rekey)
+        {
+                link_keep_rekey = false;
+                return;
+        }
+        entry = link_keep_for(s->peer, false);
+        link_session_close(s);
+        if (!entry)
+                return;
+        entry->place = (entry->place + 1) % LINK_PLACES_PER_PEER;
+        entry->wait = entry->wait
+                              ? (entry->wait * 2 < LINK_KEEP_LAST ? entry->wait * 2
+                                                                  : LINK_KEEP_LAST)
+                              : LINK_KEEP_FIRST;
+        entry->next = now + entry->wait;
+}
+
+/* Starts a dial on the session s, a new one or a rekey, with its first
+   initiation. False when that could not be sent. */
+static p8 link_keep_begin(struct link_session address_to s, p64 now, p8 rekey)
+{
+        link_keep_dial = s;
+        link_keep_rekey = rekey;
+        link_client.session = s;
+        link_client.attempts = 1;
+        link_client.ours = 0;
+        if (!rekey)
+                link_client.cookie_at = 0;
+        return link_client_initiate(s, now);
+}
+
+/* A dial to the first kept peer that is due and has no session: the session
+   is taken, the peer's own address and name are put in it, and the first
+   initiation goes at once. */
+static fn link_keep_dial_new(p64 now)
+{
+        link_peers peers;
+
+        for (positive at = 0; at < LINK_PEERS_MAX && !link_keep_dial; at++)
+        {
+                struct link_keep_entry address_to entry = link_keep + at;
+                struct waterlink_peer address_to peer;
+                struct link_session address_to s = null;
+
+                if (!entry->used || entry->next > now || link_keep_has(entry->key))
+                        continue;
+                link_peers_load(address_of peers);
+                peer = link_peer_keyed(address_of peers, entry->key);
+                if (!peer)
+                {
+                        entry->used = false;
+                        continue;
+                }
+                if (!peer->port || !(peer->group || entry->linked))
+                {
+                        entry->next = now + LINK_KEEP_LOOK;
+                        continue;
+                }
+                for (positive slot = 0; slot < LINK_SESSIONS && !s; slot++)
+                        if (!link_self.session[slot].used)
+                                s = link_self.session + slot;
+                if (!s || !link_session_open(s))
+                {
+                        entry->next = now + LINK_KEEP_LOOK;
+                        continue;
+                }
+                {
+                        struct link_place places[LINK_PLACES_PER_PEER];
+                        positive count = link_places_for(peer->key, peer->address,
+                                                         peer->port, places);
+
+                        memory_copy(s->address, places[entry->place % count].address, 16);
+                        s->port = places[entry->place % count].port;
+                }
+                memory_copy(s->peer, peer->key, 32);
+                memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
+                s->dialed = true;
+                if (system_random_fill(address_of s->conversation, 8, 0) < 0)
+                {
+                        link_session_close(s);
+                        entry->next = now + LINK_KEEP_LOOK;
+                        continue;
+                }
+                if (!link_keep_begin(s, now, false))
+                        link_keep_fail(now);
+        }
+}
+
+/*
+        The keeper's turn: the dial in progress, a rekey when a session that
+        was dialled is due for one, or a new dial when a kept peer is due.
+        Returns when it next wants a turn.
+*/
+static p64 link_keep_turn(p64 now)
+{
+        if (!link_keep_looked || link_age(now, link_keep_looked) >= LINK_KEEP_LOOK)
+        {
+                link_keep_looked = now ? now : 1;
+                link_keep_look();
+        }
+
+        if (link_keep_dial)
+        {
+                struct link_session address_to s = link_keep_dial;
+
+                if (!s->used)
+                {
+                        link_keep_dial = null;
+                        link_keep_rekey = false;
+                        link_client.ours = 0;
+                }
+                else if (!link_client.ours)
+                        link_keep_made(now);
+                else if (link_age(now, link_client.initiated) < LINK_ATTEMPT)
+                        return link_client.initiated + LINK_ATTEMPT;
+                else
+                {
+                        if (link_client.attempts < LINK_KEEP_TRIES)
+                        {
+                                link_client.attempts++;
+                                if (link_client_initiate(s, now))
+                                        return link_client.initiated + LINK_ATTEMPT;
+                        }
+                        link_keep_fail(now);
+                }
+        }
+
+        for (positive at = 0; at < LINK_SESSIONS && !link_keep_dial; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+
+                if (s->used && s->dialed && s->now.live &&
+                    link_age(now, s->now.made) >= link_rekey_after())
+                {
+                        if (!link_keep_begin(s, now, true))
+                                link_keep_fail(now);
+                }
+        }
+        if (!link_keep_dial)
+                link_keep_dial_new(now);
+        if (link_keep_dial)
+                return link_client.initiated + LINK_ATTEMPT;
+        return now + LINK_KEEP_LOOK;
+}
+
 static b32 link_client_run(string_address name, p8 kind,
                            string_address address_to words, positive count)
 {
@@ -4099,6 +4676,9 @@ static b32 link_client_run(string_address name, p8 kind,
         link_peers peers;
         struct waterlink_peer address_to peer;
         struct link_session address_to s = link_self.session;
+        struct link_place places[LINK_PLACES_PER_PEER];
+        positive place_count;
+        positive tried = 0;
         p8 request[LINK_REQUEST_MAX + 64];
         positive request_length = 0;
         bipolar input = kind == LINK_KIND_PULL || kind == LINK_KIND_LOG ? -1 : 0;
@@ -4108,6 +4688,11 @@ static b32 link_client_run(string_address name, p8 kind,
         bipolar signals;
         b32 stopped = 0;
         b32 answer = LINK_FAILED;
+
+        link_client.sent = 0;
+        link_client.send_error = 0;
+        link_client.unverified = false;
+        link_client.session = link_self.session;
 
         //      Every send reads the transport once, here. The audio modem takes a push, a file over the sound card to the
         //      receiver, which writes it where it chooses, so the machine and the path are not used; it sends nothing back, so
@@ -4138,6 +4723,8 @@ static b32 link_client_run(string_address name, p8 kind,
                 return host_refuse("%s has no address: moonwater link add "
                                    "it again with one\n",
                                    name);
+        place_count = link_places_for(peer->key, peer->address, peer->port,
+                                      places);
 
         //      The request, before anything is sent: a command that cannot be
         //      asked for is refused here.
@@ -4267,24 +4854,32 @@ static b32 link_client_run(string_address name, p8 kind,
                             link_age(now, link_client.initiated) >= LINK_ATTEMPT)
                         {
                                 p8 place[64];
+                                positive budget = tried ? LINK_PLACE_ATTEMPTS
+                                                        : LINK_ATTEMPTS;
+                                p8 spent = link_client.attempts >= budget;
 
-                                if (link_client.attempts++ < LINK_ATTEMPTS &&
-                                    link_client_initiate(s, now))
-                                        ;
-                                else
+                                //      An initiation that could not be sent
+                                //      spends its place at once: no route is
+                                //      not a datagram lost.
+                                if (!spent)
+                                {
+                                        link_client.attempts++;
+                                        spent = !link_client_initiate(s, now);
+                                }
+                                if (spent && tried + 1 < place_count)
+                                        link_client_place(s, places + ++tried);
+                                else if (spent)
                                 {
                                         link_place_text(s->address, s->port,
                                                         place);
                                         string_format(log_error,
                                                       host_label "%s did not "
                                                                  "answer at %s: "
-                                                                 "it is off, "
-                                                                 "unreachable, or "
-                                                                 "does not know "
-                                                                 "this machine's "
-                                                                 "key\n",
+                                                                 "%s\n",
                                                       name,
-                                                      (string_address)place);
+                                                      (string_address)place,
+                                                      link_reason_text(
+                                                              link_client_reason()));
                                         log_flush();
                                         break;
                                 }
@@ -4292,6 +4887,19 @@ static b32 link_client_run(string_address name, p8 kind,
                 }
                 else if (!asked)
                 {
+                        if (tried)
+                        {
+                                p8 answered_at[64];
+
+                                //      Not the place the record names: the
+                                //      place that answered is kept first.
+                                link_place_text(s->address, s->port, answered_at);
+                                host_say(log, host_label "%s answered at %s, "
+                                                         "not at the place "
+                                                         "its record names\n",
+                                         name, (string_address)answered_at);
+                                link_peer_moved(s->peer, s->address, s->port);
+                        }
                         if (kind == LINK_KIND_PULL)
                         {
                                 //      Private until it is whole and its

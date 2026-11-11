@@ -55,6 +55,17 @@
 #define LINK_GREET_AGAIN 10000000ull     // the same place, not sooner
 #define LINK_ANSWER_AGAIN 100000ull      // a one-shot asker's answer, not sooner
 
+/*      The sweep for a waiting code (link_sweep_turn): four sweeps, at the
+        start and after 15, 45 and 105 seconds, each of every host of this
+        machine's subnets (a /24 at the most around each interface), and at
+        LINK_SWEEP_BATCH addresses a LINK_SWEEP_STEP, which is 32 a second:
+        the listener calls more initiations a second than that load, and
+        under load a member wants a second MAC it does not get. */
+#define LINK_SWEEPS 4
+#define LINK_SWEEP_HOSTS 256
+#define LINK_SWEEP_BATCH 8
+#define LINK_SWEEP_STEP 250000ull
+
 /*
         A pairing code is a group of one: the namespace is the name of the
         machine that is waiting, the secret is the code, and the group lets
@@ -362,6 +373,7 @@ typedef struct
         bipolar socket;
         b32 interface[LINK_INTERFACES];
         p32 interface_address[LINK_INTERFACES];
+        p32 interface_mask[LINK_INTERFACES]; // host order; 0 when not known
         positive interfaces;
         p64 next_announce;
         p64 next_ask;
@@ -375,6 +387,14 @@ typedef struct
         positive greeted_next;
         p8 name[WATERLINK_NAME_MAX];
         p64 expiry_look;
+        positive sweep_left; // sweeps still to start for the waiting code
+        p8 sweeping;
+        positive sweep_group;
+        positive sweep_count;
+        positive sweep_at;
+        p64 sweep_next;
+        p32 sweep_target[LINK_SWEEP_HOSTS];
+        p8 sweep_datagram[WATERLINK_DATAGRAM];
 } link_nearby_state;
 
 static link_nearby_state link_nearby;
@@ -558,9 +578,12 @@ static p8 link_pair_keep(positive group, p8 address_to key,
                 changed |= peer->seen != stamped ||
                            memory_compare(peer->address, address, 16) ||
                            peer->port != port;
+                if (memory_compare(peer->address, address, 16) || peer->port != port)
+                        link_place_learn(peer->key, address, port);
                 memory_copy(peer->address, address, 16);
                 peer->port = port;
                 peer->seen = stamped;
+                link_keep_heard(peer->key);
         }
         if (changed)
         {
@@ -612,7 +635,7 @@ static bipolar link_option_set(b32 handle, b32 level, b32 name,
         One without multicast is passed over; joined already (EADDRINUSE) is
         joined.
 */
-static fn link_nearby_join(b32 index, p32 address)
+static fn link_nearby_join(b32 index, p32 address, p32 mask)
 {
 #if defined(MACOS)
         link_ip_mreq join;
@@ -639,10 +662,19 @@ static fn link_nearby_join(b32 index, p32 address)
                 return;
         link_nearby.interface[link_nearby.interfaces] = index;
         link_nearby.interface_address[link_nearby.interfaces] = address;
+        link_nearby.interface_mask[link_nearby.interfaces] = mask;
         link_nearby.interfaces++;
 }
 
 #if !defined(MACOS)
+/* The netmask of a prefix length, in host order; 0 for none. */
+static p32 link_prefix_mask(p8 prefix)
+{
+        if (!prefix || prefix > 32)
+                return 0;
+        return 0xffffffffu << (32 - prefix);
+}
+
 /* The netlink walk's callback: one address of the dump, IPv4 and with a local address. */
 static p8 link_nearby_address(netlink_header address_to header,
                                 address_any context)
@@ -660,7 +692,8 @@ static p8 link_nearby_address(netlink_header address_to header,
                              address_of size);
         if (body->family != AF_INET || !host || size < 4)
                 return true;
-        link_nearby_join((b32)body->index, network_load_32(host));
+        link_nearby_join((b32)body->index, network_load_32(host),
+                         link_prefix_mask(body->prefix));
         return true;
 }
 #endif
@@ -683,6 +716,7 @@ static fn link_nearby_interfaces(void)
         for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
         {
                 p8 address_to raw;
+                p32 mask = 0;
                 b32 index;
 
                 if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
@@ -691,9 +725,13 @@ static fn link_nearby_interfaces(void)
                 if (!index)
                         continue;
                 //      A sockaddr_in is sin_len, sin_family, sin_port, then the
-                //      address in network order at offset 4.
+                //      address in network order at offset 4, and its netmask
+                //      the same way.
                 raw = (p8 address_to)(void address_to)entry->ifa_addr;
-                link_nearby_join(index, network_load_32(raw + 4));
+                if (entry->ifa_netmask && entry->ifa_netmask->sa_family == AF_INET)
+                        mask = network_load_32((p8 address_to)(void address_to)
+                                                       entry->ifa_netmask + 4);
+                link_nearby_join(index, network_load_32(raw + 4), mask);
         }
         freeifaddrs(list);
 }
@@ -793,6 +831,151 @@ static p8 link_groups_unknown(bipolar read)
 }
 
 /*
+        The sweep, for a code that waits. Multicast does not cross every
+        network: a Wi-Fi or a virtual network may drop it while it carries
+        unicast, and a code's two machines then never hear each other. So
+        while a code waits, its greeting, the group's ordinary first message,
+        is sent from the listener's own port to every host of this machine's
+        subnets, one at a time. A member that opens it keeps the sender and
+        greets back exactly as it does for a multicast announcement; a machine
+        outside the group drops it at the first gate. Only codes sweep: a
+        group that is not a code is found by its multicast, as before.
+
+        The sweep is bounded: four a code, LINK_SWEEP_HOSTS addresses each at
+        most, paced, and none once the code is used or gone. A sweep is about
+        a kilobyte and a quarter for each host, and about eight seconds.
+*/
+
+/* The first group that is a code still waiting for its machine, or the
+   number of groups when there is none. */
+static positive link_sweep_waiting(void)
+{
+        for (positive group = 0; group < link_nearby.groups.count; group++)
+        {
+                p32 flags = link_nearby.groups.record[group].flags;
+
+                if ((flags & LINK_GROUP_ONCE) && !(flags & LINK_GROUP_DONE))
+                        return group;
+        }
+        return link_nearby.groups.count;
+}
+
+/* The hosts to sweep: every host of every interface's subnet, a /24 at the
+   most around the interface's address and never the address itself. Returns
+   how many were put in sweep_target. */
+static positive link_sweep_fill(void)
+{
+        positive count = 0;
+
+        for (positive at = 0; at < link_nearby.interfaces; at++)
+        {
+                p32 address = link_nearby.interface_address[at];
+                p32 mask = link_nearby.interface_mask[at];
+                p32 network;
+                p32 last;
+
+                if (!mask)
+                        continue;
+                if (mask < 0xffffff00u)
+                        mask = 0xffffff00u;
+                network = address & mask;
+                last = network | ~mask;
+                for (p32 host = network + 1; host < last && count < LINK_SWEEP_HOSTS;
+                     host++)
+                        if (host != address)
+                                link_nearby.sweep_target[count++] = host;
+        }
+        return count;
+}
+
+/* The greeting a sweep sends, made once for the group, as link_pair_begin
+   makes one: the first message to the group's key, from this machine's key
+   and with its name. False when it could not be made. */
+static p8 link_sweep_make(positive group)
+{
+        struct waterlink_group_keys address_to keys = link_nearby.keys + group;
+        struct waterlink_noise noise;
+        p8 hello[WATERLINK_HELLO_BYTES];
+        p8 ephemeral[32];
+        p64 wall = system_clock_ns(0);
+        p8 made = false;
+
+        if (system_random_fill(ephemeral, 32, 0) < 0)
+                return false;
+        waterlink_stamp(hello, wall / 1000000000ull,
+                        (p32)(wall % 1000000000ull));
+        memory_copy(hello + WATERLINK_STAMP_BYTES, link_nearby.name,
+                    WATERLINK_NAME_MAX);
+        made = waterlink_initiate(address_of noise, address_of link_self.me,
+                                  keys->identity.public, keys->psk, ephemeral,
+                                  hello, link_nearby.sweep_datagram);
+        crypto_forget(ephemeral, sizeof ephemeral);
+        crypto_forget(address_of noise, sizeof noise);
+        return made;
+}
+
+/* When the next sweep is due: the gaps grow, and none comes after the last. */
+static p64 link_sweep_later(p64 now)
+{
+        static const p64 gaps[LINK_SWEEPS - 1] = {15000000ull, 30000000ull,
+                                                  60000000ull};
+
+        if (!link_nearby.sweep_left)
+                return 0;
+        link_nearby.sweep_next = now + gaps[LINK_SWEEPS - 1 - link_nearby.sweep_left];
+        return link_nearby.sweep_next;
+}
+
+/*
+        One step of the sweep, and when the next is due: nothing while no code
+        waits; a sweep begun when its time comes; LINK_SWEEP_BATCH addresses
+        at a step. Returns the time of the next step, or 0 for none.
+*/
+static p64 link_sweep_turn(p64 now)
+{
+        positive group = link_sweep_waiting();
+
+        if (group == link_nearby.groups.count || link_self.socket < 0 ||
+            (link_nearby.sweeping && group != link_nearby.sweep_group))
+        {
+                //      The code is used or gone, or the listener has no port:
+                //      what is left of the sweeps is not sent.
+                link_nearby.sweeping = false;
+                link_nearby.sweep_left = 0;
+                return 0;
+        }
+        if (!link_nearby.sweeping)
+        {
+                if (!link_nearby.sweep_left)
+                        return 0;
+                if (now < link_nearby.sweep_next)
+                        return link_nearby.sweep_next;
+                link_nearby.sweep_left--;
+                link_nearby.sweep_count = link_sweep_fill();
+                if (!link_nearby.sweep_count || !link_sweep_make(group))
+                        return link_sweep_later(now);
+                link_nearby.sweeping = true;
+                link_nearby.sweep_group = group;
+                link_nearby.sweep_at = 0;
+        }
+        for (positive sent = 0; sent < LINK_SWEEP_BATCH &&
+                                link_nearby.sweep_at < link_nearby.sweep_count;
+             sent++)
+        {
+                p8 address[16];
+
+                link_address_v4(address,
+                                link_nearby.sweep_target[link_nearby.sweep_at++]);
+                (void)link_udp_send_to(link_nearby.sweep_datagram,
+                                       WATERLINK_DATAGRAM, address, link_port());
+        }
+        if (link_nearby.sweep_at < link_nearby.sweep_count)
+                return now + LINK_SWEEP_STEP;
+        link_nearby.sweeping = false;
+        return link_sweep_later(now);
+}
+
+/*
         The groups as the file says now, when it has changed: keys derived
         (cheaply -- the slow derivation happened at join), labels drawn, the
         socket opened for the first group and closed after the last. A read
@@ -868,6 +1051,11 @@ static fn link_nearby_reload(p64 now)
         link_nearby.asked = 0;
         link_nearby.next_announce = now;
         link_nearby.next_ask = now;
+        link_nearby.sweeping = false;
+        link_nearby.sweep_left = link_sweep_waiting() < link_nearby.groups.count
+                                         ? LINK_SWEEPS
+                                         : 0;
+        link_nearby.sweep_next = now;
 }
 
 static p8 link_nearby_send(p8 address_to packet, positive length,
@@ -1508,6 +1696,12 @@ static p64 link_nearby_tick(p64 now)
                         now + (link_nearby.asked < 3 ? 1000000 : LINK_ASK_EVERY);
         }
 
+        {
+                p64 sweep = link_sweep_turn(now);
+
+                if (sweep && sweep < wake)
+                        wake = sweep;
+        }
         if (link_nearby.next_announce < wake)
                 wake = link_nearby.next_announce;
         if (link_nearby.next_ask < wake)
