@@ -37,6 +37,7 @@ struct editor_tab
         char path[EDITOR_PATH];  // the file a save writes, a link's target already
         p8 address_to bytes;      // what was opened: a mapping or a read
         positive length, mapped;  // mapped: the mapping's length, 0 when read
+        positive room;            // a read's buffer, its room (array_store): given back with it when the tab goes
         p64 size, mtime, mtime_nsec;
         unsigned int mode;
         p32 owner, group;         // the file's, which a save keeps; -1 for a file not there yet
@@ -152,6 +153,16 @@ static int editor_folder(const char address_to path, const error_stat address_to
         return (int)folder;
 }
 
+// A tab's bytes given back, once its document is closed: a mapping is let go, a read buffer is released with its room.
+static fn editor_bytes_release(struct editor_tab address_to tab)
+{
+        if (tab->mapped)
+                system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
+        else if (tab->bytes)
+                array_store_release(tab->bytes, tab->room, tab->length);
+        tab->bytes = null, tab->mapped = 0, tab->room = 0;
+}
+
 // A file's bytes: mapped when large, read when small, refused when it is not a regular file. False with a status.
 static b32 editor_load(struct editor_tab address_to tab, string_address path)
 {
@@ -251,19 +262,18 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 }
         }
         {
-                positive room = 0;
                 // A regular file past the read cap is refused, not cut to it: a save would write the cut bytes over the rest of the file.
                 // (/proc's files say nothing of their size, so they are read up to the cap as they always were.)
                 b32 failed = (p64)facts.st_size > EDITOR_READ_MOST;
 
                 while (!failed && tab->length < EDITOR_READ_MOST)
                 {
-                        if (!array_store_reserve(tab->bytes, room, tab->length, tab->length + 65536, 65536))
+                        if (!array_store_reserve(tab->bytes, tab->room, tab->length, tab->length + 65536, 65536))
                         {
                                 failed = true;
                                 break;
                         }
-                        got = system_read_retry((positive)handle, tab->bytes + tab->length, room - tab->length);
+                        got = system_read_retry((positive)handle, tab->bytes + tab->length, tab->room - tab->length);
                         if (got < 0)
                         {
                                 failed = true;
@@ -280,6 +290,7 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                         if (tab->folder >= 0)
                                 system_close(tab->folder);
                         tab->folder = -1;
+                        editor_bytes_release(tab);
                         return false;
                 }
         }
@@ -305,6 +316,7 @@ static b32 editor_open(string_address path)
         {
                 if (tab->folder >= 0)
                         system_close(tab->folder);
+                editor_bytes_release(tab);
                 return false;
         }
         tab->view.own = &editor.own;
@@ -427,8 +439,7 @@ static fn editor_reload(void)
 
         string_copy_bounded((string_address)path, (string_address)tab->path, EDITOR_PATH);
         ui_text_close(&tab->view);
-        if (tab->mapped)
-                system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
+        editor_bytes_release(tab);
         if (tab->folder >= 0)
                 system_close(tab->folder);
         editor.count--;
@@ -458,8 +469,7 @@ static fn editor_close_tab(void)
         struct editor_tab address_to tab = editor_now();
 
         ui_text_close(&tab->view);
-        if (tab->mapped)
-                system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
+        editor_bytes_release(tab);
         if (tab->folder >= 0)
                 system_close(tab->folder);
         editor.count--;
