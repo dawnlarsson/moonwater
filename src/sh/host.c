@@ -14519,7 +14519,7 @@ static fn tune_suspend_record(p8 address_to text, tune_flag address_to messages,
 {
         tune_sleep_stats(text);
         tune_kernel_lines(text);
-        (void)host_write_text("/root/sleep.log", (string_address)text);
+        (void)host_write_file("/root/sleep.log", text, string_length((string_address)text), 0644, true);
         tune_flag_back(messages);
         tune_flag_back(times);
 }
