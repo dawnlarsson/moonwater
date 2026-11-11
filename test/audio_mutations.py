@@ -326,14 +326,14 @@ M = [
     ("control", "a record stream's counts not tried", 'static const signed char guess[] = {2, 1, 4, 6, 8};', 'static const signed char guess[] = {2};'),
     ("control", "a record stream's wrong count not mended", 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != CTL_INVALID)', 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != 12345)'),
     ("control", "a record stream's refusal for its count taken for one for access", '                if (got == CTL_INVALID)\n                        continue;', '                if (got < 0)\n                        continue;'),
-    ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        wire_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        wire_w_u32(&w, index + 1);"),
+    ("control", "the stream killed is another", "return ctl_index_send(c, CTL_COMMAND_KILL_SINK_INPUT, index, 0, 0, -1);", "return ctl_index_send(c, CTL_COMMAND_KILL_SINK_INPUT, index + 1, 0, 0, -1);"),
     # ---- control.c's socket and budget (CHECK_audio_control: the system's socket, to forked servers) ----
     ("socket", "one socket shared by every connection", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n        c->socket.fd = (int)fd;\n        c->socket.linked = 1;\n        c->transport = (struct ctl_transport){&c->socket,", "        static struct ctl_socket shared;\n        ctl_disconnect(c);\n        shared.fd = (int)fd;\n        shared.linked = 1;\n        c->transport = (struct ctl_transport){&shared,"),
     ("socket", "a reconnect leaks the socket it replaces", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n", ""),
-    ("socket", "a receive waits per part again", "if (ctl_wait_until(s, 1, until) <= 0)", "if (ctl_wait(s->fd, 1, timeout_ms) <= 0)"),
-    # A known hole (run at the end of 2026-11-04's pass): a send's second wait for room must come after the first wait's timeout and
-    # inside the budget, which the kernel's writability threshold (a quarter of the send buffer) does not reach in CHECK_audio_control.
-    ("socket", "a send waits per part again", "if (ctl_wait_until(s, 0, until) <= 0)", "if (ctl_wait(s->fd, 0, timeout_ms) <= 0)"),
+    # The send and the receive share one wait (ctl_socket_move). A known hole (run at the end of 2026-11-04's pass): a send's second
+    # wait for room must come after the first wait's timeout and inside the budget, which the kernel's writability threshold (a quarter
+    # of the send buffer) does not reach in CHECK_audio_control.
+    ("socket", "a socket wait per part again", "if (ctl_wait_until(s, !sending, until) <= 0)", "if (ctl_wait(s->fd, !sending, timeout_ms) <= 0)"),
     ("socket", "every part of an answer given the whole timeout", "c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0", "c->transport.receive(c->transport.context, frame, 20, c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS) < 0"),
     ("socket", "a call's budget never begun", "        c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "        (void)0;"),
     ("socket", "a transport with no clock called through null", "return c->transport.now ? c->transport.now(c->transport.context) : 0;", "return c->transport.now(c->transport.context);"),

@@ -475,10 +475,10 @@ static long ctl_set_output_volume(struct ctl *c, unsigned long index, unsigned l
         return CTL_INVALID;
 }
 
-// A stream muted or not, by the command that names its kind. The same answers as the volume's.
-// A mute on the wire: a stream named by its index (named is 0), or a device named by the page (CTL_NONE, then its name when named
-// is 1), then the flag. The same answers as the volume's.
-static long ctl_mute_send(struct ctl *c, unsigned long command, unsigned long index, int named, const char *name, int muted)
+// A command that names an index on the wire, then a name when named is 1, then a flag when muted is 0 or 1 (a stream muted
+// or not is the index and the flag; a device muted is CTL_NONE, its name and the flag; a stream ended is the index alone).
+// The same answers as the volume's.
+static long ctl_index_send(struct ctl *c, unsigned long command, unsigned long index, int named, const char *name, int muted)
 {
         struct wire_w w;
         long got;
@@ -490,7 +490,8 @@ static long ctl_mute_send(struct ctl *c, unsigned long command, unsigned long in
         wire_w_u32(&w, index);
         if (named)
                 wire_w_string(&w, name);
-        wire_w_bool(&w, muted != 0);
+        if (muted >= 0)
+                wire_w_bool(&w, muted != 0);
         if (w.bad)
                 return CTL_FAILED;
         got = ctl_exchange(c, w.len);
@@ -500,7 +501,7 @@ static long ctl_mute_send(struct ctl *c, unsigned long command, unsigned long in
 // A stream muted or not, by the command that names its kind. The same answers as the volume's.
 static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long index, int muted)
 {
-        return ctl_mute_send(c, command, index, 0, 0, muted);
+        return ctl_index_send(c, command, index, 0, 0, muted);
 }
 
 static long ctl_set_input_mute(struct ctl *c, unsigned long index, int muted)
@@ -517,18 +518,7 @@ static long ctl_set_output_mute(struct ctl *c, unsigned long index, int muted)
 // A stream ended: its program is told its stream is gone (the server only lets the person's own session do it).
 static long ctl_kill_input(struct ctl *c, unsigned long index)
 {
-        struct wire_w w;
-        long got;
-
-        ctl_budget(c);
-        if (!c->open)
-                return CTL_FAILED;
-        ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);
-        wire_w_u32(&w, index);
-        if (w.bad)
-                return CTL_FAILED;
-        got = ctl_exchange(c, w.len);
-        return got < 0 ? got : 0;
+        return ctl_index_send(c, CTL_COMMAND_KILL_SINK_INPUT, index, 0, 0, -1);
 }
 
 /*
@@ -558,7 +548,7 @@ static long ctl_device_volume(struct ctl *c, unsigned long command, const char *
 
 static long ctl_device_mute(struct ctl *c, unsigned long command, const char *name, int muted)
 {
-        return ctl_mute_send(c, command, CTL_NONE, 1, name, muted);
+        return ctl_index_send(c, command, CTL_NONE, 1, name, muted);
 }
 
 static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long volume)
@@ -628,19 +618,21 @@ static long ctl_wait_until(struct ctl_socket *s, int readable, long until)
         return left > 0 ? ctl_wait(s->fd, readable, left) : 0;
 }
 
-// Puts all count bytes on the connection within timeout_ms in total, or fails (a negative number).
-static long ctl_socket_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
+// Moves all count bytes on the connection within timeout_ms in total, or fails (a negative number): sent when sending is 1,
+// else taken. A full socket (sending) or an empty one (taking) is waited for, within the budget.
+static long ctl_socket_move(void *context, const unsigned char *bytes, long count, long timeout_ms, int sending)
 {
         struct ctl_socket *s = context;
         long done = 0, until = ctl_socket_now(s) + timeout_ms;
 
         while (done < count)
         {
-                long got = ctl_call(syscall(sendto), (positive)s->fd, (positive)(bytes + done), (positive)(count - done), 0x4000, 0, 0); // MSG_NOSIGNAL
+                long got = sending ? ctl_call(syscall(sendto), (positive)s->fd, (positive)(bytes + done), (positive)(count - done), 0x4000, 0, 0) // MSG_NOSIGNAL
+                                   : ctl_call(syscall(read), (positive)s->fd, (positive)(bytes + done), (positive)(count - done), 0, 0, 0);
 
-                if (got == -11) // EAGAIN: the server's socket is full; waited for, within the budget
+                if (got == -11) // EAGAIN: waited for, within the budget
                 {
-                        if (ctl_wait_until(s, 0, until) <= 0)
+                        if (ctl_wait_until(s, !sending, until) <= 0)
                                 return -1;
                         continue;
                 }
@@ -651,27 +643,16 @@ static long ctl_socket_send(void *context, const unsigned char *bytes, long coun
         return 0;
 }
 
+// Puts all count bytes on the connection within timeout_ms in total, or fails (a negative number).
+static long ctl_socket_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
+{
+        return ctl_socket_move(context, bytes, count, timeout_ms, 1);
+}
+
 // Takes exactly count bytes from the connection within timeout_ms in total, or fails (a negative number).
 static long ctl_socket_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
 {
-        struct ctl_socket *s = context;
-        long done = 0, until = ctl_socket_now(s) + timeout_ms;
-
-        while (done < count)
-        {
-                long got = ctl_call(syscall(read), (positive)s->fd, (positive)(bytes + done), (positive)(count - done), 0, 0, 0);
-
-                if (got == -11)
-                {
-                        if (ctl_wait_until(s, 1, until) <= 0)
-                                return -1;
-                        continue;
-                }
-                if (got <= 0)
-                        return -1;
-                done += got;
-        }
-        return 0;
+        return ctl_socket_move(context, bytes, count, timeout_ms, 0);
 }
 
 static void ctl_disconnect(struct ctl *c)

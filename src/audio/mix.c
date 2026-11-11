@@ -455,8 +455,9 @@ AUDIO_API unsigned long audio_ring_room(const struct audio_ring *ring)
         return ring->size - (ring->write - ring->read);
 }
 
-// Bytes to the cursor, as many as fit and whole frames; answers how many went in.
-AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned char *src, unsigned long n)
+// Bytes to the cursor, as many as fit and whole frames; answers how many went in. With silence set the bytes are the
+// ring's silence and src is not read.
+static unsigned long audio_ring_write(struct audio_ring *ring, const unsigned char *src, unsigned long n, int silence)
 {
         unsigned long room = audio_ring_room(ring), from, first;
 
@@ -467,34 +468,33 @@ AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned c
         first = ring->size - from;
         if (first > n)
                 first = n;
-        memory_copy_apart(ring->data + from, src, first);
+        if (silence)
+                memory_fill(ring->data + from, ring->silence, first);
+        else
+                memory_copy_apart(ring->data + from, src, first);
         if (n > first)
-                memory_copy_apart(ring->data, src + first, n - first);
+        {
+                if (silence)
+                        memory_fill(ring->data, ring->silence, n - first);
+                else
+                        memory_copy_apart(ring->data, src + first, n - first);
+        }
         ring->write += n;
         if (ring->write > ring->limit)
                 ring->limit = ring->write;
         return n;
 }
 
+// Bytes to the cursor, as many as fit and whole frames; answers how many went in.
+AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned char *src, unsigned long n)
+{
+        return audio_ring_write(ring, src, n, 0);
+}
+
 // n bytes of silence at the cursor, as put does.
 AUDIO_API unsigned long audio_ring_put_silence(struct audio_ring *ring, unsigned long n)
 {
-        unsigned long room = audio_ring_room(ring), from, first;
-
-        if (n > room)
-                n = room;
-        n -= n % ring->frame;
-        from = ring->write % ring->size;
-        first = ring->size - from;
-        if (first > n)
-                first = n;
-        memory_fill(ring->data + from, ring->silence, first);
-        if (n > first)
-                memory_fill(ring->data, ring->silence, n - first);
-        ring->write += n;
-        if (ring->write > ring->limit)
-                ring->limit = ring->write;
-        return n;
+        return audio_ring_write(ring, 0, n, 1);
 }
 
 /*
