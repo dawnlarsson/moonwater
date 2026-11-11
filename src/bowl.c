@@ -8516,7 +8516,7 @@ static const char bowl_xwayland_script[] =
     "            return None\n"
     "        try:\n"
     "            server = subprocess.Popen(\n"
-    "                [XWAYLAND, \":%d\" % number, \"-rootless\", \"-wm\", str(wm.fileno()), \"-nolisten\", \"local\", \"-noreset\"],\n"
+    "                [XWAYLAND, \":%d\" % number, \"-rootless\", \"-wm\", str(wm.fileno()), \"-nolisten\", \"local\", \"-nolisten\", \"tcp\", \"-noreset\"],\n"
     "                pass_fds=[wm.fileno()], env=dict(os.environ, WAYLAND_DISPLAY=wayland))\n"
     "        except OSError as error:\n"
     "            say(\"cannot run %s (%s)\" % (XWAYLAND, error.strerror))\n"
@@ -8626,7 +8626,7 @@ bowl_xwayland_install(const struct bowl_profile address_to profile)
         are drawn inside one window of Canvas, which is made fullscreen (with
         no window manager of X's own, the focus of an X window follows the
         pointer otherwise). Its access is the socket file only (-nolisten
-        local). The session ends the X server when Steam ends, and does not
+        local and tcp). The session ends the X server when Steam ends, and does not
         restart it if it dies while Steam runs. When Canvas listens for the
         window manager of Xwayland (BOWL_STEAM_WM) the session runs Steam under
         xwayland-moonwater instead, and the X server is rootless: each X window
@@ -8655,7 +8655,7 @@ static string_address bowl_steam_session[] = {
     "[ $status -ne 125 ] && exit $status",
     "echo \"steam: the rootless X server did not start, starting the rootful one\" >&2",
     "fi",
-    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland " BOWL_STEAM_DISPLAY " -nolisten local -fullscreen &",
+    "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland " BOWL_STEAM_DISPLAY " -nolisten local -nolisten tcp -fullscreen &",
     "xwayland=$!",
     "n=0; while [ ! -S " BOWL_STEAM_X_SOCKET " ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
     "[ -S " BOWL_STEAM_X_SOCKET " ] || { echo \"steam: the X server did not start (no "
