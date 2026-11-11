@@ -137888,8 +137888,8 @@ static fn check_launcher(void)
         }
 #endif
 
-        // The power buttons under the list are the kit's row: here the launcher hands it its events, starts what it fires and
-        // nothing else, and keeps the rest of its keys. What a start is, is a line in a file (the fixture's shell_exec_file).
+        // The power buttons under the list are the bar's view (launcher_view): here the launcher hands the view its events, starts what
+        // it fires and nothing else, and keeps the rest of its keys. What a start is, is a line in a file (the fixture's shell_exec_file).
         {
                 static const char started_path[] = "/tmp/mw-launcher-started";
                 char said[512];
@@ -137901,14 +137901,14 @@ static fn check_launcher(void)
                 launcher_type_text("ls");
                 launcher_layout();
                 check("launcher: the list leaves room for the power row, whose buttons are the kit's, Power off then Restart, right of the bar",
-                      launcher.power.count == 2 && string_equals((string_address)launcher.power.button[0].label, (string_address) "Power off") &&
-                          string_equals((string_address)launcher.power.button[1].label, (string_address) "Restart") &&
-                          launcher.power.button[1].x + launcher.power.button[1].w == LAUNCHER_WIDTH - UI_PAD &&
-                          launcher.power.button[0].y >= UI_PAD + UI_TARGET + UI_GAP2 + (int)launcher.entries * UI_ROW);
+                      launcher.view.group.count == 2 && string_equals((string_address)launcher.view.group.button[0].label, (string_address) "Power off") &&
+                          string_equals((string_address)launcher.view.group.button[1].label, (string_address) "Restart") &&
+                          launcher.view.group.button[1].x + launcher.view.group.button[1].w == LAUNCHER_WIDTH - UI_PAD &&
+                          launcher.view.group.button[0].y >= UI_PAD + UI_TARGET + UI_GAP2 + (int)launcher.entries * UI_ROW);
                 check("launcher: Shift-Tab gives the keys to the buttons, the first of them, and leaves the field as it is",
-                      launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT) && launcher.power.keys == 1 && launcher_holds("ls"));
+                      launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT) && launcher.view.group.keys == 1 && launcher_holds("ls"));
                 launcher_typed('x');
-                check("launcher: a letter typed with the keys on the buttons is the field's, and takes the keys back", launcher_holds("lsx") && !launcher.power.keys);
+                check("launcher: a letter typed with the keys on the buttons is the field's, and takes the keys back", launcher_holds("lsx") && !launcher.view.group.keys);
                 launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
                 check("launcher: Escape with the keys on the buttons closes the bar, as it does anywhere", !launcher_pressed(UI_KEY_ESCAPE, 0));
                 launcher_type_text("ls");
@@ -137920,10 +137920,10 @@ static fn check_launcher(void)
                 for (int repeat = 0; repeat < 40; repeat++)
                         launcher_pressed(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
                 check("launcher: a first Enter on Power off arms it and a held Enter's repeats start nothing",
-                      launcher.power.confirm.armed && launcher.power.confirm.what == 1 && !launcher.power_runs && file_text(started_path, said, sizeof(said)) == 0);
+                      launcher.view.group.confirm.armed && launcher.view.group.confirm.what == 1 && !launcher.power_runs && file_text(started_path, said, sizeof(said)) == 0);
                 launcher_pressed(UI_KEY_ESCAPE, 0);
                 launcher_type_text("ls");
-                check("launcher: a key that is not the press drops what was armed, and the keys are the field's again", !launcher.power.confirm.armed && !launcher.power.keys);
+                check("launcher: a key that is not the press drops what was armed, and the keys are the field's again", !launcher.view.group.confirm.armed && !launcher.view.group.keys);
                 launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
                 launcher_pressed(UI_KEY_ENTER, 0);
                 check("launcher: the next Enter starts the shell's poweroff, once, and the bar goes",
@@ -137931,12 +137931,12 @@ static fn check_launcher(void)
                           launcher_started_is(started_path, "/shell -c poweroff \n"));
                 // Restart, by Right, and Space.
                 launcher_type_text("ls");
-                launcher.power.keys = 0;
+                launcher.view.group.keys = 0;
                 launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
                 launcher_pressed(UI_KEY_RIGHT, 0);
                 launcher_pressed(UI_KEY_SPACE, 0);
                 check("launcher: Right and Space on Restart arm it, and the second Space starts the shell's reboot, once and not poweroff",
-                      launcher.power.confirm.armed && launcher.power.confirm.what == 2 && !launcher_pressed(UI_KEY_SPACE, 0) &&
+                      launcher.view.group.confirm.armed && launcher.view.group.confirm.what == 2 && !launcher_pressed(UI_KEY_SPACE, 0) &&
                           launcher.power_runs == 2 && launcher_waits(started_path, 2) && launcher_started_is(started_path, "/shell -c poweroff \n/shell -c reboot \n"));
 
                 // The pointer: a click arms, a second click starts; a click elsewhere drops it; a finger does the same.
@@ -137944,24 +137944,24 @@ static fn check_launcher(void)
                 launcher.power_runs = 0;
                 launcher_type_text("ls");
                 launcher_layout();
-                ax = launcher.power.button[0].x + 10, ay = launcher.power.button[0].y + 10;
-                bx = launcher.power.button[1].x + 10, by = launcher.power.button[1].y + 10;
+                ax = launcher.view.group.button[0].x + 10, ay = launcher.view.group.button[0].y + 10;
+                bx = launcher.view.group.button[1].x + 10, by = launcher.view.group.button[1].y + 10;
                 motion = (struct window_event){WINDOW_EVENT_MOTION, 0, ax, ay};
                 land = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                 launcher_send(&motion);
                 launcher_send(&land);
-                check("launcher: a click on Power off arms it and starts nothing", launcher_send(&lift) && launcher.power.confirm.armed && !launcher.power_runs);
+                check("launcher: a click on Power off arms it and starts nothing", launcher_send(&lift) && launcher.view.group.confirm.armed && !launcher.power_runs);
                 motion.b = 2, motion.a = 2;
                 launcher_send(&motion);
                 launcher_send(&land);
                 launcher_send(&lift);
-                check("launcher: a click elsewhere drops it", !launcher.power.confirm.armed);
+                check("launcher: a click elsewhere drops it", !launcher.view.group.confirm.armed);
                 motion.a = bx, motion.b = by;
                 launcher_send(&motion);
                 launcher_send(&land);
                 launcher_send(&lift);
-                check("launcher: a click on Restart arms Restart and not another", launcher.power.confirm.armed && launcher.power.confirm.what == 2);
+                check("launcher: a click on Restart arms Restart and not another", launcher.view.group.confirm.armed && launcher.view.group.confirm.what == 2);
                 launcher_send(&land);
                 check("launcher: the next click on it starts the shell's reboot once, and the bar goes",
                       !launcher_send(&lift) && launcher.power_runs == 1 && launcher_waits(started_path, 1) && launcher_started_is(started_path, "/shell -c reboot \n"));

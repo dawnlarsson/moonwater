@@ -30,8 +30,8 @@
         by is what the highlighted row starts as, the command row, so Enter on it
         is the shell's; a plain word that names programs highlights the nearest.
 
-        Under the list is a row of two buttons, Power off and Restart: the kit's row of buttons (ui_buttons), which does the
-        pointer, the keys and the press again to confirm, so a button asks for a second press (and a held key's repeats are
+        Under the list is a row of two buttons, Power off and Restart, declared in the bar's view (launcher_view): the kit
+        does the pointer, the keys and the press again to confirm, so a button asks for a second press (and a held key's repeats are
         no press) before the machine's own poweroff or reboot is started, quietly, by the shell as a typed command is, and
         the bar goes. Shift-Tab gives the buttons the keys; the kit says the rest.
 
@@ -70,6 +70,7 @@
 #define MOONWATER_CANVAS_LAUNCHER
 
 #define LAUNCHER_WIDTH 560 // logical pixels, times the scale: the bar's width; its field, its gap and its rows are the kit's
+#define LAUNCHER_NARROW 480 // logical pixels: a bar narrower than this shares its power row between the buttons
 #define LAUNCHER_ROWS 7    // rows the list shows at most
 #define LAUNCHER_TEXT 256  // bytes of the field
 #define LAUNCHER_NAMES 4096
@@ -172,8 +173,10 @@ static struct
         b32 asked_beside, moved;
         struct ui_anchor anchor;
 
-        // The power row under the list: the kit's buttons, and how many starts they made (what a check counts).
-        struct ui_buttons power;
+        // The bar as the view declares it (launcher_view): its tree and its buttons, the boxes it gave the field and the rows, and how many
+        // starts the power buttons made (what a check counts).
+        struct ui_view view;
+        struct ui_rect field_box, list_box;
         unsigned int power_runs;
 } launcher;
 
@@ -677,25 +680,55 @@ static b32 launcher_power_start(int which)
         return launcher_start(words, launcher_power_words(which, words));
 }
 
-/* ---- the field and the keys ---- */
+/* ---- the bar as a view ---- */
 
-// What the power row takes under the list: the kit's gap and a row.
-static int launcher_power_block(void)
+// A power button pressed again to confirm: the shell starts what it is, and the bar goes (false) once it has.
+static b32 launcher_power_act(int which)
 {
-        return ui_px(&launcher.ui, UI_GAP2) + ui_px(&launcher.ui, UI_ROW);
+        return !launcher_power_start(which);
 }
 
-// A new text: the list for it, from the top.
+// The power row, a component: a subtree of its buttons, each with what it says while it is armed. A bar narrower than LAUNCHER_NARROW
+// (logical pixels) shares the row between them.
+static fn launcher_power_row(void)
+{
+        ui_row(.class = "foot")
+                for (int at = 0; at < LAUNCHER_POWERS; at++)
+                        ui_button(language_text(launcher_powers[at].label), .class = "action outlined", .says = language_text(launcher_powers[at].says),
+                                  .on = launcher_power_act, .arg = at, .grow = ui_width() < LAUNCHER_NARROW);
+}
+
+// The bar as a tree, every size and look a class's: the field's band across the top, then the rows and the power row in from the
+// margin. The field and the list are the old composites, so they are hosts: the tree says where they are (field_box, list_box).
+static fn launcher_view(void)
+{
+        ui_host(&launcher.field_box, .class = "head");
+        ui_col(.class = "inset")
+        {
+                long rows = ui_value(&launcher.entries);
+
+                ui_host(&launcher.list_box, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
+                launcher_power_row();
+        }
+}
+
+// The bar declared and laid out in launcher.width, at most limit tall (0: as tall as it comes to): the height it comes to.
+static int launcher_build(int limit)
+{
+        ui_view_begin(&launcher.view, &launcher.ui, launcher.width, limit);
+        launcher_view();
+        return ui_view_end(&launcher.view);
+}
+
+/* ---- the field and the keys ---- */
+
+// A new text: the list for it, from the top, and the height of the bar that shows it.
 static fn launcher_changed(void)
 {
-        int height, was = launcher.height, most;
+        int was = launcher.height;
 
         launcher_search();
-        height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, UI_TARGET) +
-                 (launcher.entries ? ui_px(&launcher.ui, UI_GAP2) + (int)launcher.entries * ui_px(&launcher.ui, UI_ROW) : 0) +
-                 launcher_power_block();
-        most = launcher_most_height();
-        launcher.height = height > most ? most : height;
+        launcher.height = launcher_build(launcher_most_height());
         // A bar above a bottom panel keeps its bottom where it is, so it is put again with the picture of its new height.
         launcher.moved |= launcher.anchor.anchored && launcher.buffers.shown >= 0 && launcher.anchor.edge == TASKBAR_BOTTOM && launcher.height != was;
         launcher.dirty = true;
@@ -746,14 +779,14 @@ static b32 launcher_asked(p32 asks)
 // A key: the field's first, and what it leaves the bar's, which moves in the list. False when it closes the bar.
 static b32 launcher_key(const struct window_event address_to event)
 {
-        p32 asks = ui_buttons_event(&launcher.ui, &launcher.power, event, 0, 0);
+        p32 asks = ui_view_event(&launcher.ui, &launcher.view, event);
 
-        // The power buttons are the kit's row: what it takes of a key (Shift-Tab, and every key while it has the keys) is not the field's.
-        if (asks & UI_BUTTONS_DRAW)
+        // The power buttons are the view's: what it takes of a key (Shift-Tab, and every key while it has the keys) is not the field's.
+        if (asks & UI_VIEW_DRAW)
                 launcher.dirty = true;
-        if (asks & UI_BUTTONS_FIRED)
-                return !launcher_power_start(launcher.power.fired);
-        if (asks & UI_BUTTONS_TAKEN)
+        if (asks & UI_VIEW_QUIT)
+                return false;
+        if (asks & UI_VIEW_TAKEN)
                 return true;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
@@ -799,11 +832,10 @@ static fn launcher_damaged(int top, int bottom)
         launcher.dirty = true;
 }
 
-// The rows are the kit's list under the field: the field (a finger's target tall), the kit's gap, and a row for each entry.
+// The bar laid out: the tree says where the field and the rows are, and the rows (the kit's list) are put there.
 static fn launcher_layout(void)
 {
         struct ui address_to ui = &launcher.ui;
-        int pad = ui_px(ui, UI_PAD);
 
         if (!launcher.list.ids)
         {
@@ -812,22 +844,14 @@ static fn launcher_layout(void)
                 launcher.list.damaged = launcher_damaged;
                 launcher.list.hover = launcher.list.down = -1;
         }
-        // The words are asked each time: a language chosen while the bar is up is the next picture's.
-        for (int at = 0; at < LAUNCHER_POWERS; at++)
-                ui_buttons_set(&launcher.power, at, language_text(launcher_powers[at].label), language_text(launcher_powers[at].says));
         launcher.list.count = (int)launcher.entries;
         for (int at = 0; at < launcher.list.count; at++)
                 launcher.list.id[at] = (unsigned short)at;
-        // The rows fill the window below the field; a list longer than the window scrolls (the wheel, and the keys reveal).
-        {
-                int top = pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), rows = (int)launcher.entries * ui_px(ui, UI_ROW),
-                    room = launcher.height - top - pad - launcher_power_block();
-
-                ui_list_place(ui, &launcher.list, pad, top, launcher.width - 2 * pad,
-                              launcher.height > 0 && rows > room ? (room > 0 ? room : 0) : rows);
-        }
+        // The words are asked each time (a language chosen while the bar is up is the next picture's), and the rows fill the window below
+        // the field; a list longer than the window scrolls (the wheel, and the keys reveal).
+        launcher_build(launcher.height);
+        ui_list_place(ui, &launcher.list, launcher.list_box.x, launcher.list_box.y, launcher.list_box.w, launcher.list_box.h);
         ui_list_layout(ui, &launcher.list);
-        ui_buttons_place(ui, &launcher.power, pad, launcher.height - pad - ui_px(ui, UI_ROW), launcher.width - 2 * pad);
 }
 
 static b32 launcher_event(const struct window_event address_to event)
@@ -837,16 +861,16 @@ static b32 launcher_event(const struct window_event address_to event)
         p32 asks;
 
         launcher_layout();
-        // The power buttons are the kit's row: its hover, its presses and releases, and a press anywhere else that drops what was
-        // armed, before the field has the event; what the row takes of a pointer event is not the field's or the list's.
+        // The power buttons are the view's: its hover, its presses and releases, and a press anywhere else that drops what was
+        // armed, before the field has the event; what the view takes of a pointer event is not the field's or the list's.
         if (event->type != WINDOW_EVENT_KEY)
         {
-                asks = ui_buttons_event(&launcher.ui, &launcher.power, event, ui_kit.pointer_x, ui_kit.pointer_y);
-                if (asks & UI_BUTTONS_DRAW)
+                asks = ui_view_event(&launcher.ui, &launcher.view, event);
+                if (asks & UI_VIEW_DRAW)
                         launcher.dirty = true;
-                if (asks & UI_BUTTONS_FIRED)
-                        return !launcher_power_start(launcher.power.fired);
-                if (asks & UI_BUTTONS_TAKEN)
+                if (asks & UI_VIEW_QUIT)
+                        return false;
+                if (asks & UI_VIEW_TAKEN)
                         return true;
         }
         // The field takes the pointer on its well (a caret, a drag, the middle button's paste, its menu) and the
@@ -928,9 +952,9 @@ static fn launcher_describe(int id, struct ui_row address_to row)
 static fn launcher_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &launcher.ui;
-        int pad = ui_px(&launcher.ui, UI_PAD);
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
+        launcher_layout();
 
         // The field is the kit's, bare (no label): its well, and in it the engine's text, selection and caret, which
         // have the keys while the bar does.
@@ -943,16 +967,16 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search->items[0] = WORDS(launcher_search_hint);
                         search->edit = launcher_field();
                 }
-                search->focused = (launcher.focused || !launcher_app.had_keys) && !launcher.power.keys;
+                search->focused = (launcher.focused || !launcher_app.had_keys) && !launcher.view.group.keys;
                 // The field runs edge to edge, as the list's rows do, from the panel's top to where the list begins: its text keeps its inset.
-                search->x = 0, search->y = 0, search->w = launcher.width * 100 / ui->scale, search->h = UI_TARGET + pad * 100 / ui->scale;
+                search->x = launcher.field_box.x * 100 / ui->scale, search->y = launcher.field_box.y * 100 / ui->scale;
+                search->w = launcher.field_box.w * 100 / ui->scale, search->h = launcher.field_box.h * 100 / ui->scale;
                 ui_control_draw(ui, search);
         }
         // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field).
-        launcher_layout();
         launcher.list.lit = true;
         ui_list_draw(ui, &launcher.list);
-        ui_buttons_draw(ui, &launcher.power, launcher.focused || !launcher_app.had_keys);
+        ui_view_draw(ui, &launcher.view, launcher.focused || !launcher_app.had_keys);
         // A finger's selection in the field: its handles and actions bar, over the rows and the buttons.
         ui_text_overlay(ui, launcher_field());
 }
@@ -1063,10 +1087,11 @@ static long launcher_tick(long timeout, long address_to other)
 {
         positive now = (positive)ui_kit.now;
         b32 redraw = false;
+        int top, bottom;
 
         (void)other;
         timeout = ui_text_timeout(&launcher.ui, launcher_field(), timeout, &redraw);
-        if (redraw)
+        if (redraw || ui_view_moved(&launcher.view, &top, &bottom))
                 launcher.dirty = true;
         return timeout;
 }
