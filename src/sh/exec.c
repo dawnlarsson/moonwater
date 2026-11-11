@@ -13836,7 +13836,9 @@ static bool select_read()
                                       select_reply_used + 2))
                         return false;
 
-                if (system_read_once(0, address_of value, 1) != 1)
+                //      EINTR is retried: a signal whose handler does not restart
+                //      the read must not cut the answer short.
+                if (system_read_retry(0, address_of value, 1) != 1)
                         break;
 
                 if (value == '\n')
