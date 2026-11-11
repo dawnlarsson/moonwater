@@ -4139,26 +4139,19 @@ static fn awk_expect(b32 what, string_address complaint)
         machine rather than counting levels needs no level counted back down
         and stays true as either one changes shape.
 */
-static bool awk_room_left()
+//      One compare against the floor the caller names: the interpreter asks
+//      this of every node it walks, so the subtraction is done once in
+//      awk_stack_measure rather than here.
+static bool awk_room_left(positive floor)
 {
         b32 here;
 
-        // One global and one compare: the interpreter asks this of every
-        // node it walks, so the subtraction is done once in awk_stack_measure
-        // rather than here.
-        return (positive)address_of here >= awk_stack_floor;
-}
-
-static bool awk_walk_room_left()
-{
-        b32 here;
-
-        return (positive)address_of here >= awk_walk_floor;
+        return (positive)address_of here >= floor;
 }
 
 static fn awk_parse_room()
 {
-        if (!awk_room_left())
+        if (!awk_room_left(awk_stack_floor))
                 awk_syntax("nested too deeply");
 }
 
@@ -5396,7 +5389,7 @@ static decimal awk_eval_number(awk_node address_to node)
         // An arithmetic tree recurses here and never through awk_eval, so
         // this path needs the same measure: 1+1+...+1 two hundred thousand
         // terms long is a left-leaning tree that deep.
-        if_rare (!awk_walk_room_left())
+        if_rare (!awk_room_left(awk_walk_floor))
                 awk_leave((awk_flush_everything(), text_flush(),
                            string_diagnostic(&text_diagnostic, 2, null,
                                              "nested too deeply")));
@@ -5659,7 +5652,7 @@ static fn awk_getline(awk_node address_to node, awk_value address_to out);
 
 static fn awk_eval(awk_node address_to node, awk_value address_to out)
 {
-        if_rare (!awk_walk_room_left())
+        if_rare (!awk_room_left(awk_walk_floor))
                 awk_leave((awk_flush_everything(), text_flush(),
                            string_diagnostic(&text_diagnostic, 2, null,
                                              "nested too deeply")));
@@ -6679,7 +6672,7 @@ static fn awk_do_printf(awk_node address_to node)
 
 static b32 awk_run(awk_node address_to node)
 {
-        if_rare (!awk_walk_room_left())
+        if_rare (!awk_room_left(awk_walk_floor))
                 awk_leave((awk_flush_everything(), text_flush(),
                            string_diagnostic(&text_diagnostic, 2, null,
                                              "nested too deeply")));

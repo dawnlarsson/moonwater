@@ -37125,12 +37125,14 @@ static bool cp_into_self;
 //      source made first is a name to be left alone in the walk of the next,
 //      so cp -r a dir dir stops at dir/a, which the copy of a made, when it
 //      meets it in the walk of dir.
-static bool cp_created_holds(file_facts address_to facts)
+static bool cp_holds(p64 address_to inodes, p32 address_to majors,
+                     p32 address_to minors, positive count,
+                     file_facts address_to facts)
 {
-        return array_any(at, cp_created_count,
-                         cp_created_inode[at] == facts->inode &&
-                         cp_created_major[at] == facts->device_major &&
-                         cp_created_minor[at] == facts->device_minor);
+        return array_any(at, count,
+                         inodes[at] == facts->inode &&
+                         majors[at] == facts->device_major &&
+                         minors[at] == facts->device_minor);
 }
 
 static bool cp_created_names(positive inode)
@@ -37416,14 +37418,6 @@ static p64 cp_ancestor_inode[CP_ANCESTORS_MAX];
 static p32 cp_ancestor_major[CP_ANCESTORS_MAX];
 static p32 cp_ancestor_minor[CP_ANCESTORS_MAX];
 static positive cp_ancestor_count;
-
-static bool cp_ancestor_holds(file_facts address_to facts)
-{
-        return array_any(at, cp_ancestor_count,
-                         cp_ancestor_inode[at] == facts->inode &&
-                         cp_ancestor_major[at] == facts->device_major &&
-                         cp_ancestor_minor[at] == facts->device_minor);
-}
 
 static bool cp_tree_serial_copy(string_address path, positive name_at, positive level)
 {
@@ -38632,7 +38626,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 return string_report(log_error, false, "cp: %w is nested too deep\n",
                               writer_shell_quoted_name, source_shown);
         }
-        if (!moving && !named && cp_created_holds(address_of facts))
+        if (!moving && !named &&
+            cp_holds(cp_created_inode, cp_created_major, cp_created_minor,
+                     cp_created_count, address_of facts))
         {
                 //      Said once: the walks that read a directory's names
                 //      apart from the copy can meet it again before they
@@ -38645,7 +38641,9 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                      writer_shell_quoted_name, cp_top_source,
                                      writer_shell_quoted_name, cp_top_destination);
         }
-        if (!moving && cp_ancestor_holds(address_of facts))
+        if (!moving && cp_holds(cp_ancestor_inode, cp_ancestor_major,
+                                cp_ancestor_minor, cp_ancestor_count,
+                                address_of facts))
                 return string_report(log_error, false,
                                      "cp: cannot copy cyclic symbolic link %w\n",
                                      writer_shell_quoted_name, source_shown);
