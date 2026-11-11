@@ -8219,6 +8219,9 @@ static unsigned int ui_pinch_steps(const unsigned int *steps, unsigned int count
         button. Any other key is the app's and gives the keys back (Escape too), and a modifier alone is nobody's. A press on a
         button focuses it; a press anywhere else drops what was armed. The pointer is ui_kit_pointer's, with its hover, its press
         and its ripple.
+
+        This is the old way of an app's row of actions: placed by hand, set up by hand, routed by hand. The view (below) declares the
+        same row as ui_button elements and owns one of these for its buttons; an app that is on the view calls none of the above.
 */
 #define UI_BUTTONS_MOST 4
 #define UI_BUTTONS_W 104 // logical pixels: a button, its label inside it
@@ -8399,6 +8402,481 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
                 return ui_buttons_pointer(ui, b, event, x, y);
         return 0;
+}
+
+/* ---- the view ---- */
+/*
+        The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the
+        flexbox rules of layout.h. An app says what it shows each time the window is laid out or drawn, and the kit does the rest:
+        the sizes, the places, the hover, the press, the keys, the ripple and the confirm of each element are the kit's, and what the
+        app keeps is its own data. The elements nest in the braces after them, so a component is a function that declares a subtree:
+
+            static fn row_of_actions(void)
+            {
+                    ui_row(.class = "foot")
+                            for (int at = 0; at < count; at++)
+                                    ui_button(label[at], .class = "action outlined", .on = act, .arg = at, .grow = ui_width() < 480);
+            }
+
+            ui_view_begin(&view, ui, width, most);   // a window width wide (device pixels), at most most tall
+            ui_host(&field, .class = "head");        // the box of a widget the view does not draw: its place is written to field
+            ui_col(.class = "inset") { ... }         // a container: ui_row or ui_col; ui_text and ui_button are leaves
+            height = ui_view_end(&view);             // laid out: the window's height, and every host's rectangle
+            ui_view_draw(ui, &view, keys);           // painted (the window has the keys: the focused button shows its ring)
+            asks = ui_view_event(ui, &view, event);  // an event: UI_VIEW_DRAW (due again), _TAKEN (the view's), _QUIT (a handler said stop)
+
+        Style is the class and nothing else: .class names the classes of ui_classes, a blank apart, and a later name wins over an
+        earlier; a class says a gap, a pad, a margin, a size, a justify, an align, a shrink, a type and an ink by theme role, a fill by
+        role and a corner, and a button's variant. An app writes no colour, size or pad of its own; .w, .h, .grow, .shrink and the
+        limits are for the few sizes a class cannot say (a list as tall as its rows). A name the table lacks is counted in
+        ui_view.unknown, which a check reads, and is no style. Layout is flexbox: row or column, gap, justify, align, padding, margin,
+        grow, shrink, the sizes and their limits, and scroll (overflow: auto) as a class. Logical pixels, times the window's scale.
+
+        Events are an element's own: .on is called with .arg when the button acts, answers false to end the window as an app's event
+        does, and the view owns focus, hover, press, the ripple and the press-again confirm (.says: what the next press does). A
+        breakpoint is a plain condition on ui_width() (logical pixels). State of the app's own is read with ui_value(&x), which makes
+        the element open at the read a reader of x; a change of x, made by ui_set(&x, v) or by the app itself, is found by the next
+        ui_view_moved or ui_view_begin and puts only the rows of its readers due again. The buttons of a view are one row of the
+        kit's (ui_buttons: its keys, its confirm, its pointer), in the order they are declared, at most UI_BUTTONS_MOST.
+
+        Phase one: a leaf is one line of text, a button, or a host; the field, the list and the page are the old composites and
+        are hosts until they are elements. What removing the old way needs: every app's place, draw and event moved onto a view
+        (the launcher is), the list, the page and the lines given elements, the text field given one, the checks that read the old
+        structs' fields (launcher.power, settings.page, mixer.row) read the view's, and then ui_buttons, ui_control placed by hand
+        and the apps' damage marking deleted.
+*/
+#define UI_VIEW_WATCHES 16
+#define UI_ITEM_BOX 0
+#define UI_ITEM_TEXT 1
+#define UI_ITEM_BUTTON 2
+#define UI_ITEM_HOST 3
+#define UI_H_ROW (-1)             // a class's height: one row of a list (UI_ROW grows with the text scale)
+#define UI_ROLE(role) ((role) + 1) // a class's role or type is its number plus one: 0 is not said
+#define UI_VIEW_DRAW UI_BUTTONS_DRAW
+#define UI_VIEW_TAKEN UI_BUTTONS_TAKEN
+#define UI_VIEW_QUIT 8u
+
+struct ui_rect
+{
+        int x, y, w, h;
+};
+
+// What an app writes for an element (the element macros set the kind): its class and the few sizes a class cannot say, and what it is for.
+struct ui_props
+{
+        int kind;
+        const char address_to class;      // class names, a blank apart
+        int w, h;                         // a size, logical pixels; 0: the class's, else the content's
+        int grow, shrink;                 // the weights on the parent's main axis; 0: the class's
+        int min_w, min_h, max_w, max_h;   // the limits, logical pixels
+        b32 hidden;                       // a leaf that is not there (display: none): a host's rectangle is empty
+        const char address_to text;       // a text's words, a button's label
+        const char address_to says;       // a button that is not undone: what its next press does, said while it is armed
+        b32 (*on)(int value);             // a button's act: false ends the window
+        int arg;                          // what the handler is given
+        struct ui_rect address_to host;   // a host's rectangle, device pixels, written by ui_view_end
+};
+
+// A class: what its name stands for, in logical pixels. A zero is not said, so a class that says nothing of a thing leaves
+// what was before it; a role or a type is its number plus one (UI_ROLE).
+struct ui_class
+{
+        const char address_to name;
+        short gap, pad[4], margin[4];     // pad and margin: left, right, top, bottom
+        short w, h, min_h, grow, shrink;
+        short justify, align, scroll;     // UI_START... of layout.h; scroll 1
+        short type, ink, fill, radius;    // the type of a text, its ink and a box's fill by role, a box's corner
+        short variant;                    // a button's, UI_BUTTON_*
+};
+
+static const struct ui_class ui_classes[] = {
+        // Boxes.
+        {"inset", .pad = {UI_PAD, UI_PAD, UI_GAP2, UI_PAD}, .gap = UI_GAP2, .shrink = 1}, // a column in from the window's margin
+        {"head", .h = UI_PAD + UI_TARGET},                                               // a field's band across the top: the margin above a target
+        {"list", .shrink = 1},                                                           // rows that give way when the window is too small
+        {"foot", .h = UI_H_ROW, .gap = UI_GAP2, .justify = UI_END, .align = UI_CENTER},  // actions at the end of a row's height
+        {"scroll", .scroll = 1, .shrink = 1},                                            // overflow: auto
+        {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
+        // Text.
+        {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
+        {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
+        // Buttons: the size of an action, and the variants.
+        {"action", .w = UI_BUTTONS_W, .h = UI_BUTTONS_H},
+        {"plain", .variant = UI_ROLE(UI_BUTTON_DEFAULT)},
+        {"primary", .variant = UI_ROLE(UI_BUTTON_PRIMARY)},
+        {"outlined", .variant = UI_ROLE(UI_BUTTON_OUTLINED)},
+        {"ghost", .variant = UI_ROLE(UI_BUTTON_TEXT)},
+};
+#define UI_CLASSES (sizeof(ui_classes) / sizeof(ui_classes[0]))
+
+// What the kit knows of an element besides where it is.
+struct ui_item
+{
+        unsigned char kind;
+        int button;                       // a button's place among the view's buttons, -1 for none
+        struct ui_class look;             // the classes of the element, merged
+        const char address_to text;
+        struct ui_rect address_to host;
+};
+
+// A variable of the app's that a build read (ui_value), and what it held then.
+struct ui_watch
+{
+        const void address_to at;
+        b64 seen;
+        unsigned int size, generation;
+        int node;                         // the element that was open at the read
+};
+
+struct ui_view
+{
+        struct ui address_to ui;
+        struct ui_tree tree;
+        struct ui_item item[UI_TREE_NODES], discard;
+        struct ui_buttons group;          // the buttons of the build, in order: hover, press, keys, confirm
+        b32 (*on[UI_BUTTONS_MOST])(int value);
+        int arg[UI_BUTTONS_MOST];
+        int width, limit;                 // the viewport: its width, and the most height (device pixels; 0 for none)
+        int unknown, dropped;             // class names the table lacks, and elements refused (what a check reads)
+        unsigned int generation;          // counted up by each build
+        int watches;
+        struct ui_watch watch[UI_VIEW_WATCHES];
+        int moved_top, moved_bottom;      // the rows (device pixels) the changed variables' readers are in, empty when bottom <= top
+};
+
+static struct ui_view address_to ui_view_now; // the view being declared: the last ui_view_begin's
+
+// A size of a class in device pixels: its logical pixels at the window's scale, or a row.
+static int ui_view_px(const struct ui address_to ui, int logical)
+{
+        return ui_px(ui, logical == UI_H_ROW ? UI_ROW : logical);
+}
+
+static inline short ui_pick(short before, short said)
+{
+        return said ? said : before;
+}
+
+// What a class string stands for: each name, a blank apart, found in the table and laid over the ones before it.
+static fn ui_class_resolve(struct ui_view address_to v, const char address_to names, struct ui_class address_to into)
+{
+        memory_zero(into, sizeof(*into));
+        while (names && *names)
+        {
+                int length = 0;
+                positive at = 0;
+
+                while (*names == ' ')
+                        names++;
+                while (names[length] && names[length] != ' ')
+                        length++;
+                while (length && at < UI_CLASSES)
+                {
+                        int same = 0;
+
+                        while (same < length && ui_classes[at].name[same] == names[same])
+                                same++;
+                        if (same == length && !ui_classes[at].name[length])
+                                break;
+                        at++;
+                }
+                if (length && at == UI_CLASSES)
+                        v->unknown++;
+                else if (length)
+                {
+                        const struct ui_class address_to from = &ui_classes[at];
+
+                        into->gap = ui_pick(into->gap, from->gap), into->w = ui_pick(into->w, from->w), into->h = ui_pick(into->h, from->h);
+                        into->min_h = ui_pick(into->min_h, from->min_h), into->grow = ui_pick(into->grow, from->grow);
+                        into->shrink = ui_pick(into->shrink, from->shrink), into->justify = ui_pick(into->justify, from->justify);
+                        into->align = ui_pick(into->align, from->align), into->scroll = ui_pick(into->scroll, from->scroll);
+                        into->type = ui_pick(into->type, from->type), into->ink = ui_pick(into->ink, from->ink);
+                        into->fill = ui_pick(into->fill, from->fill), into->radius = ui_pick(into->radius, from->radius);
+                        into->variant = ui_pick(into->variant, from->variant);
+                        for (int k = 0; k < 4; k++)
+                                into->pad[k] = ui_pick(into->pad[k], from->pad[k]), into->margin[k] = ui_pick(into->margin[k], from->margin[k]);
+                }
+                names += length;
+        }
+}
+
+// A variable of the app's as a number (a whole number of one to eight bytes; a four-byte one is signed).
+static b64 ui_view_read(const void address_to at, unsigned int size)
+{
+        if (size == 1)
+                return *(const unsigned char address_to)at;
+        if (size == 2)
+                return *(const unsigned short address_to)at;
+        if (size == 4)
+                return *(const int address_to)at;
+        return *(const long long address_to)at;
+}
+
+// The variables the build read that are not what they were: the rows of their readers are due again (moved_top, moved_bottom).
+// True when any such reader is on screen. A variable that no build of the view read last shows nowhere, and moves nothing.
+static b32 ui_view_poll(struct ui_view address_to v)
+{
+        b32 any = false;
+
+        if (!v)
+                return false;
+        for (int k = 0; k < v->watches; k++)
+        {
+                struct ui_watch address_to w = &v->watch[k];
+                b64 now = ui_view_read(w->at, w->size);
+
+                if (now == w->seen)
+                        continue;
+                w->seen = now;
+                if (w->generation != v->generation)
+                        continue;
+                any = true;
+                if (w->node >= 0 && w->node < v->tree.count)
+                {
+                        const struct ui_node address_to n = &v->tree.node[w->node];
+
+                        v->moved_top = v->moved_bottom > v->moved_top && v->moved_top < n->y ? v->moved_top : n->y;
+                        v->moved_bottom = v->moved_bottom > n->y + n->h ? v->moved_bottom : n->y + n->h;
+                }
+                else
+                        v->moved_top = 0, v->moved_bottom = UI_TREE_MOST;
+        }
+        return any;
+}
+
+// A variable of the app's read by the build: its value, and the element open now is a reader of it.
+static b64 ui_view_value(const void address_to at, unsigned int size)
+{
+        struct ui_view address_to v = ui_view_now;
+        struct ui_watch address_to w = null;
+        b64 now = ui_view_read(at, size);
+
+        if (!v)
+                return now;
+        for (int k = 0; k < v->watches; k++)
+                if (v->watch[k].at == at)
+                        w = &v->watch[k];
+        if (!w && v->watches < UI_VIEW_WATCHES)
+                w = &v->watch[v->watches++], w->at = at, w->size = size;
+        if (w)
+                w->seen = now, w->generation = v->generation, w->node = v->tree.depth ? v->tree.open[v->tree.depth - 1] : -1;
+        return now;
+}
+
+#define ui_value(at) ui_view_value((const void address_to)(at), (unsigned int)sizeof(*(at)))
+#define ui_set(at, value) ((*(at) = (value)), ui_view_poll(ui_view_now))
+
+// The rows of the changed variables' readers since the last call (device pixels); false when none.
+static b32 ui_view_moved(struct ui_view address_to v, int address_to top, int address_to bottom)
+{
+        ui_view_poll(v);
+        if (v->moved_bottom <= v->moved_top)
+                return false;
+        *top = v->moved_top, *bottom = v->moved_bottom;
+        v->moved_top = v->moved_bottom = 0;
+        return true;
+}
+
+// The width of the window being declared, in logical pixels: what a breakpoint is a condition on.
+static int ui_width(void)
+{
+        return ui_view_now && ui_view_now->ui->scale > 0 ? ui_view_now->width * 100 / ui_view_now->ui->scale : 0;
+}
+
+// An element opened inside the one open: its node written from its classes and the props over them, in device pixels.
+static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui_props address_to p)
+{
+        struct ui_view address_to v = ui_view_now;
+        struct ui address_to ui = v->ui;
+        int parent = v->tree.depth ? v->tree.open[v->tree.depth - 1] : -1;
+        int along = parent >= 0 ? v->tree.node[parent].dir : 0;
+        struct ui_node address_to n = ui_tree_open(&v->tree);
+        struct ui_item address_to item = n == &v->tree.discard ? &v->discard : &v->item[n - v->tree.node];
+        struct ui_class look;
+        int fixed[2], low[2], high[2], grow, type;
+
+        ui_class_resolve(v, p->class, &look);
+        fixed[0] = p->w ? p->w : look.w, fixed[1] = p->h ? p->h : look.h;
+        low[0] = p->min_w, low[1] = p->min_h ? p->min_h : look.min_h;
+        high[0] = p->max_w, high[1] = p->max_h;
+        grow = p->grow ? p->grow : look.grow;
+        n->dir = dir, n->gap = ui_px(ui, look.gap), n->justify = look.justify, n->align = look.align, n->scroll = look.scroll;
+        for (int k = 0; k < 4; k++)
+                n->pad[k] = ui_px(ui, look.pad[k]), n->margin[k] = ui_px(ui, look.margin[k]);
+        for (int a = 0; a < 2; a++)
+        {
+                struct ui_size address_to s = &n->size[a];
+
+                s->min = ui_px(ui, low[a]);
+                s->max = high[a] ? ui_px(ui, high[a]) : UI_TREE_MOST;
+                s->shrink = p->shrink ? p->shrink : look.shrink;
+                if (grow && a == along)
+                        s->kind = UI_GROW, s->value = grow, s->min = fixed[a] ? ui_view_px(ui, fixed[a]) : s->min; // its size is its basis, the least it has
+                else if (fixed[a])
+                        s->kind = UI_FIXED, s->value = ui_view_px(ui, fixed[a]);
+        }
+        type = look.type ? look.type - 1 : kind == UI_ITEM_BUTTON ? UI_LABEL_LARGE : UI_BODY_MEDIUM;
+        if (kind == UI_ITEM_TEXT && p->text)
+        {
+                n->content[0] = fixed[0] ? 0 : ui_kit_measure(ui, (string_address)p->text, type);
+                n->content[1] = ui_dev(ui, ui_types[type].line);
+        }
+        else if (kind == UI_ITEM_BUTTON && p->text)
+        {
+                n->content[0] = fixed[0] ? 0 : ui_kit_measure(ui, (string_address)p->text, type) + 2 * ui_px(ui, UI_GAP3);
+                n->content[1] = ui_px(ui, 36);
+        }
+        item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = -1;
+        if (kind == UI_ITEM_BUTTON && item != &v->discard && v->group.count < UI_BUTTONS_MOST)
+        {
+                item->button = v->group.count;
+                v->on[item->button] = p->on, v->arg[item->button] = p->arg;
+                ui_buttons_set(&v->group, item->button, p->text, p->says);
+        }
+        return item;
+}
+
+// A container: opened, and closed by the end of the braces after the macro.
+static fn ui_view_scope(int dir, const struct ui_props address_to p)
+{
+        if (ui_view_now)
+                ui_view_open(p->kind, dir, p);
+}
+
+static fn ui_view_close(void)
+{
+        if (ui_view_now)
+                ui_tree_close(&ui_view_now->tree);
+}
+
+// A leaf: opened and closed at once. Hidden, it is not there, and a host's rectangle is empty.
+static fn ui_view_leaf(const struct ui_props address_to p)
+{
+        if (!ui_view_now)
+                return;
+        if (p->hidden)
+        {
+                if (p->host)
+                        *p->host = (struct ui_rect){0, 0, 0, 0};
+                return;
+        }
+        ui_view_open(p->kind, 0, p);
+        ui_tree_close(&ui_view_now->tree);
+}
+
+#define UI_VIEW_JOIN_(a, b) a##b
+#define UI_VIEW_JOIN(a, b) UI_VIEW_JOIN_(a, b)
+#define UI_VIEW_SCOPE_(once, open) for (int once = ((open), 1); once; once = 0, ui_view_close())
+#define UI_VIEW_SCOPE(open) UI_VIEW_SCOPE_(UI_VIEW_JOIN(ui_once_, __LINE__), open)
+
+#define ui_row(...) UI_VIEW_SCOPE(ui_view_scope(0, &(struct ui_props){.kind = UI_ITEM_BOX, __VA_ARGS__}))
+#define ui_col(...) UI_VIEW_SCOPE(ui_view_scope(1, &(struct ui_props){.kind = UI_ITEM_BOX, __VA_ARGS__}))
+#define ui_text(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_TEXT, .text = (words), __VA_ARGS__})
+#define ui_button(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BUTTON, .text = (words), __VA_ARGS__})
+#define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
+
+// A screen begun: a window width wide (device pixels) and at most limit tall (0: as tall as it comes to). The root is a column the
+// width of the window; what is declared after this is its children, until ui_view_end.
+static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, int width, int limit)
+{
+        struct ui_node address_to root;
+
+        ui_view_poll(v);
+        v->ui = ui, v->width = width, v->limit = limit, v->unknown = 0;
+        v->generation++;
+        v->group.count = 0;
+        ui_view_now = v;
+        ui_tree_begin(&v->tree);
+        root = ui_tree_open(&v->tree);
+        root->dir = 1;
+        root->size[0].kind = UI_GROW, root->size[0].value = 1;
+        root->size[1].max = limit > 0 ? limit : UI_TREE_MOST;
+        memory_zero(&v->item[0], sizeof(v->item[0]));
+        v->item[0].button = -1;
+}
+
+// The screen laid out: the window's height, every host's rectangle written, and the buttons placed in the kit's row. Reading from the
+// right the whole tree is turned over the window's width, as a page is.
+static int ui_view_end(struct ui_view address_to v)
+{
+        struct ui address_to ui = v->ui;
+        int scale = ui->scale > 0 ? ui->scale : 100, first = -1, low = 0, high = 0;
+
+        ui_tree_close(&v->tree);
+        ui_tree_run(&v->tree, v->width, v->limit);
+        v->dropped = v->tree.dropped;
+        for (int at = 0; at < v->tree.count && ui_rtl(); at++)
+                v->tree.node[at].x = v->tree.node[0].w - v->tree.node[at].x - v->tree.node[at].w;
+        for (int at = 0; at < v->tree.count; at++)
+        {
+                const struct ui_node address_to n = &v->tree.node[at];
+                const struct ui_item address_to item = &v->item[at];
+
+                if (item->kind == UI_ITEM_HOST && item->host)
+                        *item->host = (struct ui_rect){n->x, n->y, n->w, n->h};
+                else if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
+                {
+                        struct ui_control address_to c = &v->group.button[item->button];
+
+                        c->x = n->x * 100 / scale, c->y = n->y * 100 / scale, c->w = n->w * 100 / scale, c->h = n->h * 100 / scale;
+                        c->variant = v->group.confirm.armed && v->group.confirm.what == item->button + 1 ? UI_BUTTON_PRIMARY
+                                     : item->look.variant ? item->look.variant - 1 : UI_BUTTON_DEFAULT;
+                        low = first < 0 || n->x < low ? n->x : low, high = first < 0 || n->x + n->w > high ? n->x + n->w : high;
+                        first = first < 0 ? at : first;
+                }
+        }
+        if (first >= 0)
+        {
+                // What an armed button will do is said in the row of the buttons, from its start to the first of them.
+                const struct ui_node address_to row = &v->tree.node[v->tree.node[first].parent];
+                int gap = ui_px(ui, UI_GAP2), start = row->x + row->pad[ui_rtl()], end = row->x + row->w - row->pad[!ui_rtl()];
+                int from = ui_rtl() ? high + gap : start, to = ui_rtl() ? end : low - gap;
+                struct ui_control address_to line = &v->group.line;
+
+                line->kind = UI_HEADING, line->variant = UI_BODY_MEDIUM, line->role = UI_ON_SURFACE_VARIANT;
+                line->x = from * 100 / scale, line->w = (to > from ? to - from : 0) * 100 / scale;
+                line->y = (row->y + (row->h - ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)) / 2) * 100 / scale;
+        }
+        v->group.keys = v->group.keys > v->group.count ? 0 : v->group.keys;
+        return v->tree.node[0].h;
+}
+
+// The screen painted: the boxes and the text in the order they were declared, then the buttons over them (keys: the window has the keys).
+static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32 keys)
+{
+        UI_CALL();
+        for (int at = 0; at < v->tree.count; at++)
+        {
+                const struct ui_node address_to n = &v->tree.node[at];
+                const struct ui_item address_to item = &v->item[at];
+                int type = item->look.type ? item->look.type - 1 : UI_BODY_MEDIUM;
+
+                if (item->kind == UI_ITEM_BOX && item->look.fill && item->look.radius)
+                        ui_round(ui, n->x, n->y, n->w, n->h, ui_px(ui, item->look.radius), ui_role(item->look.fill - 1) | 0xff000000u);
+                else if (item->kind == UI_ITEM_BOX && item->look.fill)
+                        ui_fill(ui, n->x, n->y, n->w, n->h, ui_role(item->look.fill - 1) | 0xff000000u);
+                else if (item->kind == UI_ITEM_TEXT && item->text)
+                        ui_kit_start(ui, ui_rtl() ? n->x + n->w : n->x, ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type),
+                                     (string_address)item->text, type, ui_text_colour(ui, item->look.ink ? item->look.ink - 1 : UI_ON_SURFACE), 0, n->x,
+                                     n->x + n->w);
+        }
+        ui_buttons_draw(ui, &v->group, keys);
+}
+
+// An event for the view: its buttons take the pointer and the keys (ui_buttons_event), and the one that acted has its handler called.
+static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
+{
+        p32 asks = ui_buttons_event(ui, &v->group, event, ui_kit.pointer_x, ui_kit.pointer_y);
+
+        if (asks & UI_BUTTONS_FIRED)
+        {
+                int fired = v->group.fired;
+
+                asks &= ~UI_BUTTONS_FIRED;
+                if (fired >= 0 && fired < UI_BUTTONS_MOST && v->on[fired] && !v->on[fired](v->arg[fired]))
+                        asks |= UI_VIEW_QUIT;
+        }
+        return asks;
 }
 
 /*

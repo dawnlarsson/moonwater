@@ -150803,6 +150803,127 @@ static fn check_kit_layout(void)
                   layout_tree.node[UI_TREE_NODES - 1].x == UI_TREE_NODES - 2);
 }
 
+/*
+        The kit's view (ui.c) on a screen of the launcher's shape: a field's band across the top, then the rows and a row of two actions
+        inset by the margin, all from classes. At 100 percent the rectangles are the old hand arithmetic's: the margin above and below,
+        a target-high band, a gap, a row for each entry, a gap and a row of buttons a row tall. The class cascade, a variable's readers
+        and the buttons' press-again are read on the same view.
+*/
+static struct ui_view view_check;
+static struct ui view_check_ui;
+static struct ui_rect view_check_head, view_check_list;
+static int view_check_rows = 3, view_check_presses, view_check_last;
+
+static b32 view_check_press(int value)
+{
+        view_check_presses++, view_check_last = value;
+        return value != 1;
+}
+
+static int view_check_build(int width, int limit)
+{
+        ui_view_begin(&view_check, &view_check_ui, width, limit);
+        ui_host(&view_check_head, .class = "head");
+        ui_col(.class = "inset")
+        {
+                long rows = ui_value(&view_check_rows);
+
+                ui_host(&view_check_list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
+                ui_row(.class = "foot")
+                {
+                        ui_button("One", .class = "action outlined", .says = "do one", .on = view_check_press, .arg = 0, .grow = ui_width() < 480);
+                        ui_button("Two", .class = "action outlined", .on = view_check_press, .arg = 1, .grow = ui_width() < 480);
+                }
+        }
+        return ui_view_end(&view_check);
+}
+
+// The loop's way to an event of the view: the kit's event context, the screen declared again, then the view's.
+static p32 view_check_send(const struct window_event address_to event)
+{
+        ui_event_context(event);
+        view_check_build(560, 1000);
+        return ui_view_event(&view_check_ui, &view_check, event);
+}
+
+static fn check_kit_view(void)
+{
+        struct ui_control address_to one, two;
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, 340, 210}, land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                            lift = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        int height, top, bottom, band = UI_PAD + UI_TARGET, foot;
+        p32 asks;
+
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(&view_check_ui, sizeof(view_check_ui));
+        view_check_ui.scale = 100;
+        view_check_rows = 3;
+        height = view_check_build(560, 1000);
+        one = &view_check.group.button[0], two = &view_check.group.button[1];
+        foot = band + UI_GAP2 + 3 * UI_ROW + UI_GAP2;
+        check("kit view: a field's band, three rows and a row of two actions are laid out from their classes alone, as the hand arithmetic had them",
+              height == foot + UI_ROW + UI_PAD && view_check.unknown == 0 && view_check.group.count == 2 && view_check_head.x == 0 && view_check_head.y == 0 &&
+                  view_check_head.w == 560 && view_check_head.h == band && view_check_list.x == UI_PAD && view_check_list.y == band + UI_GAP2 &&
+                  view_check_list.w == 560 - 2 * UI_PAD && view_check_list.h == 3 * UI_ROW && one->x == 560 - UI_PAD - 2 * UI_BUTTONS_W - UI_GAP2 &&
+                  two->x + two->w == 560 - UI_PAD && one->w == UI_BUTTONS_W && one->h == UI_BUTTONS_H && one->y == foot + (UI_ROW - UI_BUTTONS_H) / 2 &&
+                  two->y == one->y && one->variant == UI_BUTTON_OUTLINED);
+        view_check_rows = 0;
+        height = view_check_build(560, 1000);
+        check("kit view: with no rows the list is not there, and the gap with it", height == band + UI_GAP2 + UI_ROW + UI_PAD && view_check_list.w == 0 &&
+              view_check_list.h == 0 && one->y == band + UI_GAP2 + (UI_ROW - UI_BUTTONS_H) / 2);
+        view_check_rows = 3;
+        height = view_check_build(560, band + 86);
+        check("kit view: a window held to a height gives it up where the shrink weights say: the list gives way, the band and the actions do not",
+              height == band + 86 && view_check_list.h == 86 - UI_PAD - UI_GAP2 - UI_GAP2 - UI_ROW && one->y == band + 86 - UI_PAD - UI_ROW + (UI_ROW - UI_BUTTONS_H) / 2);
+        height = view_check_build(400, 1000);
+        check("kit view: a window under the breakpoint shares its row between the buttons, each its own size and half of what is left",
+              view_check.group.button[0].w == UI_BUTTONS_W + (400 - 2 * UI_PAD - 2 * UI_BUTTONS_W - UI_GAP2) / 2 && two->x == one->x + one->w + UI_GAP2 &&
+                  two->x + two->w == 400 - UI_PAD);
+
+        // The classes: a later name wins, a name the table lacks is counted and is no style, and a class says a box's pad and fill.
+        ui_view_begin(&view_check, &view_check_ui, 300, 0);
+        ui_col(.class = "card nonesuch scroll")
+        {
+                ui_host(&view_check_head, .class = "head");
+                ui_host(&view_check_list, .class = "primary outlined", .w = 20, .h = 10);
+        }
+        height = ui_view_end(&view_check);
+        check("kit view: classes are laid over each other in order, an unknown name is counted, and a card's pad is its class's",
+              view_check.unknown == 1 && view_check.item[1].look.fill == UI_ROLE(UI_SURFACE_LOW) && view_check.item[1].look.scroll == 1 &&
+                  view_check.item[3].look.variant == UI_ROLE(UI_BUTTON_OUTLINED) && view_check_head.x == UI_GAP4 && view_check_head.y == UI_GAP4 &&
+                  view_check_head.w == 300 - 2 * UI_GAP4 && height == 2 * UI_GAP4 + band + UI_GAP3 + 10);
+
+        // A variable the build read: its readers' rows are due again when it changes, by the app or by ui_set, and once.
+        view_check_rows = 3;
+        view_check_build(560, 1000);
+        ui_view_moved(&view_check, &top, &bottom); // what earlier builds left is not this check's
+        view_check_rows = 2;
+        check("kit view: a variable that changed puts the rows of the element that read it due again, and only those, once",
+              ui_view_moved(&view_check, &top, &bottom) && top == band && bottom == foot + UI_ROW + UI_PAD && !ui_view_moved(&view_check, &top, &bottom));
+        check("kit view: ui_set changes it and puts its readers due the same way", ui_set(&view_check_rows, 3) && ui_view_moved(&view_check, &top, &bottom) &&
+              top == band && !ui_view_moved(&view_check, &top, &bottom));
+
+        // The buttons: a click on the first says what it does and starts nothing; the next starts it, with its argument; a button with
+        // nothing to say acts at once, and its handler's false is the window's end.
+        view_check_build(560, 1000);
+        view_check_presses = 0;
+        view_check_send(&motion);
+        view_check_send(&land);
+        asks = view_check_send(&lift);
+        check("kit view: a click on a button that says what it does arms it and starts nothing", view_check.group.confirm.armed && !view_check_presses &&
+              (asks & UI_VIEW_TAKEN) && !(asks & UI_VIEW_QUIT));
+        view_check_send(&land);
+        asks = view_check_send(&lift);
+        check("kit view: the next click calls its handler once with its argument", !view_check.group.confirm.armed && view_check_presses == 1 &&
+              view_check_last == 0 && !(asks & UI_VIEW_QUIT));
+        motion.a = two->x + 10;
+        view_check_send(&motion);
+        view_check_send(&land);
+        asks = view_check_send(&lift);
+        check("kit view: a button with nothing to say acts at once, and a handler that answers false ends the window", view_check_presses == 2 &&
+              view_check_last == 1 && (asks & UI_VIEW_QUIT));
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -164320,6 +164441,7 @@ b32 main()
         check_kit_finger_pull();
         check_kit_confirm_repeat();
         check_kit_layout();
+        check_kit_view();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
