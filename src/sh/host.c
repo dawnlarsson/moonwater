@@ -5515,11 +5515,9 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
 
         if (count == 4 && string_equals(arguments[3], "report"))
         {
+                host_need_root();
                 if (host_write_file((string_address)HOST_RECORD_DIR "/report", request, 7, 0644, false) < 0)
-                {
-                        host_say(log, "the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
-                        return 0;
-                }
+                        return host_refuse("the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
                 for (positive wait = 0; wait < 30; wait++)
                 {
                         if (host_read_state((string_address)HOST_RECORD_DIR "/report", report, 16) < 0)
@@ -5528,10 +5526,7 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
                 }
                 got = host_read_state((string_address)HOST_RECORD_DIR "/report.txt", report, HOST_RECORD_TEXT);
                 if (got < 0)
-                {
-                        host_say(log, "no report yet: the compositor has not made one (its record is kept while the desktop runs)\n");
-                        return 0;
-                }
+                        return host_refuse("no report yet: the compositor has not made one (its record is kept while the desktop runs)\n");
                 report[got] = 0;
                 host_say(log, "%s", (string_address)report);
                 return 0;
@@ -5553,11 +5548,9 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
         else
                 start[at++] = (p8)('0' + seconds);
         start[at++] = '\n';
+        host_need_root();
         if (host_write_file((string_address)HOST_RECORD_DIR "/start", start, at, 0644, false) < 0)
-        {
-                host_say(log, "the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
-                return 0;
-        }
+                return host_refuse("the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
         host_say(log, "recording %p s; the compositor takes it at its next look and writes its report when the seconds have run and a present follows\n",
                  (positive)seconds);
         host_say(log, "the report: moonwater canvas record report\n");
