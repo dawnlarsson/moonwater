@@ -640,23 +640,18 @@ static positive launcher_power_words(int which, string_address address_to words)
         return 3;
 }
 
-// A power button that acted (it was pressed again to confirm): started, and the bar goes. False when nothing could be started.
-static b32 launcher_power_start(int which)
+/* ---- the bar as a view ---- */
+
+// A power button pressed again to confirm: the shell starts what it is, and the bar goes (false) once it has. Kept (true) when
+// there is no such button, or when nothing could be started.
+static b32 launcher_power_act(int which)
 {
         string_address words[4];
 
         if (which < 0 || which >= LAUNCHER_POWERS)
-                return false;
+                return true;
         launcher.power_runs++;
-        return ui_start_apart(words, launcher_power_words(which, words));
-}
-
-/* ---- the bar as a view ---- */
-
-// A power button pressed again to confirm: the shell starts what it is, and the bar goes (false) once it has.
-static b32 launcher_power_act(int which)
-{
-        return !launcher_power_start(which);
+        return !ui_start_apart(words, launcher_power_words(which, words));
 }
 
 // The power row, a component: a subtree of its buttons, each with what it says while it is armed. A bar narrower than LAUNCHER_NARROW
@@ -952,9 +947,8 @@ static fn launcher_draw(unsigned int address_to pixels)
         ui_text_overlay(ui, launcher_field());
 }
 
-// The bar's picture, drawn whole into the buffer the kit gives (every frame is due whole: the bar has no rows to draw apart).
-
-// The bar's picture, and a new height of it that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
+// The bar's picture, drawn whole into the buffer the kit gives (every frame is due whole: the bar has no rows to draw apart), and a new
+// height of it that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
 static fn launcher_paint(unsigned int address_to pixels)
 {
         struct windows address_to table = launcher.own.table;
