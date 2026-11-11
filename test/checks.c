@@ -142760,8 +142760,10 @@ static fn check_battery(void)
               count == 4 && battery_listed(names, count, "hid-mouse") && battery_listed(names, count, "ups0") &&
                   battery_listed(names, count, "BATX") && battery_listed(names, count, "BAT1") && !battery_listed(names, count, "AC"));
         check("battery: the UPS is listed as a UPS and the batteries as batteries",
-              names[0].kind != BATTERY_KIND_NONE && battery_kind("ups0") == BATTERY_KIND_UPS && battery_kind("BAT1") == BATTERY_KIND_BATTERY &&
-                  battery_kind("hid-mouse") == BATTERY_KIND_BATTERY && battery_kind("AC") == BATTERY_KIND_NONE);
+              names[0].kind != BATTERY_KIND_NONE && battery_word_value("ups0", "/type", 16, battery_kind_words) == BATTERY_KIND_UPS &&
+                  battery_word_value("BAT1", "/type", 16, battery_kind_words) == BATTERY_KIND_BATTERY &&
+                  battery_word_value("hid-mouse", "/type", 16, battery_kind_words) == BATTERY_KIND_BATTERY &&
+                  battery_word_value("AC", "/type", 16, battery_kind_words) == BATTERY_KIND_NONE);
         found = battery_read(null, &state);
         check("battery: the default is a present battery of type Battery, the mouse's or BAT1, and never BATX or the UPS",
               found && state.present &&

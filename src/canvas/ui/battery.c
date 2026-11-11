@@ -93,23 +93,35 @@ static b32 battery_number(string_address name, string_address leaf, positive add
         return true;
 }
 
+struct battery_word
+{
+        string_address text; // a word the file may read as; a zero text ends the table
+        unsigned int value;  // what the word means; the ending entry's value is the answer when none of them is
+};
+
 /*
         What a directory entry is, by its type alone. A scope of Device is not
         a reason to leave it out: a USB or Bluetooth mouse, keyboard or
         controller reports its battery here with that scope, and it is a
         battery the machine has all the same.
 */
-static unsigned int battery_kind(string_address name)
-{
-        p8 text[16];
+static const struct battery_word battery_kind_words[] = {
+        {"Battery", BATTERY_KIND_BATTERY}, {"UPS", BATTERY_KIND_UPS}, {0, BATTERY_KIND_NONE}};
+static const struct battery_word battery_status_words[] = {
+        {"Discharging", BATTERY_DISCHARGING}, {"Charging", BATTERY_CHARGING}, {"Full", BATTERY_FULL},
+        {"Not charging", BATTERY_NOT_CHARGING}, {0, BATTERY_UNKNOWN}};
 
-        if (battery_word(name, "/type", text, sizeof(text)) < 0)
-                return BATTERY_KIND_NONE;
-        if (string_equals((string_address)text, "Battery"))
-                return BATTERY_KIND_BATTERY;
-        if (string_equals((string_address)text, "UPS"))
-                return BATTERY_KIND_UPS;
-        return BATTERY_KIND_NONE;
+// The value of the table's word that the battery's file reads as: the ending
+// entry's when the file is not there or reads as none of the words.
+static unsigned int battery_word_value(string_address name, string_address leaf, positive room, const struct battery_word address_to table)
+{
+        p8 text[32];
+        positive at = 0;
+        b32 found = battery_word(name, leaf, text, room) >= 0;
+
+        while (table[at].text && !(found && string_equals((string_address)text, table[at].text)))
+                at++;
+        return table[at].value;
 }
 
 static b32 battery_is_present(string_address name)
@@ -138,23 +150,6 @@ static int battery_percent(string_address name)
         return -1;
 }
 
-static unsigned int battery_status(string_address name)
-{
-        p8 text[32];
-
-        if (battery_word(name, "/status", text, sizeof(text)) < 0)
-                return BATTERY_UNKNOWN;
-        if (string_equals((string_address)text, "Discharging"))
-                return BATTERY_DISCHARGING;
-        if (string_equals((string_address)text, "Charging"))
-                return BATTERY_CHARGING;
-        if (string_equals((string_address)text, "Full"))
-                return BATTERY_FULL;
-        if (string_equals((string_address)text, "Not charging"))
-                return BATTERY_NOT_CHARGING;
-        return BATTERY_UNKNOWN;
-}
-
 // A battery's state, under its name: a battery that is not present has no percent and no charging state.
 static void battery_fill(string_address name, struct battery_state address_to state)
 {
@@ -166,7 +161,7 @@ static void battery_fill(string_address name, struct battery_state address_to st
                 return;
         state->present = true;
         state->percent = battery_percent(name);
-        state->charging = battery_status(name);
+        state->charging = battery_word_value(name, "/status", 32, battery_status_words);
 }
 
 /*
@@ -205,7 +200,7 @@ static positive battery_list(struct battery_name address_to names, positive room
                         at += entry->d_reclen > 0 ? entry->d_reclen : got;
                         if (name[0] == '.' || string_length(name) >= BATTERY_NAME)
                                 continue;
-                        kind = battery_kind(name);
+                        kind = battery_word_value(name, "/type", 16, battery_kind_words);
                         if (kind == BATTERY_KIND_NONE)
                                 continue;
                         for (positive have = 0; have < count && have < room; have++)
@@ -244,7 +239,7 @@ static b32 battery_read(string_address name, struct battery_state address_to sta
 
                 for (positive at = 0; name[at]; at++)
                         plain &= name[at] != '/';
-                if (!plain || battery_kind(name) == BATTERY_KIND_NONE)
+                if (!plain || battery_word_value(name, "/type", 16, battery_kind_words) == BATTERY_KIND_NONE)
                 {
                         state->present = false;
                         state->percent = -1;
