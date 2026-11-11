@@ -121,6 +121,69 @@ static p8 link_script_names_secret(string_address script,
         return false;
 }
 
+static p8 link_has_route(void);
+
+/*
+        The listener's state, one of five, and what each is called and what
+        answers it. The status line and link doctor's listener check both say
+        these words, so the two never disagree about the one listener.
+*/
+enum
+{
+        LINK_LISTENER_ON,           // switched on, and running
+        LINK_LISTENER_BY_HAND,      // running with no switch word: link serve
+        LINK_LISTENER_STILL,        // switched off, still running
+        LINK_LISTENER_NOT_RUNNING,  // switched on, and not running
+        LINK_LISTENER_OFF,          // switched off, and not running
+};
+
+static const string_address link_listener_names[] = {
+    "on, running", "on, running by hand", "off, still running",
+    "on, not running", "off"};
+static const string_address link_listener_next[] = {
+    "moonwater link pair", "moonwater link on, to keep it across boots",
+    "moonwater link off", "moonwater link on, which says why it did not start",
+    "moonwater link on"};
+
+static positive link_listener_state(bipolar owner, b32 on, b32 switched)
+{
+        if (owner > 0)
+                return !switched ? LINK_LISTENER_BY_HAND
+                       : on      ? LINK_LISTENER_ON
+                                 : LINK_LISTENER_STILL;
+        return on ? LINK_LISTENER_NOT_RUNNING : LINK_LISTENER_OFF;
+}
+
+/*      The session the listener has open with this name, if one is open now:
+        its entry, whose address is where it is heard from now. */
+static link_open_entry address_to link_open_of(link_state address_to state,
+                                               string_address name)
+{
+        for (positive at = 0; at < state->open_count && at < LINK_SESSIONS; at++)
+        {
+                link_open_entry address_to open = state->open + at;
+
+                open->name[WATERLINK_NAME_MAX - 1] = 0;
+                if (link_name_good((string_address)open->name) &&
+                    string_equals((string_address)open->name, name))
+                        return open;
+        }
+        return null;
+}
+
+/*      Whether any session the listener has open is one with a name a machine
+        can have: such a session is a link up, whatever the machines file says. */
+static b32 link_any_open(link_state address_to state)
+{
+        for (positive at = 0; at < state->open_count && at < LINK_SESSIONS; at++)
+        {
+                state->open[at].name[WATERLINK_NAME_MAX - 1] = 0;
+                if (link_name_good((string_address)state->open[at].name))
+                        return true;
+        }
+        return false;
+}
+
 static b32 link_status(void)
 {
         struct waterlink_identity me;
@@ -133,6 +196,8 @@ static b32 link_status(void)
         p8 key[48];
         p8 word[16];
         b32 on;
+        b32 routed = false;
+        b32 asked = false;
 
         //      A listener that is off, or older than this, left no state. One
         //      that was killed left its state behind, and it says nothing of
@@ -145,24 +210,18 @@ static b32 link_status(void)
                 memory_zero(address_of state, sizeof state);
 
         //      The first line is the listener, and the switch and the process
-        //      are two things: each pairing of them says what is wrong and the
-        //      command that answers it.
+        //      are two things: its state is one of five, each with the command
+        //      that answers it, and link doctor says the same words for it.
         host_read_word(LINK_SWITCH_PATH, word, sizeof word);
         on = string_equals((string_address)word, "on");
-        if (owner > 0 && on)
-                string_format(log, "link on, udp %p  next: moonwater link pair\n",
-                              (positive)link_port());
-        else if (owner > 0 && !word[0])
-                string_format(log, "link on, run by hand  next: moonwater link on, "
-                                   "to keep it across boots\n");
-        else if (owner > 0)
-                string_format(log, "link off, but still running  next: moonwater link off\n");
-        else if (on)
-                string_format(log, "link on, but not running  next: moonwater link on, "
-                                   "which says why it did not start\n");
-        else
-                string_format(log, "link off, udp %p  next: moonwater link on\n",
-                              (positive)link_port());
+        {
+                positive listener = link_listener_state(owner, on, word[0] != 0);
+
+                string_format(log, "link %s, udp %p  next: %s\n",
+                              link_listener_names[listener],
+                              (positive)link_port(),
+                              link_listener_next[listener]);
+        }
 
         if (link_identity(address_of me, false) >= 0)
         {
@@ -257,12 +316,14 @@ static b32 link_status(void)
         }
 
         //      A file that is there and cannot be read is not an empty list:
-        //      nobody linked is said only of one that is empty.
+        //      nobody linked is said only of one that is empty, and of none
+        //      that has a session open, which is a link up under whatever
+        //      name it has (the open section below says which).
         if (!link_peers_for_change(address_of peers))
                 string_format(log, "  %s could not be read  next: ls -l %s\n",
                               LINK_PEERS_PATH, LINK_PEERS_PATH);
-        else if (!peers.count)
-                string_format(log, "  nobody linked yet: moonwater link pair, "
+        else if (!peers.count && !link_any_open(address_of state))
+                string_format(log, "  nobody linked yet  next: moonwater link pair, "
                                    "and on the other machine moonwater link NAME CODE\n");
 
         for (positive at = 0; at < peers.count; at++)
@@ -272,6 +333,7 @@ static b32 link_status(void)
                 p8 place[64];
                 p8 short_key[12];
                 link_seen_entry address_to seen = null;
+                link_open_entry address_to open_now = null;
                 b32 other = false;
 
                 link_key_text(peer->key, key);
@@ -312,7 +374,24 @@ static b32 link_status(void)
                                 other = true;
                 }
 
-                if (seen)
+                //      Each line says how it was known: a session open now, a
+                //      greeting heard since boot, or nothing heard, and why.
+                open_now = link_open_of(address_of state, (string_address)peer->name);
+                if (open_now)
+                {
+                        link_place_text(open_now->address, open_now->port, place);
+                        if (!peer->may)
+                                string_format(log, "      open now from %s  next: "
+                                                   "moonwater link allow %s run\n",
+                                              (string_address)place,
+                                              (string_address)peer->name);
+                        else
+                                string_format(log, "      open now from %s  next: "
+                                                   "moonwater link %s\n",
+                                              (string_address)place,
+                                              (string_address)peer->name);
+                }
+                else if (seen)
                 {
                         p8 when[32];
 
@@ -356,16 +435,25 @@ static b32 link_status(void)
                 }
                 else if (peer->port)
                 {
+                        if (!asked)
+                        {
+                                routed = link_has_route() != 0;
+                                asked = true;
+                        }
                         link_place_text(peer->address, peer->port, place);
-                        string_format(log, "      not heard at its last address %s this boot: "
-                                           "it may be off, or on another network  next: "
-                                           "moonwater link doctor\n",
-                                      (string_address)place);
+                        if (routed)
+                                string_format(log, "      not heard since boot, last address "
+                                                   "%s  next: moonwater link doctor\n",
+                                              (string_address)place);
+                        else
+                                string_format(log, "      no route to a network, last address "
+                                                   "%s  next: join a network (moonwater wifi, "
+                                                   "or the cable), then moonwater link doctor\n",
+                                              (string_address)place);
                 }
                 else
-                        string_format(log, "      no address; it can reach this machine, not "
-                                           "the other way  next: moonwater link add %s KEY "
-                                           "HOST[:PORT]\n",
+                        string_format(log, "      never answered: no address to ask it at  "
+                                           "next: moonwater link add %s KEY HOST[:PORT]\n",
                                       (string_address)peer->name);
         }
 

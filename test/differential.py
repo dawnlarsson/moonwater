@@ -82166,8 +82166,8 @@ end = time.time() + 10
 while time.time() < end and any(os.path.exists("/proc/%d" % pid) for pid in dying):
     time.sleep(0.05)
 status, out, err = on("b", moon + " link")
-say(dying != [] and b"switched on but not running" in out,
-    "a listener that was killed is said to be switched on and not running (%r %r)" % (dying, out[:120]))
+say(dying != [] and b"link on, not running" in out,
+    "a listener that was killed is said to be on and not running (%r %r)" % (dying, out[:120]))
 status, out, err = on("a", moon + " link run b echo killed", timeout=30)
 say(status == 255 and out == b"", "and nothing answers (%r)" % (status,))
 status, out, err = on("b", moon + " link on")
