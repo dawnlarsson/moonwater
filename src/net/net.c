@@ -14985,7 +14985,7 @@ static COLD fn tls_overlay_hold(void)
         Whether NTS is asked at all is a word in /root/ntp.nts: on, off, or
         only (NTS and nothing the path could have forged). A word that is
         none of them is the tier's default: on, and at the tight tier only
-        (nts_mode_of), so a hardened or locked image never takes plain time
+        (net_mode_of), so a hardened or locked image never takes plain time
         unless someone said so.
 */
 #define NTS_KE_PORT 4460
@@ -15020,15 +15020,25 @@ typedef struct
         p8 cookie[NTS_COOKIES][NTS_COOKIE_MAX];
 } nts_state;
 
-//      The word in /root/ntp.nts as a mode: the tier's default for anything
-//      that is not on, off or only, a missing file included.
-static COLD positive nts_mode_of(string_address word)
+/* A word and the mode it names. A table of them ends with a null word and the tier's default: the mode of any word it does not name. */
+struct net_mode_word
 {
-        return string_equals(word, "off")    ? NTS_OFF
-               : string_equals(word, "on")   ? NTS_ON
-               : string_equals(word, "only") ? NTS_ONLY
-                                             : NTS_MODE_DEFAULT;
+        string_address word;
+        positive mode;
+};
+
+//      The mode a word names in a table of them: the table's default for anything it does not name, such as a word that is not on, off or only.
+static COLD positive net_mode_of(string_address word, const struct net_mode_word address_to table)
+{
+        positive at = 0;
+
+        while (table[at].word && !string_equals(word, table[at].word))
+                at++;
+        return table[at].mode;
 }
+
+//      The word in /root/ntp.nts as a mode, a missing file included.
+static const struct net_mode_word nts_modes[] = {{"off", NTS_OFF}, {"on", NTS_ON}, {"only", NTS_ONLY}, {0, NTS_MODE_DEFAULT}};
 
 /* A host name, or a dotted address: labels of letters, digits and hyphens
    between dots, none empty and none beginning or ending with a hyphen. */
@@ -15560,15 +15570,8 @@ static CONST COLD bool dns_offers_tls(p32 server)
         return false;
 }
 
-//      The word as a mode: the tier's default for anything that is not on,
-//      off or only, a missing file included.
-static COLD positive dns_tls_mode_of(string_address word)
-{
-        return string_equals(word, "off")    ? DNS_TLS_OFF
-               : string_equals(word, "on")   ? DNS_TLS_ON
-               : string_equals(word, "only") ? DNS_TLS_ONLY
-                                             : DNS_TLS_DEFAULT;
-}
+//      The word as a mode, a missing file included.
+static const struct net_mode_word dns_tls_modes[] = {{"off", DNS_TLS_OFF}, {"on", DNS_TLS_ON}, {"only", DNS_TLS_ONLY}, {0, DNS_TLS_DEFAULT}};
 
 //      The setting a confined child read before its filter went on, plus
 //      one, as dns_held holds its servers; 0 everywhere else.
@@ -15589,7 +15592,7 @@ static COLD positive dns_tls_mode(void)
         while (got && (text[got - 1] == '\n' || text[got - 1] == ' '))
                 got--;
         text[got] = end;
-        return dns_tls_mode_of((string_address)text);
+        return net_mode_of((string_address)text, dns_tls_modes);
 }
 
 /*

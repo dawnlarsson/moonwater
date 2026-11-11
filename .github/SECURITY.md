@@ -86,7 +86,7 @@ attacker gets its invariants here once there is a lane that proves them.
   named), and whose wget, fetch, `host` and zone question resolve nothing
   until then: the DNS over TLS certificate is judged against the clock, and
   NTS's own names are asked in plain, so the one bootstraps the other.
-  `nts_mode_of` and `dns_tls_mode_of` are the two lines that choose, and
+  `nts_modes` and `dns_tls_modes` are the two tables that choose, and
   CHECK_net (built at both tiers), `nts` and `dns_tls` hold them.
 - **The clock has a floor.** A clock earlier than `MOONWATER_CLOCK_FLOOR` (the
   date of the source, net.c, which the SNTP client names `SNTP_WALL_LEAST`;

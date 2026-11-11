@@ -20483,7 +20483,7 @@ static positive locale_nts_mode(void)
         p8 word[16];
 
         host_read_word(LOCALE_NTS_PATH, word, sizeof(word));
-        return nts_mode_of((string_address)word);
+        return net_mode_of((string_address)word, nts_modes);
 }
 
 //      The mode as it is said, or that the caller cannot read it.
@@ -20494,7 +20494,7 @@ static string_address locale_nts_say(void)
 
         if (!locale_readable(LOCALE_NTS_PATH, word, sizeof(word)))
                 return (string_address)LOCALE_NEEDS_ROOT;
-        mode = nts_mode_of((string_address)word);
+        mode = net_mode_of((string_address)word, nts_modes);
         return mode == NTS_OFF   ? (string_address) "off"
                : mode == NTS_ONLY ? (string_address) "only"
                                   : (string_address) "on";

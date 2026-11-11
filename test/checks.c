@@ -76527,13 +76527,13 @@ static fn nts_ke_pieces(void)
            tight tier, where plain time is not taken unless someone says so,
            and on below it. This file is built at both. */
         check("ntp.nts: on, off and only are what they say",
-              nts_mode_of((string_address) "on") == NTS_ON &&
-                  nts_mode_of((string_address) "off") == NTS_OFF &&
-                  nts_mode_of((string_address) "only") == NTS_ONLY);
+              net_mode_of((string_address) "on", nts_modes) == NTS_ON &&
+                  net_mode_of((string_address) "off", nts_modes) == NTS_OFF &&
+                  net_mode_of((string_address) "only", nts_modes) == NTS_ONLY);
         check("ntp.nts: no word, or one it does not know, is the tier's default",
-              nts_mode_of((string_address) "") == NTS_MODE_DEFAULT &&
-                  nts_mode_of((string_address) "On") == NTS_MODE_DEFAULT &&
-                  nts_mode_of((string_address) "only ") == NTS_MODE_DEFAULT &&
+              net_mode_of((string_address) "", nts_modes) == NTS_MODE_DEFAULT &&
+                  net_mode_of((string_address) "On", nts_modes) == NTS_MODE_DEFAULT &&
+                  net_mode_of((string_address) "only ", nts_modes) == NTS_MODE_DEFAULT &&
                   NTS_MODE_DEFAULT == (MOONWATER_STRICT_NET >= STRICT_TIGHT
                                            ? NTS_ONLY : NTS_ON));
 
@@ -76626,13 +76626,13 @@ static fn nts_ke_pieces(void)
 static fn dns_tls_pieces(void)
 {
         check("dns.tls: on, off and only are what they say",
-              dns_tls_mode_of((string_address) "on") == DNS_TLS_ON &&
-                  dns_tls_mode_of((string_address) "off") == DNS_TLS_OFF &&
-                  dns_tls_mode_of((string_address) "only") == DNS_TLS_ONLY);
+              net_mode_of((string_address) "on", dns_tls_modes) == DNS_TLS_ON &&
+                  net_mode_of((string_address) "off", dns_tls_modes) == DNS_TLS_OFF &&
+                  net_mode_of((string_address) "only", dns_tls_modes) == DNS_TLS_ONLY);
         check("dns.tls: no word, or one it does not know, is the tier's default",
-              dns_tls_mode_of((string_address) "") == DNS_TLS_DEFAULT &&
-                  dns_tls_mode_of((string_address) "tls-only") == DNS_TLS_DEFAULT &&
-                  dns_tls_mode_of((string_address) "ON") == DNS_TLS_DEFAULT &&
+              net_mode_of((string_address) "", dns_tls_modes) == DNS_TLS_DEFAULT &&
+                  net_mode_of((string_address) "tls-only", dns_tls_modes) == DNS_TLS_DEFAULT &&
+                  net_mode_of((string_address) "ON", dns_tls_modes) == DNS_TLS_DEFAULT &&
                   DNS_TLS_DEFAULT == (MOONWATER_STRICT_NET >= STRICT_TIGHT
                                           ? DNS_TLS_ONLY : DNS_TLS_OFF));
         check("the four public resolvers offer TLS, and nothing else is taken to",
