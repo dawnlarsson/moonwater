@@ -431,6 +431,7 @@ static b32 exec_context_enter();
 static fn exec_context_leave(b32 held);
 static bool exec_asynchronous;
 static fn shell_child_default(b32 number);
+static bool job_any_stopped();
 static bool exec_inplace_ready(bool restricted);
 static bool floodlight_parent_prepare(bool supervise);
 static bool floodlight_parent_protected HOT_STATE;
@@ -2575,7 +2576,6 @@ bool env_write_destination(const_string name, positive name_len,
 static bool shell_array_set_destination(const_string name, positive length,
     const_string key, positive key_length, const_string value, bool append,
     env_variable address_to destination, bool protect);
-                                   positive hash, const_string value);
 static bool env_write(const_string name, const_string value, bool assignment);
 
 PURE string_address env_get(const_string name);
@@ -7517,7 +7517,7 @@ COLD fn shell_exit(writer write)
                 than here.
         */
         if (shell_is_interactive && !exec_child_process() &&
-            !shell_exit_was_previous && (bool)(array_any(at, job_count, job_table[at].state == JOB_STOPPED)))
+            !shell_exit_was_previous && job_any_stopped())
         {
                 string_format(log_error,
                               shell_bash_compat

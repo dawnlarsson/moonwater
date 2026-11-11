@@ -1064,6 +1064,12 @@ positive shell_job_count()
         return job_count;
 }
 
+// Whether a job is stopped: the shell's exit warns of them.
+static bool job_any_stopped()
+{
+        return array_any(at, job_count, job_table[at].state == JOB_STOPPED);
+}
+
 //      One job's command text and whether it is stopped, for compgen -A job.
 bool shell_job_command(positive at, string_address address_to text,
                        bool address_to stopped)
