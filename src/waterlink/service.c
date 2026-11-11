@@ -797,7 +797,10 @@ typedef struct
         p8 key[32];
         p8 address[16];
         p16 port;
-        p64 seen; // seconds, this machine's clock
+        p64 seen;    // seconds, this machine's clock
+        p64 changed; // seconds: when the address last changed, 0 for never
+        p8 was[16];  // the address it changed from
+        p16 was_port;
 } link_seen_entry;
 
 //      The newest initiation stamp taken from a key: older ones are replays.
@@ -3236,6 +3239,18 @@ static fn link_note_seen(struct link_session address_to s, p64 wall)
                 if (state->seen_count == LINK_PEERS_MAX)
                         return;
                 state->seen_count++;
+                state->seen[at].changed = 0;
+                memory_zero(state->seen[at].was, sizeof state->seen[at].was);
+                state->seen[at].was_port = 0;
+        }
+        else if (memory_compare(state->seen[at].address, s->address, 16) ||
+                 state->seen[at].port != s->port)
+        {
+                //      Heard from elsewhere than last noted: the address
+                //      changed at this second, and the old one is kept.
+                memory_copy(state->seen[at].was, state->seen[at].address, 16);
+                state->seen[at].was_port = state->seen[at].port;
+                state->seen[at].changed = wall;
         }
         memory_copy(state->seen[at].key, s->peer, 32);
         memory_copy(state->seen[at].address, s->address, 16);

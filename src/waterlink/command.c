@@ -330,6 +330,17 @@ static b32 link_status(void)
                                               (string_address)when,
                                               (string_address)place,
                                               (string_address)peer->name);
+                        if (seen->changed)
+                        {
+                                p8 moved_when[32];
+                                p8 was[64];
+
+                                link_ago(seen->changed, moved_when);
+                                link_place_text(seen->was, seen->was_port, was);
+                                string_format(log, "      address changed %s, was %s\n",
+                                              (string_address)moved_when,
+                                              (string_address)was);
+                        }
                 }
                 else if (owner <= 0)
                         string_format(log, "      not heard: the listener is not running  "
