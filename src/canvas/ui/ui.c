@@ -15470,6 +15470,8 @@ static positive ui_popmenu_shown(const char address_to label, p8 address_to into
                         *mnemonic = (p32)byte_to_lower((b8)label[at + 1]);
                         continue;
                 }
+                if (label[at] == '&' && !label[at + 1])
+                        break; // a trailing & is nothing: stepping past it would read past the label's NUL
                 if (label[at] == '&')
                         at++;
                 into[out++] = (p8)label[at];
