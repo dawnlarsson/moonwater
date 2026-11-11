@@ -964,10 +964,6 @@ static bool parse_here_take_span(string_address line, positive length,
         return true;
 }
 
-bool parse_here_line(string_address line)
-{
-        return parse_here_take_span(line, string_length(line), true);
-}
 
 fn parse_here_close()
 {
@@ -1466,7 +1462,7 @@ static p8 address_to parse_here_scan_line(
         lex_nesting calls this only after seeing an unquoted << candidate in a
         command substitution.  A nested lexer/parser frame then runs the exact
         normal token-to-delimiter path above; body lines use the same quoted,
-        <<- and backslash-newline decisions as parse_here_line without retaining
+        <<- and backslash-newline decisions as parse_here_take_span without retaining
         a speculative body copy.  Bash also ends a document at the delimiter
         followed immediately by `)`, and leaves that `)` for the substitution
         closer.  Dash does not: `EOF)` is a body line, so an

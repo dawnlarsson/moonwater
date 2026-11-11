@@ -815,11 +815,6 @@ static PURE awk_slot address_to awk_array_find_hash(awk_array address_to which,
         return null;
 }
 
-static PURE awk_slot address_to awk_array_find(awk_array address_to which,
-                                          string_address key, positive length)
-{
-        return awk_array_find_hash(which, key, length, awk_hash(key, length));
-}
 
 static awk_slot address_to awk_array_place(awk_array address_to which, string_address key,
                                            positive length)
@@ -1891,10 +1886,6 @@ static bool awk_writer_quiet(awk_writer address_to which, positive address_to pr
                system_signal_install(AWK_SIGPIPE, 1, 0, 0, previous);
 }
 
-static fn awk_writer_loud(positive address_to previous)
-{
-        system_signal_action(AWK_SIGPIPE, previous, null, 8);
-}
 
 static fn awk_flush_refused(awk_writer address_to which);
 
@@ -1911,7 +1902,7 @@ static bool awk_writer_flush(awk_writer address_to which)
         which->used = 0;
 
         if (quiet)
-                awk_writer_loud(previous);
+                system_signal_action(AWK_SIGPIPE, (positive *)(previous), null, 8);
         if (put.bytes == staged)
                 return true;
 
@@ -1980,7 +1971,7 @@ static bool awk_writer_put(awk_writer address_to which, string_address data, pos
                                       (address_any)data, length);
 
         if (quiet)
-                awk_writer_loud(previous);
+                system_signal_action(AWK_SIGPIPE, (positive *)(previous), null, 8);
         if (written)
                 return true;
 
@@ -4112,10 +4103,6 @@ static fn awk_reset(awk_place address_to place)
         awk_token_text = place->text;
 }
 
-static fn awk_forget(awk_place address_to place)
-{
-        awk_text_drop(place->text);
-}
 
 static fn awk_expect(b32 what, string_address complaint)
 {
@@ -4650,7 +4637,7 @@ static awk_node address_to awk_pipe_level()
                         break;
                 }
 
-                awk_forget(address_of place);
+                awk_text_drop(((awk_place *)(address_of place))->text);
                 awk_next_token();
 
                 awk_node address_to made = awk_node_new(N_GETLINE);
@@ -4963,7 +4950,7 @@ static awk_node address_to awk_statement()
 
                         if (awk_token == T_IN)
                         {
-                                awk_forget(address_of place);
+                                awk_text_drop(((awk_place *)(address_of place))->text);
                                 awk_next_token();
 
                                 if (awk_token != T_NAME)
@@ -5734,7 +5721,7 @@ static fn awk_eval(awk_node address_to node, awk_value address_to out)
 
                 awk_array address_to array = awk_cell_array(awk_cell_of(node->index));
 
-                awk_set_number(out, awk_array_find(array, key->text, key->length) ? 1 : 0);
+                awk_set_number(out, awk_array_find_hash(array, key->text, key->length, awk_hash(((string_address)(key->text)), ((positive)(key->length)))) ? 1 : 0);
                 awk_text_drop(key);
                 return;
         }
@@ -7005,7 +6992,7 @@ static bool awk_open_next_input()
                 }
 
                 awk_text address_to key = awk_number_key((positive)awk_argv_at++);
-                awk_slot address_to slot = awk_array_find(argv, key->text, key->length);
+                awk_slot address_to slot = awk_array_find_hash(argv, key->text, key->length, awk_hash(((string_address)(key->text)), ((positive)(key->length))));
 
                 awk_text_drop(key);
 

@@ -431,7 +431,6 @@ static b32 exec_context_enter();
 static fn exec_context_leave(b32 held);
 static bool exec_asynchronous;
 static fn shell_child_default(b32 number);
-static bool job_any_stopped();
 static bool exec_inplace_ready(bool restricted);
 static bool floodlight_parent_prepare(bool supervise);
 static bool floodlight_parent_protected HOT_STATE;
@@ -885,14 +884,6 @@ static bool floodlight_descendants_blocking()
    would replace this authorized image with an interpreter policy never saw.
    A script's ENOENT is recognized below and its interpreter is sent through
    the same pinned decision before either image can run. */
-static bipolar floodlight_execute_pinned(
-    bipolar handle, string_address address_to arguments,
-    string_address address_to environment)
-{
-        return system_call_5(
-            syscall(execveat), (positive)handle, (positive)"",
-            (positive)arguments, (positive)environment, AT_EMPTY_PATH);
-}
 
 /* Linux reads at most this much while recognizing a #! line.  Keeping the
    same bound also means an unterminated interpreter name cannot make this
@@ -1084,8 +1075,7 @@ static HOT bipolar shell_exec_file_depth(
                 return -ERROR_ACCESS;
 
         answered = pinned.handle >= 0
-                       ? floodlight_execute_pinned(pinned.handle, arguments,
-                                                   environment)
+                       ? (bipolar)(system_call_5(syscall(execveat), (positive)((bipolar)(pinned.handle)), (positive)"", (positive)((string_address *)(arguments)), (positive)((string_address *)(environment)), AT_EMPTY_PATH))
                        : system_execute(path, arguments, environment);
 
         /* execveat deliberately kept the policy pin close-on-exec. Linux
@@ -2585,7 +2575,6 @@ bool env_write_destination(const_string name, positive name_len,
 static bool shell_array_set_destination(const_string name, positive length,
     const_string key, positive key_length, const_string value, bool append,
     env_variable address_to destination, bool protect);
-static bool env_assign_hashed_span(const_string name, positive name_len,
                                    positive hash, const_string value);
 static bool env_write(const_string name, const_string value, bool assignment);
 
@@ -3857,11 +3846,6 @@ static bool env_assign_name(const_string name, const_string value)
         return env_assign(name, value);
 }
 
-static bool env_assign_hashed_span(const_string name, positive name_len,
-                                   positive hash, const_string value)
-{
-        return env_write_hashed_span(name, name_len, hash, value, true);
-}
 
 /*
         The array surface the expander and the builtins reach arrays through.
@@ -3872,10 +3856,6 @@ static bool env_assign_hashed_span(const_string name, positive name_len,
         reason -- it was text in the word -- and subscript zero is answered
         from the variable's own value rather than from the element table.
 */
-static PURE positive array_index_of(const_string key, positive key_length)
-{
-        return string_digits_max((string_address)key, key_length, null);
-}
 
 typedef struct
 {
@@ -3894,7 +3874,7 @@ static COLD array_location array_locate(env_variable address_to variable,
         array_location located = {0};
         located.keyed = (variable->attributes & SHELL_ARRAY_ASSOCIATIVE) != 0;
         located.key = located.keyed ? memory_hash_33((address_any)key, length)
-                                    : array_index_of(key, length);
+                                    : (positive)(string_digits_max((string_address)((const_string)(key)), (positive)(length), null));
         if (table && (located.keyed || located.key))
         {
                 located.at = located.keyed
@@ -7537,7 +7517,7 @@ COLD fn shell_exit(writer write)
                 than here.
         */
         if (shell_is_interactive && !exec_child_process() &&
-            !shell_exit_was_previous && job_any_stopped())
+            !shell_exit_was_previous && (bool)(array_any(at, job_count, job_table[at].state == JOB_STOPPED)))
         {
                 string_format(log_error,
                               shell_bash_compat
@@ -17088,7 +17068,7 @@ COLD fn shell_trap(writer write)
                                         shell_ignore((b32)number);
                         }
                         else
-                                shell_catch((b32)number);
+                                shell_catch_mode((b32)number, true);
                 }
 
                 trap_conditions_noted();
@@ -20609,11 +20589,6 @@ static HOT b32 shell_tool_call_decided(positive which,
         return tools_stderr_status(shell_tools[which].name, answered);
 }
 
-/* The ordinary way in: this process goes on to do other things. */
-static b32 shell_tool_call(positive which)
-{
-        return shell_tool_call_in(which, false);
-}
 
 /*
         The one name in the table, found without reading the rest of them.
@@ -20627,11 +20602,6 @@ static b32 shell_tool_call(positive which)
         (shell_key_next). A name longer than a byte can hold is not any
         tool's and is answered before the walk.
 */
-static positive shell_tool_key_find(string_address name)
-{
-        return shell_name_scan(name, string_length(name), shell_tool_key,
-                               SHELL_TOOLS, shell_tools);
-}
 
 /*
         Run as the tool the binary was called as, if it was called as one.
@@ -20670,7 +20640,7 @@ static HOT b32 shell_tool_named_in(string_address name, bool own_process)
            skipping it saved a microsecond of nothing -- measured at 130 us a
            run against 129 without -- and none of those five is a tool, so
            the shortcut never decided anything the table would not have. */
-        which = shell_tool_key_find(name);
+        which = (positive)(shell_name_scan((string_address)(name), string_length(((string_address)(name))), shell_tool_key, SHELL_TOOLS, shell_tools));
 
         if (which == SHELL_TOOLS)
                 return -1;
@@ -20678,15 +20648,11 @@ static HOT b32 shell_tool_named_in(string_address name, bool own_process)
         return shell_tool_call_in(which, own_process);
 }
 
-/* Ordinary callers keep the process afterwards, so nothing is locked on. */
-static b32 shell_tool_named(string_address name)
-{
-        return shell_tool_named_in(name, false);
-}
 
 b32 shell_tool_as_called()
 {
-        return shell_tool_named(shell_tool_name(program_argument(0)));
+        /* Ordinary callers keep the process afterwards, so nothing is locked on. */
+        return shell_tool_named_in(shell_tool_name(program_argument(0)), false);
 }
 
 /* A standalone multicall image ends after its selected applet, so it may
@@ -20753,7 +20719,8 @@ static bool shell_tool_run_hashed(string_address name, positive2 named)
                         shell_child_default(SIGNAL_QUIT);
                 }
                 program_arguments_use(shell_argv, (b32)shell_argc);
-                shell_answer(shell_tool_call(which));
+                /* The ordinary way in: this process goes on to do other things. */
+                shell_answer(shell_tool_call_in(which, false));
                 return true;
         }
 
@@ -21768,7 +21735,6 @@ static b32 job_wait_interrupted()
         return signal > 0 ? 128 + (b32)signal : 129;
 }
 
-bool shell_substitution_child(bipolar pid);
 
 static bipolar shell_wait_call(bipolar pid, positive address_to status)
 {
@@ -21811,7 +21777,9 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
 
         if (first >= shell_wait_count)
         {
-                if (shell_bash_compat && shell_substitution_child(job))
+                //      Whether a process is one a <( ) or >( ) started, which wait $! may
+                //      be asked about.
+                if (shell_bash_compat && (bool)(array_any(at, expand_substitutions_count, expand_substitutions[at].child == ((bipolar)(job)))))
                 {
                         positive raw;
                         bipolar got = shell_wait_call(job, address_of raw);
@@ -23409,11 +23377,6 @@ static COLD bool bind_add(string_address spelling, string_address text,
         return true;
 }
 
-static COLD positive bind_variable_index(string_address name)
-{
-        return array_where(at, BIND_VARIABLES,
-                           !string_compare(name, bind_variable_defaults[at].name));
-}
 
 static COLD string_address bind_variable_now(positive at)
 {
@@ -23454,7 +23417,7 @@ static COLD bool bind_line(string_address line, positive keymap)
                 if (size >= sizeof(made))
                         size = sizeof(made) - 1;
                 memory_copy_end(made, name, size);
-                at = bind_variable_index(made);
+                at = (positive)(array_where(at, BIND_VARIABLES, !string_compare(((string_address)(made)), bind_variable_defaults[at].name)));
 
                 if (at >= BIND_VARIABLES)
                 {

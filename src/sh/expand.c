@@ -1337,10 +1337,6 @@ static inline INLINE fn glob_bits_put(glob_bits bits, positive at)
         bits[at >> 6] |= (p64)1 << (at & 63);
 }
 
-static bool glob_bits_any(glob_reach address_to walk, const glob_bits bits)
-{
-        return array_any(at, walk->words, bits[at]);
-}
 
 static fn glob_bits_union(glob_reach address_to walk, glob_bits into,
                           const glob_bits from)
@@ -1470,7 +1466,7 @@ static bool glob_reach_group(glob_reach address_to walk, p8 head,
                 {
                         memory_copy(frontier, added, walk->words * sizeof(p64));
 
-                        while (alive && glob_bits_any(walk, frontier))
+                        while (alive && (bool)(array_any(at, ((glob_reach *)(walk))->words, ((const glob_bits)(frontier))[at])))
                         {
                                 memory_zero(next, walk->words * sizeof(p64));
                                 alive = glob_reach_alternatives(walk, body,
@@ -1511,7 +1507,7 @@ static bool glob_reach_sequence(glob_reach address_to walk, string_address patte
 {
         glob_bits moved = null;
 
-        while (pattern < pattern_end && glob_bits_any(walk, cur))
+        while (pattern < pattern_end && (bool)(array_any(at, ((glob_reach *)(walk))->words, ((const glob_bits)(cur))[at])))
         {
                 p8 want = string_get(pattern);
                 string_address stop;
@@ -5586,12 +5582,6 @@ static fn shell_substitutions_forget()
         expand_substitutions_count = 0;
 }
 
-//      Whether a process is one a <( ) or >( ) started, which wait $! may
-//      be asked about.
-bool shell_substitution_child(bipolar pid)
-{
-        return array_any(at, expand_substitutions_count, expand_substitutions[at].child == pid);
-}
 
 static bool expand_substitution_remember(b32 descriptor, bipolar child)
 {

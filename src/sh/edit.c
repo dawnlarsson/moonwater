@@ -4517,13 +4517,6 @@ static fn edit_window_changed_handler(b32 number)
         edit_window_pending = true;
 }
 
-static bool edit_window_signal(positive address_to previous)
-{
-        return system_signal_install(
-            EDIT_SIGNAL_WINCH, (positive)edit_window_changed_handler,
-            SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART, SIGNAL_CATCH_RESTORER,
-            previous);
-}
 
 static bool edit_window_block(positive address_to previous)
 {
@@ -4639,7 +4632,7 @@ static b32 system_edit()
                 return 1;
         }
 
-        if (!edit_window_signal(window_action))
+        if (!system_signal_install(EDIT_SIGNAL_WINCH, (positive)edit_window_changed_handler, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART, SIGNAL_CATCH_RESTORER, window_action))
         {
                 system_signal_mask(EDIT_SIGNAL_SET_MASK, address_of window_mask, 0, 8);
                 edit_terminal_restore();

@@ -1925,10 +1925,6 @@ fn job_notice()
 
 /* Whether any job is stopped, which is what an interactive shell asks before
    it agrees to leave. Asked by the exit builtin, compiled before this. */
-static bool job_any_stopped()
-{
-        return array_any(at, job_count, job_table[at].state == JOB_STOPPED);
-}
 
 /*
         What a signal is called when a job ends by one.
@@ -7482,8 +7478,7 @@ static bool exec_redirect_var_store(string_address name, positive length,
                 return key && shell_array_set(name, base, key, key_length,
                                               digits, false);
 
-        return env_assign_hashed_span(name, length,
-                                      env_name_hash(name, length), digits);
+        return env_write_hashed_span(name, length, env_name_hash(name, length), digits, true);
 }
 
 static HOT bool exec_redirect_apply(b32 index)
@@ -9179,7 +9174,7 @@ static bool exec_function_import_one(string_address entry)
 
                 waiting = parse_here_open();
                 if (waiting)
-                        parse_here_line(line);
+                        parse_here_take_span(line, string_length(((string_address)(line))), true);
                 else if (!parse_feed(line))
                         goto leave;
 
@@ -10420,7 +10415,7 @@ static bool exec_inline_tool(positive which, b32 address_to status)
         b32 kept_count = program_argument_count();
 
         //      A utility the register confines needs the child the filter
-        //      goes on: asked the way shell_tool_call asks it in a process
+        //      goes on: asked the way shell_tool_call_in asks it in a process
         //      that goes on afterwards, before anything has run, and once.
         if (floodlight_launch_decide(null, shell_argv, shell_argc, true, false, true,
                                      null) != FLOODLIGHT_LAUNCH_ALLOW)
@@ -11517,7 +11512,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                         //      A placed element moves the running index to
                         //      just after it; a bare one has already moved it.
                         if (!keyed && (one->how & EXEC_HELD_ARITH))
-                                next = array_index_of(key, key_length) + 1;
+                                next = (positive)(string_digits_max((string_address)((const_string)(key)), (positive)(key_length), null)) + 1;
                 }
         }
 
@@ -16190,14 +16185,10 @@ static COLD fn exec_wait_hearing(bipolar child)
         }
 }
 
-static PURE bool exec_background_live()
-{
-        return array_any(at, shell_wait_count, !(shell_wait_table[at].flags & SHELL_WAIT_DONE));
-}
 
 static fn exec_wait_background(bipolar child)
 {
-        if (shell_wait_count && exec_background_live())
+        if (shell_wait_count && (bool)(array_any(at, shell_wait_count, !(shell_wait_table[at].flags & SHELL_WAIT_DONE))))
                 exec_wait_hearing(child);
 }
 
@@ -16543,7 +16534,7 @@ static bipolar exec_stage_spawn(b32 index, b32 input, b32 output)
         else
                 words[0] = name;
 
-        return shell_spawn_stage(executable, words, input, output, -1);
+        return shell_spawn_preflighted(SPARK_SPAWN_SHELL, executable, words, input, output, -1);
 }
 
 /*

@@ -117,16 +117,7 @@ static bipolar start_service(string_address path,
         return child;
 }
 
-static bipolar start_network()
-{
-        return start_service((string_address)network_program,
-                             network_argv, 2);
-}
 
-static bipolar start_machine()
-{
-        return start_service((string_address)machine_program, machine_argv, 3);
-}
 
 /*
         How long before the machine process is started again, by how many
@@ -481,10 +472,6 @@ static COLD fn system_kernel_defaults(void)
         a change to it is a red row and not a silent one.
 */
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
-static COLD fn system_desktop_defaults(void)
-{
-        system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
-}
 #endif
 
 static DEAD_END b32 system_init()
@@ -494,7 +481,7 @@ static DEAD_END b32 system_init()
         system_kernel_defaults();
 #endif
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_TIGHT
-        system_desktop_defaults();
+        system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
 #endif
         mount_devpts();
         mount_shm();
@@ -511,12 +498,12 @@ static DEAD_END b32 system_init()
         bipolar wait_error = 0;
 
 #ifndef SHELL_NO_UTILITIES
-        bipolar network = start_network();
+        bipolar network = start_service((string_address)network_program, network_argv, 2);
         positive network_started = clock_monotonic_nanoseconds();
         positive network_failures = 0;
 #endif
 
-        bipolar machine = start_machine();
+        bipolar machine = start_service((string_address)machine_program, machine_argv, 3);
         positive machine_started = clock_monotonic_nanoseconds();
         positive machine_failures = 0;
 
@@ -578,7 +565,7 @@ static DEAD_END b32 system_init()
                                 }
 
                                 network_started = clock_monotonic_nanoseconds();
-                                network = start_network();
+                                network = start_service((string_address)network_program, network_argv, 2);
                                 continue;
                         }
 #endif
@@ -627,7 +614,7 @@ static DEAD_END b32 system_init()
                                 if (pause_ns)
                                         host_pause(pause_ns);
                                 machine_started = clock_monotonic_nanoseconds();
-                                machine = start_machine();
+                                machine = start_service((string_address)machine_program, machine_argv, 3);
                                 continue;
                         }
 

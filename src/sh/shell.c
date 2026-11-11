@@ -31,13 +31,9 @@
 #define SIGNAL_RESTART 0x10000000
 #define SIGNAL_RESTORER 0x04000000
 
-fn shell_signal(b32 number, positive disposition)
-{
-        system_signal_install(number, disposition, 0, 0, null);
-}
 
-#define shell_ignore(n) shell_signal(n, SIGNAL_IGNORE)
-#define shell_default(n) shell_signal(n, SIGNAL_DEFAULT)
+#define shell_ignore(n) system_signal_install(n, SIGNAL_IGNORE, 0, 0, null)
+#define shell_default(n) system_signal_install(n, SIGNAL_DEFAULT, 0, 0, null)
 
 /*
         What was already ignored when this shell started.
@@ -157,10 +153,6 @@ fn shell_catch_mode(b32 number, bool restart)
                               SIGNAL_CATCH_RESTORER, null);
 }
 
-fn shell_catch(b32 number)
-{
-        shell_catch_mode(number, true);
-}
 
 // Whether anybody is watching. A script and a terminal want different
 // things of a shell that has just been told to do something impossible.
@@ -1822,13 +1814,6 @@ static HOT bipolar shell_spawn_preflighted(b32 flags, string_address path,
         later. Naming them here means the stage is spawned instead, and the
         fork never happens.
 */
-bipolar shell_spawn_stage(string_address path,
-                          string_address address_to arguments,
-                          b32 input, b32 output, b32 error)
-{
-        return shell_spawn_preflighted(SPARK_SPAWN_SHELL, path,
-                                       arguments, input, output, error);
-}
 
 static bool shell_spawn_device_open()
 {
@@ -2334,7 +2319,7 @@ static HOT fn run_line_inner(string_address line)
         fed_from = parse_token_count;
 
         if (waiting)
-                parse_here_line(line);
+                parse_here_take_span(line, string_length(((string_address)(line))), true);
         else if (!parse_feed(line))
         {
                 if (parse_here_limit_exceeded())
