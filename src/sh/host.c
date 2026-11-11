@@ -791,7 +791,11 @@ static bipolar host_lock_file(string_address path, positive command,
                               b32 address_to owner)
 {
         host_record_lock lock = {.type = HOST_FILE_WRLCK};
-        bipolar handle = host_lock_open(path);
+        //      Asking whose lock it is makes none: a lock file never made is
+        //      nobody's, so a status or a query never creates one.
+        bipolar handle = command == HOST_FILE_GETLK
+                             ? system_open_at(AT_FDCWD, path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                             : host_lock_open(path);
         bipolar asked;
 
         if (handle < 0)
