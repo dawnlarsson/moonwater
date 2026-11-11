@@ -3334,9 +3334,9 @@ static fn settings_pair_paint(struct ui address_to ui)
         y = baseline + ui_dev(ui, 28 + 24);
         for (int each = 0; each < count; each++, y += ui_dev(ui, UI_LINE))
         {
-                string_address text_line = (string_address)ui_lines_copy(&settings.card_text, each, line, sizeof(line));
+                string_address card_line = (string_address)ui_lines_copy(&settings.card_text, each, line, sizeof(line));
 
-                ui_kit_text_flipped(ui, edge, ui_kit_baseline(ui, y, UI_BODY_MEDIUM), text_line, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
+                ui_kit_text_flipped(ui, edge, ui_kit_baseline(ui, y, UI_BODY_MEDIUM), card_line, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
         }
 }
 
