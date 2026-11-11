@@ -6952,14 +6952,8 @@ static void compositor_slice_flush(const struct compositor_target *slice, int *f
 static int compositor_driver_in(const char *const *names, unsigned int count)
 {
         for (unsigned int at = 0; at < count; at++)
-        {
-                unsigned int same = 0;
-
-                while (names[at][same] && names[at][same] == compositor.driver[same])
-                        same++;
-                if (!names[at][same] && !compositor.driver[same])
+                if (string_equals((string_address)names[at], (string_address)compositor.driver))
                         return 1;
-        }
         return 0;
 }
 
