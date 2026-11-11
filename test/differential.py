@@ -52520,7 +52520,7 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
         #   Only the verbs that keep a setting and say it back as it was given: not a
         #   brightness that moves by a step, a zone a country code expands, a
         #   list or a count of lines, nor a thing that is done.
-        if prefix[0] not in (b"airplane", b"canvas", b"keyboard", b"mouse", b"ntp", b"security", b"splash", b"taskbar",
+        if prefix[0] not in (b"airplane", b"canvas", b"keyboard", b"mouse", b"ntp", b"security", b"taskbar",
                              b"wired", b"dns", b"desktop"):
             continue
         #   A recording is asked for, not kept: "canvas record SECONDS" has no setting to say back.
