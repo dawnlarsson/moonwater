@@ -3276,9 +3276,12 @@ static b32 build_spark(string_address source, string_address output,
                       text_binary, null))
                 return 1;
 
+        //      No .data is the one failure that is fine. A failed copy with
+        //      data present would pad the image with zeroes where the
+        //      initialised globals belong.
         if (build_run(objcopy, "-O", "binary", "--only-section=.data", elf,
-                      data_binary, null))
-                build_write_file(data_binary, "", 0);
+                      data_binary, null) && data_bytes > 0)
+                return 1;
 
         head.magic = SPARK_MAGIC;
         head.version = SPARK_VERSION;
@@ -3292,11 +3295,16 @@ static b32 build_spark(string_address source, string_address output,
         head.reserved[1] = 0;
 
         {
-                b32 handle = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+                //      Written beside the output and renamed over it, so a
+                //      failed write never leaves a truncated image where a good
+                //      one was. close() is checked: it is where a full disk
+                //      on a network filesystem reports itself.
+                string_address temporary = build_join(output, ".tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
+                b32 handle = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0755);
                 positive got = 0;
                 bool good;
 
-                refuse_if(handle < 0, 1, "spark: cannot write %s\n", output);
+                refuse_if(handle < 0, 1, "spark: cannot write %s\n", temporary);
 
                 //      The header occupies the first SPARK_HEADER_SIZE bytes of
                 //      the text region itself, so the image carries no page
@@ -3313,15 +3321,19 @@ static b32 build_spark(string_address source, string_address output,
                         good = good && build_pad(handle, got, data_size);
                 }
 
-                close(handle);
+                good = close(handle) == 0 && good;
+                if (good && rename(temporary, output) < 0)
+                        good = false;
+                if (!good)
+                        unlink(temporary);
 
-                if (good && hook &&
+                refuse_if(!good, 1, "spark: writing %s failed\n", output);
+
+                if (hook &&
                     (build_tool("mkdir", "-p", "dist", null) ||
                      build_tool("cp", elf, "dist/shell.coverage.elf", null)))
                         return string_report(log_error, 1,
                                              "spark: cannot keep the coverage ELF\n");
-
-                refuse_if(!good, 1, "spark: writing %s failed\n", output);
         }
 
         string_format(log, "spark: base=%s entry=%s text=%p data=%p bss=%p\n",
