@@ -211,15 +211,12 @@ static bipolar link_groups_save(link_groups address_to groups)
                                  true);
 }
 
+//      CLOCK_BOOTTIME is the library's: on Darwin, which has no boot clock
+//      under that name, it is CLOCK_MONOTONIC (6 there), which like it keeps
+//      counting while the machine sleeps.
 static p64 link_boot_seconds(void)
 {
-#if defined(MACOS)
-        //      Darwin has no boot clock. CLOCK_MONOTONIC (6 there) is the one
-        //      the pairing window is timed on, and it does not count sleep.
-        return system_clock_ns(6) / 1000000000ull;
-#else
         return system_clock_ns(CLOCK_BOOTTIME) / 1000000000ull;
-#endif
 }
 
 //      The check a name carries in a code's record: its CRC-32, which says
@@ -625,9 +622,9 @@ static fn link_nearby_join(b32 index, p32 address)
 #else
         join.index = index;
 #endif
-        joined = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                                   IP_ADD_MEMBERSHIP, address_of join,
-                                   sizeof join);
+        joined = link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                 IP_ADD_MEMBERSHIP, address_of join,
+                                 sizeof join);
         if (joined < 0 && joined != -EADDRINUSE)
                 return;
         link_nearby.interface[link_nearby.interfaces] = index;
@@ -1089,7 +1086,18 @@ static p8 link_pair_greeted(positive group, p8 address_to key,
         which is the link without discovery, not discovery unconfined. One
         that dies or answers what cannot be believed is ended and started
         again for the next packet.
+
+        The reader is a Linux feature and is not compiled on Darwin. It is
+        built on seccomp (net.c's filter, net_apart_nobody and net_apart_tie
+        are the confinement), and Darwin has no seccomp to confine a child
+        with. Discovery on a Mac is therefore the multicast path of this file
+        only: it joins the group, announces itself and asks, and a machine
+        that hears it greets it; packets that come to it are taken off the
+        socket (link_nearby_receive) and are not read, as when a Linux
+        reader cannot be confined. Reading them unconfined is not the
+        fallback, for the reason above.
 */
+#if !defined(MACOS)
 #define LINK_MDNS_SOCK_SEQPACKET 5
 #define LINK_MDNS_ANSWER_SECONDS 1
 
@@ -1109,18 +1117,10 @@ static struct
 static COLD fn link_mdns_filter_build(net_filter address_to filter)
 {
         static const p32 plain[] = {
-#ifdef MACOS
-            //      Darwin has poll where Linux has ppoll, no clock system call
-            //      (clock_gettime is a library call there), and neither
-            //      rt_sigreturn nor restart_syscall.
-            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(poll),
-            (p32)syscall(munmap), (p32)syscall(madvise), (p32)syscall(exit),
-#else
             (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
             (p32)syscall(clock_gettime), (p32)syscall(munmap), (p32)syscall(madvise),
             (p32)syscall(exit_group), (p32)syscall(exit), (p32)syscall(rt_sigreturn),
             (p32)syscall(restart_syscall),
-#endif
 #ifdef NET_APART_RISCV_HWPROBE
             NET_APART_RISCV_HWPROBE,
 #endif
@@ -1265,6 +1265,21 @@ static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
         address_to found = said.found;
         return said.read != 0;
 }
+#else
+//      Darwin: no reader, so there is none to end and nothing is read.
+static COLD fn link_mdns_end(void)
+{
+}
+
+static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
+                                      struct waterlink_found address_to found)
+{
+        (void)packet;
+        (void)length;
+        memory_zero(found, sizeof(*found));
+        return false;
+}
+#endif
 
 /*
         One mDNS packet from the local link: a question about the service is
@@ -1308,6 +1323,9 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                             .port = network_order_16(source_port),
                             .host = network_order_32(network_load_32(address + 12))};
 
+#if defined(MACOS)
+                        to.length = sizeof to;
+#endif
                         if (reply_length &&
                             link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
                         {
@@ -1402,6 +1420,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
         }
 }
 
+#if !defined(MACOS)
 /* The local IPv4 address the kernel says received this packet. IP_PKTINFO's
    data is ifindex, spec_dst and the header's destination, each four bytes;
    spec_dst is the local address selected for the incoming packet. */
@@ -1418,6 +1437,7 @@ static p32 link_nearby_local(p8 address_to control, positive length,
         (void)byte_reader_skip(&data, 4);
         return byte_reader_u32(&data);
 }
+#endif
 
 /*
         The listener's turn: reload the groups if they changed, and send what
@@ -1486,6 +1506,94 @@ static p64 link_nearby_tick(p64 now)
 }
 
 // Read what is waiting on the mDNS socket, believing only TTL 255.
+#if defined(MACOS)
+/*
+        Read what is waiting on the mDNS socket, believing only TTL 255, with
+        Darwin's recvmsg from libc. It is the same call with the same fields as
+        the Linux read below -- the sender's address, one buffer, and a control
+        buffer for the TTL and the receiving interface -- in Darwin's layouts,
+        which differ in three places:
+
+          struct msghdr has its control length in a 32-bit field, its flags
+          after it, and a 32-bit iovec count, so it is the libc struct and
+          not the Linux record link_message;
+          a control message opens with a 32-bit length, a level and a type
+          (twelve bytes, aligned to four), where Linux's length is 64 bits
+          and its data starts at sixteen. CMSG_FIRSTHDR, CMSG_NXTHDR and
+          CMSG_DATA walk them, and bound the walk by the length the kernel
+          filled;
+          the TTL arrives as a message of type IP_RECVTTL (24), one byte,
+          where Linux's is type IP_TTL with an int; and IP_PKTINFO's
+          message leaves spec_dst zero and names the receiving interface by
+          index, which is looked up among the interfaces joined for its
+          address.
+
+        The reading of the packet is link_nearby_heard, which on Darwin reads
+        nothing (see the reader above): the packet is taken off the socket.
+*/
+static fn link_nearby_receive(p64 now)
+{
+        for (positive turn = 0; turn < 64 && link_nearby.socket >= 0; turn++)
+        {
+                p8 packet[WATERLINK_MDNS_MAX + 1];
+                struct sockaddr_in from;
+                struct iovec part = {packet, sizeof packet};
+                p64 control[8];
+                struct msghdr message;
+                struct cmsghdr address_to header;
+                ssize_t got;
+                p8 address[16];
+                p32 local = 0;
+                b32 ttl = -1;
+
+                memory_zero(address_of from, sizeof from);
+                memory_zero(address_of message, sizeof message);
+                message.msg_name = address_of from;
+                message.msg_namelen = sizeof from;
+                message.msg_iov = address_of part;
+                message.msg_iovlen = 1;
+                message.msg_control = control;
+                message.msg_controllen = sizeof control;
+                got = recvmsg((int)link_nearby.socket, address_of message,
+                              MSG_DONTWAIT);
+                if (got < 0)
+                        return;
+                if ((positive)got > WATERLINK_MDNS_MAX)
+                        continue;
+
+                for (header = CMSG_FIRSTHDR(address_of message); header;
+                     header = CMSG_NXTHDR(address_of message, header))
+                {
+                        if (header->cmsg_level != IPPROTO_IP)
+                                continue;
+                        if (header->cmsg_type == IP_RECVTTL &&
+                            header->cmsg_len >= CMSG_LEN(1))
+                                ttl = *(p8 address_to)CMSG_DATA(header);
+                        else if (header->cmsg_type == IP_PKTINFO &&
+                                 header->cmsg_len >= CMSG_LEN(12))
+                        {
+                                b32 index;
+
+                                memory_copy_apart(address_of index,
+                                                  CMSG_DATA(header),
+                                                  sizeof index);
+                                for (positive at = 0;
+                                     at < link_nearby.interfaces; at++)
+                                        if (link_nearby.interface[at] == index)
+                                                local = link_nearby
+                                                            .interface_address[at];
+                        }
+                }
+                if (ttl != 255)
+                        continue;
+
+                link_address_v4(address,
+                                network_order_32(from.sin_addr.s_addr));
+                link_nearby_heard(packet, (positive)got, address,
+                                  network_order_16(from.sin_port), local, now);
+        }
+}
+#else
 static fn link_nearby_receive(p64 now)
 {
         for (positive turn = 0; turn < 64 && link_nearby.socket >= 0; turn++)
@@ -1525,5 +1633,6 @@ static fn link_nearby_receive(p64 now)
                                                     sizeof control), now);
         }
 }
+#endif
 
 #endif // WATERLINK_NEARBY_INCLUDED

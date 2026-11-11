@@ -52,9 +52,11 @@
 
 /*
         Only the headers whose names do not collide with lib.c's. lib.c spells
-        the Linux values of O_NONBLOCK, AT_FDCWD and the signals itself, so
-        fcntl.h and netinet/in.h, which give Darwin's, are not included: the
-        few Darwin values this file and the link need are written here, from
+        O_NONBLOCK, AT_FDCWD, the signals, the socket constants and errno
+        with Darwin's values on Darwin, as sys/fcntl.h, sys/signal.h and
+        sys/socket.h spell them (service.c includes those after it), so a
+        header that is included meets the same macro. The few Darwin values
+        this file needs that lib.c has no name for are written here, from
         sys/fcntl.h and netinet/in.h, with their structs in Darwin's layout.
 */
 #include <ifaddrs.h>

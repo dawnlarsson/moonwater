@@ -16307,6 +16307,18 @@ static COLD fn net_filter_load(net_filter address_to filter, positive argument)
 static COLD fn net_filter_build(net_filter address_to filter, bool clock)
 {
         static const p32 plain[] = {
+#if defined(MACOS)
+            //      The filter is never installed on Darwin (net_filter_install
+            //      refuses), so this is the list of what its table has: poll
+            //      for ppoll, and no clock, getrandom, mremap or signal-return
+            //      calls to name.
+            (p32)syscall(recvfrom), (p32)syscall(writev),
+            (p32)syscall(sendto), (p32)syscall(poll),
+            (p32)syscall(write), (p32)syscall(close),
+            (p32)syscall(connect), (p32)syscall(bind),
+            (p32)syscall(munmap), (p32)syscall(madvise),
+            (p32)syscall(exit),
+#else
             (p32)syscall(recvfrom), (p32)syscall(writev),
             (p32)syscall(sendto), (p32)syscall(ppoll),
             (p32)syscall(clock_gettime), (p32)syscall(write),
@@ -16316,6 +16328,7 @@ static COLD fn net_filter_build(net_filter address_to filter, bool clock)
             (p32)syscall(madvise), (p32)syscall(exit_group),
             (p32)syscall(exit), (p32)syscall(rt_sigreturn),
             (p32)syscall(restart_syscall),
+#endif
 #ifdef NET_APART_RISCV_HWPROBE
             NET_APART_RISCV_HWPROBE,
 #endif
@@ -16349,8 +16362,12 @@ static COLD fn net_filter_build(net_filter address_to filter, bool clock)
         //      SOCK_CLOEXEC or both), protocol 0.
         call = net_filter_when(filter, (p32)syscall(socket));
         net_filter_require(filter, 0, ~(p32)0, families, array_count(families));
+#if defined(MACOS)
+        net_filter_require(filter, 1, ~(p32)0, kinds, array_count(kinds));
+#else
         net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC),
                            kinds, array_count(kinds));
+#endif
         net_filter_require(filter, 2, ~(p32)0, protocols, array_count(protocols));
         net_filter_answer(filter, SECCOMP_RET_ALLOW);
         net_filter_past(filter, call);
@@ -16403,6 +16420,7 @@ static COLD fn net_filter_build(net_filter address_to filter, bool clock)
 //      True only when the kernel took it. ENOSYS is a refusal like any other.
 static COLD bool net_filter_install(net_filter address_to filter)
 {
+#if defined(LINUX)
         struct
         {
                 p16 count;
@@ -16415,6 +16433,14 @@ static COLD bool net_filter_install(net_filter address_to filter)
         if (installed)
                 atomic_exchange(address_of net_filter_installed, 1);
         return installed;
+#else
+        //      seccomp is Linux's and Darwin has nothing in its place, so the
+        //      filter is not installed: a refusal, as on a Linux kernel that
+        //      will not take it, and a caller that needs the confinement
+        //      fails closed (NET_APART_UNCONFINED).
+        (void)filter;
+        return false;
+#endif
 }
 
 /*
@@ -16427,6 +16453,7 @@ static COLD bool net_filter_install(net_filter address_to filter)
 */
 static COLD bool net_apart_nobody(void)
 {
+#if defined(LINUX)
         bipolar status;
 
         if (system_call_1(syscall(getuid), 0) && system_call_1(syscall(geteuid), 0))
@@ -16441,6 +16468,12 @@ static COLD bool net_apart_nobody(void)
         status = system_call_3(syscall(setresuid), NET_APART_NOBODY,
                                NET_APART_NOBODY, NET_APART_NOBODY);
         return status >= 0 || status == -EINVAL;
+#else
+        //      Part of the confinement the filter finishes, which Darwin
+        //      cannot do (no setresuid system call, no seccomp): it fails
+        //      closed with the rest.
+        return false;
+#endif
 }
 
 /* After the ids change, which clears both: no core and no ptrace by its
@@ -16448,10 +16481,17 @@ static COLD bool net_apart_nobody(void)
    client went first), and no exec that grants anything. */
 static COLD bool net_apart_tie(bipolar parent)
 {
+#if defined(LINUX)
         return system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 &&
                system_call_5(syscall(prctl), PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) == 0 &&
                system_call(syscall(getppid)) == parent &&
                system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+#else
+        //      prctl is Linux's. Darwin has no call that dies with the parent
+        //      or refuses a privilege on exec, so the tie is not made.
+        (void)parent;
+        return false;
+#endif
 }
 
 /* What a confined child does: its work, with its answer written to answer,

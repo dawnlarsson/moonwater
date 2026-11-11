@@ -45,11 +45,12 @@
 #define WATERLINK_SERVICE_INCLUDED
 
 #if defined(MACOS)
-/*      Darwin's own names for what the signal, poll and child paths wait on:
-        kqueue for a child's exit, poll for the wait, a handler and a pipe for
-        the signals, and the socket options and multicast membership of
-        discovery. These are libc calls, made by name, because the system call
-        table has no Darwin answer for ppoll, signalfd, pidfd or waitid.
+/*      Darwin's own names for what the signal and child paths wait on:
+        kqueue for a child's exit, a handler and a pipe for the signals, and
+        the socket options and multicast membership of discovery. The wait
+        itself is lib.util.c's system_poll_wait, which is poll there. These
+        are libc calls, made by name, because the system call table has no
+        Darwin answer for ppoll, signalfd, pidfd or waitid.
         <unistd.h> is not included: it declares syscall(), which lib.c has as
         a macro, and <time.h> is not included either, since lib.c defines its
         own struct timespec. */
@@ -57,7 +58,6 @@
 #include <net/if.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <signal.h>
 #include <sys/event.h>
 #include <sys/fcntl.h>
@@ -185,6 +185,13 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #endif
 #define UDP_SEGMENT 103
 #define UDP_GRO 104
+#if defined(MACOS)
+//      UDP_SEGMENT and UDP_GRO are Linux's, and so is the sendmsg that carries
+//      the first: a Darwin datagram goes out one to a call.
+#define LINK_GSO false
+#else
+#define LINK_GSO true
+#endif
 
 #define LINK_KEY_REQUEST 1
 #define LINK_KEY_ANSWER 2
@@ -262,7 +269,12 @@ static positive link_grant_asked(p8 ask)
 
 static p64 link_now(void)
 {
+#if defined(MACOS)
+        //      Darwin's CLOCK_MONOTONIC is 6; the 1 below is Linux's.
+        return system_clock_ns(CLOCK_MONOTONIC) / 1000;
+#else
         return system_clock_ns(1) / 1000;
+#endif
 }
 
 // All digits and nothing else, below a million; -1 otherwise.
@@ -689,6 +701,9 @@ static fn link_socket_address(socket_address_internet6 address_to into,
 {
         *into = (socket_address_internet6){
             .family = AF_INET6, .port = network_order_16(port)};
+#if defined(MACOS)
+        into->length = sizeof *into;
+#endif
         memory_copy(into->host, address, 16);
 }
 
@@ -1241,6 +1256,10 @@ static positive link_destination(socket_address_internet6 address_to into,
                         (socket_address_internet){
                             .family = AF_INET, .port = network_order_16(port),
                             .host = network_order_32(network_load_32(address + 12))};
+#if defined(MACOS)
+                ((socket_address_internet address_to)into)->length =
+                        sizeof(socket_address_internet);
+#endif
                 return sizeof(socket_address_internet);
         }
         link_socket_address(into, address, port);
@@ -1255,7 +1274,11 @@ static bipolar link_udp_send_to(p8 address_to bytes, positive length,
         bipolar sent;
 
         if (link_self.v4 && !link_address_mapped(address))
+#if defined(MACOS)
+                return -EAFNOSUPPORT; // no IPv6 here
+#else
                 return -97; // EAFNOSUPPORT: no IPv6 here
+#endif
         sent = socket_send((b32)link_self.socket, bytes, length, MSG_NOSIGNAL,
                            address_of to, size);
         return sent;
@@ -1594,11 +1617,35 @@ static fn link_stream_set(struct link_stream address_to stream, bipolar fd,
         shares it. A socket cannot be opened again and is asked with
         MSG_DONTWAIT on each call instead. A file never waits, and is kept as
         it is: opened again it would lose its offset and O_APPEND.
+
+        Darwin has no /proc. Its /dev/fd/N is no new description either: an
+        open there is a dup of the descriptor, the same open file, and the
+        open flags (O_NONBLOCK among them) are not applied to it. So on Darwin
+        the descriptor is passed as it is and made nonblocking itself, which
+        is the description the shell that started the client shares; the
+        flags it had are kept, and link_stdio_restore puts them back when the
+        client ends, so the terminal is not left nonblocking for that shell.
 */
+#if defined(MACOS)
+static b32 link_stdio_flags[3] = {-1, -1, -1};
+
+static fn link_stdio_restore(void)
+{
+        for (b32 at = 0; at < 3; at++)
+                if (link_stdio_flags[at] >= 0)
+                {
+                        (void)fcntl((int)at, F_SETFL, (int)link_stdio_flags[at]);
+                        link_stdio_flags[at] = -1;
+                }
+}
+#endif
+
 static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
                           p8 key, p8 flags, positive access)
 {
+#if !defined(MACOS)
         p8 path[] = "/proc/self/fd/0";
+#endif
         file_facts facts;
         p32 format;
 
@@ -1613,9 +1660,31 @@ static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
                 return;
         }
         format = facts.mode & MODE_FORMAT;
+#if !defined(MACOS)
         path[14] = (p8)('0' + fd);
+#endif
         if (format == MODE_SOCKET)
                 stream->socket = true;
+#if defined(MACOS)
+        else if (format == MODE_PIPE || format == MODE_CHARACTER)
+        {
+                int had = fcntl((int)fd, F_GETFL);
+
+                (void)access;
+                if (had >= 0 && (had & O_NONBLOCK))
+                        return;
+                if (had >= 0 && fcntl((int)fd, F_SETFL, had | O_NONBLOCK) == 0)
+                        link_stdio_flags[fd] = (b32)had;
+                else
+                {
+                        /* A blocking fallback would freeze the whole link
+                           on empty input or a full output pipe. */
+                        stream->error = -(bipolar)errno;
+                        stream->fd = -1;
+                        stream->done = true;
+                }
+        }
+#else
         else if (format == MODE_PIPE || format == MODE_CHARACTER)
         {
                 bipolar own = system_open_at(AT_FDCWD, path,
@@ -1633,6 +1702,7 @@ static fn link_stream_own(struct link_stream address_to stream, bipolar fd,
                         stream->done = true;
                 }
         }
+#endif
 }
 
 static fn link_stream_close(struct link_session address_to s,
@@ -2313,29 +2383,18 @@ static fn link_watch(system_poll_descriptor address_to watch,
 }
 
 /*
-        The descriptor wait the listener and the client make: ppoll on Linux,
-        and on Darwin poll, which takes the same pollfd layout and events
-        (POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, as the SYSTEM_POLL names
-        spell them). A timeout is rounded up to the millisecond, so a timer
-        never fires before its time; a limit longer than poll takes (about 24
-        days) is clamped to that, and the caller wakes and waits again.
+        The descriptor wait the listener and the client make: system_poll_wait
+        (lib.util.c), which is ppoll on Linux and poll on Darwin, with the same
+        pollfd layout and events (POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
+        as the SYSTEM_POLL names spell them). On Darwin a timeout is rounded up
+        to the millisecond, so a timer never fires before its time, and a limit
+        longer than poll takes (about 24 days) is clamped to that: the caller
+        wakes and waits again.
 */
 static bipolar link_poll_wait(system_poll_descriptor address_to watch,
                               positive count, timespec address_to limit)
 {
-#if defined(MACOS)
-        p64 milliseconds = limit->tv_sec > 2000000
-                               ? 0x7fffffffull
-                               : limit->tv_sec * 1000 +
-                                     (limit->tv_nsec + 999999) / 1000000;
-
-        if (milliseconds > 0x7fffffffull)
-                milliseconds = 0x7fffffffull;
-        return poll((struct pollfd address_to)watch, (unsigned int)count,
-                    (int)milliseconds);
-#else
         return system_poll_wait(watch, count, limit, null);
-#endif
 }
 
 /*      One descriptor's readiness, for the paths that wait on a single one (a
@@ -2344,14 +2403,7 @@ static bipolar link_poll_wait(system_poll_descriptor address_to watch,
         is not open, which a readiness probe must not take for readable. */
 static bipolar link_wait_readable(bipolar handle, timespec address_to limit)
 {
-#if defined(MACOS)
-        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_READ, 0};
-        bipolar ready = link_poll_wait(address_of waited, 1, limit);
-
-        return ready > 0 && (waited.returned & SYSTEM_POLL_INVALID) ? -9 : ready;
-#else
         return descriptor_wait_readable(handle, limit, null);
-#endif
 }
 
 /*
@@ -3142,9 +3194,6 @@ static bipolar link_receive(link_run address_to run)
                 }
                 got[at].length = (b32)bytes;
                 got[at].message.control_length = 0;
-                //      Darwin's sockaddr opens with its length and the family in
-                //      the next byte; Linux's has the family as the leading halfword.
-                from[at].family = ((p8 address_to)(from + at))[1];
                 count = (bipolar)(at + 1);
         }
 #else
@@ -3293,6 +3342,30 @@ static fn link_stamps_load(void)
 
 // The listener ------------------------------------------------------------------
 
+/*      A datagram socket that does not wait and is not inherited across an
+        exec. Linux says both in the type it asks for. Darwin's socket() takes
+        no flags (it has no SOCK_NONBLOCK or SOCK_CLOEXEC), so there it is a
+        plain socket and two fcntl calls, and a socket they fail on is closed
+        and its error returned, not used blocking. */
+static bipolar link_datagram_socket(b32 family)
+{
+#if defined(MACOS)
+        bipolar handle = socket_new(family, SOCK_DGRAM, 0);
+
+        if (handle >= 0 && (fcntl((int)handle, F_SETFD, FD_CLOEXEC) < 0 ||
+                            fcntl((int)handle, F_SETFL, O_NONBLOCK) < 0))
+        {
+                bipolar error = -(bipolar)errno;
+
+                socket_close((b32)handle);
+                return error;
+        }
+        return handle;
+#else
+        return socket_new(family, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+#endif
+}
+
 static bipolar link_socket_open(p16 port, p8 any)
 {
         p8 anywhere[16] = {0};
@@ -3300,15 +3373,11 @@ static bipolar link_socket_open(p16 port, p8 any)
         b32 one = 1;
         b32 big = 4 << 20;
         socket_address_internet6 self;
-        bipolar handle = socket_new(AF_INET6,
-                                    SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-                                    0);
+        bipolar handle = link_datagram_socket(AF_INET6);
 
         link_self.v4 = handle < 0;
         if (link_self.v4)
-                handle = socket_new(AF_INET,
-                                    SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-                                    0);
+                handle = link_datagram_socket(AF_INET);
         if (handle < 0)
                 return handle;
         if (!link_self.v4)
@@ -3699,7 +3768,7 @@ static b32 link_serve(string_address ready_text)
         }
         link_nearby.socket = -1;
         link_self.server = true;
-        link_self.gso = true;
+        link_self.gso = LINK_GSO;
         link_self.state_dirty = true;
         link_stamps_load();
 
@@ -4040,7 +4109,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         link_self.socket = link_socket_open(0, false);
         return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
-        link_self.gso = true;
+        link_self.gso = LINK_GSO;
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
@@ -4066,6 +4135,9 @@ static b32 link_client_run(string_address name, p8 kind,
         s->reads[0].done = true;
         link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
         link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
+#if defined(MACOS)
+        scope_exit(link_stdio_restore());
+#endif
         signals = link_signals_open(true);
 
         for (;;)
