@@ -38,7 +38,6 @@
 #define SETTINGS_FIELD 3u
 #define SETTINGS_STEP 4u
 #define SETTINGS_ACTION 5u
-#define SETTINGS_COMMAND 6u // a row of what moonwater help says: its words are typed
 #define SETTINGS_INFO 7u    // a value that only says, and that a person cannot set
 // The rows of a list a verb's output makes (a network in range, a device kept), which come and go as it is read again.
 #define SETTINGS_NETWORK 8u
