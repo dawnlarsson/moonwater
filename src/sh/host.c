@@ -20992,6 +20992,9 @@ static bipolar locale_ntp_apply(bool by_hand)
                                          "waiting for it\n");
                 lock = host_lock(LOCALE_NTP_LOCK_PATH, true);
         }
+        //      Without the lock another query could move the clock too: no walk.
+        if (lock < 0)
+                return SNTP_NO_REPLY;
         failed = locale_ntp_walk(by_hand);
         radio_unlock(lock);
         return failed;
