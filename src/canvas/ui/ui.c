@@ -38,6 +38,9 @@
 // The window list's format and reader (list.h, which the compositor reads too).
 #include "list.h"
 
+// The flexbox layout of a tree of boxes (layout.h): the rectangles the view (ui_view_begin) declares a screen into.
+#include "layout.h"
+
 // What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
 #include "text.c"
 

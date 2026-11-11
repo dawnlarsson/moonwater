@@ -150640,6 +150640,169 @@ static fn check_kit_confirm_repeat(void)
         ui_event_context(&press);
 }
 
+/*
+        The kit's layout (ui/layout.h) on trees whose rectangles are worked by hand from the rules in its head comment: the grow
+        shares in whole pixels with the pixel the floors leave to the first, a grow child frozen at its max, the justifies, the
+        aligns, a shrink that stops at a min, margins and pads in a fit size, a percent with a max, a scroll element's offset
+        clamped, and the limits.
+*/
+static struct ui_tree layout_tree;
+
+// A root that fills the viewport, a row (dir 0) or a column (dir 1).
+static struct ui_node address_to layout_root(int dir)
+{
+        struct ui_node address_to n;
+
+        ui_tree_begin(&layout_tree);
+        n = ui_tree_open(&layout_tree);
+        n->dir = dir;
+        n->size[0].kind = n->size[1].kind = UI_GROW;
+        n->size[0].value = n->size[1].value = 1;
+        return n;
+}
+
+// A child of the innermost open element, closed at once: w by h pixels, a zero being a fit size.
+static struct ui_node address_to layout_child(int w, int h)
+{
+        struct ui_node address_to n = ui_tree_open(&layout_tree);
+
+        if (w)
+                n->size[0].kind = UI_FIXED, n->size[0].value = w;
+        if (h)
+                n->size[1].kind = UI_FIXED, n->size[1].value = h;
+        ui_tree_close(&layout_tree);
+        return n;
+}
+
+static fn check_kit_layout(void)
+{
+        struct ui_node address_to root, a, b, c;
+
+        // Grow shares: 300 across, a fixed 50, two gaps of 10, so 230 left for weights 1 and 2: 76 and 153, the pixel left over to the first.
+        root = layout_root(0);
+        root->gap = 10;
+        a = layout_child(50, 0);
+        b = layout_child(0, 0), b->size[0].kind = UI_GROW, b->size[0].value = 1;
+        c = layout_child(0, 0), c->size[0].kind = UI_GROW, c->size[0].value = 2;
+        ui_tree_close(&layout_tree);
+        ui_tree_run(&layout_tree, 300, 100);
+        check("kit layout: the root fills the viewport, a fixed child keeps its size and a fit one fills the cross axis, and the grow children share what is left by weight in whole pixels, the pixel the floors leave to the first (77 and 153 of 230)",
+              root->x == 0 && root->y == 0 && root->w == 300 && root->h == 100 && a->x == 0 && a->w == 50 && a->h == 100 && b->x == 60 && b->w == 77 &&
+                  c->x == 147 && c->w == 153 && c->x + c->w == 300);
+        c->size[0].max = 100;
+        ui_tree_run(&layout_tree, 300, 100);
+        check("kit layout: a grow child that would pass its max is frozen at it and the rest share what that leaves (130 and 100)",
+              a->w == 50 && b->x == 60 && b->w == 130 && c->x == 200 && c->w == 100);
+
+        // Justify: three children of 20 in 100 leave 40 (41 in 101, which the first gap takes the odd pixel of).
+        {
+                static const int justify[] = {UI_START, UI_CENTER, UI_END, UI_BETWEEN, UI_AROUND};
+                static const int want[][3] = {{0, 20, 40}, {20, 40, 60}, {40, 60, 80}, {0, 40, 80}, {6, 39, 72}};
+                b32 same = true;
+
+                root = layout_root(0);
+                a = layout_child(20, 20), b = layout_child(20, 20), c = layout_child(20, 20);
+                ui_tree_close(&layout_tree);
+                for (int k = 0; k < 5; k++)
+                {
+                        root->justify = justify[k];
+                        ui_tree_run(&layout_tree, 100, 40);
+                        same = same && a->x == want[k][0] && b->x == want[k][1] && c->x == want[k][2];
+                }
+                check("kit layout: start, centre, end, between and around place the children in the room the sizes leave", same);
+                root->justify = UI_BETWEEN;
+                ui_tree_run(&layout_tree, 101, 40);
+                check("kit layout: between gives the first gaps the pixels that do not divide", a->x == 0 && b->x == 41 && c->x == 81);
+        }
+
+        // Align: one child of 20 in a row 100 tall.
+        {
+                root = layout_root(0);
+                a = layout_child(20, 20);
+                ui_tree_close(&layout_tree);
+                root->align = UI_CENTER;
+                ui_tree_run(&layout_tree, 100, 100);
+                b32 centre = a->y == 40;
+                root->align = UI_END;
+                ui_tree_run(&layout_tree, 100, 100);
+                b32 end = a->y == 80;
+                root->align = UI_START;
+                ui_tree_run(&layout_tree, 100, 100);
+                b32 start = a->y == 0 && a->h == 20;
+                a->size[1].kind = UI_FIT;
+                root->align = UI_STRETCH;
+                ui_tree_run(&layout_tree, 100, 100);
+                check("kit layout: align places a child across the row, and stretch makes a fit one fill it", centre && end && start && a->y == 0 && a->h == 100);
+        }
+
+        // Shrink: 80 and 60 in 100 give up 40 by weight and size (23 and 17), and stop at a min; a child with no weight does not give.
+        root = layout_root(0);
+        a = layout_child(80, 0), b = layout_child(60, 0);
+        ui_tree_close(&layout_tree);
+        a->size[0].shrink = b->size[0].shrink = 1;
+        ui_tree_run(&layout_tree, 100, 20);
+        check("kit layout: children too big for the parent give up the excess in proportion to their size, the pixel left over to the first (57 and 43)",
+              a->w == 57 && b->w == 43 && b->x == 57);
+        b->size[0].min = 55;
+        ui_tree_run(&layout_tree, 100, 20);
+        check("kit layout: a child that would shrink past its min stops at it and the others give up the rest (45 and 55)",
+              a->w == 45 && b->w == 55 && b->x == 45);
+        a->size[0].shrink = b->size[0].shrink = 0;
+        b->size[0].min = 0;
+        ui_tree_run(&layout_tree, 100, 20);
+        check("kit layout: children with no shrink weight keep their size and run past the end of the parent", a->w == 80 && b->w == 60 && b->x == 80);
+
+        // Pad, margin, gap and a fit size: a column with a pad of 10 and a gap of 5 round a child 50 by 20 with a margin and one 30 by 10.
+        ui_tree_begin(&layout_tree);
+        root = ui_tree_open(&layout_tree);
+        root->dir = 1, root->gap = 5;
+        for (int k = 0; k < 4; k++)
+                root->pad[k] = 10;
+        a = layout_child(50, 20);
+        a->margin[0] = 3, a->margin[1] = 4, a->margin[2] = 2, a->margin[3] = 1;
+        b = layout_child(30, 10);
+        ui_tree_close(&layout_tree);
+        ui_tree_run(&layout_tree, 200, 200);
+        check("kit layout: a fit size is the children with their margins and gaps, and the pad; they are placed inside the pad and clear of their margins",
+              root->w == 77 && root->h == 58 && a->x == 13 && a->y == 12 && b->x == 10 && b->y == 38);
+
+        // Percent is of the inner size and takes the limits; grow takes what is left.
+        root = layout_root(0);
+        a = layout_child(0, 0), a->size[0].kind = UI_PERCENT, a->size[0].value = 25;
+        b = layout_child(0, 0), b->size[0].kind = UI_PERCENT, b->size[0].value = 50, b->size[0].max = 80;
+        c = layout_child(0, 0), c->size[0].kind = UI_GROW, c->size[0].value = 1;
+        ui_tree_close(&layout_tree);
+        ui_tree_run(&layout_tree, 200, 50);
+        check("kit layout: a percent is of the parent's inner size and is held to its max, and a grow child takes what is left of it",
+              a->w == 50 && b->w == 80 && c->w == 70 && c->x == 130);
+
+        // Scroll: three children of 60 in 100 are not shrunk, run past the end, and are moved back by the offset, which is held to the length.
+        root = layout_root(1);
+        root->scroll = 1;
+        a = layout_child(0, 60), b = layout_child(0, 60), c = layout_child(0, 60);
+        ui_tree_close(&layout_tree);
+        a->size[1].shrink = 1;
+        root->offset = 50;
+        ui_tree_run(&layout_tree, 100, 100);
+        check("kit layout: a scroll element keeps its children's sizes, moves them back by its offset, and answers the length they take",
+              root->extent == 180 && root->offset == 50 && a->y == -50 && b->y == 10 && c->y == 70 && a->h == 60);
+        root->offset = 500;
+        ui_tree_run(&layout_tree, 100, 100);
+        check("kit layout: a scroll offset past the end is held to the end", root->offset == 80 && a->y == -80 && c->y == 40);
+
+        // The limits: elements past the tree's room and a second root are refused and counted, and nothing is written outside the arrays.
+        root = layout_root(0);
+        for (int k = 0; k < UI_TREE_NODES + 4; k++)
+                layout_child(1, 1);
+        ui_tree_close(&layout_tree);
+        a = ui_tree_open(&layout_tree);
+        ui_tree_close(&layout_tree);
+        ui_tree_run(&layout_tree, 400, 10);
+        check("kit layout: the elements past the room and a second root are refused and counted, and the others are laid out",
+              layout_tree.count == UI_TREE_NODES && layout_tree.dropped == 6 && a == &layout_tree.discard && layout_tree.depth == 0 &&
+                  layout_tree.node[UI_TREE_NODES - 1].x == UI_TREE_NODES - 2);
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -164156,6 +164319,7 @@ b32 main()
         check_kit_slider_row();
         check_kit_finger_pull();
         check_kit_confirm_repeat();
+        check_kit_layout();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
