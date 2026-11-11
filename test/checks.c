@@ -150831,7 +150831,7 @@ static int view_check_build(int width, int limit)
                 ui_host(&view_check_list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
                 ui_row(.class = "foot")
                 {
-                        ui_button("One", .class = "action outlined", .says = "do one", .on = view_check_press, .arg = 0, .grow = ui_width() < 480);
+                        ui_button("One", .class = "action.outlined", .says = "do one", .on = view_check_press, .arg = 0, .grow = ui_width() < 480);
                         ui_button("Two", .class = "action outlined", .on = view_check_press, .arg = 1, .grow = ui_width() < 480);
                 }
         }
@@ -150885,7 +150885,7 @@ static fn check_kit_view(void)
         ui_col(.class = "card nonesuch scroll")
         {
                 ui_host(&view_check_head, .class = "head");
-                ui_host(&view_check_list, .class = "primary outlined", .w = 20, .h = 10);
+                ui_host(&view_check_list, .class = "primary.outlined", .w = 20, .h = 10);
         }
         height = ui_view_end(&view_check);
         check("kit view: classes are laid over each other in order, an unknown name is counted, and a card's pad is its class's",

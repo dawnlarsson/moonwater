@@ -694,7 +694,7 @@ static fn launcher_power_row(void)
 {
         ui_row(.class = "foot")
                 for (int at = 0; at < LAUNCHER_POWERS; at++)
-                        ui_button(language_text(launcher_powers[at].label), .class = "action outlined", .says = language_text(launcher_powers[at].says),
+                        ui_button(language_text(launcher_powers[at].label), .class = "action.outlined", .says = language_text(launcher_powers[at].says),
                                   .on = launcher_power_act, .arg = at, .grow = ui_width() < LAUNCHER_NARROW);
 }
 

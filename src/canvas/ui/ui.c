@@ -8425,8 +8425,8 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
             ui_view_draw(ui, &view, keys);           // painted (the window has the keys: the focused button shows its ring)
             asks = ui_view_event(ui, &view, event);  // an event: UI_VIEW_DRAW (due again), _TAKEN (the view's), _QUIT (a handler said stop)
 
-        Style is the class and nothing else: .class names the classes of ui_classes, a blank apart, and a later name wins over an
-        earlier; a class says a gap, a pad, a margin, a size, a justify, an align, a shrink, a type and an ink by theme role, a fill by
+        Style is the class and nothing else: .class names the classes of ui_classes, a blank or a dot apart ("card.title": the language
+        check reads a literal with a blank as English, and a class is no English), and a later name wins over an earlier; a class says a gap, a pad, a margin, a size, a justify, an align, a shrink, a type and an ink by theme role, a fill by
         role and a corner, and a button's variant. An app writes no colour, size or pad of its own; .w, .h, .grow, .shrink and the
         limits are for the few sizes a class cannot say (a list as tall as its rows). A name the table lacks is counted in
         ui_view.unknown, which a check reads, and is no style. Layout is flexbox: row or column, gap, justify, align, padding, margin,
@@ -8465,7 +8465,7 @@ struct ui_rect
 struct ui_props
 {
         int kind;
-        const char address_to class;      // class names, a blank apart
+        const char address_to class;      // class names, a blank or a dot apart
         int w, h;                         // a size, logical pixels; 0: the class's, else the content's
         int grow, shrink;                 // the weights on the parent's main axis; 0: the class's
         int min_w, min_h, max_w, max_h;   // the limits, logical pixels
@@ -8557,7 +8557,7 @@ static inline short ui_pick(short before, short said)
         return said ? said : before;
 }
 
-// What a class string stands for: each name, a blank apart, found in the table and laid over the ones before it.
+// What a class string stands for: each name, a blank or a dot apart, found in the table and laid over the ones before it.
 static fn ui_class_resolve(struct ui_view address_to v, const char address_to names, struct ui_class address_to into)
 {
         memory_zero(into, sizeof(*into));
@@ -8566,9 +8566,9 @@ static fn ui_class_resolve(struct ui_view address_to v, const char address_to na
                 int length = 0;
                 positive at = 0;
 
-                while (*names == ' ')
+                while (*names == ' ' || *names == '.')
                         names++;
-                while (names[length] && names[length] != ' ')
+                while (names[length] && names[length] != ' ' && names[length] != '.')
                         length++;
                 while (length && at < UI_CLASSES)
                 {
