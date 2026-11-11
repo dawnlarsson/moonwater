@@ -14,6 +14,8 @@
         The most a splash file may be is SPLASH_FILE_MOST bytes, and each side is at most SPLASH_SIDE_MOST
         pixels. Canvas draws the picture at its own size, in device pixels, centred; it is never scaled.
 */
+#ifndef CANVAS_SPLASH_INCLUDED
+#define CANVAS_SPLASH_INCLUDED
 #define SPLASH_PATH_IMAGE "/root/canvas.splash.ppm" // the copy moonwater splash keeps; absent is the built-in picture
 #define SPLASH_PATH_STATE "/root/canvas.splash"     // "off" when the splash is off; absent otherwise
 #define SPLASH_FILE_MOST (1u << 20)                 // the most bytes a splash file may be: 1 MiB
@@ -83,3 +85,5 @@ static const char *splash_parse(const unsigned char *bytes, unsigned long length
         image->rgb = bytes + at;
         return 0;
 }
+
+#endif
