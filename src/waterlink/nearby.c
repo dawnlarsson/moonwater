@@ -54,6 +54,19 @@
 #define LINK_ASK_EVERY 30000000ull
 #define LINK_GREET_AGAIN 10000000ull     // the same place, not sooner
 #define LINK_ANSWER_AGAIN 100000ull      // a one-shot asker's answer, not sooner
+#define LINK_PENDING 4
+#define LINK_PREFER_WAIT 5000000ull      // the last-heard place, before the others
+
+/*      Why discovery has not linked a machine: the same numbers and words the
+        link's other reasons use, so a status or doctor line reads the same
+        whichever path said it. Stable: a new reason takes the next number. */
+#ifndef LINK_REASON_LINKED
+#define LINK_REASON_LINKED 0
+#define LINK_REASON_NO_ROUTE 1
+#define LINK_REASON_NO_REPLY 2
+#define LINK_REASON_BAD_KEY 3
+#define LINK_REASON_CODE_REFUSED 4
+#endif
 
 /*      The sweep for a waiting code (link_sweep_turn): four sweeps, at the
         start and after 15, 45 and 105 seconds, each of every host of this
@@ -362,6 +375,26 @@ struct link_greeted {
         p64 at;
 };
 
+/*
+        An announcement from a place a known member is not at, for a member
+        the announcement may be: the member's last-heard place is greeted at
+        once, and the place the announcement came from only if that place has
+        not answered by LINK_PREFER_WAIT. The announcement carries no key, so
+        it cannot say which member it is; the answer does, and the record's
+        address and stamp say whether the last-heard place answered.
+*/
+struct link_pending {
+        p8 key[32];
+        p8 last[16];
+        p16 last_port;
+        p32 seen;
+        p8 heard[16];
+        p16 heard_port;
+        positive group;
+        p64 due;
+        p8 used;
+};
+
 typedef struct
 {
         link_groups groups;
@@ -384,6 +417,10 @@ typedef struct
         p64 interfaces_looked;
         p8 labels_ready;
         struct link_greeted greeted[LINK_GREETED];
+        struct link_pending pending[LINK_PENDING];
+        p8 linked;       // a member's greeting opened here
+        p8 refused_code; // a one-use code turned a greeting away
+        p8 no_route;     // the last send found no route to its place
         positive greeted_next;
         p8 name[WATERLINK_NAME_MAX];
         p64 expiry_look;
@@ -555,6 +592,8 @@ static p8 link_pair_keep(positive group, p8 address_to key,
                 (!held.expect ||
                  held.expect == link_name_check((string_address)offered,
                                                 WATERLINK_NAME_MAX)));
+        if (!open)
+                link_nearby.refused_code = true;
         peer = link_peer_keyed(address_of peers, key);
         if (!peer && open && peers.count < LINK_PEERS_MAX &&
             !crypto_same(key, link_self.me.public, 32))
@@ -1047,6 +1086,8 @@ static fn link_nearby_reload(p64 now)
                 link_nearby_close();
 
         (void)link_nearby_labels();
+        //      Deferred places index the groups as they were: none survives a change.
+        memory_zero(link_nearby.pending, sizeof link_nearby.pending);
         link_nearby.announced = 0;
         link_nearby.asked = 0;
         link_nearby.next_announce = now;
@@ -1056,6 +1097,16 @@ static fn link_nearby_reload(p64 now)
                                          ? LINK_SWEEPS
                                          : 0;
         link_nearby.sweep_next = now;
+}
+
+/*      The outcome of one send, from the sender's answer (its length, or a
+        negative errno). Whichever way it went, the last send says whether it
+        found no route, which is what discovery reports as no route. */
+static p8 link_nearby_outcome(bipolar sent, positive length)
+{
+        link_nearby.no_route = sent == -ENETUNREACH || sent == -EHOSTUNREACH ||
+                               sent == -ENETDOWN;
+        return sent == (bipolar)length;
 }
 
 static p8 link_nearby_send(p8 address_to packet, positive length,
@@ -1078,12 +1129,15 @@ static p8 link_nearby_send(p8 address_to packet, positive length,
         /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
            If it fails, send would retain the preceding interface selection
            and put this interface's announcement onto another link. */
-        if (link_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                            IP_MULTICAST_IF, address_of out, sizeof out) < 0)
-                return false;
-        return sendto((b32)link_nearby.socket, packet, length, 0,
-                      (struct sockaddr *)address_of to, sizeof to) ==
-               (ssize_t)length;
+        bipolar set = link_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                      IP_MULTICAST_IF, address_of out, sizeof out);
+        ssize_t sent;
+
+        if (set < 0)
+                return link_nearby_outcome(set, length);
+        sent = sendto((b32)link_nearby.socket, packet, length, 0,
+                      (struct sockaddr *)address_of to, sizeof to);
+        return link_nearby_outcome(sent < 0 ? -errno : (bipolar)sent, length);
 #else
         link_mreqn out = {0, 0, link_nearby.interface[interface_at]};
         socket_address_internet to = {
@@ -1093,13 +1147,51 @@ static p8 link_nearby_send(p8 address_to packet, positive length,
         /* IP_MULTICAST_IF is part of the destination, not a best-effort hint.
            If it fails, send would retain the preceding interface selection
            and put this interface's announcement onto another link. */
-        if (socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
-                              IP_MULTICAST_IF, address_of out, sizeof out) < 0)
-                return false;
-        return socket_send((b32)link_nearby.socket, packet, length,
-                           MSG_NOSIGNAL, address_of to, sizeof to) ==
-               (bipolar)length;
+        bipolar set = socket_option_set((b32)link_nearby.socket, IPPROTO_IP,
+                                        IP_MULTICAST_IF, address_of out, sizeof out);
+
+        if (set < 0)
+                return link_nearby_outcome(set, length);
+        return link_nearby_outcome(
+            socket_send((b32)link_nearby.socket, packet, length, MSG_NOSIGNAL,
+                        address_of to, sizeof to),
+            length);
 #endif
+}
+
+/*
+        Why discovery has not linked a machine, as a number for a status or
+        doctor to keep and the words it prints. Linked is a greeting that
+        opened; a one-use code that turned one away is a code refused; a send
+        that found no route is no route; anything else is no reply on the port
+        (discovery hears nothing it can answer, and cannot tell a machine that
+        is off from one that does not know this key). Bad key is never said
+        here: discovery never reads a reply, and the reply that does not verify
+        is the client's to say.
+*/
+static __attribute__((unused)) positive link_discovery_reason(void)
+{
+        if (link_nearby.linked)
+                return LINK_REASON_LINKED;
+        if (link_nearby.refused_code)
+                return LINK_REASON_CODE_REFUSED;
+        if (link_nearby.no_route)
+                return LINK_REASON_NO_ROUTE;
+        return LINK_REASON_NO_REPLY;
+}
+
+/* The words for a reason, as the link's other reasons print them. */
+static __attribute__((unused)) string_address link_discovery_reason_text(positive reason)
+{
+        static const string_address texts[] = {
+            "linked",
+            "no route to the address",
+            "no reply on the link port (it is off, unreachable, or does not know this machine's key)",
+            "reply but bad key: the machine there is not the one paired",
+            "code refused: it was used already, or by another machine",
+        };
+
+        return reason < array_count(texts) ? texts[reason] : "unknown reason";
 }
 
 static p8 link_nearby_announce(p32 ttl)
@@ -1225,6 +1317,86 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
 }
 
 /*
+        A place an announcement came from, deferred behind the member's
+        last-heard place (link_pending). With the table full nothing is
+        deferred, and the next announcement from the place asks again.
+*/
+static fn link_pair_defer(positive group, struct waterlink_peer address_to peer,
+                          p8 address_to heard, p16 port, p64 now)
+{
+        struct link_pending address_to slot = null;
+
+        for (positive at = 0; at < LINK_PENDING && !slot; at++)
+                if (!link_nearby.pending[at].used)
+                        slot = link_nearby.pending + at;
+        if (!slot)
+                return;
+        memory_copy(slot->key, peer->key, 32);
+        memory_copy(slot->last, peer->address, 16);
+        slot->last_port = peer->port;
+        slot->seen = peer->seen;
+        memory_copy(slot->heard, heard, 16);
+        slot->heard_port = port;
+        slot->group = group;
+        slot->due = now + LINK_PREFER_WAIT;
+        slot->used = true;
+}
+
+/*
+        A deferred place whose time is up: the member's record says whether its
+        last-heard place answered, which it did if the record has moved or been
+        stamped since the place was greeted. If it did not, the place the
+        announcement came from is greeted now. A record that has gone since is
+        not greeted for.
+*/
+static fn link_pending_due(struct link_pending address_to slot, p64 now)
+{
+        link_peers peers;
+        p8 silent = false;
+
+        link_peers_load(address_of peers);
+        for (positive at = 0; at < peers.count; at++)
+        {
+                struct waterlink_peer address_to peer = peers.peer + at;
+
+                if (!crypto_same(peer->key, slot->key, 32))
+                        continue;
+                silent = !memory_compare(peer->address, slot->last, 16) &&
+                         peer->port == slot->last_port && peer->seen == slot->seen;
+                break;
+        }
+        if (silent && link_greet_allowed(slot->heard, now))
+                link_pair_begin(slot->group, slot->heard, slot->heard_port, now,
+                                false);
+}
+
+/*
+        The deferred places that are due, and when the next one is (0 for
+        none). Each is looked at once and dropped, greeted or not.
+*/
+static p64 link_pending_turn(p64 now)
+{
+        p64 next = 0;
+
+        for (positive at = 0; at < LINK_PENDING; at++)
+        {
+                struct link_pending address_to slot = link_nearby.pending + at;
+
+                if (!slot->used)
+                        continue;
+                if (now < slot->due)
+                {
+                        if (!next || slot->due < next)
+                                next = slot->due;
+                        continue;
+                }
+                slot->used = false;
+                link_pending_due(slot, now);
+        }
+        return next;
+}
+
+/*
         A greeting says when its sender sent it, and one that is not about now
         is a recording played back: from a member that was forgotten, and
         whose marker has been dropped since, it would keep that member again,
@@ -1264,6 +1436,8 @@ static p8 link_pair_greeted(positive group, p8 address_to key,
                            network_load_32(hello + 4), address, port,
                            address_of accepted))
                 link_pair_begin(group, address, port, now, true);
+        if (accepted)
+                link_nearby.linked = true;
         return accepted;
 }
 
@@ -1285,19 +1459,25 @@ static p8 link_pair_greeted(positive group, p8 address_to key,
         that dies or answers what cannot be believed is ended and started
         again for the next packet.
 
-        The reader is a Linux feature and is not compiled on Darwin. It is
-        built on seccomp (net.c's filter, net_apart_nobody and net_apart_tie
-        are the confinement), and Darwin has no seccomp to confine a child
-        with. Discovery on a Mac is therefore the multicast path of this file
-        only: it joins the group, announces itself and asks, and a machine
-        that hears it greets it; packets that come to it are taken off the
-        socket (link_nearby_receive) and are not read, as when a Linux
-        reader cannot be confined. Reading them unconfined is not the
-        fallback, for the reason above.
+        Linux confines the child with seccomp (net.c's filter, net_apart_nobody
+        and net_apart_tie). Darwin has no seccomp, so its child is confined by
+        Seatbelt (link_mdns_confine, below). The two differ in that one
+        function and in the socket kind the pair is made with; everything
+        else in the reader, the parent's side included, is the same code on
+        both systems. A child that cannot be confined on either reads
+        nothing, so a Mac that cannot confine it hears no machine nearby,
+        as a Linux box without seccomp does.
 */
-#if !defined(MACOS)
 #define LINK_MDNS_SOCK_SEQPACKET 5
 #define LINK_MDNS_ANSWER_SECONDS 1
+/* Darwin's unix socket pairs have no SOCK_SEQPACKET; a datagram is a whole
+   message there too, and it is the kind the pair is made with on that system. */
+#if defined(MACOS)
+#define LINK_MDNS_SOCK_KIND 2 /* SOCK_DGRAM */
+#define LINK_MDNS_DESCRIPTORS 1024 /* the child closes these bar its channel */
+#else
+#define LINK_MDNS_SOCK_KIND (LINK_MDNS_SOCK_SEQPACKET | SOCK_CLOEXEC)
+#endif
 
 struct link_mdns_said
 {
@@ -1312,6 +1492,7 @@ static struct
         p8 refused;
 } link_mdns = {-1, -1, false};
 
+#if !defined(MACOS)
 static COLD fn link_mdns_filter_build(net_filter address_to filter)
 {
         static const p32 plain[] = {
@@ -1336,14 +1517,48 @@ static COLD fn link_mdns_filter_build(net_filter address_to filter)
         net_filter_answer(filter, SECCOMP_RET_ALLOW);
 }
 
-static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
+/*      The child's confinement: seccomp, and the descriptors but the channel
+        closed, the child made nobody's. False when any of it did not take,
+        which is the child's exit to say. */
+static COLD bool link_mdns_confine(b32 channel, bipolar parent)
 {
         p32 kept[1] = {(p32)channel};
         net_filter filter;
 
         link_mdns_filter_build(address_of filter);
-        if (!descriptors_close_outside(3, kept, 1) || !net_apart_nobody() ||
-            !net_apart_tie(parent) || !net_filter_install(address_of filter))
+        return descriptors_close_outside(3, kept, 1) && net_apart_nobody() &&
+               net_apart_tie(parent) && net_filter_install(address_of filter);
+}
+#else
+/*      Darwin's child: Seatbelt, which is what Darwin has in place of
+        seccomp. sandbox_init is libsystem's; it is declared here and not taken
+        from <sandbox.h>, whose deprecation would reach the build. The profile
+        denies everything, and allows only what a read of a packet is made of
+        (the sysctls libc consults and the metadata of files it already has
+        open). The descriptors are closed first, since a profile does not close
+        what is open: the channel alone is kept. A profile that does not take,
+        or a descriptor that will not close, leaves the child unconfined and it
+        exits so, as on Linux. */
+extern int sandbox_init(const char *profile, unsigned long long flags, char **error);
+
+#define LINK_MDNS_PROFILE                                                    \
+        "(version 1)(deny default)(allow sysctl-read)(allow file-read-metadata)"
+
+static COLD bool link_mdns_confine(b32 channel, bipolar parent)
+{
+        char *error = null;
+
+        (void)parent;
+        for (positive fd = 3; fd < LINK_MDNS_DESCRIPTORS; fd++)
+                if (fd != (positive)channel)
+                        (void)system_call_1(syscall(close), fd);
+        return sandbox_init(LINK_MDNS_PROFILE, 0, &error) == 0;
+}
+#endif
+
+static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
+{
+        if (!link_mdns_confine(channel, parent))
                 system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
         for (;;)
         {
@@ -1394,8 +1609,8 @@ static COLD p8 link_mdns_start(void)
         bipolar parent = system_call(syscall(getpid));
         bipolar child;
 
-        if (system_call_4(syscall(socketpair), AF_UNIX,
-                          LINK_MDNS_SOCK_SEQPACKET | SOCK_CLOEXEC, 0, (positive)ends) < 0)
+        if (system_call_4(syscall(socketpair), AF_UNIX, LINK_MDNS_SOCK_KIND, 0,
+                          (positive)ends) < 0)
                 return false;
         child = system_fork();
         if (!child)
@@ -1463,21 +1678,6 @@ static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
         address_to found = said.found;
         return said.read != 0;
 }
-#else
-//      Darwin: no reader, so there is none to end and nothing is read.
-static COLD fn link_mdns_end(void)
-{
-}
-
-static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
-                                      struct waterlink_found address_to found)
-{
-        (void)packet;
-        (void)length;
-        memory_zero(found, sizeof(*found));
-        return false;
-}
-#endif
 
 /*
         One mDNS packet from the local link: a question about the service is
@@ -1581,6 +1781,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 for (positive group = 0; group < link_nearby.groups.count; group++)
                 {
                         p8 known = false;
+                        struct waterlink_peer address_to last = null;
                         p32 once = link_nearby.groups.record[group].flags;
 
                         //      A code that is used up greets nobody, and one that
@@ -1593,12 +1794,26 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                              link_nearby.groups.record[group].expect))
                                 continue;
 
+                        //      A member of this group on this port, heard at the
+                        //      place the announcement came from (known), or at
+                        //      another (last): the first such one is kept.
                         for (positive p = 0; p < peers.count && !known; p++)
-                                known = peers.peer[p].group ==
-                                                link_nearby.keys[group].mark &&
-                                        peers.peer[p].port == instance->port &&
-                                        !memory_compare(peers.peer[p].address,
-                                                        address, 16);
+                        {
+                                struct waterlink_peer address_to peer = peers.peer + p;
+
+                                if (peer->group != link_nearby.keys[group].mark ||
+                                    peer->port != instance->port)
+                                        continue;
+                                if (!memory_compare(peer->address, address, 16))
+                                        known = true;
+                                else if (!last)
+                                        last = peer;
+                        }
+                        if (known)
+                                continue;
+                        //      The last-heard place of a known member is greeted
+                        //      first, and the place the announcement came from
+                        //      only if that one does not answer (link_pending).
                         //      Anyone may announce, naming any port, as many as
                         //      a packet holds: the ring of places greeted is
                         //      also the budget, LINK_GREETED greetings in
@@ -1606,7 +1821,15 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                         //      cannot turn this machine into a sprayer of
                         //      handshakes. A greeting back to a member whose
                         //      own greeting opened is not held to it.
-                        if (!known && link_greet_allowed(address, now))
+                        if (last)
+                        {
+                                if (link_greet_allowed(last->address, now))
+                                        link_pair_begin(group, last->address,
+                                                        last->port, now, false);
+                                link_pair_defer(group, last, address,
+                                                instance->port, now);
+                        }
+                        else if (link_greet_allowed(address, now))
                                 link_pair_begin(group, address, instance->port,
                                                 now, false);
                 }
@@ -1706,6 +1929,12 @@ static p64 link_nearby_tick(p64 now)
                 wake = link_nearby.next_announce;
         if (link_nearby.next_ask < wake)
                 wake = link_nearby.next_ask;
+        {
+                p64 due = link_pending_turn(now);
+
+                if (due && due < wake)
+                        wake = due;
+        }
         return wake;
 }
 
@@ -1732,8 +1961,8 @@ static p64 link_nearby_tick(p64 now)
           index, which is looked up among the interfaces joined for its
           address.
 
-        The reading of the packet is link_nearby_heard, which on Darwin reads
-        nothing (see the reader above): the packet is taken off the socket.
+        The reading of the packet is link_nearby_heard, the same on both
+        systems: the packet goes to the confined reader (link_mdns_read_apart).
 */
 static fn link_nearby_receive(p64 now)
 {
