@@ -22772,7 +22772,10 @@ static b32 text_cut()
                 bool record_taken = false;
                 bool record_ended = false;
 
-                if ((whole_lines || bytes_lines) && !whole_record)
+                //      The pooled walk counts characters as UTF-8 only, so a
+                //      GB18030 or EUC-JP -c stays on the serial walk.
+                if ((whole_lines || bytes_lines) && !whole_record &&
+                    !(characters && mb_charset != TEXT_CHARSET_UTF8))
                 {
                         cut_pieces pieces = {.by_field = whole_lines,
                                              .complement = complement,
