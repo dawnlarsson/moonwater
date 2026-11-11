@@ -357,8 +357,7 @@ static b32 text_invalid_context(string_address message, p8 letter, bool help)
                       (string_address)spelled);
 
         if (help)
-                string_format(writer_stderr, "Try '%s --help' for more information.\n",
-                              text_name);
+                file_try_help(text_name, 0);
 
         return 1;
 }
@@ -368,8 +367,7 @@ static b32 text_argmatch(string_address option, string_address value,
 {
         text_complain("%s: invalid argument '%w' for '%w'\n%s%s",
                       text_name, writer_terminal_quoted_name, value, writer_terminal_quoted_name, option, list, usage ? usage : (string_address) "");
-        return string_report(writer_stderr, 1, "Try '%s --help' for more information.\n",
-                      text_name);
+        return file_try_help(text_name, 1);
 }
 
 static fn sed_write_diagnostic(bipolar reason, positive buffer);
@@ -401,9 +399,7 @@ static b32 text_operand_trouble(string_address what, string_address word,
                 string_format(writer_stderr, "%s: %s\n", text_name, what);
         if (note)
                 string_format(writer_stderr, "%s\n", note);
-        string_format(writer_stderr, "Try '%s --help' for more information.\n",
-                      text_name);
-        return 1;
+        return file_try_help(text_name, 1);
 }
 
 // The tools this file stands for that say anything but "write error" and the
@@ -6988,9 +6984,8 @@ enum
 // GNU accepts an unambiguous prefix of the four --total values. A bare "a"
 // is ambiguous between auto and always, while "o" and "n" are already
 // enough to choose only and never.
-static const string_address wc_totals[4] = {
-    (string_address) "auto", (string_address) "always",
-    (string_address) "only", (string_address) "never"};
+static const file_word wc_total_words[] = {
+    {"auto", 0}, {"always", 1}, {"only", 2}, {"never", 3}};
 
 static fn wc_row(positive lines, positive words, positive chars, positive bytes,
                  positive longest, positive width, string_address name)
@@ -7680,36 +7675,17 @@ static fn wc_utf8_finish(wc_utf8 address_to state)
 
 static positive wc_total_mode;
 
-// argmatch's refusal: a word that begins two or more of the values is
-// ambiguous (the empty word begins all four), any other word is invalid.
-static void wc_total_refused(string_address value)
-{
-        positive length = string_length(value);
-        positive begins = 0;
-
-        for (positive i = 0; i < 4; i++)
-                if (length <= string_length(wc_totals[i]) &&
-                    !string_compare_max(value, wc_totals[i], length))
-                        begins++;
-
-        text_complain("%s: %s argument '%w' for '--total'\nValid arguments are:\n"
-                      "  - 'auto'\n  - 'always'\n  - 'only'\n  - 'never'\n"
-                      "Try '%s --help' for more information.\n",
-                      text_name, begins > 1 ? "ambiguous" : "invalid",
-                      writer_terminal_quoted_name, value, text_name);
-}
-
 static bool wc_option_seen(p8 letter, string_address value)
 {
         if (letter != 'T' || !value)
                 return true;
 
-        if (!text_word_of(value, wc_totals, 4, address_of wc_total_mode))
-        {
-                wc_total_refused(value);
-                return false;
-        }
+        b32 chosen = file_word_among(text_name, "--total", value, wc_total_words, 4);
 
+        if (chosen < 0)
+                return false;
+
+        wc_total_mode = (positive)chosen;
         return true;
 }
 
@@ -9873,22 +9849,14 @@ static bool tail_value_refused(string_address what, string_address said,
 */
 static bool tail_follow_word(string_address said)
 {
-        static const string_address words[] = {
-            (string_address) "descriptor", (string_address) "name"};
-        positive chosen = 0;
+        static const file_word words[] = {{"descriptor", 'd'}, {"name", 'n'}};
+        b32 chosen = file_word_among(text_name, "--follow", said, words, array_count(words));
 
-        if (said[0] && text_word_of(said, words, 2, address_of chosen))
-        {
-                tail_follow_mode = chosen ? 'n' : 'd';
-                return true;
-        }
+        if (chosen < 0)
+                return false;
 
-        text_complain("%s: %s argument '%w' for '--follow'\n"
-                      "Valid arguments are:\n  - 'descriptor'\n  - 'name'\n"
-                      "Try '%s --help' for more information.\n",
-                      text_name, said[0] ? "invalid" : "ambiguous",
-                      writer_terminal_quoted_name, said, text_name);
-        return false;
+        tail_follow_mode = (p8)chosen;
+        return true;
 }
 
 /*
@@ -14264,10 +14232,6 @@ static const argument_option fmt_options[] = {
 */
 static p8 fmt_digit_misplaced()
 {
-        static const string_address long_names[] = {
-            "crown-margin", "goal=", "prefix=", "split-only",
-            "tagged-paragraph", "uniform-spacing", "width=", "help", "version",
-        };
         positive count = (positive)program_argument_count();
         string_address first = count > 1 ? program_argument(1) : null;
         positive at = first && first[0] == '-' && byte_is_digit(first[1]) ? 2 : 1;
@@ -14284,32 +14248,14 @@ static p8 fmt_digit_misplaced()
                                 return 0;
 
                         positive name = (positive)(string_first_of_or_end(word + 2, '=') - (word + 2));
-                        positive found = array_count(long_names);
-                        positive matches = 0;
-
-                        for (positive which = 0; which < array_count(long_names); which++)
-                        {
-                                string_address candidate = long_names[which];
-                                positive whole = string_length(candidate) - (candidate[string_length(candidate) - 1] == '=');
-
-                                if (name > whole || memory_compare(candidate, word + 2, name))
-                                        continue;
-                                if (name == whole)
-                                {
-                                        found = which;
-                                        matches = 1;
-                                        break;
-                                }
-                                found = which;
-                                matches++;
-                        }
+                        const argument_option address_to option =
+                            argument_option_long(fmt_options, word + 2, name, true);
 
                         // Unknown, ambiguous, --help or --version: getopt or
                         // the option itself answers before any digit.
-                        if (matches != 1 || found >= 7)
+                        if (!option)
                                 return 0;
-                        if (long_names[found][string_length(long_names[found]) - 1] == '=' &&
-                            !word[2 + name])
+                        if ((option->mode & ARGUMENT_REQUIRED) && !word[2 + name])
                                 at++;
                         continue;
                 }
@@ -14320,15 +14266,18 @@ static p8 fmt_digit_misplaced()
 
                         if (byte_is_digit(character))
                                 return character;
-                        if (character == 'w' || character == 'g' || character == 'p')
+
+                        const argument_option address_to option =
+                            argument_option_short(fmt_options, character);
+
+                        if (!option)
+                                return 0;
+                        if (option->mode & ARGUMENT_REQUIRED)
                         {
                                 if (!word[letter + 1])
                                         at++;
                                 break;
                         }
-                        if (character != 'c' && character != 's' &&
-                            character != 't' && character != 'u')
-                                return 0;
                 }
         }
 
@@ -14769,8 +14718,7 @@ static bipolar pr_number_option(string_address text, bipolar floor,
 // usage(EXIT_FAILURE): the pointer at --help, and out.
 static fn pr_usage_exit()
 {
-        string_format(writer_stderr, "Try '%s --help' for more information.\n",
-                      text_name);
+        file_try_help(text_name, 1);
         exit(text_done(1));
 }
 
