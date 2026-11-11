@@ -1,8 +1,8 @@
 /*
         The on-screen keyboard, as a window on the compositor in userspace.
 
-        A strip along the bottom of the primary screen, above the panel: four rows of keys drawn with the kit's buttons (ui.c), and
-        nothing round them. The keyboard never has the keys. Its window is WINDOW_NO_KEYS, so a press on a key does not move the keys
+        A strip along the bottom of the primary screen, above the panel: four rows of keys laid out by the kit's view and drawn with
+        the kit's buttons (ui.c), and nothing round them. The keyboard never has the keys. Its window is WINDOW_NO_KEYS, so a press on a key does not move the keys
         from the field that has them (the compositor never gives a WINDOW_NO_KEYS window the keys, when it is made or pressed), and
         WINDOW_NO_TAB, so it is in no focus cycle. A key is sent to the window with the keys as a key of the keyboard's own would be:
         its evdev code, the character the key makes, and the modifiers (Shift), through the window table's key ring (windows_keyboard_send,
@@ -39,7 +39,7 @@
 
 #define OSK_WIDTH 640     // logical pixels: the keyboard's width, its keys and their gaps are the kit's (never wider than the output)
 #define OSK_TOUCH 48      // a key's touch target, logical: the rows are never shorter
-#define OSK_GAP 6         // between keys, logical
+#define OSK_GAP UI_KEY_GAP // between keys, logical (the classes "keys" and "keyrow" say it for the view)
 #define OSK_ROWS 4
 #define OSK_COLS 12       // the most keys a row has (spacers count)
 #define OSK_PAGES 3
@@ -214,22 +214,15 @@ static void osk_letters_build(unsigned int name)
                 osk_letter_keys[3][k] = osk_bottom[k];
 }
 
-// A row's keys in a page: the count is the keys a row has, the spacers included.
-static int osk_row_count(int page, int row)
-{
-        int count = 0;
-
-        for (int k = 0; k < OSK_COLS; k++)
-                count += osk_page_keys[page][row][k].kind != 0 || osk_page_keys[page][row][k].span != 0;
-        return count;
-}
-
-// The keyboard's state. keys are the kit's controls, one a key of the page shown (the spacers and the empty ones have no size).
+// The keyboard's state. keys are the kit's controls, one a key of the page shown (the spacers and the empty ones are none); the view
+// lays the page out (osk_layout), and box is the rectangle it gave each key.
 static struct
 {
         struct window_row own;
         struct ui ui;
         struct ui_control keys[OSK_ROWS * OSK_COLS];
+        struct ui_view view;
+        struct ui_rect box[OSK_ROWS * OSK_COLS];
         char words[OSK_ROWS * OSK_COLS][4]; // the character a key makes, drawn: upper case under Shift
         int width, height, shown;
         int screen_width, screen_height;    // the output the keyboard is sized for (osk_metrics); another one sizes it again (osk_tick)
@@ -276,50 +269,34 @@ static unsigned int osk_modifiers(void)
         return osk.shift ? WINDOW_KEY_SHIFT : 0;
 }
 
-// The keys of the page shown, laid out in the window's pixels. A row fills the width: each key is its span of the row's halves.
+// The keys of the page shown, laid out in the window's pixels by the view: the four rows are a column and each key a box weighted by its
+// span of the row's halves (a spacer is one too, and is drawn nowhere), so the rows fill the window and the view does the arithmetic. The
+// keys are the physical keys' and are not read from the right, so what the view mirrors there is turned back.
 static void osk_layout(void)
 {
         struct ui address_to ui = &osk.ui;
-        int pad = ui_px(ui, UI_PAD), gap = ui_px(ui, OSK_GAP), row_h, top = pad;
 
-        row_h = (osk.height - 2 * pad - (OSK_ROWS - 1) * gap) / OSK_ROWS;
-        for (int row = 0; row < OSK_ROWS; row++)
+        ui_view_begin(&osk.view, ui, osk.width, -osk.height);
+        ui_col(.class = "keys")
+                for (int row = 0; row < OSK_ROWS; row++)
+                        ui_row(.class = "keyrow")
+                                for (int k = 0; k < OSK_COLS && osk_page_keys[osk.page][row][k].span; k++)
+                                        ui_host(&osk.box[row * OSK_COLS + k], .grow = osk_page_keys[osk.page][row][k].span);
+        ui_view_end(&osk.view);
+        for (int index = 0; index < OSK_ROWS * OSK_COLS; index++)
         {
-                int count = osk_row_count(osk.page, row), total = 0, avail, x = pad;
+                const struct osk_key address_to key = &osk_page_keys[osk.page][index / OSK_COLS][index % OSK_COLS];
+                const struct ui_rect box = osk.box[index];
+                struct ui_control address_to c = &osk.keys[index];
 
-                for (int k = 0; k < count; k++)
-                        total += osk_page_keys[osk.page][row][k].span;
-                avail = osk.width - 2 * pad - (count > 1 ? (count - 1) * gap : 0);
-                for (int k = 0; k < OSK_COLS; k++)
-                {
-                        const struct osk_key address_to key = &osk_page_keys[osk.page][row][k];
-                        struct ui_control address_to c = &osk.keys[row * OSK_COLS + k];
-                        int w, index = row * OSK_COLS + k;
-
-                        if (k >= count)
-                        {
-                                c->w = c->h = 0;
-                                c->kind = 0;
-                                continue;
-                        }
-                        w = (int)((long)avail * key->span / total);
-                        c->kind = key->kind == OSK_NONE ? 0 : UI_BUTTON;
-                        c->variant = key->kind == OSK_SHIFT && osk.shift ? UI_BUTTON_PRIMARY : UI_BUTTON_KEY;
-                        c->disabled = 0;
-                        c->x = x * 100 / ui->scale, c->y = top * 100 / ui->scale;
-                        c->w = w * 100 / ui->scale, c->h = row_h * 100 / ui->scale;
-                        if (key->kind == OSK_CHAR)
-                        {
-                                unsigned int ch = osk_character(key);
-
-                                osk.words[index][0] = (char)ch, osk.words[index][1] = 0;
-                                c->label = osk.words[index];
-                        }
-                        else
-                                c->label = key->word;
-                        x += w + gap;
-                }
-                top += row_h + gap;
+                c->kind = key->kind == OSK_NONE ? 0 : UI_BUTTON;
+                c->variant = key->kind == OSK_SHIFT && osk.shift ? UI_BUTTON_PRIMARY : UI_BUTTON_KEY;
+                c->disabled = 0;
+                c->x = ui_mirror(box.x, box.w, 0, osk.width) * 100 / ui->scale, c->y = box.y * 100 / ui->scale;
+                c->w = box.w * 100 / ui->scale, c->h = box.h * 100 / ui->scale;
+                if (key->kind == OSK_CHAR)
+                        osk.words[index][0] = (char)osk_character(key), osk.words[index][1] = 0;
+                c->label = key->kind == OSK_CHAR ? osk.words[index] : key->word;
         }
 }
 

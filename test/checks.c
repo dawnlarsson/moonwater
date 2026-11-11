@@ -150893,6 +150893,21 @@ static fn check_kit_view(void)
                   view_check.item[3].look.variant == UI_ROLE(UI_BUTTON_OUTLINED) && view_check_head.x == UI_GAP4 && view_check_head.y == UI_GAP4 &&
                   view_check_head.w == 300 - 2 * UI_GAP4 && height == 2 * UI_GAP4 + band + UI_GAP3 + 10);
 
+        // A negative limit is the height exactly (the on-screen keyboard's, which the compositor gives it): at 100 percent, with the margin 16
+        // and the gap 6, two rows share 113 - 32 - 6 = 75 as 38 and 37, and the keys of a row of 168 weighted 2 and 3 share 162 as 65 and 97.
+        ui_view_begin(&view_check, &view_check_ui, 200, -113);
+        ui_col(.class = "keys")
+                for (int row = 0; row < 2; row++)
+                        ui_row(.class = "keyrow")
+                        {
+                                ui_host(&view_check_head, .grow = 2);
+                                ui_host(&view_check_list, .grow = 3);
+                        }
+        height = ui_view_end(&view_check);
+        check("kit view: a negative limit is the window's height exactly, shared by the rows and in a row by the weights, no pixel left over",
+              height == 113 && view_check.unknown == 0 && view_check_head.x == 16 && view_check_head.y == 60 && view_check_head.w == 65 &&
+                  view_check_head.h == 37 && view_check_list.x == 87 && view_check_list.y == 60 && view_check_list.w == 97 && view_check_list.h == 37);
+
         // A variable the build read: its readers' rows are due again when it changes, by the app or by ui_set, and once.
         view_check_rows = 3;
         view_check_build(560, 1000);

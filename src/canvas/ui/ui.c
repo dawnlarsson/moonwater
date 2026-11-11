@@ -3800,6 +3800,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 // A key of the on-screen keyboard (osk.c): a button whose corners are the kit's 8 px, not the pill a button is.
 #define UI_BUTTON_KEY 4
 #define UI_BUTTON_KEY_RADIUS 8
+#define UI_KEY_GAP 6 // between the keys, and the rows, of the on-screen keyboard (osk.c), logical
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
 #define UI_SLIDER_VERTICAL 4 // stood on its end, with no label or number: the mixer's strips (ui_slider_draw turns it)
@@ -8418,7 +8419,7 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
                                     ui_button(label[at], .class = "action outlined", .on = act, .arg = at, .grow = ui_width() < 480);
             }
 
-            ui_view_begin(&view, ui, width, most);   // a window width wide (device pixels), at most most tall
+            ui_view_begin(&view, ui, width, most);   // a window width wide (device pixels), at most most tall (-most: exactly)
             ui_host(&field, .class = "head");        // the box of a widget the view does not draw: its place is written to field
             ui_col(.class = "inset") { ... }         // a container: ui_row or ui_col; ui_text and ui_button are leaves
             height = ui_view_end(&view);             // laid out: the window's height, and every host's rectangle
@@ -8496,6 +8497,8 @@ static const struct ui_class ui_classes[] = {
         {"list", .shrink = 1},                                                           // rows that give way when the window is too small
         {"foot", .h = UI_H_ROW, .gap = UI_GAP2, .justify = UI_END, .align = UI_CENTER},  // actions at the end of a row's height
         {"scroll", .scroll = 1, .shrink = 1},                                            // overflow: auto
+        {"keys", .pad = {UI_PAD, UI_PAD, UI_PAD, UI_PAD}, .gap = UI_KEY_GAP, .grow = 1}, // the on-screen keyboard's rows, in from the margin, filling the window
+        {"keyrow", .gap = UI_KEY_GAP, .grow = 1},                                        // one of them: its keys weighted by span, sharing the rows' height
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         // Text.
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
@@ -8775,8 +8778,8 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 #define ui_button(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BUTTON, .text = (words), __VA_ARGS__})
 #define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
 
-// A screen begun: a window width wide (device pixels) and at most limit tall (0: as tall as it comes to). The root is a column the
-// width of the window; what is declared after this is its children, until ui_view_end.
+// A screen begun: a window width wide (device pixels) and at most limit tall (0: as tall as it comes to; below 0: exactly -limit tall, a
+// height the window was given). The root is a column the width of the window; what is declared after this is its children, until ui_view_end.
 static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, int width, int limit)
 {
         struct ui_node address_to root;
@@ -8791,6 +8794,8 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
         root->dir = 1;
         root->size[0].kind = UI_GROW, root->size[0].value = 1;
         root->size[1].max = limit > 0 ? limit : UI_TREE_MOST;
+        if (limit < 0)
+                root->size[1].kind = UI_FIXED, root->size[1].value = -limit;
         memory_zero(&v->item[0], sizeof(v->item[0]));
         v->item[0].button = -1;
 }
