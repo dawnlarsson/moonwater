@@ -752,6 +752,7 @@ struct link_session {
         p64 conversation;
         p8 address[16];
         p16 port;
+        p8 moved; // the address changed under a datagram that passed: the peers file is told at the turn's end
         struct link_keys now;
         struct link_keys next;   // made by a rekey, waiting to be confirmed
         struct link_keys before; // what the last rekey replaced
@@ -2969,6 +2970,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         crypto_forget(send, sizeof send);
         crypto_forget(receive, sizeof receive);
 
+        s->moved |= memory_compare(s->address, address, 16) || s->port != port;
         memory_copy(s->address, address, 16);
         s->port = port;
         s->heard = now;
@@ -3090,6 +3092,9 @@ static p8 link_carried(p8 address_to datagram, positive length,
                 memory_copy(s->address, address, 16);
                 s->port = port;
         }
+        //      A roam: the peer answers from somewhere new, and its record
+        //      is told where, so the next attempt starts there.
+        s->moved |= moved;
         s->heard = now;
         //      Seen, to the second and from where: once a second a session,
         //      or when it moves, and not every datagram -- a walk of every
@@ -3557,10 +3562,65 @@ static fn link_sessions_granted(p64 now)
 
 #define LINK_MODEM_WAIT 20000 /* the wait while the modem's queue is full: the modem turn plays it at this pace */
 
+/*
+        A roam is written to the peers file, where the peer's address is kept,
+        so the next attempt -- a new `moonwater link`, or the listener after a
+        restart -- starts where the peer was last heard. The mark is set only
+        by a datagram that passed its tag, its counter and its replay window,
+        or by an initiation that was answered; the write is made here, at the
+        turn's end under the peers lock, not in the receive path. A write that
+        fails keeps every mark for the next turn.
+*/
+static fn link_peers_moved(void)
+{
+        link_peers peers;
+        bipolar lock;
+        p8 changed = false;
+        p8 pending = false;
+
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                pending |= link_self.session[at].used && link_self.session[at].moved;
+        if (!pending)
+                return;
+        lock = link_peers_lock();
+        if (lock < 0)
+                return;
+        if (!link_peers_for_change(address_of peers))
+        {
+                link_peers_unlock(lock);
+                return;
+        }
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+        {
+                struct link_session address_to s = link_self.session + at;
+                struct waterlink_peer address_to peer;
+
+                if (!s->used || !s->moved)
+                        continue;
+                peer = link_peer_keyed(address_of peers, s->peer);
+                if (peer && (memory_compare(peer->address, s->address, 16) ||
+                             peer->port != s->port))
+                {
+                        memory_copy(peer->address, s->address, 16);
+                        peer->port = s->port;
+                        changed = true;
+                }
+        }
+        if (changed && link_peers_save(address_of peers) < 0)
+        {
+                link_peers_unlock(lock);
+                return;
+        }
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                link_self.session[at].moved = false;
+        link_peers_unlock(lock);
+}
+
 static p64 link_sessions_turn(p64 now)
 {
         p64 wake = now + 1000000;
 
+        link_peers_moved();
         if (link_self.server)
                 link_sessions_granted(now);
 
