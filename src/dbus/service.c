@@ -142,6 +142,7 @@ static void sessionbus_scheme_file(long dark)
         char path[128], temporary[132];
         positive length = 0, slash = 0;
         bipolar handle;
+        long put;
 
         if (written == dark)
                 return;
@@ -160,10 +161,16 @@ static void sessionbus_scheme_file(long dark)
         handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
         if (handle < 0)
                 return;
-        sessionbus_call(syscall(write), (positive)handle, (positive)(dark ? "dark\n" : "light\n"), dark ? 5 : 6, 0, 0, 0);
+        //      A short or failed write is not renamed over the file: the file that is there stays as it was.
+        put = (long)sessionbus_call(syscall(write), (positive)handle, (positive)(dark ? "dark\n" : "light\n"), dark ? 5 : 6, 0, 0, 0);
         system_close(handle);
-        if (sessionbus_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) >= 0)
-                written = dark;
+        if (put != (dark ? 5 : 6) ||
+            sessionbus_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) < 0)
+        {
+                sessionbus_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
+                return;
+        }
+        written = dark;
 }
 
 // The portal's settings from the files, set (and so told) where they changed.
