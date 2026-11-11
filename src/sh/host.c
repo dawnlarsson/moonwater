@@ -22859,7 +22859,10 @@ static b32 host_notices(string_address address_to arguments, positive count)
 
         if (clearing)
         {
-                struct windows address_to table = windows_board_map();
+                struct windows address_to table;
+
+                host_need_root();
+                table = windows_board_map();
 
                 if (!table)
                         return host_refuse("moonwater notices: the board is not there (the desktop is not running)\n");
