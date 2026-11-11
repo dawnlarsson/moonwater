@@ -3901,6 +3901,17 @@ static b32 bowl_write_bytes(string_address path, string_address text,
 
         if (!failed)
                 failed = system_rename_at(parent, temp, parent, leaf, 0);
+        //      The name is synced too: the parent is an O_PATH handle, so the
+        //      directory is opened again through it. A power cut after the
+        //      rename otherwise keeps the old name (a hostname, a machine id).
+        if (!failed)
+        {
+                bipolar directory = system_open_at(parent, ".", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+
+                failed = directory < 0 ? directory : system_call_1(syscall(fsync), (positive)directory);
+                if (directory >= 0)
+                        system_close(directory);
+        }
         if (failed < 0)
                 system_remove_at(parent, temp, 0);
         system_close(parent);
