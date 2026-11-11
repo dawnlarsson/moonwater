@@ -3848,7 +3848,7 @@ struct compositor_poll
 #define COMPOSITOR_FINGER_TARGET 44
 #define COMPOSITOR_TOUCH_CORNER 24
 // The close and the minimise button of a window, to a finger: the disc and this much more on every side, in logical pixels. The
-// corner is a finger's UI_TARGET, and wins everywhere in it but the disc (compositor_corner_reach, compositor_on_close).
+// corner is a finger's UI_TARGET, and wins everywhere in it but the disc (compositor_corner_reach, compositor_on_button).
 #define COMPOSITOR_TOUCH_BUTTON_SLOP 4
 /*
         The prediction a frame ahead, for a touch screen's fingers and a tablet or pen. The mouse is not predicted: its lead is
@@ -16387,8 +16387,12 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor_remember(resized >= 0 ? resized : dragged);
 }
 
-// A release is at the real place too (see compositor_press): a mouse's button let go where the hand is.
-static void compositor_release(unsigned int code, int snap)
+/*
+        A button of the mouse is handled at the hand's real place, presses and releases alike, whatever the pointer is led to:
+        a click lands where the hand was. A finger's or a pen's press is at its led place, as it always was. act(code, arg) is
+        the press or the release itself (compositor_press_at, compositor_release_act).
+*/
+static void compositor_at_hand(void (*act)(unsigned int, int), unsigned int code, int arg)
 {
         int real;
 
@@ -16396,9 +16400,11 @@ static void compositor_release(unsigned int code, int snap)
         real = !compositor.at_real && !compositor.touching && compositor.owner == COMPOSITOR_PREDICT_MOUSE;
         if (!real)
         {
-                compositor_release_as(code, snap, 0);
+                act(code, arg);
                 return;
         }
+        // The window under the press is told the motion to the real place before the button, as each report was told before
+        // the change: a button carries no place of its own, only the last motion's. A pointer that is not led is told already.
         {
                 int led_x = compositor.pointer_x, led_y = compositor.pointer_y;
 
@@ -16407,25 +16413,37 @@ static void compositor_release(unsigned int code, int snap)
                 if (compositor.pointer_x != led_x || compositor.pointer_y != led_y)
                         compositor_motion();
         }
-        compositor_release_as(code, snap, 0);
+        act(code, arg);
         compositor.at_real = 0;
         compositor_pointer_shown();
         compositor_cursor_move();
 }
 
+static void compositor_release_act(unsigned int code, int snap)
+{
+        compositor_release_as(code, snap, 0);
+}
+
+// A release is at the real place too (see compositor_press): a mouse's button let go where the hand is.
+static void compositor_release(unsigned int code, int snap)
+{
+        compositor_at_hand(compositor_release_act, code, snap);
+}
+
 /*
-        Whether a point is on a window's close button: its box, or for a finger the box and COMPOSITOR_TOUCH_BUTTON_SLOP more
+        Whether a point is on a window's button, the close one or the minimise one (box: compositor_close_box or
+        compositor_minimize_box): its box, or for a finger the box and COMPOSITOR_TOUCH_BUTTON_SLOP more
         on every side (ui_reach_hit), and no further: the corner of the window it sits in is the finger's own, a target of
         UI_TARGET (compositor_corner_reach), and wins everywhere in it but the disc. None for a press being made again
         without its buttons (compositor_touch_resume).
 */
-static int compositor_on_close(int row, int x, int y)
+static int compositor_on_button(int row, int x, int y, int (*box)(const struct compositor_frame *, int *, int *, int *))
 {
         struct compositor_frame frame;
         int bx, by, side;
 
         compositor_frame_of(row, &frame);
-        if (compositor.touch.resumed || !compositor_close_box(&frame, &bx, &by, &side))
+        if (compositor.touch.resumed || !box(&frame, &bx, &by, &side))
                 return 0;
         return ui_reach_hit(compositor.touching, side + 2 * (COMPOSITOR_TOUCH_BUTTON_SLOP * frame.scale / 100), x, y, bx, by, side, side);
 }
@@ -16437,17 +16455,6 @@ static int compositor_on_close(int row, int x, int y)
         finger's cancel lost is not held over.
 */
 static unsigned int compositor_minimize_code;
-
-static int compositor_on_minimize(int row, int x, int y)
-{
-        struct compositor_frame frame;
-        int bx, by, side;
-
-        compositor_frame_of(row, &frame);
-        if (compositor.touch.resumed || !compositor_minimize_box(&frame, &bx, &by, &side))
-                return 0;
-        return ui_reach_hit(compositor.touching, side + 2 * (COMPOSITOR_TOUCH_BUTTON_SLOP * frame.scale / 100), x, y, bx, by, side, side);
-}
 
 static int compositor_minimize_press(unsigned int code, int down)
 {
@@ -16467,7 +16474,7 @@ static int compositor_minimize_press(unsigned int code, int down)
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         if (under < 0 || tab >= 0 || !compositor_visible(under) ||
-            !compositor_on_minimize(under, compositor.pointer_x, compositor.pointer_y))
+            !compositor_on_button(under, compositor.pointer_x, compositor.pointer_y, compositor_minimize_box))
                 return 0;
 
         compositor_popups_close(-1, -1);
@@ -16613,7 +16620,7 @@ static void compositor_button(unsigned int code, int down)
                         disc and a little more; the rest of the corner is the corner's.
                 */
                 if (compositor.touching && !alt && code == COMPOSITOR_BTN_LEFT &&
-                    compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
+                    compositor_on_button(under, compositor.pointer_x, compositor.pointer_y, compositor_close_box))
                 {
                         compositor.press = COMPOSITOR_NONE;
                         compositor.touch.closing = under;
@@ -16667,7 +16674,7 @@ static void compositor_button(unsigned int code, int down)
 
                 // The close button is the compositor's, drawn over the band, so it takes its press whatever pointer the window's
                 // kit shows under it (a control's hand or I-beam): only the rest of the band gives way to a control.
-                if (band && compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
+                if (band && compositor_on_button(under, compositor.pointer_x, compositor.pointer_y, compositor_close_box))
                 {
                         // Not one of a pair, or a second click would fill the screen on its way out.
                         compositor.press = COMPOSITOR_NONE;
@@ -16723,35 +16730,10 @@ static void compositor_button(unsigned int code, int down)
 */
 static void compositor_press_at(unsigned int code, int down);
 
-/*
-        A button of the mouse is handled at the hand's real place, presses and releases alike, whatever the pointer is led to:
-        a click lands where the hand was. A finger's or a pen's press is at its led place, as it always was.
-*/
+// A press is at the real place of a mouse's button (compositor_at_hand).
 static void compositor_press(unsigned int code, int down)
 {
-        int real;
-
-        compositor_pointer_sync();
-        real = !compositor.at_real && !compositor.touching && compositor.owner == COMPOSITOR_PREDICT_MOUSE;
-        if (!real)
-        {
-                compositor_press_at(code, down);
-                return;
-        }
-        // The window under the press is told the motion to the real place before the button, as each report was told before
-        // the change: a button carries no place of its own, only the last motion's. A pointer that is not led is told already.
-        {
-                int led_x = compositor.pointer_x, led_y = compositor.pointer_y;
-
-                compositor.at_real = 1;
-                compositor_pointer_shown();
-                if (compositor.pointer_x != led_x || compositor.pointer_y != led_y)
-                        compositor_motion();
-        }
-        compositor_press_at(code, down);
-        compositor.at_real = 0;
-        compositor_pointer_shown();
-        compositor_cursor_move();
+        compositor_at_hand(compositor_press_at, code, down);
 }
 
 static void compositor_press_at(unsigned int code, int down)
@@ -18254,7 +18236,7 @@ static int compositor_swipe_free(int x, int y, int side, int *row)
         if (under >= 0)
         {
                 compositor.touching = 1;
-                on = compositor_on_close(under, x, y) || compositor_on_minimize(under, x, y);
+                on = compositor_on_button(under, x, y, compositor_close_box) || compositor_on_button(under, x, y, compositor_minimize_box);
                 compositor.touching = 0;
         }
         if (on || (side == UI_EDGE_TOP && under < 0))
