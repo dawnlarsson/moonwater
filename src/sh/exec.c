@@ -7759,6 +7759,15 @@ static HOT bool exec_redirect_apply(b32 index)
 
                         if (string_is(target, '-') && string_is(target + 1, end))
                         {
+                                /* A descriptor a variable named is not saved
+                                   for the restore, so the shell's own script
+                                   input and spawn device are refused here. */
+                                if (want->var_length && ((b32)fd == exec_script_fd || fd == spawn_device))
+                                {
+                                        exec_redirect_diagnostic_restore(redirect_mark);
+                                        return string_report(log_error, false, "Cannot redirect descriptor: %p\n",
+                                                             (positive)fd);
+                                }
                                 system_close(fd);
                                 continue;
                         }
@@ -9142,7 +9151,7 @@ static bool exec_function_import_one(string_address entry)
                 // Before any line is read, so the name and no line.
                 string_format(log_error, "%s: ", shell_where_invoked());
                 log_error(str("error importing function definition for `"));
-                log_error(entry + sizeof(prefix) - 1, name_length);
+                writer_terminal_name_span(log_error, entry + sizeof(prefix) - 1, name_length);
                 log_error(str("'\n"));
                 return false;
         }

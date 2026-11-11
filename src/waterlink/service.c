@@ -945,7 +945,8 @@ static p8 link_path_is_own(string_address path)
         //      so the table cannot be a constant.
         string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
-            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
+            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT,
+            LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH};
         file_facts target;
         p8 exists = file_look_at(path, address_of target);
         positive leaf_at = memory_after_last(path, '/', string_length(path));
@@ -2343,7 +2344,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 break;
         case LINK_KIND_PUSH:
                 started = text[0] && link_start_push(s, text, length - skip,
-                                                     mode & 07777);
+                                                     mode & 0777);
                 break;
         default:
                 link_refuse(s, "that is not something this machine offers");

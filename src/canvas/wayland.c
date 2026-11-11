@@ -3005,7 +3005,9 @@ static int wayland_subcompositor_request(struct wayland_client *c, struct waylan
         if ((s->role != WAYLAND_ROLE_NONE && !(s->role == WAYLAND_ROLE_SUBSURFACE && !s->sub_id)) || (s->flags & WAYLAND_SURFACE_XDG))
                 return wayland_fail(c, self->id, WLN_wl_subcompositor_error_bad_surface, "the surface has a role");
         // The parent may not hang, however far up, from the surface that is to hang from it.
-        for (struct wayland_surface *up = parent; up; up = up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent ? &c->surfaces[up->sub_parent - 1] : 0)
+        long hops = 0;
+
+        for (struct wayland_surface *up = parent; up && hops < WAYLAND_SURFACES; hops++, up = up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent ? &c->surfaces[up->sub_parent - 1] : 0)
                 if (up == s)
                         return wayland_fail(c, self->id, WLN_wl_subcompositor_error_bad_parent, "the parent hangs from the surface");
         for (long at = 0; at < WAYLAND_SURFACES; at++)

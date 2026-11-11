@@ -2910,7 +2910,8 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
 
         settings_item_label(item, text + 2, word - 2);
         for (; at < size && text[at] >= '0' && text[at] <= '9'; at++)
-                megabytes = megabytes * 10 + (positive)(text[at] - '0');
+                if (megabytes < 1000000000000ull)
+                        megabytes = megabytes * 10 + (positive)(text[at] - '0');
         while (at < size && text[at] == ' ')
                 at++;
         if (at + 1 < size && text[at] == 'M' && text[at + 1] == 'B')
@@ -2952,7 +2953,8 @@ static fn settings_feed_hardware(void)
                         while (word < size && text[word] == ' ')
                                 word++;
                         for (; word < size && text[word] >= '0' && text[word] <= '9'; word++)
-                                bytes = bytes * 10 + (unsigned long long)(text[word] - '0');
+                                if (bytes <= 1844674407370955160ull)
+                                        bytes = bytes * 10 + (unsigned long long)(text[word] - '0');
                         while (word < size && text[word] == ' ')
                                 word++;
                         role_at = word;
@@ -2973,8 +2975,9 @@ static fn settings_feed_hardware(void)
                         positive more = 0;
 
                         for (positive digit = 9; digit < size && text[digit] >= '0' && text[digit] <= '9'; digit++)
-                                more = more * 10 + (positive)(text[digit] - '0');
-                        items[count - 1].segment_more = (unsigned short)more;
+                                if (more <= 65535)
+                                        more = more * 10 + (positive)(text[digit] - '0');
+                        items[count - 1].segment_more = more > 65535 ? 65535 : (unsigned short)more;
                         continue;
                 }
                 // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.

@@ -9354,6 +9354,9 @@ static bipolar radio_write_word(string_address path, string_address word)
         p8 line[96];
         p8 have[96];
 
+        //      A word too long for the line is refused, not cut and written.
+        if (string_length(word) > sizeof(line) - 2)
+                return -ENAMETOOLONG;
         string_copy_bounded(line, word, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
         //      A word that is already there is not written again: two syncs,
@@ -13243,7 +13246,7 @@ static positive radio_share_pid(void)
         if (host_read_word(NET_BLUETOOTH_SHARE_PID, text, sizeof(text)) < 0)
                 return 0;
         pid = string_digits_max(text, 10, null);
-        return pid > 1 && radio_share_is(pid) ? pid : 0;
+        return pid > 1 && pid <= 0x7fffffff && radio_share_is(pid) ? pid : 0;
 }
 
 // Whether the process the sharing was started as is still there.
@@ -23810,8 +23813,12 @@ static positive desktop_session(void)
         p8 word[24];
         p32 member;
         bool leader;
-        positive recorded = host_read_word(DESKTOP_SESSION, word, sizeof(word)) <= 0 ? 0 : string_to_positive(word);
+        positive recorded = 0;
         positive found;
+
+        if (host_read_word(DESKTOP_SESSION, word, sizeof(word)) < 0 ||
+            !string_digits_checked_exact(word, 10, address_of recorded) || recorded > 0x7fffffff)
+                recorded = 0;
 
         return_if(recorded && desktop_scan(recorded, address_of member, 1, address_of leader), recorded);
         found = desktop_compositor_session();
