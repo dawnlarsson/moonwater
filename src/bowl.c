@@ -7318,9 +7318,13 @@ static b32 bowl_udev(positive count)
         It is a process of the machine that takes each connection, tells the
         bus the client is root, and carries the bytes (bowl_bus_relay), and
         every client of this machine, a daemon or a program of the session,
-        is then the one id the machine has for all of them. Passing a file
-        descriptor is not carried: a client that asks for it is told no, as
-        a bus without it would.
+        is then the one id the machine has for all of them. That holds for
+        the machine's root and its one user (uid 0 and 1000, the clients the
+        rule is written for). The socket is open to every account, so a
+        client of any other uid is not told it is root: the relay drops to
+        that uid before it connects, and the bus holds it to its own id.
+        Passing a file descriptor is not carried: a client that asks for it
+        is told no, as a bus without it would.
 
         And the one answer the machine gives that no daemon can: polkit asks
         who may do what, and this machine has one user who may do anything,
@@ -7334,6 +7338,8 @@ static b32 bowl_udev(positive count)
 #define BOWL_BUS_LOG BOWL_BUS_DIRECTORY "/services.log"
 #define BOWL_BUS_CONFIG BOWL_BUS_DIRECTORY "/bowl-system.conf"
 #define BOWL_BUS_SERVICES BOWL_BUS_DIRECTORY "/system-services"
+#define BOWL_BUS_SOL_SOCKET 1
+#define BOWL_BUS_SO_PEERCRED 17
 #define BOWL_BUS_REQUEST 4096
 #define BOWL_BUS_LINE 1024
 #define BOWL_POLKIT_DIRECTORY "/etc/polkit-1/rules.d"
@@ -7678,7 +7684,7 @@ static bipolar bowl_bus_open(string_address path, bool listen)
 static bool bowl_bus_say(bipolar client, bipolar upstream,
                          const p8 address_to line, positive length,
                          bool address_to begun, bool address_to owed,
-                         bool address_to waiting)
+                         bool address_to waiting, bool rooted)
 {
         static const p8 as_root[] = "30\r\n";
         positive skip = 0;
@@ -7710,7 +7716,10 @@ static bool bowl_bus_say(bipolar client, bipolar upstream,
                                    !string_compare_max(line + skip, "DATA", 4)))
                 address_to waiting = true;
 
-        if (keep && line[keep] != '\r' && line[keep] != '\n')
+        /* Only a rooted client's claim is replaced: any other keeps the id it
+           claims, which the bus checks against the relay's own (the drop in
+           bowl_bus_accept), so it is held to its own user and no other. */
+        if (rooted && keep && line[keep] != '\r' && line[keep] != '\n')
         {
                 return system_write_all((positive)upstream, line, keep) == keep &&
                        system_write_all((positive)upstream, as_root,
@@ -7720,7 +7729,7 @@ static bool bowl_bus_say(bipolar client, bipolar upstream,
 }
 
 /* A client and the bus, until either is gone. */
-static fn bowl_bus_relay(bipolar client, bipolar upstream)
+static fn bowl_bus_relay(bipolar client, bipolar upstream, bool rooted)
 {
         p8 held[BOWL_BUS_LINE];
         p8 chunk[8192];
@@ -7805,7 +7814,7 @@ static fn bowl_bus_relay(bipolar client, bipolar upstream)
                         if (chunk[at] != '\n')
                                 continue;
                         if (!bowl_bus_say(client, upstream, held, kept, &begun, &owed,
-                                          &waiting))
+                                          &waiting, rooted))
                                 return;
                         kept = 0;
                         if (begun)
@@ -7859,12 +7868,42 @@ static DEAD_END fn bowl_bus_accept(bipolar listener)
                 {
                         if (system_fork() == 0)
                         {
-                                bipolar upstream = bowl_bus_open(BOWL_BUS_UPSTREAM,
-                                                                 false);
+                                /* The client's uid, from the kernel: pid, uid
+                                   and gid as SO_PEERCRED gives them. The
+                                   socket is open to every account, so a peer
+                                   that is neither root nor the machine's one
+                                   user is not made root: this process drops
+                                   to its ids before it connects, and the bus
+                                   checks the id the client claims against the
+                                   relay's own. A peer that cannot be read is
+                                   refused. */
+                                p32 peer[3] = {0, 0, 0};
+                                b32 peer_size = (b32)sizeof peer;
+                                bool rooted;
+                                bipolar upstream;
+
+                                if (socket_option_get((b32)client, BOWL_BUS_SOL_SOCKET,
+                                                      BOWL_BUS_SO_PEERCRED,
+                                                      address_of peer,
+                                                      address_of peer_size) < 0)
+                                        exit(0);
+                                rooted = peer[1] == 0 || peer[1] == BOWL_USER_ID;
+                                if (!rooted &&
+                                    (system_call_2(syscall(setgroups), (positive)0,
+                                                   (positive)0) < 0 ||
+                                     system_call_3(syscall(setresgid), (positive)peer[2],
+                                                   (positive)peer[2],
+                                                   (positive)peer[2]) < 0 ||
+                                     system_call_3(syscall(setresuid), (positive)peer[1],
+                                                   (positive)peer[1],
+                                                   (positive)peer[1]) < 0))
+                                        exit(0);
+
+                                upstream = bowl_bus_open(BOWL_BUS_UPSTREAM, false);
 
                                 socket_close((b32)listener);
                                 if (upstream >= 0)
-                                        bowl_bus_relay(client, upstream);
+                                        bowl_bus_relay(client, upstream, rooted);
                         }
                         exit(0);
                 }
