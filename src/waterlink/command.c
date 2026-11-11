@@ -1950,6 +1950,8 @@ static b32 link_doctor_port_free(void)
         return true;
 }
 
+/*      The checks print the words the status line prints, for the same state
+        of the same thing, so a check and the status cannot disagree. */
 static b32 link_doctor(void)
 {
         p8 word[16];
@@ -1957,24 +1959,22 @@ static b32 link_doctor(void)
         b32 on;
         positive failed = 0;
         positive port = (positive)link_port();
+        positive listener;
 
         host_read_word(LINK_SWITCH_PATH, word, sizeof word);
         on = string_equals((string_address)word, "on");
 
-        if (owner > 0)
-                string_format(log, "  pass  listener: running\n");
-        else if (on)
-        {
-                failed++;
-                string_format(log, "  fail  listener: switched on, but not running\n"
-                                   "        fix: moonwater link on, which says why it "
-                                   "did not start\n");
-        }
+        listener = link_listener_state(owner, on, word[0] != 0);
+        if (listener == LINK_LISTENER_ON || listener == LINK_LISTENER_BY_HAND)
+                string_format(log, "  pass  listener: %s\n",
+                              (string_address)link_listener_names[listener]);
         else
         {
                 failed++;
-                string_format(log, "  fail  listener: off\n"
-                                   "        fix: moonwater link on\n");
+                string_format(log, "  fail  listener: %s\n"
+                                   "        fix: %s\n",
+                              (string_address)link_listener_names[listener],
+                              (string_address)link_listener_next[listener]);
         }
 
         if (owner > 0)
@@ -2005,7 +2005,7 @@ static b32 link_doctor(void)
         }
 
         if (link_has_route())
-                string_format(log, "  pass  route: this machine has a route to a network\n");
+                string_format(log, "  pass  route: a route to a network\n");
         else
         {
                 failed++;
