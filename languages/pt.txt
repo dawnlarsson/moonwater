@@ -250,6 +250,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Connect over	2789	Conectar por
 =Cursor look	34ce	Aparência do ponteiro
 =Cursor size	65d4	Tamanho do ponteiro
+=Cursor style	ad1e	Estilo do ponteiro
 =Date format	7a44	Formato da data
 =Devices	f320	Dispositivos
 =Devices in this machine	d7b8	Dispositivos nesta máquina
@@ -298,6 +299,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Output device (name, or default)	d73c	Dispositivo de saída (nome ou default)
 =Pair a machine	b39b	Parear uma máquina
 =Plain Text	2bbe	Texto simples
+=Pointer squeeze (percent, or default)	bbee	Compressão do ponteiro (percentagem, ou padrão)
 =Pointer squeezes on click	ad88	O ponteiro encolhe ao clicar
 =Power	a5e6	Energia
 =Power profile	8def	Perfil de energia
@@ -358,6 +360,7 @@ ui_field_full	fe02	não cabe mais que isso
 =blue	f5cd	azul
 =bottom	6b2a	embaixo
 =center	4484	centro
+=classic	6d53	clássico
 =copies	3e10	cópias
 =dark	6945	escuro
 =dark-grey	bcb3	cinza-escuro
@@ -365,6 +368,7 @@ ui_field_full	fe02	não cabe mais que isso
 =deny	6367	negar
 =desktop	87b3	área de trabalho
 =dmy	2a79	dmy
+=dynamic	96ae	dinâmico
 =edge	d83c	borda
 =fast	02af	rápido
 =forest	2a60	floresta

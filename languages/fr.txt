@@ -250,6 +250,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Connect over	2789	Connexion par
 =Cursor look	34ce	Apparence du pointeur
 =Cursor size	65d4	Taille du pointeur
+=Cursor style	ad1e	Style du pointeur
 =Date format	7a44	Format de la date
 =Devices	f320	Périphériques
 =Devices in this machine	d7b8	Périphériques de cette machine
@@ -298,6 +299,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Pair a machine	b39b	Associer une machine
 =Plain Text	2bbe	Texte brut
+=Pointer squeeze (percent, or default)	bbee	Écrasement du pointeur (pourcentage, ou défaut)
 =Pointer squeezes on click	ad88	Le pointeur se contracte au clic
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
@@ -358,6 +360,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =blue	f5cd	bleu
 =bottom	6b2a	en bas
 =center	4484	centre
+=classic	6d53	classique
 =copies	3e10	copies
 =dark	6945	sombre
 =dark-grey	bcb3	gris foncé
@@ -365,6 +368,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =deny	6367	refuser
 =desktop	87b3	bureau
 =dmy	2a79	dmy
+=dynamic	96ae	dynamique
 =edge	d83c	bord
 =fast	02af	rapide
 =forest	2a60	forêt

@@ -251,6 +251,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Connect over	2789	اتصال از طریق
 =Cursor look	34ce	ظاهر نشانگر
 =Cursor size	65d4	اندازه نشانگر
+=Cursor style	ad1e	سبک نشانگر
 =Date format	7a44	قالب تاریخ
 =Devices	f320	دستگاه‌ها
 =Devices in this machine	d7b8	دستگاه‌های این دستگاه
@@ -299,6 +300,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Pair a machine	b39b	جفت کردن یک رایانه
 =Plain Text	2bbe	متن ساده
+=Pointer squeeze (percent, or default)	bbee	فشرده‌سازی نشانگر (درصد، یا پیش‌فرض)
 =Pointer squeezes on click	ad88	نشانگر با کلیک کوچک می‌شود
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
@@ -359,6 +361,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =blue	f5cd	آبی
 =bottom	6b2a	پایین
 =center	4484	مرکز
+=classic	6d53	کلاسیک
 =copies	3e10	کپی‌ها
 =dark	6945	تیره
 =dark-grey	bcb3	خاکستری تیره
@@ -366,6 +369,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =deny	6367	رد
 =desktop	87b3	رومیزی
 =dmy	2a79	dmy
+=dynamic	96ae	پویا
 =edge	d83c	لبه
 =fast	02af	سریع
 =forest	2a60	سبز جنگلی

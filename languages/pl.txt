@@ -250,6 +250,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Connect over	2789	Połącz przez
 =Cursor look	34ce	Wygląd wskaźnika
 =Cursor size	65d4	Rozmiar wskaźnika
+=Cursor style	ad1e	Styl wskaźnika
 =Date format	7a44	Format daty
 =Devices	f320	Urządzenia
 =Devices in this machine	d7b8	Urządzenia w tej maszynie
@@ -298,6 +299,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Pair a machine	b39b	Sparuj maszynę
 =Plain Text	2bbe	Zwykły tekst
+=Pointer squeeze (percent, or default)	bbee	Ściśnięcie wskaźnika (procent lub domyślnie)
 =Pointer squeezes on click	ad88	Wskaźnik kurczy się przy kliknięciu
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
@@ -358,6 +360,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =blue	f5cd	niebieski
 =bottom	6b2a	na dole
 =center	4484	środek
+=classic	6d53	klasyczny
 =copies	3e10	kopii
 =dark	6945	ciemny
 =dark-grey	bcb3	ciemnoszary
@@ -365,6 +368,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =deny	6367	odmów
 =desktop	87b3	pulpit
 =dmy	2a79	dmy
+=dynamic	96ae	dynamiczny
 =edge	d83c	krawędź
 =fast	02af	szybko
 =forest	2a60	leśny

@@ -250,6 +250,7 @@ ui_field_full	fe02	больше не помещается
 =Connect over	2789	Соединение через
 =Cursor look	34ce	Вид указателя
 =Cursor size	65d4	Размер указателя
+=Cursor style	ad1e	Стиль указателя
 =Date format	7a44	Формат даты
 =Devices	f320	Устройства
 =Devices in this machine	d7b8	Устройства этой машины
@@ -298,6 +299,7 @@ ui_field_full	fe02	больше не помещается
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Pair a machine	b39b	Связать компьютер
 =Plain Text	2bbe	Простой текст
+=Pointer squeeze (percent, or default)	bbee	Сжатие указателя (процент или по умолчанию)
 =Pointer squeezes on click	ad88	Указатель сжимается при щелчке
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
@@ -358,6 +360,7 @@ ui_field_full	fe02	больше не помещается
 =blue	f5cd	синий
 =bottom	6b2a	внизу
 =center	4484	центр
+=classic	6d53	классический
 =copies	3e10	копий
 =dark	6945	тёмная
 =dark-grey	bcb3	тёмно-серый
@@ -365,6 +368,7 @@ ui_field_full	fe02	больше не помещается
 =deny	6367	запретить
 =desktop	87b3	рабочий стол
 =dmy	2a79	dmy
+=dynamic	96ae	динамический
 =edge	d83c	край
 =fast	02af	быстро
 =forest	2a60	лесной

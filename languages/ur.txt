@@ -251,6 +251,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Connect over	2789	رابطے کا ذریعہ
 =Cursor look	34ce	پوائنٹر کی شکل
 =Cursor size	65d4	پوائنٹر کا سائز
+=Cursor style	ad1e	پوائنٹر کا انداز
 =Date format	7a44	تاریخ کی شکل
 =Devices	f320	ڈیوائسز
 =Devices in this machine	d7b8	اس مشین کے ڈیوائسز
@@ -299,6 +300,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Pair a machine	b39b	ایک کمپیوٹر جوڑیں
 =Plain Text	2bbe	سادہ متن
+=Pointer squeeze (percent, or default)	bbee	پوائنٹر کا دباؤ (فیصد، یا ڈیفالٹ)
 =Pointer squeezes on click	ad88	کلک پر پوائنٹر سکڑ جاتا ہے
 =Power	a5e6	پاور
 =Power profile	8def	پاور پروفائل
@@ -359,6 +361,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =blue	f5cd	نیلا
 =bottom	6b2a	نیچے
 =center	4484	درمیان
+=classic	6d53	کلاسک
 =copies	3e10	کاپیاں
 =dark	6945	تاریک
 =dark-grey	bcb3	گہرا خاکستری
@@ -366,6 +369,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =deny	6367	انکار
 =desktop	87b3	ڈیسک ٹاپ
 =dmy	2a79	dmy
+=dynamic	96ae	ڈائنامک
 =edge	d83c	کنارہ
 =fast	02af	تیز
 =forest	2a60	جنگلی سبز

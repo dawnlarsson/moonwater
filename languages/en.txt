@@ -250,6 +250,7 @@ ui_field_full	fe02	that is as much as it holds
 =Connect over	2789	Connect over
 =Cursor look	34ce	Cursor look
 =Cursor size	65d4	Cursor size
+=Cursor style	ad1e	Cursor style
 =Date format	7a44	Date format
 =Devices	f320	Devices
 =Devices in this machine	d7b8	Devices in this machine
@@ -298,6 +299,7 @@ ui_field_full	fe02	that is as much as it holds
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Pair a machine	b39b	Pair a machine
 =Plain Text	2bbe	Plain Text
+=Pointer squeeze (percent, or default)	bbee	Pointer squeeze (percent, or default)
 =Pointer squeezes on click	ad88	Pointer squeezes on click
 =Power	a5e6	Power
 =Power profile	8def	Power profile
@@ -358,6 +360,7 @@ ui_field_full	fe02	that is as much as it holds
 =blue	f5cd	blue
 =bottom	6b2a	bottom
 =center	4484	center
+=classic	6d53	classic
 =copies	3e10	copies
 =dark	6945	dark
 =dark-grey	bcb3	dark-grey
@@ -365,6 +368,7 @@ ui_field_full	fe02	that is as much as it holds
 =deny	6367	deny
 =desktop	87b3	desktop
 =dmy	2a79	dmy
+=dynamic	96ae	dynamic
 =edge	d83c	edge
 =fast	02af	fast
 =forest	2a60	forest

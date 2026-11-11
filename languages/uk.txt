@@ -250,6 +250,7 @@ ui_field_full	fe02	більше не вміщається
 =Connect over	2789	З'єднання через
 =Cursor look	34ce	Вигляд вказівника
 =Cursor size	65d4	Розмір вказівника
+=Cursor style	ad1e	Стиль вказівника
 =Date format	7a44	Формат дати
 =Devices	f320	Пристрої
 =Devices in this machine	d7b8	Пристрої цієї машини
@@ -298,6 +299,7 @@ ui_field_full	fe02	більше не вміщається
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Pair a machine	b39b	Зв'язати комп'ютер
 =Plain Text	2bbe	Звичайний текст
+=Pointer squeeze (percent, or default)	bbee	Стискання вказівника (відсоток або типове)
 =Pointer squeezes on click	ad88	Вказівник стискається під час клацання
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
@@ -358,6 +360,7 @@ ui_field_full	fe02	більше не вміщається
 =blue	f5cd	синій
 =bottom	6b2a	внизу
 =center	4484	центр
+=classic	6d53	класичний
 =copies	3e10	копій
 =dark	6945	темна
 =dark-grey	bcb3	темно-сірий
@@ -365,6 +368,7 @@ ui_field_full	fe02	більше не вміщається
 =deny	6367	заборонити
 =desktop	87b3	робочий стіл
 =dmy	2a79	dmy
+=dynamic	96ae	динамічний
 =edge	d83c	край
 =fast	02af	швидко
 =forest	2a60	лісовий

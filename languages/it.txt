@@ -250,6 +250,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Connect over	2789	Connetti tramite
 =Cursor look	34ce	Aspetto del puntatore
 =Cursor size	65d4	Dimensione del puntatore
+=Cursor style	ad1e	Stile del puntatore
 =Date format	7a44	Formato della data
 =Devices	f320	Dispositivi
 =Devices in this machine	d7b8	Dispositivi di questa macchina
@@ -298,6 +299,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Output device (name, or default)	d73c	Dispositivo di uscita (nome o default)
 =Pair a machine	b39b	Abbina una macchina
 =Plain Text	2bbe	Testo semplice
+=Pointer squeeze (percent, or default)	bbee	Schiacciamento del puntatore (percentuale, o predefinito)
 =Pointer squeezes on click	ad88	Il puntatore si restringe al clic
 =Power	a5e6	Alimentazione
 =Power profile	8def	Profilo energetico
@@ -358,6 +360,7 @@ ui_field_full	fe02	non ce ne sta di più
 =blue	f5cd	blu
 =bottom	6b2a	in basso
 =center	4484	centro
+=classic	6d53	classico
 =copies	3e10	copie
 =dark	6945	scuro
 =dark-grey	bcb3	grigio scuro
@@ -365,6 +368,7 @@ ui_field_full	fe02	non ce ne sta di più
 =deny	6367	nega
 =desktop	87b3	desktop
 =dmy	2a79	dmy
+=dynamic	96ae	dinamico
 =edge	d83c	bordo
 =fast	02af	veloce
 =forest	2a60	foresta

@@ -251,6 +251,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Connect over	2789	الاتصال عبر
 =Cursor look	34ce	شكل المؤشر
 =Cursor size	65d4	حجم المؤشر
+=Cursor style	ad1e	نمط المؤشر
 =Date format	7a44	تنسيق التاريخ
 =Devices	f320	الأجهزة
 =Devices in this machine	d7b8	الأجهزة في هذا الجهاز
@@ -299,6 +300,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Pair a machine	b39b	إقران حاسوب
 =Plain Text	2bbe	نص عادي
+=Pointer squeeze (percent, or default)	bbee	ضغط المؤشر (بالمئة، أو الافتراضي)
 =Pointer squeezes on click	ad88	ينكمش المؤشر عند النقر
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
@@ -359,6 +361,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =blue	f5cd	أزرق
 =bottom	6b2a	أسفل
 =center	4484	الوسط
+=classic	6d53	كلاسيكي
 =copies	3e10	نسخ
 =dark	6945	داكن
 =dark-grey	bcb3	رمادي داكن
@@ -366,6 +369,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =deny	6367	منع
 =desktop	87b3	سطح المكتب
 =dmy	2a79	dmy
+=dynamic	96ae	ديناميكي
 =edge	d83c	الحافة
 =fast	02af	سريع
 =forest	2a60	أخضر الغابة

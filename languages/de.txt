@@ -250,6 +250,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Connect over	2789	Verbindung über
 =Cursor look	34ce	Aussehen des Mauszeigers
 =Cursor size	65d4	Größe des Mauszeigers
+=Cursor style	ad1e	Stil des Mauszeigers
 =Date format	7a44	Datumsformat
 =Devices	f320	Geräte
 =Devices in this machine	d7b8	Geräte in diesem Rechner
@@ -298,6 +299,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Output device (name, or default)	d73c	Ausgabegerät (Name oder default)
 =Pair a machine	b39b	Maschine koppeln
 =Plain Text	2bbe	Nur-Text
+=Pointer squeeze (percent, or default)	bbee	Quetschung des Zeigers (Prozent oder Standard)
 =Pointer squeezes on click	ad88	Zeiger schrumpft beim Klicken
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
@@ -358,6 +360,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =blue	f5cd	Blau
 =bottom	6b2a	Unten
 =center	4484	Mitte
+=classic	6d53	klassisch
 =copies	3e10	Kopien
 =dark	6945	Dunkel
 =dark-grey	bcb3	Dunkelgrau
@@ -365,6 +368,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =deny	6367	Verweigern
 =desktop	87b3	Desktop
 =dmy	2a79	dmy
+=dynamic	96ae	dynamisch
 =edge	d83c	Rand
 =fast	02af	Schnell
 =forest	2a60	Wald

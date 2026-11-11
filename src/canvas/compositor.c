@@ -2974,6 +2974,36 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 // The cursor plane is as large as the smallest a driver makes: no shape is drawn larger than it takes.
 #define CP_PLANE 64
 
+/*
+        The dynamic cursor (`moonwater canvas cursor style dynamic`, and every pointer a touch uses): one cell of CP_PLANE by CP_PLANE, the
+        plane itself, with its hot cell at its centre, CP_DYN_HOT. The circle's radius is CP_DYN_RADIUS cells, and it grows and stretches
+        along the last motion by at most CP_DYN_SPEED pixels of speed: at the most its outline reaches 16 * 1.25 * 1.5 = 30 cells from the
+        hot cell, and the plane holds 31 on each side of it, so the stretch is always inside the plane and nothing is clipped. A cell is one
+        pixel at a scale of 1, so a cell at a larger scale is a block of pixels and the cell is larger than the plane: a dynamic pointer
+        that is larger than 1 is drawn on the scene, as a classic one is when it is larger than its plane allows (compositor_cursor_fit).
+        A press's squeeze takes CP_DYN_PULSE_NS, two frames of 16 ms.
+*/
+#define CP_DYN_HOT 32
+#define CP_DYN_RADIUS 16
+#define CP_DYN_SPEED 48
+#define CP_DYN_PULSE_NS 32000000ull
+#define CP_DYN_IDLE_NS 120000000ull
+#define CP_DYN_SPIN_NS 125000000ull
+
+// The geometry of one dynamic shape, in units of a cell's 64th (so a cell is 64): the outline's semi-axes along and across the
+// stretch, a rounded rectangle's corner radius, and the same one cell in for the inner edge, with the unit direction of the stretch.
+struct compositor_dyn
+{
+        long long ux, uy;      // the unit direction, times 64
+        long long a, b, c;     // the outer edge: semi-axis along the stretch, across it, and the rectangle's corner radius
+        long long ai, bi, ci;  // the inner edge, a cell in from the outer
+        int length;            // the inner mark's half length, in cells
+        int spin;              // the wait arc's eighth of a turn, 0 to 7
+};
+
+static int compositor_cursor_dynamic(void);
+static void compositor_dyn_setup(struct compositor_dyn *d);
+
 // The bitmap of each shape, one row of CP_CURSOR_W pixels a line (see above).
 static const char compositor_cursor_art[CP_SHAPES][CP_CURSOR_H][CP_CURSOR_W + 1] = {
     {  // the arrow
@@ -3376,15 +3406,17 @@ static const unsigned char compositor_cursor_by_edges[16] = {
 static void compositor_cursor_cell(int *left, int *top, int x, int y, unsigned int shape, int scale)
 {
         const signed char *hot = compositor_cursor_hot[shape < CP_SHAPES ? shape : 0];
+        int hx = compositor_cursor_dynamic() ? CP_DYN_HOT : hot[0], hy = compositor_cursor_dynamic() ? CP_DYN_HOT : hot[1];
 
-        *left = x - hot[0] * scale;
-        *top = y - hot[1] * scale;
+        *left = x - hx * scale;
+        *top = y - hy * scale;
 }
 
-// The largest whole scale of a shape the plane holds.
+// The largest whole scale of a shape the plane holds: a classic shape is CP_CURSOR_W cells across, the dynamic one CP_PLANE.
 static int compositor_cursor_fit(int scale)
 {
-        int most = CP_PLANE / CP_CURSOR_H < CP_PLANE / CP_CURSOR_W ? CP_PLANE / CP_CURSOR_H : CP_PLANE / CP_CURSOR_W;
+        int span = compositor_cursor_dynamic() ? CP_PLANE : CP_CURSOR_W;
+        int most = CP_PLANE / span;
 
         return scale < most ? scale : most;
 }
@@ -3397,8 +3429,89 @@ static int compositor_cursor_inside(unsigned int shape, int row, int column)
                compositor_cursor_art[shape][row][column] == '#';
 }
 
-static int compositor_cursor_pixel(unsigned int shape, int row, int column)
+/*
+        The dynamic pointer's ink, a cell of the plane at a time, with its geometry (compositor_dyn_setup). The circle is an ellipse
+        whose axes are the stretch's: along the last motion it is a times the radius, across it b, and the outline is the one cell
+        at its edge. The shapes that are not the text's are marked inside it, and the text's is a rounded rectangle, which is its
+        own outline and has no mark. Positions are in a cell's 64ths, so the stretch is worked in whole numbers.
+*/
+static int compositor_dyn_within(int box, long long along, long long across, long long a, long long b, long long c)
 {
+        long long aa = along < 0 ? -along : along, bb = across < 0 ? -across : across, da, db;
+
+        if (a <= 0 || b <= 0)
+                return 0;
+        if (!box)
+                return along * along * b * b + across * across * a * a <= a * a * b * b;
+        if (aa > a || bb > b)
+                return 0;
+        if (aa > a - c && bb > b - c)
+        {
+                da = aa - (a - c);
+                db = bb - (b - c);
+                return da * da + db * db <= c * c;
+        }
+        return 1;
+}
+
+// The quarter turns of the wait arc: each eighth is the two directions its quarter lies between, which are at right angles.
+static const signed char compositor_dyn_quarters[8][2][2] = {{{1, 0}, {0, 1}},   {{1, 1}, {-1, 1}}, {{0, 1}, {-1, 0}}, {{-1, 1}, {-1, -1}},
+                                                             {{-1, 0}, {0, -1}}, {{-1, -1}, {1, -1}}, {{0, -1}, {1, 0}}, {{1, -1}, {1, 1}}};
+
+// The mark a shape wears inside the circle, at dx, dy cells from the hot cell (ax, ay their sizes), with its arms L cells long.
+// The arrows of a resize are double-ended, the cross of move is four-armed, the hand's mark is a dot, the wait is a quarter of an
+// arc turning, and not-allowed is the slash (the same diagonal as a resize's bar).
+static int compositor_dyn_mark(unsigned int shape, int dx, int dy, int ax, int ay, int L, int spin)
+{
+        int d2 = ax * ax + ay * ay;
+        int hx = ax <= L && ax >= L - 4 && ay == L - ax, hy = ay <= L && ay >= L - 4 && ax == L - ay;
+        int tip = ax <= L && ay <= L && ((ax == L && ay >= L - 4) || (ay == L && ax >= L - 4));
+        const signed char (*q)[2] = compositor_dyn_quarters[spin & 7];
+
+        switch (shape)
+        {
+        case CP_RESIZE_H:
+                return (ay == 0 && ax <= L) || hx;
+        case CP_RESIZE_V:
+                return (ax == 0 && ay <= L) || hy;
+        case CP_RESIZE_NWSE:
+                return (dx == dy && ax <= L) || (dx * dy > 0 && tip);
+        case CP_RESIZE_NESW:
+                return (dx == -dy && ax <= L) || (dx * dy < 0 && tip);
+        case CP_CROSS:
+                return (ax == 0 && ay <= L) || (ay == 0 && ax <= L);
+        case CP_MOVE:
+                return (ax == 0 && ay <= L) || (ay == 0 && ax <= L) || hx || hy;
+        case CP_HAND:
+                return d2 <= 9;
+        case CP_WAIT:
+                return d2 <= L * L && d2 >= (L - 1) * (L - 1) && dx * q[0][0] + dy * q[0][1] >= 0 && dx * q[1][0] + dy * q[1][1] >= 0;
+        case CP_NOTALLOWED:
+                return dx == dy && ax <= L;
+        default:
+                return 0;
+        }
+}
+
+// The ink of a cell of the plane for the dynamic shape d (NULL for the classic bitmap).
+static int compositor_dyn_pixel(const struct compositor_dyn *d, unsigned int shape, int row, int column)
+{
+        int dx = column - CP_DYN_HOT, dy = row - CP_DYN_HOT, ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+        long long px = dx * 64ll, py = dy * 64ll;
+        long long along = (px * d->ux + py * d->uy) / 64, across = (py * d->ux - px * d->uy) / 64;
+        int text = shape == CP_TEXT;
+
+        if (!compositor_dyn_within(text, along, across, d->a, d->b, d->c))
+                return 0;
+        if (!compositor_dyn_within(text, along, across, d->ai, d->bi, d->ci))
+                return 2;
+        return !text && compositor_dyn_mark(shape, dx, dy, ax, ay, d->length, d->spin);
+}
+
+static int compositor_cursor_pixel(const struct compositor_dyn *d, unsigned int shape, int row, int column)
+{
+        if (d)
+                return compositor_dyn_pixel(d, shape, row, column);
         if (!compositor_cursor_inside(shape, row, column))
                 return 0;
         if (compositor_cursor_inside(shape, row - 1, column) && compositor_cursor_inside(shape, row + 1, column) &&
@@ -3415,17 +3528,25 @@ static int compositor_cursor_pixel(unsigned int shape, int row, int column)
 static void compositor_cursor_draw(const struct compositor_target *t, int x, int y, unsigned int shape,
                                    int scale, unsigned int fill, unsigned int edge)
 {
-        int left, top;
+        struct compositor_dyn dyn;
+        const struct compositor_dyn *d = 0;
+        int left, top, span;
 
         if (shape >= CP_SHAPES)
                 shape = CP_ARROW;
+        if (compositor_cursor_dynamic())
+        {
+                compositor_dyn_setup(&dyn);
+                d = &dyn;
+        }
+        span = d ? CP_PLANE : CP_CURSOR_W;
         compositor_cursor_cell(&left, &top, x, y, shape, scale);
-        for (int row = 0; row < CP_CURSOR_H; row++)
-                for (int column = 0; column < CP_CURSOR_W;)
+        for (int row = 0; row < span; row++)
+                for (int column = 0; column < span;)
                 {
-                        int ink = compositor_cursor_pixel(shape, row, column), run = column + 1;
+                        int ink = compositor_cursor_pixel(d, shape, row, column), run = column + 1;
 
-                        while (run < CP_CURSOR_W && compositor_cursor_pixel(shape, row, run) == ink)
+                        while (run < span && compositor_cursor_pixel(d, shape, row, run) == ink)
                                 run++;
                         if (ink)
                                 compositor_fill(t, left + column * scale, top + row * scale, (run - column) * scale, scale,
@@ -3438,17 +3559,25 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
 // The pointer the compositor draws into the scene (compositor_cursor_draw): its runs of the shape's bitmap, as fills over everything.
 static void compositor_gpu_cursor(int x, int y, unsigned int shape, int scale, unsigned int fill, unsigned int edge)
 {
-        int left, top;
+        struct compositor_dyn dyn;
+        const struct compositor_dyn *d = 0;
+        int left, top, span;
 
         if (shape >= CP_SHAPES)
                 shape = CP_ARROW;
+        if (compositor_cursor_dynamic())
+        {
+                compositor_dyn_setup(&dyn);
+                d = &dyn;
+        }
+        span = d ? CP_PLANE : CP_CURSOR_W;
         compositor_cursor_cell(&left, &top, x, y, shape, scale);
-        for (int row = 0; row < CP_CURSOR_H; row++)
-                for (int column = 0; column < CP_CURSOR_W;)
+        for (int row = 0; row < span; row++)
+                for (int column = 0; column < span;)
                 {
-                        int ink = compositor_cursor_pixel(shape, row, column), run = column + 1;
+                        int ink = compositor_cursor_pixel(d, shape, row, column), run = column + 1;
 
-                        while (run < CP_CURSOR_W && compositor_cursor_pixel(shape, row, run) == ink)
+                        while (run < span && compositor_cursor_pixel(d, shape, row, run) == ink)
                                 run++;
                         if (ink)
                                 compositor_gpu_rect(0, left + column * scale, top + row * scale, left + run * scale,
@@ -4655,10 +4784,20 @@ static struct
                 int magnify;            // the hand shook it since the last motion
                 int shake_off;          // `moonwater canvas cursor shake off`: a shake finds nothing
                 int click_off;          // `moonwater canvas cursor click off`: a press does not squeeze the pointer (on by default)
-                int squeeze;            // frames left at the squeezed scale, after a press of the left button (compositor_click_press)
+                int click_frames;       // frames left at the squeezed scale, after a press of the left button (compositor_click_press)
                 positive shake_ns;      // how long a shaken pointer stays large (0 is COMPOSITOR_MAGNIFIED_NS)
                 int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
+                int style;              // `moonwater canvas cursor style`: 1 dynamic (the default), 0 classic
+                int dyn;                // the dynamic cursor is what is drawn now: the style, or a touch was the last input (touch.hidden)
+                int squeeze;            // `moonwater canvas cursor squeeze`: the percent a pointer shrinks by on a press (compositor_pointer_squeeze)
+                int pulsing;            // a primary press squeezes the dynamic circle until pulse_until
+                positive pulse_until;
+                int ux, uy;             // the unit direction of the last motion, times 64 (64, 0 for none): the axis the circle stretches along
+                int speed;              // the last motion's speed in pixels, 0 to CP_DYN_SPEED: how far the circle grows and stretches
+                positive idle_until;    // the stretch lets go at this time when nothing moved
+                int last_x, last_y;     // where the pointer was at the last motion
+                int spin;               // the wait arc's eighth of a turn, from the clock when it was drawn
         } cursor;
         struct compositor_shake shake;
         char driver[16];            // the card's driver, which says whether it is a real card
@@ -11375,25 +11514,38 @@ static b32 compositor_card_open(void)
         where it was and where it is, and is drawn over what is composed there.
 */
 
+/*
+        The percent a pointer shrinks by when a primary button is pressed (`moonwater canvas cursor squeeze`, 0 to 50, 25 by
+        default): the dynamic circle's press (compositor_dyn_setup) and the click squeeze read it through this one helper.
+*/
+static int compositor_pointer_squeeze(void)
+{
+        return compositor.cursor.squeeze;
+}
+
 // The scale a pointer is drawn at: its own size when `moonwater canvas cursor size` gave one, and the desktop's
-// when it did not, three times that while it is shaken large, and three quarters of that (never less than one
+// when it did not, three times that while it is shaken large, and less by the squeeze percent (never less than one
 // pixel) for the frames a press squeezes it. Whole pixels only, so the hot spot stays on its pixel at either scale.
 static int compositor_cursor_scale(void)
 {
         int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
-        int scale = compositor.cursor.magnified ? 3 * base : base, squeezed = 3 * scale / 4;
+        int scale = compositor.cursor.magnified ? 3 * base : base, percent = compositor_pointer_squeeze(), squeezed;
 
-        if (compositor.cursor.squeeze)
+        if (compositor.cursor.click_frames && percent)
+        {
+                squeezed = scale * (100 - percent) / 100;
                 scale = squeezed < 1 ? 1 : squeezed;
+        }
         return scale;
 }
 
-// A press of the left button squeezes the pointer for two frames, when the setting is on (it is by default).
+// A press of the left button squeezes the pointer for two frames, when the setting is on (it is by default) and the
+// shared squeeze slider is not 0: the amount is the slider's (compositor_pointer_squeeze), not a fixed one.
 static void compositor_click_press(unsigned int code, int down)
 {
-        if (down && code == COMPOSITOR_BTN_LEFT && !compositor.cursor.click_off)
+        if (down && code == COMPOSITOR_BTN_LEFT && !compositor.cursor.click_off && compositor_pointer_squeeze())
         {
-                compositor.cursor.squeeze = 2;
+                compositor.cursor.click_frames = 2;
                 compositor_cursor_move();
         }
 }
@@ -11401,20 +11553,118 @@ static void compositor_click_press(unsigned int code, int down)
 // Each frame drawn is one of the squeezed frames left, and the last of them is followed by the full size.
 static void compositor_click_frame(void)
 {
-        if (compositor.cursor.squeeze)
+        if (compositor.cursor.click_frames)
         {
-                compositor.cursor.squeeze--;
+                compositor.cursor.click_frames--;
                 compositor_cursor_move();
         }
 }
 
+static int compositor_cursor_dynamic(void)
+{
+        return compositor.cursor.dyn;
+}
+
+// Whether the pointer is the dynamic one now: the style says so, or the last input was a touch (touch.hidden), which always is.
+static int compositor_pointer_dynamic(void)
+{
+        return compositor.cursor.style || compositor.touch.hidden;
+}
+
+// The geometry of the dynamic pointer as it is drawn now: a circle of CP_DYN_RADIUS cells, grown and stretched by the last motion,
+// squeezed while a press's pulse is on. The wait arc's turn and the stretch are what compositor_cursor_moved and the clock left.
+static void compositor_dyn_setup(struct compositor_dyn *d)
+{
+        int squeeze = compositor.cursor.pulsing ? compositor_pointer_squeeze() : 0;
+        long long g = compositor.cursor.speed, radius, along, across;
+
+        // Units of a cell's 64th: the radius, then grown by up to a quarter, then stretched along the motion by up to a half and
+        // thinned across it by up to a quarter (the speed's g, from 0 to CP_DYN_SPEED).
+        radius = (CP_DYN_RADIUS * 100ll * (100 - squeeze) / 100) * 64 / 100;
+        radius = radius * (192 + g) / 192;
+        along = radius * (96 + g) / 96;
+        across = radius * (192 - g) / 192;
+        d->ux = compositor.cursor.ux;
+        d->uy = compositor.cursor.uy;
+        if (!d->ux && !d->uy)
+                d->ux = 64;
+        d->a = along;
+        d->b = across;
+        d->c = across / 4;
+        d->ai = along - 64;
+        d->bi = across - 64;
+        d->ci = d->c - 64 > 0 ? d->c - 64 : 0;
+        d->length = (int)(2 * (across / 64) / 3);
+        if (d->length < 4)
+                d->length = 4;
+        d->spin = compositor.cursor.spin;
+}
+
+// A motion of the pointer: the last movement's direction and speed are what the dynamic circle stretches by, and it lets go of them
+// CP_DYN_IDLE_NS after the last one. A motion with no movement (a button, a redraw) changes nothing.
+static void compositor_cursor_moved(positive now)
+{
+        int dx = compositor.pointer_x - compositor.cursor.last_x, dy = compositor.pointer_y - compositor.cursor.last_y;
+        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, major, minor, length = 1;
+
+        compositor.cursor.last_x = compositor.pointer_x;
+        compositor.cursor.last_y = compositor.pointer_y;
+        if (!dx && !dy)
+                return;
+        // The speed is the longer axis and half the shorter (an octagon's edge), which needs no square root.
+        major = ax > ay ? ax : ay;
+        minor = ax > ay ? ay : ax;
+        compositor.cursor.speed = major + minor / 2 > CP_DYN_SPEED ? CP_DYN_SPEED : major + minor / 2;
+        // The direction, times 64: the vector over its length, which is worked out by counting up to it.
+        while (length * length < dx * dx + dy * dy)
+                length++;
+        compositor.cursor.ux = dx * 64 / length;
+        compositor.cursor.uy = dy * 64 / length;
+        compositor.cursor.idle_until = now + CP_DYN_IDLE_NS;
+}
+
+// What the dynamic pointer's own times are: the press's pulse, the stretch letting go, and the next eighth of a turn of the wait arc
+// (0 for none). The main loop sleeps until the first of them.
+static positive compositor_cursor_due(void)
+{
+        positive due = 0, now;
+
+        if (compositor.cursor.pulsing)
+                due = compositor.cursor.pulse_until;
+        if (compositor.cursor.speed && (!due || compositor.cursor.idle_until < due))
+                due = compositor.cursor.idle_until;
+        if (compositor.cursor.dyn && compositor.cursor.shape == CP_WAIT)
+        {
+                now = clock_monotonic_nanoseconds();
+                now = (now / CP_DYN_SPIN_NS + 1) * CP_DYN_SPIN_NS;
+                if (!due || now < due)
+                        due = now;
+        }
+        return due;
+}
+
+// The dynamic pointer's times that are up: the press lets go, the stretch goes, and the arc has turned, which redraws it.
+static void compositor_cursor_tick(positive now)
+{
+        int wake = 0;
+
+        if (compositor.cursor.pulsing && now >= compositor.cursor.pulse_until)
+                compositor.cursor.pulsing = 0, wake = 1;
+        if (compositor.cursor.speed && now >= compositor.cursor.idle_until)
+                compositor.cursor.speed = 0, compositor.cursor.ux = 64, compositor.cursor.uy = 0, wake = 1;
+        if (compositor.cursor.dyn && compositor.cursor.shape == CP_WAIT && (int)((now / CP_DYN_SPIN_NS) & 7) != compositor.cursor.spin)
+                wake = 1;
+        if (wake)
+                compositor_cursor_move();
+}
+
 static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int scale)
 {
-        int left, top;
+        int left, top, span = compositor.cursor.dyn ? CP_PLANE : CP_CURSOR_W;
 
         compositor_cursor_cell(&left, &top, x, y, shape, scale);
         compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(left, top, CP_CURSOR_W * scale, CP_CURSOR_H * scale);
+        compositor_damage(left, top, span * scale, span * scale);
         compositor.damage_by = 0;
 }
 
@@ -11460,8 +11710,10 @@ static int compositor_cursor_paint(unsigned int shape, int fitted)
         {
                 struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
 
-                compositor_cursor_draw(&t, compositor_cursor_hot[shape][0] * fitted, compositor_cursor_hot[shape][1] * fitted,
-                                       shape, fitted, compositor_cursor_ink(0, 0xff000000u),
+                int hx = compositor.cursor.dyn ? CP_DYN_HOT : compositor_cursor_hot[shape][0];
+                int hy = compositor.cursor.dyn ? CP_DYN_HOT : compositor_cursor_hot[shape][1];
+
+                compositor_cursor_draw(&t, hx * fitted, hy * fitted, shape, fitted, compositor_cursor_ink(0, 0xff000000u),
                                        compositor_cursor_ink(1, 0xff000000u));
         }
         compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
@@ -11578,9 +11830,26 @@ static void compositor_cursor_move(void)
 {
         int scale = compositor_cursor_scale();
         unsigned int shape = compositor.cursor.shape;
+        int dyn = compositor_pointer_dynamic();
 
-        // A finger was the last thing used: no pointer under it, on a plane or drawn, until a mouse or a pad moves.
-        if (compositor.touch.hidden || compositor.cursor.client_hidden)
+        // The classic pointer and the dynamic one are two pictures. The one drawn is taken off where it was, with the picture it
+        // was drawn in, and the other is drawn from here on. A touch was the last input: the dynamic one, whatever the style says.
+        if (dyn != compositor.cursor.dyn)
+        {
+                if (compositor.cursor.drawn)
+                {
+                        compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
+                                                      compositor.cursor.drawn_scale);
+                        compositor.cursor.drawn = 0;
+                }
+                if (compositor.cursor.handle[0] && compositor.cursor.plane_shape >= 0)
+                        compositor_cursor_planes_off();
+                compositor.cursor.dyn = dyn;
+        }
+        if (compositor.cursor.dyn)
+                compositor.cursor.spin = (int)((clock_monotonic_nanoseconds() / CP_DYN_SPIN_NS) & 7);
+
+        if (compositor.cursor.client_hidden)
         {
                 if (compositor.cursor.handle[0] && compositor.cursor.plane_shape >= 0)
                         compositor_cursor_planes_off();
@@ -11626,7 +11895,8 @@ static void compositor_cursor_move(void)
 
                 compositor_cursor_cell(&left, &top, compositor_drawn_x(), compositor_drawn_y(), shape, fitted);
 
-                if (((int)shape == compositor.cursor.plane_shape && fitted == compositor.cursor.plane_scale) ||
+                // The dynamic circle changes with every motion, a press and the arc's turn, so its plane is painted again each time.
+                if ((!compositor.cursor.dyn && (int)shape == compositor.cursor.plane_shape && fitted == compositor.cursor.plane_scale) ||
                     compositor_cursor_paint(shape, fitted) == 0)
                         if (compositor_cursor_planes(left, top) == 0)
                                 return;
@@ -11842,7 +12112,8 @@ static void compositor_look_read(void)
 {
         char word[16];
         long colour;
-        int size = 0, look = 0;
+        int size = 0, look = 0, style, squeeze = 25;
+        long percent = 25;
 
         compositor_word(SETTING_BACKGROUND_PATH, word, sizeof(word));
         colour = word[0] ? window_colour_parse((string_address)word) : -1;
@@ -11860,11 +12131,21 @@ static void compositor_look_read(void)
                 look = 1;
         else if (!string_compare((string_address)word, (string_address) "dark"))
                 look = 2;
+        // The style: classic is the bitmaps, and anything else (dynamic, or nothing kept) is the dynamic circle.
+        compositor_word(SETTING_CURSOR_STYLE_PATH, word, sizeof(word));
+        style = string_compare((string_address)word, (string_address) "classic") ? 1 : 0;
+        // The squeeze: what is kept, or the row's standard (25 percent) when nothing is, 0 to 50.
+        compositor_word(SETTING_SQUEEZE_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_SQUEEZE_PATH, word, &percent);
+        squeeze = percent < 0 ? 0 : percent > 50 ? 50 : (int)percent;
 
-        if (size != compositor.cursor.size || look != compositor.cursor.look)
+        if (size != compositor.cursor.size || look != compositor.cursor.look || style != compositor.cursor.style ||
+            squeeze != compositor.cursor.squeeze)
         {
                 compositor.cursor.size = size;
                 compositor.cursor.look = look;
+                compositor.cursor.style = style;
+                compositor.cursor.squeeze = squeeze;
                 // The plane wears the old one, and is painted again (a scale it is not at); a plane that is
                 // to be hidden still is told so.
                 compositor.cursor.plane_scale = 0;
@@ -17259,6 +17540,7 @@ static void compositor_motion(void)
                 compositor.cursor.asked_row = of;
                 compositor.cursor.asked_seen = asked;
         }
+        compositor_cursor_moved(clock_monotonic_nanoseconds());
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());
         compositor_cursor_move();
@@ -17671,6 +17953,14 @@ static void compositor_button(unsigned int code, int down)
         {
                 compositor_release(code, 1);
                 return;
+        }
+
+        // A primary press squeezes the dynamic pointer for two frames (compositor_dyn_setup), by the squeeze the settings give.
+        if (code == COMPOSITOR_BTN_LEFT && compositor_pointer_squeeze() && compositor_pointer_dynamic())
+        {
+                compositor.cursor.pulsing = 1;
+                compositor.cursor.pulse_until = clock_monotonic_nanoseconds() + CP_DYN_PULSE_NS;
+                compositor_cursor_move();
         }
 
         // A right press while the hand moves or resizes a window takes the move back, as Escape does (compositor_hold_cancel);
@@ -20888,6 +21178,14 @@ static b32 compositor_main()
                                                                                      : until;
                 }
 
+                // The dynamic pointer's own times: a press's squeeze, the stretch letting go, the wait arc's next turn.
+                {
+                        positive due = compositor_cursor_due();
+
+                        if (due)
+                                until = !until || due < until ? due : until;
+                }
+
                 // The sound server's volume, looked at for the tray's cell, while there is a band to show it on.
                 if (compositor.band)
                 {
@@ -21048,6 +21346,9 @@ static b32 compositor_main()
                         compositor.cursor.magnified = 0;
                         compositor_cursor_move();
                 }
+
+                // The dynamic pointer's press lets go, its stretch goes and its arc turns when their times are up (compositor_cursor_tick).
+                compositor_cursor_tick(clock_monotonic_nanoseconds());
 
                 // The shape the window under a resting pointer publishes is shown (compositor_shape_sync).
                 compositor_shape_sync();

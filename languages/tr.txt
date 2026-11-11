@@ -250,6 +250,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Connect over	2789	Bağlantı yolu
 =Cursor look	34ce	İşaretçi görünümü
 =Cursor size	65d4	İşaretçi boyutu
+=Cursor style	ad1e	İmleç stili
 =Date format	7a44	Tarih biçimi
 =Devices	f320	Aygıtlar
 =Devices in this machine	d7b8	Bu makinedeki aygıtlar
@@ -298,6 +299,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Pair a machine	b39b	Bir makine eşleştir
 =Plain Text	2bbe	Düz Metin
+=Pointer squeeze (percent, or default)	bbee	İmleç sıkıştırma (yüzde veya varsayılan)
 =Pointer squeezes on click	ad88	Tıklamada imleç küçülür
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
@@ -358,6 +360,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =blue	f5cd	mavi
 =bottom	6b2a	altta
 =center	4484	orta
+=classic	6d53	klasik
 =copies	3e10	kopya
 =dark	6945	koyu
 =dark-grey	bcb3	koyu gri
@@ -365,6 +368,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =deny	6367	reddet
 =desktop	87b3	masaüstü
 =dmy	2a79	dmy
+=dynamic	96ae	dinamik
 =edge	d83c	kenar
 =fast	02af	hızlı
 =forest	2a60	orman

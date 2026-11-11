@@ -250,6 +250,7 @@ ui_field_full	fe02	no cabe más
 =Connect over	2789	Conectar por
 =Cursor look	34ce	Aspecto del puntero
 =Cursor size	65d4	Tamaño del puntero
+=Cursor style	ad1e	Estilo del puntero
 =Date format	7a44	Formato de fecha
 =Devices	f320	Dispositivos
 =Devices in this machine	d7b8	Dispositivos de esta máquina
@@ -298,6 +299,7 @@ ui_field_full	fe02	no cabe más
 =Output device (name, or default)	d73c	Dispositivo de salida (nombre o default)
 =Pair a machine	b39b	Emparejar una máquina
 =Plain Text	2bbe	Texto sin formato
+=Pointer squeeze (percent, or default)	bbee	Compresión del puntero (por ciento, o predeterminado)
 =Pointer squeezes on click	ad88	El puntero se encoge al hacer clic
 =Power	a5e6	Energía
 =Power profile	8def	Perfil de energía
@@ -358,6 +360,7 @@ ui_field_full	fe02	no cabe más
 =blue	f5cd	azul
 =bottom	6b2a	abajo
 =center	4484	centro
+=classic	6d53	clásico
 =copies	3e10	copias
 =dark	6945	oscuro
 =dark-grey	bcb3	gris oscuro
@@ -365,6 +368,7 @@ ui_field_full	fe02	no cabe más
 =deny	6367	denegar
 =desktop	87b3	escritorio
 =dmy	2a79	dmy
+=dynamic	96ae	dinámico
 =edge	d83c	borde
 =fast	02af	rápido
 =forest	2a60	bosque

@@ -250,6 +250,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Connect over	2789	Σύνδεση μέσω
 =Cursor look	34ce	Εμφάνιση δείκτη
 =Cursor size	65d4	Μέγεθος δείκτη
+=Cursor style	ad1e	Στυλ δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
 =Devices	f320	Συσκευές
 =Devices in this machine	d7b8	Συσκευές σε αυτό το μηχάνημα
@@ -298,6 +299,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
 =Plain Text	2bbe	Απλό κείμενο
+=Pointer squeeze (percent, or default)	bbee	Συμπίεση δείκτη (ποσοστό, ή προεπιλογή)
 =Pointer squeezes on click	ad88	Ο δείκτης συρρικνώνεται στο κλικ
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
@@ -358,6 +360,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =blue	f5cd	μπλε
 =bottom	6b2a	κάτω
 =center	4484	κέντρο
+=classic	6d53	κλασικό
 =copies	3e10	αντίγραφα
 =dark	6945	σκούρο
 =dark-grey	bcb3	σκούρο γκρι
@@ -365,6 +368,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =deny	6367	άρνηση
 =desktop	87b3	επιφάνεια εργασίας
 =dmy	2a79	dmy
+=dynamic	96ae	δυναμικό
 =edge	d83c	άκρη
 =fast	02af	γρήγορα
 =forest	2a60	δάσος

@@ -89,6 +89,8 @@
 #define SETTING_BACKGROUND_PATH "/root/canvas.background"
 #define SETTING_CURSOR_SIZE_PATH "/root/canvas.cursor.size"
 #define SETTING_CURSOR_LOOK_PATH "/root/canvas.cursor.look"
+#define SETTING_CURSOR_STYLE_PATH "/root/canvas.cursor.style"
+#define SETTING_SQUEEZE_PATH "/root/canvas.cursor.squeeze"
 #define SETTING_SHAKE_PATH "/root/canvas.cursor.shake"
 #define SETTING_SHAKE_DELAY_PATH "/root/canvas.cursor.shake.delay"
 #define SETTING_CURSOR_CLICK_PATH "/root/canvas.cursor.click"
@@ -374,6 +376,20 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
                       .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto",
                       .refusal = "cursor look is light, dark or auto, not %s\n"),
+    //  The pointer's shape: the classic bitmaps, or one circle that stretches with the hand and shows the state as a mark
+    //  (compositor.c's dynamic cursor). A touch always uses the circle, whatever this says.
+    SETTING_PLAIN_ROW(null, "Cursor style", SETTINGS_CHOICE, 0, ("canvas", "cursor", "style"), "style ", "classic dynamic",
+                      .path = SETTING_CURSOR_STYLE_PATH, .standard = "dynamic", .reset = "dynamic",
+                      .refusal = "cursor style is classic or dynamic, not %s\n",
+                      .usage = "canvas cursor style [classic|dynamic]",
+                      .help = "the classic pointers, or one circle that stretches with the hand and shows the state inside it [dynamic]"),
+    //  How far a pointer shrinks when a button is pressed (compositor.c's compositor_pointer_squeeze, which both the dynamic
+    //  circle's press and the click squeeze read): 0 is none.
+    SETTING_PLAIN_ROW(null, "Pointer squeeze (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "squeeze"), "squeeze ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_SQUEEZE_PATH,
+                      .standard = "25", .unit = "percent", .low = 0, .high = 50,
+                      .usage = "canvas cursor squeeze [PERCENT|default]",
+                      .help = "how far a pointer shrinks when a button is pressed, 0 to 50 percent, 0 for none [25]"),
     SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
                       .path = SETTING_SHAKE_PATH, .standard = "on",
                       .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),

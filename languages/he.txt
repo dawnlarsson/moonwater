@@ -251,6 +251,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Connect over	2789	חיבור דרך
 =Cursor look	34ce	מראה המצביע
 =Cursor size	65d4	גודל המצביע
+=Cursor style	ad1e	סגנון המצביע
 =Date format	7a44	תבנית תאריך
 =Devices	f320	התקנים
 =Devices in this machine	d7b8	התקנים במכונה זו
@@ -299,6 +300,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
 =Plain Text	2bbe	טקסט פשוט
+=Pointer squeeze (percent, or default)	bbee	לחיצת המצביע (אחוזים, או ברירת מחדל)
 =Pointer squeezes on click	ad88	המצביע מתכווץ בלחיצה
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
@@ -359,6 +361,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =blue	f5cd	כחול
 =bottom	6b2a	למטה
 =center	4484	מרכז
+=classic	6d53	קלאסי
 =copies	3e10	עותקים
 =dark	6945	כהה
 =dark-grey	bcb3	אפור כהה
@@ -366,6 +369,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =deny	6367	חסום
 =desktop	87b3	שולחן עבודה
 =dmy	2a79	dmy
+=dynamic	96ae	דינמי
 =edge	d83c	קצה
 =fast	02af	מהיר
 =forest	2a60	ירוק יער

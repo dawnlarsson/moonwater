@@ -127627,6 +127627,7 @@ static void check_compositor_click(void)
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.scale = 200;
     compositor.card = -1;
+    compositor.cursor.squeeze = 25;
 
     compositor.cursor.click_off = 1;
     compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
@@ -127636,23 +127637,28 @@ static void check_compositor_click(void)
     compositor_click_frame();
     seen[2] = compositor_cursor_scale();
     check("click: off, a press of the left button changes no scale, frame after frame",
-          seen[0] == 2 && seen[1] == 2 && seen[2] == 2 && compositor.cursor.squeeze == 0);
+          seen[0] == 2 && seen[1] == 2 && seen[2] == 2 && compositor.cursor.click_frames == 0);
 
     compositor.cursor.click_off = 0;
+    compositor.cursor.squeeze = 0;
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
+    check("click: the squeeze slider at 0 makes a press squeeze nothing, the scale stays",
+          compositor.cursor.click_frames == 0 && compositor_cursor_scale() == 2);
+    compositor.cursor.squeeze = 25;
     compositor_click_press(COMPOSITOR_BTN_RIGHT, 1);
     compositor_click_press(COMPOSITOR_BTN_LEFT, 0);
-    check("click: on, a press of another button or a release starts nothing", compositor.cursor.squeeze == 0);
+    check("click: on, a press of another button or a release starts nothing", compositor.cursor.click_frames == 0);
 
     compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
     seen[0] = compositor_cursor_scale();
     compositor_click_frame();
     compositor_click_press(COMPOSITOR_BTN_LEFT, 0);
-    check("click: a release in the middle does not restart the squeeze", compositor.cursor.squeeze == 1);
+    check("click: a release in the middle does not restart the squeeze", compositor.cursor.click_frames == 1);
     seen[1] = compositor_cursor_scale();
     compositor_click_frame();
     seen[2] = compositor_cursor_scale();
-    check("click: on, a press is two squeezed frames (three quarters of the scale) and then full size",
-          seen[0] == 1 && seen[1] == 1 && seen[2] == 2 && compositor.cursor.squeeze == 0);
+    check("click: on, a press is two squeezed frames (the slider's 25 percent: three quarters of the scale) and then full size",
+          seen[0] == 1 && seen[1] == 1 && seen[2] == 2 && compositor.cursor.click_frames == 0);
 
     compositor.scale = 100;
     compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
@@ -127670,8 +127676,108 @@ static void check_compositor_click(void)
         hot &= left + compositor_cursor_hot[shape][0] * scale == x && top + compositor_cursor_hot[shape][1] * scale == y;
     }
     check("click: the squeezed pointer's hot spot is on the pixel it was pointed at, for every shape", hot);
-    compositor.cursor.squeeze = 0;
+    compositor.cursor.click_frames = 0;
     compositor.cursor.click_off = 0;
+}
+
+/*
+        The cursor style (compositor.c): classic draws the bitmap with its tip on the pointer; dynamic draws a circle of CP_DYN_RADIUS
+        cells about the hot cell with the state's mark inside it, the text's rounded rectangle instead; a stretch and a press's squeeze
+        stay on the plane; a touch is always dynamic; and the setting rows say dynamic and 25 when nothing is kept.
+*/
+static void check_compositor_cursor_style(void)
+{
+    static unsigned int plane[CP_PLANE * CP_PLANE];
+    static unsigned int wide[CP_PLANE * 2 * CP_PLANE];
+    struct compositor_target t = {plane, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+    struct compositor_target margin = {wide, CP_PLANE * 2, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+    struct compositor_dyn d;
+    const unsigned int fill = 0xffffffffu, edge = 0xff000000u;
+    unsigned int sentinel = 0x5a5a5a5au;
+    int left, top, row_at, column_at, sentinel_ok = 1, squeeze_row, style_row, squeezed, unsqueezed, touched, mouse;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.cursor.style = 0;
+    compositor.cursor.dyn = 0;
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 16, 16, CP_ARROW, 1, fill, edge);
+    check("cursor style: classic draws the arrow's bitmap with its tip on the pointer, the pixel right of the tip clear",
+          plane[16 * 64 + 16] != 0 && plane[17 * 64 + 16] != 0 && plane[16 * 64 + 17] == 0);
+
+    compositor.cursor.style = 1;
+    compositor.cursor.dyn = 1;
+    compositor.cursor.speed = 0;
+    compositor.cursor.ux = 64;
+    compositor.cursor.uy = 0;
+    compositor.cursor.pulsing = 0;
+    compositor_cursor_cell(&left, &top, 100, 50, CP_ARROW, 1);
+    check("cursor style: dynamic: the hot cell is the centre of the circle, so the pointer is the circle's middle",
+          left + CP_DYN_HOT == 100 && top + CP_DYN_HOT == 50);
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, CP_ARROW, 1, fill, edge);
+    check("cursor style: dynamic draws a circle of radius 16 about the hot cell: its outline at 16 in four directions and on the diagonal, "
+          "clear inside it and outside it, and the square's corner not drawn",
+          plane[32 * 64 + 48] != 0 && plane[32 * 64 + 16] != 0 && plane[16 * 64 + 32] != 0 && plane[48 * 64 + 32] != 0 &&
+          plane[43 * 64 + 43] != 0 && plane[44 * 64 + 44] == 0 && plane[32 * 64 + 47] == 0 && plane[32 * 64 + 49] == 0 &&
+          plane[32 * 64 + 32] == 0);
+
+    compositor.cursor.speed = CP_DYN_SPEED;
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, CP_ARROW, 1, fill, edge);
+    check("cursor style: a fast motion stretches the circle along it, 30 cells out and not 31, and 15 across it",
+          plane[32 * 64 + 62] != 0 && plane[32 * 64 + 63] == 0 && plane[47 * 64 + 32] != 0 && plane[48 * 64 + 32] == 0);
+
+    for (unsigned int at = 0; at < CP_PLANE * 2 * CP_PLANE; at++)
+        wide[at] = sentinel;
+    compositor_cursor_draw(&margin, 0, 0, CP_ARROW, 1, fill, edge);
+    compositor_cursor_draw(&margin, 63, 63, CP_ARROW, 1, fill, edge);
+    for (row_at = 0; row_at < CP_PLANE; row_at++)
+        for (column_at = CP_PLANE; column_at < CP_PLANE * 2; column_at++)
+            sentinel_ok &= wide[row_at * CP_PLANE * 2 + column_at] == sentinel;
+    check("cursor style: a stretched circle at the plane's edge is clipped to the plane: nothing is written past its width", sentinel_ok);
+
+    compositor.cursor.speed = 0;
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, CP_TEXT, 1, fill, edge);
+    check("cursor style: the text state is a rounded rectangle on the same outline, with no bar inside it",
+          plane[32 * 64 + 48] != 0 && plane[48 * 64 + 32] != 0 && plane[32 * 64 + 40] == 0 && plane[40 * 64 + 32] == 0 &&
+          plane[48 * 64 + 48] == 0);
+
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, CP_HAND, 1, fill, edge);
+    check("cursor style: the hand's mark is a dot at the hot cell", plane[32 * 64 + 32] != 0 && plane[32 * 64 + 48] != 0);
+
+    memory_zero(plane, sizeof(plane));
+    compositor_cursor_draw(&t, 32, 32, CP_RESIZE_H, 1, fill, edge);
+    check("cursor style: a horizontal resize's mark is a double-ended bar along the circle's middle",
+          plane[32 * 64 + 42] != 0 && plane[32 * 64 + 22] != 0 && plane[37 * 64 + 32] == 0);
+
+    compositor.cursor.speed = 0;
+    compositor.cursor.squeeze = 50;
+    compositor.cursor.pulsing = 1;
+    compositor_dyn_setup(&d);
+    squeezed = d.a == 8 * 64;
+    compositor.cursor.squeeze = 0;
+    compositor_dyn_setup(&d);
+    unsqueezed = d.a == 16 * 64;
+    compositor.cursor.squeeze = 50;
+    compositor.cursor.pulsing = 0;
+    compositor_dyn_setup(&d);
+    check("cursor style: a press squeezes the circle by the squeeze percent (8 cells at 50), a squeeze of 0 is none, and none when not pressed",
+          squeezed && unsqueezed && d.a == 16 * 64);
+
+    compositor.touch.hidden = 1;
+    compositor.cursor.style = 0;
+    touched = compositor_pointer_dynamic() == 1;
+    compositor.touch.hidden = 0;
+    mouse = compositor_pointer_dynamic() == 0;
+    check("cursor style: a touch was the last input and draws the dynamic cursor whatever the style; a mouse draws the style's", touched && mouse);
+
+    squeeze_row = settings_row_named("Pointer squeeze (percent, or default)");
+    style_row = settings_row_named("Cursor style");
+    check("cursor style: the style row is dynamic when nothing is kept, and the squeeze row is 25 percent",
+          style_row >= 0 && squeeze_row >= 0 && string_equals((string_address)settings_rows[style_row].standard, (string_address)"dynamic") &&
+              string_equals((string_address)settings_rows[squeeze_row].standard, (string_address)"25"));
 }
 
 /*
@@ -139203,9 +139309,14 @@ static fn check_settings(string_address regular, string_address bold)
 "Input\n"
 "  canvas cursor [size [N|auto]|look [light|dark|auto]]\n"
 "                                    the pointer: size 1 to 4, colours [auto]\n"
+"  canvas cursor style [classic|dynamic]\n"
+"                                    the classic pointers, or one circle that stretches with the hand and shows the state inside it [dynamic]\n"
+"  canvas cursor squeeze [PERCENT|default]\n"
+"                                    how far a pointer shrinks when a button is pressed, 0 to 50 percent, 0 for none [25]\n"
 "  canvas cursor shake [on|off]      a shake of the hand makes the pointer large for a moment [on]\n"
 "  canvas cursor shake delay [MS|default]\n"
 "                                    how long it stays large after the last shake, 100 to 10000 ms [1200]\n"
+"  canvas cursor click [on|off]      a press of the left button makes the pointer smaller for two frames [on]\n"
 "  canvas predict touch [on|off]     a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]\n"
 "  canvas touch [on|off]             a circle under each finger on a touch screen, fading for a second after it lifts [on]\n"
 "  canvas touch left [off|windows|launcher]\n"
@@ -142210,6 +142321,7 @@ static fn check_settings_groups(void)
             {"Keyboard", "Input"}, {"On-screen keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
             {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
+            {"Cursor style", "Input"}, {"Pointer squeeze (percent, or default)", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Pointer squeezes on click", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
@@ -164755,6 +164867,7 @@ b32 main()
 #endif
         check_compositor_look();
         check_compositor_click();
+        check_compositor_cursor_style();
         check_taskbar_geometry();
         check_rtl_chrome();
         check_taskbar_tray();
@@ -170691,7 +170804,7 @@ static void check_compositor_pointer(void) {
               compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
         /* The click hand is hand-drawn with its index finger up: the pointer is the fingertip, the top row of the finger. */
-        ck_ok(compositor_cursor_hot[CP_HAND][0]==12&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(CP_HAND,0,12)==2);
+        ck_ok(compositor_cursor_hot[CP_HAND][0]==12&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(0,CP_HAND,0,12)==2);
     }
 }
 

@@ -250,6 +250,7 @@ ui_field_full	fe02	mer ryms inte
 =Connect over	2789	Anslut via
 =Cursor look	34ce	Pekarens utseende
 =Cursor size	65d4	Pekarens storlek
+=Cursor style	ad1e	Pekarstil
 =Date format	7a44	Datumformat
 =Devices	f320	Enheter
 =Devices in this machine	d7b8	Enheter i den här datorn
@@ -298,6 +299,7 @@ ui_field_full	fe02	mer ryms inte
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Pair a machine	b39b	Para ihop en maskin
 =Plain Text	2bbe	Oformaterad text
+=Pointer squeeze (percent, or default)	bbee	Pekarens hoptryckning (procent, eller standard)
 =Pointer squeezes on click	ad88	Pekaren krymper vid klick
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
@@ -358,6 +360,7 @@ ui_field_full	fe02	mer ryms inte
 =blue	f5cd	blå
 =bottom	6b2a	nederst
 =center	4484	mitten
+=classic	6d53	klassisk
 =copies	3e10	kopior
 =dark	6945	mörkt
 =dark-grey	bcb3	mörkgrå
@@ -365,6 +368,7 @@ ui_field_full	fe02	mer ryms inte
 =deny	6367	neka
 =desktop	87b3	skrivbord
 =dmy	2a79	dmy
+=dynamic	96ae	dynamisk
 =edge	d83c	kant
 =fast	02af	snabb
 =forest	2a60	skog
