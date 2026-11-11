@@ -3832,7 +3832,7 @@ struct ui_control
         struct ui_squish squish;
         struct ui_chase drawn;
         struct ui_ripple ripple[3];
-        struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent, shadow, pip_x, pip_w, pip_y;
+        struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent, pip_x, pip_w, pip_y;
         struct ui_tween item_ink[UI_ITEMS], item_scale[UI_ITEMS];
         struct ui_stretch dom, item_dom[UI_ITEMS];
         int dom_origin;                    // -1 the far edge, 1 the near (left, top), 0 the middle
@@ -4614,25 +4614,6 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         if (ratio > 0)
                 ui_slider_fill(ui, c, fill, fill_ink, null, sum);
 
-        // The thumb's halo: the pointer on the thumb (its box, 20 hovered), a ring of 10 at 8% round it; pressed, 14 at 12%.
-        {
-                b32 thumb_x = ui_slider_point(vertical, zero, stop);
-                b64 hp = (b64)ui_slider_along(ui, c, c->pointer_x, c->pointer_y) * 256, halo;
-                b32 on_thumb = (c->hover || c->down) && hp >= (b64)stop - ui_q8(ui, thumb) / 2 && hp < (b64)stop + ui_q8(ui, thumb) / 2;
-
-                ui_kit_number_to(&c->shadow, on_thumb ? (c->down ? UI_Q2(12) : UI_Q2(8)) : 0, 200, &ui_ease);
-                ui_kit_number_to(&c->extent, on_thumb ? ui_q(c->down ? 14 : 10) : 0, 200, &ui_ease);
-                halo = ui_kit_tween(&c->shadow);
-                if (halo > 0)
-                {
-                        b32 r = ui_q8(ui, thumb) / 2 + (b32)((ui_kit_tween(&c->extent) * ui->scale / 100) >> 22);
-                        struct ui_box ring = ui_slider_box(vertical, thumb_x - r, thumb_x + r, mid - r, mid + r, r, r);
-
-                        ring = ui_box_transform(ring, sx, sy, ox, oy, tx, ty);
-                        // The ring and the thumb's own background, both the accent at the halo's share.
-                        ui_slider_fill(ui, c, ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null, sum);
-                }
-        }
         // The keys ring a stood slider's thumb: a ring in the accent, 3 out from the thumb.
         if (vertical && c->focused)
         {
@@ -5398,7 +5379,7 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
 */
 static fn ui_control_place(struct ui_control address_to c)
 {
-        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y, &c->shadow};
+        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y};
 
         for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
                 unplaced[k]->placed = 0;
@@ -5408,7 +5389,7 @@ static fn ui_control_place(struct ui_control address_to c)
                 ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
                 c->item_dom[k].at = 0;
         }
-        // A slider's extent is its thumb's halo radius, which is its state's at the first frame, as its shadow is: unplaced.
+        // A slider's extent is not drawn: it is unplaced, as it was when it was the thumb's halo radius.
         if (c->kind == UI_SLIDER)
                 c->extent.placed = 0;
         else
@@ -9497,7 +9478,7 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
 #define UI_STRIP_GAP 12       // extra after the first
 #define UI_STRIP_PAD 8        // before the first, and the window's edge
 #define UI_STRIP_FACE 36      // the disc
-#define UI_STRIP_SLIDER_W 28  // the slider's box: the thumb and its halo
+#define UI_STRIP_SLIDER_W 28  // the slider's box: the thumb
 #define UI_STRIP_GROUP (UI_METER_WIDTH + 6 + UI_STRIP_SLIDER_W)
 #define UI_STRIP_MUTE_W 76
 #define UI_STRIP_MUTE_H 32
