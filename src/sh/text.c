@@ -12618,9 +12618,8 @@ static bool text_tab_finish_options()
         return true;
 }
 
-/* The first stop strictly after column, and whether it was explicitly named. */
-static bool text_tab_next(positive column, positive address_to next,
-                          bool address_to explicit)
+/* The first stop strictly after column. */
+static bool text_tab_next(positive column, positive address_to next)
 {
         positive low = 0;
         positive high = text_tab_stop_count;
@@ -12638,7 +12637,6 @@ static bool text_tab_next(positive column, positive address_to next,
         if (low < text_tab_stop_count)
         {
                 address_to next = text_tab_stops[low];
-                address_to explicit = true;
                 return true;
         }
 
@@ -12655,7 +12653,6 @@ static bool text_tab_next(positive column, positive address_to next,
                 return false;
 
         address_to next = base + steps * text_tab_repeat;
-        address_to explicit = false;
         return true;
 }
 
@@ -12887,8 +12884,7 @@ static positive text_tab_expand_one(p8 character, positive column)
         if (character == '\t')
         {
                 positive stop;
-                bool explicit;
-                bool have = text_tab_next(column, address_of stop, address_of explicit);
+                bool have = text_tab_next(column, address_of stop);
                 positive after = have ? stop : column + (column != positive_max);
 
                 writer_fill_bulk(text_put, after - column, ' ');
@@ -13036,9 +13032,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                              code == 0x3000))
                                         {
                                                 positive stop;
-                                                bool explicit;
-                                                bool have = text_tab_next(column, address_of stop,
-                                                                          address_of explicit);
+                                                bool have = text_tab_next(column, address_of stop);
                                                 bool suppress = false;
                                                 positive width = unicode_width(code, UNICODE_WIDTH_WCWIDTH);
 
@@ -13129,8 +13123,6 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
 
                                                 if (column < stop_from || column >= stop_at)
                                                 {
-                                                        bool explicit;
-
                                                         //      Evenly spaced stops with none named are
                                                         //      the arithmetic text_tab_next answers
                                                         //      with, so the answer is made here.
@@ -13139,9 +13131,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                 stop = column - column % text_tab_repeat +
                                                                        text_tab_repeat;
                                                         else
-                                                                have = text_tab_next(
-                                                                    column, address_of stop,
-                                                                    address_of explicit);
+                                                                have = text_tab_next(column, address_of stop);
                                                         stop_from = have ? column : 1;
                                                         stop_at = have ? stop : 0;
                                                 }
