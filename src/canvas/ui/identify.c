@@ -124,19 +124,11 @@ static void identify_paint(struct ui address_to ui, unsigned int address_to pixe
         ui_view_draw(ui, &identify.view, false);
 }
 
-// The badge's picture, drawn whole into the buffer the kit gives (the badge has no rows to draw apart).
-static fn identify_picture(unsigned int address_to pixels, int top, int bottom)
-{
-        (void)top, (void)bottom;
-        identify_paint(&identify.ui, pixels, identify.own.table->stride, identify.width, identify.height);
-}
-
-// One picture: the badge, whole, into the buffer the compositor is not reading (ui_buffers_present). False when that buffer
-// is still being read, and the picture is due again.
-// The badge's picture, whole: its band is the whole window.
+// One picture: the badge, whole (the badge has no rows to draw apart), into the buffer the compositor is not reading
+// (ui_buffers_present). False when that buffer is still being read, and the picture is due again.
 static fn identify_draw(unsigned int address_to pixels)
 {
-        identify_picture(pixels, 0, identify.height);
+        identify_paint(&identify.ui, pixels, identify.own.table->stride, identify.width, identify.height);
 }
 
 static b32 identify_frame(void)
