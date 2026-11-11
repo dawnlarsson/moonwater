@@ -447,14 +447,9 @@ static fn mixer_draw(unsigned int address_to pixels)
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
-static void mixer_draw_whole(unsigned int address_to pixels)
-{
-        mixer_draw(pixels);
-}
-
 static b32 mixer_frame(void)
 {
-        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole);
+        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw);
 }
 
 static b32 mixer_event(const struct window_event address_to event)
