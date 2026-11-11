@@ -653,6 +653,15 @@ static b32 editor_tabs_event(const struct window_event address_to event)
         return event->type == WINDOW_EVENT_BUTTON;
 }
 
+// Words put into the status text at at, cut to the room left and a NUL after them: the place they end at, at most room - 1.
+static positive editor_status_put(char address_to text, positive room, positive at, const char address_to words)
+{
+        positive length = string_length((string_address)words);
+
+        string_copy_bounded((string_address)text + at, (string_address)words, room - at);
+        return at + length < room ? at + length : room - 1;
+}
+
 /*
         The status bar's text: where the caret is, what is selected, and the file's encoding, line ends, language and indent,
         each said by the table and set apart by four blanks. Here and not in editor_draw so a check can ask it in any language.
@@ -667,16 +676,16 @@ static positive editor_status_text(char address_to text, positive room, struct d
         at += language_format(text, room, WORDS(editor_position), (long)(line + 1), (long)(doc_column(doc, caret) + 1));
         if (selected)
         {
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address) "  "));
+                at = editor_status_put(text, room, at, "  ");
                 at += language_format(text + at, room - at, doc->selection_count > 1 ? WORDS(editor_selected_carets) : WORDS(editor_selected), (long)selected);
         }
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->bom ? WORDS(editor_encoding_bom) : "UTF-8")));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->eol == DOC_EOL_CRLF ? "CRLF" : doc->eol == DOC_EOL_CR ? "CR" : "LF")));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address)language_of(doc_languages[doc->language].name)));
-        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
+        at = editor_status_put(text, room, at, "    ");
+        at = editor_status_put(text, room, at, doc->bom ? WORDS(editor_encoding_bom) : "UTF-8");
+        at = editor_status_put(text, room, at, "    ");
+        at = editor_status_put(text, room, at, doc->eol == DOC_EOL_CRLF ? "CRLF" : doc->eol == DOC_EOL_CR ? "CR" : "LF");
+        at = editor_status_put(text, room, at, "    ");
+        at = editor_status_put(text, room, at, language_of(doc_languages[doc->language].name));
+        at = editor_status_put(text, room, at, "    ");
         at += language_format(text + at, room - at, doc->insert_spaces ? WORDS(editor_indent_spaces) : WORDS(editor_indent_tab), (long)doc->tab_size);
         text[at] = 0;
         return at;
