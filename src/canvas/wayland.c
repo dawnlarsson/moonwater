@@ -7399,44 +7399,43 @@ WAYLAND_API long wayland_frame_wanted(void)
 }
 
 /*
-        What the window in row was given as hints, for the compositor to read: the alpha multiplier its surface shows (opaque when
-        none), its content type, and whether its dialog is modal. A row with no window is opaque, of no content type, not modal.
-*/
-WAYLAND_API unsigned long wayland_row_alpha(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->alpha : 0xffffffffu;
-}
-
-WAYLAND_API long wayland_row_content(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? (long)s->content : WLN_wp_content_type_v1_type_none;
-}
-
-/*
-        Whether the window's commit waits for the barrier (wp_fifo), and the time its commit is for (wp_commit_timing, nanoseconds
-        on the monotonic clock, 0 for none). The compositor shows a commit at its next frame whatever these say, so they are read
+        A window's hints as its commits set them, one WAYLAND_HINT_ name each, read from the surface of its row. A row with no window
+        has the fallback of each: opaque (0xffffffff) for ALPHA, the multiplier its surface shows; no content type for CONTENT; 0 for
+        the rest. CONTENT is the content type; FIFO whether its commit waits for the barrier (wp_fifo); TIMESTAMP the time its commit is
+        for (wp_commit_timing, nanoseconds on the monotonic clock, 0 for none); ATTENTION whether an xdg-activation it was not vouched for
+        wants attention until it is focused; ASYNC the tearing hint; ICON whether its toplevel has an icon (xdg-toplevel-icon); MODAL
+        whether its dialog is modal. The compositor shows a commit at its next frame whatever FIFO and TIMESTAMP say, so they are read
         for what they are and not yet for a hold: a frame is already the barrier, and a commit cannot be held to a future time.
 */
-WAYLAND_API long wayland_row_fifo(long row)
+#define WAYLAND_ROW_HINTS(X) \
+        X(ALPHA, s->alpha, 0xffffffffu) \
+        X(CONTENT, s->content, WLN_wp_content_type_v1_type_none) \
+        X(FIFO, s->fifo_wait, 0) \
+        X(TIMESTAMP, s->timestamp, 0) \
+        X(ATTENTION, s->attention, 0) \
+        X(ASYNC, s->async_hint, 0) \
+        X(ICON, s->icon, 0) \
+        X(MODAL, s->modal, 0)
+
+enum wayland_row_hint
+{
+#define X(name, field, fallback) WAYLAND_HINT_##name,
+        WAYLAND_ROW_HINTS(X)
+#undef X
+};
+
+WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
-        return s ? s->fifo_wait : 0;
-}
-
-WAYLAND_API unsigned long wayland_row_timestamp(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->timestamp : 0;
+        switch (hint)
+        {
+#define X(name, field, fallback) case WAYLAND_HINT_##name: return s ? (unsigned long)(field) : (unsigned long)(fallback);
+                WAYLAND_ROW_HINTS(X)
+#undef X
+        }
+        return 0;
 }
 
 /*
@@ -7522,15 +7521,6 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
                         wayland_end(&e);
                 }
         }
-}
-
-/* Whether a window was asked for by an xdg-activation it was not vouched for (it wants attention, until it is focused). */
-WAYLAND_API long wayland_row_attention(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->attention : 0;
 }
 
 /* The window of the surface whose xwayland_surface_v1 gave this X11 serial: its row, -1 while it has none, -2 when no surface has the serial. */
@@ -7696,14 +7686,6 @@ WAYLAND_API long wayland_shortcuts_key(long row, long code, long value, int supe
         return WAYLAND_KEYS_CLIENT;
 }
 
-WAYLAND_API long wayland_row_async(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->async_hint : 0;
-}
-
 /*
         Whether any client holds an idle inhibitor. The compositor has no idle timer to hold back yet: when one exists it must not
         blank or suspend the screen while this is 1.
@@ -7816,15 +7798,6 @@ WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idle
                                 *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
 }
 
-/* Whether a window has an icon set on its toplevel (xdg-toplevel-icon), as its commit showed it. */
-WAYLAND_API long wayland_row_icon(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->icon : 0;
-}
-
 /* How many xdg_system_bell rings and xdg-toplevel-icon sets there have been, over every client (for the moonwater debug line). */
 WAYLAND_API void wayland_hint_counts(long *bells, long *icons)
 {
@@ -7832,16 +7805,8 @@ WAYLAND_API void wayland_hint_counts(long *bells, long *icons)
         *icons = wayland.icons;
 }
 
-WAYLAND_API long wayland_row_modal(long row)
-{
-        struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
-
-        return s ? s->modal : 0;
-}
-
 /*
-        The four hints of a row in one lookup, as the accessors give them one by one (wayland_row_content, _icon, _modal, _shortcuts):
+        The four hints of a row in one lookup, as wayland_row_hint gives them one by one (CONTENT, ICON, MODAL and the shortcut hint):
         compositor_wl_table asks every row of them each turn, so a row's surface is found once, not four times.
 */
 WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *modal, long *shortcuts)

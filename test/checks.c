@@ -173050,34 +173050,34 @@ static void test_hints(void)
         wlc_send(c, dialogs, WLQ_xdg_wm_dialog_v1_get_xdg_dialog, dialog, s.toplevel);
         wlc_send(c, dialog, WLQ_xdg_dialog_v1_set_modal);
         wlc_pump(c);
-        WLCHECK(c->errors == 0 && wayland_row_modal(0) == 1, "a dialog set modal is modal for its window");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_MODAL) == 1, "a dialog set modal is modal for its window");
         wlc_send(c, dialog, WLQ_xdg_dialog_v1_unset_modal);
-        WLCHECK(wayland_row_modal(0) == 0, "and not when unset");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_MODAL) == 0, "and not when unset");
         wlc_send(c, dialog, WLQ_xdg_dialog_v1_set_modal);
         wlc_send(c, dialog, WLQ_xdg_dialog_v1_destroy);
-        WLCHECK(wayland_row_modal(0) == 0, "and not once the dialog is destroyed");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_MODAL) == 0, "and not once the dialog is destroyed");
 
         wlc_send(c, bells, WLQ_xdg_system_bell_v1_ring, s.surface);
         WLCHECK(c->errors == 0, "a bell ring is taken");
 
         content = wlc_id(c, WLI_wp_content_type_v1, 1);
         wlc_send(c, contents, WLQ_wp_content_type_manager_v1_get_surface_content_type, content, s.surface);
-        WLCHECK(wayland_row_content(0) == WLN_wp_content_type_v1_type_none, "a window has no content type to begin with");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_CONTENT) == WLN_wp_content_type_v1_type_none, "a window has no content type to begin with");
         wlc_send(c, content, WLQ_wp_content_type_v1_set_content_type, (unsigned long)WLN_wp_content_type_v1_type_game);
-        WLCHECK(c->errors == 0 && wayland_row_content(0) == WLN_wp_content_type_v1_type_game, "a content type is set at once");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_CONTENT) == WLN_wp_content_type_v1_type_game, "a content type is set at once");
         wlc_send(c, content, WLQ_wp_content_type_v1_destroy);
-        WLCHECK(wayland_row_content(0) == WLN_wp_content_type_v1_type_none, "and none once destroyed");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_CONTENT) == WLN_wp_content_type_v1_type_none, "and none once destroyed");
 
         alpha = wlc_id(c, WLI_wp_alpha_modifier_surface_v1, 1);
         wlc_send(c, alphas, WLQ_wp_alpha_modifier_v1_get_surface, alpha, s.surface);
         wlc_send(c, alpha, WLQ_wp_alpha_modifier_surface_v1_set_multiplier, 0x80000000ul);
-        WLCHECK(wayland_row_alpha(0) == 0xffffffffu, "an alpha multiplier is shown from the commit after it is set");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ALPHA) == 0xffffffffu, "an alpha multiplier is shown from the commit after it is set");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(wayland_row_alpha(0) == 0x80000000u, "and it is shown at the commit");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ALPHA) == 0x80000000u, "and it is shown at the commit");
         wlc_send(c, alpha, WLQ_wp_alpha_modifier_surface_v1_destroy);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(wayland_row_alpha(0) == 0xffffffffu && c->errors == 0, "opaque again once the modifier is destroyed");
-        WLCHECK(wayland_row_alpha(7) == 0xffffffffu && wayland_row_modal(-1) == 0, "a row with no window is opaque and not modal");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ALPHA) == 0xffffffffu && c->errors == 0, "opaque again once the modifier is destroyed");
+        WLCHECK(wayland_row_hint(7, WAYLAND_HINT_ALPHA) == 0xffffffffu && wayland_row_hint(-1, WAYLAND_HINT_MODAL) == 0, "a row with no window is opaque and not modal");
 
         wlc_end(c);
         leak_check("hints");
@@ -173117,23 +173117,23 @@ static void test_pacing(void)
         fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
         wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, fifo, s.surface);
         wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
-        WLCHECK(wayland_row_fifo(0) == 0, "a barrier applies from the commit after it");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_FIFO) == 0, "a barrier applies from the commit after it");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_fifo(0) == 1, "a commit that waits for the barrier is kept as waiting");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1, "a commit that waits for the barrier is kept as waiting");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(wayland_row_fifo(0) == 0, "and the next commit does not wait unless it is told to");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_FIFO) == 0, "and the next commit does not wait unless it is told to");
 
         timer = wlc_id(c, WLI_wp_commit_timer_v1, 1);
         wlc_send(c, timers, WLQ_wp_commit_timing_manager_v1_get_timer, timer, s.surface);
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 7ul);
-        WLCHECK(wayland_row_timestamp(0) == 0, "a timestamp is for the commit after it is set");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "a timestamp is for the commit after it is set");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && wayland_row_timestamp(0) == 0, "a commit for a later time is held until that time");
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "a commit for a later time is held until that time");
         fake.now = 5001;
-        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && wayland_row_timestamp(0) == 5000000007ul,
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 5000000007ul,
                 "and is made at its time, which is the commit's, in nanoseconds");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(wayland_row_timestamp(0) == 0, "and it is for that commit only");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "and it is for that commit only");
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 1000000000ul);
         WLCHECK(c->errors == 1 && c->error_code == WLN_wp_commit_timer_v1_error_invalid_timestamp,
                 "a second of nanoseconds or more is invalid_timestamp");
@@ -173231,7 +173231,7 @@ static void test_barrier(void)
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && wayland_frame_wanted(), "a commit that waits for the barrier is held, and frames are wanted");
         wayland_frame();
-        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && wayland_row_fifo(0) == 1,
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1,
                 "the next frame clears the barrier, and the held commit is made");
         WLCHECK(!wayland_frame_wanted(), "and no frame is wanted after it");
 
@@ -173292,7 +173292,7 @@ static void test_activation(void)
         wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
         WLCHECK(fake.row[0].did_count == before + 1 && fake.row[0].did[before] == WAYLAND_DO_FOCUS,
                 "a token whose serial is still the client's recent input focuses its window");
-        WLCHECK(wayland_row_attention(0) == 0, "and that window does not want attention");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ATTENTION) == 0, "and that window does not want attention");
         before = fake.row[0].did_count;
         wlc_send(c, activation, WLQ_xdg_activation_v1_activate, given, s.surface);
         WLCHECK(fake.row[0].did_count == before, "a token is used once");
@@ -173310,7 +173310,7 @@ static void test_activation(void)
         before = fake.row[0].did_count;
         wlc_send(c, activation, WLQ_xdg_activation_v1_activate, unvouched, s.surface);
         WLCHECK(fake.row[0].did_count == before, "a token with no serial does not focus the window");
-        WLCHECK(wayland_row_attention(0) == 1, "it marks the window as wanting attention");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ATTENTION) == 1, "it marks the window as wanting attention");
 
         /* a token gone old is no focus, even with a serial */
         wlc_forget(c);
@@ -173503,12 +173503,12 @@ static void test_inhibit_state(void)
         control = wlc_id(c, WLI_wp_tearing_control_v1, 1);
         wlc_send(c, tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, control, s.surface);
         wlc_send(c, control, WLQ_wp_tearing_control_v1_set_presentation_hint, (unsigned long)WLN_wp_tearing_control_v1_presentation_hint_async);
-        WLCHECK(wayland_row_async(0) == 0, "a tearing hint is shown from the commit after it is set");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ASYNC) == 0, "a tearing hint is shown from the commit after it is set");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_async(0) == 1, "and is asynchronous from it");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_ASYNC) == 1, "and is asynchronous from it");
         wlc_send(c, control, WLQ_wp_tearing_control_v1_destroy);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(wayland_row_async(0) == 0, "and back to vsync once destroyed");
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_ASYNC) == 0, "and back to vsync once destroyed");
 
         /* a client going lets go of the inhibitor it held */
         wlc_end(c);
@@ -173697,16 +173697,16 @@ static void test_icon(void)
         wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, icon);
         wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_add_buffer, buffer, 1L);
         wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, icon);
-        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 0, "an icon is applied from the commit after it is set, as set_icon is double-buffered");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_ICON) == 0, "an icon is applied from the commit after it is set, as set_icon is double-buffered");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 1, "and the window has an icon from that commit");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_ICON) == 1, "and the window has an icon from that commit");
         wayland_hint_counts(&bells, &icons);
         WLCHECK(icons == 1, "the icon set is counted once");
         empty = wlc_id(c, WLI_xdg_toplevel_icon_v1, 1);
         wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_create_icon, empty);
         wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, empty);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 0, "an icon with neither pixels nor a name resets the icon");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_ICON) == 0, "an icon with neither pixels nor a name resets the icon");
         wayland_hint_counts(&bells, &icons);
         WLCHECK(icons == 1, "and is not counted as a set");
         wlc_end(c);
@@ -173748,7 +173748,7 @@ static void test_icon(void)
         wlc_send(c, icon, WLQ_xdg_toplevel_icon_v1_set_name, "applications-games");
         wlc_send(c, manager, WLQ_xdg_toplevel_icon_manager_v1_set_icon, s.toplevel, icon);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_icon(0) == 1, "an icon named by a name is an icon");
+        WLCHECK(c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_ICON) == 1, "an icon named by a name is an icon");
         wayland_hint_counts(&before, &icons);
         wlc_send(c, bell, WLQ_xdg_system_bell_v1_ring, s.surface);
         wlc_send(c, bell, WLQ_xdg_system_bell_v1_ring, 0UL);
@@ -176529,8 +176529,8 @@ static void test_stall_state(void)
         WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && fake.row[0].pictures - pictures == 9,
                 "in its window it is made (%ld, %s)", fake.row[0].pictures - pictures, c->error_text);
         wlc_pump(c);
-        WLCHECK(wayland_row_fifo(0) == 1, "the commit made again still waits for the barrier (%ld)", wayland_row_fifo(0));
-        WLCHECK(wayland_row_timestamp(0) == 500000ul, "and is for its time, the one it was sent with (%lu)", wayland_row_timestamp(0));
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1, "the commit made again still waits for the barrier (%lu)", wayland_row_hint(0, WAYLAND_HINT_FIFO));
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 500000ul, "and is for its time, the one it was sent with (%lu)", wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP));
 
         // A commit that sets a barrier, held for the budget, with a frame drawn while it waits: the barrier is up from the
         // frame it is made in, so the commit that waits for it after is held.
@@ -176591,8 +176591,8 @@ static void test_stall_dmabuf(void)
         WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) &&
                     fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x300000u),
                 "and is made once it is done (%s)", c->error_text);
-        WLCHECK(wayland_row_fifo(0) == 1, "made with the wait it was sent with (%ld)", wayland_row_fifo(0));
-        WLCHECK(wayland_row_timestamp(0) == 500000ul, "and the time it was sent with (%lu)", wayland_row_timestamp(0));
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1, "made with the wait it was sent with (%lu)", wayland_row_hint(0, WAYLAND_HINT_FIFO));
+        WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 500000ul, "and the time it was sent with (%lu)", wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP));
         wlc_end(c);
         leak_check("stall dmabuf");
         wayland_stop();
