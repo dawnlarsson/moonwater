@@ -1,4 +1,7 @@
-#include "../canvas/ui/features.h"
+/* the switches of the kit (ui/ui.c, its first part), which the rows below read; the shell has them already */
+#define UI_SHARED_ONLY
+#include "../canvas/ui/ui.c"
+#undef UI_SHARED_ONLY
 /* category, installed name, implementation */
 SHELL_TOOL(GENERAL, awk, text_awk)
 SHELL_TOOL(GENERAL, b2sum, checksum_main)

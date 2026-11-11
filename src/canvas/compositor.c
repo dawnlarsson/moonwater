@@ -66,8 +66,8 @@
 /* ---- backend: the look on the CPU ---- */
 
 // The desktop's ink: neutral grey, no hue, and not a kit role. The line round a window, its line with the keys, the
-// chrome's shadow and the band's inks are the kit's roles (compositor_chrome, theme.h), which is what the windows
-// draw with, so the chrome turns with the theme; the tabs drawn without a font are in taskbar.h.
+// chrome's shadow and the band's inks are the kit's roles (compositor_chrome, the theme in ui/ui.c), which is what the windows
+// draw with, so the chrome turns with the theme; the tabs drawn without a font are in ui/ui.c.
 #define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
 /*
         An edge or a corner of a window the hand holds to resize it, or all of its line while it is moved: the text's
@@ -91,7 +91,7 @@
 static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 
 // The radius of a window's corners and the width of the line round it, in logical pixels; and the largest
-// radius in device pixels, which is what the corners' scratch is made for. (The panel's height is in taskbar.h.)
+// radius in device pixels, which is what the corners' scratch is made for. (The panel's height is in ui/ui.c.)
 #define COMPOSITOR_LINE 1
 /*
         The snap's look, in one place. A snap preview is the selection's colour at COMPOSITOR_SNAP_PERCENT (more on a light
@@ -118,10 +118,11 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_MINIMIZE_IN 3
 #define COMPOSITOR_RADIUS_MOST 64
 
-#include "ui/theme.h"
-#include "ui/motion.h"
-#include "ui/taskbar.h"
-#include "ui/touch.h"
+// The kit's shared part (ui/ui.c): the switches, the theme's roles, the motion, the touch recogniser and the taskbar's geometry.
+// The rest of the kit reads the compositor, so it is taken after this file (shell.c).
+#define UI_SHARED_ONLY
+#include "ui/ui.c"
+#undef UI_SHARED_ONLY
 #include "../audio/state.c" // the sound server's page: the tray's volume cell and the volume keys
 #include "../audio/control.c" // and its socket, which the keys and the wheel tell the volume to at once
 #if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
@@ -299,7 +300,7 @@ struct compositor_frame
         For drawing and for the press alike.
 */
 #if MOONWATER_UI_ANY
-static inline int language_rtl(void); // the language taken reads from the right (ui/language.c, which is built after this file)
+static inline int language_rtl(void); // the language taken reads from the right (ui/ui.c, which is built after this file)
 #else
 static inline int language_rtl(void)
 {
@@ -3679,12 +3680,12 @@ struct compositor_touch_screen
         the pointer is not shown under it.
 */
 /*
-        The fingers' gesture is the kit's (ui/touch.h: the modes, the slop, the hold, the wheel, the taps); here are the compositor's
+        The fingers' gesture is the kit's (ui/ui.c: the modes, the slop, the hold, the wheel, the taps); here are the compositor's
         parts of it: the device it is on, the windows its events land on, and the close and hold rows.
 */
 struct compositor_touch
 {
-        struct ui_touch gesture; // what the fingers mean (ui/touch.h)
+        struct ui_touch gesture; // what the fingers mean (ui/ui.c)
         int device;              // the touch screen the gesture is on
         int hidden;              // a finger was the last thing used, so the pointer is not shown under it
         int closing;             // the window whose close button the finger went down on, which a tap closes
@@ -3697,7 +3698,7 @@ struct compositor_touch
 };
 
 /*
-        The screen edges (ui/touch.h). A finger that lands in the top or the bottom band of its screen is the system's until it
+        The screen edges (ui/ui.c). A finger that lands in the top or the bottom band of its screen is the system's until it
         is decided: the kit is not told of it (COMPOSITOR_SWIPE_UNDECIDED), and the window under it gets nothing. A decided swipe is
         the system's (COMPOSITOR_SWIPE_SWIPED) until every finger is up. A finger that is not a swipe after all is handed to the
         kit as it would have been without the band: its landing, then the report as it is (compositor_swipe_hand). The landing
@@ -4480,7 +4481,7 @@ static void compositor_meet(int *into, const int *other)
 }
 
 
-// The glass's blur constants (the block, the spread and the reach) are in taskbar.h, where the band reads them too.
+// The glass's blur constants (the block, the spread and the reach) are in ui/ui.c, where the band reads them too.
 
 // The rectangle of a window's contents, x1, y1, x2, y2, on the output and in it.
 static void compositor_contents_box(int row, int *box)
@@ -10796,7 +10797,7 @@ struct compositor_chrome
         unsigned int dark; // the theme the roles are made for: UI_THEME_DARK, else light
 };
 
-// The roles the chrome is drawn with, made by the kit (theme.h) for the window table's theme and accent, made again
+// The roles the chrome is drawn with, made by the kit (ui/ui.c) for the window table's theme and accent, made again
 // when either changes. A table not themed yet has the standard: dark, with white.
 static const struct compositor_chrome *compositor_chrome_now(void)
 {
@@ -10911,7 +10912,7 @@ static void compositor_caret_publish(unsigned int speed, unsigned int thick)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
-// The language the windows speak (ui/language.c), as the table keeps it: a change knocks every window, as a theme change does.
+// The language the windows speak (ui/ui.c), as the table keeps it: a change knocks every window, as a theme change does.
 static void compositor_language_publish(unsigned int code)
 {
         struct windows *table = compositor.table;
@@ -13667,7 +13668,7 @@ static void compositor_reveal(int row);
 
 /*
         WINDOW LISTS. A window that publishes its frame as a list (window.c's
-        window_list_of, ui/list.h's format) is drawn by the compositor into its
+        window_list_of, ui/ui.c's format) is drawn by the compositor into its
         picture, buffer 0, when the list is new and valid, and the picture is shown
         as any picture is. compositor_gpu_list_render draws it: the list (checked by
         window_list_valid; it reads the ops with ui_draw_list_open and checks them
@@ -18021,7 +18022,7 @@ static void compositor_touch_right(void)
 }
 
 /*
-        The events of the touch recogniser (ui/touch.h) applied to the windows, the pointer and the buttons: what the fingers mean is
+        The events of the touch recogniser (ui/ui.c) applied to the windows, the pointer and the buttons: what the fingers mean is
         the kit's, what they do here is the compositor's.
 */
 /*

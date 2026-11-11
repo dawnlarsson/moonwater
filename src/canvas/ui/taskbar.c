@@ -1,5 +1,5 @@
 /*
-        The taskbar's geometry, hit test, damage and painting (taskbar.h says what
+        The taskbar's geometry, hit test, damage and painting (the taskbar's part of ui/ui.c says what
         it is and what the compositor gives it).
 
         Along the edge the band runs in (its length) the tabs come first, in the
@@ -76,7 +76,7 @@ static void compositor_meet(int *into, const int *other);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
 
-static inline b32 language_rtl(void); // the language taken reads from the right (ui/language.c)
+static inline b32 language_rtl(void); // the language taken reads from the right (ui/ui.c)
 
 // The band's geometry as one struct: computed once for a call, from the view and the state.
 struct taskbar_layout

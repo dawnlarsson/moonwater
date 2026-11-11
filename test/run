@@ -5840,7 +5840,7 @@ lane_audit()
 
 lane_regex() { freestanding_checks_lane regex regex; }
 
-#       The text engine under fields, text areas and the editor (src/canvas/ui/text.c): the piece tree and its line
+#       The text engine under fields, text areas and the editor (src/canvas/ui/ui.c): the piece tree and its line
 #       index against a byte array through random edits, the history walked against snapshots, every editing command
 #       undone and redone, many carets against one at a time, the official Unicode grapheme and word test vectors (a
 #       pinned slice; differential.py --harness text_tables UCD_DIR checks all of them and the table), find against
@@ -22806,7 +22806,7 @@ def pointer_near(at, x, y):
     return sum(at(x + dx, y + dy) in ("ffffff", "000000") for dx in range(0, 12) for dy in range(0, 18))
 
 def band_on(at, width):
-    # The band's tabs and tray along the bottom: pixels of a tab's ink (taskbar.h, drawn as shapes with no font).
+    # The band's tabs and tray along the bottom: pixels of a tab's ink (the taskbar's part of ui/ui.c, drawn as shapes with no font).
     return sum(at(x, SH - 6) in ("000000", "38383c", "141416") for x in range(0, width, 4))
 
 def debug_window(title):

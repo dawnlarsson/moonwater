@@ -136,7 +136,7 @@
 #ifndef MOONWATER_CANVAS_SETTINGS
 #define MOONWATER_CANVAS_SETTINGS
 
-// The file that includes this one includes battery.c first: the Battery row's value is one of its batteries.
+// The battery reader (ui/ui.c) is read before this file: the Battery row's value is one of its batteries.
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
@@ -500,7 +500,7 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 
 /*
         The Battery row is the battery the Battery picker row chose, as
-        battery.c reads it: its percent and whether it charges. A machine with
+        the battery reader (ui/ui.c) reads it: its percent and whether it charges. A machine with
         none, or with none present, has none. The verb's words are not used
         for it, so a battery without a charge limit is still a battery.
 */

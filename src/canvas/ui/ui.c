@@ -29,23 +29,7988 @@
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
 */
-#ifndef MOONWATER_CANVAS_UI
+// This file is the whole of the UI kit, in three parts that a program takes by how far it reads (the switches
+// of the features are in the second part, so a program that reads the second part has them):
+//   UI_LIST_ONLY    the window list's format (window.c reads it before the compositor and the fonts exist);
+//   UI_SHARED_ONLY  the list, the switches, the theme, the motion, the touch recogniser and the taskbar's geometry
+//                   (compositor.c, which draws the chrome with them);
+//   neither         all of it: the kit, the text engine, the language, the battery reader.
+// Each part is in the file once, however many times it is included.
+
+#ifndef MOONWATER_CANVAS_UI_LIST
+#define MOONWATER_CANVAS_UI_LIST
+
+/*
+        A window's list: its layout and the reader's side. The kit's recorder writes a list (ui.c: ui_scene_begin, ui_scene_end),
+        and the compositor reads it (window.c's window_list_valid, compositor.c). The shell builds all of them as one translation
+        unit, and this part of ui.c is the one copy of the layout they share.
+*/
+
+/*
+        The draw list: a frame recorded for the compositor, in shared memory the app maps and the compositor maps too (a memfd). It holds the
+        ops ui.scene records, in the same format, so a list is the recording and no re-encoding. Layout, in bytes: a header of sixteen 32-bit
+        words, then two halves of one size; a half is one generation's ops (room of them, 32 bytes each) and then the cover bytes its text ops
+        index (each text op's word 7 is an offset from the list's base, so the compositor needs one mapping and no atlas). The halves ping-pong:
+        the app records into the half that is not published, and ui_scene_end publishes it, so the compositor reads the published half while
+        the app writes the other. Header words: 0 magic, 1 version, 2 the generation, a seqlock (odd while a publish writes the header, even when
+        it is whole, and it moves by two a publish), 3 the published half (0 or 1), 4 its ops, 5 the room of a half, 6 and 7 the picture's width
+        and height in device pixels, 8 its pitch in pixels, 9 to 12 the damage of the generation (x0 y0 x1 y1, empty when x1 <= x0), 13 the offset
+        from the base of the cover bytes, 14 the cover bytes used, 15 the flags (bit 0: lost, a record did not fit, so the frame is the
+        processor's). The reader maps the whole list and takes the halves' size from it, as ui_draw_list_init did. ui_draw_list_open answers 1
+        when the published half may be read, 0 when a publish is writing the header (try again later), and -1 when this is no list it can use
+        (paint the frame on the processor). After it has read the ops, ui_draw_list_still says whether the generation held: if it moved, what
+        was read is refused. Production does not record a list: ui.scene is set by a check only until the compositor consumes lists.
+*/
+#define UI_DRAW_LIST_MAGIC 0x4d574c53u // "MWLS"
+#define UI_DRAW_LIST_VERSION 1u
+#define UI_DRAW_LIST_HEADER 64ul
+#define UI_DRAW_LIST_OP 32ul
+
+enum
+{
+        UI_DRAW_LIST_MAGIC_AT, UI_DRAW_LIST_VERSION_AT, UI_DRAW_LIST_GEN, UI_DRAW_LIST_HALF, UI_DRAW_LIST_COUNT, UI_DRAW_LIST_ROOM,
+        UI_DRAW_LIST_WIDTH, UI_DRAW_LIST_HEIGHT, UI_DRAW_LIST_PITCH, UI_DRAW_LIST_DX0, UI_DRAW_LIST_DY0, UI_DRAW_LIST_DX1, UI_DRAW_LIST_DY1,
+        UI_DRAW_LIST_COVER, UI_DRAW_LIST_COVER_USED, UI_DRAW_LIST_FLAGS
+};
+
+/*
+        Why a frame the kit recorded did not record whole (ui_list_frame_end discards it and the program paints it as pixels). The scene's lost
+        is one of these (the one set last), and each window counts its lost frames by cause in the window table (list_lost, shown by moonwater debug).
+*/
+enum ui_list_lost
+{
+        UI_LOST_NONE,
+        UI_LOST_NOTHING,   // the painter recorded no op: a direct pixel writer the recorder does not see, or nothing was drawn
+        UI_LOST_ROOM,      // the ops of a half are full
+        UI_LOST_POOL,      // the cover bytes are full, or a bitmap or table does not fit
+        UI_LOST_GROUND,    // a cell's ground is not one colour (font_blend)
+        UI_LOST_CELL,      // a cell's plan or its box does not fit
+        UI_LOST_CELL_TEXT, // proportional text in a cell (ui_cell_line, ui_cell_turned): font_draw on the picture
+        UI_LOST_MARKS,     // a cell of marks, wide or emoji in a code view: font_draw on the ground
+        UI_LOST_TERM_GRID, // the terminal: a fill that is neither in the grid nor in the picture
+        UI_LOST_TERM_FONT, // the terminal: a font draw outside the grid
+        UI_LOST_TERM_WIDE, // the terminal: a wide character
+        UI_LOST_GLASS,     // the taskbar's glass (never a window: the band is the compositor's)
+        UI_LOST_STRETCH,   // a list pulled past its end is stretched in the picture (ui_stretch), which the card does not do
+        UI_LOST_COUNT
+};
+
+struct ui_draw_view
+{
+        const unsigned int address_to ops; // the published half's ops
+        const unsigned char address_to cover;
+        unsigned int count, room, width, height, gen, half;
+        unsigned long pitch, cover_at, cover_used;
+        int x0, y0, x1, y1;
+};
+
+// The reader's open: 1 when the published half may be read (its view is filled), 0 when a publish is writing the header, -1 when this is no
+// list it can use. Reads nothing but the header until it answers 1.
+static inline int ui_draw_list_open(unsigned char address_to base, unsigned long bytes, struct ui_draw_view address_to view)
+{
+        unsigned int address_to head = (unsigned int address_to)base;
+        unsigned int gen, half_index, room, count;
+        unsigned long half, ops, at;
+
+        if (!base || bytes < UI_DRAW_LIST_HEADER)
+                return -1;
+        gen = __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
+        if (gen & 1)
+                return 0;
+        if (head[UI_DRAW_LIST_MAGIC_AT] != UI_DRAW_LIST_MAGIC || head[UI_DRAW_LIST_VERSION_AT] != UI_DRAW_LIST_VERSION || head[UI_DRAW_LIST_FLAGS] & 1)
+                return -1;
+        half_index = head[UI_DRAW_LIST_HALF], room = head[UI_DRAW_LIST_ROOM], count = head[UI_DRAW_LIST_COUNT];
+        half = (bytes - UI_DRAW_LIST_HEADER) / 2 & ~15ul;
+        ops = (unsigned long)room * UI_DRAW_LIST_OP;
+        if (half_index > 1 || !room || half <= ops + 16 || count > room)
+                return -1;
+        at = UI_DRAW_LIST_HEADER + (unsigned long)half_index * half;
+        if ((unsigned long)head[UI_DRAW_LIST_COVER] != at + ops || (unsigned long)head[UI_DRAW_LIST_COVER_USED] > half - ops)
+                return -1;
+        view->ops = (const unsigned int address_to)(base + at);
+        view->cover = base + at + ops;
+        view->count = count, view->room = room, view->gen = gen, view->half = half_index;
+        view->width = head[UI_DRAW_LIST_WIDTH], view->height = head[UI_DRAW_LIST_HEIGHT], view->pitch = head[UI_DRAW_LIST_PITCH];
+        view->x0 = (int)head[UI_DRAW_LIST_DX0], view->y0 = (int)head[UI_DRAW_LIST_DY0], view->x1 = (int)head[UI_DRAW_LIST_DX1], view->y1 = (int)head[UI_DRAW_LIST_DY1];
+        view->cover_at = head[UI_DRAW_LIST_COVER], view->cover_used = head[UI_DRAW_LIST_COVER_USED];
+        return 1;
+}
+
+// After the reader has read the ops it opened: 1 when the generation is the one it opened (what it read holds), 0 when it moved (refuse it).
+static inline b32 ui_draw_list_still(unsigned char address_to base, const struct ui_draw_view address_to view)
+{
+        unsigned int address_to head = (unsigned int address_to)base;
+
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        return __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_RELAXED) == view->gen;
+}
+
+#endif /* MOONWATER_CANVAS_UI_LIST */
+
+#if !defined(UI_LIST_ONLY) && !defined(MOONWATER_CANVAS_UI_SHARED)
+#define MOONWATER_CANVAS_UI_SHARED
+
+/*
+        The desktop's features, one file each under src/canvas/ui. A feature
+        is in the shell when its switch is 1 and out of it when 0: its file is
+        not compiled in, its tool is not in the table, and its tests are not
+        built. The switches below are the defaults; to turn one off, change its
+        line here, or define it to 0 in the compiler's flags.
+
+        ui/ui.c holds the drawing primitives the features share. It is built
+        whenever any feature is, and nothing else in the shell depends on it.
+*/
+
+// The launcher: the search bar, the programs and their keys.
+#ifndef MOONWATER_UI_LAUNCHER
+#define MOONWATER_UI_LAUNCHER 1
+#endif
+
+// The settings window: the moonwater settings verb as a window, its groups and rows.
+#ifndef MOONWATER_UI_SETTINGS
+#define MOONWATER_UI_SETTINGS 1
+#endif
+
+// The identify overlay: `moonwater canvas identify`, each screen's number on it for a few seconds.
+#ifndef MOONWATER_UI_IDENTIFY
+#define MOONWATER_UI_IDENTIFY 1
+#endif
+
+// The taskbar: the strip along an edge of the desktop with the windows' tabs, the clock and, when the settings show it,
+// the battery. It is drawn by the compositor, which is always in the shell; this switch takes the band out of it.
+#ifndef MOONWATER_UI_TASKBAR
+#define MOONWATER_UI_TASKBAR 1
+#endif
+
+// The editor: files in the text engine's code view, tabs, find, a status bar and a context menu.
+#ifndef MOONWATER_UI_EDITOR
+#define MOONWATER_UI_EDITOR 1
+#endif
+
+// The mixer: the sound server's volumes, a strip for the device and for every program that plays.
+#ifndef MOONWATER_UI_MIXER
+#define MOONWATER_UI_MIXER 1
+#endif
+
+// The on-screen keyboard: a strip of keys along the bottom of the screen, for a touch screen with no keyboard (ui/osk.c).
+#ifndef MOONWATER_UI_KEYBOARD
+#define MOONWATER_UI_KEYBOARD 1
+#endif
+
+// The notices popup: the tray's notices dot, pressed, lists the board's notices and issues (ui/notices.c).
+#ifndef MOONWATER_UI_NOTICES
+#define MOONWATER_UI_NOTICES 1
+#endif
+
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES)
+
+/*
+        The kit's theme: the roles, the palettes they are written as, and the maker that turns a choice of light or
+        dark and an accent into them. Nothing here draws. The compositor is built before the rest of this file, and with every UI
+        feature switched off, so it makes the chrome it draws from these same roles that the windows take.
+*/
+
+/*
+        The kit's colours, by role (the Material role names its ui.css maps
+        onto), made from two choices: light or dark, and an accent. Light with
+        the accent ff8800 is Dawning's palette as styles-core.css and ui.css
+        have it, every value as written there; another accent derives the
+        roles that follow it (its container, the ink on it, the bright tint
+        the focus glow and the controls' off colour are mixed from) with CSS
+        color-mix in srgb, and dark is a palette of its own on the same neutral
+        ramp. The ink on a fill is whichever of the kit's ink and white stands
+        out more by WCAG's contrast ratio; where neither reaches 4.5:1 (an
+        accent of middle lightness) it is black or white, which always do. A
+        colour is 0xaarrggbb, not premultiplied.
+
+        `moonwater canvas theme` and `canvas theme accent` keep the choices;
+        the compositor puts them in the window table's header and knocks, and a
+        window turns to the new colours over the kit's .2s --ease, as the kit's
+        own background and colour transitions take them.
+*/
+#define UI_PRIMARY 0
+#define UI_ON_PRIMARY 1
+#define UI_PRIMARY_CONTAINER 2
+#define UI_ON_PRIMARY_CONTAINER 3
+#define UI_SECONDARY_CONTAINER 4
+#define UI_ON_SECONDARY_CONTAINER 5
+#define UI_SURFACE 6
+#define UI_SURFACE_DIM 7
+#define UI_SURFACE_LOWEST 8
+#define UI_SURFACE_LOW 9
+#define UI_SURFACE_CONTAINER 10
+#define UI_SURFACE_HIGH 11
+#define UI_SURFACE_HIGHEST 12
+#define UI_ON_SURFACE 13
+#define UI_ON_SURFACE_VARIANT 14
+#define UI_OUTLINE 15
+#define UI_OUTLINE_VARIANT 16
+#define UI_ERROR 17
+#define UI_ON_ERROR 18
+#define UI_ERROR_CONTAINER 19
+#define UI_ON_ERROR_CONTAINER 20
+#define UI_SUCCESS 21
+#define UI_SUCCESS_CONTAINER 22
+#define UI_ON_SUCCESS_CONTAINER 23
+#define UI_WARNING 24
+#define UI_WARNING_CONTAINER 25
+#define UI_ON_WARNING_CONTAINER 26
+#define UI_INFO 27
+#define UI_INFO_CONTAINER 28
+#define UI_ON_INFO_CONTAINER 29
+#define UI_CONTROL_OFF 30   // the rest of a switch, a checkbox, a radio and a slider: the bright accent at 14% on paper
+#define UI_ACCENT_BRIGHT 31 // --dawn-400: the focus glow, the selection and the controls' off colour are made from it
+#define UI_SELECTION 32     // the bright accent at 28%
+#define UI_SHADOW 33        // the ink of shadows, at the alphas the kit gives them
+#define UI_HIGHLIGHT 34     // the light a raised field catches on its top edge
+#define UI_ROLES 35
+
+#define UI_THEME_LIGHT 0u
+#define UI_THEME_DARK 1u
+#define UI_THEME_AUTO 2u
+#define UI_ACCENT_DAWN 0xff8800u // --dawn-500, the mark: one accent of the choices
+#define UI_ACCENT_STANDARD 0xffffffu // the accent when none is chosen: white, on the dark theme (the standard)
+#define UI_INK 0xff18181bu       // --ink
+
+/*
+        The kit's shapes and touch sizes that the compositor draws as well as the windows, so they are named here (the
+        compositor is built before the rest of this file and takes this part of it, UI_SHARED_ONLY). The windows' corner radius; how far a press
+        moves before it is a drag (a finger's slop); the close button's disc, and how far in from the window's top right
+        it sits. A close button ends UI_CLOSE_BOTTOM logical pixels from its top, which is where a titlebar's content starts.
+*/
+#define UI_RADIUS 8
+#define UI_SLOP 8
+#define UI_CLOSE 14
+#define UI_CLOSE_IN 5
+#define UI_CLOSE_BOTTOM (UI_CLOSE + UI_CLOSE_IN)
+#define UI_TARGET 48 // a finger's least target in logical pixels, 48 dp as Material has it (Android), scaled with the display; iOS's is 44 pt
+#define UI_NOTCH 40 // a wheel's notch in device pixels at 100 percent: the one notch a precise turn's 120ths are read in (the body, the stream and its gain)
+#define UI_HAND_GAP_NS 60000000ull // the one gate of a device's gesture: no report for this long ends it (a stream's notches, a trackpad's hand, and its still before its lift throws nothing; Android's 40 ms, widened so 50 ms notches stay one stream)
+#define UI_HOLD_NS 500000000ull // the one hold of a finger: still this long it is a long press (the touch recogniser), its edge's swipe is decided or failed (UI_EDGE_NS), and the processor stays out of its deep idle (compositor_hold_touch); Android's and iOS's 500 ms
+
+/*
+        A finger's target, the one rule: a finger on a touch screen is wider than a pointer and shakes as it lands, so what it
+        presses is the shape grown about its middle to at least `least` device pixels each way where it is smaller (the kit's
+        targets take UI_TARGET at the scale, ui_hit; a window's close button its disc and a little more); a pointer presses
+        the shape as it is drawn. Whether px, py is on the shape x, y, width by height, for a finger or a pointer alike:
+        only the size of the target differs.
+*/
+static inline int ui_reach_hit(int touch, int least, int px, int py, int x, int y, int width, int height)
+{
+        if (touch && width < least)
+                x -= (least - width) / 2, width = least;
+        if (touch && height < least)
+                y -= (least - height) / 2, height = least;
+        return px >= x && px < x + width && py >= y && py < y + height;
+}
+
+struct ui_theme
+{
+        unsigned int role[UI_ROLES];
+};
+
+// Dawning light, as styles-core.css and ui.css write it.
+static const struct ui_theme ui_theme_dawning = {{
+    0xffff8800, 0xff18181b, 0xffffe8cc, 0xff4a2600, 0xffededef, 0xff1c1c1f, 0xfff7f7f8, 0xffededef, 0xffffffff, 0xffffffff,
+    0xffffffff, 0xffffffff, 0xffededef, 0xff18181b, 0xff52525b, 0xffa1a1aa, 0xffe4e4e7, 0xffdc2e26, 0xffffffff, 0xfffce4e2,
+    0xff5c1512, 0xff0d7f49, 0xffe3f3ea, 0xff0b3d23, 0xff9c6b00, 0xfff7ecd4, 0xff4a330a, 0xff1f5fd0, 0xffe2ecfb, 0xff143a7a,
+    0xfffff2e2, 0xffff9f33, 0x47ff9f33, 0xff101014, 0xffffffff,
+}};
+
+/*
+        Dark, a design and not the light one turned over: paper is the ramp's
+        900, a card 850, a field's face 800 and a well or a track 700, text
+        the ramp's 100 and its quiet the 300; the status colours are lifted to
+        read on the dark and their containers are their deep colour at a
+        quarter on the field. The accent's roles are mixed into it when made.
+*/
+static const struct ui_theme ui_theme_night = {{
+    0xffff8800, 0xff18181b, 0xff47290c, 0xffffd199, 0xff2a2a30, 0xffededef, 0xff111113, 0xff0a0a0b, 0xff0a0a0b, 0xff161618,
+    0xff1c1c1f, 0xff1c1c1f, 0xff2a2a30, 0xffededef, 0xffa1a1aa, 0xff52525b, 0xff2a2a30, 0xffff6b63, 0xff18181b, 0xff4a1d1c,
+    0xffffb4ae, 0xff4cc38a, 0xff123826, 0xffa6e9c5, 0xffe5b54a, 0xff3d3012, 0xfff5d99a, 0xff7aa7ff, 0xff1b2c4f, 0xffbcd3ff,
+    0xff3a2f27, 0xffff9f33, 0x47ff9f33, 0xff000000, 0x0fffffff,
+}};
+
+// sRGB to linear light, 0 to 65536, for WCAG's relative luminance.
+static const unsigned int ui_linear[256] = {
+        0, 20, 40, 60, 80, 99, 119, 139, 159, 179, 199, 219, 241, 264, 288, 313,
+        340, 367, 396, 427, 458, 491, 526, 562, 599, 637, 677, 718, 761, 805, 851, 898,
+        947, 997, 1048, 1101, 1156, 1212, 1270, 1330, 1391, 1453, 1517, 1583, 1651, 1720, 1791, 1863,
+        1937, 2013, 2090, 2170, 2250, 2333, 2418, 2504, 2592, 2681, 2773, 2866, 2961, 3058, 3157, 3258,
+        3360, 3464, 3570, 3678, 3788, 3900, 4014, 4129, 4247, 4366, 4488, 4611, 4736, 4864, 4993, 5124,
+        5257, 5392, 5530, 5669, 5810, 5953, 6099, 6246, 6395, 6547, 6701, 6856, 7014, 7174, 7336, 7500,
+        7666, 7834, 8004, 8177, 8352, 8529, 8708, 8889, 9072, 9258, 9446, 9636, 9828, 10022, 10219, 10418,
+        10619, 10822, 11028, 11236, 11446, 11658, 11873, 12090, 12309, 12531, 12754, 12981, 13209, 13440, 13673, 13909,
+        14147, 14387, 14629, 14874, 15122, 15372, 15624, 15878, 16135, 16394, 16656, 16920, 17187, 17456, 17727, 18001,
+        18278, 18556, 18838, 19121, 19408, 19696, 19988, 20281, 20578, 20876, 21178, 21481, 21788, 22096, 22408, 22722,
+        23038, 23357, 23679, 24003, 24329, 24659, 24991, 25325, 25662, 26002, 26344, 26689, 27036, 27387, 27739, 28095,
+        28453, 28813, 29177, 29543, 29911, 30283, 30657, 31033, 31413, 31795, 32180, 32567, 32957, 33350, 33746, 34144,
+        34545, 34949, 35355, 35765, 36177, 36591, 37009, 37429, 37852, 38278, 38707, 39138, 39572, 40009, 40449, 40892,
+        41337, 41786, 42237, 42691, 43147, 43607, 44069, 44534, 45003, 45474, 45947, 46424, 46904, 47386, 47871, 48360,
+        48851, 49345, 49842, 50342, 50844, 51350, 51859, 52370, 52884, 53402, 53922, 54445, 54972, 55501, 56033, 56568,
+        57106, 57647, 58191, 58738, 59288, 59841, 60397, 60956, 61518, 62083, 62651, 63222, 63796, 64373, 64953, 65536,
+};
+
+// WCAG's relative luminance of an opaque colour, 0 to 65536.
+static unsigned int ui_luminance(unsigned int rgb)
+{
+        return (2126u * ui_linear[rgb >> 16 & 255] + 7152u * ui_linear[rgb >> 8 & 255] + 722u * ui_linear[rgb & 255] + 5000) / 10000;
+}
+
+// The contrast ratio of two opaque colours, in hundredths (700 is 7:1).
+static unsigned int ui_contrast(unsigned int one, unsigned int two)
+{
+        unsigned int a = ui_luminance(one) + 3277, b = ui_luminance(two) + 3277; // + 0.05
+
+        return a > b ? a * 100 / b : b * 100 / a;
+}
+
+/*
+        color-mix(in srgb, one percent%, two): each colour premultiplied by its
+        alpha, the two mixed channel by channel, and the alpha divided out
+        again, rounded to the nearest; mixing with transparent keeps one's
+        colour at percent of its alpha.
+*/
+static unsigned int ui_mix(unsigned int one, unsigned int percent, unsigned int two)
+{
+        unsigned int a1 = one >> 24, a2 = two >> 24, rest = 100 - percent;
+        unsigned int alpha = a1 * percent + a2 * rest; // hundredths of an 8-bit alpha
+        unsigned int out;
+
+        if (!alpha)
+                return 0;
+        out = (alpha + 50) / 100 << 24;
+        for (int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int c = ((one >> shift & 255) * a1 * percent + (two >> shift & 255) * a2 * rest + alpha / 2) / alpha;
+
+                out |= (c > 255 ? 255 : c) << shift;
+        }
+        return out;
+}
+
+// The ink to write on a fill: the kit's ink or white, whichever stands out more; black or white where neither reaches 4.5:1.
+static unsigned int ui_ink_on(unsigned int fill)
+{
+        unsigned int ink = ui_contrast(UI_INK, fill), white = ui_contrast(0xffffffffu, fill);
+
+        if (ink >= 450 || white >= 450)
+                return ink >= white ? UI_INK : 0xffffffffu;
+        return ui_contrast(0xff000000u, fill) >= white ? 0xff000000u : 0xffffffffu;
+}
+
+// An ink for text on a container, from a start mixed toward black (or white on dark) till it stands out 4.5:1.
+static unsigned int ui_ink_deepened(unsigned int start, unsigned int container, unsigned int toward)
+{
+        unsigned int ink = start;
+
+        for (int step = 0; step < 24 && ui_contrast(ink, container) < 450; step++)
+                ink = ui_mix(ink, 85, toward);
+        return ink;
+}
+
+// The roles for light or dark and an accent (0xrrggbb).
+static fn ui_theme_make(struct ui_theme address_to theme, unsigned int dark, unsigned int accent)
+{
+        unsigned int fill = 0xff000000u | (accent & 0xffffffu), bright;
+
+        *theme = dark ? ui_theme_night : ui_theme_dawning;
+        if (!dark && (accent & 0xffffffu) == UI_ACCENT_DAWN)
+                return; // the palette as written, to the value
+        // An accent that does not stand out from the surfaces (white on the light theme) fills with the theme's ink.
+        if (ui_contrast(fill, theme->role[UI_SURFACE_HIGH]) < 150)
+                fill = theme->role[UI_ON_SURFACE];
+        bright = (accent & 0xffffffu) == UI_ACCENT_DAWN ? 0xffff9f33u : ui_mix(fill, 80, 0xffffffffu);
+        theme->role[UI_PRIMARY] = fill;
+        theme->role[UI_ON_PRIMARY] = ui_ink_on(fill);
+        theme->role[UI_ACCENT_BRIGHT] = bright;
+        theme->role[UI_SELECTION] = ui_mix(bright, 28, 0);
+        if (dark)
+        {
+                theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 22, theme->role[UI_SURFACE_HIGH]);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 40, 0xffffffffu), theme->role[UI_PRIMARY_CONTAINER], 0xffffffffu);
+                theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, theme->role[UI_SURFACE_HIGHEST]);
+        }
+        else
+        {
+                theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 20, 0xffffffffu);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 29, 0xff000000u), theme->role[UI_PRIMARY_CONTAINER], 0xff000000u);
+                theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, 0xffffffffu);
+        }
+}
+
+/*
+        Where a width by height window goes beside a rectangle (rect: x, y, width, height, in the desktop's space) on a screen
+        (x, y, width, height). side is where it goes: UI_AT its top left, UI_BELOW the rectangle's bottom edge, UI_ABOVE its top
+        edge, UI_RIGHT its right edge and UI_LEFT its left edge; it is aligned to the rectangle along the other axis and kept
+        inside the screen. flip says what to do when it does not fit: UI_FLIP_SIDE turns it to the other side of the rectangle
+        (below is flipped above, to the right is flipped to the left), and UI_FLIP_CROSS turns it to the other side along the
+        other axis (a menu at a point goes left when it would run off the right). Without flips it is kept on its side and
+        clamped. This is the one place a window is put beside something: the kit's panel buttons (ui_anchor_set), the menus
+        and the compositor's popups (compositor_popup_place maps a window's popup flags onto it).
+*/
+#define UI_AT 0
+#define UI_BELOW 1
+#define UI_ABOVE 2
+#define UI_RIGHT 3
+#define UI_LEFT 4
+#define UI_FLIP_SIDE 1u
+#define UI_FLIP_CROSS 2u
+
+static inline void ui_anchor_place(unsigned int side, unsigned int flip, const int *rect, const int *screen, int width, int height,
+                                   int *x, int *y)
+{
+        int left = screen[0], top = screen[1], right = screen[0] + screen[2], bottom = screen[1] + screen[3];
+        int ax = rect[0], ay = rect[1], aw = rect[2], ah = rect[3];
+
+        *x = ax, *y = ay;
+        if (side == UI_BELOW)
+        {
+                *y = ay + ah;
+                if ((flip & UI_FLIP_SIDE) && *y + height > bottom)
+                        *y = ay - height;
+        }
+        else if (side == UI_ABOVE)
+        {
+                *y = ay - height;
+                if ((flip & UI_FLIP_SIDE) && *y < top)
+                        *y = ay + ah;
+        }
+        else if (side == UI_RIGHT)
+        {
+                *x = ax + aw;
+                if ((flip & UI_FLIP_SIDE) && *x + width > right)
+                        *x = ax - width;
+        }
+        else if (side == UI_LEFT)
+                *x = ax - width;
+        if ((side == UI_BELOW || side == UI_ABOVE) && (flip & UI_FLIP_CROSS) && *x + width > right)
+                *x = ax - width;
+        *x = *x + width > right ? right - width : *x;
+        *y = *y + height > bottom ? bottom - height : *y;
+        *x = *x < left ? left : *x;
+        *y = *y < top ? top : *y;
+}
+
+/*
+        The kit's motion arithmetic that more than one part of Canvas needs: the fixed point (Q30), the
+        products and quotients in it, the time-to-progress map, and the cubic-bezier timing function the kit
+        calls --ease. The rest of the motion is further down this file. The compositor takes this part for the one
+        landing tween (compositor_land), so the window and the kit ease with the same curve, to the number.
+        Included by ui.c and by compositor.c; the kernel build has the types from lib.c.
+*/
+
+#define UI_Q 30                    // the kit's fixed point, Q30: the drag's throw is kept in it, and the glide's
+#define UI_ONE (1ll << UI_Q)
+#define UI_HALF (1ll << (UI_Q - 1))
+#define UI_MS 1000000ll                    // a millisecond in nanoseconds
+// A window's own motion, on --ease: a window gliding to where it was put (a snap, a tile, a restore, a take back) and a
+// snap's preview moving between targets or fading. One time for all of them, so a window lands as its preview goes.
+#define UI_WINDOW_NS (180 * UI_MS)
+static inline b64 ui_qmul(b64 a, b64 b)
+{
+        return (b64)(((b128)a * b + UI_HALF) >> UI_Q);
+}
+
+// a / b, both Q30, rounded to the nearest. A large a shifts less and b loses as many of its last places.
+static inline b64 ui_qdiv(b64 a, b64 b)
+{
+        p64 n = (p64)(a < 0 ? -a : a), d = (p64)(b < 0 ? -b : b);
+        int shift = UI_Q;
+
+        while (shift > 0 && n >> (62 - shift))
+                shift--;
+        d >>= UI_Q - shift;
+        if (!d)
+                return 0;
+        n = ((n << shift) + d / 2) / d;
+        return (a < 0) != (b < 0) ? -(b64)n : (b64)n;
+}
+
+// How far through a span of duration a time elapsed is, 0 to UI_ONE.
+static inline b64 ui_progress(b64 elapsed, b64 duration)
+{
+        if (elapsed <= 0 || duration <= 0)
+                return duration <= 0 ? UI_ONE : 0;
+        if (elapsed >= duration)
+                return UI_ONE;
+        // Both under 2^33 ns (8 s), so the shifted time stays in 64 bits; longer spans lose their last places.
+        while (duration >= 1ll << 33)
+                duration >>= 1, elapsed >>= 1;
+        return (elapsed << UI_Q) / duration;
+}
+
+/*
+        A cubic-bezier timing function: x(t) and y(t) as polynomials, Q30. CSS's
+        are solved for t as Chrome solves them (gfx::CubicBezier: Newton's steps
+        from the straight guess, then halving the bracket), to under 1e-7 of x.
+*/
+struct ui_bezier
+{
+        b64 ax, bx, cx, ay, by, cy;
+};
+
+#define UI_BEZIER(x1, y1, x2, y2)                                                                                     \
+        {(UI_ONE - 3 * (x1) - (3 * ((x2) - (x1)) - 3 * (x1))), (3 * ((x2) - (x1)) - 3 * (x1)), 3 * (x1),                \
+         (UI_ONE - 3 * (y1) - (3 * ((y2) - (y1)) - 3 * (y1))), (3 * ((y2) - (y1)) - 3 * (y1)), 3 * (y1)}
+#define UI_Q2(hundredths) ((b64)(hundredths) * UI_ONE / 100)
+
+static const struct ui_bezier ui_ease = UI_BEZIER(UI_Q2(20), 0, 0, UI_ONE);                  // --ease, --ease-emphasized
+static inline b64 ui_bezier_x(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(ui_qmul(e->ax, t) + e->bx, t) + e->cx, t);
+}
+
+static inline b64 ui_bezier_y(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(ui_qmul(e->ay, t) + e->by, t) + e->cy, t);
+}
+
+static inline b64 ui_bezier_dx(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(3 * e->ax, t) + 2 * e->bx, t) + e->cx;
+}
+
+static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
+{
+        b64 t = x, low = 0, high = UI_ONE;
+
+        if (x <= 0)
+                return 0;
+        if (x >= UI_ONE)
+                return UI_ONE;
+        for (int step = 0; step < 8; step++)
+        {
+                b64 off = ui_bezier_x(e, t) - x, slope = ui_bezier_dx(e, t);
+
+                if (off >= -1 && off <= 1)
+                        return ui_bezier_y(e, t);
+                if (slope < 108) // 1e-7
+                        break;
+                t -= ui_qdiv(off, slope);
+                t = t < 0 ? 0 : t > UI_ONE ? UI_ONE : t;
+        }
+        t = x;
+        for (int step = 0; step < 48 && low < high; step++)
+        {
+                b64 at = ui_bezier_x(e, t);
+
+                if (at - x >= -1 && at - x <= 1)
+                        break;
+                if (x > at)
+                        low = t;
+                else
+                        high = t;
+                t = (low + high) / 2;
+        }
+        return ui_bezier_y(e, t);
+}
+
+/*
+        A click's count, the kit's one double-press rule for every text, the terminal, the panel's tray and the windows' tops: a
+        press within UI_CLICK_NS (450 ms) of the last one, and within UI_CLICK_PX (4 logical px) of where it was, is the next
+        click of its run (a double click, then a triple, then the first again); any other press is the first of a run. The
+        place is the pointer's, in the desktop's pixels, and scale is the kit's percent (the px are scaled by it).
+*/
+#define UI_CLICK_NS 450000000ull
+#define UI_CLICK_PX 4
+
+struct ui_click
+{
+        b64 at;
+        int x, y, count;
+};
+
+static inline int ui_click_again(struct ui_click *k, b64 now, int x, int y, int scale)
+{
+        long dx = (long)x - k->x, dy = (long)y - k->y, reach = UI_CLICK_PX * (long)scale / 100;
+        b32 again = k->count && now - k->at < UI_CLICK_NS && dx * dx + dy * dy <= reach * reach;
+
+        k->count = again ? k->count % 3 + 1 : 1;
+        k->at = now, k->x = x, k->y = y;
+        return k->count;
+}
+
+// The whole notches a turn of a wheel makes, its 120ths added to the rest kept from the turns before (the rest is what is left
+// under the last notch, for the next turn: a wheel that reports 120ths sends several turns to a notch). The compositor's
+// tray wheel and the kit's wheel share it; a turn back takes notches back.
+static inline int ui_notch_take(int *rest, int v120)
+{
+        int turns;
+
+        *rest += v120;
+        turns = *rest / 120;
+        *rest %= 120;
+        return turns;
+}
+
+/*
+        The kit's touch recogniser: what the fingers on a touch screen mean, as gestures, and nothing about the windows or the
+        device they are on. The compositor reads the device (slots, ids, the points in the desktop's pixels), keeps the windows,
+        and applies the events this file answers with (ui_touch_out): a finger that went down is the pointer's, its press is the
+        left button where it went down, and it moves nothing until it is UI_SLOP past where it went down (a tap is a click where it
+        landed); a second finger before the first has moved makes the two a wheel from their middle (the left press is taken back
+        with a release that says it was no click), and the two lifted soon, neither moved, are a click of the right button; a long
+        press (UI_HOLD_NS, still, with the left button taken) is the right button, held, and the finger may move on until it
+        lifts, which ends the press. A window's close button under the finger is the caller's: it marks the press pending
+        (ui_touch_pend), and a lift unmoved then is UI_TOUCH_CLOSE, a move past the slop UI_TOUCH_RESUME.
+
+        Use: each report of the device, ui_touch_begin when no finger was down (it answers the first finger's START and PRESS),
+        apply those events, then ui_touch_report with the frame as it now is (the press may have made a drag, or marked a close),
+        apply its events. A tick (ui_touch_tick, ui_touch_due) asks for the long press when its time is come. A device that
+        drops events or goes away is ui_touch_drop or ui_touch_reset.
+
+        Two fingers are classified by what they do, not by who landed second. Their span (the distance between them) and their
+        middle are followed from the report they became two. A change of the span of UI_TOUCH_PINCH_SLOP touch slops from the
+        span it was measured from begins a pinch (PINCH_BEGIN at scale 1024, then PINCH_UPDATE with the scale: the span over the
+        span it began from, in 1024ths, about the middle). A pinch carries the middle's pan with it and turns no wheel; a pinch
+        ends when a finger lifts (PINCH_END). Two fingers whose span does not change are the wheel from their middle, as before,
+        and a pinch is never a right click (the two were moved). A parallel move with the span under the slop is a wheel, so a
+        scroll never zooms and a pinch never scrolls by accident.
+*/
+
+#define UI_TOUCH_SLOTS 10                  // the fingers a touch screen says at once that are followed
+#define UI_TOUCH_NONE 0
+#define UI_TOUCH_ONE 1                     // the first finger is down: the pointer's, and its press is made
+#define UI_TOUCH_TWO 2                     // two fingers: the wheel, or the right button when they are lifted soon
+#define UI_TOUCH_HELD 3                    // a long press: nothing more until every finger is up
+#define UI_TOUCH_TAP_NS 400000000ull       // two fingers lifted within this of the second landing, neither moved, are a right click
+#define UI_TOUCH_EVENTS 12                 // the most events one call answers
+#define UI_TOUCH_PINCH_ONE 1024            // a pinch's scale of 1.0, in 1024ths (the scale is span over the span it began from)
+#define UI_TOUCH_PINCH_MAX 8192            // the largest scale a pinch reports: 8 times the span it began from
+#define UI_TOUCH_PINCH_SLOP 2              // the span of two fingers must change by this many touch slops to begin a pinch (16 px at 100%)
+
+enum ui_touch_kind
+{
+        UI_TOUCH_START,    // a finger went down: the pointer goes to x, y (hidden), and the press follows
+        UI_TOUCH_MOVE,     // the pointer goes to x, y
+        UI_TOUCH_PRESS,    // the left button goes down at the pointer
+        UI_TOUCH_RELEASE,  // the left button goes up where it is
+        UI_TOUCH_CANCEL,   // the left button goes up and says it was no click (the press was taken back)
+        UI_TOUCH_CLOSE,    // a pending press lifted unmoved: the window whose close button it was closes
+        UI_TOUCH_RESUME,   // a pending press moved past the slop: the press is made again, without the close button
+        UI_TOUCH_RIGHT,    // a click of the right button at the pointer
+        UI_TOUCH_WHEEL,    // a precise turn at the pointer's window: v120 in 120ths of UI_NOTCH (the two fingers' motion, one for one), horizontal or vertical
+        UI_TOUCH_TURN_END, // the two fingers' turn is over (a lift): the window's precise hand lets go, and throws on its speed
+        UI_TOUCH_HOLD,     // a long press: the left press is taken back, the right button goes down held at the pointer
+        UI_TOUCH_HOLD_END, // the lift that ends a long press
+        UI_TOUCH_PINCH_BEGIN,  // two fingers changed their span past the pinch slop: a pinch begins at scale 1024 about x, y
+        UI_TOUCH_PINCH_UPDATE, // the pinch's scale (1024ths of the span it began from) and its focal point, x, y (the middle)
+        UI_TOUCH_PINCH_END,    // a finger of the pinch lifted (or the fingers changed): the pinch's last scale
+        UI_TOUCH_IDLE     // no finger is down
+};
+
+struct ui_touch_event
+{
+        enum ui_touch_kind kind;
+        int x, y;          // START, MOVE and the pinch's focal point: the place
+        int v120;          // WHEEL: the turn
+        int horizontal;    // WHEEL: sideways
+        int scale;         // PINCH_*: the scale in 1024ths (UI_TOUCH_PINCH_ONE is 1.0)
+};
+
+struct ui_touch_out
+{
+        unsigned int count;
+        struct ui_touch_event event[UI_TOUCH_EVENTS];
+};
+
+struct ui_touch
+{
+        int mode, first, count, tcount;      // the mode; the first finger's slot; the fingers down, and in the two's last report
+        int moved, two_moved, pending;       // the first finger is past the slop; the two have moved (a wheel or a pinch); a close is pending
+        int turned;                          // the two's wheel has sent a precise turn, whose stop (UI_TOUCH_TURN_END) is owed when they lift
+        int start_x, start_y, mid_x, mid_y;  // the first finger's landing; the two's middle, where the wheel last counted from
+        int left_x, left_y;                  // what the wheel has not yet turned, in 120ths times the pixels of a notch
+        int span_ref, span_now;              // the span the pinch is measured from (set when the two are two, or change their count); the span last told
+        int pinching, pinch_scale;           // a pinch is under way, and the scale it last reported (1024ths)
+        b64 start, two_at;                   // when the first finger landed; when the two last were two
+};
+
+// One device report: each slot's id (negative for none down now) and the id it had at the last report, and the point of each slot
+// that is down, in the desktop's pixels; the pointer where it is; whether a drag or a resize holds the hand; the scale in percent;
+// and the time.
+struct ui_touch_frame
+{
+        int id[UI_TOUCH_SLOTS], was[UI_TOUCH_SLOTS], x[UI_TOUCH_SLOTS], y[UI_TOUCH_SLOTS];
+        int pointer_x, pointer_y, busy, scale;
+        b64 now;
+};
+
+// The slop: a finger is past it when its distance from where it landed is at least this (the kit's one touch slop, UI_SLOP at the
+// scale). The window's motion and the gestures take the same test.
+static inline int ui_touch_past(int x0, int y0, int x, int y, int slop)
+{
+        long long dx = (long long)x - x0, dy = (long long)y - y0;
+
+        return dx * dx + dy * dy >= (long long)slop * slop;
+}
+
+static inline int ui_touch_slop(int scale)
+{
+        return UI_SLOP * scale / 100;
+}
+
+static inline void ui_touch_emit(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int v120, int horizontal, int scale)
+{
+        if (out->count < UI_TOUCH_EVENTS)
+        {
+                struct ui_touch_event *e = &out->event[out->count++];
+
+                e->kind = kind, e->x = x, e->y = y, e->v120 = v120, e->horizontal = horizontal, e->scale = scale;
+        }
+}
+
+static inline void ui_touch_put(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y)
+{
+        ui_touch_emit(out, kind, x, y, 0, 0, 0);
+}
+
+
+static inline void ui_touch_put_pinch(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int scale)
+{
+        ui_touch_emit(out, kind, x, y, 0, 0, scale);
+}
+
+// The integer square root (floor), by the bit loop: a finger's span is the root of the squares of its two offsets.
+static inline unsigned long long ui_touch_isqrt(unsigned long long n)
+{
+        unsigned long long root = 0, bit = 1ull << 62;
+
+        while (bit > n)
+                bit >>= 2;
+        for (; bit; bit >>= 2)
+                if (n >= root + bit)
+                        n -= root + bit, root = (root >> 1) + bit;
+                else
+                        root >>= 1;
+        return root;
+}
+
+// The distance between two slots' points, in the desktop's pixels, floored.
+static inline int ui_touch_span(const struct ui_touch_frame *f, int a, int b)
+{
+        long long dx = (long long)f->x[a] - f->x[b], dy = (long long)f->y[a] - f->y[b];
+
+        return (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy));
+}
+
+// A span as a scale of the span it began from, in 1024ths. Both spans are floored at the pinch's slop (floor, in the same units):
+// two fingers that began at nearly the same point would otherwise make the scale of any spread enormous (a start of 3 px and a
+// spread to 200 px is 66 times). The scale is capped at UI_TOUCH_PINCH_MAX (8 times the span it began at).
+static inline int ui_touch_ratio(int span, int ref, int floor)
+{
+        long long scale;
+
+        if (floor < 1)
+                floor = 1;
+        if (ref < floor)
+                ref = floor;
+        if (span < floor)
+                span = floor;
+        scale = (long long)span * UI_TOUCH_PINCH_ONE / ref;
+        return scale > UI_TOUCH_PINCH_MAX ? UI_TOUCH_PINCH_MAX : (int)scale;
+}
+
+// Whether a span is at least slop away from the span a pinch is measured from, either way.
+static inline int ui_touch_span_past(int ref, int span, int slop)
+{
+        return span - ref >= slop || ref - span >= slop;
+}
+
+// The fingers down in the frame: how many, and the lowest slot down other than skip (-1 for none).
+static inline int ui_touch_fingers(const struct ui_touch_frame *f, int skip, int *other)
+{
+        int count = 0;
+
+        *other = -1;
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                if (f->id[slot] >= 0)
+                {
+                        count++;
+                        if (slot != skip && *other < 0)
+                                *other = slot;
+                }
+        return count;
+}
+
+/*
+        The first finger down, when no finger was: the pointer goes to its landing (START), and the left button is pressed there
+        (PRESS). Nothing else answers in the same report: the caller applies these, then reports the frame as it is then.
+*/
+static inline void ui_touch_begin(struct ui_touch *t, const struct ui_touch_frame *f, struct ui_touch_out *out)
+{
+        int other;
+
+        out->count = 0;
+        if (t->mode != UI_TOUCH_NONE || !ui_touch_fingers(f, -1, &other))
+                return;
+        t->mode = UI_TOUCH_ONE, t->first = other;
+        t->moved = t->two_moved = t->pending = t->pinching = 0;
+        t->start = f->now;
+        t->start_x = f->x[other], t->start_y = f->y[other];
+        ui_touch_put(out, UI_TOUCH_START, t->start_x, t->start_y);
+        ui_touch_put(out, UI_TOUCH_PRESS, t->start_x, t->start_y);
+}
+
+/*
+        A report of the fingers, after ui_touch_begin's: an idle answer when none is down, then the mode's own step. ONE: the
+        first finger's lift is a release or a close; a second finger (not moved, and not while a drag or a resize holds the hand, nor
+        pending) takes the press back and makes the two; else the first finger moves past the slop and is the pointer's motion.
+        TWO: lifted soon and not moved, a right click; two or more, the wheel from their middle; one, the two are one again.
+        HELD: lifted, the hold ends; moved on, the pointer follows it.
+*/
+static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_frame *f, struct ui_touch_out *out)
+{
+        int other, count, x, y, slop = ui_touch_slop(f->scale);
+
+        out->count = 0;
+        count = ui_touch_fingers(f, -1, &other);
+        if (!count)
+                ui_touch_put(out, UI_TOUCH_IDLE, 0, 0);
+
+        if (t->mode == UI_TOUCH_ONE)
+        {
+                int first = t->first;
+
+                if (f->id[first] < 0 || (f->was[first] >= 0 && f->id[first] != f->was[first]))
+                {
+                        // Lifted: a release where it is, or a close on the button it went down on, unmoved.
+                        ui_touch_put(out, t->pending && !t->moved ? UI_TOUCH_CLOSE : UI_TOUCH_RELEASE, 0, 0);
+                        t->pending = 0;
+                        t->mode = count ? UI_TOUCH_HELD : UI_TOUCH_NONE;
+                }
+                else if (count >= 2 && !t->moved && !f->busy && !t->pending)
+                {
+                        // A second finger: the press is taken back, and the two are the wheel or the right button.
+                        ui_touch_put(out, UI_TOUCH_CANCEL, 0, 0);
+                        ui_touch_fingers(f, first, &other);
+                        t->mode = UI_TOUCH_TWO;
+                        t->two_at = f->now;
+                        t->tcount = count;
+                        t->mid_x = (f->x[other] + f->x[first]) / 2;
+                        t->mid_y = (f->y[other] + f->y[first]) / 2;
+                        t->left_x = t->left_y = t->turned = 0;
+                        t->span_ref = t->span_now = ui_touch_span(f, first, other);
+                        t->pinching = 0, t->pinch_scale = UI_TOUCH_PINCH_ONE;
+                }
+                else
+                {
+                        x = f->x[first], y = f->y[first];
+                        if (!t->moved && ui_touch_past(t->start_x, t->start_y, x, y, slop))
+                        {
+                                int was_pending = t->pending;
+
+                                t->moved = 1, t->pending = 0;
+                                if (was_pending)
+                                        ui_touch_put(out, UI_TOUCH_RESUME, x, y);
+                        }
+                        if (t->moved && (x != f->pointer_x || y != f->pointer_y))
+                                ui_touch_put(out, UI_TOUCH_MOVE, x, y);
+                }
+        }
+        else if (t->mode == UI_TOUCH_TWO)
+        {
+                if (!count)
+                {
+                        if (t->pinching)
+                                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
+                        if (t->turned)
+                                ui_touch_put(out, UI_TOUCH_TURN_END, 0, 0);
+                        if (!t->two_moved && f->now - t->two_at <= UI_TOUCH_TAP_NS)
+                                ui_touch_put(out, UI_TOUCH_RIGHT, 0, 0);
+                        t->mode = UI_TOUCH_NONE;
+                }
+                else if (count >= 2)
+                {
+                        int one = f->id[t->first] >= 0 ? t->first : other, per = UI_NOTCH * f->scale / 100;
+                        int mid_x, mid_y, span, slop2 = UI_TOUCH_PINCH_SLOP * slop;
+
+                        ui_touch_fingers(f, one, &other);
+                        mid_x = (f->x[other] + f->x[one]) / 2;
+                        mid_y = (f->y[other] + f->y[one]) / 2;
+                        span = ui_touch_span(f, one, other);
+                        // A finger more or less: the middle is somewhere else, the wheel counts from it again, and the span a pinch is
+                        // measured from is the new one (a pinch that was under way is over, and the next begins from here).
+                        if (count != t->tcount)
+                        {
+                                if (t->pinching)
+                                        ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
+                                t->tcount = count;
+                                t->mid_x = mid_x, t->mid_y = mid_y;
+                                t->span_ref = t->span_now = span;
+                                t->pinching = 0, t->pinch_scale = UI_TOUCH_PINCH_ONE;
+                        }
+                        else if (t->pinching || ui_touch_span_past(t->span_ref, span, slop2))
+                        {
+                                // Both at once, or only the span: a pinch, scaled about the middle, which carries the pan with it (the
+                                // wheel is not turned meanwhile). Two fingers that moved apart or together are never a wheel after it.
+                                int scale = ui_touch_ratio(span, t->span_ref, slop2);
+
+                                if (!t->pinching)
+                                        t->pinching = 1, t->two_moved = 1, t->pinch_scale = UI_TOUCH_PINCH_ONE,
+                                        ui_touch_put_pinch(out, UI_TOUCH_PINCH_BEGIN, mid_x, mid_y, UI_TOUCH_PINCH_ONE);
+                                t->span_now = span;
+                                t->mid_x = mid_x, t->mid_y = mid_y, t->left_x = t->left_y = 0;
+                                if (scale != t->pinch_scale)
+                                        t->pinch_scale = scale, ui_touch_put_pinch(out, UI_TOUCH_PINCH_UPDATE, mid_x, mid_y, scale);
+                        }
+                        else if (t->two_moved || ui_touch_past(t->mid_x, t->mid_y, mid_x, mid_y, slop))
+                        {
+                                // What is under them follows them: fingers down are the wheel up, to the right it left.
+                                long down = (long)t->left_y + (long)(mid_y - t->mid_y) * 120;
+                                long right = (long)t->left_x - (long)(mid_x - t->mid_x) * 120;
+                                int turn_y = (int)(down / per), turn_x = (int)(right / per);
+
+                                t->two_moved = t->turned = 1;
+                                t->left_y = (int)(down - (long)turn_y * per);
+                                t->left_x = (int)(right - (long)turn_x * per);
+                                t->mid_x = mid_x, t->mid_y = mid_y;
+                                if (turn_y)
+                                        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, turn_y, 0, 0);
+                                if (turn_x)
+                                        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, turn_x, 1, 0);
+                        }
+                }
+                else
+                {
+                        // One finger of the two lifted: the pinch is over (its last scale), and the one left is nothing.
+                        if (t->pinching)
+                                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
+                        t->tcount = count;
+                }
+        }
+        else if (t->mode == UI_TOUCH_HELD && !count)
+        {
+                ui_touch_put(out, UI_TOUCH_HOLD_END, 0, 0);
+                t->mode = UI_TOUCH_NONE;
+        }
+        else if (t->mode == UI_TOUCH_HELD && count == 1 && f->id[t->first] >= 0)
+        {
+                // Held, then moved on: the pointer follows the finger, and what it drags follows it. Nothing is pressed.
+                x = f->x[t->first], y = f->y[t->first];
+                if (!t->moved && ui_touch_past(t->start_x, t->start_y, x, y, slop))
+                        t->moved = 1;
+                if (t->moved && (x != f->pointer_x || y != f->pointer_y))
+                        ui_touch_put(out, UI_TOUCH_MOVE, x, y);
+        }
+}
+
+// When the first finger is a long press: its time when it is one (still, the left button pressed and not a close), or 0.
+static inline b64 ui_touch_due(const struct ui_touch *t, int pressed)
+{
+        return t->mode == UI_TOUCH_ONE && !t->moved && !t->pending && pressed ? t->start + (b64)UI_HOLD_NS : 0;
+}
+
+// The tick: at or after the long press's time, the first finger is a hold (UI_TOUCH_HOLD) and the press is HELD.
+static inline void ui_touch_tick(struct ui_touch *t, b64 now, int pressed, struct ui_touch_out *out)
+{
+        b64 due = ui_touch_due(t, pressed);
+
+        out->count = 0;
+        if (!due || now < due)
+                return;
+        ui_touch_put(out, UI_TOUCH_HOLD, 0, 0);
+        t->mode = UI_TOUCH_HELD;
+}
+
+// A close button under the first finger: its press is pending until the finger lifts unmoved (UI_TOUCH_CLOSE) or moves (RESUME).
+static inline void ui_touch_pend(struct ui_touch *t, int on)
+{
+        t->pending = on != 0;
+}
+
+// The events lost: what the first finger was doing ends as if it were lifted (a cancel), and no click is made.
+static inline void ui_touch_drop(struct ui_touch *t, struct ui_touch_out *out)
+{
+        out->count = 0;
+        if (t->mode == UI_TOUCH_ONE)
+                ui_touch_put(out, UI_TOUCH_CANCEL, 0, 0);
+        if (t->mode == UI_TOUCH_TWO && t->pinching)
+                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
+        if (t->mode == UI_TOUCH_TWO && t->turned)
+                ui_touch_put(out, UI_TOUCH_TURN_END, 0, 0);
+        t->mode = UI_TOUCH_NONE;
+        t->pending = 0;
+        t->pinching = 0;
+}
+
+// The device is gone: no event, and the gesture is over.
+static inline void ui_touch_reset(struct ui_touch *t)
+{
+        t->mode = UI_TOUCH_NONE;
+        t->pending = 0;
+        t->pinching = 0;
+}
+
+/*
+        The screen edges. A finger that lands in a band at an edge of its screen (UI_EDGE_BAND, the nearest edge) is the system's
+        until it is decided, and the kit is told nothing of it meanwhile. The top and the bottom are the system's by default; the
+        sides are when the compositor's side edges are on. ui_edge_judge says whether it has
+        travelled UI_EDGE_SWIPE inward within a cone of about 30 degrees (SWIPED: the system's gesture, and the window under it
+        gets nothing); whether it has gone back past the slop, or strayed sideways past the slop out of the cone (FAILED: the
+        press is the window's, as if no band were there); or neither yet (UNDECIDED). The caller fails a finger still
+        UI_HOLD_NS after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
+        when it lifts. A finger on a control of the window's controls (UI_EDGE_CONTROL) is judged by travel alone: any travel
+        past the slop fails it, a lift without travel is the control's. Sides are the screen's own, from its rectangle in the
+        desktop's pixels, so a screen turned is judged in its own orientation.
+*/
+#define UI_EDGE_BAND 12                  // dp: the band at each edge of a screen where a swipe begins
+#define UI_EDGE_SWIPE 48                 // dp: the travel inward that decides a swipe
+#define UI_EDGE_CONE 60                  // hundredths: the sideways travel a swipe may not pass of its inward travel (about 30 degrees)
+#define UI_EDGE_CONTROL_SLOP 8           // dp: a finger's slop about the window's controls, above and below their row
+#define UI_EDGE_CONTROL_CELL 40          // dp: a window control's cell, wide (three to a strip)
+
+enum ui_edge_side
+{
+        UI_EDGE_NONE,
+        UI_EDGE_BOTTOM,  // the bottom band: a swipe up
+        UI_EDGE_TOP,     // the top band: a swipe down
+        UI_EDGE_LEFT,    // the left band: a swipe right (the window switcher, when the side edges are on)
+        UI_EDGE_RIGHT,   // the right band: a swipe left (the mixer, when the side edges are on)
+        UI_EDGE_CONTROL  // a finger on one of a window's controls, which were shown by a swipe down
+};
+
+enum ui_edge_verdict
+{
+        UI_EDGE_UNDECIDED,
+        UI_EDGE_SWIPED,
+        UI_EDGE_FAILED
+};
+
+// The side of the rectangle (x, y, width, height) a point is within band of, the nearest where two are; UI_EDGE_NONE when the point
+// is not in the rectangle or is not near any of its edges.
+static inline int ui_edge_band_side(int x, int y, const int *rect, int band)
+{
+        int left = x - rect[0], right = rect[0] + rect[2] - 1 - x, top = y - rect[1], bottom = rect[1] + rect[3] - 1 - y;
+        int side = UI_EDGE_NONE, least = band;
+
+        if (left < 0 || right < 0 || top < 0 || bottom < 0)
+                return UI_EDGE_NONE;
+        if (top < least)
+                least = top, side = UI_EDGE_TOP;
+        if (bottom < least)
+                least = bottom, side = UI_EDGE_BOTTOM;
+        if (left < least)
+                least = left, side = UI_EDGE_LEFT;
+        if (right < least)
+                least = right, side = UI_EDGE_RIGHT;
+        return side;
+}
+
+// The travel of a finger from where it landed: inward toward the screen from the side (positive is inward), and sideways along it.
+static inline void ui_edge_travel(int side, int x0, int y0, int x, int y, int *inward, int *lateral)
+{
+        switch (side)
+        {
+        case UI_EDGE_BOTTOM: *inward = y0 - y, *lateral = x - x0; break;
+        case UI_EDGE_TOP: *inward = y - y0, *lateral = x - x0; break;
+        case UI_EDGE_LEFT: *inward = x - x0, *lateral = y - y0; break;
+        default: *inward = x0 - x, *lateral = y - y0; break;
+        }
+        if (*lateral < 0)
+                *lateral = -*lateral;
+}
+
+// The verdict for a finger that landed at x0, y0 on side and is now at x, y: slop and swipe are in the desktop's pixels (the scale's).
+static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop, int swipe)
+{
+        int inward, lateral;
+        long long past, out;
+
+        if (side == UI_EDGE_CONTROL)
+                return ui_touch_past(x0, y0, x, y, slop) ? UI_EDGE_FAILED : UI_EDGE_UNDECIDED;
+        ui_edge_travel(side, x0, y0, x, y, &inward, &lateral);
+        if (inward <= -slop)
+                return UI_EDGE_FAILED;
+        past = inward > 0 ? inward : 0;
+        if (lateral >= slop && (long long)lateral * 100 > past * UI_EDGE_CONE)
+                return UI_EDGE_FAILED;
+        out = (long long)inward;
+        if (out >= swipe && (long long)lateral * 100 <= out * UI_EDGE_CONE)
+                return UI_EDGE_SWIPED;
+        return UI_EDGE_UNDECIDED;
+}
+
+/*
+        The taskbar: the strip along one edge of the output with a tab for
+        each window, and the tray at the far end of it with the time and, when
+        the settings name one, the battery. The edge is the position: bottom
+        (the default), top, left or right. compositor.c keeps the windows, the
+        glass and the frames; taskbar.c has the band's geometry, its hit test,
+        its damage and the painting of its tabs and tray, all read from the
+        struct taskbar_view the compositor fills for each call.
+
+        Included by compositor.c. With MOONWATER_UI_TASKBAR 0 taskbar.c is not
+        built, and these stubs answer as if there were no band at all: nothing
+        is drawn, nothing is hit and nothing is damaged.
+*/
+
+// the double press of a pair cell (the tray), ui_click_again (the motion above)
+
+// Where the band sits: the edge of the output it is along.
+#define TASKBAR_BOTTOM 0u
+#define TASKBAR_TOP 1u
+#define TASKBAR_LEFT 2u
+#define TASKBAR_RIGHT 3u
+
+// What a point of the band is over: a tab's number (0 up), -2 the tray, TASKBAR_LAUNCHER for the launcher button (which
+// is a slot of the band's like the tray, its own bit of the redo mask), the tray's cells (TASKBAR_VOLUME, TASKBAR_MIC,
+// TASKBAR_NOTICES, defined below), or TASKBAR_HIT_NONE for none of them.
+#define TASKBAR_HIT_NONE (-3)
+#define TASKBAR_LAUNCHER (-5)
+// The volume item at the start of the tray, a cell of its own when the sound server is there: pressed, it opens the mixer, a middle
+// press mutes, and the wheel over it changes the volume (compositor.c).
+#define TASKBAR_VOLUME (-6)
+// And before it a microphone, a cell of its own while a program records from one: pressed, it opens the recording strips of the mixer, a
+// middle press mutes the microphone (compositor.c).
+#define TASKBAR_MIC (-7)
+// The notices dot at the start of the tray, drawn only while the board holds a notice or an issue (taskbar_notices_set): pressed, it
+// opens the notices popup beside the dot (notices.c), which lists them and starts Settings on its System notices page.
+#define TASKBAR_NOTICES (-8)
+
+// The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in
+// /root, which the compositor reads again when it is written.
+#define TASKBAR_TUNE_PATH "/root/tune"
+#define TASKBAR_TUNE_NAME "tune"
+
+// A battery's name, its null included: the battery reader's BATTERY_NAME, here so the compositor can size its buffers
+// before that file is read. The two agree.
+#ifndef BATTERY_NAME
+#define BATTERY_NAME 32
+#endif
+
+// The band's size and ink, which compositor.c draws with as well as taskbar.c: the panel's height in logical pixels,
+// the ink of the panel and of a tab (the chrome's shadow, lighter while its window has the keys, a little off black
+// while it is put away) for a tab drawn without a font, and each tab's mark. The panel's and the lit tab's inks are
+// not kit roles; the shadow is compositor_ink_shadow.
+#define COMPOSITOR_PANEL 24
+#define COMPOSITOR_INK_PANEL 0x141416u
+#define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
+// A window's tab: lit while it has the keys, dim while it is put away.
+#define COMPOSITOR_TAB_LIT 1u
+#define COMPOSITOR_TAB_AWAY 2u
+// The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale: the room
+// round the text inside each tab, either side of it): the range of each, and what each is when nothing is kept. The gap between the band's
+// items and at its ends is not set: it is the kit's gap between pieces that go together (UI_GAP1, which taskbar.c holds it to), at the scale.
+#define TASKBAR_SCALE_LEAST 50
+#define TASKBAR_SCALE_STANDARD 100
+#define TASKBAR_SCALE_MOST 200
+#define TASKBAR_PADDING_STANDARD 6
+#define TASKBAR_GAP 4
+#define TASKBAR_PADDING_MOST 24
+// The blur under the tabs: the glass is halved this many times, a block of the output a side, and the small blur's reach
+// in blocks. Its reach is what a change of the band reaches through the blur and the rise, in device pixels.
+#define COMPOSITOR_GLASS_LEVELS 3
+#define COMPOSITOR_GLASS_BLOCK (1 << COMPOSITOR_GLASS_LEVELS)
+#define COMPOSITOR_GLASS_SPREAD 3 // the small blur's reach, in small pixels: two rounds of a box of four
+#define COMPOSITOR_GLASS_REACH ((COMPOSITOR_GLASS_SPREAD + 3) * COMPOSITOR_GLASS_BLOCK)
+// The glass under the tabs, half its width and half its height in logical pixels.
+#define COMPOSITOR_GLASS_ACROSS 8
+#define COMPOSITOR_GLASS_DOWN 4
+
+// What the compositor shows the taskbar: the output, the windows that have a tab and the buffers the band is
+// drawn into (none when there is no font, and the tabs are shapes the compositor draws).
+struct taskbar_view
+{
+        int width, height;               // the output, in device pixels
+        int scale;                       // the output's scale in percent (100 is one device pixel to a logical one)
+        int x, y;                        // where that output is in the desktop's space: its screen's top left
+        unsigned int position;           // TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT or TASKBAR_RIGHT
+        unsigned int *pixels;            // the band's pixels, or none
+        struct ui_scene *scene;          // when set, the launcher's bars and the speaker and microphone are recorded into it, not painted (the rig's)
+        unsigned long band_bytes;        // how much memory pixels has
+        unsigned int *glass;             // the blurred scene under the tabs
+        font_face *face;                 // the face the tabs are written in
+        font_engine *engine;             // and its engine
+        unsigned int count;              // the windows with a tab, in the order they are shown
+        unsigned int launcher_lit;       // the launcher is up: its button, when the band has one, is drawn as a tab with the keys is
+        const unsigned char *marks;      // each tab's mark: lit, put away
+        const unsigned char *lengths;    // each tab's title, in characters
+        const char *titles[WINDOWS];     // each tab's title
+};
+
+// The glass the band's tabs are made of over a rectangle of the output: the compositor blurs it into
+// view->glass and answers the row stride (0 when there is no memory for it).
+typedef int (*taskbar_glass_fn)(void *context, int x, int y, int width, int height);
+
+#if MOONWATER_UI_TASKBAR
+
+static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
+static int taskbar_hit(const struct taskbar_view *view, int px, int py);
+static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach);
+static int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages);
+static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
+                        int *rect);
+static unsigned int taskbar_tab_ink(int slot, unsigned int mark);
+static unsigned int taskbar_square(unsigned int position);
+static int taskbar_tick(void);
+static void taskbar_changed(void);
+static int taskbar_stale(void);
+static void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass);
+static unsigned int taskbar_position(void);
+static void taskbar_position_default(unsigned int position);
+static void taskbar_settings_set(const char *position, const char *display, const char *tune);
+static int taskbar_display_all(void);
+static void taskbar_text_set(int edge);
+static void taskbar_tray_set(const char *text);
+static void taskbar_launcher_set(int on);
+static void taskbar_hide_set(int on);
+static void taskbar_scale_set(int percent);
+static void taskbar_padding_set(int pixels);
+static int taskbar_thick(int scale);
+static int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before);
+static int taskbar_sliding(positive now);
+static b64 taskbar_shift(void);
+static void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height);
+static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_volume_set(int present, int percent, int muted, int flash);
+static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_mic_set(int present, int muted);
+static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_notices_set(int present, unsigned int severity);
+static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+
+#else
+
+static inline void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view; *x = *y = *width = *height = 0; }
+static inline int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
+{ (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_hit(const struct taskbar_view *view, int px, int py)
+{ (void)view, (void)px, (void)py; return TASKBAR_HIT_NONE; }
+static inline int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
+{ (void)view, (void)px, (void)py, (void)reach; return TASKBAR_HIT_NONE; }
+static inline int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages)
+{ (void)view, (void)damage, (void)damages; return 0; }
+static inline int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
+                               int *rect)
+{ (void)view, (void)redo, (void)glass, (void)context, (void)rect; return 0; }
+static inline unsigned int taskbar_tab_ink(int slot, unsigned int mark)
+{ (void)slot, (void)mark; return 0; }
+static inline unsigned int taskbar_square(unsigned int position)
+{ (void)position; return 0; }
+static inline int taskbar_tick(void) { return 0; }
+static inline void taskbar_changed(void) {}
+static inline int taskbar_stale(void) { return 0; }
+static inline void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
+{ (void)width, (void)height, (void)scale; *band = *glass = 0; }
+static inline unsigned int taskbar_position(void) { return TASKBAR_BOTTOM; }
+static inline void taskbar_position_default(unsigned int position) { (void)position; }
+static inline void taskbar_settings_set(const char *position, const char *display, const char *tune)
+{ (void)position, (void)display, (void)tune; }
+static inline int taskbar_display_all(void) { return 0; }
+static inline void taskbar_text_set(int edge) { (void)edge; }
+static inline void taskbar_tray_set(const char *text) { (void)text; }
+static inline void taskbar_launcher_set(int on) { (void)on; }
+static inline void taskbar_hide_set(int on) { (void)on; }
+static inline void taskbar_scale_set(int percent) { (void)percent; }
+static inline void taskbar_padding_set(int pixels) { (void)pixels; }
+static inline int taskbar_thick(int scale) { return COMPOSITOR_PANEL * scale / 100; }
+static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
+{ (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
+static inline int taskbar_sliding(positive now) { (void)now; return 0; }
+static inline b64 taskbar_shift(void) { return 0; }
+static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
+{ (void)view, (void)before, *x = *y = *width = *height = 0; }
+static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_volume_set(int present, int percent, int muted, int flash)
+{ (void)present, (void)percent, (void)muted, (void)flash; return 0; }
+static inline int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_mic_set(int present, int muted)
+{ (void)present, (void)muted; return 0; }
+static inline int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_notices_set(int present, unsigned int severity)
+{ (void)present, (void)severity; return 0; }
+static inline int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+
+#endif
+
+/*
+        The panel's cells and what a press on one does: the launcher's button, the volume and microphone cells and the tray. The
+        rule is data (taskbar_cell_rules): by the cell's hit and the button, the action the compositor carries out. The buttons are
+        the input's order (left 0, middle 2) and the wheel, a turn over the cell. A pair cell (the tray) acts on the second press of a
+        double press, which is the kit's click count (ui_click_again: within 450 ms and 4 px, scaled); its state is taskbar_cells.
+*/
+#define TASKBAR_TRAY (-2) // what a point of the tray is over (the tray as a whole, between the cells)
+#define TASKBAR_BUTTON_LEFT 0u
+#define TASKBAR_BUTTON_MIDDLE 2u
+#define TASKBAR_BUTTON_WHEEL 3u
+
+enum taskbar_cell_act
+{
+        TASKBAR_ACT_NONE,
+        TASKBAR_ACT_LAUNCHER,    // the launcher's button: put the launcher away when it is up, else start one beside the button
+        TASKBAR_ACT_VOLUME_OPEN, // the volume cell: the mixer beside it
+        TASKBAR_ACT_VOLUME_MUTE, // the volume cell's middle press: the master mute thrown
+        TASKBAR_ACT_VOLUME_STEP, // the wheel over the volume cell: a notch is five percent
+        TASKBAR_ACT_MIC_OPEN,    // the microphone cell: the recording strips beside it
+        TASKBAR_ACT_MIC_MUTE,    // the microphone cell's middle press
+        TASKBAR_ACT_SETTINGS,    // the tray: a double press opens the settings
+        TASKBAR_ACT_NOTICES_OPEN // the notices dot: the notices popup beside it
+};
+
+struct taskbar_cell_rule
+{
+        int hit;
+        unsigned int button;
+        enum taskbar_cell_act act;
+        int pair; // acts on the second press of a double press only
+};
+
+static const struct taskbar_cell_rule taskbar_cell_rules[] = {
+        {TASKBAR_LAUNCHER, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_LAUNCHER, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_VOLUME_OPEN, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_VOLUME_MUTE, 0},
+        {TASKBAR_VOLUME, TASKBAR_BUTTON_WHEEL, TASKBAR_ACT_VOLUME_STEP, 0},
+        {TASKBAR_MIC, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_MIC_OPEN, 0},
+        {TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_MIC_MUTE, 0},
+        {TASKBAR_NOTICES, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_NOTICES_OPEN, 0},
+        {TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SETTINGS, 1},
+};
+
+#define TASKBAR_CELL_RULES (sizeof(taskbar_cell_rules) / sizeof(taskbar_cell_rules[0]))
+
+struct taskbar_cells
+{
+        struct ui_click pair[TASKBAR_CELL_RULES]; // the double press of each pair rule (the tray's)
+};
+
+// The click state of a pair rule (the tray's press): its double press is kept there, and a check reads or moves its time.
+static inline struct ui_click *taskbar_cell_clicks(struct taskbar_cells *cells, int hit, unsigned int button)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+                if (taskbar_cell_rules[at].hit == hit && taskbar_cell_rules[at].button == button && taskbar_cell_rules[at].pair)
+                        return &cells->pair[at];
+        return &cells->pair[0];
+}
+
+// What a press (or a wheel turn, TASKBAR_BUTTON_WHEEL) on a cell does, for a rule that is no pair.
+static inline enum taskbar_cell_act taskbar_cell_of(int hit, unsigned int button)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+                if (taskbar_cell_rules[at].hit == hit && taskbar_cell_rules[at].button == button && !taskbar_cell_rules[at].pair)
+                        return taskbar_cell_rules[at].act;
+        return TASKBAR_ACT_NONE;
+}
+
+// What a press on a cell does now: the rule's action, or for a pair rule the action on its second press of a double press (the
+// presses of the rule's own button only are counted, and the first press of a pair is none).
+static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cells, int hit, unsigned int button, b64 now, int x, int y,
+                                                       int scale)
+{
+        for (unsigned int at = 0; at < TASKBAR_CELL_RULES; at++)
+        {
+                const struct taskbar_cell_rule *r = &taskbar_cell_rules[at];
+
+                if (r->hit != hit || r->button != button)
+                        continue;
+                if (!r->pair)
+                        return r->act;
+                return ui_click_again(&cells->pair[at], now, x, y, scale) == 2 ? r->act : TASKBAR_ACT_NONE;
+        }
+        return TASKBAR_ACT_NONE;
+}
+
+#endif /* MOONWATER_CANVAS_UI_SHARED */
+
+#if !defined(UI_LIST_ONLY) && !defined(UI_SHARED_ONLY) && !defined(MOONWATER_CANVAS_UI)
 #define MOONWATER_CANVAS_UI
 
-// The shapes and touch sizes the compositor draws too (theme.h, which the compositor includes before this file).
-#include "theme.h"
+/*
+        The kit's layout: a tree of boxes and the rectangle of each, by the rules of CSS's flexbox, in whole pixels. A tree is
+        declared into an array the caller owns (struct ui_tree: no allocation, no pointers), opened and closed in the order the
+        elements nest, and two passes give every element its rectangle. Integer arithmetic only, so every platform gets the
+        same rectangles; the units are the caller's (the view, ui.c, runs it in device pixels).
 
-// The window list's format and reader (list.h, which the compositor reads too).
-#include "list.h"
+            ui_tree_begin(&tree);
+            n = ui_tree_open(&tree);          // the root: element 0; n is the element, to be written
+                n->dir = 1, n->gap = 8;
+                n = ui_tree_open(&tree);      // a child of the root
+                ui_tree_close(&tree);
+            ui_tree_close(&tree);
+            ui_tree_run(&tree, width, height);    // tree.node[i].x, y, w, h, in the order the elements were opened
 
-// The flexbox layout of a tree of boxes (layout.h): the rectangles the view (ui_view_begin) declares a screen into.
-#include "layout.h"
+        The element is the whole of what it declares, in one value (struct ui_node):
 
-// What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
-#include "text.c"
+            dir          0 lays its children out left to right (a row), 1 top to bottom (a column): the main axis
+            gap          between two children along the main axis
+            pad, margin  left, right, top, bottom: inside the element's edge, and outside it (a margin is the child's, the
+                         parent's pad is the room its children are in)
+            justify      the children along the main axis, in the room the sizes and gaps leave: UI_START (0 too), UI_CENTER,
+                         UI_END, UI_BETWEEN (the room between the children, the first gaps a pixel wider by what does not
+                         divide) and UI_AROUND (an equal room round each)
+            align        the children across it: UI_START, UI_CENTER, UI_END, or UI_STRETCH (0 too): a child of fit size fills
+            scroll       1: the children are not shrunk, run past the end, and are moved back by offset (clamped, answered in
+                         offset), with the length of what they take in extent: overflow: auto along the main axis
+            size[0..1]   the width and the height, below
 
-// What the windows say, in the language chosen: the table of words and the file of each other language (language.c).
-#include "language.c"
+        Sizing, per axis (size[0] is the width, size[1] the height):
+            UI_FIT       the content: along the main axis its children's sizes, margins and the gaps between them; across it,
+                         the largest child with its margins; plus its pad. A leaf has none of its own: its content[] is what
+                         the caller measured (a line of text). A child that grows or is a percent counts as its min.
+            UI_FIXED     value pixels.
+            UI_GROW      flex-grow: a share of the parent's leftover room on the main axis in proportion to value (the weight;
+                         0 takes no share) on top of its min; across it, all the room.
+            UI_PERCENT   value percent of the parent's inner size on that axis (its size less its pad).
+            min, max     the limits, applied last to every size; a max below its min reads as the min.
+            shrink       flex-shrink: when the children are more than the parent has room for, a child with a weight gives up a
+                         share of the excess in proportion to the weight and its size, down to its min. A GROW child never.
+
+        Pass 1 (bottom-up, the reverse of open order) gives every element its preferred size. Pass 2 (top-down, in open order)
+        gives the root its size from the viewport (GROW: all of it, PERCENT: that share of it) and then, each parent in turn, its
+        children their main sizes (FIXED and FIT as pass 1 has them, PERCENT of the inner size, the GROW shares of what is left
+        after the sizes, margins and gaps) and their places. A share is in whole pixels, floor(room * weight / total weight), and the
+        pixels the floors leave go one each to the first children with a weight, in open order. A GROW child that would pass its max
+        is frozen at the max and the room shared again among the rest; a shrinking child that would pass its min is frozen at the min
+        and the excess shared again; each repeats till none passes. Children are never clipped: one larger than its parent runs
+        past it.
+
+        Every value is read within its range: sizes, gaps, pads, margins and the viewport lie in [0, UI_TREE_MOST], weights in
+        [0, UI_TREE_WEIGHT], a direction other than 1 is 0, a kind outside 0 to 3 is UI_FIT, a justify or an align the table does
+        not have is the first; a position is kept to +-2^30. So every product stays in 64 bits.
+
+        Limits, and what happens at them: UI_TREE_NODES elements, UI_TREE_DEPTH open at once. An open that would pass either, or is
+        a second root, or sits inside a refused open, is refused: it adds no element, is counted in dropped, and what is written
+        to the node it answers goes to a node nothing reads. Its close is paired as usual. Nothing is written outside the arrays.
+
+        This is the reference. The routine the kit runs is this C; there is no assembly under it yet, and the one thing that
+        would be is ui_tree_run's pass 2, the only part with work per child. The struct is laid out for it (the asserts below pin
+        the sizes it indexes by shift), and the shape of its inner loops is the usb.tools layout's, which is assembly on arm64 and
+        x86-64 and was checked against this same arithmetic rectangle by rectangle. Nothing is measured here to say it wins.
+*/
+
+#define UI_TREE_NODES 128
+#define UI_TREE_DEPTH 16
+#define UI_TREE_MOST (1 << 22)   // the largest size, gap, pad or margin; a larger value reads as this
+#define UI_TREE_WEIGHT 1024      // the largest weight
+#define UI_TREE_FAR (1 << 30)    // the farthest a position is kept from the origin
+
+// The sizing kinds.
+#define UI_FIT 0
+#define UI_FIXED 1
+#define UI_GROW 2
+#define UI_PERCENT 3
+
+// Justify and align: 0 is the first of each (start for a justify, stretch for an align).
+#define UI_START 1
+#define UI_CENTER 2
+#define UI_END 3
+#define UI_BETWEEN 4
+#define UI_AROUND 5
+#define UI_STRETCH 6
+
+struct ui_size
+{
+        int kind;   // UI_FIT, UI_FIXED, UI_GROW or UI_PERCENT
+        int value;  // FIXED: pixels; GROW: the weight; PERCENT: percent; FIT: unused
+        int min;    // the smallest, pixels
+        int max;    // the largest, pixels (UI_TREE_MOST: none)
+        int shrink; // the weight of what it gives up when its parent is too small (0: none)
+};
+
+struct ui_node
+{
+        int dir, justify, align, scroll, gap;
+        int pad[4], margin[4];             // left, right, top, bottom
+        struct ui_size size[2];            // [0] the width, [1] the height
+        int content[2];                    // a leaf's own size per axis (what FIT takes when it has no children)
+        int offset, extent;                // a scroll element's offset (in, then clamped) and the length of its children (out)
+        int parent, first, last, next, children;
+        int pref[2], base, frozen;         // the scratch of the passes
+        b64 sum[2];
+        int widest[2];
+        int x, y, w, h;                    // the answer: the rectangle, from the root's top left
+        int spare[2];
+};
+
+struct ui_tree
+{
+        struct ui_node node[UI_TREE_NODES];
+        struct ui_node discard;            // what a refused open answers, to be written and not read
+        int count, depth, over, dropped;
+        int open[UI_TREE_DEPTH];           // the open stack: each open's element, or -1 for a refused one
+};
+
+_Static_assert(sizeof(struct ui_size) == 20, "ui_size: five ints");
+_Static_assert(sizeof(struct ui_node) == 192, "ui_node: three cache lines");
+_Static_assert(offset_of(struct ui_node, x) == 168 && offset_of(struct ui_node, sum) == 144, "ui_node offsets");
+
+static inline int ui_tree_pixels(int v)
+{
+        return v < 0 ? 0 : v > UI_TREE_MOST ? UI_TREE_MOST : v;
+}
+
+static inline int ui_tree_weight(int v)
+{
+        return v < 0 ? 0 : v > UI_TREE_WEIGHT ? UI_TREE_WEIGHT : v;
+}
+
+static inline int ui_tree_place(b64 v)
+{
+        return v < -UI_TREE_FAR ? -UI_TREE_FAR : v > UI_TREE_FAR ? UI_TREE_FAR : (int)v;
+}
+
+// v within [low, high], low <= high.
+static inline b64 ui_tree_clamp(b64 v, b64 low, b64 high)
+{
+        return v < low ? low : v > high ? high : v;
+}
+
+// The position and the length of an element on an axis (0 across, 1 down).
+static inline int address_to ui_tree_at(struct ui_node address_to n, int axis)
+{
+        return axis ? &n->y : &n->x;
+}
+
+static inline int address_to ui_tree_len(struct ui_node address_to n, int axis)
+{
+        return axis ? &n->h : &n->w;
+}
+
+// The gaps of an element's children: one fewer than they are.
+static inline b64 ui_tree_gaps(const struct ui_node address_to n)
+{
+        return n->children > 1 ? (b64)(n->children - 1) * n->gap : 0;
+}
+
+// An empty tree; the array is left as it is.
+static fn ui_tree_begin(struct ui_tree address_to t)
+{
+        t->count = t->depth = t->over = t->dropped = 0;
+}
+
+// An element opened as the last child of the innermost open one (or as the root), zeroed but for the limits: fit sizes, no max.
+// It is the node to write its declaration in. A refused open answers t->discard, zeroed, and the element is not there.
+static struct ui_node address_to ui_tree_open(struct ui_tree address_to t)
+{
+        struct ui_node address_to n;
+        int parent = -1, refused;
+
+        if (t->depth == UI_TREE_DEPTH)
+        {
+                t->over++, t->dropped++;
+                memory_zero(&t->discard, sizeof(t->discard));
+                return &t->discard;
+        }
+        if (t->depth)
+                parent = t->open[t->depth - 1];
+        refused = (t->depth ? parent < 0 : t->count != 0) || t->count >= UI_TREE_NODES;
+        if (refused)
+        {
+                t->dropped++;
+                t->open[t->depth++] = -1;
+                memory_zero(&t->discard, sizeof(t->discard));
+                return &t->discard;
+        }
+        n = &t->node[t->count];
+        memory_zero(n, sizeof(*n));
+        n->size[0].max = n->size[1].max = UI_TREE_MOST;
+        n->parent = parent;
+        n->first = n->last = n->next = -1;
+        if (parent >= 0)
+        {
+                struct ui_node address_to p = &t->node[parent];
+
+                if (p->first < 0)
+                        p->first = t->count;
+                else
+                        t->node[p->last].next = t->count;
+                p->last = t->count;
+                p->children++;
+        }
+        t->open[t->depth++] = t->count++;
+        return n;
+}
+
+// The innermost open element is closed (a refused one past the depth first).
+static fn ui_tree_close(struct ui_tree address_to t)
+{
+        if (t->over)
+                t->over--;
+        else if (t->depth)
+                t->depth--;
+}
+
+// The grow children of e, on axis m, share left (> 0) pixels over their minimums.
+static fn ui_tree_grow(struct ui_tree address_to t, const struct ui_node address_to e, int m, b64 left)
+{
+        for (;;)
+        {
+                b64 total = 0, shares = 0, freed = 0, rest;
+                b32 violated = false;
+
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                        if (t->node[ch].size[m].kind == UI_GROW && !t->node[ch].frozen)
+                                total += t->node[ch].size[m].value;
+                if (!total)
+                {
+                        // No weight left: those that are not frozen are at their minimums.
+                        for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                                if (t->node[ch].size[m].kind == UI_GROW && !t->node[ch].frozen)
+                                        *ui_tree_len(&t->node[ch], m) = t->node[ch].size[m].min;
+                        return;
+                }
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                        if (t->node[ch].size[m].kind == UI_GROW && !t->node[ch].frozen)
+                                shares += left * t->node[ch].size[m].value / total;
+                rest = left - shares;
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                {
+                        struct ui_node address_to k = &t->node[ch];
+                        b64 weight = k->size[m].value, amount = left * weight / total;
+
+                        if (k->size[m].kind != UI_GROW || k->frozen)
+                                continue;
+                        if (weight > 0 && rest > 0)
+                                amount++, rest--;
+                        if (k->size[m].min + amount > k->size[m].max)
+                        {
+                                *ui_tree_len(k, m) = k->size[m].max;
+                                k->frozen = 1;
+                                freed += k->size[m].max - k->size[m].min;
+                                violated = true;
+                        }
+                        else
+                                *ui_tree_len(k, m) = (int)(k->size[m].min + amount);
+                }
+                if (!violated)
+                        return;
+                left -= freed;
+        }
+}
+
+// The children of e that give way, on axis m, give up excess (> 0) pixels between them, none below its min.
+static fn ui_tree_shrink(struct ui_tree address_to t, const struct ui_node address_to e, int m, b64 excess)
+{
+        for (;;)
+        {
+                b64 total = 0, shares = 0, freed = 0, rest;
+                b32 violated = false;
+
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                        if (t->node[ch].size[m].kind != UI_GROW && !t->node[ch].frozen)
+                                total += (b64)t->node[ch].size[m].shrink * t->node[ch].base;
+                if (!total)
+                        return;
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                        if (t->node[ch].size[m].kind != UI_GROW && !t->node[ch].frozen)
+                                shares += excess * ((b64)t->node[ch].size[m].shrink * t->node[ch].base) / total;
+                rest = excess - shares;
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                {
+                        struct ui_node address_to k = &t->node[ch];
+                        b64 weight = (b64)k->size[m].shrink * k->base, cut = excess * weight / total;
+
+                        if (k->size[m].kind == UI_GROW || k->frozen)
+                                continue;
+                        if (weight > 0 && rest > 0)
+                                cut++, rest--;
+                        if (k->base - cut < k->size[m].min)
+                        {
+                                *ui_tree_len(k, m) = k->size[m].min;
+                                k->frozen = 1;
+                                freed += k->base - k->size[m].min;
+                                violated = true;
+                        }
+                        else
+                                *ui_tree_len(k, m) = (int)(k->base - cut);
+                }
+                if (!violated)
+                        return;
+                excess -= freed;
+        }
+}
+
+// The rectangles of the tree for a viewport of width by height: every element's x, y, w and h.
+static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
+{
+        b64 view[2] = {ui_tree_pixels(width), ui_tree_pixels(height)};
+        int count = t->count;
+
+        if (!count)
+                return;
+        // Every value read within its range, and the scratch cleared.
+        for (int i = 0; i < count; i++)
+        {
+                struct ui_node address_to e = &t->node[i];
+
+                e->dir = e->dir == 1;
+                e->scroll = e->scroll != 0;
+                e->gap = ui_tree_pixels(e->gap);
+                e->offset = ui_tree_pixels(e->offset);
+                e->extent = 0;
+                for (int k = 0; k < 4; k++)
+                        e->pad[k] = ui_tree_pixels(e->pad[k]), e->margin[k] = ui_tree_pixels(e->margin[k]);
+                for (int a = 0; a < 2; a++)
+                {
+                        struct ui_size address_to s = &e->size[a];
+
+                        s->kind = (unsigned int)s->kind > UI_PERCENT ? UI_FIT : s->kind;
+                        s->value = s->kind == UI_GROW ? ui_tree_weight(s->value) : ui_tree_pixels(s->value);
+                        s->min = ui_tree_pixels(s->min), s->max = ui_tree_pixels(s->max);
+                        s->max = s->max < s->min ? s->min : s->max;
+                        s->shrink = ui_tree_weight(s->shrink);
+                        e->content[a] = ui_tree_pixels(e->content[a]);
+                        e->sum[a] = 0, e->widest[a] = 0;
+                }
+        }
+        // Pass 1, bottom-up: each element's preferred size, and its part in its parent's.
+        for (int i = count - 1; i >= 0; i--)
+        {
+                struct ui_node address_to e = &t->node[i];
+
+                for (int a = 0; a < 2; a++)
+                {
+                        const struct ui_size address_to s = &e->size[a];
+                        b64 v = 0;
+
+                        if (s->kind == UI_FIXED)
+                                v = s->value;
+                        else if (s->kind == UI_FIT)
+                                v = (!e->children ? e->content[a] : a == e->dir ? e->sum[a] + ui_tree_gaps(e) : e->widest[a]) + e->pad[2 * a] +
+                                    e->pad[2 * a + 1];
+                        e->pref[a] = (int)ui_tree_clamp(v, s->min, s->max);
+                }
+                if (e->parent >= 0)
+                {
+                        struct ui_node address_to p = &t->node[e->parent];
+
+                        for (int a = 0; a < 2; a++)
+                        {
+                                int outer = e->pref[a] + e->margin[2 * a] + e->margin[2 * a + 1];
+
+                                if (a == p->dir)
+                                        p->sum[a] += outer;
+                                else if (outer > p->widest[a])
+                                        p->widest[a] = outer;
+                        }
+                }
+        }
+        // The root: from the viewport, at the origin.
+        for (int a = 0; a < 2; a++)
+        {
+                const struct ui_size address_to s = &t->node[0].size[a];
+                b64 v = s->kind == UI_GROW ? view[a] : s->kind == UI_PERCENT ? view[a] * s->value / 100 : t->node[0].pref[a];
+
+                *ui_tree_at(&t->node[0], a) = 0;
+                *ui_tree_len(&t->node[0], a) = (int)ui_tree_clamp(v, s->min, s->max);
+        }
+        // Pass 2, top-down: each parent places its children, in open order.
+        for (int p = 0; p < count; p++)
+        {
+                struct ui_node address_to e = &t->node[p];
+                int m = e->dir, c = 1 - m;
+                b64 inner[2], origin[2], gaps = ui_tree_gaps(e), used = 0, total, slack, lead = 0, extra = 0, rest = 0, cursor;
+                int stretch = e->align < UI_START || e->align > UI_END;
+
+                if (e->first < 0)
+                        continue;
+                for (int a = 0; a < 2; a++)
+                {
+                        origin[a] = *ui_tree_at(e, a) + e->pad[2 * a];
+                        inner[a] = *ui_tree_len(e, a) - e->pad[2 * a] - e->pad[2 * a + 1];
+                        inner[a] = inner[a] < 0 ? 0 : inner[a];
+                }
+                // The main axis: every child at the size it asks for (a grow child at its min), and what is left.
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                {
+                        struct ui_node address_to k = &t->node[ch];
+                        const struct ui_size address_to s = &k->size[m];
+
+                        k->frozen = 0;
+                        k->base = s->kind == UI_GROW ? s->min
+                                  : s->kind == UI_PERCENT ? (int)ui_tree_clamp(inner[m] * s->value / 100, s->min, s->max)
+                                                          : k->pref[m];
+                        *ui_tree_len(k, m) = k->base;
+                        used += k->base + k->margin[2 * m] + k->margin[2 * m + 1];
+                }
+                if (inner[m] - used - gaps > 0)
+                        ui_tree_grow(t, e, m, inner[m] - used - gaps);
+                else if (inner[m] - used - gaps < 0 && !e->scroll)
+                        ui_tree_shrink(t, e, m, used + gaps - inner[m]);
+                // Where they go: the room the sizes, margins and gaps leave, by the justify (a scroll element has none).
+                total = gaps;
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                        total += *ui_tree_len(&t->node[ch], m) + t->node[ch].margin[2 * m] + t->node[ch].margin[2 * m + 1];
+                slack = inner[m] - total < 0 ? 0 : inner[m] - total;
+                if (e->scroll)
+                {
+                        e->extent = (int)ui_tree_clamp(total, 0, UI_TREE_FAR);
+                        e->offset = (int)ui_tree_clamp(e->offset, 0, total > inner[m] ? total - inner[m] : 0);
+                }
+                else if (e->justify == UI_CENTER)
+                        lead = slack / 2;
+                else if (e->justify == UI_END)
+                        lead = slack;
+                else if (e->justify == UI_BETWEEN && e->children > 1)
+                        extra = slack / (e->children - 1), rest = slack - extra * (e->children - 1);
+                else if (e->justify == UI_AROUND)
+                        extra = slack / e->children, lead = extra / 2;
+                cursor = origin[m] + lead - (e->scroll ? e->offset : 0);
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                {
+                        struct ui_node address_to k = &t->node[ch];
+
+                        *ui_tree_at(k, m) = ui_tree_place(cursor + k->margin[2 * m]);
+                        cursor += *ui_tree_len(k, m) + k->margin[2 * m] + k->margin[2 * m + 1] + e->gap + extra + (rest > 0 ? 1 : 0);
+                        rest -= rest > 0;
+                }
+                // The cross axis: grow fills the room, percent is of it, a fit child fills it too when the align is stretch, and
+                // the child is placed in what it leaves by the align.
+                for (int ch = e->first; ch >= 0; ch = t->node[ch].next)
+                {
+                        struct ui_node address_to k = &t->node[ch];
+                        const struct ui_size address_to s = &k->size[c];
+                        b64 room = inner[c] - k->margin[2 * c] - k->margin[2 * c + 1], v, left;
+
+                        room = room < 0 ? 0 : room;
+                        v = s->kind == UI_GROW || (s->kind == UI_FIT && stretch) ? room : s->kind == UI_PERCENT ? room * s->value / 100 : k->pref[c];
+                        v = ui_tree_clamp(v, s->min, s->max);
+                        *ui_tree_len(k, c) = (int)v;
+                        left = room - v < 0 ? 0 : room - v;
+                        *ui_tree_at(k, c) = ui_tree_place(origin[c] + k->margin[2 * c] + (e->align == UI_CENTER ? left / 2 : e->align == UI_END ? left : 0));
+                }
+        }
+}
+
+/*
+        Text: what a field, a text area and a code editor are made of, below
+        any pixel. A document is bytes, a history of what changed them, and
+        the selections over them; nothing here draws, reads a file or makes a
+        system call of its own (memory is the library's), so the check that
+        holds it to a naive model runs it as it is, on every machine.
+
+        A file of its own rather than a part of ui.c, which is the look: the
+        engine needs no font, no window and no table, so the check that
+        drives it through a million random edits builds it with the library
+        and nothing else of the desktop, and the look's file stays the
+        look's. ui.c includes it, so it is the same translation unit as
+        everything that uses it.
+
+        THE BUFFER is a piece tree: the file as it was opened (mapped or
+        read, never copied, never changed) and what was typed or pasted
+        since (one buffer that only grows), and a balanced tree of pieces
+        of the two in document order. Each node keeps the sums of its
+        subtree: its bytes, its line feeds, its carriage returns and the
+        CR LF pairs among them, and whether it starts with a LF and ends
+        with a CR, so two subtrees side by side know whether a pair spans
+        them. A line ends at a LF, at a CR alone, or at a CR LF, which is one
+        line end and not two; the lines a subtree ends are its LFs and CRs
+        less its pairs, a sum that adds up from the halves. So every
+        question a view asks -- how long, how many lines, where line k
+        starts, which line an offset is on -- is one walk down the tree, and
+        an insert or a delete is a split and a join: O(log n) in the pieces,
+        whatever the file's size. A piece is at most DOC_PIECE_MOST bytes,
+        so the one scan a question ends in (the k-th line end inside a
+        piece) is bounded too; the file is cut into pieces that long when it
+        is opened, counted once with memory_count.
+
+        The tree is a treap: a node's priority is random and not below its
+        children's, so it is balanced with no rotations to write, and split
+        and join are the whole of it.
+
+        Bytes are never changed on the way in or out. A byte that is not
+        UTF-8 is kept as it was and is a character of its own to the caret
+        (U+FFFD is what a view draws for it); a file's line ends stay what
+        they were, line by line, and Enter types the file's own; a byte
+        order mark is held aside and written back; the last line end is
+        there or not as it was.
+
+        THE HISTORY is groups of changes. A change is a replace: at an
+        offset, the pieces it took out and the pieces it put in, and since a
+        piece names bytes of buffers that never change, undo and redo move
+        pieces and copy no text. A group is what one undo takes back: one
+        keystroke at every caret, a run of typing, a paste, a replace of
+        every match. It keeps the selections from before and after, so undo
+        puts the carets back where they were. Typing joins the group before
+        it while the carets are where that group left them, the kind is the
+        same (typing, deleting back, deleting forward), it is under a second
+        since, and a word does not begin after a blank (so "hello world" is
+        two undos, as in VS Code). Redo is dropped by the next change: one
+        line of history, not a tree, which is what every editor a person
+        already knows does. It is bounded: past DOC_HISTORY_GROUPS groups,
+        or the pieces, changes and snapshots it holds past their limits, the
+        oldest quarter is forgotten.
+
+        THE SELECTIONS are a list, each an anchor and an active end and the
+        column the caret keeps going up and down; one is the primary. After
+        anything moves them they are sorted and the ones that overlap are
+        joined. An edit of every caret is one list of replaces, applied from
+        the last to the first so no offset before one moves, and the carets
+        after it are worked out from the sums of what came before each.
+
+        THE CHARACTERS the caret steps over are extended grapheme clusters
+        (UAX #29, Unicode 16, rules GB1-GB999 with GB9c), from a table of the
+        break properties made from the Unicode data files by differential.py's
+        text_tables harness and held to the official test files. Word
+        boundaries are UAX #29's too (WB1-WB999), cut again at the separators
+        a person can set (VS Code's list by default), and a word jump goes
+        over runs of one kind: a word, separators, blanks. Display width is
+        unicode_width's, the terminal's: a tab to the next stop, a control
+        picture for a control, U+FFFD for a byte that is not UTF-8.
+
+        Backspace takes back the last code point of a letter and its marks (e
+        and an acute accent typed as two is e again), and a whole emoji
+        sequence, a flag, a keycap, a Hangul syllable of jamo or a CR LF;
+        Delete takes a whole cluster. That is what macOS and Windows do.
+
+        Bidirectional text is stored and stepped here in logical order, and
+        that is all this file knows of it: the look (ui.c) lays a line out by
+        the font engine's bidirectional algorithm, draws it reordered and
+        shaped, and goes by what is on the screen for the caret, the click and
+        Left and Right. A wrapped line of such text is one row.
+
+        Dawn Larsson - Apache-2.0 license
+        github.com/dawnlarsson/moonwater
+*/
+
+#define DOC_PIECE_MOST 16384u
+#define DOC_ORIGINAL 0
+#define DOC_ADDED 1
+#define DOC_INVALID 0x80000000u // a byte that is not UTF-8, as a code point: the byte in its low bits
+#define DOC_EOL_LF 0
+#define DOC_EOL_CRLF 1
+#define DOC_EOL_CR 2
+#define DOC_STACK 192 // the deepest walk kept: a treap of a billion pieces is far under it
+#define DOC_HISTORY_GROUPS 20000u
+#define DOC_HISTORY_PIECES (1u << 20)
+#define DOC_HISTORY_CHANGES (1u << 19)
+#define DOC_HISTORY_SNAPSHOTS (1u << 20)
+#define DOC_PAUSE_NS 1000000000ull
+#define DOC_NONE ((p64)-1)
+#define DOC_EXPAND 16
+
+// The kinds of group, for joining: typing, deleting back, deleting forward, anything else (never joined).
+#define DOC_KIND_OTHER 0
+#define DOC_KIND_TYPING 1
+#define DOC_KIND_BACK 2
+#define DOC_KIND_FORWARD 3
+
+// A node's edge bits: its first byte is a LF, its last a CR.
+#define DOC_FIRST_LF 1u
+#define DOC_LAST_CR 2u
+
+struct doc_sums
+{
+        p64 bytes, lf, cr, pairs;
+        p8 edge;
+};
+
+struct doc_node
+{
+        p32 left, right, priority, length;
+        p64 start;
+        p32 lf, cr, pairs;
+        p8 buffer, edge;
+        struct doc_sums sum;
+};
+
+// A piece as the history keeps it.
+struct doc_piece
+{
+        p64 start;
+        p32 length;
+        p8 buffer;
+};
+
+struct doc_change
+{
+        p64 at, removed, inserted;
+        p32 removed_first, removed_count, inserted_first, inserted_count;
+};
+
+struct doc_selection
+{
+        p64 anchor, active;
+        b64 goal; // the column or the x the caret keeps going up and down, -1 for none
+};
+
+struct doc_group
+{
+        p32 change_first, change_count;
+        p32 before_first, before_count, after_first, after_count;
+        p32 before_primary, after_primary;
+        p8 kind;
+        p8 last; // the last character typed into it, for the word rule
+        positive time;
+};
+
+// A range that keeps its place through edits: a decoration, a read-only span, a fold, a mark.
+struct doc_range
+{
+        p64 start, finish;
+        p32 kind, data;
+};
+
+struct doc
+{
+        const p8 address_to original;
+        p64 original_length;
+        p8 address_to added;
+        positive added_room, added_used;
+
+        struct doc_node address_to nodes;
+        positive node_room, node_used;
+        p32 root, free_list;
+        p64 random;
+
+        p8 bom, eol;
+        p32 tab_size;
+        b32 insert_spaces, overwrite, auto_close;
+        b32 normalize_paste; // a paste's line ends become the file's
+        b32 single_line;     // a field: a line end typed or pasted is a blank
+        const char address_to separators;
+
+        // The history.
+        struct doc_group address_to groups;
+        positive group_room, group_count;
+        struct doc_change address_to changes;
+        positive change_room, change_count;
+        struct doc_piece address_to pieces;
+        positive piece_room, piece_count;
+        struct doc_selection address_to snapshots;
+        positive snapshot_room, snapshot_count;
+        p32 done;         // the groups applied: those past it are redo
+        b32 open;         // the last group may be joined
+        p32 depth;        // doc_group_begin's nesting
+        b32 depth_opened; // the outer begin made a group, not joined one
+        b64 saved;        // done when last saved, -1 when that state is gone
+        b32 recording;    // false while undo or redo replays
+
+        // The selections, and what select-next and expand remember.
+        struct doc_selection address_to selections;
+        positive selection_room, selection_count;
+        p32 primary;
+        b32 occurrence_whole; // select-next began on a caret: it finds whole words
+        struct doc_selection expanded[DOC_EXPAND], expand_now;
+        p32 expand_count;
+        p64 expand_version;
+
+        // Ranges that move with the text.
+        struct doc_range address_to ranges;
+        positive range_room, range_count;
+
+        // What changed: a count, the lowest offset and line since a view last looked.
+        p64 version, changed_from, changed_line;
+        positive now; // the caller's clock, for joining typing
+        // Closers auto_close typed, where they are now: typing the same closer there steps over it.
+        p64 closers[8];
+        p32 closer_count;
+
+        // The tokenizer's state at the start of each line, in a gap buffer, and how far it is known.
+        p32 address_to states;
+        positive state_room, gap_start, gap_end;
+        p64 states_valid, states_converge, states_last_edit;
+        p32 language;
+};
+
+static p64 doc_breaks(const struct doc_sums address_to sums)
+{
+        return sums->lf + sums->cr - sums->pairs;
+}
+
+/* ---- UTF-8, one code point at a time ---- */
+
+// One code point from bytes, available of them: its length, its value in code. A byte that starts no valid
+// sequence (a stray continuation, an overlong form, a surrogate, past U+10FFFF, cut short) is one byte long and
+// its value is DOC_INVALID with the byte in it.
+static p32 doc_decode(const p8 address_to bytes, positive available, p32 address_to code)
+{
+        p32 lead = bytes[0], length, value;
+
+        if (lead < 0x80)
+        {
+                *code = lead;
+                return 1;
+        }
+        if (lead < 0xc2 || lead > 0xf4)
+                goto invalid;
+        length = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+        if (available < length)
+                goto invalid;
+        value = lead & (0x7fu >> length);
+        for (p32 at = 1; at < length; at++)
+        {
+                if ((bytes[at] & 0xc0) != 0x80)
+                        goto invalid;
+                value = value << 6 | (bytes[at] & 0x3f);
+        }
+        if ((length == 3 && (value < 0x800 || (value >= 0xd800 && value <= 0xdfff))) ||
+            (length == 4 && (value < 0x10000 || value > 0x10ffff)))
+                goto invalid;
+        *code = value;
+        return length;
+invalid:
+        *code = DOC_INVALID | lead;
+        return 1;
+}
+
+// The code point that ends at bytes + count (count bytes before it readable): its length and value, read as
+// doc_decode reads forward, so a step back lands where a step forward did.
+static p32 doc_decode_back(const p8 address_to bytes, positive count, p32 address_to code)
+{
+        for (p32 back = 1; back <= 4 && back <= count; back++)
+        {
+                if ((bytes[count - back] & 0xc0) == 0x80 && back < 4)
+                        continue;
+                if (doc_decode(bytes + count - back, back, code) == back)
+                        return back;
+                break;
+        }
+        return doc_decode(bytes + count - 1, 1, code);
+}
+
+/* ---- break properties ---- */
+
+// Grapheme_Cluster_Break, in the properties' low four bits.
+enum
+{
+        GCB_OTHER, GCB_CR, GCB_LF, GCB_CONTROL, GCB_EXTEND, GCB_ZWJ, GCB_RI, GCB_PREPEND, GCB_SPACING,
+        GCB_L, GCB_V, GCB_T, GCB_LV, GCB_LVT
+};
+// Word_Break, in bits 4 to 8.
+enum
+{
+        WB_OTHER, WB_CR, WB_LF, WB_NEWLINE, WB_EXTEND, WB_ZWJ, WB_RI, WB_FORMAT, WB_KATAKANA, WB_HEBREW, WB_ALETTER,
+        WB_SINGLE_QUOTE, WB_DOUBLE_QUOTE, WB_MIDNUMLET, WB_MIDLETTER, WB_MIDNUM, WB_NUMERIC, WB_EXTENDNUMLET, WB_WSEGSPACE
+};
+// Indic_Conjunct_Break in bits 9 and 10, Extended_Pictographic in bit 11.
+#define INCB_LINKER 1
+#define INCB_CONSONANT 2
+#define INCB_EXTEND 3
+#define DOC_GCB(props) ((p32)(props) & 15u)
+#define DOC_WB(props) ((p32)(props) >> 4 & 31u)
+#define DOC_INCB(props) ((p32)(props) >> 9 & 3u)
+#define DOC_PICTOGRAPHIC(props) ((p32)(props) >> 11 & 1u)
+
+static const p32 doc_break_range_count;
+static const p16 doc_break_combos[];
+static const p32 doc_break_ranges[];
+
+// The break properties of a code point. A byte that is not UTF-8 is a control: a cluster and a word of its own.
+static p16 doc_props(p32 code)
+{
+        p32 low = 0, high;
+
+        if (code & DOC_INVALID)
+                return GCB_CONTROL;
+        high = doc_break_range_count;
+        while (high - low > 1)
+        {
+                p32 middle = (low + high) / 2;
+
+                if (doc_break_ranges[middle] >> 8 <= code)
+                        low = middle;
+                else
+                        high = middle;
+        }
+        return doc_break_combos[doc_break_ranges[low] & 255];
+}
+
+/*
+        Grapheme clusters, forward: a state that has seen the code points of the cluster so far, asked whether
+        there is a break before the next. ri counts the regional indicators in a row; pictograph is 1 after an
+        Extended_Pictographic and its Extends, 2 after a ZWJ that follows them (GB11); conjunct is 1 after an
+        InCB Consonant and its Extends and Linkers, 2 once a Linker is among them (GB9c).
+*/
+struct doc_gstate
+{
+        p8 previous, ri, pictograph, conjunct;
+        b32 started;
+};
+
+static b32 doc_grapheme_step(struct doc_gstate address_to state, p16 props)
+{
+        p32 now = DOC_GCB(props), before = state->previous, incb = DOC_INCB(props);
+        b32 cut;
+
+        if (!state->started)
+                cut = true; // GB1
+        else if (before == GCB_CR && now == GCB_LF)
+                cut = false; // GB3
+        else if (before == GCB_CR || before == GCB_LF || before == GCB_CONTROL)
+                cut = true; // GB4
+        else if (now == GCB_CR || now == GCB_LF || now == GCB_CONTROL)
+                cut = true; // GB5
+        else if (before == GCB_L && (now == GCB_L || now == GCB_V || now == GCB_LV || now == GCB_LVT))
+                cut = false; // GB6
+        else if ((before == GCB_LV || before == GCB_V) && (now == GCB_V || now == GCB_T))
+                cut = false; // GB7
+        else if ((before == GCB_LVT || before == GCB_T) && now == GCB_T)
+                cut = false; // GB8
+        else if (now == GCB_EXTEND || now == GCB_ZWJ || now == GCB_SPACING || before == GCB_PREPEND)
+                cut = false; // GB9, GB9a, GB9b
+        else if (incb == INCB_CONSONANT && state->conjunct == 2)
+                cut = false; // GB9c
+        else if (DOC_PICTOGRAPHIC(props) && state->pictograph == 2)
+                cut = false; // GB11
+        else if (before == GCB_RI && now == GCB_RI && (state->ri & 1))
+                cut = false; // GB12, GB13
+        else
+                cut = true; // GB999
+
+        state->started = true;
+        state->ri = (p8)(now == GCB_RI ? (before == GCB_RI && !cut ? state->ri + 1 : 1) : 0);
+        if (DOC_PICTOGRAPHIC(props))
+                state->pictograph = 1;
+        else if (state->pictograph == 1 && now == GCB_ZWJ)
+                state->pictograph = 2;
+        else if (!(state->pictograph == 1 && now == GCB_EXTEND))
+                state->pictograph = 0;
+        if (incb == INCB_CONSONANT)
+                state->conjunct = 1;
+        else if (state->conjunct && (incb == INCB_EXTEND || incb == INCB_LINKER))
+                state->conjunct = incb == INCB_LINKER ? 2 : state->conjunct;
+        else
+                state->conjunct = 0;
+        state->previous = (p8)now;
+        return cut;
+}
+
+/*
+        Word boundaries of a run of code points (UAX #29, WB1-WB999) from their properties: breaks[i] is 1 when
+        there is a boundary before props[i], and breaks[0] and breaks[count] are 1. Extend, Format and ZWJ hang on
+        what is before them (WB4) -- but not on a line end or the start, after which one stands alone -- so the
+        rules that look past a character read the ones that are not those.
+*/
+static b32 doc_wb_ignored(p32 wb)
+{
+        return wb == WB_EXTEND || wb == WB_FORMAT || wb == WB_ZWJ;
+}
+
+static b32 doc_wb_newline(p32 wb)
+{
+        return wb == WB_CR || wb == WB_LF || wb == WB_NEWLINE;
+}
+
+static b32 doc_wb_letter(p32 wb)
+{
+        return wb == WB_ALETTER || wb == WB_HEBREW;
+}
+
+static b32 doc_wb_mid_letter(p32 wb)
+{
+        return wb == WB_MIDLETTER || wb == WB_MIDNUMLET || wb == WB_SINGLE_QUOTE;
+}
+
+static b32 doc_wb_mid_number(p32 wb)
+{
+        return wb == WB_MIDNUM || wb == WB_MIDNUMLET || wb == WB_SINGLE_QUOTE;
+}
+
+// The character the rules see before i: back over the ignored, but not past the one after a line end or the start.
+static positive doc_wb_before(const p16 address_to props, positive i)
+{
+        positive b = i - 1;
+
+        while (b > 0 && doc_wb_ignored(DOC_WB(props[b])) && !doc_wb_newline(DOC_WB(props[b - 1])))
+                b--;
+        return b;
+}
+
+static fn doc_word_breaks(const p16 address_to props, positive count, p8 address_to breaks)
+{
+        breaks[0] = 1;
+        if (count)
+                breaks[count] = 1;
+        for (positive i = 1; i < count; i++)
+        {
+                p32 now = DOC_WB(props[i]), raw = DOC_WB(props[i - 1]), before, before_before = WB_OTHER, after = WB_OTHER;
+                positive b;
+                b32 cut = true;
+
+                if (raw == WB_CR && now == WB_LF)
+                        cut = false; // WB3
+                else if (doc_wb_newline(raw))
+                        cut = true; // WB3a
+                else if (doc_wb_newline(now))
+                        cut = true; // WB3b
+                else if (raw == WB_ZWJ && DOC_PICTOGRAPHIC(props[i]))
+                        cut = false; // WB3c
+                else if (raw == WB_WSEGSPACE && now == WB_WSEGSPACE)
+                        cut = false; // WB3d
+                else if (doc_wb_ignored(now))
+                        cut = false; // WB4
+                else
+                {
+                        b = doc_wb_before(props, i);
+                        before = DOC_WB(props[b]);
+                        if (b > 0)
+                                before_before = DOC_WB(props[doc_wb_before(props, b)]);
+                        for (positive a = i + 1; a < count; a++)
+                                if (!doc_wb_ignored(DOC_WB(props[a])))
+                                {
+                                        after = DOC_WB(props[a]);
+                                        break;
+                                }
+                        if (doc_wb_letter(before) && doc_wb_letter(now))
+                                cut = false; // WB5
+                        else if (doc_wb_letter(before) && doc_wb_mid_letter(now) && doc_wb_letter(after))
+                                cut = false; // WB6
+                        else if (b > 0 && doc_wb_letter(before_before) && doc_wb_mid_letter(before) && doc_wb_letter(now))
+                                cut = false; // WB7
+                        else if (before == WB_HEBREW && now == WB_SINGLE_QUOTE)
+                                cut = false; // WB7a
+                        else if (before == WB_HEBREW && now == WB_DOUBLE_QUOTE && after == WB_HEBREW)
+                                cut = false; // WB7b
+                        else if (b > 0 && before_before == WB_HEBREW && before == WB_DOUBLE_QUOTE && now == WB_HEBREW)
+                                cut = false; // WB7c
+                        else if (before == WB_NUMERIC && now == WB_NUMERIC)
+                                cut = false; // WB8
+                        else if (doc_wb_letter(before) && now == WB_NUMERIC)
+                                cut = false; // WB9
+                        else if (before == WB_NUMERIC && doc_wb_letter(now))
+                                cut = false; // WB10
+                        else if (b > 0 && before_before == WB_NUMERIC && doc_wb_mid_number(before) && now == WB_NUMERIC)
+                                cut = false; // WB11
+                        else if (before == WB_NUMERIC && doc_wb_mid_number(now) && after == WB_NUMERIC)
+                                cut = false; // WB12
+                        else if (before == WB_KATAKANA && now == WB_KATAKANA)
+                                cut = false; // WB13
+                        else if ((doc_wb_letter(before) || before == WB_NUMERIC || before == WB_KATAKANA ||
+                                  before == WB_EXTENDNUMLET) &&
+                                 now == WB_EXTENDNUMLET)
+                                cut = false; // WB13a
+                        else if (before == WB_EXTENDNUMLET && (doc_wb_letter(now) || now == WB_NUMERIC || now == WB_KATAKANA))
+                                cut = false; // WB13b
+                        else if (before == WB_RI && now == WB_RI)
+                        {
+                                // WB15, WB16: the regional indicators before, in a row, the ignored not counting.
+                                positive run = 0;
+
+                                for (positive k = b + 1; k-- > 0;)
+                                {
+                                        p32 wb = DOC_WB(props[k]);
+
+                                        if (wb == WB_RI)
+                                                run++;
+                                        else if (!doc_wb_ignored(wb))
+                                                break;
+                                }
+                                cut = !(run & 1);
+                        }
+                }
+                breaks[i] = (p8)cut;
+        }
+}
+
+/* ---- the piece tree ---- */
+
+static const p8 address_to doc_buffer(const struct doc address_to doc, p8 buffer)
+{
+        return buffer == DOC_ORIGINAL ? doc->original : doc->added;
+}
+
+static const p8 address_to doc_piece_bytes(const struct doc address_to doc, const struct doc_node address_to node)
+{
+        return doc_buffer(doc, node->buffer) + node->start;
+}
+
+// The line ends of bytes, as a piece counts them.
+static fn doc_count(const p8 address_to bytes, p32 length, p32 address_to lf, p32 address_to cr, p32 address_to pairs,
+                    p8 address_to edge)
+{
+        p32 found = 0;
+
+        *lf = length ? (p32)memory_count((address_any)bytes, length, '\n') : 0;
+        *cr = length ? (p32)memory_count((address_any)bytes, length, '\r') : 0;
+        if (*cr && *lf)
+        {
+                const p8 address_to at = bytes, address_to stop = bytes + length - 1;
+
+                while (at < stop)
+                {
+                        const p8 address_to next = memory_first_of((address_any)at, '\r', (positive)(stop - at));
+
+                        if (!next)
+                                break;
+                        found += next[1] == '\n';
+                        at = next + 1;
+                }
+        }
+        *pairs = found;
+        *edge = (p8)((length && bytes[0] == '\n' ? DOC_FIRST_LF : 0) | (length && bytes[length - 1] == '\r' ? DOC_LAST_CR : 0));
+}
+
+static p64 doc_rand(struct doc address_to doc)
+{
+        doc->random ^= doc->random << 13;
+        doc->random ^= doc->random >> 7;
+        doc->random ^= doc->random << 17;
+        return doc->random;
+}
+
+// A node for a piece, its counts made, or 0 when there is no memory for one.
+static p32 doc_node_new(struct doc address_to doc, p8 buffer, p64 start, p32 length)
+{
+        p32 index;
+        struct doc_node address_to node;
+
+        if (doc->free_list)
+        {
+                index = doc->free_list;
+                doc->free_list = doc->nodes[index].left;
+        }
+        else
+        {
+                // Node 0 is no node: the first one made is 1.
+                if (!array_store_reserve(doc->nodes, doc->node_room, doc->node_used, (doc->node_used ? doc->node_used : 1) + 1, 1024))
+                        return 0;
+                // Node 0 is the sentinel a missing child reads: all zero, so it adds no bytes, lines or edge.
+                if (!doc->node_used)
+                        doc->node_used = 1, memory_zero(&doc->nodes[0], sizeof(doc->nodes[0]));
+                index = (p32)doc->node_used++;
+        }
+        node = &doc->nodes[index];
+        node->left = node->right = 0;
+        node->priority = (p32)(doc_rand(doc) >> 16);
+        node->buffer = buffer;
+        node->start = start;
+        node->length = length;
+        doc_count(doc_buffer(doc, buffer) + start, length, &node->lf, &node->cr, &node->pairs, &node->edge);
+        node->sum = (struct doc_sums){length, node->lf, node->cr, node->pairs, node->edge};
+        return index;
+}
+
+static fn doc_node_free(struct doc address_to doc, p32 index)
+{
+        doc->nodes[index].left = doc->free_list;
+        doc->free_list = index;
+}
+
+// A node's sums from its children's and its own.
+static fn doc_update(struct doc address_to doc, p32 index)
+{
+        struct doc_node address_to node = &doc->nodes[index];
+        struct doc_sums sum = {node->length, node->lf, node->cr, node->pairs, node->edge};
+
+        if (node->left)
+        {
+                const struct doc_sums address_to left = &doc->nodes[node->left].sum;
+
+                sum.pairs += left->pairs + ((left->edge & DOC_LAST_CR) && (node->edge & DOC_FIRST_LF));
+                sum.bytes += left->bytes, sum.lf += left->lf, sum.cr += left->cr;
+                sum.edge = (p8)((left->edge & DOC_FIRST_LF) | (sum.edge & DOC_LAST_CR));
+        }
+        if (node->right)
+        {
+                const struct doc_sums address_to right = &doc->nodes[node->right].sum;
+
+                sum.pairs += right->pairs + ((node->edge & DOC_LAST_CR) && (right->edge & DOC_FIRST_LF));
+                sum.bytes += right->bytes, sum.lf += right->lf, sum.cr += right->cr;
+                sum.edge = (p8)((sum.edge & DOC_FIRST_LF) | (right->edge & DOC_LAST_CR));
+        }
+        node->sum = sum;
+}
+
+static p64 doc_bytes_of(const struct doc address_to doc, p32 index)
+{
+        return index ? doc->nodes[index].sum.bytes : 0;
+}
+
+/*
+        A tree cut in two: its first at bytes in left, the rest in right. A cut inside a piece makes the piece
+        two, the second taking the first's priority so the heap stays one. False when there was no memory for the
+        node that makes (left and right then still join back into the whole).
+*/
+static b32 doc_split(struct doc address_to doc, p32 tree, p64 at, p32 address_to left, p32 address_to right)
+{
+        p64 before;
+        p32 length;
+
+        if (!tree)
+        {
+                *left = *right = 0;
+                return true;
+        }
+        before = doc_bytes_of(doc, doc->nodes[tree].left);
+        length = doc->nodes[tree].length;
+        if (at <= before)
+        {
+                p32 inner_left, inner_right;
+                b32 made = doc_split(doc, doc->nodes[tree].left, at, &inner_left, &inner_right);
+
+                doc->nodes[tree].left = inner_right;
+                doc_update(doc, tree);
+                *left = inner_left;
+                *right = tree;
+                return made;
+        }
+        if (at >= before + length)
+        {
+                p32 inner_left, inner_right;
+                b32 made = doc_split(doc, doc->nodes[tree].right, at - before - length, &inner_left, &inner_right);
+
+                doc->nodes[tree].right = inner_left;
+                doc_update(doc, tree);
+                *left = tree;
+                *right = inner_right;
+                return made;
+        }
+        {
+                p32 cut = (p32)(at - before), tail;
+                struct doc_node whole = doc->nodes[tree];
+                struct doc_node address_to node;
+
+                tail = doc_node_new(doc, whole.buffer, whole.start + cut, whole.length - cut);
+                if (!tail)
+                {
+                        *left = tree;
+                        *right = 0;
+                        return false;
+                }
+                node = &doc->nodes[tree];
+                node->length = cut;
+                doc_count(doc_buffer(doc, whole.buffer) + whole.start, cut, &node->lf, &node->cr, &node->pairs, &node->edge);
+                doc->nodes[tail].priority = whole.priority;
+                doc->nodes[tail].right = whole.right;
+                node->right = 0;
+                doc_update(doc, tree);
+                doc_update(doc, tail);
+                *left = tree;
+                *right = tail;
+                return true;
+        }
+}
+
+static p32 doc_join(struct doc address_to doc, p32 left, p32 right)
+{
+        if (!left || !right)
+                return left ? left : right;
+        if (doc->nodes[left].priority >= doc->nodes[right].priority)
+        {
+                p32 joined = doc_join(doc, doc->nodes[left].right, right);
+
+                doc->nodes[left].right = joined;
+                doc_update(doc, left);
+                return left;
+        }
+        {
+                p32 joined = doc_join(doc, left, doc->nodes[right].left);
+
+                doc->nodes[right].left = joined;
+                doc_update(doc, right);
+                return right;
+        }
+}
+
+// A tree's pieces in order onto the history's pieces (when keep), its nodes freed. False when there was no room.
+static b32 doc_collect(struct doc address_to doc, p32 tree, b32 keep)
+{
+        p32 stack[DOC_STACK], depth = 0;
+        b32 kept = true;
+
+        while (tree || depth)
+        {
+                while (tree && depth < DOC_STACK)
+                {
+                        stack[depth++] = tree;
+                        tree = doc->nodes[tree].left;
+                }
+                tree = stack[--depth];
+                if (keep && kept &&
+                    array_store_reserve(doc->pieces, doc->piece_room, doc->piece_count, doc->piece_count + 1, 1024))
+                        doc->pieces[doc->piece_count++] =
+                            (struct doc_piece){doc->nodes[tree].start, doc->nodes[tree].length, doc->nodes[tree].buffer};
+                else if (keep)
+                        kept = false;
+                {
+                        p32 right = doc->nodes[tree].right;
+
+                        doc_node_free(doc, tree);
+                        tree = right;
+                }
+        }
+        return kept;
+}
+
+// Pieces as a tree of their own, in order: 0 for none, and *failed for no memory.
+static p32 doc_build(struct doc address_to doc, const struct doc_piece address_to pieces, p32 count, b32 address_to failed)
+{
+        p32 tree = 0;
+
+        for (p32 at = 0; at < count; at++)
+        {
+                p32 node = doc_node_new(doc, pieces[at].buffer, pieces[at].start, pieces[at].length);
+
+                if (!node)
+                {
+                        *failed = true;
+                        return tree;
+                }
+                tree = doc_join(doc, tree, node);
+        }
+        return tree;
+}
+
+/* ---- reading ---- */
+
+static p64 doc_length(const struct doc address_to doc)
+{
+        return doc_bytes_of(doc, doc->root);
+}
+
+static p64 doc_line_count(const struct doc address_to doc)
+{
+        return doc->root ? doc_breaks(&doc->nodes[doc->root].sum) + 1 : 1;
+}
+
+// count bytes from at into into: how many there were. A walk down to the piece at at, kept on a stack, and then in
+// order through the pieces after it.
+//
+// The x86-64 body is the walk for a read that lies in one piece, which is nearly every read (a byte, a
+// cluster, a line): it keeps no stack and copies the bytes itself. A read that runs past its piece goes to the C
+// walk below, which is the same code as before, so the answer is the same on every path.
+#if X64
+p64 doc_read(const struct doc address_to doc, p64 at, p8 address_to into, positive count);
+_Static_assert(offset_of(struct doc, original) == 0 && offset_of(struct doc, added) == 16 &&
+                       offset_of(struct doc, nodes) == 40 && offset_of(struct doc, root) == 64 &&
+                       offset_of(struct doc_node, length) == 12 && offset_of(struct doc_node, start) == 16 &&
+                       offset_of(struct doc_node, buffer) == 36 && offset_of(struct doc_node, sum.bytes) == 40 &&
+                       sizeof(struct doc_node) == 80,
+               "doc and doc_node layout the read walks");
+__asm__(
+    ASM_FUNC(doc_read)
+    "push %rsi\n"                                             // at, for the C walk
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %rdi, %rbp\n   mov %rsi, %r14\n   mov %rdx, %r15\n   mov %rcx, %rbx\n" // rbp: the document, r14: the offset, r15: into, rbx: count
+    "test %rbx, %rbx\n   jz .Ldoc_read_none\n"
+    "mov 40(%rbp), %r12\n   mov 64(%rbp), %r13d\n"        // r12: the nodes, r13: the tree
+    ".Ldoc_read_level:\n"
+    "test %r13d, %r13d\n   jz .Ldoc_read_none\n"          // past the end: nothing
+    "lea (%r13,%r13,4), %rax\n   shl $4, %rax\n   add %r12, %rax\n" // rax: the node, 80 bytes each
+    "mov 0(%rax), %ecx\n"                                  // ecx: left
+    // A missing child is nodes[0], all zero, so its subtree is nothing bytes.
+    "lea (%rcx,%rcx,4), %r11\n   shl $4, %r11\n   add %r12, %r11\n" // r11: the left node
+    "mov 40(%r11), %r10\n"                                 // r10: before, the left subtree's bytes
+    "cmp %r10, %r14\n   jb .Ldoc_read_left\n"              // offset < before: the piece is in the left subtree
+    "mov 12(%rax), %esi\n   add %r10, %rsi\n"              // rsi: before + length
+    "cmp %rsi, %r14\n   jb .Ldoc_read_found\n"             // offset < before + length: this piece
+    "sub %rsi, %r14\n"
+    "mov 4(%rax), %r13d\n"                                 // right
+    "jmp .Ldoc_read_level\n"
+    ".Ldoc_read_left:\n"
+    "mov %ecx, %r13d\n"
+    "jmp .Ldoc_read_level\n"
+    ".Ldoc_read_found:\n"
+    "sub %r10, %r14\n"                                     // the offset within the piece
+    "mov 12(%rax), %esi\n   sub %r14, %rsi\n"              // what the piece has from there
+    "cmp %rbx, %rsi\n   jb .Ldoc_read_span\n"              // the count runs past the piece: the C walk
+    "mov 0(%rbp), %rsi\n   mov 16(%rbp), %rdx\n"           // the original and the added buffer
+    "cmpb $0, 36(%rax)\n   cmovne %rdx, %rsi\n"            // the piece's buffer
+    "add 16(%rax), %rsi\n   add %r14, %rsi\n"              // + its start + the offset: the bytes
+    "cmp $1, %rbx\n   jne .Ldoc_read_copy\n"               // a byte, which doc_byte asks for: no call
+    "movzbl (%rsi), %ecx\n   mov %cl, (%r15)\n   mov $1, %eax\n"
+    "jmp .Ldoc_read_out\n"
+    ".Ldoc_read_copy:\n"
+    "mov %r15, %rdi\n   mov %rbx, %rdx\n"
+    "call memory_copy\n"
+    "mov %rbx, %rax\n"
+    "jmp .Ldoc_read_out\n"
+    ".Ldoc_read_none:\n"
+    "xor %eax, %eax\n"
+    ".Ldoc_read_out:\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "add $8, %rsp\n"
+    ASM_RET
+    ".Ldoc_read_span:\n"
+    "mov %rbp, %rdi\n   mov 48(%rsp), %rsi\n   mov %r15, %rdx\n   mov %rbx, %rcx\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "add $8, %rsp\n"
+    "jmp doc_read_span\n"
+    ASM_END(doc_read)
+);
+KEEP positive doc_read_span(const struct doc address_to doc, p64 at, p8 address_to into, positive count)
+#else
+static positive doc_read(const struct doc address_to doc, p64 at, p8 address_to into, positive count)
+#endif
+{
+        p32 stack[DOC_STACK], depth = 0, tree = doc->root;
+        p64 offset = at;
+        positive done = 0;
+
+        while (tree)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                p64 before = doc_bytes_of(doc, node->left);
+
+                if (offset < before)
+                {
+                        if (depth == DOC_STACK)
+                                return 0;
+                        stack[depth++] = tree;
+                        tree = node->left;
+                }
+                else if (offset < before + node->length)
+                {
+                        offset -= before;
+                        break;
+                }
+                else
+                {
+                        offset -= before + node->length;
+                        tree = node->right;
+                }
+        }
+        while (tree && done < count)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                positive take = node->length - offset;
+
+                take = take < count - done ? take : count - done;
+                memory_copy(into + done, doc_piece_bytes(doc, node) + offset, take);
+                done += take;
+                offset = 0;
+                if (node->right)
+                {
+                        tree = node->right;
+                        while (doc->nodes[tree].left && depth < DOC_STACK)
+                        {
+                                stack[depth++] = tree;
+                                tree = doc->nodes[tree].left;
+                        }
+                }
+                else
+                        tree = depth ? stack[--depth] : 0;
+        }
+        return done;
+}
+
+// The byte at at, or 0x100 past the end.
+static p32 doc_byte(const struct doc address_to doc, p64 at)
+{
+        p8 byte = 0;
+
+        return doc_read(doc, at, &byte, 1) ? byte : 0x100;
+}
+
+// The k-th line end inside a piece (k from 1), the byte after the piece a LF when next_lf: the offset just past it.
+/*
+        The one line-end rule of a piece: the byte at at ends a line when it is an LF, or a CR that no LF follows. A CR that is the
+        piece's last byte is followed by the next piece's first byte, which is the LF when next_lf (the caller says so; the piece's
+        line count never asks, since it looks at the bytes before its own last).
+*/
+static b32 doc_piece_line_end(const p8 address_to bytes, p32 length, p32 at, b32 next_lf)
+{
+        return bytes[at] == '\n' || (bytes[at] == '\r' && !(at + 1 < length ? bytes[at + 1] == '\n' : next_lf));
+}
+
+static p64 doc_piece_break(const struct doc address_to doc, const struct doc_node address_to node, p64 k, b32 next_lf)
+{
+        const p8 address_to bytes = doc_piece_bytes(doc, node);
+
+        // Every CR paired with its LF: the line ends are the LFs.
+        if (node->cr == node->pairs)
+                return memory_nth_of((address_any)bytes, '\n', node->length, k).x;
+        for (p32 at = 0; at < node->length; at++)
+                if (doc_piece_line_end(bytes, node->length, at, next_lf) && !--k)
+                        return at + 1;
+        return node->length;
+}
+
+// Just past the k-th line end of the document (k from 1).
+static p64 doc_find_break(const struct doc address_to doc, p64 k)
+{
+        p32 tree = doc->root;
+        p64 offset = 0;
+        b32 next_lf = false;
+
+        while (tree)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                const struct doc_node address_to left = node->left ? &doc->nodes[node->left] : null;
+                b32 after_node = node->right ? (doc->nodes[node->right].sum.edge & DOC_FIRST_LF) != 0 : next_lf;
+                p64 in_left = left ? doc_breaks(&left->sum) - ((left->sum.edge & DOC_LAST_CR) && (node->edge & DOC_FIRST_LF)) : 0;
+                p64 in_node = (p64)node->lf + node->cr - node->pairs - ((node->edge & DOC_LAST_CR) && after_node);
+
+                if (k <= in_left)
+                {
+                        next_lf = (node->edge & DOC_FIRST_LF) != 0;
+                        tree = node->left;
+                        continue;
+                }
+                k -= in_left;
+                offset += left ? left->sum.bytes : 0;
+                if (k <= in_node)
+                        return offset + doc_piece_break(doc, node, k, after_node);
+                k -= in_node;
+                offset += node->length;
+                tree = node->right;
+        }
+        return offset;
+}
+
+// Where line starts (from 0); the end of the document for a line past the last.
+static p64 doc_line_start(const struct doc address_to doc, p64 line)
+{
+        if (!line)
+                return 0;
+        if (line >= doc_line_count(doc))
+                return doc_length(doc);
+        return doc_find_break(doc, line);
+}
+
+// The line ends before at: which line at is on. A place between a CR and its LF is on the CR's line.
+static p64 doc_line_of(const struct doc address_to doc, p64 at)
+{
+        p32 tree = doc->root;
+        p64 lines = 0;
+        b32 next_lf = false;
+
+        while (tree)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                const struct doc_node address_to left = node->left ? &doc->nodes[node->left] : null;
+                p64 before = left ? left->sum.bytes : 0;
+                b32 after_node = node->right ? (doc->nodes[node->right].sum.edge & DOC_FIRST_LF) != 0 : next_lf;
+
+                if (at < before)
+                {
+                        next_lf = (node->edge & DOC_FIRST_LF) != 0;
+                        tree = node->left;
+                        continue;
+                }
+                if (left)
+                        lines += doc_breaks(&left->sum) - ((left->sum.edge & DOC_LAST_CR) && (node->edge & DOC_FIRST_LF));
+                at -= before;
+                if (at < node->length)
+                {
+                        const p8 address_to bytes = doc_piece_bytes(doc, node);
+
+                        if (!at)
+                                return lines;
+                        lines += memory_count((address_any)bytes, at, '\n');
+                        // Every CR paired: none of them ends a line (the one at at - 1 included, whose LF is at).
+                        if (node->cr != node->pairs)
+                                for (p64 i = 0; i < at; i++)
+                                        lines += bytes[i] == '\r' && doc_piece_line_end(bytes, node->length, (p32)i, false);
+                        return lines;
+                }
+                lines += (p64)node->lf + node->cr - node->pairs - ((node->edge & DOC_LAST_CR) && after_node);
+                at -= node->length;
+                tree = node->right;
+        }
+        return lines;
+}
+
+// Where line ends, before its line end.
+static p64 doc_line_end(const struct doc address_to doc, p64 line)
+{
+        p64 start = doc_line_start(doc, line), next;
+
+        if (line + 1 >= doc_line_count(doc))
+                return doc_length(doc);
+        next = doc_line_start(doc, line + 1);
+        if (next > start && doc_byte(doc, next - 1) == '\n')
+                next--;
+        if (next > start && doc_byte(doc, next - 1) == '\r')
+                next--;
+        return next;
+}
+
+/*
+        A window over the text for walking code points: bytes copied from the tree a block at a time, so a walk reads
+        the tree once a block and not once a character.
+*/
+#define DOC_WINDOW 512
+
+struct doc_reader
+{
+        const struct doc address_to doc;
+        p64 from;
+        p32 count;
+        p8 bytes[DOC_WINDOW];
+};
+
+static fn doc_reader_start(struct doc_reader address_to reader, const struct doc address_to doc)
+{
+        reader->doc = doc;
+        reader->from = 0;
+        reader->count = 0;
+}
+
+// The code point at at: its length, and 0 at the end.
+static p32 doc_code_at(struct doc_reader address_to reader, p64 at, p32 address_to code)
+{
+        if (at < reader->from || at + 4 > reader->from + reader->count)
+        {
+                reader->from = at;
+                reader->count = (p32)doc_read(reader->doc, at, reader->bytes, DOC_WINDOW);
+        }
+        if (at >= reader->from + reader->count)
+                return 0;
+        return doc_decode(reader->bytes + (at - reader->from), reader->from + reader->count - at, code);
+}
+
+// The code point that ends at at: its length, and 0 at the start.
+static p32 doc_code_before(struct doc_reader address_to reader, p64 at, p32 address_to code)
+{
+        if (!at)
+                return 0;
+        if (at > reader->from + reader->count || at < reader->from + (reader->from ? 4 : 1))
+        {
+                p64 from = at > DOC_WINDOW ? at - DOC_WINDOW : 0;
+
+                reader->from = from;
+                reader->count = (p32)doc_read(reader->doc, from, reader->bytes, (positive)(at - from));
+        }
+        if (at - reader->from > reader->count)
+                return 0;
+        return doc_decode_back(reader->bytes, at - reader->from, code);
+}
+
+/* ---- the document ---- */
+
+/*
+        A document over bytes that outlive it (a mapped file, or memory the caller keeps): a byte order mark is held
+        aside, the file's line end is the first it has (LF when it has none), and the rest is cut into pieces. False
+        when there was no memory.
+*/
+static b32 doc_open(struct doc address_to doc, const p8 address_to bytes, p64 length)
+{
+        p64 at = 0;
+
+        memory_zero(doc, sizeof(*doc));
+        doc->random = 0x9e3779b97f4a7c15ull ^ length;
+        doc->tab_size = 4;
+        doc->insert_spaces = true;
+        doc->auto_close = true;
+        doc->normalize_paste = true;
+        doc->recording = true;
+        doc->changed_from = doc->changed_line = DOC_NONE;
+        doc->separators = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+        if (length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf)
+        {
+                doc->bom = 1;
+                bytes += 3, length -= 3;
+        }
+        doc->original = bytes;
+        doc->original_length = length;
+        {
+                positive look = length < 1048576 ? length : 1048576;
+                const p8 address_to lf = look ? memory_first_of((address_any)bytes, '\n', look) : null;
+                const p8 address_to cr = look ? memory_first_of((address_any)bytes, '\r', look) : null;
+
+                doc->eol = cr && (!lf || cr < lf) ? (cr + 1 < bytes + length && cr[1] == '\n' ? DOC_EOL_CRLF : DOC_EOL_CR)
+                                                  : DOC_EOL_LF;
+        }
+        while (at < length)
+        {
+                p32 take = length - at > DOC_PIECE_MOST ? DOC_PIECE_MOST : (p32)(length - at), node;
+
+                node = doc_node_new(doc, DOC_ORIGINAL, at, take);
+                if (!node)
+                        return false;
+                doc->root = doc_join(doc, doc->root, node);
+                at += take;
+        }
+        if (!array_store_reserve(doc->selections, doc->selection_room, 0, 1, 16))
+                return false;
+        doc->selections[0] = (struct doc_selection){0, 0, -1};
+        doc->selection_count = 1;
+        return true;
+}
+
+static fn doc_close(struct doc address_to doc)
+{
+        positive used;
+
+        used = doc->node_used, array_store_release(doc->nodes, doc->node_room, used);
+        used = doc->added_used, array_store_release(doc->added, doc->added_room, used);
+        used = doc->group_count, array_store_release(doc->groups, doc->group_room, used);
+        used = doc->change_count, array_store_release(doc->changes, doc->change_room, used);
+        used = doc->piece_count, array_store_release(doc->pieces, doc->piece_room, used);
+        used = doc->snapshot_count, array_store_release(doc->snapshots, doc->snapshot_room, used);
+        used = doc->selection_count, array_store_release(doc->selections, doc->selection_room, used);
+        used = doc->range_count, array_store_release(doc->ranges, doc->range_room, used);
+        used = doc->state_room, array_store_release(doc->states, doc->state_room, used);
+        memory_zero(doc, sizeof(*doc));
+}
+
+// The line end Enter types: the file's.
+static const char address_to doc_eol_text(const struct doc address_to doc)
+{
+        return doc->eol == DOC_EOL_CRLF ? "\r\n" : doc->eol == DOC_EOL_CR ? "\r" : "\n";
+}
+
+static positive doc_eol_length(const struct doc address_to doc)
+{
+        return doc->eol == DOC_EOL_CRLF ? 2 : 1;
+}
+
+/* ---- ranges that move with the text ---- */
+
+#define DOC_RANGE_READONLY 1u
+#define DOC_RANGE_ERROR 2u
+#define DOC_RANGE_WARNING 3u
+#define DOC_RANGE_INFO 4u
+#define DOC_RANGE_HIGHLIGHT 5u
+#define DOC_RANGE_FOLD 6u // the folded text: the lines after a fold's first, to its last's end
+#define DOC_RANGE_MARK 7u // a mark in the gutter at a line's start, data its kind
+#define DOC_RANGE_LINE 8u // a line's ground, data its role
+
+// An offset through a replace at at of removed bytes by inserted: before it stays, after it moves, inside goes to the
+// start; stick takes a place at at itself, or inside, to past what was put in.
+static p64 doc_shift(p64 offset, p64 at, p64 removed, p64 inserted, b32 stick)
+{
+        if (offset < at || (offset == at && !stick))
+                return offset;
+        if (offset >= at + removed && (offset > at || stick))
+                return offset - removed + inserted;
+        return stick ? at + inserted : at;
+}
+
+static fn doc_ranges_shift(struct doc address_to doc, p64 at, p64 removed, p64 inserted)
+{
+        positive kept = 0;
+
+        for (positive i = 0; i < doc->range_count; i++)
+        {
+                struct doc_range range = doc->ranges[i];
+                b32 had = range.finish > range.start;
+
+                // A fold an edit reaches into is opened: what it hid is being changed.
+                if (range.kind == DOC_RANGE_FOLD && at < range.finish && at + removed > range.start - (range.start > 0))
+                        continue;
+                range.start = doc_shift(range.start, at, removed, inserted, false);
+                range.finish = doc_shift(range.finish, at, removed, inserted, false);
+                if (had && range.finish <= range.start)
+                        continue;
+                doc->ranges[kept++] = range;
+        }
+        doc->range_count = kept;
+        for (p32 i = 0; i < doc->closer_count; i++)
+                doc->closers[i] = doc_shift(doc->closers[i], at, removed, inserted, true);
+}
+
+static b32 doc_range_add(struct doc address_to doc, p64 start, p64 finish, p32 kind, p32 data)
+{
+        if (!array_store_reserve(doc->ranges, doc->range_room, doc->range_count, doc->range_count + 1, 16))
+                return false;
+        doc->ranges[doc->range_count++] = (struct doc_range){start, finish, kind, data};
+        return true;
+}
+
+// Whether a replace at at of removed bytes would touch read-only text: put something inside it, or take any of it.
+// Its edges are not inside: text typed against a read-only span is not in it.
+static b32 doc_readonly(const struct doc address_to doc, p64 at, p64 removed)
+{
+        for (positive i = 0; i < doc->range_count; i++)
+        {
+                const struct doc_range address_to range = &doc->ranges[i];
+
+                if (range->kind != DOC_RANGE_READONLY)
+                        continue;
+                if (removed ? at < range->finish && at + removed > range->start : at > range->start && at < range->finish)
+                        return true;
+        }
+        return false;
+}
+
+/* ---- the tokenizer's line states, which move with the lines ---- */
+
+// The state kept for line, from the gap buffer.
+static p32 doc_state_get(const struct doc address_to doc, p64 line)
+{
+        positive at = line < doc->gap_start ? line : line + (doc->gap_end - doc->gap_start);
+
+        return at < doc->state_room ? doc->states[at] : 0;
+}
+
+static fn doc_state_set(struct doc address_to doc, p64 line, p32 state)
+{
+        positive at = line < doc->gap_start ? line : line + (doc->gap_end - doc->gap_start);
+
+        if (at < doc->state_room)
+                doc->states[at] = state;
+}
+
+// The gap moved to line and removed lines taken out there and inserted put in, so the states after keep their lines.
+static fn doc_states_splice(struct doc address_to doc, p64 line, p64 removed, p64 inserted)
+{
+        positive used = doc->state_room - (doc->gap_end - doc->gap_start);
+
+        if (!doc->states || line > used)
+                return;
+        removed = removed > used - line ? used - line : removed;
+        // The gap to line.
+        if (line < doc->gap_start)
+        {
+                positive move = doc->gap_start - line;
+
+                memory_copy(doc->states + doc->gap_end - move, doc->states + line, move * sizeof(p32));
+                doc->gap_start -= move, doc->gap_end -= move;
+        }
+        else if (line > doc->gap_start)
+        {
+                positive move = line - doc->gap_start;
+
+                memory_copy(doc->states + doc->gap_start, doc->states + doc->gap_end, move * sizeof(p32));
+                doc->gap_start += move, doc->gap_end += move;
+        }
+        doc->gap_end += removed;
+        if (inserted > doc->gap_end - doc->gap_start)
+        {
+                positive room = doc->state_room, tail = doc->state_room - doc->gap_end;
+                positive need = doc->state_room + inserted - (doc->gap_end - doc->gap_start) + 4096;
+
+                if (!array_store_reserve(doc->states, room, doc->state_room, need, 4096))
+                {
+                        // No room: nothing is known past the first line, and it is all worked out again.
+                        doc->states_valid = 1;
+                        doc->states_converge = 0;
+                        doc->gap_start = doc->gap_end;
+                        return;
+                }
+                memory_copy(doc->states + room - tail, doc->states + doc->gap_end, tail * sizeof(p32));
+                doc->gap_end = room - tail;
+                doc->state_room = room;
+        }
+        for (p64 i = 0; i < inserted; i++)
+                doc->states[doc->gap_start++] = 0;
+}
+
+/* ---- the change itself ---- */
+
+// Bytes into the added buffer as a tree of pieces: 0 with *failed for no memory.
+static p32 doc_add(struct doc address_to doc, const p8 address_to text, p64 length, b32 address_to failed)
+{
+        p32 tree = 0;
+        positive from = doc->added_used;
+
+        if (!length)
+                return 0;
+        if (!array_store_reserve(doc->added, doc->added_room, doc->added_used, doc->added_used + length, 65536))
+        {
+                *failed = true;
+                return 0;
+        }
+        memory_copy(doc->added + doc->added_used, text, length);
+        doc->added_used += length;
+        while (from < doc->added_used)
+        {
+                p32 take = doc->added_used - from > DOC_PIECE_MOST ? DOC_PIECE_MOST : (p32)(doc->added_used - from);
+                p32 node = doc_node_new(doc, DOC_ADDED, from, take);
+
+                if (!node)
+                {
+                        *failed = true;
+                        return tree;
+                }
+                tree = doc_join(doc, tree, node);
+                from += take;
+        }
+        return tree;
+}
+
+/*
+        The rightmost piece of a tree grown by the length bytes that follow it in the added buffer: typing at the end
+        of what was just typed, so a run of typing is one piece and not one a key.
+*/
+static b32 doc_extend(struct doc address_to doc, p32 tree, p64 length)
+{
+        p32 path[DOC_STACK], depth = 0, at = tree;
+        struct doc_node address_to node;
+
+        while (at && doc->nodes[at].right && depth < DOC_STACK)
+        {
+                path[depth++] = at;
+                at = doc->nodes[at].right;
+        }
+        if (!at || depth == DOC_STACK)
+                return false;
+        node = &doc->nodes[at];
+        if (node->buffer != DOC_ADDED || node->start + node->length != doc->added_used - length ||
+            node->length + length > DOC_PIECE_MOST)
+                return false;
+        node->length += (p32)length;
+        doc_count(doc->added + node->start, node->length, &node->lf, &node->cr, &node->pairs, &node->edge);
+        doc_update(doc, at);
+        while (depth)
+                doc_update(doc, path[--depth]);
+        return true;
+}
+
+// The pieces of the document from at, length bytes, onto the history's pieces. False when there was no room.
+static b32 doc_keep(struct doc address_to doc, p64 at, p64 length)
+{
+        p32 stack[DOC_STACK], depth = 0, tree = doc->root;
+        p64 offset = 0;
+
+        while (tree && length)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                p64 before = doc_bytes_of(doc, node->left);
+
+                if (at < before)
+                {
+                        stack[depth++] = tree;
+                        tree = node->left;
+                }
+                else if (at < before + node->length)
+                {
+                        at -= before;
+                        break;
+                }
+                else
+                {
+                        at -= before + node->length;
+                        tree = node->right;
+                }
+        }
+        while (tree && offset < length)
+        {
+                const struct doc_node address_to node = &doc->nodes[tree];
+                p64 take = node->length - at;
+
+                take = take < length - offset ? take : length - offset;
+                if (!array_store_reserve(doc->pieces, doc->piece_room, doc->piece_count, doc->piece_count + 1, 1024))
+                        return false;
+                doc->pieces[doc->piece_count++] = (struct doc_piece){node->start + at, (p32)take, node->buffer};
+                offset += take;
+                at = 0;
+                if (node->right)
+                {
+                        tree = node->right;
+                        while (doc->nodes[tree].left && depth < DOC_STACK)
+                        {
+                                stack[depth++] = tree;
+                                tree = doc->nodes[tree].left;
+                        }
+                }
+                else
+                        tree = depth ? stack[--depth] : 0;
+        }
+        return true;
+}
+
+// What every change tells the rest: the ranges and the line states move, the lowest change is remembered.
+static fn doc_changed(struct doc address_to doc, p64 at, p64 removed, p64 inserted, p64 line, p64 lines_removed,
+                      p64 lines_inserted)
+{
+        p64 edge = line + 1;
+
+        doc->version++;
+        doc_ranges_shift(doc, at, removed, inserted);
+        if (at < doc->changed_from || doc->changed_from == DOC_NONE)
+                doc->changed_from = at;
+        if (line < doc->changed_line || doc->changed_line == DOC_NONE)
+                doc->changed_line = line;
+        if (lines_removed != lines_inserted)
+                doc_states_splice(doc, edge, lines_removed, lines_inserted);
+        /*
+                The states known stop at the edited line; the ones kept past it, moved with their lines, are what the
+                tokenizer stops at when it comes out the same (states_converge), but only past every edit since.
+        */
+#define DOC_MOVED(line_number) ((line_number) > edge ? ((line_number) + lines_inserted > edge + lines_removed ? (line_number) + lines_inserted - lines_removed : edge) : (line_number))
+        doc->states_converge = DOC_MOVED(doc->states_converge);
+        doc->states_last_edit = DOC_MOVED(doc->states_last_edit);
+        if (edge < doc->states_valid)
+        {
+                p64 moved = DOC_MOVED(doc->states_valid);
+
+                doc->states_converge = moved > doc->states_converge ? moved : doc->states_converge;
+                doc->states_valid = edge;
+        }
+#undef DOC_MOVED
+        if (edge + lines_inserted > doc->states_last_edit)
+                doc->states_last_edit = edge + lines_inserted;
+}
+
+// The pieces of a tree put in place of length bytes at at: the raw move undo and redo make.
+static fn doc_swap(struct doc address_to doc, p64 at, p64 length, const struct doc_piece address_to pieces, p32 count,
+                   p64 bytes)
+{
+        p32 left, middle, right, middle_right, put;
+        b32 failed = false;
+        p64 line = doc_line_of(doc, at), lines_before = doc_line_count(doc), lines_after;
+
+        doc_split(doc, doc->root, at, &left, &middle_right);
+        doc_split(doc, middle_right, length, &middle, &right);
+        doc_collect(doc, middle, false);
+        put = doc_build(doc, pieces, count, &failed);
+        doc->root = doc_join(doc, doc_join(doc, left, put), right);
+        lines_after = doc_line_count(doc);
+        // The lines the swap took and put, as their difference: the state machinery needs only that.
+        doc_changed(doc, at, length, bytes, line, lines_before > lines_after ? lines_before - lines_after : 0,
+                    lines_after > lines_before ? lines_after - lines_before : 0);
+}
+
+/*
+        The text from at, removed bytes long, replaced by length bytes of text, the change kept in the group that is
+        open (doc_replace opens one when none is). False when it is refused (out of the document, read-only) or there
+        was no memory; nothing has changed then.
+*/
+static b32 doc_replace_in(struct doc address_to doc, p64 at, p64 removed, const p8 address_to text, p64 length)
+{
+        p32 left, middle, right, middle_right, added = 0;
+        struct doc_change change = {at, removed, length, 0, 0, 0, 0};
+        b32 failed = false;
+        p64 line, lines_before, lines_after;
+
+        if (at > doc_length(doc) || removed > doc_length(doc) - at)
+                return false;
+        if (!removed && !length)
+                return true;
+        if (doc_readonly(doc, at, removed))
+                return false;
+        if (doc->recording && !array_store_reserve(doc->changes, doc->change_room, doc->change_count, doc->change_count + 1, 256))
+                return false;
+        line = doc_line_of(doc, at);
+        lines_before = doc_line_count(doc);
+        change.removed_first = (p32)doc->piece_count;
+        if (doc->recording && removed && !doc_keep(doc, at, removed))
+        {
+                doc->piece_count = change.removed_first;
+                return false;
+        }
+        change.removed_count = (p32)(doc->piece_count - change.removed_first);
+        if (!doc_split(doc, doc->root, at, &left, &middle_right))
+        {
+                doc->root = doc_join(doc, left, middle_right);
+                doc->piece_count = change.removed_first;
+                return false;
+        }
+        if (!doc_split(doc, middle_right, removed, &middle, &right))
+        {
+                doc->root = doc_join(doc, left, doc_join(doc, middle, right));
+                doc->piece_count = change.removed_first;
+                return false;
+        }
+        doc_collect(doc, middle, false);
+
+        // Typing on the end of what was typed last grows that piece.
+        if (length && left && length <= DOC_PIECE_MOST &&
+            array_store_reserve(doc->added, doc->added_room, doc->added_used, doc->added_used + length, 65536))
+        {
+                memory_copy(doc->added + doc->added_used, text, length);
+                doc->added_used += length;
+                if (!doc_extend(doc, left, length))
+                {
+                        doc->added_used -= length;
+                        added = doc_add(doc, text, length, &failed);
+                }
+        }
+        else if (length)
+                added = doc_add(doc, text, length, &failed);
+        doc->root = doc_join(doc, doc_join(doc, left, added), right);
+        lines_after = doc_line_count(doc);
+
+        if (doc->recording)
+        {
+                change.inserted_first = (p32)doc->piece_count;
+                if (length && !doc_keep(doc, at, length))
+                        failed = true;
+                change.inserted_count = (p32)(doc->piece_count - change.inserted_first);
+                doc->changes[doc->change_count++] = change;
+                if (doc->group_count)
+                        doc->groups[doc->group_count - 1].change_count++;
+        }
+        {
+                // The lines the change spans: what it took is lines_removed of them, what it put lines_inserted.
+                p64 inserted_lines = lines_after + 0, removed_lines = lines_before;
+
+                doc_changed(doc, at, removed, length, line, removed_lines > inserted_lines ? removed_lines - inserted_lines : 0,
+                            inserted_lines > removed_lines ? inserted_lines - removed_lines : 0);
+        }
+        return !failed;
+}
+
+/* ---- the history ---- */
+
+static b32 doc_snapshot(struct doc address_to doc, p32 address_to first, p32 address_to count)
+{
+        if (!array_store_reserve(doc->snapshots, doc->snapshot_room, doc->snapshot_count,
+                                 doc->snapshot_count + doc->selection_count, 1024))
+                return false;
+        *first = (p32)doc->snapshot_count;
+        *count = (p32)doc->selection_count;
+        memory_copy(doc->snapshots + doc->snapshot_count, doc->selections, doc->selection_count * sizeof(struct doc_selection));
+        doc->snapshot_count += doc->selection_count;
+        return true;
+}
+
+/*
+        The oldest quarter of the history forgotten: its groups, and the changes, pieces and snapshots only they held,
+        the rest moved down. What a forgotten undo would have brought back cannot be had again; saved follows the
+        count and is gone when it was among them.
+*/
+static fn doc_forget(struct doc address_to doc)
+{
+        p32 drop = (p32)(doc->group_count / 4 ? doc->group_count / 4 : doc->group_count);
+        p32 changes, pieces, snapshots;
+
+        drop = drop > doc->done ? doc->done : drop;
+        if (!drop)
+                return;
+        changes = drop < doc->group_count ? doc->groups[drop].change_first : (p32)doc->change_count;
+        snapshots = drop < doc->group_count ? doc->groups[drop].before_first : (p32)doc->snapshot_count;
+        pieces = changes < doc->change_count ? doc->changes[changes].removed_first : (p32)doc->piece_count;
+        memory_copy(doc->groups, doc->groups + drop, (doc->group_count - drop) * sizeof(struct doc_group));
+        doc->group_count -= drop;
+        memory_copy(doc->changes, doc->changes + changes, (doc->change_count - changes) * sizeof(struct doc_change));
+        doc->change_count -= changes;
+        memory_copy(doc->pieces, doc->pieces + pieces, (doc->piece_count - pieces) * sizeof(struct doc_piece));
+        doc->piece_count -= pieces;
+        memory_copy(doc->snapshots, doc->snapshots + snapshots, (doc->snapshot_count - snapshots) * sizeof(struct doc_selection));
+        doc->snapshot_count -= snapshots;
+        for (positive g = 0; g < doc->group_count; g++)
+        {
+                doc->groups[g].change_first -= changes;
+                doc->groups[g].before_first -= snapshots;
+                doc->groups[g].after_first -= snapshots;
+        }
+        for (positive c = 0; c < doc->change_count; c++)
+        {
+                doc->changes[c].removed_first -= pieces;
+                doc->changes[c].inserted_first -= pieces;
+        }
+        doc->done -= drop;
+        doc->saved = doc->saved >= (b64)drop ? doc->saved - drop : -1;
+}
+
+// The redo past done dropped: a change made after an undo starts a new line of history.
+static fn doc_drop_redo(struct doc address_to doc)
+{
+        const struct doc_group address_to first;
+
+        if (doc->done >= doc->group_count)
+                return;
+        first = &doc->groups[doc->done];
+        doc->change_count = first->change_first;
+        doc->snapshot_count = first->before_first;
+        // A change keeps the pieces it took out and then those it put in, so the last change's last piece ends them.
+        doc->piece_count = first->change_first ? doc->changes[first->change_first - 1].inserted_first +
+                                                     doc->changes[first->change_first - 1].inserted_count
+                                               : 0;
+        if (doc->saved > (b64)doc->done)
+                doc->saved = -1;
+        doc->group_count = doc->done;
+}
+
+/*
+        A group begun for a change of kind: the open one joined when this may join it (the same kind, the carets
+        where it left them, soon enough, and not a word typed after a blank or a line end typed), or a new one with the
+        selections as they are now. Nested begins are one group. False when there was no memory.
+*/
+static b32 doc_group_begin(struct doc address_to doc, p8 kind, p32 typed)
+{
+        struct doc_group address_to last;
+
+        if (!doc->recording)
+                return true;
+        if (doc->depth++)
+                return true;
+        doc_drop_redo(doc);
+        last = doc->group_count && doc->done == doc->group_count ? &doc->groups[doc->group_count - 1] : null;
+        if (last && doc->open && kind != DOC_KIND_OTHER && last->kind == kind && doc->now - last->time < DOC_PAUSE_NS &&
+            last->after_count == doc->selection_count &&
+            last->after_first + last->after_count == doc->snapshot_count &&
+            !memory_compare(doc->snapshots + last->after_first, doc->selections,
+                            doc->selection_count * sizeof(struct doc_selection)) &&
+            !(kind == DOC_KIND_TYPING && typed > ' ' && (last->last == ' ' || last->last == '\t')) &&
+            !(kind == DOC_KIND_TYPING && (typed == '\n' || typed == '\r')))
+        {
+                // The after snapshot is the last thing kept: it is made again when the group ends.
+                doc->snapshot_count = last->after_first;
+                doc->depth_opened = false;
+                return true;
+        }
+        if (doc->group_count >= DOC_HISTORY_GROUPS || doc->piece_count >= DOC_HISTORY_PIECES ||
+            doc->change_count >= DOC_HISTORY_CHANGES || doc->snapshot_count >= DOC_HISTORY_SNAPSHOTS)
+                doc_forget(doc);
+        if (!array_store_reserve(doc->groups, doc->group_room, doc->group_count, doc->group_count + 1, 256))
+        {
+                doc->depth--;
+                return false;
+        }
+        last = &doc->groups[doc->group_count];
+        memory_zero(last, sizeof(*last));
+        last->change_first = (p32)doc->change_count;
+        last->kind = kind;
+        last->before_primary = doc->primary;
+        if (!doc_snapshot(doc, &last->before_first, &last->before_count))
+        {
+                doc->depth--;
+                return false;
+        }
+        doc->group_count++;
+        doc->done = (p32)doc->group_count;
+        doc->depth_opened = true;
+        return true;
+}
+
+static fn doc_group_end(struct doc address_to doc, p32 typed)
+{
+        struct doc_group address_to last;
+
+        if (!doc->recording || !doc->depth || --doc->depth)
+                return;
+        last = &doc->groups[doc->group_count - 1];
+        // A group that changed nothing is no undo.
+        if (!last->change_count)
+        {
+                doc->snapshot_count = last->before_first;
+                doc->group_count--;
+                doc->done = (p32)doc->group_count;
+                doc->open = false;
+                return;
+        }
+        last->after_primary = doc->primary;
+        if (!doc_snapshot(doc, &last->after_first, &last->after_count))
+                last->after_count = 0;
+        last->time = doc->now;
+        if (typed)
+                last->last = (p8)(typed < 128 ? typed : 'a');
+        doc->open = last->kind != DOC_KIND_OTHER;
+}
+
+// The next change is a group of its own: the carets moved, the file was saved, a command ran.
+static fn doc_seal(struct doc address_to doc)
+{
+        doc->open = false;
+}
+
+// A replace that is an undo of its own when no group is open, so a change outside one still drops the redo.
+static b32 doc_replace(struct doc address_to doc, p64 at, p64 removed, const p8 address_to text, p64 length)
+{
+        b32 done;
+
+        if (!doc->recording || doc->depth)
+                return doc_replace_in(doc, at, removed, text, length);
+        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
+                return false;
+        done = doc_replace_in(doc, at, removed, text, length);
+        doc_group_end(doc, 0);
+        doc_seal(doc);
+        return done;
+}
+
+static fn doc_selections_load(struct doc address_to doc, p32 first, p32 count, p32 primary)
+{
+        if (!count || !array_store_reserve(doc->selections, doc->selection_room, 0, count, 16))
+                return;
+        memory_copy(doc->selections, doc->snapshots + first, count * sizeof(struct doc_selection));
+        doc->selection_count = count;
+        doc->primary = primary < count ? primary : 0;
+}
+
+// The last group taken back, its changes undone from the last to the first, its selections from before. False when
+// there is none.
+static b32 doc_undo(struct doc address_to doc)
+{
+        const struct doc_group address_to group;
+
+        if (!doc->done || doc->depth)
+                return false;
+        group = &doc->groups[doc->done - 1];
+        for (p32 c = group->change_count; c--;)
+        {
+                const struct doc_change address_to change = &doc->changes[group->change_first + c];
+
+                doc_swap(doc, change->at, change->inserted, doc->pieces + change->removed_first, change->removed_count,
+                         change->removed);
+        }
+        doc_selections_load(doc, group->before_first, group->before_count, group->before_primary);
+        doc->done--;
+        doc->open = false;
+        doc->closer_count = 0;
+        return true;
+}
+
+static b32 doc_redo(struct doc address_to doc)
+{
+        const struct doc_group address_to group;
+
+        if (doc->done >= doc->group_count || doc->depth)
+                return false;
+        group = &doc->groups[doc->done];
+        for (p32 c = 0; c < group->change_count; c++)
+        {
+                const struct doc_change address_to change = &doc->changes[group->change_first + c];
+
+                doc_swap(doc, change->at, change->removed, doc->pieces + change->inserted_first, change->inserted_count,
+                         change->inserted);
+        }
+        if (group->after_count)
+                doc_selections_load(doc, group->after_first, group->after_count, group->after_primary);
+        doc->done++;
+        doc->open = false;
+        doc->closer_count = 0;
+        return true;
+}
+
+static b32 doc_dirty(const struct doc address_to doc)
+{
+        return doc->saved != (b64)doc->done;
+}
+
+static fn doc_mark_saved(struct doc address_to doc)
+{
+        doc->saved = doc->done;
+        doc->open = false;
+}
+
+/* ---- selections ---- */
+
+static p64 doc_sel_start(const struct doc_selection address_to s)
+{
+        return s->anchor < s->active ? s->anchor : s->active;
+}
+
+static p64 doc_sel_end(const struct doc_selection address_to s)
+{
+        return s->anchor < s->active ? s->active : s->anchor;
+}
+
+/*
+        The selections sorted by where they start and those that overlap joined: two that share a byte, a caret on
+        another caret, a caret inside a selection. Two that only touch stay two. A joined pair keeps the primary's
+        direction, and is the primary when either was. Every end is clamped to the document first.
+*/
+static fn doc_normalize(struct doc address_to doc)
+{
+        p64 length = doc_length(doc);
+        positive count = doc->selection_count, kept = 0;
+        p32 primary = doc->primary < count ? doc->primary : 0;
+
+        if (!count)
+        {
+                doc->selections[0] = (struct doc_selection){0, 0, -1};
+                doc->selection_count = 1;
+                doc->primary = 0;
+                return;
+        }
+        for (positive i = 0; i < count; i++)
+        {
+                doc->selections[i].anchor = doc->selections[i].anchor > length ? length : doc->selections[i].anchor;
+                doc->selections[i].active = doc->selections[i].active > length ? length : doc->selections[i].active;
+        }
+        // An insertion sort, carrying the primary: the list is nearly sorted after any edit, and short.
+        for (positive i = 1; i < count; i++)
+        {
+                struct doc_selection moving = doc->selections[i];
+                positive j = i;
+
+                while (j && doc_sel_start(&doc->selections[j - 1]) > doc_sel_start(&moving))
+                {
+                        doc->selections[j] = doc->selections[j - 1];
+                        if (primary == j - 1)
+                                primary = (p32)j;
+                        j--;
+                }
+                doc->selections[j] = moving;
+                if (primary == i)
+                        primary = (p32)j;
+        }
+        for (positive i = 0; i < count; i++)
+        {
+                struct doc_selection now = doc->selections[i];
+
+                if (kept)
+                {
+                        struct doc_selection address_to last = &doc->selections[kept - 1];
+                        p64 last_start = doc_sel_start(last), last_end = doc_sel_end(last);
+                        p64 now_start = doc_sel_start(&now), now_end = doc_sel_end(&now);
+                        b32 now_caret = now.anchor == now.active, last_caret = last->anchor == last->active;
+
+                        if (now_start < last_end || (now_start == last_end && (now_caret ? (last_caret || now_start < last_end) : last_caret && last_start == now_start)))
+                        {
+                                p64 finish = now_end > last_end ? now_end : last_end;
+                                b32 is_primary = primary == i, forward = is_primary ? now.anchor <= now.active : last->anchor <= last->active;
+
+                                last->anchor = forward ? last_start : finish;
+                                last->active = forward ? finish : last_start;
+                                if (is_primary)
+                                        last->goal = now.goal;
+                                if (is_primary || primary == kept - 1)
+                                        primary = (p32)(kept - 1);
+                                else if (primary > i)
+                                        primary--;
+                                continue;
+                        }
+                }
+                if (primary == i)
+                        primary = (p32)kept;
+                doc->selections[kept++] = now;
+        }
+        doc->selection_count = kept;
+        doc->primary = primary < kept ? primary : 0;
+}
+
+static fn doc_select_set(struct doc address_to doc, p64 anchor, p64 active)
+{
+        doc->selections[0] = (struct doc_selection){anchor, active, -1};
+        doc->selection_count = 1;
+        doc->primary = 0;
+        doc->closer_count = 0;
+        doc_normalize(doc);
+        doc_seal(doc);
+}
+
+// One more selection, the primary now.
+static b32 doc_select_add(struct doc address_to doc, p64 anchor, p64 active)
+{
+        if (!array_store_reserve(doc->selections, doc->selection_room, doc->selection_count, doc->selection_count + 1, 16))
+                return false;
+        doc->selections[doc->selection_count] = (struct doc_selection){anchor, active, -1};
+        doc->primary = (p32)doc->selection_count++;
+        doc_normalize(doc);
+        doc_seal(doc);
+        return true;
+}
+
+/* ---- characters, words and columns over the document ---- */
+
+// The end of the cluster that starts at at (which is the start of one).
+static p64 doc_cluster_end(const struct doc address_to doc, p64 at)
+{
+        struct doc_reader reader;
+        struct doc_gstate state = {0};
+        p64 length = doc_length(doc);
+        p32 code, size;
+        p8 two[2];
+        positive got = doc_read(doc, at, two, 2);
+
+        // An ASCII character with ASCII (or nothing) after it is a cluster of one: nothing ASCII extends or prepends,
+        // and only CR LF pairs.
+        if (got && two[0] < 0x80 && two[0] != '\r' && (got == 1 || two[1] < 0x80))
+                return at + 1;
+        doc_reader_start(&reader, doc);
+        if (at >= length || !(size = doc_code_at(&reader, at, &code)))
+                return at;
+        doc_grapheme_step(&state, doc_props(code));
+        at += size;
+        while (at < length && (size = doc_code_at(&reader, at, &code)))
+        {
+                struct doc_gstate next = state;
+
+                if (doc_grapheme_step(&next, doc_props(code)))
+                        break;
+                state = next;
+                at += size;
+        }
+        return at;
+}
+
+/*
+        Whether a cluster surely begins at the boundary between before and now (the code point before it and the one at
+        it): no rule of UAX #29 joins the two. Where one might -- a mark, a Hangul vowel or trailer after a leader or a
+        vowel, a joiner before a pictograph, a regional indicator after one, a conjunct's linker -- it answers no, and a
+        walk back goes on to a boundary it is sure of.
+*/
+static b32 doc_cluster_cut(p32 before, p32 now)
+{
+        p32 b = DOC_GCB(doc_props(before)), n = DOC_GCB(doc_props(now));
+
+        if (b == GCB_CR && n == GCB_LF)
+                return false;
+        if (b == GCB_CR || b == GCB_LF || b == GCB_CONTROL || n == GCB_CR || n == GCB_LF || n == GCB_CONTROL)
+                return true;
+        if (n == GCB_EXTEND || n == GCB_ZWJ || n == GCB_SPACING || b == GCB_PREPEND)
+                return false;
+        if (b == GCB_L && (n == GCB_L || n == GCB_V || n == GCB_LV || n == GCB_LVT))
+                return false;
+        if ((b == GCB_LV || b == GCB_V) && (n == GCB_V || n == GCB_T))
+                return false;
+        if ((b == GCB_LVT || b == GCB_T) && n == GCB_T)
+                return false;
+        if (b == GCB_ZWJ || (b == GCB_RI && n == GCB_RI))
+                return false;
+        if (DOC_INCB(doc_props(now)) == INCB_CONSONANT &&
+            (DOC_INCB(doc_props(before)) == INCB_LINKER || DOC_INCB(doc_props(before)) == INCB_EXTEND))
+                return false;
+        return true;
+}
+
+/*
+        Where the cluster that ends at at begins. The walk starts where a cluster surely does -- after a control or
+        a line end, or the document's start -- and goes back to at, cut short only past 1024 bytes and at a boundary
+        doc_cluster_cut is sure of, so a long run of marks is walked to its base and a run of regional indicators to
+        its pairs' start; never more than 64 KiB back. Then it goes forward from there to at.
+*/
+static p64 doc_cluster_start(const struct doc address_to doc, p64 at)
+{
+        struct doc_reader reader;
+        p64 from = at, last;
+        p32 code, size;
+
+        if (at > doc_length(doc))
+                at = from = doc_length(doc);
+        if (!at)
+                return 0;
+        {
+                // The same rule backwards: an ASCII character with ASCII before it (or nothing) begins its cluster.
+                p8 two[2];
+                positive back = at >= 2 ? 2 : 1;
+                p8 last, before;
+
+                doc_read(doc, at - back, two, back);
+                last = two[back - 1], before = back == 2 ? two[0] : 0;
+                if (last < 0x80 && !(last == '\n' && before == '\r') && before < 0x80)
+                        return at - 1;
+        }
+        doc_reader_start(&reader, doc);
+        while (from && (size = doc_code_before(&reader, from, &code)))
+        {
+                p32 gcb = DOC_GCB(doc_props(code)), now;
+
+                // A cluster starts after a control or a line end; a CR is one only when no LF follows it.
+                if (from < at && (gcb == GCB_LF || gcb == GCB_CONTROL || (gcb == GCB_CR && doc_byte(doc, from) != '\n')))
+                        break;
+                // Past a kilobyte the walk stops at the first boundary that surely starts a cluster, the code point at from
+                // being one that no rule joins to the one before it; a mark run stays joined, so it is walked to its base.
+                if (at - from >= 1024 && doc_code_at(&reader, from, &now) && doc_cluster_cut(code, now))
+                        break;
+                if (at - from >= 65536)
+                        break;
+                from -= size;
+        }
+        // Forward from there with one reader: the last cut before at is the cluster's start.
+        last = from;
+        {
+                struct doc_gstate state = {0};
+                p64 position = from;
+
+                doc_reader_start(&reader, doc);
+                while (position < at && (size = doc_code_at(&reader, position, &code)))
+                {
+                        if (doc_grapheme_step(&state, doc_props(code)))
+                                last = position;
+                        position += size;
+                }
+        }
+        return last;
+}
+
+// Whether a cluster is one Backspace takes whole: an emoji sequence, a flag, a keycap, Hangul jamo, a CR LF.
+static b32 doc_cluster_whole(const struct doc address_to doc, p64 start, p64 finish)
+{
+        struct doc_reader reader;
+        p32 code, size;
+
+        doc_reader_start(&reader, doc);
+        for (p64 at = start; at < finish && (size = doc_code_at(&reader, at, &code)); at += size)
+        {
+                p16 props = doc_props(code);
+
+                if (DOC_PICTOGRAPHIC(props) || DOC_GCB(props) == GCB_RI || DOC_GCB(props) == GCB_CR || code == 0x20e3 ||
+                    code == 0xfe0f || (DOC_GCB(props) >= GCB_L && DOC_GCB(props) <= GCB_LVT))
+                        return true;
+        }
+        return false;
+}
+
+// Where Backspace at at goes back to.
+static p64 doc_backspace_start(const struct doc address_to doc, p64 at)
+{
+        p64 start = doc_cluster_start(doc, at);
+        struct doc_reader reader;
+        p32 code, size;
+
+        if (start == at || doc_cluster_whole(doc, start, at))
+                return start;
+        doc_reader_start(&reader, doc);
+        size = doc_code_before(&reader, at, &code);
+        return size ? at - size : start;
+}
+
+// A character's kind for word jumps.
+#define DOC_CLASS_BLANK 0
+#define DOC_CLASS_SEPARATOR 1
+#define DOC_CLASS_WORD 2
+#define DOC_CLASS_BREAK 3
+
+static p32 doc_class(const struct doc address_to doc, p32 code)
+{
+        if (code == '\n' || code == '\r')
+                return DOC_CLASS_BREAK;
+        if (code == ' ' || code == '\t' || code == 0xa0 || code == 0x3000 || code == 0x1680 || (code >= 0x2000 && code <= 0x200a))
+                return DOC_CLASS_BLANK;
+        if (code < 128 && doc->separators)
+                for (const char address_to at = doc->separators; *at; at++)
+                        if ((p32)(p8)*at == code)
+                                return DOC_CLASS_SEPARATOR;
+        return DOC_CLASS_WORD;
+}
+
+// A word jump right from at, as VS Code's: the blanks passed, then a run of one kind; a line end is a stop of its own.
+static p64 doc_word_right(const struct doc address_to doc, p64 at)
+{
+        struct doc_reader reader;
+        p64 length = doc_length(doc);
+        p32 code = 0, size, kind;
+
+        doc_reader_start(&reader, doc);
+        if (at >= length)
+                return length;
+        doc_code_at(&reader, at, &code);
+        if (doc_class(doc, code) == DOC_CLASS_BREAK)
+                return doc_cluster_end(doc, at);
+        while (at < length && (size = doc_code_at(&reader, at, &code)) && doc_class(doc, code) == DOC_CLASS_BLANK)
+                at += size;
+        if (at >= length || doc_class(doc, code) == DOC_CLASS_BREAK)
+                return at;
+        kind = doc_class(doc, code);
+        while (at < length && doc_code_at(&reader, at, &code) && doc_class(doc, code) == kind)
+                at = doc_cluster_end(doc, at);
+        return at;
+}
+
+static p64 doc_word_left(const struct doc address_to doc, p64 at)
+{
+        struct doc_reader reader;
+        p32 code = 0, size, kind;
+
+        doc_reader_start(&reader, doc);
+        if (!at)
+                return 0;
+        doc_code_before(&reader, at, &code);
+        if (doc_class(doc, code) == DOC_CLASS_BREAK)
+                return doc_cluster_start(doc, at);
+        while (at && (size = doc_code_before(&reader, at, &code)) && doc_class(doc, code) == DOC_CLASS_BLANK)
+                at -= size;
+        if (!at || doc_class(doc, code) == DOC_CLASS_BREAK)
+                return at;
+        kind = doc_class(doc, code);
+        while (at && doc_code_before(&reader, at, &code) && doc_class(doc, code) == kind)
+                at = doc_cluster_start(doc, at);
+        return at;
+}
+
+#define DOC_WORD_WINDOW 2048 // the window of text a word is read from, in bytes
+
+/*
+        The word rule over bytes, the one rule every selection takes (the text widget's and the terminal's): the UAX #29 segment that
+        holds at, cut again at the separators, with a separator a word of its own; on blanks, the blanks; at the end of the text, the
+        word before. bytes holds length bytes of text, at is a byte offset in it, and the answer is the word's [start, finish) in bytes.
+        doc supplies the separators only (a zeroed document has the default ones).
+*/
+static fn doc_word_in(const struct doc address_to doc, const p8 address_to bytes, positive length, positive at, positive address_to start,
+                      positive address_to finish)
+{
+        p16 props[DOC_WORD_WINDOW];
+        p32 offsets[DOC_WORD_WINDOW + 1];
+        p8 breaks[DOC_WORD_WINDOW + 1];
+        positive count = 0, here = 0;
+
+        for (positive i = 0; i < length;)
+        {
+                p32 code, size = doc_decode(bytes + i, length - i, &code);
+
+                offsets[count] = (p32)i;
+                props[count] = doc_props(code);
+                if (i <= at)
+                        here = count;
+                count++;
+                i += size;
+        }
+        offsets[count] = (p32)length;
+        if (!count)
+        {
+                *start = *finish = at;
+                return;
+        }
+        doc_word_breaks(props, count, breaks);
+        // A separator is a word of its own, whatever UAX #29 joins it to.
+        for (positive i = 0; i < count; i++)
+        {
+                p32 code;
+
+                doc_decode(bytes + offsets[i], length - offsets[i], &code);
+                if (doc_class(doc, code) == DOC_CLASS_SEPARATOR)
+                        breaks[i] = breaks[i + 1] = 1;
+        }
+        {
+                positive first = here, last = here + 1;
+
+                while (first && !breaks[first])
+                        first--;
+                while (last < count && !breaks[last])
+                        last++;
+                *start = offsets[first];
+                *finish = offsets[last];
+        }
+}
+
+// The word at at, for a double click: doc_word_in over a window of the line round it.
+static fn doc_word_at(const struct doc address_to doc, p64 at, p64 address_to start, p64 address_to finish)
+{
+        p64 line = doc_line_of(doc, at), line_start = doc_line_start(doc, line), line_end = doc_line_end(doc, line);
+        p64 from = at > line_start + DOC_WORD_WINDOW / 2 ? doc_cluster_start(doc, at - DOC_WORD_WINDOW / 2) : line_start;
+        p64 to = line_end - from > DOC_WORD_WINDOW ? from + DOC_WORD_WINDOW : line_end;
+        p8 bytes[DOC_WORD_WINDOW];
+        positive length = doc_read(doc, from, bytes, (positive)(to - from)), first, last;
+
+        if (at == line_end && at > line_start)
+                at--;
+        if (!length)
+        {
+                *start = *finish = at;
+                return;
+        }
+        doc_word_in(doc, bytes, length, (positive)(at - from), &first, &last);
+        *start = from + first;
+        *finish = from + last;
+}
+
+// How many columns a cluster takes at column: a tab to the next stop, a flag or an emoji asked for (VS16) two.
+static p32 doc_cluster_width(const struct doc address_to doc, const p8 address_to bytes, positive length, p64 column)
+{
+        p32 code, size, width;
+
+        if (!length)
+                return 0;
+        size = doc_decode(bytes, length, &code);
+        if (code == '\t')
+                return doc->tab_size - (p32)(column % doc->tab_size);
+        if ((code & DOC_INVALID) || code < 0x20 || code == 0x7f || (code >= 0x80 && code < 0xa0))
+                return 1;
+        if (DOC_GCB(doc_props(code)) == GCB_RI)
+                return 2;
+        width = (p32)unicode_width(code, UNICODE_WIDTH_TERMINAL);
+        for (positive at = size; at < length;)
+        {
+                p32 next;
+
+                at += doc_decode(bytes + at, length - at, &next);
+                if (next == 0xfe0f && DOC_PICTOGRAPHIC(doc_props(code)))
+                        width = 2;
+        }
+        return width ? width : 1;
+}
+
+// The cluster that starts at at, on a line walked from its start at column: its width there, and next, the place it ends at.
+// The one walk the columns are made of (doc_column and doc_at_column both measure a line by it).
+static p32 doc_cluster_measure(const struct doc address_to doc, p64 at, p64 column, p64 address_to next)
+{
+        p8 cluster[64];
+        p64 finish = doc_cluster_end(doc, at);
+        positive size = doc_read(doc, at, cluster, finish - at < sizeof(cluster) ? (positive)(finish - at) : sizeof(cluster));
+
+        *next = finish;
+        return doc_cluster_width(doc, cluster, size, column);
+}
+
+// The display column of at on its line.
+static p64 doc_column(const struct doc address_to doc, p64 at)
+{
+        p64 start = doc_line_start(doc, doc_line_of(doc, at)), column = 0, next;
+
+        while (start < at)
+        {
+                column += doc_cluster_measure(doc, start, column, &next);
+                start = next;
+        }
+        return column;
+}
+
+// Where column want falls on line: the boundary before it, or the one after when want is past a wide one's middle.
+static p64 doc_at_column(const struct doc address_to doc, p64 line, p64 want)
+{
+        p64 at = doc_line_start(doc, line), finish = doc_line_end(doc, line), column = 0, next;
+
+        while (at < finish)
+        {
+                p32 width = doc_cluster_measure(doc, at, column, &next);
+
+                if (column + width > want)
+                        return want - column >= (width + 1) / 2 && width > 1 ? next : at;
+                column += width;
+                at = next;
+        }
+        return finish;
+}
+
+// The first character on line that is not a blank: the line's end when it is all blanks.
+static p64 doc_first_text(const struct doc address_to doc, p64 line)
+{
+        p64 at = doc_line_start(doc, line), finish = doc_line_end(doc, line);
+
+        while (at < finish)
+        {
+                p32 byte = doc_byte(doc, at);
+
+                if (byte != ' ' && byte != '\t')
+                        break;
+                at++;
+        }
+        return at;
+}
+
+/* ---- edits of every selection at once ---- */
+
+/*
+        One replace of an edit list: from at, removed bytes, by length bytes of text, and where the selection it
+        stands for goes, as offsets into the text it puts in (anchor and active), or DOC_NONE to map the old ones.
+*/
+struct doc_edit
+{
+        p64 at, removed;
+        const p8 address_to text;
+        p64 length;
+        p64 anchor, active;
+};
+
+// An offset through an edit list (sorted, not overlapping): moved by every edit before it, and inside one to its end
+// (stick) or start.
+static p64 doc_map(p64 offset, const struct doc_edit address_to edits, positive count, b32 stick)
+{
+        p64 moved = offset;
+
+        for (positive i = 0; i < count; i++)
+        {
+                const struct doc_edit address_to edit = &edits[i];
+
+                if (offset < edit->at || (offset == edit->at && !stick && edit->removed == 0))
+                        break;
+                if (offset >= edit->at + edit->removed && !(offset == edit->at && edit->removed == 0 && !stick))
+                        moved += edit->length - edit->removed;
+                else
+                {
+                        p64 before = moved - offset;
+
+                        return edit->at + before + (stick ? edit->length : 0);
+                }
+        }
+        return moved;
+}
+
+/*
+        An edit list applied as one group of kind: sorted by at and not overlapping, done from the last to the first,
+        and the selections set from the edits that say where theirs go (when there is one an edit for every selection)
+        and mapped through the list otherwise. False when one was refused; the group then holds what was done.
+*/
+static b32 doc_apply(struct doc address_to doc, struct doc_edit address_to edits, positive count, p8 kind, p32 typed)
+{
+        b32 done = true, placed = count == doc->selection_count && count, changes = false;
+
+        for (positive i = 0; i < count; i++)
+        {
+                if (doc_readonly(doc, edits[i].at, edits[i].removed))
+                        return false;
+                placed = placed && edits[i].anchor != DOC_NONE;
+                changes = changes || edits[i].removed || edits[i].length;
+        }
+        /*
+                An edit list that changes no text begins no group. Beginning one drops the redo at once, so a Delete at
+                the end of the text threw away what an undo had given back, and the group was then dropped as no change.
+        */
+        if (changes && !doc_group_begin(doc, kind, typed))
+                return false;
+        for (positive i = count; changes && i--;)
+                if (!doc_replace(doc, edits[i].at, edits[i].removed, edits[i].text, edits[i].length))
+                        done = false;
+        if (placed)
+        {
+                p64 delta = 0;
+
+                for (positive i = 0; i < count; i++)
+                {
+                        doc->selections[i].anchor = edits[i].at + delta + edits[i].anchor;
+                        doc->selections[i].active = edits[i].at + delta + edits[i].active;
+                        doc->selections[i].goal = -1;
+                        delta += edits[i].length - edits[i].removed;
+                }
+        }
+        else
+                for (positive s = 0; s < doc->selection_count; s++)
+                {
+                        struct doc_selection address_to sel = &doc->selections[s];
+                        b32 caret = sel->anchor == sel->active, forward = sel->anchor <= sel->active;
+                        p64 start = doc_map(doc_sel_start(sel), edits, count, caret);
+                        p64 finish = doc_map(doc_sel_end(sel), edits, count, true);
+
+                        sel->anchor = forward ? start : finish;
+                        sel->active = forward ? finish : start;
+                        if (caret)
+                                sel->anchor = sel->active = finish;
+                }
+        doc_normalize(doc);
+        if (changes)
+                doc_group_end(doc, typed);
+        return done;
+}
+
+// Room for an edit list of count, kept between calls.
+static struct doc_edit address_to doc_edits_room(positive count)
+{
+        static struct doc_edit address_to room;
+        static positive held;
+
+        if (!array_store_reserve(room, held, 0, count ? count : 1, 64))
+                return null;
+        return room;
+}
+
+// Bytes kept between calls for the texts of an edit list.
+static p8 address_to doc_bytes_room(positive count)
+{
+        static p8 address_to room;
+        static positive held;
+
+        if (!array_store_reserve(room, held, 0, count ? count : 1, 4096))
+                return null;
+        return room;
+}
+
+static b32 doc_any_selected(const struct doc address_to doc)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+                if (doc->selections[s].anchor != doc->selections[s].active)
+                        return true;
+        return false;
+}
+
+static const char doc_opens[] = "([{\"'`", doc_closes[] = ")]}\"'`";
+
+// Text put round every selection: open before, close after, the selections kept on the text between.
+static b32 doc_surround(struct doc address_to doc, p8 open, p8 close)
+{
+        positive count = doc->selection_count;
+        struct doc_edit address_to edits = doc_edits_room(count * 2);
+        static p8 pair[2];
+
+        if (!edits)
+                return false;
+        pair[0] = open, pair[1] = close;
+        for (positive s = 0; s < count; s++)
+        {
+                edits[s * 2] = (struct doc_edit){doc_sel_start(&doc->selections[s]), 0, &pair[0], 1, DOC_NONE, DOC_NONE};
+                edits[s * 2 + 1] = (struct doc_edit){doc_sel_end(&doc->selections[s]), 0, &pair[1], 1, DOC_NONE, DOC_NONE};
+        }
+        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
+                return false;
+        {
+                b32 done;
+                struct doc_selection address_to before = null;
+                positive room = 0;
+
+                if (!array_store_reserve(before, room, 0, count, 16))
+                {
+                        doc_group_end(doc, 0);
+                        return false;
+                }
+                memory_copy(before, doc->selections, count * sizeof(*before));
+                done = doc_apply(doc, edits, count * 2, DOC_KIND_OTHER, 0);
+                // Each selection on its text, one further on for every opener before it and its own.
+                if (doc->selection_count == count)
+                        for (positive s = 0; s < count; s++)
+                        {
+                                b32 forward = before[s].anchor <= before[s].active;
+                                p64 start = doc_sel_start(&before[s]) + 2 * s + 1, finish = doc_sel_end(&before[s]) + 2 * s + 1;
+
+                                doc->selections[s].anchor = forward ? start : finish;
+                                doc->selections[s].active = forward ? finish : start;
+                        }
+                array_store_release(before, room, count);
+                doc_group_end(doc, 0);
+                doc_seal(doc);
+                return done;
+        }
+}
+
+/*
+        Text typed at every selection: each selection's text replaced, the caret after it. Overwrite takes the cluster
+        after a caret. With auto_close, a bracket or quote typed at a caret puts its closer after it when what follows
+        is a blank, a closer or the end (a quote after a letter is an apostrophe and does not), around a selection it
+        wraps it, and a closer typed where auto_close put one steps over it.
+*/
+static b32 doc_type(struct doc address_to doc, const p8 address_to text, p64 length)
+{
+        struct doc_edit address_to edits;
+        p32 typed = length == 1 ? text[0] : length ? 'a' : 0;
+        const char address_to open = length == 1 && doc->auto_close ? memory_first_of((address_any)doc_opens, (b8)text[0], 6) : null;
+        const char address_to close = length == 1 && doc->auto_close ? memory_first_of((address_any)doc_closes, (b8)text[0], 6) : null;
+        static p8 pair[2];
+
+        if (!length)
+                return true;
+        if (close && doc->closer_count && !doc_any_selected(doc))
+        {
+                b32 all = true;
+
+                for (positive s = 0; s < doc->selection_count && all; s++)
+                {
+                        b32 found = false;
+
+                        for (p32 c = 0; c < doc->closer_count; c++)
+                                found |= doc->closers[c] == doc->selections[s].active;
+                        all = found && doc_byte(doc, doc->selections[s].active) == text[0];
+                }
+                if (all)
+                {
+                        for (positive s = 0; s < doc->selection_count; s++)
+                                doc->selections[s].anchor = ++doc->selections[s].active;
+                        doc->closer_count = 0;
+                        doc_seal(doc);
+                        return true;
+                }
+        }
+        if (open && doc_any_selected(doc))
+                return doc_surround(doc, (p8)*open, (p8)doc_closes[open - doc_opens]);
+        edits = doc_edits_room(doc->selection_count);
+        if (!edits)
+                return false;
+        pair[0] = open ? (p8)*open : 0;
+        pair[1] = open ? (p8)doc_closes[open - doc_opens] : 0;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                const struct doc_selection address_to sel = &doc->selections[s];
+                p64 start = doc_sel_start(sel), finish = doc_sel_end(sel);
+                struct doc_edit edit = {start, finish - start, text, length, length, length};
+
+                if (doc->overwrite && start == finish && start < doc_length(doc) && doc_byte(doc, start) != '\n' &&
+                    doc_byte(doc, start) != '\r')
+                        edit.removed = doc_cluster_end(doc, start) - start;
+                if (open && start == finish)
+                {
+                        p32 next = doc_byte(doc, finish), before = start ? doc_byte(doc, start - 1) : ' ';
+                        b32 quote = *open == '"' || *open == '\'' || *open == '`';
+                        b32 room = next == 0x100 || next == ' ' || next == '\t' || next == '\n' || next == '\r' ||
+                                   memory_first_of((address_any)doc_closes, (b8)next, 3) != null;
+
+                        if (quote && (byte_is_alpha((b8)before) || byte_is_digit((b8)before) || before == '_' || before >= 0x80))
+                                room = false;
+                        // A quote typed before the same quote steps over it, as a closer does.
+                        if (room)
+                        {
+                                edit.text = pair;
+                                edit.length = 2;
+                                edit.anchor = edit.active = 1;
+                        }
+                }
+                edits[s] = edit;
+        }
+        if (!doc_apply(doc, edits, doc->selection_count, DOC_KIND_TYPING, typed))
+                return false;
+        if (open)
+        {
+                doc->closer_count = 0;
+                for (positive s = 0; s < doc->selection_count && doc->closer_count < 8; s++)
+                        if (doc->selections[s].active && doc_byte(doc, doc->selections[s].active) == pair[1] &&
+                            doc_byte(doc, doc->selections[s].active - 1) == pair[0])
+                                doc->closers[doc->closer_count++] = doc->selections[s].active;
+        }
+        return true;
+}
+
+/*
+        Text pasted, which may hold line ends: they are made the file's when normalize_paste says so (a field makes
+        them blanks), and when there are as many lines as carets each caret takes one (VS Code's multi-cursor paste).
+*/
+static b32 doc_paste(struct doc address_to doc, const p8 address_to text, p64 length)
+{
+        p8 address_to made = null;
+        positive made_room = 0, made_length = 0, eol_length = doc_eol_length(doc), lines = 1;
+        const char address_to eol = doc_eol_text(doc);
+        struct doc_edit address_to edits;
+        b32 done;
+
+        if (doc->normalize_paste || doc->single_line)
+        {
+                for (p64 at = 0; at < length; at++)
+                {
+                        if (!array_store_reserve(made, made_room, made_length, made_length + eol_length + 1, 4096))
+                        {
+                                array_store_release(made, made_room, made_length);
+                                return false;
+                        }
+                        if (text[at] != '\n' && text[at] != '\r')
+                        {
+                                made[made_length++] = text[at];
+                                continue;
+                        }
+                        if (text[at] == '\r' && at + 1 < length && text[at + 1] == '\n')
+                                at++;
+                        if (doc->single_line)
+                                made[made_length++] = ' ';
+                        else
+                                memory_copy(made + made_length, eol, eol_length), made_length += eol_length;
+                }
+                text = made, length = made_length;
+        }
+        edits = doc_edits_room(doc->selection_count);
+        if (!edits)
+        {
+                array_store_release(made, made_room, made_length);
+                return false;
+        }
+        if (doc->selection_count > 1)
+        {
+                for (p64 at = 0; at + eol_length <= length; at++)
+                        if (!memory_compare(text + at, eol, eol_length))
+                                lines++, at += eol_length - 1;
+                if (length >= eol_length && !memory_compare(text + length - eol_length, eol, eol_length))
+                        lines--;
+        }
+        doc_seal(doc);
+        if (doc->selection_count > 1 && lines == doc->selection_count)
+        {
+                p64 from = 0;
+
+                for (positive s = 0; s < lines; s++)
+                {
+                        p64 to = from;
+
+                        while (to < length && (to + eol_length > length || memory_compare(text + to, eol, eol_length)))
+                                to++;
+                        edits[s] = (struct doc_edit){doc_sel_start(&doc->selections[s]),
+                                                     doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]),
+                                                     text + from, to - from, to - from, to - from};
+                        from = to + eol_length;
+                }
+        }
+        else
+                for (positive s = 0; s < doc->selection_count; s++)
+                        edits[s] = (struct doc_edit){doc_sel_start(&doc->selections[s]),
+                                                     doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]), text,
+                                                     length, length, length};
+        done = doc_apply(doc, edits, doc->selection_count, DOC_KIND_OTHER, 0);
+        doc_seal(doc);
+        doc->closer_count = 0;
+        array_store_release(made, made_room, made_length);
+        return done;
+}
+
+// The selected text of every selection, joined by the file's line end, into a buffer the caller releases with
+// array_store_release: its length, 0 and nothing kept when nothing is selected or there is no memory.
+static positive doc_copy_text(const struct doc address_to doc, p8 address_to address_to into, positive address_to room)
+{
+        positive length = 0, eol_length = doc_eol_length(doc);
+        const char address_to eol = doc_eol_text(doc);
+
+        *into = null;
+        *room = 0;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
+
+                if (start == finish)
+                        continue;
+                if (!array_store_reserve(*into, *room, length, length + (finish - start) + eol_length, 4096))
+                {
+                        array_store_release(*into, *room, length);
+                        return 0;
+                }
+                if (length)
+                        memory_copy(*into + length, eol, eol_length), length += eol_length;
+                length += doc_read(doc, start, *into + length, (positive)(finish - start));
+        }
+        return length;
+}
+
+// Every selection's text taken out.
+static b32 doc_erase_selections(struct doc address_to doc)
+{
+        struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
+
+        if (!edits)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
+
+                edits[s] = (struct doc_edit){start, finish - start, null, 0, 0, 0};
+        }
+        doc_seal(doc);
+        return doc_apply(doc, edits, doc->selection_count, DOC_KIND_OTHER, 0);
+}
+
+// How far a delete reaches: a cluster, a word, to the line's start or end.
+#define DOC_REACH_CLUSTER 0
+#define DOC_REACH_WORD 1
+#define DOC_REACH_LINE 2
+
+/*
+        Backspace (forward false) or Delete at every caret, by reach; selections are taken out instead. Backspace in
+        an indent of spaces goes back to the stop before; between a pair auto_close made it takes both.
+*/
+static b32 doc_delete(struct doc address_to doc, b32 forward, p32 reach)
+{
+        struct doc_edit address_to edits;
+        positive kept = 0;
+
+        if (doc_any_selected(doc))
+                return doc_erase_selections(doc);
+        edits = doc_edits_room(doc->selection_count);
+        if (!edits)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 at = doc->selections[s].active, other, line = doc_line_of(doc, at), line_start = doc_line_start(doc, line);
+
+                if (forward)
+                        other = reach == DOC_REACH_WORD ? doc_word_right(doc, at)
+                                : reach == DOC_REACH_LINE && doc_line_end(doc, line) > at ? doc_line_end(doc, line)
+                                                                                         : doc_cluster_end(doc, at);
+                else if (reach == DOC_REACH_WORD)
+                        other = doc_word_left(doc, at);
+                else if (reach == DOC_REACH_LINE)
+                        other = at > line_start ? line_start : doc_cluster_start(doc, at);
+                else
+                {
+                        other = doc_backspace_start(doc, at);
+                        if (doc->insert_spaces && at > line_start && doc_first_text(doc, line) >= at && doc_byte(doc, at - 1) == ' ')
+                                other = line_start + (at - line_start - 1) / doc->tab_size * doc->tab_size;
+                        if (doc->auto_close && other + 1 == at && at < doc_length(doc))
+                        {
+                                p32 before = doc_byte(doc, other), after = doc_byte(doc, at);
+                                const char address_to which = memory_first_of((address_any)doc_opens, (b8)before, 6);
+
+                                for (p32 c = 0; which && c < doc->closer_count; c++)
+                                        if (doc->closers[c] == at && after == (p8)doc_closes[which - doc_opens])
+                                        {
+                                                edits[kept++] = (struct doc_edit){other, 2, null, 0, 0, 0};
+                                                other = DOC_NONE;
+                                                break;
+                                        }
+                                if (other == DOC_NONE)
+                                        continue;
+                        }
+                }
+                if (kept && (forward ? at : other) < edits[kept - 1].at + edits[kept - 1].removed)
+                {
+                        // Two carets that reach into each other's deletes are one delete.
+                        p64 finish = forward ? other : at;
+
+                        if (finish > edits[kept - 1].at + edits[kept - 1].removed)
+                                edits[kept - 1].removed = finish - edits[kept - 1].at;
+                        continue;
+                }
+                edits[kept++] = forward ? (struct doc_edit){at, other - at, null, 0, 0, 0}
+                                        : (struct doc_edit){other, at - other, null, 0, 0, 0};
+        }
+        if (kept != doc->selection_count)
+                for (positive k = 0; k < kept; k++)
+                        edits[k].anchor = edits[k].active = DOC_NONE;
+        return doc_apply(doc, edits, kept, forward ? DOC_KIND_FORWARD : DOC_KIND_BACK, 0);
+}
+
+// The leading blanks of line, at most room bytes of them: how many.
+static positive doc_indent_of(const struct doc address_to doc, p64 line, p8 address_to into, positive room)
+{
+        p64 start = doc_line_start(doc, line), finish = doc_first_text(doc, line);
+
+        return doc_read(doc, start, into, finish - start < room ? (positive)(finish - start) : room);
+}
+
+/*
+        Enter at every caret: the file's line end and the line's indent, one stop more after an opening bracket, and
+        between a pair of brackets the closer on a line of its own after the caret's. A field takes none.
+*/
+static b32 doc_newline(struct doc address_to doc)
+{
+        struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
+        positive used = 0, eol_length = doc_eol_length(doc), most = doc->selection_count * (2 * eol_length + 2 * 256 + 64);
+        const char address_to eol = doc_eol_text(doc);
+        p8 address_to texts = doc_bytes_room(most);
+
+        if (doc->single_line)
+                return false;
+        if (!edits || !texts)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                const struct doc_selection address_to sel = &doc->selections[s];
+                p64 start = doc_sel_start(sel), finish = doc_sel_end(sel), line = doc_line_of(doc, start);
+                p8 indent[256];
+                positive indent_length = doc_indent_of(doc, line, indent, sizeof(indent)), from = used, caret;
+                p32 before = start ? doc_byte(doc, start - 1) : 0, after = doc_byte(doc, finish);
+                b32 opened = before == '{' || before == '(' || before == '[';
+                b32 between = (before == '{' && after == '}') || (before == '(' && after == ')') || (before == '[' && after == ']');
+
+                if (start - doc_line_start(doc, line) < indent_length)
+                        indent_length = (positive)(start - doc_line_start(doc, line));
+                memory_copy(texts + used, eol, eol_length), used += eol_length;
+                memory_copy(texts + used, indent, indent_length), used += indent_length;
+                if (opened)
+                {
+                        if (doc->insert_spaces)
+                                for (p32 i = 0; i < doc->tab_size && i < 16; i++)
+                                        texts[used++] = ' ';
+                        else
+                                texts[used++] = '\t';
+                }
+                caret = used - from;
+                if (between)
+                {
+                        memory_copy(texts + used, eol, eol_length), used += eol_length;
+                        memory_copy(texts + used, indent, indent_length), used += indent_length;
+                }
+                edits[s] = (struct doc_edit){start, finish - start, texts + from, used - from, caret, caret};
+        }
+        doc->closer_count = 0;
+        return doc_apply(doc, edits, doc->selection_count, DOC_KIND_TYPING, '\n');
+}
+
+/*
+        The lines the selections touch, as runs of whole lines: the first and last line of each, a selection ending at
+        a line's very start not taking that line, runs that meet joined. How many, into room of them.
+*/
+static positive doc_line_runs(const struct doc address_to doc, p64 (address_to runs)[2], positive room)
+{
+        positive count = 0;
+
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                const struct doc_selection address_to sel = &doc->selections[s];
+                p64 first = doc_line_of(doc, doc_sel_start(sel)), last = doc_line_of(doc, doc_sel_end(sel));
+
+                if (last > first && doc_line_start(doc, last) == doc_sel_end(sel))
+                        last--;
+                if (count && first <= runs[count - 1][1] + 1)
+                {
+                        if (last > runs[count - 1][1])
+                                runs[count - 1][1] = last;
+                        continue;
+                }
+                if (count == room)
+                        break;
+                runs[count][0] = first;
+                runs[count][1] = last;
+                count++;
+        }
+        return count;
+}
+
+static p64 (address_to doc_runs_room(positive count))[2]
+{
+        static p64 (address_to room)[2];
+        static positive held;
+
+        if (!array_store_reserve(room, held, 0, count ? count : 1, 64))
+                return null;
+        return room;
+}
+
+// Every line the selections touch indented by one stop, or outdented by one (a tab, or up to a stop of spaces).
+static b32 doc_indent(struct doc address_to doc, b32 outdent)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, edit_count = 0, lines = 0;
+        struct doc_edit address_to edits;
+        static p8 stop[64];
+
+        for (positive r = 0; r < count; r++)
+                lines += runs[r][1] - runs[r][0] + 1;
+        edits = doc_edits_room(lines);
+        if (!edits || !runs)
+                return false;
+        memory_fill(stop, ' ', sizeof(stop));
+        stop[0] = doc->insert_spaces ? ' ' : '\t';
+        for (positive r = 0; r < count; r++)
+                for (p64 line = runs[r][0]; line <= runs[r][1]; line++)
+                {
+                        p64 start = doc_line_start(doc, line), finish = doc_line_end(doc, line), at = start;
+
+                        if (!outdent)
+                        {
+                                if (finish == start && runs[r][0] != runs[r][1])
+                                        continue;
+                                edits[edit_count++] =
+                                    (struct doc_edit){start, 0, stop, doc->insert_spaces ? (doc->tab_size < 64 ? doc->tab_size : 64) : 1,
+                                                      DOC_NONE, DOC_NONE};
+                                continue;
+                        }
+                        if (at < finish && doc_byte(doc, at) == '\t')
+                                at++;
+                        else
+                                while (at < finish && at - start < doc->tab_size && doc_byte(doc, at) == ' ')
+                                        at++;
+                        if (at > start)
+                                edits[edit_count++] = (struct doc_edit){start, at - start, null, 0, DOC_NONE, DOC_NONE};
+                }
+        doc_seal(doc);
+        return doc_apply(doc, edits, edit_count, DOC_KIND_OTHER, 0);
+}
+
+/*
+        The text of lines first to last as a block that ends in a line end: the last line's own, or the file's when
+        the last line is the file's and has none (had_end says which). Into bytes from at: its length.
+*/
+static positive doc_block(const struct doc address_to doc, p64 first, p64 last, p8 address_to into, b32 address_to had_end)
+{
+        p64 start = doc_line_start(doc, first), finish = doc_line_start(doc, last + 1);
+        positive length = doc_read(doc, start, into, (positive)(finish - start));
+
+        *had_end = last + 1 < doc_line_count(doc);
+        if (!*had_end)
+        {
+                memory_copy(into + length, doc_eol_text(doc), doc_eol_length(doc));
+                length += doc_eol_length(doc);
+        }
+        return length;
+}
+
+// The length of a block's last line end.
+static positive doc_block_eol(const p8 address_to block, positive length)
+{
+        if (length >= 2 && block[length - 2] == '\r' && block[length - 1] == '\n')
+                return 2;
+        return length && (block[length - 1] == '\n' || block[length - 1] == '\r') ? 1 : 0;
+}
+
+/*
+        The lines the selections touch moved up (down false) or down past the line beside them: the run and that line
+        swapped as one replace, each selection going with its run. Nothing moves when a run is at the edge. The file's
+        last line has no line end, so when it is in a swap the line ends are given and taken to keep it so.
+*/
+static b32 doc_move_lines(struct doc address_to doc, b32 down)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, used = 0, total = 0;
+        struct doc_edit address_to edits = doc_edits_room(count);
+        p64 lines = doc_line_count(doc), delta = 0;
+        p8 address_to texts;
+        struct doc_selection address_to before = null;
+        positive before_room = 0, n = doc->selection_count;
+        p64 run_old[64], run_new[64];
+        b32 done;
+
+        if (!edits || !count || count > 64)
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                if (down ? runs[r][1] + 1 >= lines : runs[r][0] == 0)
+                        return false;
+                total += doc_line_start(doc, runs[r][1] + 2) - doc_line_start(doc, runs[r][0] - (down ? 0 : 1)) + 4;
+        }
+        texts = doc_bytes_room(total);
+        if (!texts || !array_store_reserve(before, before_room, 0, n, 16))
+                return false;
+        memory_copy(before, doc->selections, n * sizeof(*before));
+        for (positive r = 0; r < count; r++)
+        {
+                p64 run_first = runs[r][0], run_last = runs[r][1];
+                p64 other = down ? run_last + 1 : run_first - 1;
+                p64 first = down ? run_first : other, last = down ? other : run_last;
+                p64 start = doc_line_start(doc, first), finish = doc_line_start(doc, last + 1);
+                b32 run_end, other_end, ends_file = last + 1 >= lines;
+                positive run_length, other_length;
+
+                // The two blocks laid side by side in their new order, each ending in a line end, and the very last
+                // line end taken off again when the swap ends the file.
+                {
+                        p8 address_to scratch = texts + used;
+                        positive put = 0;
+
+                        if (down)
+                        {
+                                other_length = doc_block(doc, other, other, scratch, &other_end);
+                                put += other_length;
+                                run_new[r] = put;
+                                run_length = doc_block(doc, run_first, run_last, scratch + put, &run_end);
+                                put += run_length;
+                        }
+                        else
+                        {
+                                run_new[r] = 0;
+                                run_length = doc_block(doc, run_first, run_last, scratch, &run_end);
+                                put += run_length;
+                                other_length = doc_block(doc, other, other, scratch + put, &other_end);
+                                put += other_length;
+                        }
+                        if (ends_file)
+                                put -= doc_block_eol(scratch, put);
+                        used += put;
+                        run_old[r] = doc_line_start(doc, run_first);
+                        edits[r] = (struct doc_edit){start, finish - start, scratch, put, DOC_NONE, DOC_NONE};
+                }
+        }
+        doc_seal(doc);
+        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
+        {
+                array_store_release(before, before_room, n);
+                return false;
+        }
+        done = doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
+        if (done)
+        {
+                // Each selection where its run went, its place in the run kept.
+                positive r = 0;
+
+                for (positive s = 0; s < n; s++)
+                {
+                        while (r + 1 < count && doc_sel_start(&before[s]) >= run_old[r + 1])
+                                r++;
+                        delta = 0;
+                        for (positive k = 0; k < r; k++)
+                                delta += edits[k].length - edits[k].removed;
+                        before[s].anchor = edits[r].at + delta + run_new[r] + (before[s].anchor - run_old[r]);
+                        before[s].active = edits[r].at + delta + run_new[r] + (before[s].active - run_old[r]);
+                }
+                memory_copy(doc->selections, before, n * sizeof(*before));
+                doc->selection_count = n;
+                doc_normalize(doc);
+        }
+        doc_group_end(doc, 0);
+        doc_seal(doc);
+        array_store_release(before, before_room, n);
+        return done;
+}
+
+// The lines the selections touch copied below themselves (above false), the selections on the copy below.
+static b32 doc_duplicate_lines(struct doc address_to doc, b32 above)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, used = 0, total = 0;
+        struct doc_edit address_to edits = doc_edits_room(count);
+        p64 lines = doc_line_count(doc);
+        p8 address_to texts;
+        struct doc_selection address_to before = null;
+        positive before_room = 0, n = doc->selection_count;
+        p64 shift[64], run_old[64];
+        b32 done;
+
+        if (!edits || !count || count > 64)
+                return false;
+        for (positive r = 0; r < count; r++)
+                total += doc_line_start(doc, runs[r][1] + 1) - doc_line_start(doc, runs[r][0]) + 4;
+        texts = doc_bytes_room(total);
+        if (!texts || !array_store_reserve(before, before_room, 0, n, 16))
+                return false;
+        memory_copy(before, doc->selections, n * sizeof(*before));
+        for (positive r = 0; r < count; r++)
+        {
+                b32 had_end;
+                positive length = doc_block(doc, runs[r][0], runs[r][1], texts + used, &had_end);
+                p64 start = doc_line_start(doc, runs[r][0]);
+
+                run_old[r] = start;
+                if (above || had_end)
+                {
+                        // The copy before the run: the run itself moves down by the copy, and the selections stay on it
+                        // when copying up, or follow to the lower one when copying down.
+                        edits[r] = (struct doc_edit){start, 0, texts + used, length, DOC_NONE, DOC_NONE};
+                        shift[r] = above ? 0 : length;
+                }
+                else
+                {
+                        // The file's last line copied down: a line end and the copy after it.
+                        p8 address_to block = texts + used;
+                        positive eol = doc_block_eol(block, length);
+
+                        memory_copy(block + eol, block, length - eol);
+                        memory_copy(block, doc_eol_text(doc), eol);
+                        edits[r] = (struct doc_edit){doc_length(doc), 0, block, length, DOC_NONE, DOC_NONE};
+                        shift[r] = doc_length(doc) - start + eol;
+                }
+                used += length;
+                (void)lines;
+        }
+        doc_seal(doc);
+        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
+        {
+                array_store_release(before, before_room, n);
+                return false;
+        }
+        done = doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
+        if (done)
+        {
+                positive r = 0;
+                p64 delta = 0;
+
+                for (positive s = 0; s < n; s++)
+                {
+                        while (r + 1 < count && doc_sel_start(&before[s]) >= run_old[r + 1])
+                                r++;
+                        delta = 0;
+                        for (positive k = 0; k < r; k++)
+                                delta += edits[k].length;
+                        before[s].anchor += delta + shift[r];
+                        before[s].active += delta + shift[r];
+                }
+                memory_copy(doc->selections, before, n * sizeof(*before));
+                doc->selection_count = n;
+                doc_normalize(doc);
+        }
+        doc_group_end(doc, 0);
+        doc_seal(doc);
+        array_store_release(before, before_room, n);
+        return done;
+}
+
+// The lines the selections touch taken out whole, each caret on the line that comes up at its column's start.
+static b32 doc_delete_lines(struct doc address_to doc)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0;
+        struct doc_edit address_to edits = doc_edits_room(count);
+        p64 lines = doc_line_count(doc);
+
+        if (!edits || !count)
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                p64 start = doc_line_start(doc, runs[r][0]), finish = doc_line_start(doc, runs[r][1] + 1);
+
+                // The file's last lines: the line end before them goes, not one after.
+                if (runs[r][1] + 1 >= lines && runs[r][0] > 0)
+                        start = doc_line_end(doc, runs[r][0] - 1);
+                edits[r] = (struct doc_edit){start, finish - start, null, 0, DOC_NONE, DOC_NONE};
+        }
+        doc_seal(doc);
+        if (count == doc->selection_count)
+                for (positive r = 0; r < count; r++)
+                        edits[r].anchor = edits[r].active = 0;
+        return doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
+}
+
+/*
+        Lines joined: a caret's line with the next, a selection's lines with each other, the line end and the next
+        line's leading blanks made one blank (none when either side is empty or already ends in one).
+*/
+static b32 doc_join_lines(struct doc address_to doc)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, edit_count = 0, total = 0;
+        struct doc_edit address_to edits;
+        static const p8 blank = ' ';
+        p64 lines = doc_line_count(doc);
+
+        for (positive r = 0; r < count; r++)
+                total += runs[r][1] - runs[r][0] + 1;
+        edits = doc_edits_room(total);
+        if (!edits || !runs)
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                p64 last = runs[r][1] > runs[r][0] ? runs[r][1] : runs[r][0] + 1;
+
+                for (p64 line = runs[r][0]; line < last && line + 1 < lines; line++)
+                {
+                        p64 finish = doc_line_end(doc, line), next = doc_first_text(doc, line + 1);
+                        b32 empty_next = next == doc_line_end(doc, line + 1);
+                        p32 before = finish > doc_line_start(doc, line) ? doc_byte(doc, finish - 1) : ' ';
+
+                        edits[edit_count++] = (struct doc_edit){finish, next - finish, &blank, empty_next || before == ' ' || before == '\t' ? 0 : 1,
+                                                                DOC_NONE, DOC_NONE};
+                }
+        }
+        doc_seal(doc);
+        return doc_apply(doc, edits, edit_count, DOC_KIND_OTHER, 0);
+}
+
+// The clusters either side of each caret swapped (at a line's end, the two before it), the caret after them.
+static b32 doc_transpose(struct doc address_to doc)
+{
+        struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
+        positive kept = 0;
+        p8 address_to texts = doc_bytes_room(doc->selection_count * 128);
+
+        if (!edits || !texts)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 at = doc->selections[s].active, line = doc_line_of(doc, at), a, b, c;
+
+                if (doc->selections[s].anchor != at)
+                        continue;
+                if (at == doc_line_end(doc, line))
+                        at = doc_cluster_start(doc, at);
+                if (at <= doc_line_start(doc, line) || at >= doc_line_end(doc, line))
+                        continue;
+                a = doc_cluster_start(doc, at), b = at, c = doc_cluster_end(doc, at);
+                if (c - a > 128 || (kept && a < edits[kept - 1].at + edits[kept - 1].removed))
+                        continue;
+                doc_read(doc, b, texts + s * 128, (positive)(c - b));
+                doc_read(doc, a, texts + s * 128 + (c - b), (positive)(b - a));
+                edits[kept++] = (struct doc_edit){a, c - a, texts + s * 128, c - a, DOC_NONE, DOC_NONE};
+        }
+        if (!kept)
+                return false;
+        doc_seal(doc);
+        return doc_apply(doc, edits, kept, DOC_KIND_OTHER, 0);
+}
+
+// A line put above (or below) each caret's line with its indent, the caret on it.
+static b32 doc_insert_line(struct doc address_to doc, b32 above)
+{
+        struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
+        p8 address_to texts = doc_bytes_room(doc->selection_count * 260);
+        positive kept = 0, eol_length = doc_eol_length(doc);
+
+        if (!edits || !texts || doc->single_line)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 line = doc_line_of(doc, doc->selections[s].active);
+                p8 address_to text = texts + s * 260;
+                positive indent = doc_indent_of(doc, line, above ? text : text + eol_length, 250);
+
+                if (kept && doc_line_of(doc, edits[kept - 1].at) == line)
+                        continue;
+                if (above)
+                {
+                        memory_copy(text + indent, doc_eol_text(doc), eol_length);
+                        edits[kept++] = (struct doc_edit){doc_line_start(doc, line), 0, text, indent + eol_length, indent, indent};
+                }
+                else
+                {
+                        memory_copy(text, doc_eol_text(doc), eol_length);
+                        edits[kept++] = (struct doc_edit){doc_line_end(doc, line), 0, text, indent + eol_length,
+                                                          indent + eol_length, indent + eol_length};
+                }
+        }
+        if (kept != doc->selection_count)
+                for (positive k = 0; k < kept; k++)
+                        edits[k].anchor = edits[k].active = DOC_NONE;
+        doc_seal(doc);
+        return doc_apply(doc, edits, kept, DOC_KIND_OTHER, 0);
+}
+
+/*
+        A line comment of prefix put on or taken off every line the selections touch: taken off when every line that
+        has text has it after its indent (with one blank after it, when there is one), put on at the least indent of
+        them otherwise. Lines of blanks are left alone.
+*/
+static b32 doc_comment(struct doc address_to doc, const char address_to prefix)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, lines = 0, edit_count = 0;
+        positive size = prefix ? string_length((string_address)prefix) : 0;
+        struct doc_edit address_to edits;
+        static p8 with_blank[16];
+
+        if (!size || size > 14)
+                return false;
+        for (positive r = 0; r < count; r++)
+                lines += runs[r][1] - runs[r][0] + 1;
+        edits = doc_edits_room(lines);
+        if (!edits || !runs)
+                return false;
+        memory_copy(with_blank, prefix, size);
+        with_blank[size] = ' ';
+        for (positive r = 0; r < count; r++)
+        {
+                p64 least = DOC_NONE;
+                b32 all = true;
+
+                for (p64 line = runs[r][0]; line <= runs[r][1] && all; line++)
+                {
+                        p64 text = doc_first_text(doc, line);
+                        p8 head[16];
+
+                        if (text == doc_line_end(doc, line))
+                                continue;
+                        all = doc_read(doc, text, head, size) == size && !memory_compare(head, prefix, size);
+                }
+                for (p64 line = runs[r][0]; line <= runs[r][1]; line++)
+                {
+                        p64 text = doc_first_text(doc, line), indent = text - doc_line_start(doc, line);
+
+                        if (text != doc_line_end(doc, line) && indent < least)
+                                least = indent;
+                }
+                for (p64 line = runs[r][0]; line <= runs[r][1] && least != DOC_NONE; line++)
+                {
+                        p64 text = doc_first_text(doc, line);
+
+                        if (text == doc_line_end(doc, line))
+                                continue;
+                        if (!all)
+                                edits[edit_count++] = (struct doc_edit){doc_line_start(doc, line) + least, 0, with_blank, size + 1, DOC_NONE, DOC_NONE};
+                        else
+                                edits[edit_count++] = (struct doc_edit){text, size + (doc_byte(doc, text + size) == ' '), null, 0, DOC_NONE, DOC_NONE};
+                }
+        }
+        doc_seal(doc);
+        return doc_apply(doc, edits, edit_count, DOC_KIND_OTHER, 0);
+}
+
+// The case of every selection (a caret: the word at it) changed: upper, lower, or title (a word's first letter up).
+#define DOC_CASE_UPPER 0
+#define DOC_CASE_LOWER 1
+#define DOC_CASE_TITLE 2
+
+static b32 doc_case(struct doc address_to doc, p32 mode)
+{
+        struct doc_edit address_to edits = doc_edits_room(doc->selection_count);
+        positive total = 0, used = 0;
+        p8 address_to texts;
+        b32 done;
+
+        if (!edits)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
+
+                if (start == finish)
+                        doc_word_at(doc, start, &start, &finish);
+                edits[s] = (struct doc_edit){start, finish - start, null, 0, 0, finish - start};
+                total += (finish - start) * 2 + 4;
+        }
+        texts = doc_bytes_room(total);
+        if (!texts)
+                return false;
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p8 address_to from = texts + used + edits[s].removed + 4;
+                positive length = doc_read(doc, edits[s].at, from, (positive)edits[s].removed), out = 0;
+                b32 word_start = true;
+
+                // Each code point mapped one to one; a byte that is not UTF-8 is kept as it is.
+                for (positive at = 0; at < length;)
+                {
+                        p32 code, size = doc_decode(from + at, length - at, &code), mapped;
+
+                        if (code & DOC_INVALID)
+                        {
+                                texts[used + out++] = from[at++];
+                                word_start = false;
+                                continue;
+                        }
+                        mapped = (p32)unicode_case(code, mode == DOC_CASE_UPPER || (mode == DOC_CASE_TITLE && word_start) ? UNICODE_CASE_UPPER
+                                                                                                                         : UNICODE_CASE_LOWER);
+                        word_start = doc_class(doc, code) != DOC_CLASS_WORD;
+                        // A mapping that would grow past the room the text had is not made.
+                        if (out + 4 > edits[s].removed * 2 + 4)
+                                mapped = code;
+                        out += memory_utf8_encode(texts + used + out, 4, mapped);
+                        at += size;
+                }
+                edits[s].text = texts + used;
+                edits[s].length = out;
+                edits[s].active = out;
+                edits[s].anchor = 0;
+                if (doc_sel_start(&doc->selections[s]) == doc_sel_end(&doc->selections[s]))
+                        edits[s].anchor = edits[s].active = doc->selections[s].active - edits[s].at;
+                used += out;
+        }
+        doc_seal(doc);
+        done = doc_apply(doc, edits, doc->selection_count, DOC_KIND_OTHER, 0);
+        return done;
+}
+
+/*
+        The lines a selection holds sorted, by their bytes (descending when asked), each selection's lines on their
+        own; a selection on one line sorts nothing. Equal lines keep their order.
+*/
+static b32 doc_sort_lines(struct doc address_to doc, b32 descending)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, total = 0, used = 0, edit_count = 0;
+        struct doc_edit address_to edits = doc_edits_room(count);
+        p8 address_to texts;
+        p64 address_to starts = null;
+        positive starts_room = 0;
+
+        if (!edits || !count)
+                return false;
+        for (positive r = 0; r < count; r++)
+                total += doc_line_start(doc, runs[r][1] + 1) - doc_line_start(doc, runs[r][0]) + 4;
+        texts = doc_bytes_room(total * 2);
+        if (!texts)
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                p64 first = runs[r][0], last = runs[r][1], line_count = last - first + 1;
+                p8 address_to block = texts + total + used;
+                b32 had_end;
+                positive length, out = 0;
+
+                if (line_count < 2)
+                        continue;
+                length = doc_block(doc, first, last, block, &had_end);
+                if (!array_store_reserve(starts, starts_room, 0, line_count + 1, 64))
+                        return false;
+                // The lines' starts in the block, sorted by insertion (stable), then laid out again in that order.
+                {
+                        positive n = 0;
+
+                        for (positive at = 0; at < length && n < line_count; n++)
+                        {
+                                starts[n] = at;
+                                while (at < length && block[at] != '\n' && block[at] != '\r')
+                                        at++;
+                                at += at < length ? (block[at] == '\r' && at + 1 < length && block[at + 1] == '\n' ? 2 : 1) : 0;
+                        }
+                        starts[n] = length;
+                        for (positive i = 1; i < n; i++)
+                        {
+                                p64 moving = starts[i];
+                                positive j = i;
+
+                                while (j)
+                                {
+                                        p64 a = starts[j - 1], b = moving;
+                                        positive la = 0, lb = 0;
+                                        b32 cmp;
+
+                                        while (a + la < length && block[a + la] != '\n' && block[a + la] != '\r')
+                                                la++;
+                                        while (b + lb < length && block[b + lb] != '\n' && block[b + lb] != '\r')
+                                                lb++;
+                                        {
+                                                b32 c = memory_compare(block + a, block + b, la < lb ? la : lb);
+
+                                                cmp = c ? c : (b32)(la > lb) - (b32)(la < lb);
+                                        }
+                                        if (descending ? cmp >= 0 : cmp <= 0)
+                                                break;
+                                        starts[j] = starts[j - 1];
+                                        j--;
+                                }
+                                starts[j] = moving;
+                        }
+                        for (positive i = 0; i < n; i++)
+                        {
+                                positive la = 0;
+
+                                while (starts[i] + la < length && block[starts[i] + la] != '\n' && block[starts[i] + la] != '\r')
+                                        la++;
+                                memory_copy(texts + used + out, block + starts[i], la);
+                                out += la;
+                                memory_copy(texts + used + out, doc_eol_text(doc), doc_eol_length(doc));
+                                out += doc_eol_length(doc);
+                        }
+                }
+                if (!had_end)
+                        out -= doc_eol_length(doc);
+                {
+                        p64 start = doc_line_start(doc, first);
+                        p64 finish = had_end ? doc_line_start(doc, last + 1) : doc_length(doc);
+
+                        edits[edit_count++] = (struct doc_edit){start, finish - start, texts + used, out, DOC_NONE, DOC_NONE};
+                }
+                used += out;
+        }
+        {
+                positive none = 0;
+
+                array_store_release(starts, starts_room, none);
+        }
+        if (!edit_count)
+                return false;
+        doc_seal(doc);
+        return doc_apply(doc, edits, edit_count, DOC_KIND_OTHER, 0);
+}
+
+/* ---- moving and selecting ---- */
+
+// Every selection moved by a step: its active end to where step says, the anchor with it unless extend.
+static fn doc_move(struct doc address_to doc, p64 (address_to step)(const struct doc address_to, p64), b32 extend)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+
+                sel->active = step(doc, sel->active);
+                if (!extend)
+                        sel->anchor = sel->active;
+                sel->goal = -1;
+        }
+        doc_normalize(doc);
+        doc_seal(doc);
+        doc->closer_count = 0;
+}
+
+// Every selection collapsed to its end (to_end) or its start, the caret there; a horizontal key also forgets its goal column
+// (reset_goal). The caller normalizes and seals: a vertical key does its walk over the collapsed carets first.
+static fn doc_collapse(struct doc address_to doc, b32 to_end, b32 reset_goal)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+
+                sel->anchor = sel->active = to_end ? doc_sel_end(sel) : doc_sel_start(sel);
+                if (reset_goal)
+                        sel->goal = -1;
+        }
+}
+
+/*
+        Left and Right: a caret steps a cluster; without Shift a selection collapses to the end the key points at
+        rather than stepping.
+*/
+static fn doc_move_horizontal(struct doc address_to doc, b32 right, b32 word, b32 extend)
+{
+        if (!extend && !word && doc_any_selected(doc))
+        {
+                doc_collapse(doc, right, true);
+                doc_normalize(doc);
+                doc_seal(doc);
+                return;
+        }
+        doc_move(doc, word ? (right ? doc_word_right : doc_word_left) : (right ? doc_cluster_end : doc_cluster_start), extend);
+}
+
+// Home: to the line's first text, and from there (or from before it) to the line's start. End: to the line's end.
+static p64 doc_step_home(const struct doc address_to doc, p64 at)
+{
+        p64 line = doc_line_of(doc, at), text = doc_first_text(doc, line);
+
+        return at == text ? doc_line_start(doc, line) : text;
+}
+
+static p64 doc_step_end(const struct doc address_to doc, p64 at)
+{
+        return doc_line_end(doc, doc_line_of(doc, at));
+}
+
+static p64 doc_step_top(const struct doc address_to doc, p64 at)
+{
+        (void)doc, (void)at;
+        return 0;
+}
+
+static p64 doc_step_bottom(const struct doc address_to doc, p64 at)
+{
+        (void)at;
+        return doc_length(doc);
+}
+
+/*
+        Up and Down by lines, in display columns: each caret keeps the column it had when it began going up or down
+        (its goal), so it comes back to it past shorter lines. At the first line Up goes to the start, at the last Down
+        to the end.
+*/
+static fn doc_move_vertical(struct doc address_to doc, b64 lines, b32 extend)
+{
+        p64 count = doc_line_count(doc);
+
+        if (!extend && doc_any_selected(doc) && (lines == 1 || lines == -1))
+                doc_collapse(doc, lines > 0, false);
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+                p64 line = doc_line_of(doc, sel->active);
+                b64 goal = sel->goal >= 0 ? sel->goal : (b64)doc_column(doc, sel->active);
+                b64 target = (b64)line + lines;
+
+                if (target < 0)
+                        sel->active = 0;
+                else if ((p64)target >= count)
+                        sel->active = doc_length(doc);
+                else
+                        sel->active = doc_at_column(doc, (p64)target, (p64)goal);
+                if (!extend)
+                        sel->anchor = sel->active;
+                sel->goal = goal;
+        }
+        doc_normalize(doc);
+        doc_seal(doc);
+        doc->closer_count = 0;
+}
+
+
+// Every selection made whole lines, line ends included; a second press takes the next line too.
+static fn doc_select_lines(struct doc address_to doc)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+                p64 first = doc_line_of(doc, doc_sel_start(sel)), last = doc_line_of(doc, doc_sel_end(sel));
+                p64 start = doc_line_start(doc, first);
+
+                if (doc_sel_end(sel) == doc_line_start(doc, last) && last > first)
+                        last--;
+                if (sel->anchor == start && sel->active == doc_line_start(doc, last + 1) && sel->active > start)
+                        last++;
+                sel->anchor = start;
+                sel->active = doc_line_start(doc, last + 1);
+                if (sel->active == doc_length(doc) && last + 1 >= doc_line_count(doc))
+                        sel->active = doc_length(doc);
+        }
+        doc_normalize(doc);
+        doc_seal(doc);
+}
+
+// Esc: the selections back to the primary alone.
+static fn doc_single(struct doc address_to doc)
+{
+        struct doc_selection primary = doc->selections[doc->primary];
+
+        if (doc->selection_count == 1)
+                primary.anchor = primary.active;
+        doc->selections[0] = primary;
+        doc->selection_count = 1;
+        doc->primary = 0;
+        doc_seal(doc);
+}
+
+/*
+        Brackets: the one that matches the bracket at at (or just before it), counting nesting of its own kind, at
+        most a MiB away. DOC_NONE for none.
+*/
+#define DOC_BRACKET_REACH 1048576u
+
+static p64 doc_match_bracket(const struct doc address_to doc, p64 at)
+{
+        static const char brackets[] = "()[]{}";
+        p64 length = doc_length(doc);
+
+        for (p32 side = 0; side < 2; side++)
+        {
+                p64 here = side ? at - 1 : at;
+                p32 byte = side && !at ? 0x100 : doc_byte(doc, here);
+                const char address_to found = byte < 0x100 ? memory_first_of((address_any)brackets, (b8)byte, 6) : null;
+                p32 depth = 0;
+                b32 forward;
+                p8 open, close;
+
+                if (!found)
+                        continue;
+                forward = !((found - brackets) & 1);
+                open = (p8)brackets[(found - brackets) & ~1];
+                close = (p8)brackets[((found - brackets) & ~1) + 1];
+                for (p64 step = 0; step < DOC_BRACKET_REACH; step++)
+                {
+                        p64 at_now;
+                        p32 now;
+
+                        if (forward ? here + step >= length : step > here)
+                                break;
+                        at_now = forward ? here + step : here - step;
+                        now = doc_byte(doc, at_now);
+                        if (now == open)
+                                depth += forward ? 1 : (p32)-1;
+                        else if (now == close)
+                                depth += forward ? (p32)-1 : 1;
+                        if (!depth)
+                                return at_now;
+                }
+        }
+        return DOC_NONE;
+}
+
+// Every caret to the bracket that matches the one it is at.
+static fn doc_jump_bracket(struct doc address_to doc)
+{
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 match = doc_match_bracket(doc, doc->selections[s].active);
+
+                if (match != DOC_NONE)
+                        doc->selections[s].anchor = doc->selections[s].active = match;
+        }
+        doc_normalize(doc);
+        doc_seal(doc);
+}
+
+/*
+        Expand: a caret to its word, a word to what the brackets round it hold, that to the brackets too, then the line,
+        then everything; shrink goes back the way expand came (only while nothing else moved the selection).
+*/
+static fn doc_expand(struct doc address_to doc)
+{
+        struct doc_selection address_to sel = &doc->selections[doc->primary];
+        p64 start = doc_sel_start(sel), finish = doc_sel_end(sel), length = doc_length(doc);
+        p64 new_start = 0, new_end = length;
+
+        if (doc->expand_version != doc->version || doc->expand_now.anchor != sel->anchor || doc->expand_now.active != sel->active)
+                doc->expand_count = 0;
+        if (start == finish)
+                doc_word_at(doc, start, &new_start, &new_end);
+        if (new_start == start && new_end == finish)
+        {
+                // The innermost brackets round the selection: a walk back for an opener whose closer is past the end.
+                p32 depth[3] = {0, 0, 0};
+
+                new_start = 0, new_end = length;
+                for (p64 at = start; at-- > 0 && start - at < DOC_BRACKET_REACH;)
+                {
+                        p32 byte = doc_byte(doc, at);
+                        const char address_to which = memory_first_of((address_any) "([{)]}", (b8)byte, 6);
+                        p32 kind;
+
+                        if (!which)
+                                continue;
+                        kind = (p32)(which - "([{)]}") % 3;
+                        if (which - "([{)]}" >= 3)
+                                depth[kind]++;
+                        else if (depth[kind])
+                                depth[kind]--;
+                        else
+                        {
+                                p64 match = doc_match_bracket(doc, at);
+
+                                if (match != DOC_NONE && match >= finish)
+                                {
+                                        // The inside first; when that is what is selected already, the brackets too.
+                                        if (at + 1 == start && match == finish)
+                                                new_start = at, new_end = match + 1;
+                                        else
+                                                new_start = at + 1, new_end = match;
+                                        break;
+                                }
+                        }
+                }
+                if (new_start == 0 && new_end == length)
+                {
+                        p64 first = doc_line_of(doc, start), last = doc_line_of(doc, finish);
+
+                        if (start != doc_line_start(doc, first) || finish != doc_line_end(doc, last))
+                                new_start = doc_line_start(doc, first), new_end = doc_line_end(doc, last);
+                }
+        }
+        if (doc->expand_count == DOC_EXPAND)
+        {
+                memory_copy(doc->expanded, doc->expanded + 1, (DOC_EXPAND - 1) * sizeof(doc->expanded[0]));
+                doc->expand_count--;
+        }
+        doc->expanded[doc->expand_count++] = *sel;
+        doc->selections[0] = (struct doc_selection){new_start, new_end, -1};
+        doc->selection_count = 1;
+        doc->primary = 0;
+        doc->expand_now = doc->selections[0];
+        doc->expand_version = doc->version;
+        doc_seal(doc);
+}
+
+// Shrink: back to the selection before the last expand, while nothing else has moved it.
+static fn doc_shrink(struct doc address_to doc)
+{
+        const struct doc_selection address_to sel = &doc->selections[doc->primary];
+
+        if (!doc->expand_count || doc->expand_version != doc->version || sel->anchor != doc->expand_now.anchor ||
+            sel->active != doc->expand_now.active)
+                return;
+        doc->selections[0] = doc->expanded[--doc->expand_count];
+        doc->selections[0].goal = -1;
+        doc->selection_count = 1;
+        doc->primary = 0;
+        doc->expand_now = doc->selections[0];
+        doc_seal(doc);
+}
+
+// A caret added on the line above (or below) each caret at the end of the list in that direction, at its column.
+static fn doc_add_cursor(struct doc address_to doc, b32 below)
+{
+        const struct doc_selection address_to edge = &doc->selections[below ? doc->selection_count - 1 : 0];
+        p64 line = doc_line_of(doc, edge->active);
+        b64 goal = edge->goal >= 0 ? edge->goal : (b64)doc_column(doc, edge->active);
+        p64 at;
+
+        if (below ? line + 1 >= doc_line_count(doc) : line == 0)
+                return;
+        at = doc_at_column(doc, below ? line + 1 : line - 1, (p64)goal);
+        if (doc_select_add(doc, at, at))
+                doc->selections[doc->primary].goal = goal;
+        for (positive s = 0; s < doc->selection_count; s++)
+                if (doc->selections[s].goal < 0)
+                        doc->selections[s].goal = goal;
+}
+
+/*
+        Column (box) selection, from the anchor's line and column to the active one's: one selection on each line
+        between, from the one column to the other. A line too short to reach the left column has none, unless no
+        line does.
+*/
+static fn doc_select_box(struct doc address_to doc, p64 anchor_line, p64 anchor_column, p64 active_line, p64 active_column)
+{
+        p64 first = anchor_line < active_line ? anchor_line : active_line, last = anchor_line < active_line ? active_line : anchor_line;
+        p64 left = anchor_column < active_column ? anchor_column : active_column;
+        positive count = 0;
+
+        last = last >= doc_line_count(doc) ? doc_line_count(doc) - 1 : last;
+        if (!array_store_reserve(doc->selections, doc->selection_room, 0, last - first + 1, 16))
+                return;
+        for (p64 line = first; line <= last; line++)
+        {
+                p64 anchor = doc_at_column(doc, line, anchor_column), active = doc_at_column(doc, line, active_column);
+
+                if (doc_column(doc, doc_line_end(doc, line)) < left && anchor_line != active_line)
+                        continue;
+                doc->selections[count++] = (struct doc_selection){anchor, active, (b64)active_column};
+        }
+        if (!count)
+        {
+                p64 at = doc_at_column(doc, active_line, active_column);
+
+                doc->selections[count++] = (struct doc_selection){at, at, (b64)active_column};
+        }
+        doc->selection_count = count;
+        doc->primary = (p32)(active_line >= anchor_line ? count - 1 : 0);
+        doc_normalize(doc);
+        doc_seal(doc);
+}
+
+// The caret to the start of line (from 0), the view's to show it.
+static fn doc_goto_line(struct doc address_to doc, p64 line)
+{
+        p64 count = doc_line_count(doc);
+
+        line = line >= count ? count - 1 : line;
+        doc_select_set(doc, doc_line_start(doc, line), doc_line_start(doc, line));
+}
+
+/* ---- find and replace ---- */
+
+#define DOC_FIND_CASE 1u   // case matters
+#define DOC_FIND_WORD 2u   // a match is a whole word
+#define DOC_FIND_REGEX 4u  // the query is a regular expression (POSIX extended, the system's one engine)
+#define DOC_FIND_LINE_MOST 1048576u // a line longer than this is searched in its first MiB
+
+struct doc_find
+{
+        p8 query[1024];
+        positive length;
+        p32 flags;
+        b32 ready, failed;
+#ifdef RX_NODE_LIMIT
+        regex_program program;
+        b32 kept;
+#endif
+};
+
+// The query set, and the program compiled when it is a pattern or the case does not matter. False for a pattern that
+// does not compile (failed then stays set, and nothing is found).
+static b32 doc_find_set(struct doc_find address_to find, const p8 address_to query, positive length, p32 flags)
+{
+        if (length >= sizeof(find->query))
+                length = sizeof(find->query) - 1;
+#ifdef RX_NODE_LIMIT
+        if (find->kept)
+                regex_release(&find->program);
+        find->kept = false;
+#endif
+        memory_copy(find->query, query, length);
+        find->query[length] = 0;
+        find->length = length;
+        find->flags = flags;
+        find->ready = length != 0;
+        find->failed = false;
+        if (!length || (!(flags & DOC_FIND_REGEX) && (flags & DOC_FIND_CASE)))
+                return true;
+#ifdef RX_NODE_LIMIT
+        {
+                // A plain query without case is a pattern too: its specials escaped, so the engine's case folding
+                // (Unicode's simple folds) is the one used.
+                p8 pattern[2 * sizeof(find->query) + 1];
+                positive size = 0;
+
+                if (flags & DOC_FIND_REGEX)
+                        memory_copy(pattern, query, length), size = length;
+                else
+                        for (positive at = 0; at < length; at++)
+                        {
+                                if (memory_first_of((address_any) "\\.[]()*+?{}|^$", (b8)query[at], 14))
+                                        pattern[size++] = '\\';
+                                pattern[size++] = query[at];
+                        }
+                pattern[size] = 0;
+                if (!regex_compile_bytes(pattern, size, true, !(flags & DOC_FIND_CASE), true, REGEX_CHARACTERS | REGEX_POLICY_DEFAULT) ||
+                    !regex_keep_checked(&find->program))
+                {
+                        find->failed = true;
+                        find->ready = false;
+                        return false;
+                }
+                find->kept = true;
+        }
+#else
+        if (flags & DOC_FIND_REGEX)
+        {
+                find->failed = true;
+                find->ready = false;
+                return false;
+        }
+#endif
+        return true;
+}
+
+static fn doc_find_drop(struct doc_find address_to find)
+{
+#ifdef RX_NODE_LIMIT
+        if (find->kept)
+                regex_release(&find->program);
+        find->kept = false;
+#endif
+        find->ready = false;
+}
+
+// Whether a match from start to end of a line's bytes is a whole word: no word character either side of it.
+static b32 doc_find_whole(const struct doc address_to doc, const p8 address_to bytes, positive length, positive start, positive finish)
+{
+        p32 code;
+
+        if (start)
+        {
+                doc_decode_back(bytes, start, &code);
+                if (doc_class(doc, code) == DOC_CLASS_WORD)
+                        return false;
+        }
+        if (finish < length)
+        {
+                doc_decode(bytes + finish, length - finish, &code);
+                if (doc_class(doc, code) == DOC_CLASS_WORD)
+                        return false;
+        }
+        return true;
+}
+
+/*
+        The first match in a line's bytes at or after from: its start and end, and the captures' (the regex engine's
+        slots) when there are any. False for none.
+*/
+static b32 doc_find_in(const struct doc address_to doc, struct doc_find address_to find, const p8 address_to bytes, positive length,
+                       positive from, positive address_to start, positive address_to finish)
+{
+        while (from <= length)
+        {
+                positive found_start, found_end;
+
+                if (!find->ready)
+                        return false;
+#ifdef RX_NODE_LIMIT
+                if (find->kept)
+                {
+                        p8 result = rx_find(&regex_match, &find->program, REGEX_LONGEST, true, (string_address)bytes, length, from);
+
+                        if (result != RX_MATCH)
+                                return false;
+                        found_start = regex_slots[0];
+                        found_end = regex_slots[1];
+                }
+                else
+#endif
+                {
+                        const p8 address_to hit = length - from >= find->length
+                                                      ? memory_search((address_any)(bytes + from), length - from, find->query, find->length)
+                                                      : null;
+
+                        if (!hit)
+                                return false;
+                        found_start = (positive)(hit - bytes);
+                        found_end = found_start + find->length;
+                }
+                if (!(find->flags & DOC_FIND_WORD) || doc_find_whole(doc, bytes, length, found_start, found_end))
+                {
+                        *start = found_start;
+                        *finish = found_end;
+                        return true;
+                }
+                from = found_start + 1;
+                // The next search starts at a character, not inside one.
+                while (from < length && (bytes[from] & 0xc0) == 0x80)
+                        from++;
+        }
+        return false;
+}
+
+// A line's bytes, at most DOC_FIND_LINE_MOST, into a buffer kept between calls: its length.
+static positive doc_line_bytes(const struct doc address_to doc, p64 line, const p8 address_to address_to bytes)
+{
+        static p8 address_to room;
+        static positive held;
+        p64 start = doc_line_start(doc, line), finish = doc_line_end(doc, line);
+        positive length = finish - start > DOC_FIND_LINE_MOST ? DOC_FIND_LINE_MOST : (positive)(finish - start);
+
+        if (!array_store_reserve(room, held, 0, length + 1, 4096))
+        {
+                *bytes = (const p8 address_to) "";
+                return 0;
+        }
+        length = doc_read(doc, start, room, length);
+        room[length] = 0;
+        *bytes = room;
+        return length;
+}
+
+/*
+        The next match from at (backward: the last that starts before at), wrapping round the document when wrap: its
+        start and end. False for none. Matches are found a line at a time: a pattern does not match across a line end.
+*/
+static b32 doc_find_next(const struct doc address_to doc, struct doc_find address_to find, p64 at, b32 backward, b32 wrap,
+                         p64 address_to start, p64 address_to finish)
+{
+        p64 lines = doc_line_count(doc), first = doc_line_of(doc, at);
+
+        if (!find->ready)
+                return false;
+        for (p64 step = 0; step <= lines; step++)
+        {
+                p64 line;
+                const p8 address_to bytes;
+                positive length, line_start, s, e, from = 0, best_s = 0, best_e = 0;
+                b32 any = false;
+
+                if (!backward)
+                {
+                        line = first + step;
+                        if (line >= lines)
+                        {
+                                if (!wrap)
+                                        return false;
+                                line -= lines;
+                        }
+                }
+                else
+                {
+                        if (step > first && !wrap)
+                                return false;
+                        line = step <= first ? first - step : lines - (step - first);
+                }
+                length = doc_line_bytes(doc, line, &bytes);
+                line_start = doc_line_start(doc, line);
+                if (!backward)
+                {
+                        from = step == 0 ? (positive)(at - line_start) : 0;
+                        if (step == lines && line == first)
+                                length = at - line_start < length ? (positive)(at - line_start) : length;
+                        if (doc_find_in(doc, find, bytes, length, from, &s, &e))
+                        {
+                                *start = line_start + s;
+                                *finish = line_start + e;
+                                return true;
+                        }
+                        continue;
+                }
+                while (from <= length && doc_find_in(doc, find, bytes, length, from, &s, &e))
+                {
+                        if (step == 0 && line_start + s >= at)
+                                break;
+                        if (step == lines && line_start + s < at)
+                        {
+                                from = s + 1;
+                                continue;
+                        }
+                        best_s = s, best_e = e, any = true;
+                        from = e > s ? e : s + 1;
+                }
+                if (any)
+                {
+                        *start = line_start + best_s;
+                        *finish = line_start + best_e;
+                        return true;
+                }
+        }
+        return false;
+}
+
+/*
+        A replacement for the match just found, with $1 to $9 the captures, $& and $0 the match, $$ a dollar, \n a
+        line end, \t a tab and \\ a backslash when the query is a pattern; the text as it is otherwise. Into room
+        bytes: its length.
+*/
+static positive doc_find_replacement(const struct doc_find address_to find, const p8 address_to bytes, const p8 address_to with,
+                                     positive with_length, p8 address_to into, positive room)
+{
+        positive out = 0;
+
+        if (!(find->flags & DOC_FIND_REGEX))
+        {
+                with_length = with_length < room ? with_length : room;
+                memory_copy(into, with, with_length);
+                return with_length;
+        }
+        for (positive at = 0; at < with_length && out < room; at++)
+        {
+                p8 c = with[at], next = at + 1 < with_length ? with[at + 1] : 0;
+
+                if (c == '\\' && (next == 'n' || next == 't' || next == '\\'))
+                {
+                        into[out++] = next == 'n' ? '\n' : next == 't' ? '\t' : '\\';
+                        at++;
+                        continue;
+                }
+                if (c == '$' && next == '$')
+                {
+                        into[out++] = '$';
+                        at++;
+                        continue;
+                }
+#ifdef RX_NODE_LIMIT
+                if (c == '$' && (next == '&' || (next >= '0' && next <= '9')))
+                {
+                        positive group = next == '&' ? 0 : (positive)(next - '0');
+                        positive s = regex_slots[group * 2], e = regex_slots[group * 2 + 1];
+
+                        if (group <= (positive)find->program.groups && s != positive_max && e != positive_max && e >= s)
+                        {
+                                positive take = e - s < room - out ? e - s : room - out;
+
+                                memory_copy(into + out, bytes + s, take);
+                                out += take;
+                        }
+                        at++;
+                        continue;
+                }
+#endif
+                into[out++] = c;
+        }
+        return out;
+}
+
+/*
+        Many replaces made as one: the text from the first edit's start to the last's end built again in a buffer (what
+        is between the edits read from the tree, the replacements put in their places) and swapped in with one change,
+        the selections mapped through the edits. Millions of matches are then one copy of the span and one undo record,
+        where an edit each was a split and a join each, and as many records to undo.
+*/
+#define DOC_REPLACE_BULK 4096
+
+static b32 doc_replace_bulk(struct doc address_to doc, const struct doc_edit address_to edits, positive count)
+{
+        p64 start = edits[0].at, finish = edits[count - 1].at + edits[count - 1].removed, at = start;
+        p8 address_to span = null;
+        positive room = 0, used = 0, need = 0;
+        b32 done;
+
+        for (positive i = 0; i < count; i++)
+                need += edits[i].length;
+        need += finish - start;
+        if (!array_store_reserve(span, room, 0, need + 1, 65536))
+                return false;
+        for (positive i = 0; i < count; i++)
+        {
+                used += doc_read(doc, at, span + used, (positive)(edits[i].at - at));
+                memory_copy(span + used, edits[i].text, edits[i].length);
+                used += edits[i].length;
+                at = edits[i].at + edits[i].removed;
+        }
+        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
+        {
+                array_store_release(span, room, used);
+                return false;
+        }
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                struct doc_selection address_to sel = &doc->selections[s];
+
+                sel->anchor = doc_map(sel->anchor, edits, count, sel->anchor > sel->active);
+                sel->active = doc_map(sel->active, edits, count, sel->active >= sel->anchor);
+        }
+        {
+                struct doc_selection address_to kept = null;
+                positive kept_room = 0, n = doc->selection_count;
+
+                // The swap would move every selection inside the span to its end; they are put back where the map said.
+                if (array_store_reserve(kept, kept_room, 0, n, 16))
+                        memory_copy(kept, doc->selections, n * sizeof(*kept));
+                done = doc_replace_in(doc, start, finish - start, span, used);
+                if (kept)
+                {
+                        memory_copy(doc->selections, kept, n * sizeof(*kept));
+                        array_store_release(kept, kept_room, n);
+                }
+        }
+        doc_normalize(doc);
+        doc_group_end(doc, 0);
+        array_store_release(span, room, used);
+        return done;
+}
+
+/*
+        Every match replaced, as one undo: the matches found a line at a time from the start, each replacement made
+        (with its captures, for a pattern), and the edit list applied once from the last to the first. How many were
+        replaced, which is 0 when a replacement was refused (read-only text) and nothing changed.
+*/
+static positive doc_replace_all(struct doc address_to doc, struct doc_find address_to find, const p8 address_to with,
+                                positive with_length)
+{
+        struct doc_edit address_to edits = null;
+        positive edit_room = 0, count = 0, text_room = 0, text_used = 0;
+        p8 address_to texts = null;
+        p64 lines = doc_line_count(doc);
+        b32 done;
+
+        if (!find->ready)
+                return 0;
+        for (p64 line = 0; line < lines; line++)
+        {
+                const p8 address_to bytes;
+                positive length = doc_line_bytes(doc, line, &bytes), from = 0, s, e;
+                p64 line_start = doc_line_start(doc, line);
+
+                while (from <= length && doc_find_in(doc, find, bytes, length, from, &s, &e))
+                {
+                        positive most = with_length + (find->flags & DOC_FIND_REGEX ? 10 * (length + 1) : 0) + 16;
+
+                        if (!array_store_reserve(edits, edit_room, count, count + 1, 1024) ||
+                            !array_store_reserve(texts, text_room, text_used, text_used + most, 65536))
+                        {
+                                array_store_release(edits, edit_room, count);
+                                array_store_release(texts, text_room, text_used);
+                                return 0;
+                        }
+                        {
+                                positive made = doc_find_replacement(find, bytes, with, with_length, texts + text_used, most);
+
+                                edits[count++] = (struct doc_edit){line_start + s, e - s, (const p8 address_to)text_used, made, DOC_NONE, DOC_NONE};
+                                text_used += made;
+                        }
+                        // An empty match moves on a character, or it would be found again.
+                        from = e > s ? e : s + 1;
+                        while (from < length && (bytes[from] & 0xc0) == 0x80)
+                                from++;
+                }
+        }
+        for (positive i = 0; i < count; i++)
+                edits[i].text = texts + (positive)edits[i].text;
+        doc_seal(doc);
+        if (count > DOC_REPLACE_BULK)
+                done = doc_replace_bulk(doc, edits, count);
+        else
+                done = count && doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
+        doc_seal(doc);
+        {
+                positive replaced = done ? count : 0;
+
+                // A release empties the count it is given.
+                array_store_release(edits, edit_room, count);
+                array_store_release(texts, text_room, text_used);
+                return replaced;
+        }
+}
+
+/*
+        Select next occurrence (Ctrl+D): on a caret, the word at it; then each press adds the next match of the
+        primary selection's text after the last selection, wrapping, as a new primary. A first press on a caret finds
+        whole words with case, as VS Code does; one on a selection finds its text anywhere.
+*/
+static b32 doc_select_next(struct doc address_to doc)
+{
+        struct doc_selection address_to primary = &doc->selections[doc->primary];
+        struct doc_find find = {0};
+        p8 text[1024];
+        positive length;
+        p64 start, finish, after = 0;
+
+        if (primary->anchor == primary->active)
+        {
+                doc_word_at(doc, primary->active, &start, &finish);
+                if (start == finish)
+                        return false;
+                primary->anchor = start, primary->active = finish;
+                doc->occurrence_whole = doc->selection_count == 1;
+                doc_normalize(doc);
+                doc_seal(doc);
+                return true;
+        }
+        start = doc_sel_start(primary), finish = doc_sel_end(primary);
+        if (finish - start >= sizeof(text))
+                return false;
+        length = doc_read(doc, start, text, (positive)(finish - start));
+        doc_find_set(&find, text, length, DOC_FIND_CASE | (doc->occurrence_whole ? DOC_FIND_WORD : 0));
+        for (positive s = 0; s < doc->selection_count; s++)
+                after = doc_sel_end(&doc->selections[s]) > after ? doc_sel_end(&doc->selections[s]) : after;
+        for (p32 tries = 0; tries < 2; tries++)
+        {
+                b32 taken = false;
+
+                if (!doc_find_next(doc, &find, after, false, true, &start, &finish))
+                        break;
+                for (positive s = 0; s < doc->selection_count; s++)
+                        taken |= doc_sel_start(&doc->selections[s]) == start && doc_sel_end(&doc->selections[s]) == finish;
+                if (taken)
+                {
+                        after = 0;
+                        if (!doc_find_next(doc, &find, after, false, false, &start, &finish))
+                                break;
+                        taken = false;
+                        for (positive s = 0; s < doc->selection_count; s++)
+                                taken |= doc_sel_start(&doc->selections[s]) == start && doc_sel_end(&doc->selections[s]) == finish;
+                        // Every match is selected: nothing more to add.
+                        if (taken)
+                                break;
+                }
+                doc_find_drop(&find);
+                return doc_select_add(doc, start, finish);
+        }
+        doc_find_drop(&find);
+        return false;
+}
+
+// Every match of the primary selection's text (or of the word at a caret) selected.
+static positive doc_select_all_matches(struct doc address_to doc)
+{
+        struct doc_selection primary = doc->selections[doc->primary];
+        struct doc_find find = {0};
+        p8 text[1024];
+        positive length, count = 0;
+        p64 start = doc_sel_start(&primary), finish = doc_sel_end(&primary), at = 0;
+        b32 whole = false;
+
+        if (start == finish)
+        {
+                doc_word_at(doc, start, &start, &finish);
+                whole = true;
+        }
+        if (start == finish || finish - start >= sizeof(text))
+                return 0;
+        length = doc_read(doc, start, text, (positive)(finish - start));
+        doc_find_set(&find, text, length, DOC_FIND_CASE | (whole ? DOC_FIND_WORD : 0));
+        doc->selection_count = 0;
+        while (doc_find_next(doc, &find, at, false, false, &start, &finish))
+        {
+                if (!array_store_reserve(doc->selections, doc->selection_room, doc->selection_count, doc->selection_count + 1, 64))
+                        break;
+                doc->selections[doc->selection_count++] = (struct doc_selection){start, finish, -1};
+                if (start == primary.anchor || finish == primary.active)
+                        doc->primary = (p32)(doc->selection_count - 1);
+                count++;
+                at = finish > start ? finish : start + 1;
+                if (at > doc_length(doc))
+                        break;
+        }
+        if (!doc->selection_count)
+                doc->selections[doc->selection_count++] = primary;
+        doc_normalize(doc);
+        doc_seal(doc);
+        doc_find_drop(&find);
+        return count;
+}
+
+/* ---- commands and the keys that name them ---- */
+
+/*
+        What a key can do, by name: the keymap is data, a list of lines KEYS COMMAND, the defaults below and then the
+        lines of /root/canvas.text.keys over them (KEYS none takes a default away). KEYS is modifiers and a key joined
+        by +: ctrl, shift, alt, super, and a key's name (left, home, pageup, f3, ...) or one character. A character
+        binds what the keyboard's layout types (so Ctrl+Z is undo on any layout); Shift is part of a binding only for
+        a name or a letter, since a symbol often needs it to be typed at all.
+*/
+enum
+{
+        DOC_CMD_NONE,
+        DOC_CMD_LEFT, DOC_CMD_RIGHT, DOC_CMD_UP, DOC_CMD_DOWN, DOC_CMD_WORD_LEFT, DOC_CMD_WORD_RIGHT, DOC_CMD_HOME,
+        DOC_CMD_END, DOC_CMD_TOP, DOC_CMD_BOTTOM, DOC_CMD_PAGE_UP, DOC_CMD_PAGE_DOWN,
+        DOC_CMD_SELECT_LEFT, DOC_CMD_SELECT_RIGHT, DOC_CMD_SELECT_UP, DOC_CMD_SELECT_DOWN, DOC_CMD_SELECT_WORD_LEFT,
+        DOC_CMD_SELECT_WORD_RIGHT, DOC_CMD_SELECT_HOME, DOC_CMD_SELECT_END, DOC_CMD_SELECT_TOP, DOC_CMD_SELECT_BOTTOM,
+        DOC_CMD_SELECT_PAGE_UP, DOC_CMD_SELECT_PAGE_DOWN,
+        DOC_CMD_BACKSPACE, DOC_CMD_DELETE, DOC_CMD_DELETE_WORD_LEFT, DOC_CMD_DELETE_WORD_RIGHT, DOC_CMD_DELETE_LINE_LEFT,
+        DOC_CMD_DELETE_LINE_RIGHT, DOC_CMD_NEWLINE, DOC_CMD_TAB, DOC_CMD_OUTDENT, DOC_CMD_INDENT,
+        DOC_CMD_MOVE_LINE_UP, DOC_CMD_MOVE_LINE_DOWN, DOC_CMD_COPY_LINE_UP, DOC_CMD_COPY_LINE_DOWN, DOC_CMD_DELETE_LINES,
+        DOC_CMD_JOIN_LINES, DOC_CMD_TRANSPOSE, DOC_CMD_LINE_BELOW, DOC_CMD_LINE_ABOVE, DOC_CMD_COMMENT, DOC_CMD_UPPER,
+        DOC_CMD_LOWER, DOC_CMD_TITLE, DOC_CMD_SORT, DOC_CMD_SORT_DESCENDING,
+        DOC_CMD_UNDO, DOC_CMD_REDO, DOC_CMD_CUT, DOC_CMD_COPY, DOC_CMD_PASTE, DOC_CMD_SELECT_ALL, DOC_CMD_SELECT_LINE,
+        DOC_CMD_EXPAND, DOC_CMD_SHRINK, DOC_CMD_CURSOR_ABOVE, DOC_CMD_CURSOR_BELOW, DOC_CMD_NEXT_MATCH, DOC_CMD_ALL_MATCHES,
+        DOC_CMD_SINGLE, DOC_CMD_BRACKET, DOC_CMD_FIND, DOC_CMD_REPLACE, DOC_CMD_FIND_NEXT, DOC_CMD_FIND_PREVIOUS,
+        DOC_CMD_GOTO_LINE, DOC_CMD_ZOOM_IN, DOC_CMD_ZOOM_OUT, DOC_CMD_ZOOM_RESET, DOC_CMD_WRAP, DOC_CMD_OVERWRITE,
+        DOC_CMD_SAVE, DOC_CMD_OPEN, DOC_CMD_NEW, DOC_CMD_CLOSE, DOC_CMD_NEXT_TAB, DOC_CMD_PREVIOUS_TAB, DOC_CMD_MENU,
+        DOC_CMD_FOLD, DOC_CMD_UNFOLD, DOC_CMD_SAVE_AS,
+        DOC_CMDS
+};
+
+static const char address_to const doc_command_names[DOC_CMDS] = {
+    "none", "left", "right", "up", "down", "word_left", "word_right", "home", "end", "top", "bottom", "page_up", "page_down",
+    "select_left", "select_right", "select_up", "select_down", "select_word_left", "select_word_right", "select_home",
+    "select_end", "select_top", "select_bottom", "select_page_up", "select_page_down", "backspace", "delete",
+    "delete_word_left", "delete_word_right", "delete_line_left", "delete_line_right", "newline", "tab", "outdent", "indent",
+    "move_line_up", "move_line_down", "copy_line_up", "copy_line_down", "delete_lines", "join_lines", "transpose",
+    "line_below", "line_above", "comment", "upper", "lower", "title", "sort", "sort_descending", "undo", "redo", "cut",
+    "copy", "paste", "select_all", "select_line", "expand", "shrink", "cursor_above", "cursor_below", "next_match",
+    "all_matches", "single", "bracket", "find", "replace", "find_next", "find_previous", "goto_line", "zoom_in",
+    "zoom_out", "zoom_reset", "wrap", "overwrite", "save", "open", "new", "close", "next_tab", "previous_tab", "menu",
+    "fold", "unfold", "save_as",
+};
+
+/*
+        The default keys: the common ones of every desktop and VS Code's, on Linux. Each line is what the keymap file
+        holds, and is read by the same parser.
+*/
+static const char address_to const doc_default_keys[] = {
+    "left left", "right right", "up up", "down down", "ctrl+left word_left", "ctrl+right word_right", "home home",
+    "end end", "ctrl+home top", "ctrl+end bottom", "pageup page_up", "pagedown page_down",
+    "shift+left select_left", "shift+right select_right", "shift+up select_up", "shift+down select_down",
+    "ctrl+shift+left select_word_left", "ctrl+shift+right select_word_right", "shift+home select_home",
+    "shift+end select_end", "ctrl+shift+home select_top", "ctrl+shift+end select_bottom",
+    "shift+pageup select_page_up", "shift+pagedown select_page_down",
+    "backspace backspace", "shift+backspace backspace", "delete delete", "ctrl+backspace delete_word_left",
+    "ctrl+delete delete_word_right", "ctrl+shift+backspace delete_line_left", "ctrl+shift+delete delete_line_right",
+    "enter newline", "shift+enter newline", "kpenter newline", "tab tab", "shift+tab outdent", "ctrl+] indent",
+    "ctrl+[ outdent", "alt+up move_line_up", "alt+down move_line_down", "ctrl+shift+alt+up copy_line_up",
+    "ctrl+shift+alt+down copy_line_down", "ctrl+shift+k delete_lines", "ctrl+j join_lines", "ctrl+t transpose",
+    "ctrl+enter line_below", "ctrl+shift+enter line_above", "ctrl+/ comment",
+    "ctrl+z undo", "ctrl+y redo", "ctrl+shift+z redo", "ctrl+x cut", "shift+delete cut", "ctrl+c copy",
+    "ctrl+insert copy", "ctrl+v paste", "shift+insert paste", "ctrl+a select_all", "ctrl+l select_line",
+    "shift+alt+right expand", "shift+alt+left shrink", "shift+alt+up cursor_above", "shift+alt+down cursor_below",
+    "ctrl+shift+up cursor_above", "ctrl+shift+down cursor_below", "ctrl+d next_match", "ctrl+shift+l all_matches",
+    "escape single", "ctrl+shift+\\ bracket", "ctrl+f find", "ctrl+h replace", "f3 find_next",
+    "shift+f3 find_previous", "ctrl+g goto_line", "ctrl+= zoom_in", "ctrl++ zoom_in", "ctrl+- zoom_out",
+    "ctrl+0 zoom_reset", "alt+z wrap", "insert overwrite", "ctrl+s save", "ctrl+shift+s save_as", "ctrl+o open",
+    "ctrl+n new", "ctrl+w close", "ctrl+tab next_tab", "ctrl+pagedown next_tab", "ctrl+shift+tab previous_tab",
+    "ctrl+pageup previous_tab", "shift+f10 menu", "menu menu", "ctrl+{ fold", "ctrl+} unfold",
+};
+
+// Linux's numbers for the keys a binding can name.
+static const struct
+{
+        const char address_to name;
+        p16 code;
+} doc_key_names[] = {
+    {"escape", 1}, {"backspace", 14}, {"tab", 15}, {"enter", 28}, {"space", 57}, {"f1", 59}, {"f2", 60}, {"f3", 61},
+    {"f4", 62}, {"f5", 63}, {"f6", 64}, {"f7", 65}, {"f8", 66}, {"f9", 67}, {"f10", 68}, {"f11", 87}, {"f12", 88},
+    {"kpenter", 96}, {"home", 102}, {"up", 103}, {"pageup", 104}, {"left", 105}, {"right", 106}, {"end", 107},
+    {"down", 108}, {"pagedown", 109}, {"insert", 110}, {"delete", 111}, {"menu", 127},
+};
+
+#define DOC_MOD_SHIFT 1u
+#define DOC_MOD_CONTROL 2u
+#define DOC_MOD_ALT 4u
+#define DOC_MOD_SUPER 8u
+#define DOC_KEYS_MOST 256
+
+struct doc_binding
+{
+        p16 code;      // a key by its number, or 0
+        p32 character; // a key by what it types, or 0
+        p8 modifiers;
+        p8 command;
+};
+
+struct doc_keymap
+{
+        struct doc_binding bindings[DOC_KEYS_MOST];
+        p32 count;
+};
+
+// One line of a keymap, KEYS COMMAND, onto it: a binding of the same keys is replaced; none takes it away. False for
+// a line that is not one.
+static b32 doc_keymap_line(struct doc_keymap address_to map, const char address_to line, positive length)
+{
+        struct doc_binding binding = {0, 0, 0, 0};
+        positive at = 0, word;
+        b32 known = false;
+
+        while (at < length && (line[at] == ' ' || line[at] == '\t'))
+                at++;
+        if (at == length || line[at] == '#')
+                return true;
+        // The keys: words joined by +, a + of its own being the key itself (ctrl++).
+        for (;;)
+        {
+                positive start = at;
+                b32 last;
+
+                while (at < length && line[at] != ' ' && line[at] != '\t' && (line[at] != '+' || at == start))
+                        at++;
+                word = at - start;
+                last = at >= length || line[at] != '+';
+                if (!word)
+                        return false;
+                if (!last)
+                {
+                        if (word == 4 && !memory_compare(line + start, "ctrl", 4))
+                                binding.modifiers |= DOC_MOD_CONTROL;
+                        else if (word == 5 && !memory_compare(line + start, "shift", 5))
+                                binding.modifiers |= DOC_MOD_SHIFT;
+                        else if (word == 3 && !memory_compare(line + start, "alt", 3))
+                                binding.modifiers |= DOC_MOD_ALT;
+                        else if (word == 5 && !memory_compare(line + start, "super", 5))
+                                binding.modifiers |= DOC_MOD_SUPER;
+                        else
+                                return false;
+                        at++;
+                        continue;
+                }
+                for (p32 k = 0; k < sizeof(doc_key_names) / sizeof(doc_key_names[0]); k++)
+                        if (string_length((string_address)doc_key_names[k].name) == word &&
+                            !memory_compare(line + start, doc_key_names[k].name, word))
+                                binding.code = doc_key_names[k].code, known = true;
+                if (!known)
+                {
+                        p32 code;
+
+                        if (doc_decode((const p8 address_to)line + start, word, &code) != word || (code & DOC_INVALID))
+                                return false;
+                        binding.character = code < 128 ? (p32)byte_to_lower((b8)code) : code;
+                }
+                break;
+        }
+        while (at < length && (line[at] == ' ' || line[at] == '\t'))
+                at++;
+        word = 0;
+        while (at + word < length && line[at + word] != ' ' && line[at + word] != '\t' && line[at + word] != '\r')
+                word++;
+        for (p32 c = 0; c < DOC_CMDS; c++)
+                if (string_length((string_address)doc_command_names[c]) == word && !memory_compare(line + at, doc_command_names[c], word))
+                {
+                        binding.command = (p8)c;
+                        for (p32 b = 0; b < map->count; b++)
+                                if (map->bindings[b].code == binding.code && map->bindings[b].character == binding.character &&
+                                    map->bindings[b].modifiers == binding.modifiers)
+                                {
+                                        map->bindings[b] = binding;
+                                        return true;
+                                }
+                        if (map->count == DOC_KEYS_MOST || !c)
+                                return !c;
+                        map->bindings[map->count++] = binding;
+                        return true;
+                }
+        return false;
+}
+
+static fn doc_keymap_defaults(struct doc_keymap address_to map)
+{
+        map->count = 0;
+        for (p32 i = 0; i < sizeof(doc_default_keys) / sizeof(doc_default_keys[0]); i++)
+                doc_keymap_line(map, doc_default_keys[i], string_length((string_address)doc_default_keys[i]));
+}
+
+// A keymap file's text over the defaults, a line at a time: how many lines were not bindings (and were skipped).
+static positive doc_keymap_read(struct doc_keymap address_to map, const char address_to text, positive length)
+{
+        positive bad = 0;
+
+        for (positive at = 0; at < length;)
+        {
+                positive finish = at;
+
+                while (finish < length && text[finish] != '\n')
+                        finish++;
+                bad += !doc_keymap_line(map, text + at, finish - at);
+                at = finish + 1;
+        }
+        return bad;
+}
+
+/*
+        The command a key names: by its number, or by the character it types (the control code Ctrl turns a letter
+        into is that letter again). AltGr types: a key with it is a character, never a chord.
+*/
+static p32 doc_keymap_find(const struct doc_keymap address_to map, p32 code, p32 character, p32 modifiers)
+{
+        p32 typed = character && character < 32 && (modifiers & DOC_MOD_CONTROL) && code != 1 && code != 14 && code != 15 && code != 28
+                        ? character | 0x60
+                        : character;
+
+        typed = typed < 128 ? (p32)byte_to_lower((b8)typed) : typed;
+        for (p32 b = 0; b < map->count; b++)
+        {
+                const struct doc_binding address_to binding = &map->bindings[b];
+
+                if (binding->code ? binding->code != code : !typed || binding->character != typed)
+                        continue;
+                if (binding->code || (binding->character >= 'a' && binding->character <= 'z')
+                        ? binding->modifiers != modifiers
+                        : (binding->modifiers & ~DOC_MOD_SHIFT) != (modifiers & ~DOC_MOD_SHIFT))
+                        continue;
+                return binding->command;
+        }
+        return DOC_CMD_NONE;
+}
+
+/*
+        The first key the keymap binds a command to, written as a menu shows it: its modifiers and its key joined by +
+        (Ctrl+X, Shift+Delete, F3), each name capitalised and a letter upper case. A binding of a character no menu can
+        show (not printable ASCII) is passed over. Answers the length written into out, which gets a NUL, or 0 when
+        no key is bound to the command.
+*/
+static positive doc_keymap_name(const struct doc_keymap address_to map, p32 command, char address_to out, positive room)
+{
+        static const struct
+        {
+                p32 bit;
+                const char address_to word;
+        } modifiers[] = {{DOC_MOD_CONTROL, "Ctrl"}, {DOC_MOD_SHIFT, "Shift"}, {DOC_MOD_ALT, "Alt"}, {DOC_MOD_SUPER, "Super"}};
+
+        for (p32 b = 0; room && command && b < map->count; b++)
+        {
+                const struct doc_binding address_to binding = &map->bindings[b];
+                positive at = 0;
+                b32 named = false;
+
+                if (binding->command != command || (!binding->code && (binding->character < 32 || binding->character >= 128)))
+                        continue;
+                for (p32 k = 0; k < sizeof(modifiers) / sizeof(modifiers[0]); k++)
+                        if (binding->modifiers & modifiers[k].bit)
+                        {
+                                for (positive w = 0; modifiers[k].word[w] && at + 1 < room; w++)
+                                        out[at++] = modifiers[k].word[w];
+                                if (at + 1 < room)
+                                        out[at++] = '+';
+                        }
+                for (p32 k = 0; binding->code && k < sizeof(doc_key_names) / sizeof(doc_key_names[0]); k++)
+                        if (doc_key_names[k].code == binding->code)
+                        {
+                                for (positive w = 0; doc_key_names[k].name[w] && at + 1 < room; w++)
+                                        out[at++] = (char)(w ? doc_key_names[k].name[w]
+                                                             : byte_to_upper((b8)doc_key_names[k].name[w]));
+                                named = true;
+                        }
+                if (!binding->code && !named && at + 1 < room)
+                        out[at++] = (char)byte_to_upper((b8)binding->character);
+                out[at] = 0;
+                return at;
+        }
+        if (room)
+                out[0] = 0;
+        return 0;
+}
+
+/*
+        A command that needs only the document, done: the moves (by lines, since only a view knows its rows), the
+        edits and the selections. Answers whether it was one of these; the rest (the clipboard, pages, find, zoom,
+        files) are the view's.
+*/
+static b32 doc_command(struct doc address_to doc, p32 command, const char address_to comment)
+{
+        switch (command)
+        {
+        case DOC_CMD_LEFT: case DOC_CMD_SELECT_LEFT:
+                doc_move_horizontal(doc, false, false, command == DOC_CMD_SELECT_LEFT);
+                return true;
+        case DOC_CMD_RIGHT: case DOC_CMD_SELECT_RIGHT:
+                doc_move_horizontal(doc, true, false, command == DOC_CMD_SELECT_RIGHT);
+                return true;
+        case DOC_CMD_WORD_LEFT: case DOC_CMD_SELECT_WORD_LEFT:
+                doc_move_horizontal(doc, false, true, command == DOC_CMD_SELECT_WORD_LEFT);
+                return true;
+        case DOC_CMD_WORD_RIGHT: case DOC_CMD_SELECT_WORD_RIGHT:
+                doc_move_horizontal(doc, true, true, command == DOC_CMD_SELECT_WORD_RIGHT);
+                return true;
+        case DOC_CMD_UP: case DOC_CMD_SELECT_UP:
+                doc_move_vertical(doc, -1, command == DOC_CMD_SELECT_UP);
+                return true;
+        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN:
+                doc_move_vertical(doc, 1, command == DOC_CMD_SELECT_DOWN);
+                return true;
+        case DOC_CMD_HOME: case DOC_CMD_SELECT_HOME:
+                doc_move(doc, doc_step_home, command == DOC_CMD_SELECT_HOME);
+                return true;
+        case DOC_CMD_END: case DOC_CMD_SELECT_END:
+                doc_move(doc, doc_step_end, command == DOC_CMD_SELECT_END);
+                return true;
+        case DOC_CMD_TOP: case DOC_CMD_SELECT_TOP:
+                doc_move(doc, doc_step_top, command == DOC_CMD_SELECT_TOP);
+                return true;
+        case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_BOTTOM:
+                doc_move(doc, doc_step_bottom, command == DOC_CMD_SELECT_BOTTOM);
+                return true;
+        case DOC_CMD_BACKSPACE:
+                doc_delete(doc, false, DOC_REACH_CLUSTER);
+                return true;
+        case DOC_CMD_DELETE:
+                doc_delete(doc, true, DOC_REACH_CLUSTER);
+                return true;
+        case DOC_CMD_DELETE_WORD_LEFT:
+                doc_delete(doc, false, DOC_REACH_WORD);
+                return true;
+        case DOC_CMD_DELETE_WORD_RIGHT:
+                doc_delete(doc, true, DOC_REACH_WORD);
+                return true;
+        case DOC_CMD_DELETE_LINE_LEFT:
+                doc_delete(doc, false, DOC_REACH_LINE);
+                return true;
+        case DOC_CMD_DELETE_LINE_RIGHT:
+                doc_delete(doc, true, DOC_REACH_LINE);
+                return true;
+        case DOC_CMD_NEWLINE:
+                doc_newline(doc);
+                return true;
+        case DOC_CMD_TAB:
+        {
+                // Tab: indent the lines of a selection that spans lines; type a stop's worth at the carets otherwise.
+                b32 lines = false;
+
+                for (positive s = 0; s < doc->selection_count; s++)
+                        lines |= doc_line_of(doc, doc->selections[s].anchor) != doc_line_of(doc, doc->selections[s].active);
+                if (lines)
+                        doc_indent(doc, false);
+                else if (doc->insert_spaces)
+                {
+                        static const p8 spaces[17] = "                ";
+                        p64 column = doc_column(doc, doc->selections[doc->primary].active);
+                        p32 size = doc->tab_size - (p32)(column % doc->tab_size);
+
+                        doc_type(doc, spaces, size < 16 ? size : 16);
+                }
+                else
+                        doc_type(doc, (const p8 address_to) "\t", 1);
+                return true;
+        }
+        case DOC_CMD_OUTDENT:
+                doc_indent(doc, true);
+                return true;
+        case DOC_CMD_INDENT:
+                doc_indent(doc, false);
+                return true;
+        case DOC_CMD_MOVE_LINE_UP: case DOC_CMD_MOVE_LINE_DOWN:
+                doc_move_lines(doc, command == DOC_CMD_MOVE_LINE_DOWN);
+                return true;
+        case DOC_CMD_COPY_LINE_UP: case DOC_CMD_COPY_LINE_DOWN:
+                doc_duplicate_lines(doc, command == DOC_CMD_COPY_LINE_UP);
+                return true;
+        case DOC_CMD_DELETE_LINES:
+                doc_delete_lines(doc);
+                return true;
+        case DOC_CMD_JOIN_LINES:
+                doc_join_lines(doc);
+                return true;
+        case DOC_CMD_TRANSPOSE:
+                doc_transpose(doc);
+                return true;
+        case DOC_CMD_LINE_BELOW: case DOC_CMD_LINE_ABOVE:
+                doc_insert_line(doc, command == DOC_CMD_LINE_ABOVE);
+                return true;
+        case DOC_CMD_COMMENT:
+                doc_comment(doc, comment);
+                return true;
+        case DOC_CMD_UPPER: case DOC_CMD_LOWER: case DOC_CMD_TITLE:
+                doc_case(doc, command == DOC_CMD_UPPER ? DOC_CASE_UPPER : command == DOC_CMD_LOWER ? DOC_CASE_LOWER : DOC_CASE_TITLE);
+                return true;
+        case DOC_CMD_SORT: case DOC_CMD_SORT_DESCENDING:
+                doc_sort_lines(doc, command == DOC_CMD_SORT_DESCENDING);
+                return true;
+        case DOC_CMD_UNDO:
+                doc_undo(doc);
+                return true;
+        case DOC_CMD_REDO:
+                doc_redo(doc);
+                return true;
+        case DOC_CMD_SELECT_ALL:
+                doc_select_set(doc, 0, doc_length(((struct doc *)(doc))));
+                return true;
+        case DOC_CMD_SELECT_LINE:
+                doc_select_lines(doc);
+                return true;
+        case DOC_CMD_EXPAND:
+                doc_expand(doc);
+                return true;
+        case DOC_CMD_SHRINK:
+                doc_shrink(doc);
+                return true;
+        case DOC_CMD_CURSOR_ABOVE: case DOC_CMD_CURSOR_BELOW:
+                doc_add_cursor(doc, command == DOC_CMD_CURSOR_BELOW);
+                return true;
+        case DOC_CMD_NEXT_MATCH:
+                doc_select_next(doc);
+                return true;
+        case DOC_CMD_ALL_MATCHES:
+                doc_select_all_matches(doc);
+                return true;
+        case DOC_CMD_SINGLE:
+                doc_single(doc);
+                return true;
+        case DOC_CMD_BRACKET:
+                doc_jump_bracket(doc);
+                return true;
+        case DOC_CMD_OVERWRITE:
+                doc->overwrite = !doc->overwrite;
+                return true;
+        }
+        return false;
+}
+
+/* ---- tokenizers: colour roles for a line, from the state the line before left ---- */
+
+/*
+        A tokenizer reads one line and the state the lines before it left (0 at the file's start) and says the roles of
+        its runs and the state it leaves: a comment or a string still open, as a number. The document keeps the state at
+        each line's start, so an edit tokenizes again from its line, only as far as the view needs, and stops early when
+        a line's state comes out as it was (the lines after it are then as they were). The roles are what the theme
+        colours; a language is a tokenizer and the comment its lines take.
+*/
+enum
+{
+        DOC_ROLE_TEXT, DOC_ROLE_KEYWORD, DOC_ROLE_TYPE, DOC_ROLE_STRING, DOC_ROLE_NUMBER, DOC_ROLE_COMMENT,
+        DOC_ROLE_OPERATOR, DOC_ROLE_PREPROCESSOR, DOC_ROLE_FUNCTION, DOC_ROLE_VARIABLE, DOC_ROLE_INVALID, DOC_ROLES
+};
+
+struct doc_token
+{
+        p32 start, length;
+        p8 role;
+};
+
+typedef p32 (address_to doc_tokenizer)(const p8 address_to line, positive length, p32 state, struct doc_token address_to tokens,
+                                       positive address_to count, positive room);
+
+static fn doc_token_put(struct doc_token address_to tokens, positive address_to count, positive room, positive start,
+                        positive length, p8 role)
+{
+        if (!length)
+                return;
+        if (*count && tokens[*count - 1].role == role && tokens[*count - 1].start + tokens[*count - 1].length == start)
+        {
+                tokens[*count - 1].length += (p32)length;
+                return;
+        }
+        if (*count < room)
+                tokens[(*count)++] = (struct doc_token){(p32)start, (p32)length, role};
+}
+
+static b32 doc_word_byte(p8 byte)
+{
+        return byte_is_alpha((b8)byte) || byte_is_digit((b8)byte) || byte == '_' || byte >= 0x80;
+}
+
+static b32 doc_in_list(const char address_to const address_to list, const p8 address_to word, positive length)
+{
+        for (; *list; list++)
+                if (string_length((string_address)*list) == length && !memory_compare(*list, word, length))
+                        return true;
+        return false;
+}
+
+// Plain text: one role, no state.
+static p32 doc_tokenize_plain(const p8 address_to line, positive length, p32 state, struct doc_token address_to tokens,
+                              positive address_to count, positive room)
+{
+        (void)line, (void)state;
+        doc_token_put(tokens, count, room, 0, length, DOC_ROLE_TEXT);
+        return 0;
+}
+
+/*
+        The languages written like C (C, C++, JavaScript, TypeScript, Rust, Go, Java, C#): // and block comments, quoted
+        strings with backslashes, numbers, the preprocessor's lines, and the keywords and types of all of them. The
+        state is 1 inside a block comment and 2 inside a string a line end continues (a backslash at the end).
+*/
+static p32 doc_tokenize_c(const p8 address_to line, positive length, p32 state, struct doc_token address_to tokens,
+                          positive address_to count, positive room)
+{
+        static const char address_to const keywords[] = {
+            "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto",
+            "struct", "union", "enum", "typedef", "static", "extern", "const", "volatile", "inline", "sizeof", "class",
+            "public", "private", "protected", "virtual", "template", "typename", "namespace", "using", "new", "delete",
+            "try", "catch", "throw", "function", "var", "let", "import", "export", "from", "async", "await", "yield",
+            "fn", "pub", "mod", "impl", "trait", "match", "loop", "mut", "use", "where", "go", "func", "package",
+            "interface", "type", "defer", "range", "this", "self", "true", "false", "null", "nullptr", "None", "in",
+            "of", "as", "extends", "implements", "super", "static_assert", "_Static_assert", "constexpr", "auto",
+            "register", "restrict", null};
+        static const char address_to const types[] = {
+            "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "bool", "_Bool", "size_t",
+            "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "usize", "isize", "str", "String",
+            "p8", "p16", "p32", "p64", "b8", "b16", "b32", "b64", "positive", "bipolar", "string", "boolean", "number",
+            "byte", "rune", null};
+        positive at = 0;
+
+        if (state == 1)
+        {
+                const p8 address_to close = length >= 2 ? memory_search((address_any)line, length, "*/", 2) : null;
+
+                at = close ? (positive)(close - line) + 2 : length;
+                doc_token_put(tokens, count, room, 0, at, DOC_ROLE_COMMENT);
+                state = close ? 0 : 1;
+        }
+        else if (state == 2)
+        {
+                positive finish = 0;
+
+                while (finish < length && line[finish] != '"')
+                        finish += line[finish] == '\\' ? 2 : 1;
+                finish = finish < length ? finish + 1 : length;
+                doc_token_put(tokens, count, room, 0, finish, DOC_ROLE_STRING);
+                at = finish;
+                state = finish >= length && length && line[length - 1] == '\\' ? 2 : 0;
+        }
+        {
+                positive first = at;
+
+                while (first < length && (line[first] == ' ' || line[first] == '\t'))
+                        first++;
+                if (!at && first < length && line[first] == '#')
+                {
+                        doc_token_put(tokens, count, room, 0, length, DOC_ROLE_PREPROCESSOR);
+                        return 0;
+                }
+        }
+        while (at < length)
+        {
+                p8 c = line[at];
+                positive start = at;
+
+                if (c == '/' && at + 1 < length && line[at + 1] == '/')
+                {
+                        doc_token_put(tokens, count, room, at, length - at, DOC_ROLE_COMMENT);
+                        return 0;
+                }
+                if (c == '/' && at + 1 < length && line[at + 1] == '*')
+                {
+                        const p8 address_to close = length - at >= 4 ? memory_search((address_any)(line + at + 2), length - at - 2, "*/", 2) : null;
+
+                        at = close ? (positive)(close - line) + 2 : length;
+                        doc_token_put(tokens, count, room, start, at - start, DOC_ROLE_COMMENT);
+                        if (!close)
+                                return 1;
+                        continue;
+                }
+                if (c == '"' || c == '\'' || c == '`')
+                {
+                        at++;
+                        while (at < length && line[at] != c)
+                                at += line[at] == '\\' ? 2 : 1;
+                        at = at < length ? at + 1 : length;
+                        doc_token_put(tokens, count, room, start, at - start, DOC_ROLE_STRING);
+                        if (at >= length && c == '"' && line[length - 1] == '\\')
+                                return 2;
+                        continue;
+                }
+                if (byte_is_digit((b8)c) || (c == '.' && at + 1 < length && byte_is_digit((b8)line[at + 1])))
+                {
+                        while (at < length && (doc_word_byte(line[at]) || line[at] == '.'))
+                                at++;
+                        doc_token_put(tokens, count, room, start, at - start, DOC_ROLE_NUMBER);
+                        continue;
+                }
+                if (doc_word_byte(c))
+                {
+                        while (at < length && doc_word_byte(line[at]))
+                                at++;
+                        doc_token_put(tokens, count, room, start, at - start,
+                                      doc_in_list(keywords, line + start, at - start) ? DOC_ROLE_KEYWORD
+                                      : doc_in_list(types, line + start, at - start) ? DOC_ROLE_TYPE
+                                      : at < length && line[at] == '(' ? DOC_ROLE_FUNCTION
+                                                                       : DOC_ROLE_TEXT);
+                        continue;
+                }
+                at++;
+                doc_token_put(tokens, count, room, start, 1,
+                              memory_first_of((address_any) "+-*/%=<>!&|^~?:", (b8)c, 15) ? DOC_ROLE_OPERATOR : DOC_ROLE_TEXT);
+        }
+        return 0;
+}
+
+/*
+        Shell (POSIX sh, bash, zsh): # comments where a word starts, strings in single and double quotes (which a line
+        end does not close: the state says which is open), $ variables, and the shell's words.
+*/
+static p32 doc_tokenize_shell(const p8 address_to line, positive length, p32 state, struct doc_token address_to tokens,
+                              positive address_to count, positive room)
+{
+        static const char address_to const keywords[] = {
+            "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "function",
+            "return", "local", "export", "readonly", "set", "unset", "shift", "exit", "break", "continue", "trap",
+            "eval", "exec", "source", "alias", "declare", "typeset", "select", "time", null};
+        positive at = 0;
+
+        if (state == 1 || state == 2)
+        {
+                p8 quote = state == 1 ? '\'' : '"';
+
+                while (at < length && line[at] != quote)
+                        at += line[at] == '\\' && quote == '"' ? 2 : 1;
+                at = at < length ? at + 1 : length;
+                doc_token_put(tokens, count, room, 0, at, DOC_ROLE_STRING);
+                if (at >= length && (length == 0 || line[length - 1] != quote))
+                        return state;
+        }
+        while (at < length)
+        {
+                p8 c = line[at];
+                positive start = at;
+
+                if (c == '#' && (at == 0 || line[at - 1] == ' ' || line[at - 1] == '\t' || line[at - 1] == ';'))
+                {
+                        doc_token_put(tokens, count, room, at, length - at, DOC_ROLE_COMMENT);
+                        return 0;
+                }
+                if (c == '\'' || c == '"')
+                {
+                        at++;
+                        while (at < length && line[at] != c)
+                                at += line[at] == '\\' && c == '"' ? 2 : 1;
+                        if (at >= length)
+                        {
+                                doc_token_put(tokens, count, room, start, length - start, DOC_ROLE_STRING);
+                                return c == '\'' ? 1 : 2;
+                        }
+                        at++;
+                        doc_token_put(tokens, count, room, start, at - start, DOC_ROLE_STRING);
+                        continue;
+                }
+                if (c == '$')
+                {
+                        at++;
+                        if (at < length && line[at] == '{')
+                        {
+                                while (at < length && line[at] != '}')
+                                        at++;
+                                at += at < length;
+                        }
+                        else
+                                while (at < length && (doc_word_byte(line[at]) || (at == start + 1 && memory_first_of((address_any) "?@#*$!-0", (b8)line[at], 8))))
+                                        at++;
+                        doc_token_put(tokens, count, room, start, at - start, DOC_ROLE_VARIABLE);
+                        continue;
+                }
+                if (doc_word_byte(c) || c == '-')
+                {
+                        while (at < length && (doc_word_byte(line[at]) || line[at] == '-' || line[at] == '.'))
+                                at++;
+                        doc_token_put(tokens, count, room, start, at - start,
+                                      doc_in_list(keywords, line + start, at - start) ? DOC_ROLE_KEYWORD
+                                      : byte_is_digit((b8)c) ? DOC_ROLE_NUMBER
+                                                             : DOC_ROLE_TEXT);
+                        continue;
+                }
+                at++;
+                doc_token_put(tokens, count, room, start, 1,
+                              memory_first_of((address_any) "|&;<>()=!", (b8)c, 9) ? DOC_ROLE_OPERATOR : DOC_ROLE_TEXT);
+        }
+        return 0;
+}
+
+#define DOC_LANGUAGE_PLAIN 0
+#define DOC_LANGUAGE_C 1
+#define DOC_LANGUAGE_SHELL 2
+
+static const struct
+{
+        const char address_to name;
+        doc_tokenizer tokenize;
+        const char address_to comment;
+} doc_languages[] = {
+    {"Plain Text", doc_tokenize_plain, "#"},
+    {"C", doc_tokenize_c, "//"},
+    {"Shell", doc_tokenize_shell, "#"},
+};
+
+// A file's language from its name and its first bytes: a C family extension, a shell one or a #! naming a shell.
+static p32 doc_language_of(const char address_to name, const p8 address_to head, positive length)
+{
+        static const char address_to const c_like[] = {"c", "h", "cc", "cpp", "cxx", "hpp", "hh", "js", "mjs", "ts",
+                                                       "tsx", "jsx", "rs", "go", "java", "cs", "swift", "kt", "zig", "json",
+                                                       "css", "scss", null};
+        static const char address_to const shells[] = {"sh", "bash", "zsh", "ksh", "profile", "bashrc", "zshrc", null};
+        positive size = name ? string_length((string_address)name) : 0, dot = size;
+
+        while (dot && name[dot - 1] != '.' && name[dot - 1] != '/')
+                dot--;
+        if (dot && name[dot - 1] == '.')
+        {
+                if (doc_in_list(c_like, (const p8 address_to)name + dot, size - dot))
+                        return DOC_LANGUAGE_C;
+                if (doc_in_list(shells, (const p8 address_to)name + dot, size - dot))
+                        return DOC_LANGUAGE_SHELL;
+        }
+        if (length > 2 && head[0] == '#' && head[1] == '!')
+        {
+                positive finish = 2;
+
+                while (finish < length && finish < 128 && head[finish] != '\n')
+                        finish++;
+                if (memory_search((address_any)head, finish, "sh", 2))
+                        return DOC_LANGUAGE_SHELL;
+        }
+        return DOC_LANGUAGE_PLAIN;
+}
+
+/*
+        The tokens of line: the line's start state made known first (tokenizing from the last line known, and stopping
+        at the first line past every edit whose state comes out as it was), then the line itself. Into room tokens:
+        how many. Each line is read at most DOC_FIND_LINE_MOST into it.
+*/
+static positive doc_tokens(struct doc address_to doc, p64 line, struct doc_token address_to tokens, positive room)
+{
+        doc_tokenizer tokenize = doc_languages[doc->language < 3 ? doc->language : 0].tokenize;
+        p64 lines = doc_line_count(doc);
+        positive count = 0;
+        const p8 address_to bytes;
+        positive length;
+        static struct doc_token scratch[512];
+
+        if (line >= lines)
+                return 0;
+        // The states, one a line, made the first time (the gap after the last line); every change keeps them a line each.
+        if (!doc->states)
+        {
+                positive room = 0;
+
+                if (!array_store_reserve(doc->states, room, 0, lines + 4096, 4096))
+                        return 0;
+                doc->state_room = room;
+                memory_zero(doc->states, room * sizeof(p32));
+                doc->gap_start = lines;
+                doc->gap_end = room;
+                doc->states_valid = 1;
+                doc->states_converge = doc->states_last_edit = 0;
+        }
+        if (doc->state_room - (doc->gap_end - doc->gap_start) < lines)
+                doc_states_splice(doc, doc->state_room - (doc->gap_end - doc->gap_start), 0,
+                                  lines - (doc->state_room - (doc->gap_end - doc->gap_start)));
+        if (!doc->states_valid)
+                doc->states_valid = 1;
+        while (doc->states_valid <= line)
+        {
+                p64 at = doc->states_valid - 1;
+                positive scratch_count = 0;
+                p32 state;
+
+                length = doc_line_bytes(doc, at, &bytes);
+                state = tokenize(bytes, length, doc_state_get(doc, at), scratch, &scratch_count, 512);
+                if (doc->states_valid > doc->states_last_edit && doc->states_valid < doc->states_converge &&
+                    doc_state_get(doc, doc->states_valid) == state)
+                {
+                        // The lines after are as they were: their states hold.
+                        doc->states_valid = doc->states_converge;
+                        doc->states_converge = 0;
+                        continue;
+                }
+                doc_state_set(doc, doc->states_valid, state);
+                doc->states_valid++;
+        }
+        length = doc_line_bytes(doc, line, &bytes);
+        tokenize(bytes, length, doc_state_get(doc, line), tokens, &count, room);
+        return count;
+}
+
+/* ---- folding ---- */
+
+// A line's indent in columns, and whether it is all blanks.
+static p64 doc_indent_columns(const struct doc address_to doc, p64 line, b32 address_to blank)
+{
+        p64 text = doc_first_text(doc, line);
+
+        *blank = text == doc_line_end(doc, line);
+        return doc_column(doc, text);
+}
+
+/*
+        The range that folds at line, by indent: the lines after it with more indent than it (blank lines among them),
+        when the next line with text has more. Answers the last line of the range, or DOC_NONE when line folds nothing.
+        At most 100000 lines are looked at.
+*/
+static p64 doc_fold_end(const struct doc address_to doc, p64 line)
+{
+        p64 lines = doc_line_count(doc), last = DOC_NONE;
+        b32 blank;
+        p64 indent = doc_indent_columns(doc, line, &blank);
+
+        if (blank)
+                return DOC_NONE;
+        for (p64 next = line + 1; next < lines && next - line < 100000; next++)
+        {
+                p64 now = doc_indent_columns(doc, next, &blank);
+
+                if (blank)
+                        continue;
+                if (now <= indent)
+                        break;
+                last = next;
+        }
+        return last;
+}
+
+// Whether line is hidden in a fold, and the fold's end line when it starts one that is folded.
+static b32 doc_folded_at(const struct doc address_to doc, p64 line, p64 address_to end_line)
+{
+        p64 start = doc_line_start(doc, line);
+
+        for (positive i = 0; i < doc->range_count; i++)
+                if (doc->ranges[i].kind == DOC_RANGE_FOLD && doc->ranges[i].start == doc_line_end(doc, line))
+                {
+                        *end_line = doc_line_of(doc, doc->ranges[i].finish);
+                        return true;
+                }
+        (void)start;
+        return false;
+}
+
+static b32 doc_hidden(const struct doc address_to doc, p64 line)
+{
+        p64 start = doc_line_start(doc, line);
+
+        for (positive i = 0; i < doc->range_count; i++)
+                if (doc->ranges[i].kind == DOC_RANGE_FOLD && start > doc->ranges[i].start && start <= doc->ranges[i].finish)
+                        return true;
+        return false;
+}
+
+// The fold at line closed (or opened again): what it hides is a range from the line's end to its last line's end.
+static b32 doc_fold(struct doc address_to doc, p64 line, b32 close)
+{
+        p64 end_line;
+
+        for (positive i = 0; i < doc->range_count; i++)
+                if (doc->ranges[i].kind == DOC_RANGE_FOLD && doc->ranges[i].start == doc_line_end(doc, line))
+                {
+                        if (close)
+                                return true;
+                        doc->ranges[i] = doc->ranges[--doc->range_count];
+                        return true;
+                }
+        if (!close)
+                return false;
+        end_line = doc_fold_end(doc, line);
+        if (end_line == DOC_NONE)
+                return false;
+        return doc_range_add(doc, doc_line_end(doc, line), doc_line_end(doc, end_line), DOC_RANGE_FOLD, 0);
+}
+
+/* ---- the break property table ---- */
+
+// TEXT_TABLES BEGIN
+// Generated by differential.py --harness text_tables from the Unicode 16.0.0 data files: GraphemeBreakProperty,
+// WordBreakProperty, emoji-data (Extended_Pictographic) and DerivedCoreProperties (InCB). A range is its first
+// code point shifted left 8 and the index of its properties in doc_break_combos.
+static const p32 doc_break_range_count = 3079;
+static const p16 doc_break_combos[] = {
+        0x0, 0x3, 0x8, 0x11, 0x22, 0x33, 0x40, 0x44, 0x48, 0x66, 0x73, 0x80,
+        0x90, 0xa0, 0xa7, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xb0, 0xc0, 0xd0, 0xe0,
+        0xf0, 0x100, 0x107, 0x110, 0x120, 0x244, 0x4a0, 0x644, 0x655, 0x800, 0x8a0,
+};
+static const p32 doc_break_ranges[] = {
+        0x1, 0xa04, 0xb05, 0xd03, 0xe01, 0x201c, 0x2100, 0x2215, 0x2300, 0x2714,
+        0x2800, 0x2c18, 0x2d00, 0x2e16, 0x2f00, 0x3019, 0x3a17, 0x3b18, 0x3c00, 0x410d,
+        0x5b00, 0x5f1b, 0x6000, 0x610d, 0x7b00, 0x7f01, 0x8505, 0x8601, 0xa000, 0xa921,
+        0xaa0d, 0xab00, 0xad0a, 0xae21, 0xaf00, 0xb50d, 0xb600, 0xb717, 0xb800, 0xba0d,
+        0xbb00, 0xc00d, 0xd700, 0xd80d, 0xf700, 0xf80d, 0x2d800, 0x2de0d, 0x3001f, 0x3700d,
+        0x37500, 0x3760d, 0x37800, 0x37a0d, 0x37e18, 0x37f0d, 0x38000, 0x3860d, 0x38717, 0x3880d,
+        0x38b00, 0x38c0d, 0x38d00, 0x38e0d, 0x3a200, 0x3a30d, 0x3f600, 0x3f70d, 0x48200, 0x4831f,
+        0x48a0d, 0x53000, 0x5310d, 0x55700, 0x5590d, 0x55d00, 0x55e0d, 0x55f17, 0x5600d, 0x58918,
+        0x58a0d, 0x58b00, 0x5911f, 0x5be00, 0x5bf1f, 0x5c000, 0x5c11f, 0x5c300, 0x5c41f, 0x5c600,
+        0x5c71f, 0x5c800, 0x5d00c, 0x5eb00, 0x5ef0c, 0x5f30d, 0x5f417, 0x5f500, 0x6001a, 0x60600,
+        0x60c18, 0x60e00, 0x6101f, 0x61b00, 0x61c0a, 0x61d00, 0x6200d, 0x64b1f, 0x66019, 0x66a00,
+        0x66b19, 0x66c18, 0x66d00, 0x66e0d, 0x6701f, 0x6710d, 0x6d400, 0x6d50d, 0x6d61f, 0x6dd1a,
+        0x6de00, 0x6df1f, 0x6e50d, 0x6e71f, 0x6e900, 0x6ea1f, 0x6ee0d, 0x6f019, 0x6fa0d, 0x6fd00,
+        0x6ff0d, 0x70000, 0x70f0e, 0x7100d, 0x7111f, 0x7120d, 0x7301f, 0x74b00, 0x74d0d, 0x7a61f,
+        0x7b10d, 0x7b200, 0x7c019, 0x7ca0d, 0x7eb1f, 0x7f40d, 0x7f600, 0x7f818, 0x7f900, 0x7fa0d,
+        0x7fb00, 0x7fd1f, 0x7fe00, 0x8000d, 0x8161f, 0x81a0d, 0x81b1f, 0x8240d, 0x8251f, 0x8280d,
+        0x8291f, 0x82e00, 0x8400d, 0x8591f, 0x85c00, 0x8600d, 0x86b00, 0x8700d, 0x88800, 0x8890d,
+        0x88f00, 0x8901a, 0x89200, 0x8971f, 0x8a00d, 0x8ca1f, 0x8e21a, 0x8e31f, 0x90308, 0x9040d,
+        0x9151e, 0x93a1f, 0x93b08, 0x93c1f, 0x93d0d, 0x93e08, 0x9411f, 0x94908, 0x94d1d, 0x94e08,
+        0x9500d, 0x9511f, 0x9581e, 0x9600d, 0x9621f, 0x96400, 0x96619, 0x97000, 0x9710d, 0x9781e,
+        0x9800d, 0x9811f, 0x98208, 0x98400, 0x9850d, 0x98d00, 0x98f0d, 0x99100, 0x9930d, 0x9951e,
+        0x9a900, 0x9aa1e, 0x9b100, 0x9b21e, 0x9b300, 0x9b61e, 0x9ba00, 0x9bc1f, 0x9bd0d, 0x9be1f,
+        0x9bf08, 0x9c11f, 0x9c500, 0x9c708, 0x9c900, 0x9cb08, 0x9cd1d, 0x9ce0d, 0x9cf00, 0x9d71f,
+        0x9d800, 0x9dc1e, 0x9de00, 0x9df1e, 0x9e00d, 0x9e21f, 0x9e400, 0x9e619, 0x9f01e, 0x9f200,
+        0x9fc0d, 0x9fd00, 0x9fe1f, 0x9ff00, 0xa011f, 0xa0308, 0xa0400, 0xa050d, 0xa0b00, 0xa0f0d,
+        0xa1100, 0xa130d, 0xa2900, 0xa2a0d, 0xa3100, 0xa320d, 0xa3400, 0xa350d, 0xa3700, 0xa380d,
+        0xa3a00, 0xa3c1f, 0xa3d00, 0xa3e08, 0xa411f, 0xa4300, 0xa471f, 0xa4900, 0xa4b1f, 0xa4e00,
+        0xa511f, 0xa5200, 0xa590d, 0xa5d00, 0xa5e0d, 0xa5f00, 0xa6619, 0xa701f, 0xa720d, 0xa751f,
+        0xa7600, 0xa811f, 0xa8308, 0xa8400, 0xa850d, 0xa8e00, 0xa8f0d, 0xa9200, 0xa930d, 0xa951e,
+        0xaa900, 0xaaa1e, 0xab100, 0xab21e, 0xab400, 0xab51e, 0xaba00, 0xabc1f, 0xabd0d, 0xabe08,
+        0xac11f, 0xac600, 0xac71f, 0xac908, 0xaca00, 0xacb08, 0xacd1d, 0xace00, 0xad00d, 0xad100,
+        0xae00d, 0xae21f, 0xae400, 0xae619, 0xaf000, 0xaf91e, 0xafa1f, 0xb0000, 0xb011f, 0xb0208,
+        0xb0400, 0xb050d, 0xb0d00, 0xb0f0d, 0xb1100, 0xb130d, 0xb151e, 0xb2900, 0xb2a1e, 0xb3100,
+        0xb321e, 0xb3400, 0xb351e, 0xb3a00, 0xb3c1f, 0xb3d0d, 0xb3e1f, 0xb4008, 0xb411f, 0xb4500,
+        0xb4708, 0xb4900, 0xb4b08, 0xb4d1d, 0xb4e00, 0xb551f, 0xb5800, 0xb5c1e, 0xb5e00, 0xb5f1e,
+        0xb600d, 0xb621f, 0xb6400, 0xb6619, 0xb7000, 0xb711e, 0xb7200, 0xb821f, 0xb830d, 0xb8400,
+        0xb850d, 0xb8b00, 0xb8e0d, 0xb9100, 0xb920d, 0xb9600, 0xb990d, 0xb9b00, 0xb9c0d, 0xb9d00,
+        0xb9e0d, 0xba000, 0xba30d, 0xba500, 0xba80d, 0xbab00, 0xbae0d, 0xbba00, 0xbbe1f, 0xbbf08,
+        0xbc01f, 0xbc108, 0xbc300, 0xbc608, 0xbc900, 0xbca08, 0xbcd1f, 0xbce00, 0xbd00d, 0xbd100,
+        0xbd71f, 0xbd800, 0xbe619, 0xbf000, 0xc001f, 0xc0108, 0xc041f, 0xc050d, 0xc0d00, 0xc0e0d,
+        0xc1100, 0xc120d, 0xc151e, 0xc2900, 0xc2a1e, 0xc3a00, 0xc3c1f, 0xc3d0d, 0xc3e1f, 0xc4108,
+        0xc4500, 0xc461f, 0xc4900, 0xc4a1f, 0xc4d1d, 0xc4e00, 0xc551f, 0xc5700, 0xc581e, 0xc5b00,
+        0xc5d0d, 0xc5e00, 0xc600d, 0xc621f, 0xc6400, 0xc6619, 0xc7000, 0xc800d, 0xc811f, 0xc8208,
+        0xc8400, 0xc850d, 0xc8d00, 0xc8e0d, 0xc9100, 0xc920d, 0xca900, 0xcaa0d, 0xcb400, 0xcb50d,
+        0xcba00, 0xcbc1f, 0xcbd0d, 0xcbe08, 0xcbf1f, 0xcc108, 0xcc21f, 0xcc308, 0xcc500, 0xcc61f,
+        0xcc900, 0xcca1f, 0xcce00, 0xcd51f, 0xcd700, 0xcdd0d, 0xcdf00, 0xce00d, 0xce21f, 0xce400,
+        0xce619, 0xcf000, 0xcf10d, 0xcf308, 0xcf400, 0xd001f, 0xd0208, 0xd040d, 0xd0d00, 0xd0e0d,
+        0xd1100, 0xd120d, 0xd151e, 0xd3b1f, 0xd3d0d, 0xd3e1f, 0xd3f08, 0xd411f, 0xd4500, 0xd4608,
+        0xd4900, 0xd4a08, 0xd4d1d, 0xd4e0e, 0xd4f00, 0xd540d, 0xd571f, 0xd5800, 0xd5f0d, 0xd621f,
+        0xd6400, 0xd6619, 0xd7000, 0xd7a0d, 0xd8000, 0xd811f, 0xd8208, 0xd8400, 0xd850d, 0xd9700,
+        0xd9a0d, 0xdb200, 0xdb30d, 0xdbc00, 0xdbd0d, 0xdbe00, 0xdc00d, 0xdc700, 0xdca1f, 0xdcb00,
+        0xdcf1f, 0xdd008, 0xdd21f, 0xdd500, 0xdd61f, 0xdd700, 0xdd808, 0xddf1f, 0xde000, 0xde619,
+        0xdf000, 0xdf208, 0xdf400, 0xe311f, 0xe3200, 0xe3302, 0xe341f, 0xe3b00, 0xe471f, 0xe4f00,
+        0xe5019, 0xe5a00, 0xeb11f, 0xeb200, 0xeb302, 0xeb41f, 0xebd00, 0xec81f, 0xecf00, 0xed019,
+        0xeda00, 0xf000d, 0xf0100, 0xf181f, 0xf1a00, 0xf2019, 0xf2a00, 0xf351f, 0xf3600, 0xf371f,
+        0xf3800, 0xf391f, 0xf3a00, 0xf3e08, 0xf400d, 0xf4800, 0xf490d, 0xf6d00, 0xf711f, 0xf7f08,
+        0xf801f, 0xf8500, 0xf861f, 0xf880d, 0xf8d1f, 0xf9800, 0xf991f, 0xfbd00, 0xfc61f, 0xfc700,
+        0x102b06, 0x102d1f, 0x103108, 0x10321f, 0x103806, 0x10391f, 0x103b08, 0x103d1f, 0x103f00, 0x104019,
+        0x104a00, 0x105608, 0x10581f, 0x105a00, 0x105e1f, 0x106100, 0x106206, 0x106500, 0x106706, 0x106e00,
+        0x10711f, 0x107500, 0x10821f, 0x108306, 0x108408, 0x10851f, 0x108706, 0x108d1f, 0x108e00, 0x108f06,
+        0x109019, 0x109a06, 0x109d1f, 0x109e00, 0x10a00d, 0x10c600, 0x10c70d, 0x10c800, 0x10cd0d, 0x10ce00,
+        0x10d00d, 0x10fb00, 0x10fc0d, 0x11000f, 0x116010, 0x11a811, 0x12000d, 0x124900, 0x124a0d, 0x124e00,
+        0x12500d, 0x125700, 0x12580d, 0x125900, 0x125a0d, 0x125e00, 0x12600d, 0x128900, 0x128a0d, 0x128e00,
+        0x12900d, 0x12b100, 0x12b20d, 0x12b600, 0x12b80d, 0x12bf00, 0x12c00d, 0x12c100, 0x12c20d, 0x12c600,
+        0x12c80d, 0x12d700, 0x12d80d, 0x131100, 0x13120d, 0x131600, 0x13180d, 0x135b00, 0x135d1f, 0x136000,
+        0x13800d, 0x139000, 0x13a00d, 0x13f600, 0x13f80d, 0x13fe00, 0x14010d, 0x166d00, 0x166f0d, 0x16801c,
+        0x16810d, 0x169b00, 0x16a00d, 0x16eb00, 0x16ee0d, 0x16f900, 0x17000d, 0x17121f, 0x171600, 0x171f0d,
+        0x17321f, 0x173500, 0x17400d, 0x17521f, 0x175400, 0x17600d, 0x176d00, 0x176e0d, 0x177100, 0x17721f,
+        0x177400, 0x17b41f, 0x17b608, 0x17b71f, 0x17be08, 0x17c61f, 0x17c708, 0x17c91f, 0x17d400, 0x17dd1f,
+        0x17de00, 0x17e019, 0x17ea00, 0x180b1f, 0x180e0a, 0x180f1f, 0x181019, 0x181a00, 0x18200d, 0x187900,
+        0x18800d, 0x18851f, 0x18870d, 0x18a91f, 0x18aa0d, 0x18ab00, 0x18b00d, 0x18f600, 0x19000d, 0x191f00,
+        0x19201f, 0x192308, 0x19271f, 0x192908, 0x192c00, 0x193008, 0x19321f, 0x193308, 0x19391f, 0x193c00,
+        0x194619, 0x195000, 0x19d019, 0x19db00, 0x1a000d, 0x1a171f, 0x1a1908, 0x1a1b1f, 0x1a1c00, 0x1a5508,
+        0x1a561f, 0x1a5708, 0x1a581f, 0x1a5f00, 0x1a601f, 0x1a6106, 0x1a621f, 0x1a6306, 0x1a651f, 0x1a6d08,
+        0x1a731f, 0x1a7d00, 0x1a7f1f, 0x1a8019, 0x1a8a00, 0x1a9019, 0x1a9a00, 0x1ab01f, 0x1acf00, 0x1b001f,
+        0x1b0408, 0x1b050d, 0x1b341f, 0x1b3e08, 0x1b421f, 0x1b450d, 0x1b4d00, 0x1b5019, 0x1b5a00, 0x1b6b1f,
+        0x1b7400, 0x1b801f, 0x1b8208, 0x1b830d, 0x1ba108, 0x1ba21f, 0x1ba608, 0x1ba81f, 0x1bae0d, 0x1bb019,
+        0x1bba0d, 0x1be61f, 0x1be708, 0x1be81f, 0x1bea08, 0x1bed1f, 0x1bee08, 0x1bef1f, 0x1bf400, 0x1c000d,
+        0x1c2408, 0x1c2c1f, 0x1c3408, 0x1c361f, 0x1c3800, 0x1c4019, 0x1c4a00, 0x1c4d0d, 0x1c5019, 0x1c5a0d,
+        0x1c7e00, 0x1c800d, 0x1c8b00, 0x1c900d, 0x1cbb00, 0x1cbd0d, 0x1cc000, 0x1cd01f, 0x1cd300, 0x1cd41f,
+        0x1ce108, 0x1ce21f, 0x1ce90d, 0x1ced1f, 0x1cee0d, 0x1cf41f, 0x1cf50d, 0x1cf708, 0x1cf81f, 0x1cfa0d,
+        0x1cfb00, 0x1d000d, 0x1dc01f, 0x1e000d, 0x1f1600, 0x1f180d, 0x1f1e00, 0x1f200d, 0x1f4600, 0x1f480d,
+        0x1f4e00, 0x1f500d, 0x1f5800, 0x1f590d, 0x1f5a00, 0x1f5b0d, 0x1f5c00, 0x1f5d0d, 0x1f5e00, 0x1f5f0d,
+        0x1f7e00, 0x1f800d, 0x1fb500, 0x1fb60d, 0x1fbd00, 0x1fbe0d, 0x1fbf00, 0x1fc20d, 0x1fc500, 0x1fc60d,
+        0x1fcd00, 0x1fd00d, 0x1fd400, 0x1fd60d, 0x1fdc00, 0x1fe00d, 0x1fed00, 0x1ff20d, 0x1ff500, 0x1ff60d,
+        0x1ffd00, 0x20001c, 0x200700, 0x20081c, 0x200b01, 0x200c07, 0x200d20, 0x200e0a, 0x201000, 0x201816,
+        0x201a00, 0x202416, 0x202500, 0x202717, 0x202805, 0x202a0a, 0x202f1b, 0x203000, 0x203c21, 0x203d00,
+        0x203f1b, 0x204100, 0x204418, 0x204500, 0x204921, 0x204a00, 0x20541b, 0x205500, 0x205f1c, 0x20600a,
+        0x206501, 0x20660a, 0x207000, 0x20710d, 0x207200, 0x207f0d, 0x208000, 0x20900d, 0x209d00, 0x20d01f,
+        0x20f100, 0x21020d, 0x210300, 0x21070d, 0x210800, 0x210a0d, 0x211400, 0x21150d, 0x211600, 0x21190d,
+        0x211e00, 0x212221, 0x212300, 0x21240d, 0x212500, 0x21260d, 0x212700, 0x21280d, 0x212900, 0x212a0d,
+        0x212e00, 0x212f0d, 0x213922, 0x213a00, 0x213c0d, 0x214000, 0x21450d, 0x214a00, 0x214e0d, 0x214f00,
+        0x21600d, 0x218900, 0x219421, 0x219a00, 0x21a921, 0x21ab00, 0x231a21, 0x231c00, 0x232821, 0x232900,
+        0x238821, 0x238900, 0x23cf21, 0x23d000, 0x23e921, 0x23f400, 0x23f821, 0x23fb00, 0x24b60d, 0x24c222,
+        0x24c30d, 0x24ea00, 0x25aa21, 0x25ac00, 0x25b621, 0x25b700, 0x25c021, 0x25c100, 0x25fb21, 0x25ff00,
+        0x260021, 0x260600, 0x260721, 0x261300, 0x261421, 0x268600, 0x269021, 0x270600, 0x270821, 0x271300,
+        0x271421, 0x271500, 0x271621, 0x271700, 0x271d21, 0x271e00, 0x272121, 0x272200, 0x272821, 0x272900,
+        0x273321, 0x273500, 0x274421, 0x274500, 0x274721, 0x274800, 0x274c21, 0x274d00, 0x274e21, 0x274f00,
+        0x275321, 0x275600, 0x275721, 0x275800, 0x276321, 0x276800, 0x279521, 0x279800, 0x27a121, 0x27a200,
+        0x27b021, 0x27b100, 0x27bf21, 0x27c000, 0x293421, 0x293600, 0x2b0521, 0x2b0800, 0x2b1b21, 0x2b1d00,
+        0x2b5021, 0x2b5100, 0x2b5521, 0x2b5600, 0x2c000d, 0x2ce500, 0x2ceb0d, 0x2cef1f, 0x2cf20d, 0x2cf400,
+        0x2d000d, 0x2d2600, 0x2d270d, 0x2d2800, 0x2d2d0d, 0x2d2e00, 0x2d300d, 0x2d6800, 0x2d6f0d, 0x2d7000,
+        0x2d7f1f, 0x2d800d, 0x2d9700, 0x2da00d, 0x2da700, 0x2da80d, 0x2daf00, 0x2db00d, 0x2db700, 0x2db80d,
+        0x2dbf00, 0x2dc00d, 0x2dc700, 0x2dc80d, 0x2dcf00, 0x2dd00d, 0x2dd700, 0x2dd80d, 0x2ddf00, 0x2de01f,
+        0x2e0000, 0x2e2f0d, 0x2e3000, 0x30001c, 0x300100, 0x30050d, 0x300600, 0x302a1f, 0x303021, 0x30310b,
+        0x303600, 0x303b0d, 0x303d21, 0x303e00, 0x30991f, 0x309b0b, 0x309d00, 0x30a00b, 0x30fb00, 0x30fc0b,
+        0x310000, 0x31050d, 0x313000, 0x31310d, 0x318f00, 0x31a00d, 0x31c000, 0x31f00b, 0x320000, 0x329721,
+        0x329800, 0x329921, 0x329a00, 0x32d00b, 0x32ff00, 0x33000b, 0x335800, 0xa0000d, 0xa48d00, 0xa4d00d,
+        0xa4fe00, 0xa5000d, 0xa60d00, 0xa6100d, 0xa62019, 0xa62a0d, 0xa62c00, 0xa6400d, 0xa66f1f, 0xa67300,
+        0xa6741f, 0xa67e00, 0xa67f0d, 0xa69e1f, 0xa6a00d, 0xa6f01f, 0xa6f200, 0xa7080d, 0xa7ce00, 0xa7d00d,
+        0xa7d200, 0xa7d30d, 0xa7d400, 0xa7d50d, 0xa7dd00, 0xa7f20d, 0xa8021f, 0xa8030d, 0xa8061f, 0xa8070d,
+        0xa80b1f, 0xa80c0d, 0xa82308, 0xa8251f, 0xa82708, 0xa82800, 0xa82c1f, 0xa82d00, 0xa8400d, 0xa87400,
+        0xa88008, 0xa8820d, 0xa8b408, 0xa8c41f, 0xa8c600, 0xa8d019, 0xa8da00, 0xa8e01f, 0xa8f20d, 0xa8f800,
+        0xa8fb0d, 0xa8fc00, 0xa8fd0d, 0xa8ff1f, 0xa90019, 0xa90a0d, 0xa9261f, 0xa92e00, 0xa9300d, 0xa9471f,
+        0xa95208, 0xa9531f, 0xa95400, 0xa9600f, 0xa97d00, 0xa9801f, 0xa98308, 0xa9840d, 0xa9b31f, 0xa9b408,
+        0xa9b61f, 0xa9ba08, 0xa9bc1f, 0xa9be08, 0xa9c01f, 0xa9c100, 0xa9cf0d, 0xa9d019, 0xa9da00, 0xa9e51f,
+        0xa9e600, 0xa9f019, 0xa9fa00, 0xaa000d, 0xaa291f, 0xaa2f08, 0xaa311f, 0xaa3308, 0xaa351f, 0xaa3700,
+        0xaa400d, 0xaa431f, 0xaa440d, 0xaa4c1f, 0xaa4d08, 0xaa4e00, 0xaa5019, 0xaa5a00, 0xaa7b06, 0xaa7c1f,
+        0xaa7d06, 0xaa7e00, 0xaab01f, 0xaab100, 0xaab21f, 0xaab500, 0xaab71f, 0xaab900, 0xaabe1f, 0xaac000,
+        0xaac11f, 0xaac200, 0xaae00d, 0xaaeb08, 0xaaec1f, 0xaaee08, 0xaaf000, 0xaaf20d, 0xaaf508, 0xaaf61f,
+        0xaaf700, 0xab010d, 0xab0700, 0xab090d, 0xab0f00, 0xab110d, 0xab1700, 0xab200d, 0xab2700, 0xab280d,
+        0xab2f00, 0xab300d, 0xab6a00, 0xab700d, 0xabe308, 0xabe51f, 0xabe608, 0xabe81f, 0xabe908, 0xabeb00,
+        0xabec08, 0xabed1f, 0xabee00, 0xabf019, 0xabfa00, 0xac0012, 0xac0113, 0xac1c12, 0xac1d13, 0xac3812,
+        0xac3913, 0xac5412, 0xac5513, 0xac7012, 0xac7113, 0xac8c12, 0xac8d13, 0xaca812, 0xaca913, 0xacc412,
+        0xacc513, 0xace012, 0xace113, 0xacfc12, 0xacfd13, 0xad1812, 0xad1913, 0xad3412, 0xad3513, 0xad5012,
+        0xad5113, 0xad6c12, 0xad6d13, 0xad8812, 0xad8913, 0xada412, 0xada513, 0xadc012, 0xadc113, 0xaddc12,
+        0xaddd13, 0xadf812, 0xadf913, 0xae1412, 0xae1513, 0xae3012, 0xae3113, 0xae4c12, 0xae4d13, 0xae6812,
+        0xae6913, 0xae8412, 0xae8513, 0xaea012, 0xaea113, 0xaebc12, 0xaebd13, 0xaed812, 0xaed913, 0xaef412,
+        0xaef513, 0xaf1012, 0xaf1113, 0xaf2c12, 0xaf2d13, 0xaf4812, 0xaf4913, 0xaf6412, 0xaf6513, 0xaf8012,
+        0xaf8113, 0xaf9c12, 0xaf9d13, 0xafb812, 0xafb913, 0xafd412, 0xafd513, 0xaff012, 0xaff113, 0xb00c12,
+        0xb00d13, 0xb02812, 0xb02913, 0xb04412, 0xb04513, 0xb06012, 0xb06113, 0xb07c12, 0xb07d13, 0xb09812,
+        0xb09913, 0xb0b412, 0xb0b513, 0xb0d012, 0xb0d113, 0xb0ec12, 0xb0ed13, 0xb10812, 0xb10913, 0xb12412,
+        0xb12513, 0xb14012, 0xb14113, 0xb15c12, 0xb15d13, 0xb17812, 0xb17913, 0xb19412, 0xb19513, 0xb1b012,
+        0xb1b113, 0xb1cc12, 0xb1cd13, 0xb1e812, 0xb1e913, 0xb20412, 0xb20513, 0xb22012, 0xb22113, 0xb23c12,
+        0xb23d13, 0xb25812, 0xb25913, 0xb27412, 0xb27513, 0xb29012, 0xb29113, 0xb2ac12, 0xb2ad13, 0xb2c812,
+        0xb2c913, 0xb2e412, 0xb2e513, 0xb30012, 0xb30113, 0xb31c12, 0xb31d13, 0xb33812, 0xb33913, 0xb35412,
+        0xb35513, 0xb37012, 0xb37113, 0xb38c12, 0xb38d13, 0xb3a812, 0xb3a913, 0xb3c412, 0xb3c513, 0xb3e012,
+        0xb3e113, 0xb3fc12, 0xb3fd13, 0xb41812, 0xb41913, 0xb43412, 0xb43513, 0xb45012, 0xb45113, 0xb46c12,
+        0xb46d13, 0xb48812, 0xb48913, 0xb4a412, 0xb4a513, 0xb4c012, 0xb4c113, 0xb4dc12, 0xb4dd13, 0xb4f812,
+        0xb4f913, 0xb51412, 0xb51513, 0xb53012, 0xb53113, 0xb54c12, 0xb54d13, 0xb56812, 0xb56913, 0xb58412,
+        0xb58513, 0xb5a012, 0xb5a113, 0xb5bc12, 0xb5bd13, 0xb5d812, 0xb5d913, 0xb5f412, 0xb5f513, 0xb61012,
+        0xb61113, 0xb62c12, 0xb62d13, 0xb64812, 0xb64913, 0xb66412, 0xb66513, 0xb68012, 0xb68113, 0xb69c12,
+        0xb69d13, 0xb6b812, 0xb6b913, 0xb6d412, 0xb6d513, 0xb6f012, 0xb6f113, 0xb70c12, 0xb70d13, 0xb72812,
+        0xb72913, 0xb74412, 0xb74513, 0xb76012, 0xb76113, 0xb77c12, 0xb77d13, 0xb79812, 0xb79913, 0xb7b412,
+        0xb7b513, 0xb7d012, 0xb7d113, 0xb7ec12, 0xb7ed13, 0xb80812, 0xb80913, 0xb82412, 0xb82513, 0xb84012,
+        0xb84113, 0xb85c12, 0xb85d13, 0xb87812, 0xb87913, 0xb89412, 0xb89513, 0xb8b012, 0xb8b113, 0xb8cc12,
+        0xb8cd13, 0xb8e812, 0xb8e913, 0xb90412, 0xb90513, 0xb92012, 0xb92113, 0xb93c12, 0xb93d13, 0xb95812,
+        0xb95913, 0xb97412, 0xb97513, 0xb99012, 0xb99113, 0xb9ac12, 0xb9ad13, 0xb9c812, 0xb9c913, 0xb9e412,
+        0xb9e513, 0xba0012, 0xba0113, 0xba1c12, 0xba1d13, 0xba3812, 0xba3913, 0xba5412, 0xba5513, 0xba7012,
+        0xba7113, 0xba8c12, 0xba8d13, 0xbaa812, 0xbaa913, 0xbac412, 0xbac513, 0xbae012, 0xbae113, 0xbafc12,
+        0xbafd13, 0xbb1812, 0xbb1913, 0xbb3412, 0xbb3513, 0xbb5012, 0xbb5113, 0xbb6c12, 0xbb6d13, 0xbb8812,
+        0xbb8913, 0xbba412, 0xbba513, 0xbbc012, 0xbbc113, 0xbbdc12, 0xbbdd13, 0xbbf812, 0xbbf913, 0xbc1412,
+        0xbc1513, 0xbc3012, 0xbc3113, 0xbc4c12, 0xbc4d13, 0xbc6812, 0xbc6913, 0xbc8412, 0xbc8513, 0xbca012,
+        0xbca113, 0xbcbc12, 0xbcbd13, 0xbcd812, 0xbcd913, 0xbcf412, 0xbcf513, 0xbd1012, 0xbd1113, 0xbd2c12,
+        0xbd2d13, 0xbd4812, 0xbd4913, 0xbd6412, 0xbd6513, 0xbd8012, 0xbd8113, 0xbd9c12, 0xbd9d13, 0xbdb812,
+        0xbdb913, 0xbdd412, 0xbdd513, 0xbdf012, 0xbdf113, 0xbe0c12, 0xbe0d13, 0xbe2812, 0xbe2913, 0xbe4412,
+        0xbe4513, 0xbe6012, 0xbe6113, 0xbe7c12, 0xbe7d13, 0xbe9812, 0xbe9913, 0xbeb412, 0xbeb513, 0xbed012,
+        0xbed113, 0xbeec12, 0xbeed13, 0xbf0812, 0xbf0913, 0xbf2412, 0xbf2513, 0xbf4012, 0xbf4113, 0xbf5c12,
+        0xbf5d13, 0xbf7812, 0xbf7913, 0xbf9412, 0xbf9513, 0xbfb012, 0xbfb113, 0xbfcc12, 0xbfcd13, 0xbfe812,
+        0xbfe913, 0xc00412, 0xc00513, 0xc02012, 0xc02113, 0xc03c12, 0xc03d13, 0xc05812, 0xc05913, 0xc07412,
+        0xc07513, 0xc09012, 0xc09113, 0xc0ac12, 0xc0ad13, 0xc0c812, 0xc0c913, 0xc0e412, 0xc0e513, 0xc10012,
+        0xc10113, 0xc11c12, 0xc11d13, 0xc13812, 0xc13913, 0xc15412, 0xc15513, 0xc17012, 0xc17113, 0xc18c12,
+        0xc18d13, 0xc1a812, 0xc1a913, 0xc1c412, 0xc1c513, 0xc1e012, 0xc1e113, 0xc1fc12, 0xc1fd13, 0xc21812,
+        0xc21913, 0xc23412, 0xc23513, 0xc25012, 0xc25113, 0xc26c12, 0xc26d13, 0xc28812, 0xc28913, 0xc2a412,
+        0xc2a513, 0xc2c012, 0xc2c113, 0xc2dc12, 0xc2dd13, 0xc2f812, 0xc2f913, 0xc31412, 0xc31513, 0xc33012,
+        0xc33113, 0xc34c12, 0xc34d13, 0xc36812, 0xc36913, 0xc38412, 0xc38513, 0xc3a012, 0xc3a113, 0xc3bc12,
+        0xc3bd13, 0xc3d812, 0xc3d913, 0xc3f412, 0xc3f513, 0xc41012, 0xc41113, 0xc42c12, 0xc42d13, 0xc44812,
+        0xc44913, 0xc46412, 0xc46513, 0xc48012, 0xc48113, 0xc49c12, 0xc49d13, 0xc4b812, 0xc4b913, 0xc4d412,
+        0xc4d513, 0xc4f012, 0xc4f113, 0xc50c12, 0xc50d13, 0xc52812, 0xc52913, 0xc54412, 0xc54513, 0xc56012,
+        0xc56113, 0xc57c12, 0xc57d13, 0xc59812, 0xc59913, 0xc5b412, 0xc5b513, 0xc5d012, 0xc5d113, 0xc5ec12,
+        0xc5ed13, 0xc60812, 0xc60913, 0xc62412, 0xc62513, 0xc64012, 0xc64113, 0xc65c12, 0xc65d13, 0xc67812,
+        0xc67913, 0xc69412, 0xc69513, 0xc6b012, 0xc6b113, 0xc6cc12, 0xc6cd13, 0xc6e812, 0xc6e913, 0xc70412,
+        0xc70513, 0xc72012, 0xc72113, 0xc73c12, 0xc73d13, 0xc75812, 0xc75913, 0xc77412, 0xc77513, 0xc79012,
+        0xc79113, 0xc7ac12, 0xc7ad13, 0xc7c812, 0xc7c913, 0xc7e412, 0xc7e513, 0xc80012, 0xc80113, 0xc81c12,
+        0xc81d13, 0xc83812, 0xc83913, 0xc85412, 0xc85513, 0xc87012, 0xc87113, 0xc88c12, 0xc88d13, 0xc8a812,
+        0xc8a913, 0xc8c412, 0xc8c513, 0xc8e012, 0xc8e113, 0xc8fc12, 0xc8fd13, 0xc91812, 0xc91913, 0xc93412,
+        0xc93513, 0xc95012, 0xc95113, 0xc96c12, 0xc96d13, 0xc98812, 0xc98913, 0xc9a412, 0xc9a513, 0xc9c012,
+        0xc9c113, 0xc9dc12, 0xc9dd13, 0xc9f812, 0xc9f913, 0xca1412, 0xca1513, 0xca3012, 0xca3113, 0xca4c12,
+        0xca4d13, 0xca6812, 0xca6913, 0xca8412, 0xca8513, 0xcaa012, 0xcaa113, 0xcabc12, 0xcabd13, 0xcad812,
+        0xcad913, 0xcaf412, 0xcaf513, 0xcb1012, 0xcb1113, 0xcb2c12, 0xcb2d13, 0xcb4812, 0xcb4913, 0xcb6412,
+        0xcb6513, 0xcb8012, 0xcb8113, 0xcb9c12, 0xcb9d13, 0xcbb812, 0xcbb913, 0xcbd412, 0xcbd513, 0xcbf012,
+        0xcbf113, 0xcc0c12, 0xcc0d13, 0xcc2812, 0xcc2913, 0xcc4412, 0xcc4513, 0xcc6012, 0xcc6113, 0xcc7c12,
+        0xcc7d13, 0xcc9812, 0xcc9913, 0xccb412, 0xccb513, 0xccd012, 0xccd113, 0xccec12, 0xcced13, 0xcd0812,
+        0xcd0913, 0xcd2412, 0xcd2513, 0xcd4012, 0xcd4113, 0xcd5c12, 0xcd5d13, 0xcd7812, 0xcd7913, 0xcd9412,
+        0xcd9513, 0xcdb012, 0xcdb113, 0xcdcc12, 0xcdcd13, 0xcde812, 0xcde913, 0xce0412, 0xce0513, 0xce2012,
+        0xce2113, 0xce3c12, 0xce3d13, 0xce5812, 0xce5913, 0xce7412, 0xce7513, 0xce9012, 0xce9113, 0xceac12,
+        0xcead13, 0xcec812, 0xcec913, 0xcee412, 0xcee513, 0xcf0012, 0xcf0113, 0xcf1c12, 0xcf1d13, 0xcf3812,
+        0xcf3913, 0xcf5412, 0xcf5513, 0xcf7012, 0xcf7113, 0xcf8c12, 0xcf8d13, 0xcfa812, 0xcfa913, 0xcfc412,
+        0xcfc513, 0xcfe012, 0xcfe113, 0xcffc12, 0xcffd13, 0xd01812, 0xd01913, 0xd03412, 0xd03513, 0xd05012,
+        0xd05113, 0xd06c12, 0xd06d13, 0xd08812, 0xd08913, 0xd0a412, 0xd0a513, 0xd0c012, 0xd0c113, 0xd0dc12,
+        0xd0dd13, 0xd0f812, 0xd0f913, 0xd11412, 0xd11513, 0xd13012, 0xd13113, 0xd14c12, 0xd14d13, 0xd16812,
+        0xd16913, 0xd18412, 0xd18513, 0xd1a012, 0xd1a113, 0xd1bc12, 0xd1bd13, 0xd1d812, 0xd1d913, 0xd1f412,
+        0xd1f513, 0xd21012, 0xd21113, 0xd22c12, 0xd22d13, 0xd24812, 0xd24913, 0xd26412, 0xd26513, 0xd28012,
+        0xd28113, 0xd29c12, 0xd29d13, 0xd2b812, 0xd2b913, 0xd2d412, 0xd2d513, 0xd2f012, 0xd2f113, 0xd30c12,
+        0xd30d13, 0xd32812, 0xd32913, 0xd34412, 0xd34513, 0xd36012, 0xd36113, 0xd37c12, 0xd37d13, 0xd39812,
+        0xd39913, 0xd3b412, 0xd3b513, 0xd3d012, 0xd3d113, 0xd3ec12, 0xd3ed13, 0xd40812, 0xd40913, 0xd42412,
+        0xd42513, 0xd44012, 0xd44113, 0xd45c12, 0xd45d13, 0xd47812, 0xd47913, 0xd49412, 0xd49513, 0xd4b012,
+        0xd4b113, 0xd4cc12, 0xd4cd13, 0xd4e812, 0xd4e913, 0xd50412, 0xd50513, 0xd52012, 0xd52113, 0xd53c12,
+        0xd53d13, 0xd55812, 0xd55913, 0xd57412, 0xd57513, 0xd59012, 0xd59113, 0xd5ac12, 0xd5ad13, 0xd5c812,
+        0xd5c913, 0xd5e412, 0xd5e513, 0xd60012, 0xd60113, 0xd61c12, 0xd61d13, 0xd63812, 0xd63913, 0xd65412,
+        0xd65513, 0xd67012, 0xd67113, 0xd68c12, 0xd68d13, 0xd6a812, 0xd6a913, 0xd6c412, 0xd6c513, 0xd6e012,
+        0xd6e113, 0xd6fc12, 0xd6fd13, 0xd71812, 0xd71913, 0xd73412, 0xd73513, 0xd75012, 0xd75113, 0xd76c12,
+        0xd76d13, 0xd78812, 0xd78913, 0xd7a400, 0xd7b010, 0xd7c700, 0xd7cb11, 0xd7fc00, 0xfb000d, 0xfb0700,
+        0xfb130d, 0xfb1800, 0xfb1d0c, 0xfb1e1f, 0xfb1f0c, 0xfb2900, 0xfb2a0c, 0xfb3700, 0xfb380c, 0xfb3d00,
+        0xfb3e0c, 0xfb3f00, 0xfb400c, 0xfb4200, 0xfb430c, 0xfb4500, 0xfb460c, 0xfb500d, 0xfbb200, 0xfbd30d,
+        0xfd3e00, 0xfd500d, 0xfd9000, 0xfd920d, 0xfdc800, 0xfdf00d, 0xfdfc00, 0xfe001f, 0xfe1000, 0xfe1317,
+        0xfe1400, 0xfe201f, 0xfe3000, 0xfe331b, 0xfe3500, 0xfe4d1b, 0xfe5018, 0xfe5100, 0xfe5216, 0xfe5300,
+        0xfe5418, 0xfe5517, 0xfe5600, 0xfe700d, 0xfe7500, 0xfe760d, 0xfefd00, 0xfeff0a, 0xff0000, 0xff0716,
+        0xff0800, 0xff0c18, 0xff0d00, 0xff0e16, 0xff0f00, 0xff1019, 0xff1a17, 0xff1b18, 0xff1c00, 0xff210d,
+        0xff3b00, 0xff3f1b, 0xff4000, 0xff410d, 0xff5b00, 0xff660b, 0xff9e1f, 0xffa00d, 0xffbf00, 0xffc20d,
+        0xffc800, 0xffca0d, 0xffd000, 0xffd20d, 0xffd800, 0xffda0d, 0xffdd00, 0xfff001, 0xfff90a, 0xfffc00,
+        0x100000d, 0x1000c00, 0x1000d0d, 0x1002700, 0x100280d, 0x1003b00, 0x1003c0d, 0x1003e00, 0x1003f0d, 0x1004e00,
+        0x100500d, 0x1005e00, 0x100800d, 0x100fb00, 0x101400d, 0x1017500, 0x101fd1f, 0x101fe00, 0x102800d, 0x1029d00,
+        0x102a00d, 0x102d100, 0x102e01f, 0x102e100, 0x103000d, 0x1032000, 0x1032d0d, 0x1034b00, 0x103500d, 0x103761f,
+        0x1037b00, 0x103800d, 0x1039e00, 0x103a00d, 0x103c400, 0x103c80d, 0x103d000, 0x103d10d, 0x103d600, 0x104000d,
+        0x1049e00, 0x104a019, 0x104aa00, 0x104b00d, 0x104d400, 0x104d80d, 0x104fc00, 0x105000d, 0x1052800, 0x105300d,
+        0x1056400, 0x105700d, 0x1057b00, 0x1057c0d, 0x1058b00, 0x1058c0d, 0x1059300, 0x105940d, 0x1059600, 0x105970d,
+        0x105a200, 0x105a30d, 0x105b200, 0x105b30d, 0x105ba00, 0x105bb0d, 0x105bd00, 0x105c00d, 0x105f400, 0x106000d,
+        0x1073700, 0x107400d, 0x1075600, 0x107600d, 0x1076800, 0x107800d, 0x1078600, 0x107870d, 0x107b100, 0x107b20d,
+        0x107bb00, 0x108000d, 0x1080600, 0x108080d, 0x1080900, 0x1080a0d, 0x1083600, 0x108370d, 0x1083900, 0x1083c0d,
+        0x1083d00, 0x1083f0d, 0x1085600, 0x108600d, 0x1087700, 0x108800d, 0x1089f00, 0x108e00d, 0x108f300, 0x108f40d,
+        0x108f600, 0x109000d, 0x1091600, 0x109200d, 0x1093a00, 0x109800d, 0x109b800, 0x109be0d, 0x109c000, 0x10a000d,
+        0x10a011f, 0x10a0400, 0x10a051f, 0x10a0700, 0x10a0c1f, 0x10a100d, 0x10a1400, 0x10a150d, 0x10a1800, 0x10a190d,
+        0x10a3600, 0x10a381f, 0x10a3b00, 0x10a3f1f, 0x10a4000, 0x10a600d, 0x10a7d00, 0x10a800d, 0x10a9d00, 0x10ac00d,
+        0x10ac800, 0x10ac90d, 0x10ae51f, 0x10ae700, 0x10b000d, 0x10b3600, 0x10b400d, 0x10b5600, 0x10b600d, 0x10b7300,
+        0x10b800d, 0x10b9200, 0x10c000d, 0x10c4900, 0x10c800d, 0x10cb300, 0x10cc00d, 0x10cf300, 0x10d000d, 0x10d241f,
+        0x10d2800, 0x10d3019, 0x10d3a00, 0x10d4019, 0x10d4a0d, 0x10d6600, 0x10d691f, 0x10d6e00, 0x10d6f0d, 0x10d8600,
+        0x10e800d, 0x10eaa00, 0x10eab1f, 0x10ead00, 0x10eb00d, 0x10eb200, 0x10ec20d, 0x10ec500, 0x10efc1f, 0x10f000d,
+        0x10f1d00, 0x10f270d, 0x10f2800, 0x10f300d, 0x10f461f, 0x10f5100, 0x10f700d, 0x10f821f, 0x10f8600, 0x10fb00d,
+        0x10fc500, 0x10fe00d, 0x10ff700, 0x1100008, 0x110011f, 0x1100208, 0x110030d, 0x110381f, 0x1104700, 0x1106619,
+        0x110701f, 0x110710d, 0x110731f, 0x110750d, 0x1107600, 0x1107f1f, 0x1108208, 0x110830d, 0x110b008, 0x110b31f,
+        0x110b708, 0x110b91f, 0x110bb00, 0x110bd1a, 0x110be00, 0x110c21f, 0x110c300, 0x110cd1a, 0x110ce00, 0x110d00d,
+        0x110e900, 0x110f019, 0x110fa00, 0x111001f, 0x111030d, 0x111271f, 0x1112c08, 0x1112d1f, 0x1113500, 0x1113619,
+        0x1114000, 0x111440d, 0x1114508, 0x111470d, 0x1114800, 0x111500d, 0x111731f, 0x1117400, 0x111760d, 0x1117700,
+        0x111801f, 0x1118208, 0x111830d, 0x111b308, 0x111b61f, 0x111bf08, 0x111c01f, 0x111c10d, 0x111c20e, 0x111c40d,
+        0x111c500, 0x111c91f, 0x111cd00, 0x111ce08, 0x111cf1f, 0x111d019, 0x111da0d, 0x111db00, 0x111dc0d, 0x111dd00,
+        0x112000d, 0x1121200, 0x112130d, 0x1122c08, 0x1122f1f, 0x1123208, 0x112341f, 0x1123800, 0x1123e1f, 0x1123f0d,
+        0x112411f, 0x1124200, 0x112800d, 0x1128700, 0x112880d, 0x1128900, 0x1128a0d, 0x1128e00, 0x1128f0d, 0x1129e00,
+        0x1129f0d, 0x112a900, 0x112b00d, 0x112df1f, 0x112e008, 0x112e31f, 0x112eb00, 0x112f019, 0x112fa00, 0x113001f,
+        0x1130208, 0x1130400, 0x113050d, 0x1130d00, 0x1130f0d, 0x1131100, 0x113130d, 0x1132900, 0x1132a0d, 0x1133100,
+        0x113320d, 0x1133400, 0x113350d, 0x1133a00, 0x1133b1f, 0x1133d0d, 0x1133e1f, 0x1133f08, 0x113401f, 0x1134108,
+        0x1134500, 0x1134708, 0x1134900, 0x1134b08, 0x1134d1f, 0x1134e00, 0x113500d, 0x1135100, 0x113571f, 0x1135800,
+        0x1135d0d, 0x1136208, 0x1136400, 0x113661f, 0x1136d00, 0x113701f, 0x1137500, 0x113800d, 0x1138a00, 0x1138b0d,
+        0x1138c00, 0x1138e0d, 0x1138f00, 0x113900d, 0x113b600, 0x113b70d, 0x113b81f, 0x113b908, 0x113bb1f, 0x113c100,
+        0x113c21f, 0x113c300, 0x113c51f, 0x113c600, 0x113c71f, 0x113ca08, 0x113cb00, 0x113cc08, 0x113ce1f, 0x113d10e,
+        0x113d21f, 0x113d30d, 0x113d400, 0x113e11f, 0x113e300, 0x114000d, 0x1143508, 0x114381f, 0x1144008, 0x114421f,
+        0x1144508, 0x114461f, 0x114470d, 0x1144b00, 0x1145019, 0x1145a00, 0x1145e1f, 0x1145f0d, 0x1146200, 0x114800d,
+        0x114b01f, 0x114b108, 0x114b31f, 0x114b908, 0x114ba1f, 0x114bb08, 0x114bd1f, 0x114be08, 0x114bf1f, 0x114c108,
+        0x114c21f, 0x114c40d, 0x114c600, 0x114c70d, 0x114c800, 0x114d019, 0x114da00, 0x115800d, 0x115af1f, 0x115b008,
+        0x115b21f, 0x115b600, 0x115b808, 0x115bc1f, 0x115be08, 0x115bf1f, 0x115c100, 0x115d80d, 0x115dc1f, 0x115de00,
+        0x116000d, 0x1163008, 0x116331f, 0x1163b08, 0x1163d1f, 0x1163e08, 0x1163f1f, 0x1164100, 0x116440d, 0x1164500,
+        0x1165019, 0x1165a00, 0x116800d, 0x116ab1f, 0x116ac08, 0x116ad1f, 0x116ae08, 0x116b01f, 0x116b80d, 0x116b900,
+        0x116c019, 0x116ca00, 0x116d019, 0x116e400, 0x1171d1f, 0x1171e08, 0x1171f1f, 0x1172006, 0x117221f, 0x1172608,
+        0x117271f, 0x1172c00, 0x1173019, 0x1173a00, 0x118000d, 0x1182c08, 0x1182f1f, 0x1183808, 0x118391f, 0x1183b00,
+        0x118a00d, 0x118e019, 0x118ea00, 0x118ff0d, 0x1190700, 0x119090d, 0x1190a00, 0x1190c0d, 0x1191400, 0x119150d,
+        0x1191700, 0x119180d, 0x119301f, 0x1193108, 0x1193600, 0x1193708, 0x1193900, 0x1193b1f, 0x1193f0e, 0x1194008,
+        0x119410e, 0x1194208, 0x119431f, 0x1194400, 0x1195019, 0x1195a00, 0x119a00d, 0x119a800, 0x119aa0d, 0x119d108,
+        0x119d41f, 0x119d800, 0x119da1f, 0x119dc08, 0x119e01f, 0x119e10d, 0x119e200, 0x119e30d, 0x119e408, 0x119e500,
+        0x11a000d, 0x11a011f, 0x11a0b0d, 0x11a331f, 0x11a3908, 0x11a3a0e, 0x11a3b1f, 0x11a3f00, 0x11a471f, 0x11a4800,
+        0x11a500d, 0x11a511f, 0x11a5708, 0x11a591f, 0x11a5c0d, 0x11a840e, 0x11a8a1f, 0x11a9708, 0x11a981f, 0x11a9a00,
+        0x11a9d0d, 0x11a9e00, 0x11ab00d, 0x11af900, 0x11bc00d, 0x11be100, 0x11bf019, 0x11bfa00, 0x11c000d, 0x11c0900,
+        0x11c0a0d, 0x11c2f08, 0x11c301f, 0x11c3700, 0x11c381f, 0x11c3e08, 0x11c3f1f, 0x11c400d, 0x11c4100, 0x11c5019,
+        0x11c5a00, 0x11c720d, 0x11c9000, 0x11c921f, 0x11ca800, 0x11ca908, 0x11caa1f, 0x11cb108, 0x11cb21f, 0x11cb408,
+        0x11cb51f, 0x11cb700, 0x11d000d, 0x11d0700, 0x11d080d, 0x11d0a00, 0x11d0b0d, 0x11d311f, 0x11d3700, 0x11d3a1f,
+        0x11d3b00, 0x11d3c1f, 0x11d3e00, 0x11d3f1f, 0x11d460e, 0x11d471f, 0x11d4800, 0x11d5019, 0x11d5a00, 0x11d600d,
+        0x11d6600, 0x11d670d, 0x11d6900, 0x11d6a0d, 0x11d8a08, 0x11d8f00, 0x11d901f, 0x11d9200, 0x11d9308, 0x11d951f,
+        0x11d9608, 0x11d971f, 0x11d980d, 0x11d9900, 0x11da019, 0x11daa00, 0x11ee00d, 0x11ef31f, 0x11ef508, 0x11ef700,
+        0x11f001f, 0x11f020e, 0x11f0308, 0x11f040d, 0x11f1100, 0x11f120d, 0x11f3408, 0x11f361f, 0x11f3b00, 0x11f3e08,
+        0x11f401f, 0x11f4300, 0x11f5019, 0x11f5a1f, 0x11f5b00, 0x11fb00d, 0x11fb100, 0x120000d, 0x1239a00, 0x124000d,
+        0x1246f00, 0x124800d, 0x1254400, 0x12f900d, 0x12ff100, 0x130000d, 0x134300a, 0x134401f, 0x134410d, 0x134471f,
+        0x1345600, 0x134600d, 0x143fb00, 0x144000d, 0x1464700, 0x161000d, 0x1611e1f, 0x1612a08, 0x1612d1f, 0x1613019,
+        0x1613a00, 0x168000d, 0x16a3900, 0x16a400d, 0x16a5f00, 0x16a6019, 0x16a6a00, 0x16a700d, 0x16abf00, 0x16ac019,
+        0x16aca00, 0x16ad00d, 0x16aee00, 0x16af01f, 0x16af500, 0x16b000d, 0x16b301f, 0x16b3700, 0x16b400d, 0x16b4400,
+        0x16b5019, 0x16b5a00, 0x16b630d, 0x16b7800, 0x16b7d0d, 0x16b9000, 0x16d400d, 0x16d6310, 0x16d640d, 0x16d6710,
+        0x16d6b0d, 0x16d6d00, 0x16d7019, 0x16d7a00, 0x16e400d, 0x16e8000, 0x16f000d, 0x16f4b00, 0x16f4f1f, 0x16f500d,
+        0x16f5108, 0x16f8800, 0x16f8f1f, 0x16f930d, 0x16fa000, 0x16fe00d, 0x16fe200, 0x16fe30d, 0x16fe41f, 0x16fe500,
+        0x16ff01f, 0x16ff200, 0x1aff00b, 0x1aff400, 0x1aff50b, 0x1affc00, 0x1affd0b, 0x1afff00, 0x1b0000b, 0x1b00100,
+        0x1b1200b, 0x1b12300, 0x1b1550b, 0x1b15600, 0x1b1640b, 0x1b16800, 0x1bc000d, 0x1bc6b00, 0x1bc700d, 0x1bc7d00,
+        0x1bc800d, 0x1bc8900, 0x1bc900d, 0x1bc9a00, 0x1bc9d1f, 0x1bc9f00, 0x1bca00a, 0x1bca400, 0x1ccf019, 0x1ccfa00,
+        0x1cf001f, 0x1cf2e00, 0x1cf301f, 0x1cf4700, 0x1d1651f, 0x1d16a00, 0x1d16d1f, 0x1d1730a, 0x1d17b1f, 0x1d18300,
+        0x1d1851f, 0x1d18c00, 0x1d1aa1f, 0x1d1ae00, 0x1d2421f, 0x1d24500, 0x1d4000d, 0x1d45500, 0x1d4560d, 0x1d49d00,
+        0x1d49e0d, 0x1d4a000, 0x1d4a20d, 0x1d4a300, 0x1d4a50d, 0x1d4a700, 0x1d4a90d, 0x1d4ad00, 0x1d4ae0d, 0x1d4ba00,
+        0x1d4bb0d, 0x1d4bc00, 0x1d4bd0d, 0x1d4c400, 0x1d4c50d, 0x1d50600, 0x1d5070d, 0x1d50b00, 0x1d50d0d, 0x1d51500,
+        0x1d5160d, 0x1d51d00, 0x1d51e0d, 0x1d53a00, 0x1d53b0d, 0x1d53f00, 0x1d5400d, 0x1d54500, 0x1d5460d, 0x1d54700,
+        0x1d54a0d, 0x1d55100, 0x1d5520d, 0x1d6a600, 0x1d6a80d, 0x1d6c100, 0x1d6c20d, 0x1d6db00, 0x1d6dc0d, 0x1d6fb00,
+        0x1d6fc0d, 0x1d71500, 0x1d7160d, 0x1d73500, 0x1d7360d, 0x1d74f00, 0x1d7500d, 0x1d76f00, 0x1d7700d, 0x1d78900,
+        0x1d78a0d, 0x1d7a900, 0x1d7aa0d, 0x1d7c300, 0x1d7c40d, 0x1d7cc00, 0x1d7ce19, 0x1d80000, 0x1da001f, 0x1da3700,
+        0x1da3b1f, 0x1da6d00, 0x1da751f, 0x1da7600, 0x1da841f, 0x1da8500, 0x1da9b1f, 0x1daa000, 0x1daa11f, 0x1dab000,
+        0x1df000d, 0x1df1f00, 0x1df250d, 0x1df2b00, 0x1e0001f, 0x1e00700, 0x1e0081f, 0x1e01900, 0x1e01b1f, 0x1e02200,
+        0x1e0231f, 0x1e02500, 0x1e0261f, 0x1e02b00, 0x1e0300d, 0x1e06e00, 0x1e08f1f, 0x1e09000, 0x1e1000d, 0x1e12d00,
+        0x1e1301f, 0x1e1370d, 0x1e13e00, 0x1e14019, 0x1e14a00, 0x1e14e0d, 0x1e14f00, 0x1e2900d, 0x1e2ae1f, 0x1e2af00,
+        0x1e2c00d, 0x1e2ec1f, 0x1e2f019, 0x1e2fa00, 0x1e4d00d, 0x1e4ec1f, 0x1e4f019, 0x1e4fa00, 0x1e5d00d, 0x1e5ee1f,
+        0x1e5f00d, 0x1e5f119, 0x1e5fb00, 0x1e7e00d, 0x1e7e700, 0x1e7e80d, 0x1e7ec00, 0x1e7ed0d, 0x1e7ef00, 0x1e7f00d,
+        0x1e7ff00, 0x1e8000d, 0x1e8c500, 0x1e8d01f, 0x1e8d700, 0x1e9000d, 0x1e9441f, 0x1e94b0d, 0x1e94c00, 0x1e95019,
+        0x1e95a00, 0x1ee000d, 0x1ee0400, 0x1ee050d, 0x1ee2000, 0x1ee210d, 0x1ee2300, 0x1ee240d, 0x1ee2500, 0x1ee270d,
+        0x1ee2800, 0x1ee290d, 0x1ee3300, 0x1ee340d, 0x1ee3800, 0x1ee390d, 0x1ee3a00, 0x1ee3b0d, 0x1ee3c00, 0x1ee420d,
+        0x1ee4300, 0x1ee470d, 0x1ee4800, 0x1ee490d, 0x1ee4a00, 0x1ee4b0d, 0x1ee4c00, 0x1ee4d0d, 0x1ee5000, 0x1ee510d,
+        0x1ee5300, 0x1ee540d, 0x1ee5500, 0x1ee570d, 0x1ee5800, 0x1ee590d, 0x1ee5a00, 0x1ee5b0d, 0x1ee5c00, 0x1ee5d0d,
+        0x1ee5e00, 0x1ee5f0d, 0x1ee6000, 0x1ee610d, 0x1ee6300, 0x1ee640d, 0x1ee6500, 0x1ee670d, 0x1ee6b00, 0x1ee6c0d,
+        0x1ee7300, 0x1ee740d, 0x1ee7800, 0x1ee790d, 0x1ee7d00, 0x1ee7e0d, 0x1ee7f00, 0x1ee800d, 0x1ee8a00, 0x1ee8b0d,
+        0x1ee9c00, 0x1eea10d, 0x1eea400, 0x1eea50d, 0x1eeaa00, 0x1eeab0d, 0x1eebc00, 0x1f00021, 0x1f10000, 0x1f10d21,
+        0x1f11000, 0x1f12f21, 0x1f1300d, 0x1f14a00, 0x1f1500d, 0x1f16a00, 0x1f16c21, 0x1f17022, 0x1f1720d, 0x1f17e22,
+        0x1f1800d, 0x1f18a00, 0x1f18e21, 0x1f18f00, 0x1f19121, 0x1f19b00, 0x1f1ad21, 0x1f1e609, 0x1f20000, 0x1f20121,
+        0x1f21000, 0x1f21a21, 0x1f21b00, 0x1f22f21, 0x1f23000, 0x1f23221, 0x1f23b00, 0x1f23c21, 0x1f24000, 0x1f24921,
+        0x1f3fb1f, 0x1f40021, 0x1f53e00, 0x1f54621, 0x1f65000, 0x1f68021, 0x1f70000, 0x1f77421, 0x1f78000, 0x1f7d521,
+        0x1f80000, 0x1f80c21, 0x1f81000, 0x1f84821, 0x1f85000, 0x1f85a21, 0x1f86000, 0x1f88821, 0x1f89000, 0x1f8ae21,
+        0x1f90000, 0x1f90c21, 0x1f93b00, 0x1f93c21, 0x1f94600, 0x1f94721, 0x1fb0000, 0x1fbf019, 0x1fbfa00, 0x1fc0021,
+        0x1fffe00, 0xe000001, 0xe00010a, 0xe000201, 0xe00201f, 0xe008001, 0xe01001f, 0xe01f001, 0xe100000,
+};
+// TEXT_TABLES END
+
+/*
+        The language the system's own windows speak.
+
+        Every word those windows say is one id of the language table (LANGUAGE_WORDS), whose English is the table itself: asking
+        for it is an index, and with English chosen nothing is read, parsed or hashed. Any other language
+        is one file, SETTING_LANGUAGE_DIRECTORY (registry.c) and the code and .txt (languages/ in the tree, which the image
+        carries beside the fonts), read whole into one buffer of this program the first time the table
+        says that language and again when it says another. Its lines are
+
+            ID TAB STAMP TAB TEXT         a word of the table, by its id
+            =ENGLISH TAB STAMP TAB TEXT   a word of a data table (a Settings row's label), by its English
+
+        and its header lines start with @ (@language, @name, @translated, and @direction rtl for a language that reads from
+        the right; English and the rest have no @direction line). The stamp is for the checks
+        alone: a hash of the English the line was made from, so an English edit shows every translation of
+        it as old. The text is one line of UTF-8 with no escapes, and the line's two tabs and its end are
+        turned to NULs in place, so a word asked for is a pointer into the buffer and the file is never
+        copied or parsed twice. A word a file lacks is the English; nothing is ever blank.
+
+        The code is the table's: the window table carries it (windows_language_code packs it), the
+        compositor reads /root/language into it and counts the table's theme up, and the kit takes it
+        where it takes the theme (ui_kit_language_take), so every window changes at once and none reads
+        a setting of its own. A text an app copied when it started is set again by a listener it registers
+        here (language_listen), run after the file is taken.
+
+        language_text(id) is for a word the code names, language_of(english) for one that is data (a
+        label in a table, which code also compares and so keeps in English as its key): the English
+        passes through untouched when there is no other language, and is looked up by its hash in the
+        file's keyed lines when there is. language_format fills the placeholders of a text in the order its
+        language wants: %s a string, %d a number, %% a percent sign, and %N$s or %N$d the Nth argument,
+        so a translation may put its words in another order than the English.
+*/
+
+// A language file may be this long; a longer one is read as far as it goes and the rest is English.
+#define LANGUAGE_FILE_MOST (96u << 10)
+// The slots of the keyed lines (a power of two), of which three quarters are filled at most.
+#define LANGUAGE_KEYED 512u
+#define LANGUAGE_LISTENERS 8
+#define LANGUAGE_ARGUMENTS 9
+// English's own code, packed as windows_language_code packs it: the same as no language kept.
+#define LANGUAGE_ENGLISH ('e' | 'n' << 8)
+
+/*
+        The words the system's own windows say, in English: one line for each, its id and what it says.
+        English is the table's index and costs nothing to ask; every other language is a file under
+        languages/ (ui/ui.c says how it is read), made of the same ids.
+
+        Kept sorted by id, which the lookup of a file's lines relies on, and an id is used by code as
+        WORDS(id). An id says what the words are for (menu_copy, ui_field_full), never what they say, so
+        a change of wording leaves the id; and its text is whole, a sentence or a label with its
+        placeholders (%s, %d, or %1$s to be placed again), because words made of pieces cannot be
+        put in another language's order. A mnemonic is an & before one ASCII letter.
+
+        A text that code compares is not here: it is a key, and stays where it is compared (registry.c
+        keeps the Settings rows' labels and choice words, which are shown through language_of).
+*/
+#define LANGUAGE_WORDS \
+LANGUAGE_ID(action_copy, "Copy") \
+LANGUAGE_ID(action_cut, "Cut") \
+LANGUAGE_ID(action_paste, "Paste") \
+LANGUAGE_ID(action_select_all, "Select All") \
+LANGUAGE_ID(editor_changed_on_disk, "changed on disk: Ctrl+R reads it again") \
+LANGUAGE_ID(editor_closes_unsaved, "closes the unsaved changes") \
+LANGUAGE_ID(editor_encoding_bom, "UTF-8 with BOM") \
+LANGUAGE_ID(editor_find_hint, "Find") \
+LANGUAGE_ID(editor_find_replace_hint, "Find/Replace with") \
+LANGUAGE_ID(editor_indent_spaces, "Spaces: %d") \
+LANGUAGE_ID(editor_indent_tab, "Tab: %d") \
+LANGUAGE_ID(editor_line_hint, "Line") \
+LANGUAGE_ID(editor_lock_stale, "%s is left by an earlier save: remove it, then save") \
+LANGUAGE_ID(editor_no_file_name, "no file name: start the editor with one") \
+LANGUAGE_ID(editor_no_match, "no match") \
+LANGUAGE_ID(editor_not_regular, "not a regular file: refused") \
+LANGUAGE_ID(editor_open_none, "open is not here: start the editor with the file's name") \
+LANGUAGE_ID(editor_pattern_bad, "the pattern does not compile") \
+LANGUAGE_ID(editor_position, "Ln %1$d, Col %2$d") \
+LANGUAGE_ID(editor_read_failed, "the file could not be read: it is not opened") \
+LANGUAGE_ID(editor_reload_unsaved, "reads the file again and drops the unsaved changes") \
+LANGUAGE_ID(editor_replace_usage, "replace is FIND/REPLACEMENT") \
+LANGUAGE_ID(editor_replaced, "%d replaced") \
+LANGUAGE_ID(editor_save_as_none, "save as is not here: Ctrl+S saves the file") \
+LANGUAGE_ID(editor_save_failed, "the save failed: the file is as it was") \
+LANGUAGE_ID(editor_saved, "saved") \
+LANGUAGE_ID(editor_selected, "(%d selected)") \
+LANGUAGE_ID(editor_selected_carets, "(%d selected, carets)") \
+LANGUAGE_ID(editor_tabs_full, "all %d tabs are open: close one first") \
+LANGUAGE_ID(editor_unsaved, "unsaved changes: save them, or close each with Ctrl+W twice") \
+LANGUAGE_ID(editor_untitled, "untitled") \
+LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
+LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
+LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
+LANGUAGE_ID(launcher_power_off, "Power off") \
+LANGUAGE_ID(launcher_power_off_armed, "power off") \
+LANGUAGE_ID(launcher_restart, "Restart") \
+LANGUAGE_ID(launcher_restart_armed, "restart") \
+LANGUAGE_ID(launcher_run, "Run  %s") \
+LANGUAGE_ID(launcher_search_hint, "Search programs, or type a command") \
+LANGUAGE_ID(menu_copy, "&Copy") \
+LANGUAGE_ID(menu_cut, "Cu&t") \
+LANGUAGE_ID(menu_delete, "&Delete") \
+LANGUAGE_ID(menu_find, "&Find") \
+LANGUAGE_ID(menu_go_to_line, "&Go to Line") \
+LANGUAGE_ID(menu_paste, "&Paste") \
+LANGUAGE_ID(menu_redo, "&Redo") \
+LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
+LANGUAGE_ID(menu_select_all, "Select &All") \
+LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
+LANGUAGE_ID(menu_undo, "&Undo") \
+LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
+LANGUAGE_ID(menu_zoom_out, "Zoom &Out") \
+LANGUAGE_ID(mixer_allow, "Allow") \
+LANGUAGE_ID(mixer_empty, "No sound is playing") \
+LANGUAGE_ID(mixer_mute, "Mute") \
+LANGUAGE_ID(mixer_no_mic, "No microphone") \
+LANGUAGE_ID(mixer_nobody, "No program is recording") \
+LANGUAGE_ID(mixer_off, "Sound server is off") \
+LANGUAGE_ID(mixer_playback, "Playback") \
+LANGUAGE_ID(mixer_recording, "Recording") \
+LANGUAGE_ID(mixer_recording_off, "Recording is off") \
+LANGUAGE_ID(mixer_unmute, "Unmute") \
+LANGUAGE_ID(mixer_unplugged, "Nothing plugged in") \
+LANGUAGE_ID(mixer_why_analog, "Picked: speaker or analog") \
+LANGUAGE_ID(mixer_why_chosen, "Picked: you chose it") \
+LANGUAGE_ID(mixer_why_display, "Picked: a display is plugged in") \
+LANGUAGE_ID(mixer_why_hdmi, "Picked: HDMI, display unknown") \
+LANGUAGE_ID(mixer_why_named, "Picked: started with it") \
+LANGUAGE_ID(mixer_why_nothing, "Picked: the first one there is") \
+LANGUAGE_ID(notices_dismiss, "Dismiss all") \
+LANGUAGE_ID(notices_item, "%1$s: %2$s") \
+LANGUAGE_ID(notices_item_times, "%1$s: %2$s (%3$d times, %4$d min ago)") \
+LANGUAGE_ID(notices_open, "Open System notices") \
+LANGUAGE_ID(settings_already_joined, "already joined to %s") \
+LANGUAGE_ID(settings_already_set, "already set") \
+LANGUAGE_ID(settings_any_text, "any command, as the words after moonwater: its verb, then its arguments") \
+LANGUAGE_ID(settings_asks_first, "asks first") \
+LANGUAGE_ID(settings_badge_error, "Error") \
+LANGUAGE_ID(settings_badge_warning, "Warning") \
+LANGUAGE_ID(settings_battery_charging, ", Charging") \
+LANGUAGE_ID(settings_battery_discharging, ", Discharging") \
+LANGUAGE_ID(settings_battery_full, ", Full") \
+LANGUAGE_ID(settings_battery_idle, ", Not charging") \
+LANGUAGE_ID(settings_busy, "moonwater is busy: the changes before this one are not done") \
+LANGUAGE_ID(settings_cannot_join, "moonwater cannot join what that network asks for") \
+LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run") \
+LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
+LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
+LANGUAGE_ID(settings_copied, "copied to the clipboard") \
+LANGUAGE_ID(settings_device_name, "Name of the device") \
+LANGUAGE_ID(settings_done, "done") \
+LANGUAGE_ID(settings_drive_state, "drive, ") \
+LANGUAGE_ID(settings_edit_keys, "Enter sets it, Escape keeps it, a click outside sets it too") \
+LANGUAGE_ID(settings_filter_hint, "Type to filter") \
+LANGUAGE_ID(settings_forget, "forget %s") \
+LANGUAGE_ID(settings_help_more, "moonwater help says more than All commands lists: the first row runs any command") \
+LANGUAGE_ID(settings_identify_screens, "Identify screens") \
+LANGUAGE_ID(settings_issue_audio_open, "The sound card could not be opened (error %1$d)") \
+LANGUAGE_ID(settings_issue_audio_rate, "The sound card took %2$d Hz, not the %1$d Hz asked for") \
+LANGUAGE_ID(settings_issue_gpu_cooling, "The card is cooling down after hangs (%1$d in a row)") \
+LANGUAGE_ID(settings_issue_gpu_family, "This GPU family is not supported (family %1$d)") \
+LANGUAGE_ID(settings_issue_gpu_fault, "The card faulted reading its memory: %1$s") \
+LANGUAGE_ID(settings_issue_gpu_hung, "The card hung twice within a minute: the processor draws the desktop for the rest of this session") \
+LANGUAGE_ID(settings_issue_gpu_lists, "Lists are off: the card is not composing in earnest") \
+LANGUAGE_ID(settings_issue_gpu_lost, "Apps lost %1$d of %2$d frames to the processor") \
+LANGUAGE_ID(settings_issue_gpu_map, "The kernel refused to map window pictures for the card (step %1$d, error %2$d)") \
+LANGUAGE_ID(settings_issue_gpu_refused, "The card refused %1$d presents: %2$s") \
+LANGUAGE_ID(settings_issue_gpu_scanout, "The card refused a window's framebuffer for direct scan-out (error %1$d)") \
+LANGUAGE_ID(settings_issue_gpu_untrusted, "The card's self-test drew wrong, so it is not trusted (family %1$d)") \
+LANGUAGE_ID(settings_issue_gpu_userptr, "the kernel would not map a page for the card: rebuild it with CONFIG_DRM_AMDGPU_USERPTR=y (error 19 is that kernel: it selects HMM_MIRROR and MMU_NOTIFIER)") \
+LANGUAGE_ID(settings_issue_unknown, "A problem this version does not name (code %1$d)") \
+LANGUAGE_ID(settings_item_add, "Enter keeps the name of a device; the radio goes on for what pairs") \
+LANGUAGE_ID(settings_item_ask, "Enter asks for its passphrase and joins it") \
+LANGUAGE_ID(settings_item_cannot, "moonwater cannot join what this network asks for") \
+LANGUAGE_ID(settings_item_drive, "shown, not held: no verb changes a drive") \
+LANGUAGE_ID(settings_item_joined, "joined: Delete forgets it") \
+LANGUAGE_ID(settings_item_kept, "kept by its name: Delete forgets it") \
+LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it") \
+LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delete forgets it") \
+LANGUAGE_ID(settings_joined, "joined") \
+LANGUAGE_ID(settings_kept, "kept") \
+LANGUAGE_ID(settings_legend_comma, ", ") \
+LANGUAGE_ID(settings_legend_semicolon, "; ") \
+LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \
+LANGUAGE_ID(settings_map_hint, "Drag a screen to move it.") \
+LANGUAGE_ID(settings_map_keys, "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.") \
+LANGUAGE_ID(settings_map_none, "No screen is connected.") \
+LANGUAGE_ID(settings_map_one, "Only one screen is connected.") \
+LANGUAGE_ID(settings_menu_keys, "Up and Down choose, Enter sets it, Escape leaves it") \
+LANGUAGE_ID(settings_metrics, "Card %1$d µs mean, %2$d µs worst; processor %3$d µs, %4$d µs worst; maps %5$d; wakes %6$d; %7$d presents a second, %8$d list frames a second") \
+LANGUAGE_ID(settings_mode_largest, "Biggest picture") \
+LANGUAGE_ID(settings_mode_preferred, "Recommended") \
+LANGUAGE_ID(settings_name_chars, "a name is letters, digits and hyphens") \
+LANGUAGE_ID(settings_name_long, "a name is under 32 characters") \
+LANGUAGE_ID(settings_no_rates, "The screen lists no rates") \
+LANGUAGE_ID(settings_no_screen, "No screen is connected") \
+LANGUAGE_ID(settings_not_here, "not on this machine") \
+LANGUAGE_ID(settings_not_shown, "%d more not shown") \
+LANGUAGE_ID(settings_nothing_kept, "nothing typed: the value is kept") \
+LANGUAGE_ID(settings_nothing_matches, "Nothing matches what is typed") \
+LANGUAGE_ID(settings_nothing_typed, "nothing typed") \
+LANGUAGE_ID(settings_notices_count, "%1$d notices") \
+LANGUAGE_ID(settings_notices_dismiss, "dismiss all") \
+LANGUAGE_ID(settings_notices_none, "no kernel notices") \
+LANGUAGE_ID(settings_percent, "%d%%") \
+LANGUAGE_ID(settings_rate_best, "%d Hz (recommended)") \
+LANGUAGE_ID(settings_rate_plain, "%d Hz") \
+LANGUAGE_ID(settings_refused, "moonwater refused") \
+LANGUAGE_ID(settings_refused_place, "%s (its place in the file is not read)") \
+LANGUAGE_ID(settings_refused_rate, "%1$s (%2$d Hz is not offered)") \
+LANGUAGE_ID(settings_refused_turn, "%1$s (%2$s could not be done)") \
+LANGUAGE_ID(settings_req_context, "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)") \
+LANGUAGE_ID(settings_req_driver, "the card's driver is not amdgpu: there is no GPU path for it yet (i915, virtio_gpu and nouveau stay on the processor)") \
+LANGUAGE_ID(settings_req_family, "this AMD family has no kernels (RDNA2 only: 144, 146, 149, 151); the card stays on the processor") \
+LANGUAGE_ID(settings_req_node, "no render node of the card opened: check its mode and owner, and that the driver is loaded (the render group, or mode 0666, lets a user open it)") \
+LANGUAGE_ID(settings_req_prime, "a dma-buf would not import into the render node: the card cannot read a window's memfd (CONFIG_DRM_AMDGPU, with PRIME; the card still composes)") \
+LANGUAGE_ID(settings_req_ring, "the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)") \
+LANGUAGE_ID(settings_req_selftest, "the card drew the self-test picture wrong: its kernels do not match this family's ISA; the card stays on the processor") \
+LANGUAGE_ID(settings_req_udmabuf, "/dev/udmabuf would not make a dma-buf of a memfd page: CONFIG_UDMABUF=y, and /dev/udmabuf must open (the card still composes; a refused userptr then has no fallback)") \
+LANGUAGE_ID(settings_role_efi, "EFI system") \
+LANGUAGE_ID(settings_role_free, "free") \
+LANGUAGE_ID(settings_role_linux, "Linux data") \
+LANGUAGE_ID(settings_role_other, "other") \
+LANGUAGE_ID(settings_role_swap, "swap") \
+LANGUAGE_ID(settings_role_unpartitioned, "unpartitioned") \
+LANGUAGE_ID(settings_run_any, "Run any moonwater command") \
+LANGUAGE_ID(settings_running, "running %s (Escape stops it)") \
+LANGUAGE_ID(settings_saved, "saved") \
+LANGUAGE_ID(settings_scale_best, "%d%% (recommended)") \
+LANGUAGE_ID(settings_scale_plain, "%d%%") \
+LANGUAGE_ID(settings_screen_bare, "Screen %1$d: %2$s") \
+LANGUAGE_ID(settings_screen_named, "Screen %1$d: %2$s [%3$s]") \
+LANGUAGE_ID(settings_status_in_use, "In use: the card composed %1$d of %2$d presents (%3$d%%)") \
+LANGUAGE_ID(settings_status_none, "No supported GPU: the processor draws everything") \
+LANGUAGE_ID(settings_status_not, "Not in use: the card composed %1$d of %2$d presents, the processor drew the rest") \
+LANGUAGE_ID(settings_status_off, "Off: the setting is off, so the processor draws everything") \
+LANGUAGE_ID(settings_status_partly, "Partly in use: the card composed %1$d of %2$d presents (%3$d%%)") \
+LANGUAGE_ID(settings_status_waiting, "Waiting for the first presents") \
+LANGUAGE_ID(settings_stopped, "stopped") \
+LANGUAGE_ID(settings_too_long, "moonwater took too long, and was stopped") \
+LANGUAGE_ID(settings_too_many, "that is more words than one command takes") \
+LANGUAGE_ID(settings_turned_software, "Turned by Moonwater (slower)") \
+LANGUAGE_ID(settings_type_command, "type a command: its verb, then what follows it") \
+LANGUAGE_ID(settings_type_device, "type the name of a device: Enter keeps it, Escape leaves it") \
+LANGUAGE_ID(settings_type_passphrase, "type its passphrase: Enter joins it, Escape leaves it") \
+LANGUAGE_ID(settings_unknown, "unknown") \
+LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
+LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
+LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
+LANGUAGE_ID(tray_am, "AM") \
+LANGUAGE_ID(tray_charging, "charging") \
+LANGUAGE_ID(tray_day_fri, "Fri") \
+LANGUAGE_ID(tray_day_mon, "Mon") \
+LANGUAGE_ID(tray_day_sat, "Sat") \
+LANGUAGE_ID(tray_day_sun, "Sun") \
+LANGUAGE_ID(tray_day_thu, "Thu") \
+LANGUAGE_ID(tray_day_tue, "Tue") \
+LANGUAGE_ID(tray_day_wed, "Wed") \
+LANGUAGE_ID(tray_discharging, "discharging") \
+LANGUAGE_ID(tray_month_apr, "Apr") \
+LANGUAGE_ID(tray_month_aug, "Aug") \
+LANGUAGE_ID(tray_month_dec, "Dec") \
+LANGUAGE_ID(tray_month_feb, "Feb") \
+LANGUAGE_ID(tray_month_jan, "Jan") \
+LANGUAGE_ID(tray_month_jul, "Jul") \
+LANGUAGE_ID(tray_month_jun, "Jun") \
+LANGUAGE_ID(tray_month_mar, "Mar") \
+LANGUAGE_ID(tray_month_may, "May") \
+LANGUAGE_ID(tray_month_nov, "Nov") \
+LANGUAGE_ID(tray_month_oct, "Oct") \
+LANGUAGE_ID(tray_month_sep, "Sep") \
+LANGUAGE_ID(tray_pm, "PM") \
+LANGUAGE_ID(ui_confirm_again, "press again to confirm: ") \
+LANGUAGE_ID(ui_field_digits, "a number is digits") \
+LANGUAGE_ID(ui_field_full, "that is as much as it holds")
+
+enum
+{
+#define LANGUAGE_ID(id, text) LANGUAGE_##id,
+        LANGUAGE_WORDS
+#undef LANGUAGE_ID
+        LANGUAGE_COUNT
+};
+
+static const struct language_entry
+{
+        const char address_to name;
+        const char address_to english;
+} language_table[LANGUAGE_COUNT] = {
+#define LANGUAGE_ID(id, text) {#id, text},
+        LANGUAGE_WORDS
+#undef LANGUAGE_ID
+};
+
+static struct language
+{
+        unsigned int code; // the language taken, 0 for English
+        b32 loaded;        // a file is read: asking goes to it
+        b32 rtl;           // its file says @direction rtl: it reads from the right (Arabic, Hebrew, Persian, Urdu)
+        unsigned int keyed_count;
+        const char address_to text[LANGUAGE_COUNT];
+        struct
+        {
+                const char address_to key;
+                const char address_to text;
+        } keyed[LANGUAGE_KEYED];
+        void (*listener[LANGUAGE_LISTENERS])(void);
+        unsigned int listeners;
+} language;
+
+// Where the files are: the image's directory (registry.c), which a check points at the tree's languages/ instead.
+static const char address_to language_directory = SETTING_LANGUAGE_DIRECTORY;
+
+// The file, in place: untouched pages cost nothing, and a language costs the size of its file. Two, taken by turns, so the
+// words a window still holds (a menu's labels, a refusal on a field) of the language just left are whole when it changes.
+static char language_file[2][LANGUAGE_FILE_MOST];
+static unsigned int language_side;
+
+// The words of an id, in the language taken, or the English where the file has none.
+static inline const char address_to language_text(unsigned int id)
+{
+        const char address_to said = language.loaded ? language.text[id] : null;
+
+        return said ? said : language_table[id].english;
+}
+
+#define WORDS(id) language_text(LANGUAGE_##id)
+
+// Whether the language taken reads from the right to the left: the kit's layout direction (ui_kit.rtl) is this.
+static inline b32 language_rtl(void)
+{
+        return language.rtl;
+}
+
+static unsigned int language_hash(const char address_to text)
+{
+        unsigned int hash = 2166136261u;
+
+        for (; *text; text++)
+                hash = (hash ^ (p8)*text) * 16777619u;
+        return hash;
+}
+
+static const char address_to language_keyed_of(const char address_to english)
+{
+        unsigned int at = language_hash(english) & (LANGUAGE_KEYED - 1);
+
+        while (language.keyed[at].key)
+        {
+                if (string_equals((string_address)language.keyed[at].key, (string_address)english))
+                        return language.keyed[at].text;
+                at = (at + 1) & (LANGUAGE_KEYED - 1);
+        }
+        return english;
+}
+
+// A data table's English text as the language says it: itself when there is no other language, or no line for it.
+static inline const char address_to language_of(const char address_to english)
+{
+        return language.loaded && english ? language_keyed_of(english) : english;
+}
+
+// Where name is among the ids, which the table keeps sorted by their bytes; -1 for none.
+static int language_find(const char address_to name)
+{
+        unsigned int low = 0, high = LANGUAGE_COUNT;
+
+        while (low < high)
+        {
+                unsigned int mid = (low + high) / 2;
+                const char address_to other = language_table[mid].name;
+                const char address_to mine = name;
+
+                while (*mine && *mine == *other)
+                        mine++, other++;
+                if (*mine == *other)
+                        return (int)mid;
+                if ((p8)*mine < (p8)*other)
+                        high = mid;
+                else
+                        low = mid + 1;
+        }
+        return -1;
+}
+
+static fn language_put(char address_to key, char address_to text)
+{
+        if (key[0] == '=')
+        {
+                unsigned int at;
+
+                key++;
+                if (language.keyed_count >= LANGUAGE_KEYED / 4 * 3)
+                        return;
+                at = language_hash(key) & (LANGUAGE_KEYED - 1);
+                while (language.keyed[at].key && !string_equals((string_address)language.keyed[at].key, (string_address)key))
+                        at = (at + 1) & (LANGUAGE_KEYED - 1);
+                language.keyed_count += !language.keyed[at].key;
+                language.keyed[at].key = key, language.keyed[at].text = text;
+        }
+        else
+        {
+                int found = language_find(key);
+
+                if (found >= 0)
+                        language.text[found] = text;
+        }
+}
+
+// The lines of a file read to stop, which holds a NUL: header lines and any line that is not two tabs and a text are skipped.
+static fn language_parse(char address_to at, char address_to stop)
+{
+        while (at < stop)
+        {
+                char address_to line = at, address_to tab;
+
+                while (at < stop && *at != '\n')
+                        at++;
+                *at++ = 0;
+                if (line[0] == '@')
+                {
+                        language.rtl |= string_equals((string_address)line, (string_address) "@direction rtl");
+                        continue;
+                }
+                if (!line[0] || line[0] == '#')
+                        continue;
+                for (tab = line; *tab && *tab != '\t'; tab++)
+                        ;
+                if (!*tab)
+                        continue;
+                *tab++ = 0;
+                while (*tab && *tab != '\t')
+                        tab++;
+                if (!*tab)
+                        continue;
+                language_put(line, tab + 1);
+        }
+}
+
+/*
+        The languages the Language row offers: a code and the language's own name for itself, which is what its menu shows
+        (a person finds their language by its own name, whichever language is taken) and what the file's @name says. The
+        codes are SETTINGS_LANGUAGE_CODES, in the same order, which a check holds them to.
+*/
+static const struct
+{
+        const char address_to code;
+        const char address_to name;
+} language_names[] = {
+        {"en", "English"},
+        {"es", "Espa\xc3\xb1ol"},
+        {"fr", "Fran\xc3\xa7" "ais"},
+        {"de", "Deutsch"},
+        {"pt", "Portugu\xc3\xaas"},
+        {"it", "Italiano"},
+        {"nl", "Nederlands"},
+        {"pl", "Polski"},
+        {"tr", "T\xc3\xbcrk\xc3\xa7" "e"},
+        {"sv", "Svenska"},
+        {"ru", "\xd0\xa0\xd1\x83\xd1\x81\xd1\x81\xd0\xba\xd0\xb8\xd0\xb9"},
+        {"uk", "\xd0\xa3\xd0\xba\xd1\x80\xd0\xb0\xd1\x97\xd0\xbd\xd1\x81\xd1\x8c\xd0\xba\xd0\xb0"},
+        {"el", "\xce\x95\xce\xbb\xce\xbb\xce\xb7\xce\xbd\xce\xb9\xce\xba\xce\xac"},
+        {"ar", "\xd8\xa7\xd9\x84\xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a\xd8\xa9"},
+        {"he", "\xd7\xa2\xd7\x91\xd7\xa8\xd7\x99\xd7\xaa"},
+        {"fa", "\xd9\x81\xd8\xa7\xd8\xb1\xd8\xb3\xdb\x8c"},
+        {"ur", "\xd8\xa7\xd8\xb1\xd8\xaf\xd9\x88"},
+};
+
+// A language's own name for its code, or the code when it is none of the table's.
+static const char address_to language_name_of(const char address_to code)
+{
+        for (positive at = 0; at < sizeof(language_names) / sizeof(language_names[0]); at++)
+                if (string_equals((string_address)code, (string_address)language_names[at].code))
+                        return language_names[at].name;
+        return code;
+}
+
+// The code of a language's own name (the inverse of language_name_of), or the word itself.
+static const char address_to language_code_of(const char address_to name)
+{
+        for (positive at = 0; at < sizeof(language_names) / sizeof(language_names[0]); at++)
+                if (string_equals((string_address)name, (string_address)language_names[at].name))
+                        return language_names[at].code;
+        return name;
+}
+
+// Run again, after the language changes, by the code that copied a text when it started (a title, a list of names).
+static fn language_listen(void (*again)(void))
+{
+        if (language.listeners < LANGUAGE_LISTENERS)
+                language.listener[language.listeners++] = again;
+}
+
+/*
+        The language the table says, taken: English when the code is none or en, else the file of that code
+        (and English if there is none, or it does not read). A code already taken does nothing, so the loops
+        may ask at every pass.
+*/
+// Whether a code is two or three lower-case letters, a byte each from the low end (windows_language_code's packing). The table's word is
+// one a peer may write, and the code is made into a path, so any other value is English and no path is made of it.
+static b32 language_code_ok(unsigned int code)
+{
+        unsigned int length = 0;
+
+        while (length < 3 && (code >> (8 * length) & 255))
+        {
+                unsigned int c = code >> (8 * length) & 255;
+
+                if (c < 'a' || c > 'z')
+                        return false;
+                length++;
+        }
+        return length >= 2 && !(code >> (8 * length));
+}
+
+static fn language_take(unsigned int code)
+{
+        if (code && !language_code_ok(code))
+                code = 0;
+        if (code == LANGUAGE_ENGLISH)
+                code = 0;
+        if (code == language.code)
+                return;
+        language.code = code, language.loaded = 0, language.keyed_count = 0, language.rtl = 0;
+        memory_zero(language.text, sizeof(language.text));
+        memory_zero(language.keyed, sizeof(language.keyed));
+        if (code)
+        {
+                char path[96];
+                positive at = string_length((string_address)language_directory);
+                char address_to file = language_file[language_side ^= 1];
+                bipolar got;
+
+                if (at + 8 > sizeof(path))
+                        at = 0;
+                memory_copy(path, language_directory, at);
+                for (unsigned int shift = 0; shift < 24 && (code >> shift & 255); shift += 8)
+                        path[at++] = (char)(code >> shift & 255);
+                memory_copy(path + at, ".txt", 5);
+                got = at ? file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)file, LANGUAGE_FILE_MOST) : -1;
+                if (got > 0)
+                {
+                        language_parse(file, file + got);
+                        language.loaded = 1;
+                }
+        }
+        for (unsigned int k = 0; k < language.listeners; k++)
+                language.listener[k]();
+}
+
+/*
+        A text with its placeholders filled. The arguments come in the English's order and a placeholder may
+        name any of them (%2$s before %1$d), which the first pass learns from the format itself; one
+        a translation leaves out is still read, as a number, so the arguments after it are the ones named.
+        Answers the length, which is cut to room - 1.
+*/
+static positive language_format(char address_to into, positive room, const char address_to format, ...)
+{
+        union
+        {
+                long number;
+                const char address_to string;
+        } argument[LANGUAGE_ARGUMENTS];
+        char kind[LANGUAGE_ARGUMENTS] = {0};
+        unsigned int implicit = 0, used = 0;
+        positive out = 0;
+        var_args list;
+
+        for (const char address_to f = format; *f; f++)
+        {
+                unsigned int index;
+
+                if (*f != '%')
+                        continue;
+                if (*++f == '%')
+                        continue;
+                if (*f >= '1' && *f <= '9' && f[1] == '$')
+                        index = (unsigned int)(*f - '0'), f += 2;
+                else
+                        index = ++implicit;
+                if (!*f)
+                        break;
+                if (index >= 1 && index <= LANGUAGE_ARGUMENTS)
+                        kind[index - 1] = *f == 's' ? 's' : 'd', used = index > used ? index : used;
+        }
+        var_list(list, format);
+        for (unsigned int k = 0; k < used; k++)
+        {
+                if (kind[k] == 's')
+                        argument[k].string = var_list_get(list, const char address_to);
+                else
+                        argument[k].number = var_list_get(list, long);
+        }
+        var_list_end(list);
+        implicit = 0;
+        for (const char address_to f = format; *f && out + 1 < room; f++)
+        {
+                unsigned int index;
+
+                if (*f != '%')
+                {
+                        into[out++] = *f;
+                        continue;
+                }
+                if (*++f == '%')
+                {
+                        into[out++] = '%';
+                        continue;
+                }
+                if (*f >= '1' && *f <= '9' && f[1] == '$')
+                        index = (unsigned int)(*f - '0'), f += 2;
+                else
+                        index = ++implicit;
+                if (!*f)
+                        break;
+                if (index < 1 || index > used)
+                        continue;
+                if (*f == 's')
+                {
+                        for (const char address_to s = argument[index - 1].string; s && *s && out + 1 < room; s++)
+                                into[out++] = *s;
+                }
+                else
+                {
+                        char digits[24];
+                        unsigned int count = 0;
+                        long number = argument[index - 1].number;
+                        unsigned long magnitude = number < 0 ? 0ul - (unsigned long)number : (unsigned long)number;
+
+                        do
+                                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
+                        while (magnitude);
+                        if (number < 0 && out + 1 < room)
+                                into[out++] = '-';
+                        while (count && out + 1 < room)
+                                into[out++] = digits[--count];
+                }
+        }
+        // A text cut at the room's end has no half of a character left at its end: the lead byte of a sequence that did not all fit goes.
+        {
+                positive back = out;
+
+                while (back && out - back < 3 && (((unsigned char)into[back - 1]) & 0xc0) == 0x80)
+                        back--;
+                if (back && (unsigned char)into[back - 1] >= 0xc0)
+                {
+                        unsigned char lead = (unsigned char)into[back - 1];
+
+                        if (back - 1 + (lead >= 0xf0 ? 4u : lead >= 0xe0 ? 3u : 2u) > out)
+                                out = back - 1;
+                }
+        }
+        into[out] = 0;
+        return out;
+}
 
 /*
         A place where something is drawn that reading from the right does not turn over (a check mark, a signal's bars): its
@@ -1248,7 +9213,7 @@ static int ui_px(const struct ui address_to ui, int logical)
 }
 
 /*
-        A click's count (ui_click_again, motion.h: the one double-press rule) at the kit's scale.
+        A click's count (ui_click_again, the motion: the one double-press rule) at the kit's scale.
 */
 static positive ui_kit_time(void);
 static int ui_click_count(const struct ui address_to ui, struct ui_click address_to k, int x, int y)
@@ -1325,7 +9290,7 @@ static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it 
 static b32 ui_kit_retract; // the event is a hand's lead taken away (WINDOW_KEY_SETTLE): a place and no step the hand made
 
 // Whether px, py hits a shape x, y, width by height: a finger's reach is the shape grown to UI_TARGET each way where it is smaller
-// (ui_reach_hit, theme.h's rule, which the compositor's resize corners and buttons take too).
+// (ui_reach_hit, the theme's rule, which the compositor's resize corners and buttons take too).
 static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int x, int y, int width, int height)
 {
         return ui_reach_hit(touch, UI_TARGET * ui->scale / 100, px, py, x, y, width, height);
@@ -1338,7 +9303,6 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
         velocity estimate. The throw is the body's: ui_body_let_go carries a region on that speed, and ui_body_free a throw with no
         ends. A call's time is the kit's (ui_kit_time) or the event's (ui_press_now: the device's stamp, so a batch is its own speed).
 */
-#include "motion.h"
 static inline b64 ui_qmul(b64 a, b64 b);
 static b64 ui_exp_neg(b64 x);
 #define UI_PRESS_SAMPLES 16
@@ -1565,7 +9529,7 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
 
 /* ---- kit: motion ---- */
 /*
-        The motion, in Q30 (motion.h). Springs: ui_spring_go (a kick), ui_spring_at (the value now), ui_spring_stop. Tweens:
+        The motion, in Q30 (see the motion above). Springs: ui_spring_go (a kick), ui_spring_at (the value now), ui_spring_stop. Tweens:
         ui_tween_put (the target), ui_tween_at, ui_tween_still. Ripples: ui_ripple_go, ui_ripple_at, ui_ripple_exit. Slides:
         ui_slide_go, ui_slide_value, ui_slide_land. The time is the last argument, in nanoseconds, and the caller passes
         ui_kit.now (set by ui_event_context); a caller's own clock is what check_kit_standard counts.
@@ -2229,10 +10193,9 @@ static b64 ui_slide_land(struct ui_slide address_to s, b32 address_to live)
         turn says UI_KEEP (see the macro above; a build says nothing of it).
 */
 
-#include "theme.h"
 
 /*
-        The kit's threshold for text on a glass ground, in hundredths (ui_contrast, theme.h): WCAG's 4.5:1 and 0.2 more, kept
+        The kit's threshold for text on a glass ground, in hundredths (ui_contrast, the theme): WCAG's 4.5:1 and 0.2 more, kept
         for the compositor's grain, which moves a glass ground up to three levels a pixel (a 4.5:1 fill came out at 4.46:1).
 */
 #define UI_READABLE 470
@@ -8380,7 +16343,7 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
 /* ---- the view ---- */
 /*
         The view: a screen declared as a tree, the way a page is in HTML, styled by class as it is in CSS, and laid out by the
-        flexbox rules of layout.h. An app says what it shows each time the window is laid out or drawn, and the kit does the rest:
+        flexbox rules of the layout. An app says what it shows each time the window is laid out or drawn, and the kit does the rest:
         the sizes, the places, the hover, the press, the keys, the ripple and the confirm of each element are the kit's, and what the
         app keeps is its own data. The elements nest in the braces after them, so a component is a function that declares a subtree:
 
@@ -8457,7 +16420,7 @@ struct ui_class
         const char address_to name;
         short gap, pad[4], margin[4];     // pad and margin: left, right, top, bottom
         short w, h, min_h, grow, shrink;
-        short justify, align, scroll;     // UI_START... of layout.h; scroll 1
+        short justify, align, scroll;     // UI_START... of the layout; scroll 1
         short type, ink, fill, radius;    // the type of a text, its ink and a box's fill by role, a box's corner
         short variant;                    // a button's, UI_BUTTON_*
 };
@@ -12117,7 +20080,7 @@ static b32 ui_buffers_paint(struct ui_buffers address_to b, int slot, int spoile
 }
 
 /*
-        The window's list (ui/list.h's format, the GPU's draw list). While the compositor renders the lists its windows publish (the table's
+        The window's list (ui/ui.c's format, the GPU's draw list). While the compositor renders the lists its windows publish (the table's
         list_mode is 1) and has not refused this window's last (list_state 2), a frame is recorded into the window's list instead of painted:
         ui_app_run gives the app's kit ui and the row's list (ui_app_ui, ui_app_row, ui_app_list). The frame is begun (ui_scene_begin), drawn
         with the picture's painter, which records its ops and writes no pixel, and published (ui_scene_end) with the picture's knock, buffer 0,
@@ -16289,4 +24252,280 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
         t->well_left = ui_dev(ui, c->x), t->well_right = ui_dev(ui, c->x + c->w);
 }
 
-#endif // MOONWATER_CANVAS_UI
+#if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
+// The battery reader (the sysfs files): the settings window and the taskbar read it.
+/*
+        The machine's batteries, as the kernel's power supply class shows them
+        (Documentation/ABI/testing/sysfs-class-power): each entry of
+        /sys/class/power_supply whose type is Battery, by its directory name,
+        with whether it is present, its charge in percent and whether it is
+        charging.
+
+        A battery is read the way btop reads one (src/linux/btop_collect.cpp,
+        get_battery): it is present when its present file reads 1, its
+        percent is capacity, else energy_now over energy_full, else charge_now
+        over charge_full, clamped to 0 to 100, and its status is the word the
+        kernel gives. One deliberate difference: an entry whose scope is Device
+        (a mouse's or a keyboard's battery, reported here too) is not one the
+        machine has, so it is left out.
+
+        Nothing is allocated. A list is filled into the caller's names and a
+        state into the caller's struct, and a file that is missing or unreadable
+        is an answer (not present, no percent), never a failure of the caller.
+*/
+
+#define BATTERY_ROOT "/sys/class/power_supply"
+#define BATTERY_LIST 16    // names a caller's list holds at most
+#define BATTERY_PATH 192
+#define BATTERY_DIGITS 15  // the most digits a reading takes
+
+enum battery_charging
+{
+        BATTERY_UNKNOWN,
+        BATTERY_DISCHARGING,
+        BATTERY_CHARGING,
+        BATTERY_FULL,
+        BATTERY_NOT_CHARGING
+};
+
+struct battery_state
+{
+        b32 present;             // the battery's present file reads 1
+        int percent;             // 0 to 100, or -1 when no reading gives one
+        unsigned int charging;   // enum battery_charging
+        char name[BATTERY_NAME]; // the directory name it was read under
+};
+
+// What a power supply entry is: a battery, a UPS (which carries a battery and reports its capacity), or neither.
+enum battery_kind
+{
+        BATTERY_KIND_NONE,
+        BATTERY_KIND_BATTERY,
+        BATTERY_KIND_UPS
+};
+
+struct battery_name
+{
+        char text[BATTERY_NAME];
+        unsigned int kind; // enum battery_kind
+};
+
+// The directory the batteries are read under. A check points it at a tree of its own.
+static string_address battery_root = (string_address)BATTERY_ROOT;
+
+// A word of a battery's file, without its newline or the blanks after it: its length, or -1 when the file is not there.
+static bipolar battery_word(string_address name, string_address leaf, p8 address_to into, positive room)
+{
+        p8 path[BATTERY_PATH];
+        bipolar got;
+
+        into[0] = end;
+        if (!string_join(path, sizeof(path), battery_root, "/", name, leaf))
+                return -1;
+        got = file_slurp_once_at(AT_FDCWD, (string_address)path, into, room);
+        if (got < 0)
+                return -1;
+        while (got && (into[got - 1] == '\n' || into[got - 1] == ' ' || into[got - 1] == '\t'))
+                into[--got] = end;
+        return got;
+}
+
+// One reading of a battery's file: a number of digits and no more, and false when it is not one.
+static b32 battery_number(string_address name, string_address leaf, positive address_to value)
+{
+        p8 text[32];
+        positive number = 0, used = 0;
+        bipolar got = battery_word(name, leaf, text, sizeof(text));
+
+        if (got <= 0 || got > BATTERY_DIGITS)
+                return false;
+        number = string_digits_max((string_address)text, (positive)got, &used);
+        if (used != (positive)got)
+                return false;
+        *value = number;
+        return true;
+}
+
+struct battery_word
+{
+        string_address text; // a word the file may read as; a zero text ends the table
+        unsigned int value;  // what the word means; the ending entry's value is the answer when none of them is
+};
+
+/*
+        What a directory entry is, by its type alone. A scope of Device is not
+        a reason to leave it out: a USB or Bluetooth mouse, keyboard or
+        controller reports its battery here with that scope, and it is a
+        battery the machine has all the same.
+*/
+static const struct battery_word battery_kind_words[] = {
+        {"Battery", BATTERY_KIND_BATTERY}, {"UPS", BATTERY_KIND_UPS}, {0, BATTERY_KIND_NONE}};
+static const struct battery_word battery_status_words[] = {
+        {"Discharging", BATTERY_DISCHARGING}, {"Charging", BATTERY_CHARGING}, {"Full", BATTERY_FULL},
+        {"Not charging", BATTERY_NOT_CHARGING}, {0, BATTERY_UNKNOWN}};
+
+// The value of the table's word that the battery's file reads as: the ending
+// entry's when the file is not there or reads as none of the words.
+static unsigned int battery_word_value(string_address name, string_address leaf, positive room, const struct battery_word address_to table)
+{
+        p8 text[32];
+        positive at = 0;
+        b32 found = battery_word(name, leaf, text, room) >= 0;
+
+        while (table[at].text && !(found && string_equals((string_address)text, table[at].text)))
+                at++;
+        return table[at].value;
+}
+
+static b32 battery_is_present(string_address name)
+{
+        p8 text[8];
+
+        return battery_word(name, "/present", text, sizeof(text)) >= 0 && string_equals((string_address)text, "1");
+}
+
+// The percent a battery reads at: capacity, else energy, else charge, and -1 when none of them gives one.
+static int battery_percent(string_address name)
+{
+        positive now, full;
+
+        if (battery_number(name, "/capacity", &now))
+                return now > 100 ? 100 : (int)now;
+        if ((battery_number(name, "/energy_now", &now) && battery_number(name, "/energy_full", &full)) ||
+            (battery_number(name, "/charge_now", &now) && battery_number(name, "/charge_full", &full)))
+        {
+                if (!full)
+                        return -1;
+                positive percent = (now * 100 + full / 2) / full;
+
+                return percent > 100 ? 100 : (int)percent;
+        }
+        return -1;
+}
+
+// A battery's state, under its name: a battery that is not present has no percent and no charging state.
+static void battery_fill(string_address name, struct battery_state address_to state)
+{
+        state->present = false;
+        state->percent = -1;
+        state->charging = BATTERY_UNKNOWN;
+        string_copy_bounded((string_address)state->name, name, BATTERY_NAME);
+        if (!battery_is_present(name))
+                return;
+        state->present = true;
+        state->percent = battery_percent(name);
+        state->charging = battery_word_value(name, "/status", 32, battery_status_words);
+}
+
+/*
+        Every battery and UPS the machine has, in the order the directory
+        gives them, into names (room of them at most), each with its kind. A
+        name is listed once among those kept: a repeat past room is not seen,
+        and is counted again, which no caller can tell, since both clamp the
+        answer to room. The answer is how many there are, which can be more
+        than room; the names are not sorted. Nothing is allocated: the block
+        of directory records is on the stack.
+*/
+static positive battery_list(struct battery_name address_to names, positive room)
+{
+        p64 block[256];   // the getdents records, 2 KiB on the stack
+        p8 address_to bytes = (p8 address_to)block;
+        bipolar handle = system_open_at(AT_FDCWD, battery_root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        positive count = 0;
+
+        if (handle < 0)
+                return 0;
+        for (;;)
+        {
+                bipolar got = system_read_directory(handle, block, sizeof(block));
+
+                if (got <= 0)
+                        break;
+                for (bipolar at = 0; at < got;)
+                {
+                        struct linux_dirent64 address_to entry = (struct linux_dirent64 address_to)(bytes + at);
+                        string_address name = (string_address)entry->d_name;
+
+                        //      A record of no length would stop the walk where it is: the block is left then.
+                        unsigned int kind;
+                        b32 listed = false;
+
+                        at += entry->d_reclen > 0 ? entry->d_reclen : got;
+                        if (name[0] == '.' || string_length(name) >= BATTERY_NAME)
+                                continue;
+                        kind = battery_word_value(name, "/type", 16, battery_kind_words);
+                        if (kind == BATTERY_KIND_NONE)
+                                continue;
+                        for (positive have = 0; have < count && have < room; have++)
+                                listed |= string_equals((string_address)names[have].text, name);
+                        if (listed)
+                                continue;
+                        if (count < room)
+                        {
+                                string_copy_bounded((string_address)names[count].text, name, BATTERY_NAME);
+                                names[count].kind = kind;
+                        }
+                        count++;
+                }
+        }
+        system_close((positive)handle);
+        return count;
+}
+
+/*
+        The state of one battery: the one named, or with no name (NULL or
+        empty) the first battery that is present, or else the first there is.
+        Answers whether a battery of that name is one the machine has. A name
+        that is not a plain directory name of a battery is not one, and gives
+        a state that is not present.
+*/
+static b32 battery_read(string_address name, struct battery_state address_to state)
+{
+        struct battery_name names[BATTERY_LIST];
+        positive count, chosen = 0;
+        b32 found = false;
+
+        if (name && name[0])
+        {
+                // A name is one directory entry: no slash and no dot-name, so it reads nothing outside the root.
+                b32 plain = string_length(name) < BATTERY_NAME && name[0] != '.';
+
+                for (positive at = 0; name[at]; at++)
+                        plain &= name[at] != '/';
+                if (!plain || battery_word_value(name, "/type", 16, battery_kind_words) == BATTERY_KIND_NONE)
+                {
+                        state->present = false;
+                        state->percent = -1;
+                        state->charging = BATTERY_UNKNOWN;
+                        string_copy_bounded((string_address)state->name, plain ? name : (string_address) "", BATTERY_NAME);
+                        return false;
+                }
+                battery_fill(name, state);
+                return true;
+        }
+
+        count = battery_list(names, BATTERY_LIST);
+        if (count > BATTERY_LIST)
+                count = BATTERY_LIST;
+        if (!count)
+        {
+                state->present = false;
+                state->percent = -1;
+                state->charging = BATTERY_UNKNOWN;
+                state->name[0] = end;
+                return false;
+        }
+        //      The default is the first present battery of type Battery; a present UPS is taken only when there is none.
+        for (positive pass = 0; pass < 2 && !found; pass++)
+                for (positive at = 0; at < count && !found; at++)
+                        if ((pass || names[at].kind == BATTERY_KIND_BATTERY) && battery_is_present(names[at].text))
+                        {
+                                chosen = at;
+                                found = true;
+                        }
+        battery_fill((string_address)names[chosen].text, state);
+        return true;
+}
+#endif
+
+#endif /* MOONWATER_CANVAS_UI */

@@ -5397,7 +5397,7 @@ static b32 build_fonts(string_address image)
 /*
         The languages the desktop's windows speak besides English.
 
-        languages/ holds one file for each, CODE.txt (ui/language.c says what is in it), and they go into the image as
+        languages/ holds one file for each, CODE.txt (ui/ui.c says what is in it), and they go into the image as
         /usr/share/moonwater/language/CODE.txt, beside the fonts, which is where the windows look. English is not
         among them: its words are the table in the programs themselves, and en.txt is only that table written out,
         for the checks. They are only words for something that draws a window: a build without the compositor or the

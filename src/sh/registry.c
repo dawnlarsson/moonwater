@@ -54,7 +54,7 @@
 #define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
 #define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
 #define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
-#define SETTINGS_LANGUAGE 32u  // a choice of the languages: the verb says the code and the menu shows the language's own name (ui/language.c)
+#define SETTINGS_LANGUAGE 32u  // a choice of the languages: the verb says the code and the menu shows the language's own name (ui/ui.c)
 #define SETTINGS_WAITS 64u     // a verb that waits for another machine (a pairing, up to five minutes): its first line is shown while it waits, its last when it ends
 #define SETTINGS_TRANSPORT 128u // a choice of how linked machines reach each other: network always, modem only while the audio modem is ready (its row says so)
 
@@ -160,7 +160,7 @@
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
 // The text's size, in percent of what every role's size says: ui.c's ui_em multiplies it in, and the portal says it as text-scaling-factor.
 #define SETTING_TEXT_SCALE_PATH "/root/canvas.text.scale"
-// The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/language.c reads it).
+// The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/ui.c reads it).
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
 #define SETTING_LANGUAGE_PATH "/root/language"
 #define SETTING_LANGUAGE_DIRECTORY "/usr/share/moonwater/language/"
@@ -381,7 +381,7 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_TOUCH_PATH, .standard = "on",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
-    //  The screen's side edges (ui/touch.h, compositor.c): a swipe in from the left edge runs the window switcher or opens the
+    //  The screen's side edges (ui/ui.c, compositor.c): a swipe in from the left edge runs the window switcher or opens the
     //  launcher, one in from the right runs the switcher or opens the volume popup. Off by default: a swipe from a side is then
     //  the window's, as a touch.
     SETTING_PLAIN_ROW(null, "Left edge", SETTINGS_CHOICE, 0, ("canvas", "touch", "left"), "left ", "off windows launcher",

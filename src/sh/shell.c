@@ -932,7 +932,10 @@ SHELL_OPTIMIZE_OS_POP
 #include "../waterlink/modem.c"
 // The session bus: a process of its own too, which the programs of a bowl find at /run/moonwater/bus (src/dbus).
 #include "../dbus/service.c"
-#include "../canvas/ui/features.h"
+// The kit's switches (ui/ui.c's first part): the gate below reads them. The compositor took them already.
+#define UI_SHARED_ONLY
+#include "../canvas/ui/ui.c"
+#undef UI_SHARED_ONLY
 #if MOONWATER_UI_ANY
 SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/ui/ui.c"
@@ -944,11 +947,6 @@ SHELL_OPTIMIZE_OS_POP
 SHELL_OPTIMIZE_OS_PUSH
 #include "../canvas/klog.c"
 SHELL_OPTIMIZE_OS_POP
-#if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
-SHELL_OPTIMIZE_OS_PUSH
-#include "../canvas/ui/battery.c"
-SHELL_OPTIMIZE_OS_POP
-#endif
 #if MOONWATER_UI_SETTINGS
 #include "../canvas/ui/gallery.c"
 #include "../canvas/ui/settings.c"

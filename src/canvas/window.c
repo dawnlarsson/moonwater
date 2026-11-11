@@ -34,8 +34,10 @@
 #include "canvas.c"
 #undef CANVAS_ABI_ONLY
 
-// The window list: its format and reader (ui/list.h), which the compositor checks a list with (window_list_valid).
-#include "ui/list.h"
+// The window list: its format and reader (ui/ui.c's first part, UI_LIST_ONLY), which the compositor checks a list with (window_list_valid).
+#define UI_LIST_ONLY
+#include "ui/ui.c"
+#undef UI_LIST_ONLY
 
 // O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
 // A window is this program's, not whatever it goes on to exec.
@@ -559,7 +561,7 @@ static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
         X(STORAGE, "storage", "a kernel notice about storage")             \
         X(SYSTEM, WINDOWS_KEY_NOTICES, "a kernel notice about the system") \
         X(PROGRAM, WINDOWS_KEY_NOTICES, "a program crashed")
-// The messages (Settings words each in the reader's language, language.inc's WINDOWS_ISSUE_* ids). a and b are the numbers the message
+// The messages (Settings words each in the reader's language, the language table's WINDOWS_ISSUE_* ids in ui/ui.c). a and b are the numbers the message
 // formats, and detail is shown after it, copyable. The numbers are per code: see the comment on each.
 enum windows_issue_code
 {
@@ -699,7 +701,7 @@ struct windows_issue
 #define WINDOW_SCROLL_STOPS 2u
 #define WINDOW_SCROLL_STILL 4u
 /*
-        A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/touch.h).
+        A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/ui.c).
         a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
         two, in the window's own pixels (window_pinch_pack). The flags are WINDOW_PINCH_BEGIN, WINDOW_PINCH_END, or neither for an
         update. A program that has said it takes pinches (the window pinch_wanted flag) is sent these; any other is sent Ctrl with a wheel of a notch
@@ -1209,7 +1211,7 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
 
 /*
-        A window's list (ui/list.h's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
+        A window's list (ui/ui.c's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
         pages of which exist only where the program wrote them. WINDOW_LIST_ROOM is the ops a half holds: the kit's recorder and the
         compositor's reader take the room from the list's header, and both are made with these numbers.
 */
@@ -1226,7 +1228,7 @@ static inline unsigned char *window_list_of(const struct windows *table, int row
 }
 
 /*
-        Whether a list (window_list_of's) may be rendered at width by height: the header is the kit's list, read as ui/list.h reads it
+        Whether a list (window_list_of's) may be rendered at width by height: the header is the kit's list, read as ui/ui.c reads it
         (magic, version, a generation even and the same after the read, the halves, the room, the cover bytes inside the list, and no
         lost flag), its room is WINDOW_LIST_ROOM, its picture is the row's size and its pitch is at least the width, and the damage it
         names is inside the picture. A list a program wrote is not trusted: each word is read once, by the reader. The ops are read

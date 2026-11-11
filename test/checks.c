@@ -59479,7 +59479,7 @@ static fn windows_client(void)
 /*
         The window lists: a table with a list for every row after its pictures, each row's list at its own place inside the mapping, a
         table whose lists do not fit or do not follow the pictures refused by windows_take, a reset row with no list state, and a
-        list's header read as window_list_valid reads it (ui/list.h's format): valid when it is one the compositor may render, and
+        list's header read as window_list_valid reads it (ui/ui.c's format): valid when it is one the compositor may render, and
         refused for each word that makes it another list (a publish in progress, a count past the room, a size that is not the row's,
         damage past the picture, a lost frame, a half that is not one, a cover offset that is not the layout's, a pitch narrower than
         the picture, a magic or version that is not the kit's, and no list at all).
@@ -122963,7 +122963,9 @@ static fn card_fake_close(void)
         card_fake.fd = -1;
         compositor.card = -1;
 }
-#include "../src/canvas/ui/features.h"
+#define UI_SHARED_ONLY
+#include "../src/canvas/ui/ui.c"
+#undef UI_SHARED_ONLY
 #ifdef CHECK_terminal
 static void rtl_keep_add(int x, int y, int w, int h);
 #define UI_KEEP(x, y, w, h) rtl_keep_add((x), (y), (w), (h))
@@ -122972,9 +122974,6 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #include "../src/canvas/ui/ui.c"
 #endif
 #include "../src/canvas/ui/terminal.c"
-#if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
-#include "../src/canvas/ui/battery.c"
-#endif
 #if MOONWATER_UI_SETTINGS
 #include "../src/canvas/ui/gallery.c"
 #include "../src/canvas/ui/settings.c"
@@ -150643,7 +150642,7 @@ static fn check_kit_confirm_repeat(void)
 }
 
 /*
-        The kit's layout (ui/layout.h) on trees whose rectangles are worked by hand from the rules in its head comment: the grow
+        The kit's layout (ui/ui.c) on trees whose rectangles are worked by hand from the rules in its head comment: the grow
         shares in whole pixels with the pixel the floors leave to the first, a grow child frozen at its max, the justifies, the
         aligns, a shrink that stops at a min, margins and pads in a fit size, a percent with a max, a scroll element's offset
         clamped, and the limits.
@@ -151397,7 +151396,7 @@ static fn check_kit_anchor_flip(void)
 }
 
 /*
-        The touch recogniser (ui/touch.h) fed with recorded point streams: each frame is the slots' ids and points, applied as the
+        The touch recogniser (ui/ui.c) fed with recorded point streams: each frame is the slots' ids and points, applied as the
         compositor applies it (begin, its events, then the report with the frame as it then is, its events). The events are written
         as letters: S START, M MOVE, P PRESS, R RELEASE, C CANCEL, X CLOSE, U RESUME, r RIGHT, w WHEEL (its v120 summed apart),
         H HOLD, E HOLD_END, I IDLE, Z PINCH_BEGIN, z PINCH_UPDATE, Y PINCH_END. Each row is one stream and the letters it must give.
@@ -158742,8 +158741,7 @@ static fn check_glass_pieces(string_address regular)
 static fn check_no_hand_typing(void)
 {
         static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
-                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
-                                                      "src/canvas/ui/ui.c"};
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/ui.c"};
         static const char address_to const idioms[] = {"memory_utf8_encode(bytes, sizeof(bytes)", "[length - 1] & 0xc0) == 0x80",
                                                        "c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT))",
                                                        "c == ' ' && !length", "unsigned int c = (unsigned int)event->b;"};
@@ -158803,8 +158801,7 @@ static positive check_hits(const char address_to text, positive size, const char
 static fn check_kit_standard(void)
 {
         static const char address_to const apps[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
-                                                     "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
-                                                     "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c", "src/canvas/ui/language.c"};
+                                                     "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c"};
         static const char address_to const idioms[] = {"WINDOW_KEY_TOUCH", "clock_monotonic_nanoseconds", ".press.down", "static fn ui_",
                                                        "static void ui_", "static int ui_", "static b32 ui_"};
         static const struct
@@ -158956,7 +158953,7 @@ static positive check_hits(const char address_to text, positive size, const char
 
 #if MOONWATER_UI_ANY
 /*
-        The language table and its files (ui/language.inc, ui/language.c, languages/). Read from the tree the check runs in
+        The language table and its files (ui/ui.c, ui/ui.c, languages/). Read from the tree the check runs in
         (the repository's root), as the checks above are; not run where the sources are not.
 
         English is the table, and languages/en.txt is the same words written out, which pins them: a word changed in the table
@@ -159436,7 +159433,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 // The sources an id may be named in, and the ones converted: no English literal is left in them.
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
-    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
+    "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
     "src/canvas/ui/notices.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
                                                          "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
@@ -160678,8 +160675,7 @@ static fn check_caret_terminal(void)
 static fn check_one_cut(void)
 {
         static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
-                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
-                                                      "src/canvas/ui/identify.c"};
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/identify.c"};
         static const char address_to const dots[] = {"\"...\", 3)", "\"...\", capacity)", "ui_cut_find("};
         positive read = 0, dots_found = 0, asks = 0;
 
@@ -160722,7 +160718,7 @@ static fn check_one_cut(void)
 */
 static fn check_one_digits(void)
 {
-        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/battery.c", "src/canvas/ui/ui.c",
+        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/ui.c",
                                                       "src/canvas/ui/terminal.c"};
         static const char address_to const hand[] = {"* 10 + (", "- '0')"};
         positive read = 0, hand_found = 0, reads = 0;
@@ -160755,8 +160751,7 @@ static fn check_one_digits(void)
 static fn check_no_input_codes(void)
 {
         static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
-                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
-                                                      "src/canvas/ui/identify.c"};
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/identify.c"};
         static const char address_to const codes[] = {"#define UI_KEY_", "#define UI_KEY_", "#define TERMINAL_KEY_",
                                                       "#define SETTINGS_BUTTON_", "#define LAUNCHER_BUTTON_", "0x110", "0x111", "0x112"};
         positive found = 0, read = 0;
@@ -160798,7 +160793,7 @@ static fn check_no_input_codes(void)
 
 /*
         No shape by hand: a window's corner radius, its gap, a finger's slop, a close button, a status dot and a
-        segmented tab's height are the kit's numbers (theme.h for the ones the compositor draws too, ui.c for the rest).
+        segmented tab's height are the kit's numbers (the theme's roles for the ones the compositor draws too, the rest of ui.c).
         A window that #defines one of those names with a number of its own is the copy the kit replaced, so the scan
         reads every #define in the window sources for a name of the kit's kinds with a digit where its value goes.
 */
@@ -160815,8 +160810,7 @@ static b32 shape_name(const char address_to name, positive length)
 static fn check_no_shapes_by_hand(void)
 {
         static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
-                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
-                                                      "src/canvas/ui/identify.c"};
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/identify.c"};
         positive found = 0, read = 0;
 
         for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
@@ -167594,7 +167588,7 @@ b32 main(void)
 
 #ifdef CHECK_text_engine
 /*
-        The text engine (src/canvas/ui/text.c) against what it stands for.
+        The text engine (src/canvas/ui/ui.c) against what it stands for.
 
         A naive model -- the document as one array of bytes, every edit a copy, every line counted from the start --
         is driven through the same random edits as the piece tree, and after each the two must agree on every byte,
@@ -170036,7 +170030,7 @@ static void *compositor_map_zeroed(unsigned long bytes) { return calloc(1,bytes)
 #ifndef memory_copy
 #define memory_copy memmove
 #endif
-/* ui/taskbar.h holds the face and engine the tabs are written in by
+/* ui/ui.c holds the face and engine the tabs are written in by
    pointer; the backend's cut never looks inside them. */
 typedef struct font_face font_face;
 typedef struct font_engine font_engine;
@@ -172964,7 +172958,7 @@ static void test_touch(void)
         wayland_stop();
 }
 
-/* A finger's notch: the kit's UI_NOTCH (theme.h, not included here), in pixels at 100 percent, written as the number the shim is handed. */
+/* A finger's notch: the kit's UI_NOTCH (the theme in ui/ui.c, not included here), in pixels at 100 percent, written as the number the shim is handed. */
 #define WAYLAND_FINGER_NOTCH 40
 
 /*

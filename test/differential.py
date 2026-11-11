@@ -28996,9 +28996,9 @@ def harness_core_state(argv):
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- outputs: the screens one desktop spans ---- */",
             "/* ---- end of the outputs ---- */"))
-        # The backend's taskbar constants come from ui/taskbar.h, which the extract includes.
+        # The backend's taskbar constants come from ui/ui.c (its shared part), which the extract includes.
         (work / "ui").mkdir(exist_ok=True)
-        (work / "ui" / "taskbar.h").write_text((root / "src/canvas/ui/taskbar.h").read_text())
+        (work / "ui" / "ui.c").write_text((root / "src/canvas/ui/ui.c").read_text())
         # The renderer's own assembly bodies. lib.c assembles them only into
         # a kernel build with Canvas, so they are lifted out of it rather than linked.
         target = work / "canvas.S"
@@ -99376,7 +99376,7 @@ def harness_text_tables(argv):
 
     UCD_DIR holds GraphemeBreakProperty.txt, WordBreakProperty.txt, emoji-data.txt, DerivedCoreProperties.txt,
     GraphemeBreakTest.txt and WordBreakTest.txt of Unicode 16.0.0 (unicode.org/Public/16.0.0/ucd/, the auxiliary
-    and emoji directories). The table in src/canvas/ui/text.c and the slice of vectors test/checks.c pins are made
+    and emoji directories). The table in src/canvas/ui/ui.c and the slice of vectors test/checks.c pins are made
     again from them and must be what is there (--write puts them there). Given the text_engine check's binary, every
     vector of both test files is run through it (its `vectors` mode), not only the slice. NOT RUN (2) without the
     files.
@@ -99388,7 +99388,7 @@ def harness_text_tables(argv):
         print("text tables: NOT RUN, no Unicode data files (unicode.org/Public/16.0.0/ucd/)")
         return 2
     ucd = Path(rest[0])
-    places = [(HARNESS_ROOT / "src/canvas/ui/text.c", "// TEXT_TABLES BEGIN\n", "// TEXT_TABLES END", text_table(ucd)),
+    places = [(HARNESS_ROOT / "src/canvas/ui/ui.c", "// TEXT_TABLES BEGIN\n", "// TEXT_TABLES END", text_table(ucd)),
               (HARNESS_ROOT / "test/checks.c", None, "// TEXT_VECTORS END",
                text_slice("text_grapheme_vectors", ucd / "GraphemeBreakTest.txt", 4) +
                text_slice("text_word_vectors", ucd / "WordBreakTest.txt", 6))]

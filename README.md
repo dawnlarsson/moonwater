@@ -348,7 +348,7 @@ with, and `canvas motion reduced` turns the motion off; every open window turns 
 change at once. `moonwater settings gallery` opens the settings window on the kit's
 gallery: every control, as the kit's own demo page has them, to see and press.
 
-The words those windows say are one table of ids (src/canvas/ui/language.inc), English being the table itself, and
+The words those windows say are one table of ids (src/canvas/ui/ui.c), English being the table itself, and
 every other language is a file of `languages/` (the image carries them as /usr/share/moonwater/language/CODE.txt)
 with the same ids. `moonwater language CODE` picks one, and every open window says its words in it at once; bare, it
 lists the languages and marks the ones a machine translated and no person has reviewed. Es, fr, de, pt, it, nl, pl,
