@@ -456,23 +456,15 @@ static bipolar host_publish_again(string_address path, address_any bytes, positi
    saved wifi list, passwords and all, was truncated first and written second)
    leaves the file as it was or as it is to be, and nothing half of each, and
    two writers at once leave one whole. A /run file that only says what this
-   session is doing does not need to be. */
+   session is doing does not need to be synced, but it is still renamed over
+   its name: a file another process reads (the wifi SAE list, the scan and
+   avoid lists) was truncated in place before, so a reader could see it empty
+   and a signal between the truncate and the write left it empty. */
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
 {
-        bipolar handle;
-        bipolar failed;
-
-        if (sync)
-                return host_publish_again(path, bytes, length, mode, true,
-                                          FILE_STAGED_EXACT_MODE);
-
-        handle = host_open_state(AT_FDCWD, path, mode, FILE_WRITE);
-        if (handle < 0)
-                return handle;
-        failed = storage_format_write(handle, bytes, length, 0);
-        system_close(handle);
-        return failed;
+        return host_publish_again(path, bytes, length, mode, sync,
+                                  FILE_STAGED_EXACT_MODE);
 }
 
 /* Bytes over a /run file that others read, whole or not at all and not synced:
