@@ -13221,7 +13221,20 @@ static bool radio_share_kept(void)
         return host_read_word(NET_BLUETOOTH_SHARE, text, sizeof(text)) >= 0 && host_onoff((string_address)text) == 1;
 }
 
-// The pid the sharing was started with, read from its file; 0 when none is kept.
+// Whether pid is still bt-network. The file is not removed when bt-network
+// ends on its own, so its pid may be another process's by the next look.
+static bool radio_share_is(positive pid)
+{
+        p8 path[32] = "/proc/", text[32];
+        positive length = positive_into_string(path + 6, pid) + 6;
+
+        string_copy(path + length, "/comm");
+        if (host_read_kernel((string_address)path, text, sizeof(text)) < 0)
+                return false;
+        return string_equals((string_address)text, "bt-network");
+}
+
+// The pid the sharing was started with, read from its file; 0 when none is kept or it is not bt-network.
 static positive radio_share_pid(void)
 {
         p8 text[24];
@@ -13230,7 +13243,7 @@ static positive radio_share_pid(void)
         if (host_read_word(NET_BLUETOOTH_SHARE_PID, text, sizeof(text)) < 0)
                 return 0;
         pid = string_digits_max(text, 10, null);
-        return pid > 1 ? pid : 0;
+        return pid > 1 && radio_share_is(pid) ? pid : 0;
 }
 
 // Whether the process the sharing was started as is still there.
