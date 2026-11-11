@@ -154262,6 +154262,41 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer: the device's slider is filled up to its thumb at 80 percent, the thumb a gap, and empty above it",
                       strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_SURFACE));
         }
+        // A stood slider focused by a mouse press draws no ring round its thumb: the press takes the strip's focus with no keys, so the
+        // keys' ring (3 out from a pressed thumb of 12, 2 thick: columns 7 to 9 past the track's middle, clear of the bars) is not drawn;
+        // a key on the strip after it draws the ring again. The strip's percent is put back as it was.
+        {
+                struct ui_control address_to slider = &s->control[0];
+                int x = slider->x + slider->w / 2, thumb = ui_slider_thumb(slider), knob = slider->y + slider->h - thumb / 2 - (slider->h - thumb) * 80 / 100;
+                int percent_was = s->item[0].percent, pressed = 0, keyed = 0;
+                b32 keys_was = mixer.focused;
+                struct window_event at_knob = {WINDOW_EVENT_MOTION, 0, x, knob, 0};
+                struct window_event hold = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
+                struct window_event key_up = strips_key(UI_KEY_UP, 0);
+                struct window_event let_go = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
+
+                mixer.focused = 1;
+                ui_strips_event(&mixer.ui, s, &at_knob);
+                ui_strips_event(&mixer.ui, s, &hold);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                for (int py = slider->y; py < slider->y + slider->h; py++)
+                        for (int px = x + 7; px <= x + 9; px++)
+                                pressed += strips_is(px, py, UI_PRIMARY);
+                ui_strips_event(&mixer.ui, s, &key_up);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                for (int py = slider->y; py < slider->y + slider->h; py++)
+                        for (int px = x + 7; px <= x + 9; px++)
+                                keyed += strips_is(px, py, UI_PRIMARY);
+                ui_strips_event(&mixer.ui, s, &let_go);
+                s->item[0].percent = percent_was;
+                mixer.focused = keys_was;
+                check("mixer: a stood slider focused by a mouse press draws no ring round its thumb", pressed == 0);
+                check("mixer: a key on the focused strip draws its ring round the thumb", keyed > 0);
+        }
         // The popup (-q): the device's strip alone, the Mixer row under it, the keys and the pointer, the mixer started by the row, the place
         // beside the cell, and the keys going elsewhere.
         {

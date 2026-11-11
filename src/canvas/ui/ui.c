@@ -17492,6 +17492,7 @@ struct ui_strips
 {
         struct ui_strip item[UI_STRIPS_MOST], before[UI_STRIPS_MOST];
         int count, before_count, changed, focus;
+        b32 keyed;                                     // the focus came from the keys: a press or a wheel takes it with no ring on the stood slider
         b32 noted;                                     // some strip has a note: the sliders start lower for it
         unsigned long focus_id;
         struct ui_control control[2 * UI_STRIPS_MOST]; // strip k's slider is 2k and its mute button 2k + 1
@@ -17773,7 +17774,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                               shown, hold);
                 if (shown[0] > 0 || shown[1] > 0 || hold[0] > shown[0] || hold[1] > shown[1])
                         ui_kit.busy = 1;
-                slider->focused = keys && s->focus == k;
+                slider->focused = keys && s->focus == k && s->keyed;
                 ui_control_draw(ui, slider);
                 ui_control_draw(ui, &s->control[2 * k + 1]);
         }
@@ -17884,7 +17885,7 @@ static p32 ui_strips_wheel(struct ui address_to ui, struct ui_strips address_to 
                 ui_kit_number_to(&s->shift, want < 0 ? 0 : want > most ? most : want, 220, &ui_ease);
                 return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
         }
-        s->focus = over, s->focus_id = s->item[over].id;
+        s->focus = over, s->focus_id = s->item[over].id, s->keyed = 0;
         if ((steps > 0 && s->item[over].percent >= 100) || (steps < 0 && s->item[over].percent <= 0))
                 return UI_STRIPS_TAKEN;
         ui_strips_set(s, over, s->item[over].percent + steps * UI_STRIPS_WHEEL);
@@ -17926,6 +17927,7 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
                 {
                         s->focus = (int)(ui_kit_held - s->control) / 2;
                         s->focus_id = s->item[s->focus].id;
+                        s->keyed = 0; // a press takes the focus, and the stood slider shows no ring for it
                         bits |= UI_STRIPS_TAKEN;
                 }
                 else if (ui_strips_most(ui, s) > 0 && x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h)
@@ -17961,7 +17963,13 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
 static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to s, const struct window_event address_to event)
 {
         if (event->type == WINDOW_EVENT_KEY)
-                return ui_strips_key(ui, s, event);
+        {
+                p32 bits = ui_strips_key(ui, s, event);
+
+                if (bits & UI_STRIPS_TAKEN)
+                        s->keyed = 1;
+                return bits;
+        }
         if (event->type == WINDOW_EVENT_WHEEL)
                 return ui_strips_wheel(ui, s, event);
         if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
