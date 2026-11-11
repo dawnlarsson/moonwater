@@ -372,7 +372,7 @@ function desktop_start {
   echo $! > /run/moonwater/supervisor.pid
 }
 
-# Waits up to three seconds for the compositor to be gone, so the card is
+# Waits up to three seconds for the compositor to be gone, and kills it if it is still there, so the card is
 # Canvas's again when this returns.
 function desktop_stop {
   kill $(cat /run/moonwater/supervisor.pid) 2> /dev/null
@@ -387,5 +387,10 @@ function desktop_stop {
     sleep 0.05
     desktop_wait=$((desktop_wait + 1))
   done
+  # A compositor that ignores its TERM is not left holding the card: the same as the C side's desktop_yield.
+  if [ -n "$desktop_pid" ] && kill -0 $desktop_pid 2> /dev/null; then
+    kill -9 $desktop_pid 2> /dev/null
+    sleep 0.1
+  fi
   rm -f /run/moonwater/supervisor.pid /run/moonwater/compositor.pid
 }
