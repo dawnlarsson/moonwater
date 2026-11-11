@@ -19,13 +19,77 @@
 */
 #define GALLERY_W 1092
 #define GALLERY_H 1538
-#define GALLERY_MOST 72
+
+/*
+        The page, one list: every control once, in the order it is made, drawn and hit, in page pixels (the first card's top left
+        at 24, 24), several to a line where they are short. A heading's height 0 is its type's line; an x of -1 flows, after the last
+        piece on its row (gallery_draw). The list sizes the page (GALLERY_MOST) and is the rows gallery_build makes the controls of.
+*/
+#define GALLERY_PAGE(X) \
+        X(UI_WINDOW, 0, 24, 24, 332, 606, "Provision node") X(UI_CARD, 0, 380, 24, 332, 606, null) X(UI_CARD, 0, 736, 24, 332, 606, null) \
+        X(UI_CARD, 0, 24, 654, 332, 507, null) X(UI_CARD, 0, 380, 654, 332, 507, null) X(UI_CARD, 0, 24, 1185, 1044, 329, null) \
+        X(UI_RULE, 0, 48, 537, 284, 1, null) X(UI_RULE, 0, 405, 233, 282, 1, null) X(UI_RULE, 0, 49, 927, 282, 1, null) X(UI_RULE, 0, 49, 1420, 994, 1, null) \
+        X(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, 0, "System preferences", .role = UI_ON_SURFACE) \
+        X(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, 0, "Navigation", .role = UI_ON_SURFACE) \
+        X(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, 0, "Build target", .role = UI_ON_SURFACE) \
+        X(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, 0, "Actions", .role = UI_ON_SURFACE) \
+        X(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, 0, "System upgrades", .role = UI_ON_SURFACE) \
+        X(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, 0, "Firmware DB-9 patching in progress\xe2\x80\xa6", .role = UI_ON_SURFACE_VARIANT) \
+        X(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, 0, "Node replication (80%)", .role = UI_ON_SURFACE_VARIANT) \
+        X(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, 0, "3 nodes pending a kernel rebuild.", .role = UI_ON_SURFACE_VARIANT) \
+        X(UI_INPUT, 0, UI_FIELD_H, 117, 284, 78, "Node name", .items = {"my-kernel"}) \
+        X(UI_INPUT, 0, UI_FIELD_H, 203, 284, 78, "Region", .items = {"moon-1"}) \
+        X(UI_SLIDER, 0, 48, 289, 284, 88, "vCPU allocation", .low = 1, .high = 64, .step = 1, .value = 8) \
+        X(UI_SLIDER, 0, 405, 266, 282, 88, "Log verbosity", .high = 100, .step = 1, .value = 70) \
+        X(UI_SLIDER, UI_SLIDER_STEPS, 405, 370, 282, 88, "Replication limit", .high = 100, .step = 25, .value = 50) \
+        X(UI_SWITCH, 0, 48, 393, 284, 48, "Pin to bare metal", .on = 1) X(UI_SWITCH, 0, 48, 457, 284, 48, "Auto-deploy on push") \
+        X(UI_SWITCH, 0, 405, 89, 282, 48, "Telemetry", .on = 1) X(UI_SWITCH, 0, 405, 153, 282, 48, "Offline cache") \
+        X(UI_CHECKBOX, 0, 49, 960, 282, 48, "Enable WASM target", .on = 1) X(UI_CHECKBOX, 0, 49, 1024, 282, 48, "Build as no_std", .on = 1) \
+        X(UI_CHECKBOX, 0, 49, 1088, 282, 48, "Strip symbols") \
+        X(UI_RADIOS, 0, 49, 719, 282, 48, null, .count = 3, .items = {"x86-64", "ARM64", "RISC-V (experimental)"}) \
+        X(UI_BUTTON, UI_BUTTON_TEXT, 48, 570, 67, 36, "Cancel") X(UI_BUTTON, UI_BUTTON_PRIMARY, 204, 570, 129, 36, "Provision node") \
+        X(UI_BUTTON, UI_BUTTON_PRIMARY, 405, 719, 75, 36, "Deploy") X(UI_BUTTON, UI_BUTTON_DEFAULT, 492, 719, 62, 36, "Build") \
+        X(UI_BUTTON, UI_BUTTON_OUTLINED, 566, 719, 63, 36, "Logs") X(UI_BUTTON, UI_BUTTON_TEXT, 405, 767, 67, 36, "Cancel") \
+        X(UI_BUTTON, UI_BUTTON_DEFAULT, 405, 819, 87, 36, "Disabled", .disabled = 1) X(UI_BUTTON, UI_BUTTON_OUTLINED, 504, 819, 87, 36, "Disabled", .disabled = 1) \
+        X(UI_BUTTON, UI_BUTTON_PRIMARY, 916, 1453, 127, 36, "Verify updates") \
+        X(UI_TABS, UI_TABS_SEGMENTED, 761, 89, 223, 32, null, .count = 3, .items = {"All", "Running", "Stopped"}) \
+        X(UI_PROGRESS, 0, 49, 1294, 994, 6, null, .value = -1) X(UI_PROGRESS, 0, 49, 1382, 994, 6, null, .value = UI_ONE / 100 * 80) \
+        X(UI_CARD, 0, 736, 654, 332, 507, null) X(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, 0, "Pieces", .role = UI_ON_SURFACE) \
+        X(UI_BADGE, 1, 761, 719, 0, 22, "Accent", .role = UI_PRIMARY) X(UI_BADGE, 1, -1, 719, 0, 22, "Healthy", .role = UI_SUCCESS) \
+        X(UI_BADGE, 0, -1, 719, 0, 22, "Degraded", .role = UI_WARNING) X(UI_BADGE, 0, 761, 749, 0, 22, "Failed", .role = UI_ERROR) \
+        X(UI_BADGE, 0, -1, 749, 0, 22, "Info", .role = UI_INFO) X(UI_BADGE, 0, -1, 749, 0, 22, "Idle", .role = UI_SURFACE_HIGHEST) \
+        X(UI_BADGE, 0, -1, 749, 0, 22, "Draft", .role = -1) \
+        X(UI_TAG, 0, 761, 787, 0, 26, "riscv64") X(UI_TAG, 0, -1, 787, 0, 26, "kernel", .on = 1) \
+        X(UI_KBD, 0, -1, 790, 0, 20, "Ctrl") X(UI_KBD, 0, -1, 790, 0, 20, "K") \
+        X(UI_AVATAR, 0, 761, 829, 32, 32, "AL", .on = 1) X(UI_AVATAR, 0, 805, 833, 24, 24, "DL") X(UI_AVATAR, 1, 841, 829, 32, 32, "MW") \
+        X(UI_SPINNER, 0, 905, 838, 14, 14, null) X(UI_SPINNER, 0, 931, 835, 20, 20, null) X(UI_SPINNER, 0, 963, 831, 28, 28, null) \
+        X(UI_CALLOUT, 0, 761, 877, 282, 70, "Kernel rebuild pending", .role = UI_WARNING, .text = "Three nodes wait for it.") \
+        X(UI_CODE_WELL, 0, 761, 963, 282, 172, "build.sh", .count = 4, \
+          .items = {"$ sh build.sh arch/x64", "  kernel   ok", "  shell    ok", "  canvas   ok"})
+
+struct gallery_row
+{
+        unsigned char kind, variant;
+        short x, y, w, h;
+        const char address_to label, address_to text; // a callout's second line is the text
+        int role, count;
+        b32 on, disabled;
+        const char address_to items[4]; // a radios', tabs' or code well's lines; a field's hint in the first
+        int low, high, step, value;     // a slider's range and value, whole numbers; a progress's as the control has it
+};
+
+#define GALLERY_COUNT(...) +1
+enum { GALLERY_MOST = 0 GALLERY_PAGE(GALLERY_COUNT) };
+#define GALLERY_ROW(kind, variant, x, y, w, h, ...) {kind, variant, x, y, w, h, __VA_ARGS__},
+static const struct gallery_row gallery_page[GALLERY_MOST] = {GALLERY_PAGE(GALLERY_ROW)};
+#undef GALLERY_COUNT
+#undef GALLERY_ROW
+#undef GALLERY_PAGE
 
 static struct
 {
         b32 on;
         struct ui_control control[GALLERY_MOST];
-        struct ui_control spare;    // a control made past GALLERY_MOST: it takes its fields and is never drawn, hit or started
         int count;
         struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
         struct ui_text field[2]; // the fields' engines: a node's name, which takes a name's characters, and a region
@@ -39,134 +103,45 @@ struct gallery_mark
         int item, hover_x;
 };
 
-static struct ui_control address_to gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
-{
-        struct ui_control address_to c = gallery.count < GALLERY_MOST ? &gallery.control[gallery.count++] : &gallery.spare;
-
-        memory_zero(c, sizeof(*c));
-        c->kind = (unsigned char)kind, c->variant = (unsigned char)variant;
-        c->x = x, c->y = y, c->w = w, c->h = h;
-        c->label = label;
-        return c;
-}
-
-static fn gallery_slider(struct ui_control address_to c, int low, int high, int step, int value)
-{
-        c->low = ui_q(low), c->high = ui_q(high), c->step = ui_q(step), c->value = ui_q(value);
-}
-
-// The page, from the demo's layout in Chrome (page pixels, the first card's top left at 24, 24).
+// The page, from the demo's layout in Chrome: each row of the list made a control, and the fields given their engines.
 static fn gallery_build(struct window_row address_to own, const char address_to (*accept)(p32 code), int most)
 {
-        gallery.count = 0;
-        gallery_put(UI_WINDOW, 0, 24, 24, 332, 606, "Provision node");
-        gallery_put(UI_CARD, 0, 380, 24, 332, 606, null);
-        gallery_put(UI_CARD, 0, 736, 24, 332, 606, null);
-        gallery_put(UI_CARD, 0, 24, 654, 332, 507, null);
-        gallery_put(UI_CARD, 0, 380, 654, 332, 507, null);
-        gallery_put(UI_CARD, 0, 24, 1185, 1044, 329, null);
-        gallery_put(UI_RULE, 0, 48, 537, 284, 1, null);
-        gallery_put(UI_RULE, 0, 405, 233, 282, 1, null);
-        gallery_put(UI_RULE, 0, 49, 927, 282, 1, null);
-        gallery_put(UI_RULE, 0, 49, 1420, 994, 1, null);
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "System preferences")->role = UI_ON_SURFACE;
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "Navigation")->role = UI_ON_SURFACE;
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Build target")->role = UI_ON_SURFACE;
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Actions")->role = UI_ON_SURFACE;
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, ui_types[UI_TITLE_MEDIUM].line, "System upgrades")->role = UI_ON_SURFACE;
-        gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, ui_types[UI_BODY_MEDIUM].line, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
-        gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, ui_types[UI_BODY_MEDIUM].line, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
-        gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, ui_types[UI_BODY_MEDIUM].line, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
-        // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
-        for (int k = 0; k < 2; k++)
-        {
-                struct ui_control address_to field = gallery_put(UI_INPUT, 0, UI_FIELD_H, k ? 203 : 117, 284, 78, k ? "Region" : "Node name");
+        int field = 0;
 
-                if (!gallery.field[k].doc.selections)
-                        ui_field_open(&gallery.field[k], own, "");
-                ui_field_focus(&gallery.field[k], false);
-                gallery.field[k].most = 63;
-                gallery.field[k].keeps_vertical = true; // Up and Down scroll the page
-                field->items[0] = k ? "moon-1" : "my-kernel";
-                field->edit = &gallery.field[k];
+        gallery.count = GALLERY_MOST;
+        for (int at = 0; at < GALLERY_MOST; at++)
+        {
+                const struct gallery_row address_to r = &gallery_page[at];
+                struct ui_control address_to c = &gallery.control[at];
+
+                memory_zero(c, sizeof(*c));
+                c->kind = r->kind, c->variant = r->variant;
+                c->x = r->x, c->y = r->y, c->w = r->w, c->h = r->kind == UI_HEADING ? ui_types[r->variant].line : r->h;
+                c->label = r->label, c->role = r->role, c->on = r->on, c->disabled = r->disabled, c->count = r->count;
+                for (int k = 0; k < 4; k++)
+                        c->items[k] = r->items[k];
+                if (r->text)
+                        string_copy_bounded((string_address)c->text, (string_address)r->text, sizeof(c->text));
+                if (r->kind == UI_SLIDER)
+                        c->low = ui_q(r->low), c->high = ui_q(r->high), c->step = ui_q(r->step), c->value = ui_q(r->value);
+                else
+                        c->value = r->value;
+                // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
+                if (r->kind == UI_INPUT)
+                {
+                        struct ui_text address_to t = &gallery.field[field++];
+
+                        if (!t->doc.selections)
+                                ui_field_open(t, own, "");
+                        ui_field_focus(t, false);
+                        t->most = 63;
+                        t->keeps_vertical = true; // Up and Down scroll the page
+                        c->edit = t;
+                }
+                ui_control_start(c);
         }
         gallery.field[0].accept = accept;
         gallery.field[0].most = most, gallery.field[0].most_said = "a name is under 32 characters";
-        gallery_slider(gallery_put(UI_SLIDER, 0, 48, 289, 284, 88, "vCPU allocation"), 1, 64, 1, 8);
-        gallery_slider(gallery_put(UI_SLIDER, 0, 405, 266, 282, 88, "Log verbosity"), 0, 100, 1, 70);
-        gallery_slider(gallery_put(UI_SLIDER, UI_SLIDER_STEPS, 405, 370, 282, 88, "Replication limit"), 0, 100, 25, 50);
-        gallery_put(UI_SWITCH, 0, 48, 393, 284, 48, "Pin to bare metal")->on = 1;
-        gallery_put(UI_SWITCH, 0, 48, 457, 284, 48, "Auto-deploy on push")->on = 0;
-        gallery_put(UI_SWITCH, 0, 405, 89, 282, 48, "Telemetry")->on = 1;
-        gallery_put(UI_SWITCH, 0, 405, 153, 282, 48, "Offline cache")->on = 0;
-        gallery_put(UI_CHECKBOX, 0, 49, 960, 282, 48, "Enable WASM target")->on = 1;
-        gallery_put(UI_CHECKBOX, 0, 49, 1024, 282, 48, "Build as no_std")->on = 1;
-        gallery_put(UI_CHECKBOX, 0, 49, 1088, 282, 48, "Strip symbols")->on = 0;
-        {
-                struct ui_control address_to radios = gallery_put(UI_RADIOS, 0, 49, 719, 282, 48, null);
-
-                radios->items[0] = "x86-64";
-                radios->items[1] = "ARM64";
-                radios->items[2] = "RISC-V (experimental)";
-                radios->count = 3;
-                radios->at = 0;
-        }
-        gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 48, 570, 67, 36, "Cancel")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 204, 570, 129, 36, "Provision node")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 405, 719, 75, 36, "Deploy")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 492, 719, 62, 36, "Build")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 566, 719, 63, 36, "Logs")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 405, 767, 67, 36, "Cancel")->disabled = 0;
-        gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 405, 819, 87, 36, "Disabled")->disabled = 1;
-        gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 504, 819, 87, 36, "Disabled")->disabled = 1;
-        gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 916, 1453, 127, 36, "Verify updates")->disabled = 0;
-        {
-                struct ui_control address_to tabs = gallery_put(UI_TABS, UI_TABS_SEGMENTED, 761, 89, 223, 32, null);
-
-                tabs->items[0] = "All";
-                tabs->items[1] = "Running";
-                tabs->items[2] = "Stopped";
-                tabs->count = 3;
-        }
-        gallery_put(UI_PROGRESS, 0, 49, 1294, 994, 6, null)->value = -1;
-        gallery_put(UI_PROGRESS, 0, 49, 1382, 994, 6, null)->value = UI_ONE / 100 * 80;
-        // The pieces, in the grid's cell the demo leaves empty: a heading, then rows that flow left to right (x -1).
-        gallery_put(UI_CARD, 0, 736, 654, 332, 507, null);
-        gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Pieces")->role = UI_ON_SURFACE;
-        gallery_put(UI_BADGE, 1, 761, 719, 0, 22, "Accent")->role = UI_PRIMARY;
-        gallery_put(UI_BADGE, 1, -1, 719, 0, 22, "Healthy")->role = UI_SUCCESS;
-        gallery_put(UI_BADGE, 0, -1, 719, 0, 22, "Degraded")->role = UI_WARNING;
-        gallery_put(UI_BADGE, 0, 761, 749, 0, 22, "Failed")->role = UI_ERROR;
-        gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Info")->role = UI_INFO;
-        gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Idle")->role = UI_SURFACE_HIGHEST;
-        gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Draft")->role = -1;
-        gallery_put(UI_TAG, 0, 761, 787, 0, 26, "riscv64");
-        gallery_put(UI_TAG, 0, -1, 787, 0, 26, "kernel")->on = 1;
-        gallery_put(UI_KBD, 0, -1, 790, 0, 20, "Ctrl");
-        gallery_put(UI_KBD, 0, -1, 790, 0, 20, "K");
-        gallery_put(UI_AVATAR, 0, 761, 829, 32, 32, "AL")->on = 1;
-        gallery_put(UI_AVATAR, 0, 805, 833, 24, 24, "DL");
-        gallery_put(UI_AVATAR, 1, 841, 829, 32, 32, "MW");
-        gallery_put(UI_SPINNER, 0, 905, 838, 14, 14, null);
-        gallery_put(UI_SPINNER, 0, 931, 835, 20, 20, null);
-        gallery_put(UI_SPINNER, 0, 963, 831, 28, 28, null);
-        {
-                struct ui_control address_to callout = gallery_put(UI_CALLOUT, 0, 761, 877, 282, 70, "Kernel rebuild pending");
-
-                callout->role = UI_WARNING;
-                string_copy_bounded((string_address)callout->text, (string_address) "Three nodes wait for it.", sizeof(callout->text));
-        }
-        {
-                struct ui_control address_to code = gallery_put(UI_CODE_WELL, 0, 761, 963, 282, 172, "build.sh");
-
-                code->items[0] = "$ sh build.sh arch/x64";
-                code->items[1] = "  kernel   ok";
-                code->items[2] = "  shell    ok";
-                code->items[3] = "  canvas   ok";
-                code->count = 4;
-        }
-        for (int at = 0; at < gallery.count; at++)
-                ui_control_start(&gallery.control[at]);
 }
 
 static fn gallery_place(struct ui address_to ui, int width, int height);
@@ -189,14 +164,9 @@ static fn gallery_draw(struct ui address_to ui)
                 struct ui_control address_to c = &gallery.control[at];
                 int y = c->y;
 
-                // A piece that flows: after the last on its row, 8 apart.
-                if (c->x < 0 || (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD))
-                {
-                        if (c->x < 0 && (row_y == c->y || row_y == c->y - 3 || row_y == c->y + 3))
-                                c->x = right + 8;
-                        else if (c->x < 0)
-                                c->x = 761;
-                }
+                // A piece that flows (x -1): after the last on its row, 8 apart.
+                if (c->x < 0)
+                        c->x = row_y == c->y || row_y == c->y - 3 || row_y == c->y + 3 ? right + 8 : 761;
                 c->y = y - scroll;
                 if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height * 100 / ui->scale)
                 {
