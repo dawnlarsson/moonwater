@@ -1026,11 +1026,14 @@ bipolar system_read_retry(positive handle, address_any into, positive length);
 #define system_pipe(pair, flags)                                             \
         system_call_2(syscall(pipe2), (positive)(pair), (positive)(flags))
 
-#if defined(LINUX) && !defined(KERNEL_MODE)
+#if (defined(LINUX) || defined(MACOS)) && !defined(KERNEL_MODE)
 /* Linux exposes pollfd as an eight-byte kernel record on every supported
    architecture.  Keep its effective type, event spelling and ppoll's
    eight-byte kernel signal-set ABI in one floor shared by networking,
-   terminals and process supervisors. */
+   terminals and process supervisors.  Darwin's struct pollfd is the same
+   record (int descriptor, short events, short revents) with the same event
+   bits, so the type and the SYSTEM_POLL_* names below are one definition on
+   both; only the wait differs, because Darwin has poll and no ppoll. */
 typedef struct
 {
         b32 descriptor;
@@ -1047,12 +1050,54 @@ _Static_assert(sizeof(system_poll_descriptor) == 8,
 #define SYSTEM_POLL_HANGUP 0x010
 #define SYSTEM_POLL_INVALID 0x020
 
+#if defined(MACOS)
+/* Darwin's poll, by its libSystem symbol. <poll.h> declares poll with its own
+   struct pollfd, and a prototype of that name here would conflict with it in
+   any file that includes both, so the symbol is bound under a name of the
+   library's own. A raw trap would answer a failure as a positive errno with
+   the carry flag set, which a count of ready descriptors cannot be told
+   from, so the libSystem entry (which answers -1 and sets errno) is the one
+   used, and its errno is read through ___error. */
+extern b32 system_poll_libc(address_any descriptors, p32 count,
+                            b32 milliseconds) __asm__("_poll");
+extern b32 address_to system_poll_error(void) __asm__("___error");
+#endif
+
+/* Wait for the descriptors for as long as limit says (null waits for ever).
+   Answers the count of ready ones, or the negative errno, as the Linux call
+   does.  On Darwin the wait is poll, and:
+     - the limit is rounded up to the millisecond, so a timer never fires
+       before its time, and a limit past what poll's int takes (about 24
+       days) is clamped to that: the caller wakes and waits again;
+     - poll has no signal mask to swap in atomically, which is all ppoll's
+       fourth argument is, so a caller that passes one is refused (-22) and
+       not raced.  No Darwin caller passes one. */
 static inline INLINE bipolar system_poll_wait(
     system_poll_descriptor address_to descriptors, positive count,
     timespec address_to limit, positive address_to signal_mask)
 {
+#if defined(MACOS)
+        b32 wait = -1;
+        b32 ready;
+
+        if (signal_mask)
+                return -22;
+        if (limit)
+        {
+                p64 milliseconds = 0x7fffffffull;
+
+                if (limit->tv_sec <= 2000000)
+                        milliseconds = limit->tv_sec * 1000 +
+                                       (limit->tv_nsec + 999999) / 1000000;
+                wait = milliseconds > 0x7fffffffull ? 0x7fffffff
+                                                    : (b32)milliseconds;
+        }
+        ready = system_poll_libc(descriptors, (p32)count, wait);
+        return ready < 0 ? -(bipolar)*system_poll_error() : (bipolar)ready;
+#else
         return system_call_5(syscall(ppoll), (positive)descriptors, count,
                              (positive)limit, (positive)signal_mask, 8);
+#endif
 }
 
 static inline INLINE bipolar descriptor_wait_readable(
@@ -2811,8 +2856,16 @@ static inline bool memory_from_base64(p8 address_to into, string_address text,
    spell them, and three files each spelled their own name for the same
    four shorts and the same two numbers. */
 #ifndef KERNEL_MODE
+#if defined(MACOS)
+//      Darwin's are _IOR('t', 104, struct winsize) and _IOW('t', 103, ...):
+//      the direction and the eight bytes of the struct are in the number,
+//      where Linux's are plain numbers.
+#define TIOCGWINSZ 0x40087468u
+#define TIOCSWINSZ 0x80087467u
+#else
 #define TIOCGWINSZ 0x5413u
 #define TIOCSWINSZ 0x5414u
+#endif
 
 typedef struct
 {
@@ -12231,6 +12284,344 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
         would be a redefinition the moment those two land in a translation
         unit with this one.
 */
+#if defined(MACOS)
+/*
+        Darwin's numbers (sys/errno.h), which are not these: its EAGAIN is 35
+        where Linux's is 11 (11 is EDEADLK there), EADDRINUSE 48 and not 98,
+        ELOOP 62 and not 40, ENOSYS 78 and not 38, ENODATA 96 and not 61. The
+        kernel hands its own back, negated, through system_read_retry and the
+        socket calls, so a comparison with the Linux number is a comparison
+        with some other error. Only the names Darwin has are defined: a
+        Linux-only name (ECHRNG, EBADFD, EHWPOISON and the rest) shares its
+        number with a Darwin error that is not it, and is not defined here
+        for that reason. The message text below is glibc's, indexed by the
+        Linux number, and is not translated.
+*/
+#ifndef EPERM
+#define EPERM 1
+#endif
+#ifndef ENOENT
+#define ENOENT 2
+#endif
+#ifndef ESRCH
+#define ESRCH 3
+#endif
+#ifndef EINTR
+#define EINTR 4
+#endif
+#ifndef EIO
+#define EIO 5
+#endif
+#ifndef ENXIO
+#define ENXIO 6
+#endif
+#ifndef E2BIG
+#define E2BIG 7
+#endif
+#ifndef ENOEXEC
+#define ENOEXEC 8
+#endif
+#ifndef EBADF
+#define EBADF 9
+#endif
+#ifndef ECHILD
+#define ECHILD 10
+#endif
+#ifndef EDEADLK
+#define EDEADLK 11
+#endif
+#ifndef ENOMEM
+#define ENOMEM 12
+#endif
+#ifndef EACCES
+#define EACCES 13
+#endif
+#ifndef EFAULT
+#define EFAULT 14
+#endif
+#ifndef ENOTBLK
+#define ENOTBLK 15
+#endif
+#ifndef EBUSY
+#define EBUSY 16
+#endif
+#ifndef EEXIST
+#define EEXIST 17
+#endif
+#ifndef EXDEV
+#define EXDEV 18
+#endif
+#ifndef ENODEV
+#define ENODEV 19
+#endif
+#ifndef ENOTDIR
+#define ENOTDIR 20
+#endif
+#ifndef EISDIR
+#define EISDIR 21
+#endif
+#ifndef EINVAL
+#define EINVAL 22
+#endif
+#ifndef ENFILE
+#define ENFILE 23
+#endif
+#ifndef EMFILE
+#define EMFILE 24
+#endif
+#ifndef ENOTTY
+#define ENOTTY 25
+#endif
+#ifndef ETXTBSY
+#define ETXTBSY 26
+#endif
+#ifndef EFBIG
+#define EFBIG 27
+#endif
+#ifndef ENOSPC
+#define ENOSPC 28
+#endif
+#ifndef ESPIPE
+#define ESPIPE 29
+#endif
+#ifndef EROFS
+#define EROFS 30
+#endif
+#ifndef EMLINK
+#define EMLINK 31
+#endif
+#ifndef EPIPE
+#define EPIPE 32
+#endif
+#ifndef EDOM
+#define EDOM 33
+#endif
+#ifndef ERANGE
+#define ERANGE 34
+#endif
+#ifndef EAGAIN
+#define EAGAIN 35
+#endif
+#ifndef EINPROGRESS
+#define EINPROGRESS 36
+#endif
+#ifndef EALREADY
+#define EALREADY 37
+#endif
+#ifndef ENOTSOCK
+#define ENOTSOCK 38
+#endif
+#ifndef EDESTADDRREQ
+#define EDESTADDRREQ 39
+#endif
+#ifndef EMSGSIZE
+#define EMSGSIZE 40
+#endif
+#ifndef EPROTOTYPE
+#define EPROTOTYPE 41
+#endif
+#ifndef ENOPROTOOPT
+#define ENOPROTOOPT 42
+#endif
+#ifndef EPROTONOSUPPORT
+#define EPROTONOSUPPORT 43
+#endif
+#ifndef ESOCKTNOSUPPORT
+#define ESOCKTNOSUPPORT 44
+#endif
+#ifndef ENOTSUP
+#define ENOTSUP 45
+#endif
+#ifndef EPFNOSUPPORT
+#define EPFNOSUPPORT 46
+#endif
+#ifndef EAFNOSUPPORT
+#define EAFNOSUPPORT 47
+#endif
+#ifndef EADDRINUSE
+#define EADDRINUSE 48
+#endif
+#ifndef EADDRNOTAVAIL
+#define EADDRNOTAVAIL 49
+#endif
+#ifndef ENETDOWN
+#define ENETDOWN 50
+#endif
+#ifndef ENETUNREACH
+#define ENETUNREACH 51
+#endif
+#ifndef ENETRESET
+#define ENETRESET 52
+#endif
+#ifndef ECONNABORTED
+#define ECONNABORTED 53
+#endif
+#ifndef ECONNRESET
+#define ECONNRESET 54
+#endif
+#ifndef ENOBUFS
+#define ENOBUFS 55
+#endif
+#ifndef EISCONN
+#define EISCONN 56
+#endif
+#ifndef ENOTCONN
+#define ENOTCONN 57
+#endif
+#ifndef ESHUTDOWN
+#define ESHUTDOWN 58
+#endif
+#ifndef ETOOMANYREFS
+#define ETOOMANYREFS 59
+#endif
+#ifndef ETIMEDOUT
+#define ETIMEDOUT 60
+#endif
+#ifndef ECONNREFUSED
+#define ECONNREFUSED 61
+#endif
+#ifndef ELOOP
+#define ELOOP 62
+#endif
+#ifndef ENAMETOOLONG
+#define ENAMETOOLONG 63
+#endif
+#ifndef EHOSTDOWN
+#define EHOSTDOWN 64
+#endif
+#ifndef EHOSTUNREACH
+#define EHOSTUNREACH 65
+#endif
+#ifndef ENOTEMPTY
+#define ENOTEMPTY 66
+#endif
+#ifndef EPROCLIM
+#define EPROCLIM 67
+#endif
+#ifndef EUSERS
+#define EUSERS 68
+#endif
+#ifndef EDQUOT
+#define EDQUOT 69
+#endif
+#ifndef ESTALE
+#define ESTALE 70
+#endif
+#ifndef EREMOTE
+#define EREMOTE 71
+#endif
+#ifndef EBADRPC
+#define EBADRPC 72
+#endif
+#ifndef ERPCMISMATCH
+#define ERPCMISMATCH 73
+#endif
+#ifndef EPROGUNAVAIL
+#define EPROGUNAVAIL 74
+#endif
+#ifndef EPROGMISMATCH
+#define EPROGMISMATCH 75
+#endif
+#ifndef EPROCUNAVAIL
+#define EPROCUNAVAIL 76
+#endif
+#ifndef ENOLCK
+#define ENOLCK 77
+#endif
+#ifndef ENOSYS
+#define ENOSYS 78
+#endif
+#ifndef EFTYPE
+#define EFTYPE 79
+#endif
+#ifndef EAUTH
+#define EAUTH 80
+#endif
+#ifndef ENEEDAUTH
+#define ENEEDAUTH 81
+#endif
+#ifndef EPWROFF
+#define EPWROFF 82
+#endif
+#ifndef EDEVERR
+#define EDEVERR 83
+#endif
+#ifndef EOVERFLOW
+#define EOVERFLOW 84
+#endif
+#ifndef EBADEXEC
+#define EBADEXEC 85
+#endif
+#ifndef EBADARCH
+#define EBADARCH 86
+#endif
+#ifndef ESHLIBVERS
+#define ESHLIBVERS 87
+#endif
+#ifndef EBADMACHO
+#define EBADMACHO 88
+#endif
+#ifndef ECANCELED
+#define ECANCELED 89
+#endif
+#ifndef EIDRM
+#define EIDRM 90
+#endif
+#ifndef ENOMSG
+#define ENOMSG 91
+#endif
+#ifndef EILSEQ
+#define EILSEQ 92
+#endif
+#ifndef ENOATTR
+#define ENOATTR 93
+#endif
+#ifndef EBADMSG
+#define EBADMSG 94
+#endif
+#ifndef EMULTIHOP
+#define EMULTIHOP 95
+#endif
+#ifndef ENODATA
+#define ENODATA 96
+#endif
+#ifndef ENOLINK
+#define ENOLINK 97
+#endif
+#ifndef ENOSR
+#define ENOSR 98
+#endif
+#ifndef ENOSTR
+#define ENOSTR 99
+#endif
+#ifndef EPROTO
+#define EPROTO 100
+#endif
+#ifndef ETIME
+#define ETIME 101
+#endif
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP 102
+#endif
+#ifndef ENOPOLICY
+#define ENOPOLICY 103
+#endif
+#ifndef ENOTRECOVERABLE
+#define ENOTRECOVERABLE 104
+#endif
+#ifndef EOWNERDEAD
+#define EOWNERDEAD 105
+#endif
+#ifndef EQFULL
+#define EQFULL 106
+#endif
+#ifndef ENOTCAPABLE
+#define ENOTCAPABLE 107
+#endif
+#ifndef EWOULDBLOCK
+#define EWOULDBLOCK EAGAIN
+#endif
+#else
 #ifndef EPERM
 #define EPERM 1
 #endif
@@ -12638,6 +13029,7 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
 #endif
 #ifndef EDEADLOCK
 #define EDEADLOCK EDEADLK
+#endif
 #endif
 
 /*
@@ -18650,6 +19042,36 @@ b32 system(string_address command)
         identical redefinition is legal but only if the spelling matches, and
         a guard is cheaper than requiring it to.
 */
+#if defined(MACOS)
+/*
+        Darwin's identifiers (time.h) are a different enumeration: its
+        CLOCK_MONOTONIC is 6, where 1 names nothing and clock_gettime answers
+        EINVAL; the process and thread clocks are 12 and 16. It has no boot
+        clock under that name. Its CLOCK_MONOTONIC, like Linux's
+        CLOCK_BOOTTIME, keeps counting while the machine sleeps, which is
+        what a timer written against the boot clock wants, so that is what
+        CLOCK_BOOTTIME means there.
+*/
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 6
+#endif
+
+#ifndef CLOCK_PROCESS_CPUTIME_ID
+#define CLOCK_PROCESS_CPUTIME_ID 12
+#endif
+
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME CLOCK_MONOTONIC
+#endif
+
+#ifndef CLOCK_THREAD_CPUTIME_ID
+#define CLOCK_THREAD_CPUTIME_ID 16
+#endif
+#else
 #ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME 0
 #endif
@@ -18668,6 +19090,7 @@ b32 system(string_address command)
 
 #ifndef CLOCK_THREAD_CPUTIME_ID
 #define CLOCK_THREAD_CPUTIME_ID 3
+#endif
 #endif
 
 /*
@@ -26975,6 +27398,110 @@ static decimal modf(decimal, decimal address_to)
         and SIGCHLD and cost nothing to carry; code being ported in uses them
         and a missing one is a compile error a long way from its cause.
 */
+#if defined(MACOS)
+/*      Darwin's signal numbers (sys/signal.h), which are not Linux's: SIGBUS
+        is 10 and not 7, SIGSYS 12 and not 31, SIGURG 16, SIGSTOP 17, SIGTSTP
+        18, SIGCONT 19, SIGCHLD 20, SIGIO 23, SIGUSR1 30 and SIGUSR2 31. A
+        kill with the Linux number would stop one process and call another a
+        user signal. Darwin has no SIGSTKFLT, SIGPWR, SIGCLD, SIGPOLL or
+        real-time range, and has SIGEMT and SIGINFO in their places. */
+#ifndef SIGHUP
+#define SIGHUP 1
+#endif
+#ifndef SIGINT
+#define SIGINT 2
+#endif
+#ifndef SIGQUIT
+#define SIGQUIT 3
+#endif
+#ifndef SIGILL
+#define SIGILL 4
+#endif
+#ifndef SIGTRAP
+#define SIGTRAP 5
+#endif
+#ifndef SIGABRT
+#define SIGABRT 6
+#endif
+#ifndef SIGIOT
+#define SIGIOT SIGABRT
+#endif
+#ifndef SIGEMT
+#define SIGEMT 7
+#endif
+#ifndef SIGFPE
+#define SIGFPE 8
+#endif
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#ifndef SIGBUS
+#define SIGBUS 10
+#endif
+#ifndef SIGSEGV
+#define SIGSEGV 11
+#endif
+#ifndef SIGSYS
+#define SIGSYS 12
+#endif
+#ifndef SIGPIPE
+#define SIGPIPE 13
+#endif
+#ifndef SIGALRM
+#define SIGALRM 14
+#endif
+#ifndef SIGTERM
+#define SIGTERM 15
+#endif
+#ifndef SIGURG
+#define SIGURG 16
+#endif
+#ifndef SIGSTOP
+#define SIGSTOP 17
+#endif
+#ifndef SIGTSTP
+#define SIGTSTP 18
+#endif
+#ifndef SIGCONT
+#define SIGCONT 19
+#endif
+#ifndef SIGCHLD
+#define SIGCHLD 20
+#endif
+#ifndef SIGTTIN
+#define SIGTTIN 21
+#endif
+#ifndef SIGTTOU
+#define SIGTTOU 22
+#endif
+#ifndef SIGIO
+#define SIGIO 23
+#endif
+#ifndef SIGXCPU
+#define SIGXCPU 24
+#endif
+#ifndef SIGXFSZ
+#define SIGXFSZ 25
+#endif
+#ifndef SIGVTALRM
+#define SIGVTALRM 26
+#endif
+#ifndef SIGPROF
+#define SIGPROF 27
+#endif
+#ifndef SIGWINCH
+#define SIGWINCH 28
+#endif
+#ifndef SIGINFO
+#define SIGINFO 29
+#endif
+#ifndef SIGUSR1
+#define SIGUSR1 30
+#endif
+#ifndef SIGUSR2
+#define SIGUSR2 31
+#endif
+#else
 #ifndef SIGHUP
 #define SIGHUP 1
 #endif
@@ -27080,6 +27607,7 @@ static decimal modf(decimal, decimal address_to)
 #ifndef SIGUNUSED
 #define SIGUNUSED 31
 #endif
+#endif
 
 /*
         The real-time range, which is a range and not a list.
@@ -27095,11 +27623,13 @@ static decimal modf(decimal, decimal address_to)
         cookie would otherwise find the two libraries disagreeing about which
         signal it meant.
 */
+#if !defined(MACOS)
 #ifndef SIGRTMIN
 #define SIGRTMIN 32
 #endif
 #ifndef SIGRTMAX
 #define SIGRTMAX 64
+#endif
 #endif
 
 //      Sixty four signals, numbered from one, so the highest is also the
@@ -27107,11 +27637,15 @@ static decimal modf(decimal, decimal address_to)
 //      for the bound of a loop over dispositions.
 #define SIGNAL_HIGHEST 64
 
+//      Darwin's <signal.h> gives NSIG as 32, which is its own count; it is
+//      left to that header there.
+#if !defined(MACOS)
 #ifndef NSIG
 #define NSIG 65
 #endif
 #ifndef _NSIG
 #define _NSIG 65
+#endif
 #endif
 
 /*
@@ -27127,6 +27661,38 @@ static decimal modf(decimal, decimal address_to)
         at all, which is why it is guarded and why nothing outside the one
         line that sets it may mention it.
 */
+#if defined(MACOS)
+//      Darwin's flag bits (sys/signal.h), spelled as that header spells them.
+//      They are not Linux's: SA_RESTART is 0x0002 and not 0x10000000, and
+//      SA_NOCLDSTOP 0x0008 and not 0x1.
+#ifndef SA_ONSTACK
+#define SA_ONSTACK 0x0001
+#endif
+#ifndef SA_RESTART
+#define SA_RESTART 0x0002
+#endif
+#ifndef SA_RESETHAND
+#define SA_RESETHAND 0x0004
+#endif
+#ifndef SA_NOCLDSTOP
+#define SA_NOCLDSTOP 0x0008
+#endif
+#ifndef SA_NODEFER
+#define SA_NODEFER 0x0010
+#endif
+#ifndef SA_NOCLDWAIT
+#define SA_NOCLDWAIT 0x0020
+#endif
+#ifndef SA_SIGINFO
+#define SA_SIGINFO 0x0040
+#endif
+#ifndef SA_NOMASK
+#define SA_NOMASK SA_NODEFER
+#endif
+#ifndef SA_ONESHOT
+#define SA_ONESHOT SA_RESETHAND
+#endif
+#else
 #ifndef SA_NOCLDSTOP
 #define SA_NOCLDSTOP 0x00000001
 #endif
@@ -27154,6 +27720,7 @@ static decimal modf(decimal, decimal address_to)
 #ifndef SA_ONESHOT
 #define SA_ONESHOT SA_RESETHAND
 #endif
+#endif
 
 //      Only x86_64 has the field this names. Spelled with the family key on
 //      the internal side so that nothing here depends on whether a sibling
@@ -27161,6 +27728,18 @@ static decimal modf(decimal, decimal address_to)
 #define SIGNAL_KERNEL_RESTORER 0x04000000
 
 //      What sigprocmask's first argument may be.
+#if defined(MACOS)
+//      Darwin counts from one: SIG_BLOCK is 1, SIG_UNBLOCK 2, SIG_SETMASK 3.
+#ifndef SIG_BLOCK
+#define SIG_BLOCK 1
+#endif
+#ifndef SIG_UNBLOCK
+#define SIG_UNBLOCK 2
+#endif
+#ifndef SIG_SETMASK
+#define SIG_SETMASK 3
+#endif
+#else
 #ifndef SIG_BLOCK
 #define SIG_BLOCK 0
 #endif
@@ -27169,6 +27748,7 @@ static decimal modf(decimal, decimal address_to)
 #endif
 #ifndef SIG_SETMASK
 #define SIG_SETMASK 2
+#endif
 #endif
 
 /*

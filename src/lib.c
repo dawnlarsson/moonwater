@@ -56232,6 +56232,82 @@ typedef b64 ptrdiff_t;
 #define standard_output_descriptor 1
 #define standard_error_descriptor 2
 
+#if defined(MACOS)
+/*
+        Darwin's numbers, spelled as sys/signal.h and sys/fcntl.h spell them,
+        so that a file which then includes those headers meets the same macro
+        again and not a different one. Linux's signal numbers are not
+        Darwin's (SIGSTOP is 17 there and 19 here, SIGCHLD 20 and 17), and
+        neither are its open flags: 04000 is O_NONBLOCK on Linux and 0x0800
+        on Darwin is O_EXCL. Darwin's AT_FDCWD is -2, not -100.
+*/
+#define SIGTRAP 5
+#define SIGKILL 9
+#define SIGSTOP 17
+#define SIGCHLD 20
+
+#define O_NOCTTY 0x00020000
+#define O_NONBLOCK 0x00000004
+#define O_DIRECTORY 0x00100000
+#define O_NOFOLLOW 0x00000100
+#define AT_FDCWD -2
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x0020
+#endif
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x0080
+#endif
+#ifndef AT_EACCESS
+#define AT_EACCESS 0x0010
+#endif
+#ifndef AT_SYMLINK_FOLLOW
+#define AT_SYMLINK_FOLLOW 0x0040
+#endif
+//      Linux-only flags with no Darwin meaning. Zero asks for nothing, so a
+//      call that ORs one in is not refused for a bit the kernel does not
+//      know; an empty path names nothing on Darwin (ENOENT), so a call that
+//      needs the descriptor itself is the caller's per-platform case.
+#ifndef AT_NO_AUTOMOUNT
+#define AT_NO_AUTOMOUNT 0
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0
+#endif
+#define O_TRUNC 0x00000400
+#define O_CLOEXEC 0x01000000
+//      O_PATH is Linux's (a descriptor that only names, needing no
+//      permission); Darwin has no such open, and a plain read-only open
+//      pins a directory there.
+#define O_PATH 0
+
+#define FILE_READ 00
+#define FILE_WRITE (O_WRONLY | O_CREAT | O_TRUNC)
+#define FILE_READ_WRITE 02
+#define FILE_EXECUTE 010
+#define FILE_APPEND (O_WRONLY | O_CREAT | O_APPEND)
+#define FILE_CREATE 0x00000200
+#define FILE_EXCLUSIVE 0x00000800
+#define FILE_TRUNCATE 0x00000400
+
+#ifndef O_RDONLY
+#define O_RDONLY 0x0000
+#endif
+#ifndef O_WRONLY
+#define O_WRONLY 0x0001
+#endif
+#ifndef O_RDWR
+#define O_RDWR 0x0002
+#endif
+#ifndef O_CREAT
+#define O_CREAT 0x00000200
+#endif
+#ifndef O_EXCL
+#define O_EXCL 0x00000800
+#endif
+#ifndef O_APPEND
+#define O_APPEND 0x00000008
+#endif
+#else
 #define SIGTRAP 5
 #define SIGKILL 9
 #define SIGSTOP 19
@@ -56309,6 +56385,7 @@ typedef b64 ptrdiff_t;
 #ifndef O_APPEND
 #define O_APPEND 02000
 #endif
+#endif
 
 /*
         mmap's own numbers, which these were not.
@@ -56330,7 +56407,13 @@ typedef b64 ptrdiff_t;
 
 #define FILE_MAP_SHARED 1
 #define FILE_MAP_PRIVATE 2
+#if defined(MACOS)
+//      MAP_ANON on Darwin; 0x20 there is MAP_RENAME, which asks for nothing
+//      anonymous, so an mmap of no file came back EBADF.
+#define FILE_MAP_ANONYMOUS 0x1000
+#else
 #define FILE_MAP_ANONYMOUS 0x20
+#endif
 
 #define FILE_SEEK_SET 0
 #define FILE_SEEK_CUR 1
@@ -60143,20 +60226,73 @@ __asm__(
 #endif
 
 /*
-        The sockets themselves are Linux only, deliberately.
+        The sockets: Linux's, and Darwin's on arm64.
 
-        The syscall table carries Darwin's socket numbers and they are correct, but a
-        sockaddr there is not the one below: Darwin spends the first byte on a
-        length and leaves the family in the second, where Linux gives the
-        family the full leading halfword. SOL_SOCKET and the option names
-        differ as well. None of that is hard, but writing it here without a
-        Darwin machine to run it on would be shipping a structure that is
-        quietly the wrong shape, so it waits for someone who can test it.
+        The two kernels spend the same system calls differently, and the
+        differences are in what is passed, not in the names:
+
+          a sockaddr on Darwin opens with a length byte and then the family
+          in one byte, where Linux gives the family the full leading
+          halfword. socket_address and its three-letter cousins below are
+          laid out that way there, with a length first, so a family stored in
+          the Linux place would be read as a length. Everything after the
+          family -- the port, the address, the flow and scope of IPv6 -- is
+          where it is on Linux, which is why the structures differ in their
+          first two bytes and nowhere else;
+          SOL_SOCKET is 0xffff there and not 1, and the option names are
+          different numbers (SO_REUSEADDR is 4, SO_RCVBUF 0x1002);
+          AF_INET6 is 30 and not 10, and MSG_DONTWAIT 0x80 and not 0x40;
+          there is no SOCK_NONBLOCK or SOCK_CLOEXEC, no accept4, no netlink
+          and no packet socket, so a caller sets close-on-exec and
+          nonblocking with fcntl after socket() and accept(), and the names
+          are not defined there so that a caller which forgets is told at
+          compile time and not by a socket that blocks;
+          a failed trap answers a positive errno with the carry flag set,
+          which the routines below turn into the negative errno the Linux
+          ones return, so that a caller reads both alike. The errno is
+          Darwin's own (EAGAIN is 35).
+
+        The numbers are written as sys/socket.h and netinet/in.h write them,
+        spelling and all, so a file that includes those headers after this
+        one meets the same macros and not different ones.
+
+        Darwin's routines are arm64 only: the table carries no x86_64 numbers
+        for Darwin, so there is nothing to trap with there.
 
         The byte order above is arithmetic and builds everywhere.
 */
-#if defined(LINUX) && !defined(KERNEL_MODE)
+#if (defined(LINUX) || defined(MACOS)) && !defined(KERNEL_MODE)
 
+#if defined(MACOS)
+#define AF_UNSPEC       0
+#define AF_UNIX         1
+#define AF_INET         2
+#define AF_INET6        30
+
+#define SOCK_STREAM     1
+#define SOCK_DGRAM      2
+#define SOCK_RAW        3
+
+#define IPPROTO_IP              0
+#define IPPROTO_ICMP            1
+#define IPPROTO_TCP             6
+#define IPPROTO_UDP             17
+#define TCP_NODELAY             0x01
+
+#define SOL_SOCKET      0xffff
+#define SO_REUSEADDR    0x0004
+#define SO_ERROR        0x1007
+#define SO_BROADCAST    0x0020
+#define SO_SNDBUF       0x1001
+#define SO_RCVBUF       0x1002
+#define SO_RCVTIMEO     0x1006
+#define SO_SNDTIMEO     0x1005
+
+#define MSG_PEEK        0x2
+#define MSG_TRUNC       0x10
+#define MSG_DONTWAIT    0x80
+#define MSG_NOSIGNAL    0x80000
+#else
 #define AF_UNSPEC 0
 #define AF_UNIX 1
 #define AF_INET 2
@@ -60190,11 +60326,13 @@ __asm__(
 #define MSG_TRUNC 0x20
 #define MSG_DONTWAIT 0x40
 #define MSG_NOSIGNAL 0x4000
+#endif
 
 #define SHUT_READ 0
 #define SHUT_WRITE 1
 #define SHUT_BOTH 2
 
+#if !defined(MACOS)
 #define NETLINK_ROUTE 0
 #define NETLINK_GENERIC 16
 #define SOL_NETLINK 270
@@ -60203,6 +60341,7 @@ __asm__(
 #define ETH_P_IP 0x0800
 #define ETH_P_ARP 0x0806
 #define ETH_P_PAE 0x888e
+#endif
 
 #define HOST_ANY 0x00000000u
 #define HOST_LOOPBACK 0x7f000001u
@@ -60217,7 +60356,47 @@ __asm__(
         expects to be told, not because anything reads the padding. The port
         and the host are held in wire order, which is why they are written
         through network_order rather than assigned.
+
+        On Darwin each opens with sa_len and then a one-byte sa_family (the
+        BSD sockaddr), and is otherwise the same bytes: sockaddr_in is 16,
+        sockaddr_in6 28 with the port, flow, address and scope where they are
+        here. A kernel that is handed one takes the length from the call's
+        own length argument and ignores the byte, and fills it when it
+        answers; a caller that builds one sets length all the same, so that a
+        structure that is kept or passed on is whole. Linux's structures have
+        no such byte.
 */
+#if defined(MACOS)
+typedef struct
+{
+        p8 length;
+        p8 family;
+        p8 data[14];
+} socket_address;
+
+typedef struct
+{
+        p8 length;
+        p8 family;
+        p16 port;
+        p32 host;
+        p8 padding[8];
+} socket_address_internet;
+
+typedef struct
+{
+        p8 length;
+        p8 family;
+        p16 port;
+        p32 flow;
+        p8 host[16];
+        p32 scope;
+} socket_address_internet6;
+
+_Static_assert(sizeof(socket_address) == 16, "a BSD sockaddr is sixteen bytes");
+_Static_assert(sizeof(socket_address_internet) == 16, "a BSD sockaddr_in is sixteen bytes");
+_Static_assert(sizeof(socket_address_internet6) == 28, "a BSD sockaddr_in6 is 28 bytes");
+#else
 typedef struct
 {
         p16 family;
@@ -60260,6 +60439,8 @@ typedef struct
         p8 addr[8];
 } socket_address_packet;
 
+#endif
+
 bipolar socket_new(b32 family, b32 kind, b32 protocol);
 bipolar socket_bind(b32 handle, address_any address, positive size);
 bipolar socket_connect(b32 handle, address_any address, positive size);
@@ -60294,11 +60475,19 @@ bipolar socket_close(b32 handle);
 
         Nothing checks the result. Every one of these returns exactly what the
         kernel returned, negative errno and all, which is the convention the
-        file routines already keep.
+        file routines already keep. On Darwin the kernel's answer is a
+        positive errno with the carry flag set, and the trap there is
+        followed by the one instruction that makes it the same shape: carry
+        set, negate. A success is untouched.
 */
 #define SOCKET_RUNTIME_TEXT_INNER(value) #value
 #define SOCKET_RUNTIME_TEXT(value) SOCKET_RUNTIME_TEXT_INNER(value)
 
+/*
+        Darwin x86_64 has no system call table here (syscall(name) names
+        nothing for it), so there is nothing to trap with and no routines.
+*/
+#if !defined(MACOS) || ARM64
 #if X64
 __asm__(
     ASM_SECTION
@@ -60370,70 +60559,83 @@ __asm__(
 
 );
 #elif ARM64
+/*
+        One body for both kernels that have arm64: the number and the trap
+        are what differ. Linux loads it with mov into x8 and traps with svc #0.
+        Darwin loads it with movz and movk into x16, since its class bit
+        (0x2000000) is not an immediate one mov can carry, traps with svc
+        #0x80, and answers a failure as a positive errno with the carry flag
+        set, which b.lo steps over on a success and neg makes the negative
+        errno of the Linux routines on a failure. The arguments are already in
+        x0 to x5 on Darwin as they are on Linux. accept is accept4 on Linux and
+        takes no flags argument on Darwin, whose accept ignores the fourth.
+*/
+#if defined(MACOS)
+#define SOCKET_ARM64_TRAP(number, text)                                       \
+    ASM_SYSCALL_NUMBER(number)                                                 \
+    "svc #0x80\n   b.lo 1f\n   neg x0, x0\n1:\n"
+#else
+#define SOCKET_ARM64_TRAP(number, text)                                       \
+    "mov x8, #" SOCKET_RUNTIME_TEXT(number) "  // " text "\n"                  \
+    "svc #0\n"
+#endif
 __asm__(
     ASM_SECTION
 
     ASM_FUNC(socket_new)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(socket)) "  // socket\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(socket), "socket") ASM_RET
     ASM_END(socket_new)
 
     ASM_FUNC(socket_bind)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(bind)) "  // bind\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(bind), "bind") ASM_RET
     ASM_END(socket_bind)
 
     ASM_FUNC(socket_connect)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(connect)) "  // connect\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(connect), "connect") ASM_RET
     ASM_END(socket_connect)
 
     ASM_FUNC(socket_listen)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(listen)) "  // listen\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(listen), "listen") ASM_RET
     ASM_END(socket_listen)
 
     ASM_FUNC(socket_accept)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(accept4)) "  // accept4\n"
-    "svc #0\n" ASM_RET
+#if defined(MACOS)
+    SOCKET_ARM64_TRAP(syscall(accept), "accept") ASM_RET
+#else
+    SOCKET_ARM64_TRAP(syscall(accept4), "accept4") ASM_RET
+#endif
     ASM_END(socket_accept)
 
     ASM_FUNC(socket_send)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(sendto)) "  // sendto\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(sendto), "sendto") ASM_RET
     ASM_END(socket_send)
 
     ASM_FUNC(socket_receive)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(recvfrom)) "  // recvfrom\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(recvfrom), "recvfrom") ASM_RET
     ASM_END(socket_receive)
 
     ASM_FUNC(socket_option_set)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(setsockopt)) "  // setsockopt\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(setsockopt), "setsockopt") ASM_RET
     ASM_END(socket_option_set)
 
     ASM_FUNC(socket_option_get)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(getsockopt)) "  // getsockopt\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(getsockopt), "getsockopt") ASM_RET
     ASM_END(socket_option_get)
 
     ASM_FUNC(socket_name)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(getsockname)) "  // getsockname\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(getsockname), "getsockname") ASM_RET
     ASM_END(socket_name)
 
     ASM_FUNC(socket_shutdown)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(shutdown)) "  // shutdown\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(shutdown), "shutdown") ASM_RET
     ASM_END(socket_shutdown)
 
     ASM_FUNC(socket_close)
-    "mov x8, #" SOCKET_RUNTIME_TEXT(syscall(close)) "  // close\n"
-    "svc #0\n" ASM_RET
+    SOCKET_ARM64_TRAP(syscall(close), "close") ASM_RET
     ASM_END(socket_close)
 
 );
+#undef SOCKET_ARM64_TRAP
 #elif RISCV64
 __asm__(
     ASM_SECTION
@@ -60500,11 +60702,12 @@ __asm__(
 
 );
 #endif
+#endif
 
 #undef SOCKET_RUNTIME_TEXT
 #undef SOCKET_RUNTIME_TEXT_INNER
 
-#endif // LINUX userspace
+#endif // LINUX and MACOS userspace
 
 //      The small routines a C program expects, and the names it knows
 //      them by. Arithmetic and one instruction, never a table.
