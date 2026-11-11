@@ -58,6 +58,7 @@
 
 #include "../moonwater/moonwater.c"
 #include "../audio/state.c" // the sound server's page, which bare `moonwater audio` reads
+#include "../canvas/splash.c" // the picture Canvas shows while the desktop loads: its parser, which moonwater splash checks a copy with
 
 //      What this file says as log and log_error is said through plain_out and
 //      plain_err (file.c): colour only to a terminal, names shown and not obeyed.
@@ -21392,6 +21393,139 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
 }
 
 /*
+        moonwater splash [FILE|default|off]: the picture Canvas shows on the desktop's background while the desktop loads
+        (compositor.c draws it). FILE is a binary PPM (P6) of at most SPLASH_FILE_MOST bytes and SPLASH_SIDE_MOST pixels a side,
+        and the copy kept is SPLASH_PATH_IMAGE; default takes that copy away, so the built-in picture is shown; off keeps the
+        word off in SPLASH_PATH_STATE. Canvas reads what is kept when it starts, so a change shows the next time it does.
+        Bare, the verb says what is kept, and a copy that does not parse is said so.
+*/
+static p8 host_splash_bytes[SPLASH_FILE_MOST + 1];
+
+// Whether SPLASH_PATH_STATE keeps off, its word cut at a space or line end as Canvas cuts it.
+static int host_splash_off(void)
+{
+        char word[16] = {0};
+        bipolar handle = system_open_at(AT_FDCWD, SPLASH_PATH_STATE, FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+        bipolar got = 0;
+        positive at = 0;
+
+        if (handle < 0)
+                return 0;
+        got = system_read_once(handle, word, sizeof(word) - 1);
+        system_close(handle);
+        while (at < (positive)(got > 0 ? got : 0) && word[at] != '\n' && word[at] != ' ' && word[at] != '\r')
+                at++;
+        word[at] = 0;
+        return string_equals(word, "off");
+}
+
+// The file at path read whole into host_splash_bytes: its count, or the negative reason, -2 when it is larger than the most.
+static bipolar host_splash_read(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        positive length = 0;
+
+        if (handle < 0)
+                return handle;
+        while (length <= SPLASH_FILE_MOST)
+        {
+                bipolar got = system_read_once(handle, host_splash_bytes + length, SPLASH_FILE_MOST + 1 - length);
+
+                if (got < 0)
+                {
+                        system_close(handle);
+                        return got;
+                }
+                if (!got)
+                        break;
+                length += (positive)got;
+        }
+        system_close(handle);
+        return length > SPLASH_FILE_MOST ? -2 : (bipolar)length;
+}
+
+// What is kept, said in a line: off, the built-in picture, or the copy's size. A copy that does not parse is said so, and is 1.
+static b32 host_splash_status(void)
+{
+        struct splash_image image;
+        bipolar length;
+        const char *reason = 0;
+
+        if (host_splash_off())
+        {
+                host_say(log, host_label "splash: off, Canvas shows no picture while the desktop loads\n");
+                return 0;
+        }
+        length = host_splash_read(SPLASH_PATH_IMAGE);
+        if (length == -ENOENT)
+        {
+                host_say(log, host_label "splash: built-in picture, Canvas shows it while the desktop loads\n");
+                return 0;
+        }
+        if (length == -2)
+                reason = "it is larger than 1 MiB";
+        else if (length < 0)
+                reason = file_reason(length);
+        else
+                reason = splash_parse(host_splash_bytes, (unsigned long)length, &image);
+        if (reason)
+        {
+                host_say(log_error, host_label "splash: %s does not parse (%s), so Canvas shows the built-in picture\n",
+                         SPLASH_PATH_IMAGE, reason);
+                return 1;
+        }
+        host_say(log, host_label "splash: %p x %p picture from %s, Canvas shows it while the desktop loads\n",
+                 (positive)image.width, (positive)image.height, SPLASH_PATH_IMAGE);
+        return 0;
+}
+
+//      moonwater splash [FILE|default|off]
+static b32 host_splash(string_address address_to arguments, positive count)
+{
+        string_address word = count > 2 ? arguments[2] : null;
+        bipolar length;
+        struct splash_image image;
+        const char *reason;
+
+        return_if(count > 3, host_usage());
+        if (!word)
+                return host_splash_status();
+        //      Root is asked before anything is kept, as moonwater canvas modes asks it.
+        if (!bowl_is_root())
+                return host_refuse("setting the splash needs root (CAP_SYS_ADMIN)\n");
+        if (string_equals(word, "default"))
+        {
+                (void)system_remove_at(AT_FDCWD, SPLASH_PATH_IMAGE, 0);
+                (void)system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+                host_say(log, host_label "splash: built-in picture kept; Canvas shows it the next time it starts\n");
+                return 0;
+        }
+        if (string_equals(word, "off"))
+        {
+                if (host_save("splash", SPLASH_PATH_STATE, "off"))
+                        return 1;
+                host_say(log, host_label "splash: off kept; Canvas shows no picture the next time it starts\n");
+                return 0;
+        }
+        length = host_splash_read(word);
+        if (length == -2)
+                return host_refuse("splash: %s is larger than 1 MiB\n", word);
+        if (length < 0)
+                return host_refuse("splash: %s cannot be read: %s\n", word, file_reason(length));
+        reason = splash_parse(host_splash_bytes, (unsigned long)length, &image);
+        if (reason)
+                return host_refuse("splash: %s is not a usable picture: %s\n", word, reason);
+        //      The copy is published whole, as the settings are, and the word that said off is taken away so it is shown.
+        length = host_write_file(SPLASH_PATH_IMAGE, host_splash_bytes, (positive)length, 0644, true);
+        if (length < 0)
+                return host_fail("splash", length);
+        (void)system_remove_at(AT_FDCWD, SPLASH_PATH_STATE, 0);
+        host_say(log, host_label "splash: %p x %p picture kept from %s; Canvas shows it the next time it starts\n",
+                 (positive)image.width, (positive)image.height, word);
+        return 0;
+}
+
+/*
         The desktop's ink and the pointer's look and size are rows of the settings table, kept in /root as the
         scale is and taken by the compositor as soon as a file is written (it watches /root, as it does for the
         keyboard layout) and again whenever it starts. Nothing is asked of Canvas, so what is said is what is
@@ -26925,6 +27059,7 @@ static b32 host_main()
             // event. init and exit still need root.
             {"bind", host_bind, false, true},
             {"canvas", host_canvas, false},
+            {"splash", host_splash, false, true},
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
             {"window", host_window, false},
