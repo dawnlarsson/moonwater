@@ -144,8 +144,6 @@ M = [
     (X, "a page asked is the other page", "                mixer_page(page == 1);", "                mixer_page(page == 0);"),
     (X, "an output with nothing plugged in is not dim", "ui_strips_dim(strips, unplugged);", "ui_strips_dim(strips, 0);"),
     (X, "the unplugged note missing", "ui_strips_note(strips, 0, unplugged ? WORDS(mixer_unplugged) : \"\");", "ui_strips_note(strips, 0, \"\");"),
-    (X, "a server playing to a clock says why", "(page->output_state & AUDIO_STATE_OUT_CLOCK) ? \"\"", "0 ? \"\""),
-    (X, "the reason a display is plugged in said as another", "why == AUDIO_STATE_WHY_DISPLAY ? WORDS(mixer_why_display)", "why == AUDIO_STATE_WHY_DISPLAY ? WORDS(mixer_why_chosen)"),
     (U, "the sliders do not start lower for the notes", "(s->noted ? UI_STRIP_NOTE_ROWS * 16 : 0)", "0"),
     (U, "a dim strip drawn in the ink", "strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE", "strip->muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE"),
     (U, "a text block that never breaks", "if (taken > at && ui_kit_measure(ui, line, type) > width)", "if (0)"),

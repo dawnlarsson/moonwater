@@ -72,6 +72,7 @@ struct mixer_big
         unsigned char send[UI_STRIPS_MOST]; // what is to be sent for a strip: 1 its volume, 2 its mute
         char sink[64];                      // the output device as programs name it, for its volume
         char source[64];                    // and the microphone
+        char device_name[96];               // the output's name, drawn beside its slider (mixer_device_name): its strip is listed with none
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
         struct ui_view view;                // the window as a tree: Allow, on the Recording page with recording turned off, and the popup's Mixer row
 };
@@ -148,28 +149,19 @@ static int mixer_percent(unsigned int volume)
 }
 
 /*
-        What the page says of the output that plays, under its strip: nothing is plugged into it (and then the strip is dim), and why it is
-        the one that plays (not said when the server plays to a clock, which is no output to be picked).
+        What the page says of the output that plays, under its strip: nothing is plugged into it (and then the strip is dim). Why it is
+        the one that plays is not said here: a note under the volume takes four rows from every slider, and at the default size a
+        plugged output always has a reason, so the sliders would be shorter all the time for a line that is rarely needed.
 */
 static fn mixer_device_notes(const struct audio_state address_to page)
 {
         struct ui_strips address_to strips = &mixer.big->strips;
-        unsigned int why = page->output_why;
         b32 unplugged = false;
 
         for (unsigned int k = 0; k < page->devices && k < AUDIO_STATE_DEVICES; k++)
                 unplugged |= (page->device_list[k].flags & AUDIO_STATE_DEVICE_ACTIVE) && (page->device_list[k].flags & AUDIO_STATE_DEVICE_UNPLUGGED);
         ui_strips_dim(strips, unplugged);
         ui_strips_note(strips, 0, unplugged ? WORDS(mixer_unplugged) : "");
-        ui_strips_note(strips, 1,
-                       (page->output_state & AUDIO_STATE_OUT_CLOCK) ? ""
-                       : why == AUDIO_STATE_WHY_CHOSEN  ? WORDS(mixer_why_chosen)
-                       : why == AUDIO_STATE_WHY_NAMED   ? WORDS(mixer_why_named)
-                       : why == AUDIO_STATE_WHY_ANALOG  ? WORDS(mixer_why_analog)
-                       : why == AUDIO_STATE_WHY_DISPLAY ? WORDS(mixer_why_display)
-                       : why == AUDIO_STATE_WHY_HDMI    ? WORDS(mixer_why_hdmi)
-                       : why == AUDIO_STATE_WHY_NOTHING ? WORDS(mixer_why_nothing)
-                                                        : "");
 }
 
 /*
@@ -202,8 +194,10 @@ static fn mixer_list(b64 now)
         mixer.capture_off = off;
         if (mixer.have && !mixer.recording)
         {
-                ui_strips_add(&big->strips, 0xfffffffffffffffeul, page->device[0] ? page->device : page->name[0] ? page->name : "?", mixer_percent(page->volume),
-                              page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
+                // The output's name is not the strip's: mixer_device_name draws it beside the slider, so the strip's own line is left empty.
+                ui_strips_add(&big->strips, 0xfffffffffffffffeul, "", mixer_percent(page->volume), page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
+                string_copy_bounded((string_address)big->device_name, (string_address)(page->device[0] ? page->device : page->name[0] ? page->name : "?"),
+                                    sizeof(big->device_name));
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
                 mixer_device_notes(page);
         }
@@ -418,6 +412,60 @@ static fn mixer_dirty(void)
         mixer.dirty = true;
 }
 
+// The unit of text at at: one character, or a whole UTF-8 sequence, and the byte after it.
+static int mixer_unit_next(const char address_to text, int at)
+{
+        int next = at + 1;
+
+        if ((p8)text[at] >= 0xc0)
+                for (; next < at + 4 && ((p8)text[next] & 0xc0) == 0x80; next++)
+                        ;
+        return next;
+}
+
+/*
+        The playback output's name, beside its slider rather than in the strip's header: the kit sets text in rows that run across,
+        and a name laid across takes the strip's width, so it is set down the strip's margin to the slider's side (the side the
+        meter is not on), a letter a line, from the slider's foot upward. The kit has no turned text, so the letters are upright.
+        What does not fit the slider's height is cut, with three dots after the last letter that does.
+*/
+static fn mixer_device_name(struct ui address_to ui, struct ui_strips address_to s)
+{
+        struct ui_control address_to slider = &s->control[0];
+        struct ui_strip address_to strip = &s->item[0];
+        const char address_to name = mixer.big->device_name;
+        int left = ui_strip_at(ui, s, 0, ui_strips_shift(ui, s));
+        int line = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line), bottom = ui_dev(ui, slider->y + slider->h);
+        int fits = line > 0 ? ui_dev(ui, slider->h) / line : 0, units = 0, shown = 0, at = 0, centre;
+        unsigned int ink = ui_text_colour(ui, strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
+        b32 dots;
+
+        if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
+                return;
+        centre = ui_strip_part(ui, left, ui_dev(ui, 68), ui_dev(ui, 24)) + ui_dev(ui, 12);
+        for (int next = 0; name[next]; next = mixer_unit_next(name, next))
+                units++;
+        if (units == 0 || fits <= 0)
+                return;
+        dots = units > fits;
+        shown = dots ? fits - 1 : units;
+        for (int k = 0; k <= shown && (k < shown || dots); k++)
+        {
+                char glyph[8] = "...";
+                int end = at, width;
+
+                if (k < shown)
+                {
+                        end = mixer_unit_next(name, at);
+                        memory_copy(glyph, name + at, (positive)(end - at));
+                        glyph[end - at] = 0;
+                }
+                width = ui_kit_measure(ui, (string_address)glyph, UI_LABEL_MEDIUM);
+                ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, bottom - (k + 1) * line, UI_LABEL_MEDIUM), (string_address)glyph, UI_LABEL_MEDIUM, ink, 0);
+                at = end;
+        }
+}
+
 static fn mixer_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &mixer.ui;
@@ -434,6 +482,8 @@ static fn mixer_draw(unsigned int address_to pixels)
         if (!mixer.quick)
                 ui_control_draw(ui, &mixer.tabs);
         ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys);
+        if (!mixer.recording && strips->count && strips->item[0].master == 1)
+                mixer_device_name(ui, strips);
         ui_view_draw(ui, &mixer.big->view, mixer.focused);
         // What there is to say instead of strips or beside them.
         if (mixer.capture_off)

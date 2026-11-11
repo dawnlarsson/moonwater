@@ -65,12 +65,6 @@ mixer_recording	f20c	Enregistrement
 mixer_recording_off	9c09	L'enregistrement est désactivé
 mixer_unmute	72bb	Rétablir le son
 mixer_unplugged	3ed9	Rien de branché
-mixer_why_analog	b797	Choisi : haut-parleur ou analogique
-mixer_why_chosen	5e67	Choisi : vous l'avez choisi
-mixer_why_display	fd9f	Choisi : un écran y est branché
-mixer_why_hdmi	f5eb	Choisi : HDMI, écran inconnu
-mixer_why_named	0295	Choisi : lancé avec
-mixer_why_nothing	ff66	Choisi : le premier qui existe
 notices_dismiss	9a10	Tout ignorer
 notices_item	56a6	%1$s : %2$s
 notices_item_times	36d7	%1$s : %2$s (%3$d fois, il y a %4$d min)

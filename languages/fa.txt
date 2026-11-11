@@ -66,12 +66,6 @@ mixer_recording	f20c	ضبط
 mixer_recording_off	9c09	ضبط خاموش است
 mixer_unmute	72bb	برداشتن بی‌صدایی
 mixer_unplugged	3ed9	چیزی وصل نیست
-mixer_why_analog	b797	انتخاب: بلندگو یا آنالوگ
-mixer_why_chosen	5e67	انتخاب: انتخاب شما
-mixer_why_display	fd9f	انتخاب: نمایشگر وصل است
-mixer_why_hdmi	f5eb	انتخاب: HDMI، نمایشگر نامعلوم
-mixer_why_named	0295	انتخاب: با آن شروع شد
-mixer_why_nothing	ff66	انتخاب: اولین موجود
 notices_dismiss	9a10	رد کردن همه
 notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d دقیقه پیش)

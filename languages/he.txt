@@ -66,12 +66,6 @@ mixer_recording	f20c	הקלטה
 mixer_recording_off	9c09	ההקלטה כבויה
 mixer_unmute	72bb	ביטול השתקה
 mixer_unplugged	3ed9	שום דבר לא מחובר
-mixer_why_analog	b797	נבחר: רמקול או אנלוגי
-mixer_why_chosen	5e67	נבחר: בחירתך
-mixer_why_display	fd9f	נבחר: מחובר מסך
-mixer_why_hdmi	f5eb	נבחר: HDMI, מסך לא ידוע
-mixer_why_named	0295	נבחר: הופעל איתו
-mixer_why_nothing	ff66	נבחר: הראשון שקיים
 notices_dismiss	9a10	דחה הכול
 notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דקות)

@@ -65,12 +65,6 @@ mixer_recording	f20c	Inspelning
 mixer_recording_off	9c09	Inspelning är av
 mixer_unmute	72bb	Ljud på
 mixer_unplugged	3ed9	Inget anslutet
-mixer_why_analog	b797	Vald: högtalare eller analog
-mixer_why_chosen	5e67	Vald: ditt val
-mixer_why_display	fd9f	Vald: en skärm är ansluten
-mixer_why_hdmi	f5eb	Vald: HDMI, skärm okänd
-mixer_why_named	0295	Vald: startad med den
-mixer_why_nothing	ff66	Vald: den första som finns
 notices_dismiss	9a10	Avfärda alla
 notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d gånger, för %4$d min sedan)

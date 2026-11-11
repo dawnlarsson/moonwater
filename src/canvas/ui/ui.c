@@ -7479,12 +7479,6 @@ LANGUAGE_ID(mixer_recording, "Recording") \
 LANGUAGE_ID(mixer_recording_off, "Recording is off") \
 LANGUAGE_ID(mixer_unmute, "Unmute") \
 LANGUAGE_ID(mixer_unplugged, "Nothing plugged in") \
-LANGUAGE_ID(mixer_why_analog, "Picked: speaker or analog") \
-LANGUAGE_ID(mixer_why_chosen, "Picked: you chose it") \
-LANGUAGE_ID(mixer_why_display, "Picked: a display is plugged in") \
-LANGUAGE_ID(mixer_why_hdmi, "Picked: HDMI, display unknown") \
-LANGUAGE_ID(mixer_why_named, "Picked: started with it") \
-LANGUAGE_ID(mixer_why_nothing, "Picked: the first one there is") \
 LANGUAGE_ID(notices_dismiss, "Dismiss all") \
 LANGUAGE_ID(notices_item, "%1$s: %2$s") \
 LANGUAGE_ID(notices_item_times, "%1$s: %2$s (%3$d times, %4$d min ago)") \

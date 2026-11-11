@@ -154108,6 +154108,7 @@ static fn mixer_fixture_streams(void)
         memory_zero(page, sizeof(*page));
         page->magic = AUDIO_STATE_MAGIC, page->version = AUDIO_STATE_VERSION, page->bytes = sizeof(*page), page->seq = 2;
         page->volume = 52429, page->peak_left = 16384, page->peak_right = 8192;
+        page->output_why = AUDIO_STATE_WHY_ANALOG; // the usual reason a plugged output plays: it must not take rows from the sliders
         string_copy_bounded((string_address)page->device, (string_address) "Speakers (Realtek)", sizeof(page->device));
         string_copy_bounded((string_address)page->name, (string_address) "alsa_output.pci.analog", sizeof(page->name));
         for (int k = 0; k < AUDIO_STATE_STREAMS; k++)
@@ -154169,7 +154170,8 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         check("mixer: a page that is the server's is read whole", check_mixer_poll_at(mixer_t0) && mixer.have);
         check("mixer: the device, then Firefox (two streams), mpv and the program that gave no name: four strips", s->count == 4);
         check("mixer: the device is a strip of its own, named as the person is shown it, at 80 percent",
-              s->item[0].master && string_equals((string_address)s->item[0].name, (string_address) "Speakers (Realtek)") && s->item[0].percent == 80 && !s->item[0].muted);
+              s->item[0].master && string_equals((string_address)mixer.big->device_name, (string_address) "Speakers (Realtek)") && !s->item[0].name[0] &&
+                  s->item[0].percent == 80 && !s->item[0].muted);
         check("mixer: a program's streams are one strip at the loudest of their volumes, playing, with the greater peaks",
               string_equals((string_address)s->item[1].name, (string_address) "Firefox") && s->item[1].percent == 100 && s->item[1].playing && !s->item[1].master &&
                   mixer.big->group[0].count == 2 && mixer.big->group[0].member[0] == 7 && mixer.big->group[0].member[1] == 9);
@@ -154370,6 +154372,30 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer: a stood slider focused by a mouse press draws no ring round its thumb", pressed == 0);
                 check("mixer: a key on the focused strip draws its ring round the thumb", keyed > 0);
         }
+        // The playback device at the default size, with a long name and the reason it plays in the page: no note takes rows from the sliders, so the slider
+        // keeps its width and its full height, and the name is drawn beside it (on the side the meter is not), in both ways the window reads.
+        for (int rtl = 0; rtl < 2; rtl++)
+        {
+                struct ui_control address_to slider = &s->control[0];
+                int beside = 0, full;
+
+                ui_kit.rtl = rtl;
+                mixer_fixture_streams();
+                mixer_fixture_page.seq += 2;
+                check_mixer_poll_at(mixer_t0 + 720000000ll + (b64)rtl * 10000000ll);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_kit.now = mixer_t0 + 720000000ll + (b64)rtl * 10000000ll;
+                mixer_draw(pixels);
+                full = s->h * 100 / mixer.ui.scale - 16 - UI_STRIP_MUTE_H - 12 - (16 + UI_STRIP_FACE + 8 + 16 + 24);
+                for (int y = ui_dev(&mixer.ui, slider->y); y < ui_dev(&mixer.ui, slider->y + slider->h); y++)
+                        for (int x = ui_dev(&mixer.ui, rtl ? slider->x - 20 : slider->x + slider->w + 4); x < ui_dev(&mixer.ui, rtl ? slider->x - 4 : slider->x + slider->w + 20); x++)
+                                beside += (pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                check(rtl ? "mixer: right to left, the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it"
+                          : "mixer: the playback slider keeps its width and its full height with a long name and a reason in the page, and the name is beside it",
+                      slider->w == UI_STRIP_SLIDER_W && slider->h == full && full >= UI_STRIP_LEAST && !s->noted && beside > 0);
+        }
+        ui_kit.rtl = 0;
         // The popup (-q): the device's strip alone, the Mixer row under it, the keys and the pointer, the mixer started by the row, the place
         // beside the cell, and the keys going elsewhere.
         {
@@ -154718,9 +154744,11 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.width = 640, mixer.height = 400;
         }
 
-        // The output that plays, as the page says it: with nothing plugged into it the strip is dim and says so, under its volume, and the reason it plays is
-        // there too (not for a server that plays to a clock); a plugged output says only why; the programs' strips say nothing.
+        // The output that plays, as the page says it: with nothing plugged into it the strip is dim and says so, under its volume; a plugged output says
+        // nothing, whatever the reason it plays (a note takes rows from every slider); the programs' strips say nothing.
         {
+                b32 quiet = true;
+
                 mixer.recording = false;
                 mixer_fixture_streams();
                 mixer_fixture_page.devices = 2;
@@ -154731,31 +154759,24 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
                 check_mixer_poll_at(mixer_t0 + 1400000000ll);
-                check("mixer: an output with nothing plugged into it is a dim strip that says so, with the reason it plays; the programs say nothing",
-                      s->item[0].dim && string_equals((string_address)s->item[0].note[0], (string_address)WORDS(mixer_unplugged)) &&
-                          string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_nothing)) && !s->item[1].dim && !s->item[1].note[0][0] && s->noted);
+                check("mixer: an output with nothing plugged into it is a dim strip that says so under its volume; the programs say nothing",
+                      s->item[0].dim && string_equals((string_address)s->item[0].note[0], (string_address)WORDS(mixer_unplugged)) && !s->item[0].note[1][0] &&
+                          !s->item[1].dim && !s->item[1].note[0][0] && s->noted);
                 mixer_fixture_page.device_list[0].flags = AUDIO_STATE_DEVICE_ACTIVE;
-                mixer_fixture_page.output_why = AUDIO_STATE_WHY_DISPLAY;
-                mixer_fixture_page.seq += 2;
-                check_mixer_poll_at(mixer_t0 + 1500000000ll);
-                check("mixer: one that is plugged in is not dim and says only why it plays", !s->item[0].dim && !s->item[0].note[0][0] &&
-                                                                                                  string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_display)));
-                mixer_fixture_page.output_state = AUDIO_STATE_OUT_CLOCK;
-                mixer_fixture_page.seq += 2;
-                check_mixer_poll_at(mixer_t0 + 1600000000ll);
-                check("mixer: a server that plays to a clock has picked nothing, and says nothing of it", !s->item[0].note[1][0] && !s->noted);
-                mixer_fixture_page.output_state = 0;
-                for (unsigned int why = 1; why <= 6; why++)
+                for (unsigned int why = 0; why <= 6; why++)
                 {
                         mixer_fixture_page.output_why = why;
                         mixer_fixture_page.seq += 2;
-                        check_mixer_poll_at(mixer_t0 + 1700000000ll + (b64)why * 1000000ll);
-                        check("mixer: each reason it plays is a line of its own", s->item[0].note[1][0] != 0 && (why == 1 || !string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_chosen))));
+                        check_mixer_poll_at(mixer_t0 + 1500000000ll + (b64)why * 1000000ll);
+                        quiet &= !s->item[0].dim && !s->item[0].note[0][0] && !s->item[0].note[1][0] && !s->noted;
                 }
-                mixer_fixture_page.output_why = 0;
+                check("mixer: one that is plugged in is not dim and says nothing, whatever the reason it plays, so no slider gives rows to a note", quiet);
+                mixer_fixture_page.output_state = AUDIO_STATE_OUT_CLOCK;
+                mixer_fixture_page.output_why = AUDIO_STATE_WHY_DISPLAY;
                 mixer_fixture_page.seq += 2;
-                check_mixer_poll_at(mixer_t0 + 1800000000ll);
-                check("mixer: and none known is none said", !s->item[0].note[1][0]);
+                check_mixer_poll_at(mixer_t0 + 1600000000ll);
+                check("mixer: a server that plays to a clock says nothing of it", !s->item[0].note[0][0] && !s->item[0].note[1][0] && !s->noted);
+                mixer_fixture_page.output_state = 0;
         }
 
         // A second start of the mixer with -i asks the first for its Recording page, as a window is lifted (ui_lift_page): the app is told once, by the kit's

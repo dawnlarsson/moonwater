@@ -65,12 +65,6 @@ mixer_recording	f20c	Grabación
 mixer_recording_off	9c09	La grabación está desactivada
 mixer_unmute	72bb	Activar sonido
 mixer_unplugged	3ed9	Nada conectado
-mixer_why_analog	b797	Elegido: altavoz o analógico
-mixer_why_chosen	5e67	Elegido: lo eligió usted
-mixer_why_display	fd9f	Elegido: hay una pantalla
-mixer_why_hdmi	f5eb	Elegido: HDMI, pantalla incierta
-mixer_why_named	0295	Elegido: arrancó con él
-mixer_why_nothing	ff66	Elegido: el primero que hay
 notices_dismiss	9a10	Descartar todo
 notices_item	56a6	%1$s: %2$s
 notices_item_times	36d7	%1$s: %2$s (%3$d veces, hace %4$d min)
