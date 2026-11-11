@@ -1052,7 +1052,7 @@ static int settings_sub_rows(int row, int count)
 {
         char key[WINDOWS_ISSUE_KEY], text[SETTINGS_SUB_TEXT];
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
-        int section;
+        int section, next;
 
         // The lines show when the row is open, and while it shuts (they fold away on the spring): each issue's message and its detail, and the
         // GPU's status and metrics first.
@@ -1076,10 +1076,12 @@ static int settings_sub_rows(int row, int count)
                 if (!issue->used || !windows_issue_same(issue->key, key))
                         continue;
                 settings_issue_text(issue, text, sizeof(text));
-                count = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
-                                         text, count);
-                if (settings_sub_count > 0)
+                next = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
+                                        text, count);
+                // A line that did not fit is not added, and the line before it is not this issue's: only an added line takes its code.
+                if (next != count)
                         settings_sub[settings_sub_count - 1].code = issue->code;
+                count = next;
                 // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
                 if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_RADIO))
                         count = settings_sub_put(section, true, null, issue->detail, count);
@@ -1087,9 +1089,11 @@ static int settings_sub_rows(int row, int count)
         // The kernel's notices row lists them with one line that dismisses every kernel notice, after the last of them.
         if (which && which->output == SETTINGS_OUT_NOTICES && count > 0 && settings_sub_count > 0)
         {
-                count = settings_sub_put(section, false, null, WORDS(settings_notices_dismiss), count);
-                if (settings_sub_count > 0)
+                next = settings_sub_put(section, false, null, WORDS(settings_notices_dismiss), count);
+                // Only an added line dismisses: a refused one must not make the line before it dismiss every kernel notice.
+                if (next != count)
                         settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_DISMISS_ALL;
+                count = next;
         }
         return count;
 }
