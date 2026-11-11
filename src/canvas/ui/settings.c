@@ -3836,40 +3836,32 @@ static fn settings_output_apply(int row, const char address_to label)
                 return;
         }
         length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
+        // The value the screen has already sends nothing, and says so.
+        if ((which->output == SETTINGS_OUT_TURN && settings_turns[at].degrees == (int)table->output_turn[chosen]) ||
+            (which->output == SETTINGS_OUT_SCALE && at < (int)(sizeof(settings_scales) / sizeof(settings_scales[0])) &&
+             settings_scales[at] == table->output_asked_scale[chosen]) ||
+            (which->output == SETTINGS_OUT_REFRESH && at < (int)settings_rates_of(chosen) && table->output_hz[chosen][at] == table->output_now[chosen]))
+        {
+                settings_say((string_address)WORDS(settings_already_set));
+                return;
+        }
         if (which->output == SETTINGS_OUT_TURN)
         {
-                if (settings_turns[at].degrees == (int)table->output_turn[chosen])
-                {
-                        settings_say((string_address)WORDS(settings_already_set));
-                        return;
-                }
                 length = settings_map_add(value, sizeof(value), length, " rotation ");
                 settings_map_number(value, sizeof(value), length, settings_turns[at].degrees);
         }
         else if (which->output == SETTINGS_OUT_SCALE && at < (int)(sizeof(settings_scales) / sizeof(settings_scales[0])))
         {
-                if (settings_scales[at] == table->output_asked_scale[chosen])
-                {
-                        settings_say((string_address)WORDS(settings_already_set));
-                        return;
-                }
                 length = settings_map_add(value, sizeof(value), length, " scale ");
                 settings_map_number(value, sizeof(value), length, (long)settings_scales[at]);
         }
         else if (which->output == SETTINGS_OUT_REFRESH && at < (int)settings_rates_of(chosen))
         {
-                unsigned int hz = table->output_hz[chosen][at];
-
-                if (hz == table->output_now[chosen])
-                {
-                        settings_say((string_address)WORDS(settings_already_set));
-                        return;
-                }
                 length = settings_map_add(value, sizeof(value), length, " refresh ");
                 if (at == 0)
                         settings_map_add(value, sizeof(value), length, "preferred");
                 else
-                        settings_map_number(value, sizeof(value), length, (long)hz);
+                        settings_map_number(value, sizeof(value), length, (long)table->output_hz[chosen][at]);
         }
         else
                 return;
