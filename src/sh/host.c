@@ -12124,11 +12124,13 @@ static bipolar radio_wifi_leave(void)
         nl80211_iface iface;
         bipolar failed;
 
+        //      The keeper goes whether or not the link can be asked to leave: a
+        //      keeper left running would join the network again.
+        radio_keeper_stop();
         failed = nl80211_open(address_of session);
         if (failed < 0)
                 return failed;
 
-        radio_keeper_stop();
         failed = nl80211_interface(address_of session, address_of iface);
         if (!failed)
                 failed = nl80211_disconnect(address_of session, iface.index);
