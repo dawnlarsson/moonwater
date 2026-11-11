@@ -304,6 +304,7 @@ ui_field_full	fe02	больше не помещается
 =Predict touch and pen	e2b7	Предсказывать касание и перо
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
+=Resize border width (pixels, or default)	7fdf	Ширина рамки изменения размера (пикселей или default)
 =Right edge	279a	Правый край
 =Rotation	777f	Поворот
 =Rubber band	9c42	Эффект резинки

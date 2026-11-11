@@ -304,6 +304,7 @@ ui_field_full	fe02	that is as much as it holds
 =Predict touch and pen	e2b7	Predict touch and pen
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
+=Resize border width (pixels, or default)	7fdf	Resize border width (pixels, or default)
 =Right edge	279a	Right edge
 =Rotation	777f	Rotation
 =Rubber band	9c42	Rubber band

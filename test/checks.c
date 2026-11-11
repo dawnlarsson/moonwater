@@ -134393,6 +134393,79 @@ static void check_compositor_lit(void)
     check("lit: and none once it is let go", glass_at(100, 29) == 0x4d4d4du && glass_at(39, 70) == 0x4d4d4du);
 }
 
+// The pixels of the hover ink on the left edge's row (y 70) of the window at 50, 30: the band is the line's one at width 1, and
+// four pixels inward from the outline at 4.
+static unsigned int border_lit_pixels(void)
+{
+    unsigned int count = 0;
+
+    for (int x = 40; x < 60; x++)
+        count += glass_at(x, 70) == 0x9a9a9au;
+    return count;
+}
+
+/*
+        The width of the lit edge (the setting `canvas border width`, 1 to 4 pixels, 2 by default): at 1 the lit edge is the
+        line's pixel as it always was, at 4 it is four pixels inward from the window's outline, and nothing outside the
+        window is drawn; a value outside 1 to 4 is refused, and the compositor keeps the standard for it.
+*/
+static void check_compositor_border(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int outside, one, four;
+    long value = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = compositor.lit_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("border: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->asked[1] = 1;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    compositor.pointer_x = 47, compositor.pointer_y = 70;
+    compositor_motion();
+    compositor_present();
+
+    compositor_border_publish(1);
+    compositor_present();
+    one = border_lit_pixels();
+    outside = glass_at(48, 70);
+    check("border: a width of 1 lights the line's one pixel, and the contents beside it are not lit",
+          one == 1 && glass_at(49, 70) == 0x9a9a9au && glass_at(50, 70) == 0x404040u);
+
+    compositor_border_publish(4);
+    compositor_present();
+    four = border_lit_pixels();
+    check("border: a width of 4 lights four pixels inward from the outline, and the outline stays and nothing outside it is drawn",
+          four == 4 && glass_at(49, 70) == 0x9a9a9au && glass_at(52, 70) == 0x9a9a9au && glass_at(53, 70) == 0x404040u &&
+              glass_at(48, 70) == outside);
+
+    compositor.pointer_x = 100;
+    compositor_motion();
+    compositor_present();
+    check("border: off the edge nothing is lit at any width", border_lit_pixels() == 0);
+
+    check("border: 1 to 4 is kept, and the compositor reads a value outside it as the standard of 2",
+          compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "1", &value) && value == 1 &&
+              compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "4", &value) && value == 4 &&
+              !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "0", &value) && value == 2 &&
+              !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "5", &value) && value == 2 &&
+              !compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, "default", &value) && value == 2);
+}
+
 #ifdef COMPOSITOR_LINE
 /*
         A touch screen through the compositor's reader, from a pipe that stands for one in slot 0, its events as a
@@ -142121,7 +142194,7 @@ static fn check_settings_groups(void)
                 const char address_to group;
         } families[] = {
             {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
-            {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
+            {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
@@ -142147,6 +142220,7 @@ static fn check_settings_groups(void)
             {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
             {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
+            {"Resize border width (pixels, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},
             {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
             {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
@@ -164599,6 +164673,7 @@ b32 main()
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_lit();
+        check_compositor_border();
         check_compositor_chrome();
         check_compositor_minimise();
         check_compositor_predict();

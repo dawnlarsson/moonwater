@@ -304,6 +304,7 @@ ui_field_full	fe02	no cabe más
 =Predict touch and pen	e2b7	Predecir el tacto y el lápiz
 =Refresh rate	bf6e	Frecuencia de actualización
 =Remembered devices	abbc	Dispositivos recordados
+=Resize border width (pixels, or default)	7fdf	Ancho del borde de cambio de tamaño (píxeles o default)
 =Right edge	279a	Borde derecho
 =Rotation	777f	Rotación
 =Rubber band	9c42	Efecto elástico

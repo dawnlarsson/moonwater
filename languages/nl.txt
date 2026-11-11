@@ -304,6 +304,7 @@ ui_field_full	fe02	meer past er niet in
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
+=Resize border width (pixels, or default)	7fdf	Breedte van de rand voor formaatwijziging (pixels of default)
 =Right edge	279a	Rechterrand
 =Rotation	777f	Rotatie
 =Rubber band	9c42	Rubberbandeffect

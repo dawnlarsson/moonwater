@@ -304,6 +304,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et
 =Refresh rate	bf6e	Yenileme hızı
 =Remembered devices	abbc	Hatırlanan aygıtlar
+=Resize border width (pixels, or default)	7fdf	Boyutlandırma kenarlığı genişliği (piksel veya default)
 =Right edge	279a	Sağ kenar
 =Rotation	777f	Döndürme
 =Rubber band	9c42	Lastik bant efekti

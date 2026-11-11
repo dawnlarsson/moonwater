@@ -305,6 +305,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Predict touch and pen	e2b7	חיזוי מגע ועט
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
+=Resize border width (pixels, or default)	7fdf	רוחב מסגרת שינוי הגודל (פיקסלים או default)
 =Right edge	279a	קצה ימני
 =Rotation	777f	סיבוב
 =Rubber band	9c42	אפקט גומייה

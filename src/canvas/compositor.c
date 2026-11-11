@@ -85,6 +85,10 @@
 #define COMPOSITOR_LIT_ALL 16u
 // How far along each of its two edges a held corner is lit, in logical pixels: the corner's arc alone is too short to see.
 #define COMPOSITOR_LIT_REACH 32
+// The width of a lit edge or corner in logical pixels, the setting's (compositor_lit_px): drawn inward from the window's outline,
+// over its contents where it is wider than the line, which is one pixel at 100 percent. The standard is COMPOSITOR_BORDER_STANDARD.
+#define COMPOSITOR_BORDER_STANDARD 2
+#define COMPOSITOR_BORDER_MOST 4
 
 // The desktop's ink as `moonwater canvas background` set it, and the default when none is: what is drawn
 // where no window is, and behind a window's round corners. The tabs' glass is made from what is on the screen.
@@ -273,6 +277,7 @@ struct compositor_frame
         // What of its line is lit, and in what ink (COMPOSITOR_INK_LINE_HELD or _HOVER): one edge (CP_EDGE_*) lit whole,
         // two that meet a corner lit with COMPOSITOR_LIT_REACH of each, COMPOSITOR_LIT_ALL all of it; 0 none.
         unsigned int lit, lit_ink;
+        int lit_w;           // the lit edges' width in device pixels (compositor_lit_px); the line's, or more
         // A window landing is drawn at less than its picture's size, source_w by source_h: its contents are that
         // picture scaled (compositor_scaled). 0 for a frame drawn at its picture's size.
         int source_w, source_h;
@@ -838,6 +843,73 @@ static int compositor_corner_lit(const struct compositor_frame *frame, int corne
 }
 
 /*
+        A lit round corner drawn over the contents, where the lit width (frame->lit_w) is more than the line: the ring
+        between the corner's outline and the outline cut lit_w in, in the lit ink, a row at a time as compositor_corner_rows
+        makes its line (the same masks, the outer less the inner). Nothing else of the frame is drawn here.
+*/
+static void compositor_lit_corner(const struct compositor_target *t, const struct compositor_frame *frame, int corner, int r,
+                                  int thick, unsigned int ink)
+{
+        int ox, oy, ow, oh, ri = r > thick ? r - thick : 0, right = corner & 1, down = (corner & 2) != 0;
+        const unsigned char *outer = right ? compositor_corner_mirror(r) : compositor_corner_mask(r);
+        const unsigned char *inner = ri ? (right ? compositor_corner_mirror(ri) : compositor_corner_mask(ri)) : 0;
+        unsigned int ink_row[COMPOSITOR_RADIUS_MOST];
+        unsigned char ring[COMPOSITOR_RADIUS_MOST];
+        int cx, cy, x1, y1, x2, y2;
+
+        compositor_outline(frame, &ox, &oy, &ow, &oh);
+        cx = right ? ox + ow - r : ox;
+        cy = down ? oy + oh - r : oy;
+        x1 = cx > t->x1 ? cx : t->x1;
+        y1 = cy > t->y1 ? cy : t->y1;
+        x2 = cx + r < t->x2 ? cx + r : t->x2;
+        y2 = cy + r < t->y2 ? cy + r : t->y2;
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        memory_fill_u32(ink_row, (positive)(x2 - x1), ink & 0xffffffu);
+        for (int py = y1; py < y2; py++)
+        {
+                int my = down ? cy + r - 1 - py : py - cy;
+                unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                for (int k = 0; k < x2 - x1; k++)
+                {
+                        int col = x1 - cx + k, iy = my - thick, ix = right ? col : col - thick;
+                        unsigned int oc = outer[(unsigned long)my * r + col], ic = 0;
+
+                        if (ri && iy >= 0 && iy < ri && ix >= 0 && ix < ri)
+                                ic = inner[(unsigned long)iy * ri + ix];
+                        ring[k] = oc > ic ? (unsigned char)(oc - ic) : 0;
+                }
+                memory_mix_u32_row(at, ink_row, ring, (positive)(x2 - x1));
+        }
+}
+
+// The lit edges and corners at their width over a frame's contents (frame->lit_w more than the line): the straight bands, and
+// the lit corners' rings, or for a square corner its two bands of that width. Drawn after the contents, so they cover them.
+static void compositor_lit_over(const struct compositor_target *t, const struct compositor_frame *frame, int ox, int oy, int ow, int oh,
+                                int r)
+{
+        int thick = frame->lit_w;
+
+        compositor_lit_line(t, frame, ox, oy, ow, oh, r, thick);
+        for (int corner = 0; r && corner < 4; corner++)
+        {
+                int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
+
+                if (!compositor_corner_lit(frame, corner))
+                        continue;
+                if (!(frame->square & (1 << corner)))
+                {
+                        compositor_lit_corner(t, frame, corner, r, thick, frame->lit_ink);
+                        continue;
+                }
+                compositor_fill(t, cx, corner & 2 ? oy + oh - thick : oy, r, thick, frame->lit_ink);
+                compositor_fill(t, corner & 1 ? ox + ow - thick : ox, cy, thick, r, frame->lit_ink);
+        }
+}
+
+/*
         One round corner's square, a row at a time, for a frame whose contents are its picture at its own size or a tab's
         ink (a scaled picture keeps the pixel loop in compositor_draw_with). Each row is two calls of memory_mix_u32_row,
         the same two mixes the pixel loop makes in the same order: the line's outside over the target by the outer
@@ -937,7 +1009,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                 compositor_fill(t, ox + r, y + h, ow - 2 * r, b, frame->edge);
                 compositor_fill(t, ox, oy + r, b, oh - 2 * r, frame->edge);
                 compositor_fill(t, x + w, oy + r, b, oh - 2 * r, frame->edge);
-                if (frame->lit)
+                if (frame->lit && frame->lit_w <= b)
                         compositor_lit_line(t, frame, ox, oy, ow, oh, r, b);
         }
 
@@ -945,6 +1017,8 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
         if (!r)
         {
                 compositor_contents(t, frame);
+                if (b && frame->lit && frame->lit_w > b)
+                        compositor_lit_over(t, frame, ox, oy, ow, oh, r);
                 compositor_close_draw(t, frame);
                 compositor_minimize_draw(t, frame);
                 return;
@@ -1020,6 +1094,8 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                                 *at = pixel;
                         }
         }
+        if (b && frame->lit && frame->lit_w > b)
+                compositor_lit_over(t, frame, ox, oy, ow, oh, r);
         compositor_close_draw(t, frame);
         compositor_minimize_draw(t, frame);
 }
@@ -1137,7 +1213,15 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
                         int my = down ? r - 1 - row : row;
                         unsigned char cover = outer[my * r + col];
 
-                        if (content && b)
+                        // Content 2 is the ring of the line at b (the outside less the inside), a lit corner drawn over the contents.
+                        if (content == 2)
+                        {
+                                int iy = my - b, ix = right ? col : col - b;
+                                unsigned int in = inner && iy >= 0 && iy < ri && ix >= 0 && ix < ri ? inner[iy * ri + ix] : 0;
+
+                                cover = cover > in ? (unsigned char)(cover - in) : 0;
+                        }
+                        else if (content && b)
                         {
                                 int iy = my - b, ix = right ? col : col - b;
 
@@ -1262,6 +1346,38 @@ static void compositor_gpu_lit(const struct compositor_frame *f, int ox, int oy,
                 compositor_gpu_rect(0, ox + ow - b, from_y, ox + ow, from_y + seg_h, f->lit_ink, 0, 0, 0);
 }
 
+// compositor_lit_over on the GPU: the lit edges at frame->lit_w over the contents, and each lit round corner's ring (its cover table
+// is content 2 of compositor_gpu_table), or a square corner's two bands. False when a table is not made (the pools are full).
+static b32 compositor_gpu_lit_over(const struct compositor_frame *f, int ox, int oy, int ow, int oh, int r)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int thick = f->lit_w;
+        unsigned int ink = f->lit_ink & 0xffffffu;
+
+        compositor_gpu_lit(f, ox, oy, ow, oh, r, thick);
+        for (int corner = 0; r && corner < 4; corner++)
+        {
+                int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
+                unsigned int ring;
+
+                if (!compositor_corner_lit(f, corner))
+                        continue;
+                if (f->square & (1 << corner))
+                {
+                        int top = corner & 2 ? oy + oh - thick : oy, left = corner & 1 ? ox + ow - thick : ox;
+
+                        compositor_gpu_rect(0, cx, top, cx + r, top + thick, ink, 0, 0, 0);
+                        compositor_gpu_rect(0, left, cy, left + thick, cy + r, ink, 0, 0, 0);
+                        continue;
+                }
+                ring = compositor_gpu_table(r, thick, corner, 2);
+                if (!ring)
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                compositor_gpu_rect(5, cx, cy, cx + r, cy + r, ink, 0, ring, r);
+        }
+        return true;
+}
+
 // What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
@@ -1303,12 +1419,14 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 compositor_gpu_rect(0, ox + r, y + h, ox + ow - r, y + h + b, f->edge, 0, 0, 0);
                 compositor_gpu_rect(0, ox, oy + r, ox + b, oy + oh - r, f->edge, 0, 0, 0);
                 compositor_gpu_rect(0, x + w, oy + r, x + w + b, oy + oh - r, f->edge, 0, 0, 0);
-                if (f->lit)
+                if (f->lit && f->lit_w <= b)
                         compositor_gpu_lit(f, ox, oy, ow, oh, r, b);
         }
         if (!r)
         {
                 compositor_gpu_contents(f, tab, x, y, x + w, y + h);
+                if (b && f->lit && f->lit_w > b && !compositor_gpu_lit_over(f, ox, oy, ow, oh, r))
+                        return false;
                 return compositor_gpu_buttons(f);
         }
         compositor_gpu_contents(f, tab, x + ri, y, x + w - ri, y + h);
@@ -1336,6 +1454,8 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 if (ri && sx2 > sx1 && sy2 > sy1)
                         compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
+        if (b && f->lit && f->lit_w > b && !compositor_gpu_lit_over(f, ox, oy, ow, oh, r))
+                return false;
         return compositor_gpu_buttons(f);
 }
 
@@ -4622,6 +4742,7 @@ static struct
         // The window whose line is lit (lit_row, COMPOSITOR_NONE for none), what of it, and whether held (else hovered).
         int lit_row;
         unsigned int lit_edges, lit_held;
+        unsigned int border; // the lit edges' width in logical pixels, 1 to 4 as the setting says (compositor_border_publish); 0 is the standard
         // The snap preview a drag shows (compositor_preview): the row whose drag it is, and its target's rectangle, from the
         // frame the target is touched. The edges of the window's screen its rectangle touched last frame (compositor_snap_rule's
         // dead zone).
@@ -5575,6 +5696,15 @@ static void compositor_stretch(int row)
 
 static int compositor_output_scale(int at);
 
+// The width of a lit edge or corner in device pixels at a scale in percent: the setting's (compositor.border, the standard when
+// none is kept), its logical pixels cut to whole ones and never less than one, so a width of 1 is the line's own pixel as before.
+static int compositor_lit_px(int percent)
+{
+        int px = (int)(compositor.border ? compositor.border : COMPOSITOR_BORDER_STANDARD) * percent / 100;
+
+        return px < 1 ? 1 : px;
+}
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line, scale;
@@ -5606,6 +5736,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         {
                 frame->lit = compositor.lit_edges;
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
+                frame->lit_w = compositor_lit_px(scale);
         }
         // The snap preview is the dragged window's, carried here for compositor_preview_lift to take over every window: where
         // it is drawn now (compositor_preview_shown), shaped as
@@ -5671,6 +5802,8 @@ static void compositor_damage_line(int row)
         compositor_frame_of(row, &frame);
         compositor_outline(&frame, &x, &y, &width, &height);
         band = compositor_radius(&frame) > frame.x - x ? compositor_radius(&frame) : frame.x - x;
+        if (frame.lit && frame.lit_w > band)
+                band = frame.lit_w;
         compositor_damage(x, y, width, band);
         compositor_damage(x, y + height - band, width, band);
         compositor_damage(x, y + band, band, height - 2 * band);
@@ -11911,6 +12044,19 @@ static void compositor_caret_publish(unsigned int speed, unsigned int thick)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// The width of a lit edge or corner (compositor_lit_px): the lit edge is drawn again at the old width and at the new, so the
+// pixels the old one drew are not left behind. Only the window the hand is on has one lit.
+static void compositor_border_publish(unsigned int width)
+{
+        if (compositor.border == width)
+                return;
+        if (compositor.lit_row >= 0)
+                compositor_damage_line(compositor.lit_row);
+        compositor.border = width;
+        if (compositor.lit_row >= 0)
+                compositor_damage_line(compositor.lit_row);
+}
+
 // The language the windows speak (ui/ui.c), as the table keeps it: a change knocks every window, as a theme change does.
 static void compositor_language_publish(unsigned int code)
 {
@@ -11986,7 +12132,7 @@ static void compositor_scroll_read(void)
 static void compositor_theme_read(void)
 {
         char word[16];
-        long accent = -1, smooth = 0, blink = 0, thick = 0, text = 100;
+        long accent = -1, smooth = 0, blink = 0, thick = 0, text = 100, border = COMPOSITOR_BORDER_STANDARD;
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
@@ -12014,6 +12160,10 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_TEXT_SCALE_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_TEXT_SCALE_PATH, word, &text);
         compositor_text_publish(text == 100 ? 0 : (unsigned int)text);
+        // The lit edges' width, 1 to 4 (the standard when none is kept, which compositor_setting_kept gives as the row's standard).
+        compositor_word(SETTING_BORDER_WIDTH_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, word, &border);
+        compositor_border_publish((unsigned int)(border < 1 ? 1 : border > COMPOSITOR_BORDER_MOST ? COMPOSITOR_BORDER_MOST : border));
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);

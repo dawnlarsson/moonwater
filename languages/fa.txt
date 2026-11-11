@@ -305,6 +305,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
+=Resize border width (pixels, or default)	7fdf	پهنای لبهٔ تغییر اندازه (پیکسل یا default)
 =Right edge	279a	لبه راست
 =Rotation	777f	چرخش
 =Rubber band	9c42	اثر کشسانی

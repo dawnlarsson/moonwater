@@ -305,6 +305,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
+=Resize border width (pixels, or default)	7fdf	سائز بدلنے کے کنارے کی چوڑائی (پکسل یا default)
 =Right edge	279a	دائیں کنارہ
 =Rotation	777f	گردش
 =Rubber band	9c42	ربڑ بینڈ اثر

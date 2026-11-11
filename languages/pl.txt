@@ -304,6 +304,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik
 =Refresh rate	bf6e	Częstotliwość odświeżania
 =Remembered devices	abbc	Zapamiętane urządzenia
+=Resize border width (pixels, or default)	7fdf	Szerokość ramki zmiany rozmiaru (piksele lub default)
 =Right edge	279a	Prawa krawędź
 =Rotation	777f	Obrót
 =Rubber band	9c42	Efekt gumki

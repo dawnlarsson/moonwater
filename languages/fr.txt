@@ -304,6 +304,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
+=Resize border width (pixels, or default)	7fdf	Épaisseur de la bordure de redimensionnement (pixels ou default)
 =Right edge	279a	Bord droit
 =Rotation	777f	Rotation
 =Rubber band	9c42	Effet élastique

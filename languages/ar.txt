@@ -305,6 +305,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Predict touch and pen	e2b7	توقع اللمس والقلم
 =Refresh rate	bf6e	معدل التحديث
 =Remembered devices	abbc	الأجهزة المحفوظة
+=Resize border width (pixels, or default)	7fdf	عرض حد تغيير الحجم (بكسل أو default)
 =Right edge	279a	الحافة اليمنى
 =Rotation	777f	الدوران
 =Rubber band	9c42	تأثير المطاط

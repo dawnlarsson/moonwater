@@ -304,6 +304,7 @@ ui_field_full	fe02	mer ryms inte
 =Predict touch and pen	e2b7	Förutse touch och penna
 =Refresh rate	bf6e	Uppdateringsfrekvens
 =Remembered devices	abbc	Ihågkomna enheter
+=Resize border width (pixels, or default)	7fdf	Bredd på kanten för storleksändring (pixlar eller default)
 =Right edge	279a	Höger kant
 =Rotation	777f	Rotation
 =Rubber band	9c42	Gummibandseffekt

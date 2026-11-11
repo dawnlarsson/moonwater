@@ -304,6 +304,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen
 =Refresh rate	bf6e	Bildwiederholrate
 =Remembered devices	abbc	Gemerkte Geräte
+=Resize border width (pixels, or default)	7fdf	Breite des Größenänderungsrahmens (Pixel oder default)
 =Right edge	279a	Rechter Rand
 =Rotation	777f	Drehung
 =Rubber band	9c42	Gummiband-Effekt

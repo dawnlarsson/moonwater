@@ -38,6 +38,7 @@ moonwater name [NEW|random]            what this machine is called, like space-w
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater canvas arrange [NAME[@X,Y|@off]...|default]  where each screen is: names left to right, the first the primary [default]
 moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
+moonwater canvas border width [PIXELS|default]  how wide the highlight on a window's edge or corner is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]
 moonwater canvas caret blink [slow|normal|fast|off]  how the caret blinks, or off for a solid caret [normal]
 moonwater canvas caret thickness [thin|normal|thick]  how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]

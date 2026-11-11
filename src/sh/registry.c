@@ -161,6 +161,7 @@
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
 // The text's size, in percent of what every role's size says: ui.c's ui_em multiplies it in, and the portal says it as text-scaling-factor.
 #define SETTING_TEXT_SCALE_PATH "/root/canvas.text.scale"
+#define SETTING_BORDER_WIDTH_PATH "/root/canvas.border.width"
 // The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/ui.c reads it).
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
 #define SETTING_LANGUAGE_PATH "/root/language"
@@ -274,6 +275,13 @@ static const struct settings_row settings_rows[] = {
                       .unit = "percent", .low = 50, .high = 300,
                       .usage = "canvas text scale [PERCENT|default]",
                       .help = "how large the text of the windows Canvas draws is, 50 to 300 percent [100]"),
+    //  The width of the highlight on a window's edge or corner the pointer is over or the hand holds (compositor.c's
+    //  compositor_lit_px): drawn inward from the outline, so the window does not move; 1 is the line's own pixel.
+    SETTING_PLAIN_ROW(null, "Resize border width (pixels, or default)", SETTINGS_SLIDER, 0, ("canvas", "border", "width"), "width ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BORDER_WIDTH_PATH, .standard = "2",
+                      .unit = "pixels", .low = 1, .high = 4,
+                      .usage = "canvas border width [PIXELS|default]",
+                      .help = "how wide the highlight on a window's edge or corner is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .live = SETTING_LIVE_NONE, .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on",

@@ -304,6 +304,7 @@ ui_field_full	fe02	більше не вміщається
 =Predict touch and pen	e2b7	Передбачати дотик і перо
 =Refresh rate	bf6e	Частота оновлення
 =Remembered devices	abbc	Запам'ятовані пристрої
+=Resize border width (pixels, or default)	7fdf	Ширина рамки зміни розміру (пікселів або default)
 =Right edge	279a	Правий край
 =Rotation	777f	Поворот
 =Rubber band	9c42	Ефект гумки

@@ -304,6 +304,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
+=Resize border width (pixels, or default)	7fdf	Πλάτος περιγράμματος αλλαγής μεγέθους (pixel ή default)
 =Right edge	279a	Δεξιό άκρο
 =Rotation	777f	Περιστροφή
 =Rubber band	9c42	Ελαστικό εφέ
