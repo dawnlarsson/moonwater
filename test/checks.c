@@ -127715,17 +127715,17 @@ static void check_compositor_cursor_style(void)
           left + CP_DYN_HOT == 100 && top + CP_DYN_HOT == 50);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, CP_ARROW, 1, fill, edge);
-    check("cursor style: dynamic draws a circle of radius 16 about the hot cell: its outline at 16 in four directions and on the diagonal, "
-          "clear inside it and outside it, and the square's corner not drawn",
-          plane[32 * 64 + 48] != 0 && plane[32 * 64 + 16] != 0 && plane[16 * 64 + 32] != 0 && plane[48 * 64 + 32] != 0 &&
-          plane[43 * 64 + 43] != 0 && plane[44 * 64 + 44] == 0 && plane[32 * 64 + 47] == 0 && plane[32 * 64 + 49] == 0 &&
-          plane[32 * 64 + 32] == 0);
+    check("cursor style: dynamic draws a filled circle of radius 8 about the hot cell: an outline one cell thick at 8 in four "
+          "directions and on the diagonal, filled inside, clear outside it, and the square's corner not drawn",
+          plane[32 * 64 + 40] != 0 && plane[32 * 64 + 24] != 0 && plane[24 * 64 + 32] != 0 && plane[40 * 64 + 32] != 0 &&
+          plane[37 * 64 + 37] != 0 && plane[32 * 64 + 32] != 0 && plane[32 * 64 + 41] == 0 && plane[40 * 64 + 40] == 0 &&
+          plane[44 * 64 + 44] == 0);
 
     compositor.cursor.speed = CP_DYN_SPEED;
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, CP_ARROW, 1, fill, edge);
-    check("cursor style: a fast motion stretches the circle along it, 30 cells out and not 31, and 15 across it",
-          plane[32 * 64 + 62] != 0 && plane[32 * 64 + 63] == 0 && plane[47 * 64 + 32] != 0 && plane[48 * 64 + 32] == 0);
+    check("cursor style: a fast motion stretches the circle along it, 15 cells out and not 16, and 7 across it",
+          plane[32 * 64 + 47] != 0 && plane[32 * 64 + 48] == 0 && plane[39 * 64 + 32] != 0 && plane[40 * 64 + 32] == 0);
 
     for (unsigned int at = 0; at < CP_PLANE * 2 * CP_PLANE; at++)
         wide[at] = sentinel;

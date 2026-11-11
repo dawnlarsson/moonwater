@@ -2984,7 +2984,7 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
         A press's squeeze takes CP_DYN_PULSE_NS, two frames of 16 ms.
 */
 #define CP_DYN_HOT 32
-#define CP_DYN_RADIUS 16
+#define CP_DYN_RADIUS 8
 #define CP_DYN_SPEED 48
 #define CP_DYN_PULSE_NS 32000000ull
 #define CP_DYN_IDLE_NS 120000000ull
@@ -3505,7 +3505,10 @@ static int compositor_dyn_pixel(const struct compositor_dyn *d, unsigned int sha
                 return 0;
         if (!compositor_dyn_within(text, along, across, d->ai, d->bi, d->ci))
                 return 2;
-        return !text && compositor_dyn_mark(shape, dx, dy, ax, ay, d->length, d->spin);
+        // The inside is filled (ink 1, as the classic cursors' white); a mark is drawn over it in outline ink (2). The text's is all fill.
+        if (text)
+                return 1;
+        return compositor_dyn_mark(shape, dx, dy, ax, ay, d->length, d->spin) ? 2 : 1;
 }
 
 static int compositor_cursor_pixel(const struct compositor_dyn *d, unsigned int shape, int row, int column)
