@@ -23446,7 +23446,6 @@ static b32 host_debug(string_address address_to arguments, positive count)
 static b32 host_name(string_address address_to arguments, positive count)
 {
         p8 name[NAME_ROOM];
-        bool rolled;
         bipolar applied;
 
         return_if(count > 3, host_usage());
@@ -23455,21 +23454,20 @@ static b32 host_name(string_address address_to arguments, positive count)
         {
                 file_machine machine;
 
-                //      /root is root's. Anyone else is told what the kernel
-                //      calls the machine, which is the name this applies; so
-                //      is root when /root will not keep a roll, because a
-                //      name that is not kept is not made up again at every
-                //      question.
-                if (bowl_is_root() &&
-                    name_ensure(name, sizeof(name), address_of rolled))
+                //      A read never rolls, saves or sets a name. Root reads
+                //      the saved one; with none (a namespace whose /root is
+                //      empty) root is told what the kernel calls the machine.
+                //      The roll is the boot's, and `moonwater name random`
+                //      asks for one. Anyone else is told what the kernel calls
+                //      the machine.
+                if (bowl_is_root())
+                        host_read_word(NAME_PATH, name, sizeof(name));
+                if (!bowl_is_root() || !name_valid(name))
                 {
-                        if (rolled)
-                                (void)name_apply(name);
-                }
-                else if (file_machine_read(address_of machine))
+                        if (!file_machine_read(address_of machine))
+                                return host_fail("name", -EIO);
                         string_copy_bounded(name, machine.node, sizeof(name));
-                else
-                        return host_fail("name", -EIO);
+                }
 
                 //      What the kernel says can be whatever the root of a
                 //      UTS namespace set, escape and bell included.
