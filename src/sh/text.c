@@ -13042,7 +13042,8 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                         convert = false;
                                                 else
                                                 {
-                                                        column += width;
+                                                        column = column > positive_max - width ? positive_max
+                                                                                               : column + width;
 
                                                         if (!(previous_blank && column >= stop))
                                                         {
@@ -13228,7 +13229,10 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
 
                                                         if (said == WC_VALID)
                                                         {
-                                                                column += text_char_columns(code);
+                                                                positive span = text_char_columns(code);
+
+                                                                column = column > positive_max - span ? positive_max
+                                                                                                     : column + span;
                                                                 whole = got - 1;
                                                         }
                                                         else if (said == WC_SHORT &&
