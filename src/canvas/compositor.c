@@ -6591,7 +6591,7 @@ static void compositor_card_read(void)
 
                 memory_copy(address_of type, events + at, 4);
                 memory_copy(address_of length, events + at + 4, 4);
-                if (length < 8)
+                if (length < 8 || at + (long)length > got)
                         break;
                 if (type == COMPOSITOR_EVENT_FLIP_COMPLETE)
                 {
