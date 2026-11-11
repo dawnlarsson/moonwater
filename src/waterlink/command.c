@@ -3,9 +3,13 @@
 
                 link                    who this machine is linked with and
                                         what each may do
+                link on | off           the listener, kept across boots
                 link pair [NAME]        a code, and wait for a machine to use it
                 link cancel             end every wait for a code
                 link NAME CODE          link to the machine called NAME
+                link transport [network|modem]   how machines reach each other
+                link modem key          the modem's key, made on first use, in hex
+                link modem send FILE    FILE over the sound card, to the receiver
                 link NAME [COMMAND...]  a terminal on NAME, or one command
                 link push NAME FILE PATH   a file there, whole or not at all
                 link pull NAME PATH FILE   and back
@@ -16,12 +20,8 @@
                 link deny NAME GRANT...
                 link group ...          machines on one network that link
                                         themselves
-                link on | off           the listener, kept across boots
                 link doctor             the listener, port, addresses, route and
                                         discovery: each pass or fail, and the fix
-                link transport [network|modem]   how machines reach each other
-                link modem key          the modem's key, made on first use, in hex
-                link modem send FILE    FILE over the sound card, to the receiver
 
         `key` and `serve` are not in the page: the key is in the status, and
         `serve` is how the listener starts itself.
