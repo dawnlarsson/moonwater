@@ -332,24 +332,23 @@ static b32 host_lock_owner(string_address path)
         return owner;
 }
 
-// A signal for whoever holds the lock, and never for a pid reused since.
-// pidfd_open and pidfd_send_signal are the names the Darwin system-call table provides.
+/*
+        A signal for whoever holds the lock. Darwin has no pidfd to send through,
+        so this kills the pid, as service.c's session close does, after checking
+        that it still holds the lock. Linux's pidfd pins the process between the
+        check and the signal; Darwin's kill does not, so a pid that exited and was
+        reused in that instant can be signalled. The holder is the listener, which
+        lives until it is told to go, so the window is the one the rest of the
+        link already accepts.
+*/
 static bool host_lock_signal(string_address path, b32 signal)
 {
         b32 owner = host_lock_owner(path);
-        bipolar handle;
-        bool sent;
 
         if (!owner)
                 return false;
-        handle = system_call_2(syscall(pidfd_open), (positive)owner, 0);
-        if (handle < 0)
-                return false;
-        sent = host_lock_owner(path) == owner &&
-               system_call_4(syscall(pidfd_send_signal), (positive)handle,
-                             (positive)signal, 0, 0) >= 0;
-        system_close(handle);
-        return sent;
+        return host_lock_owner(path) == owner &&
+               system_call_2(syscall(kill), (positive)owner, (positive)signal) >= 0;
 }
 
 /*
