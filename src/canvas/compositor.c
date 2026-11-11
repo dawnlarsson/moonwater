@@ -10605,10 +10605,18 @@ static void compositor_cursor_start(void)
 
         compositor.cursor.plane_shape = -1;
         if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
-            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0 ||
-            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[1]) != 0)
+            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0)
         {
                 compositor.cursor.soft = compositor.card >= 0;
+                return;
+        }
+        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[1]) != 0)
+        {
+                // The first buffer is given back: nothing holds it yet.
+                unsigned int close[2] = {dumb[0].handle, 0};
+
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                compositor.cursor.soft = 1;
                 return;
         }
 
