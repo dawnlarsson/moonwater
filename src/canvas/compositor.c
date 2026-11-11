@@ -7216,7 +7216,7 @@ static int compositor_overlay_buffers(unsigned int rows)
                 struct compositor_dumb dumb = {rows, (unsigned int)compositor.width, 32, 0, 0, 0, 0};
                 struct compositor_map_dumb map = {0};
                 struct compositor_fb2 fb = {0};
-                long mapped;
+                long mapped = -COMPOSITOR_EINVAL;
 
                 if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
                         return 0;
@@ -7225,12 +7225,19 @@ static int compositor_overlay_buffers(unsigned int rows)
                 fb.format = COMPOSITOR_XRGB8888;
                 fb.handles[0] = map.handle = dumb.handle;
                 fb.pitches[0] = dumb.pitch;
-                if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0 ||
-                    system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
-                        return 0;
-                mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
+                if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) == 0 &&
+                    system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) == 0)
+                        mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
                 if (mapped < 0 && mapped > -4096)
+                {
+                        // Made but not kept: the framebuffer (if the card took it) and the buffer go back, as a scanout's do.
+                        unsigned int close[2] = {dumb.handle, 0};
+
+                        if (fb.fb_id)
+                                system_control(compositor.card, COMPOSITOR_RMFB, address_of fb.fb_id);
+                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
                         return 0;
+                }
                 compositor.overlay_fb[which] = fb.fb_id;
                 compositor.overlay_handle[which] = dumb.handle;
                 compositor.overlay_pixels[which] = (unsigned int *)mapped;
