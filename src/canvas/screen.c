@@ -416,6 +416,36 @@ static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 }
 
 /*
+        The shell's end, waited for for a bounded time. Once its pty is gone a
+        shell may still be there: it closed its descriptors and went on, or it
+        ignores the hangup. It is polled for two seconds, hung up on after one
+        and killed after two, so that a window whose shell lives on is not held
+        open for ever. Answers the wait status; sent is set when this window
+        sent the hangup or the kill, which is not a signal from elsewhere.
+*/
+static positive term_reap(bipolar child, b32 address_to sent)
+{
+        positive status = 0;
+        timespec wait = {0, 25000000};
+
+        for (positive tries = 0; tries < 80; tries++)
+        {
+                if (system_wait4_retry(child, address_of status, 1, null) != 0)
+                        return status;
+                if (tries == 40)
+                {
+                        system_call_2(syscall(kill), (positive)(-child), SIGHUP);
+                        address_to sent = 1;
+                }
+                system_call_2(syscall(nanosleep), (positive)address_of wait, 0);
+        }
+        system_call_2(syscall(kill), (positive)(-child), SIGKILL);
+        address_to sent = 1;
+        system_wait4_retry(child, address_of status, 0, null);
+        return status;
+}
+
+/*
         The shell is over: reaped, the pty closed, and whether it went by a
         signal this window did not send. An exit of any status, and the hangup
         the X sent, close the window as they always have; only a signal from
@@ -424,16 +454,17 @@ static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 */
 static b32 term_finish(bipolar child, b32 master, b32 hung_up, positive oom_kills)
 {
-        positive status = 0;
+        positive status;
         positive signal;
+        b32 sent = 0;
 
-        system_wait4_retry(child, address_of status, 0, null);
+        status = term_reap(child, address_of sent);
         system_close(master);
 
         term_exit_status = status;
         signal = status & 0x7f;
 
-        if (!hung_up && signal && signal != 0x7f)
+        if (!hung_up && !sent && signal && signal != 0x7f)
         {
                 p8 name[16];
                 positive kills = term_oom_kills();
