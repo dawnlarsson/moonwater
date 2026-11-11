@@ -40880,6 +40880,14 @@ static fn mv_refused_after_rename(void)
                                        SYSTEM_PATH_RENAME_NOREPLACE);
 }
 
+static fn mv_cannot_move(string_address source, string_address destination,
+                         bipolar reason)
+{
+        string_format(log_error, "mv: cannot move %w to %w: %s\n",
+                      writer_shell_quoted_name, source,
+                      writer_shell_quoted_name, destination, file_reason(reason));
+}
+
 static fn mv_one(string_address source, string_address destination)
 {
         if (!mv_backup_state)
@@ -40930,10 +40938,7 @@ static fn mv_one(string_address source, string_address destination)
         string_address dest_named = destination;
         if (!file_dest_slash(destination, dest_stripped, address_of dest_named))
         {
-                string_format(log_error, "mv: cannot move %w to %w: %s\n",
-                              writer_shell_quoted_name, source,
-                              writer_shell_quoted_name, destination,
-                              file_reason(-ERROR_NAME_TOO_LONG));
+                mv_cannot_move(source, destination, -ERROR_NAME_TOO_LONG);
                 mv_status = 1;
                 goto finished;
         }
@@ -40950,9 +40955,7 @@ static fn mv_one(string_address source, string_address destination)
                         file_path_failed("mv", "cannot stat", writer_shell_quoted_name, source,
                                          source_directory, 0);
                 else
-                        string_format(log_error, "mv: cannot move %w to %w: %s\n",
-                                      writer_shell_quoted_name, source, writer_shell_quoted_name,
-                                      destination, file_reason(destination_directory));
+                        mv_cannot_move(source, destination, destination_directory);
                 mv_status = 1;
                 goto finished;
         }
@@ -41042,10 +41045,7 @@ static fn mv_one(string_address source, string_address destination)
                 }
                 if (reached == -ERROR_NO_ENTRY && !moving_directory)
                 {
-                        string_format(log_error, "mv: cannot move %w to %w: %s\n",
-                                      writer_shell_quoted_name, source,
-                                      writer_shell_quoted_name, destination,
-                                      file_reason(-ERROR_NOT_DIRECTORY));
+                        mv_cannot_move(source, destination, -ERROR_NOT_DIRECTORY);
                         mv_status = 1;
                         goto finished;
                 }
@@ -41355,10 +41355,7 @@ static fn mv_one(string_address source, string_address destination)
                 file_path_failed("mv", "cannot overwrite", writer_shell_quoted_name, destination,
                                  done, 0);
         else
-                string_format(log_error, "mv: cannot move %w to %w: %s\n",
-                              writer_shell_quoted_name, source,
-                              writer_shell_quoted_name, destination,
-                              file_reason(done));
+                mv_cannot_move(source, destination, done);
         mv_status = 1;
 
 finished:
