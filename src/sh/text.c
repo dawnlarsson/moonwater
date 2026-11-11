@@ -1157,7 +1157,7 @@ static fn text_record_preserve(p8 address_to address_to previous,
                 //      A long record moves the store it is kept in first.
                 if (bytes > TEXT_LINE_MAX + 1 &&
                     !text_spill_room(address_of storage, 0, bytes, null))
-                        return;
+                        text_die("memory exhausted");
 
                 memory_copy(storage, address_to previous, bytes);
                 address_to previous = storage;
