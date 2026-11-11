@@ -480,20 +480,13 @@ static fn build_size(string_address path)
         which is the test src/build/host.sh settled on after the tree was rearranged
         twice underneath the old one.
 */
-static bool build_is_directory(string_address path)
+//      The file type the path names: S_IFREG for a file, S_IFDIR for a directory.
+static bool build_is_type(string_address path, positive kind)
 {
         error_stat status;
 
         return stat(path, address_of status) >= 0 &&
-               (status.st_mode & S_IFMT) == S_IFDIR;
-}
-
-static bool build_is_file(string_address path)
-{
-        error_stat status;
-
-        return stat(path, address_of status) >= 0 &&
-               (status.st_mode & S_IFMT) == S_IFREG;
+               (status.st_mode & S_IFMT) == kind;
 }
 
 static positive build_modified(string_address path)
@@ -513,7 +506,7 @@ static positive build_modified(string_address path)
 //      was silently ignored and the previous configuration got built.
 static bool build_is_newer(string_address first, string_address second)
 {
-        if (!build_is_file(first) || !build_is_file(second))
+        if (!build_is_type(first, S_IFREG) || !build_is_type(second, S_IFREG))
                 return true;
 
         return build_modified(first) > build_modified(second);
@@ -1639,7 +1632,7 @@ static p8 build_essential_word(string_address name, string_address address_to pr
                                                  "/", profiles[at], null);
                 build_lines walk;
 
-                if (!build_is_file(path) || file_slurp(path, build_file_two, BUILD_FILE_ROOM) < 0)
+                if (!build_is_type(path, S_IFREG) || file_slurp(path, build_file_two, BUILD_FILE_ROOM) < 0)
                         continue;
 
                 build_lines_open(address_of walk, (string_address)build_file_two);
@@ -1832,7 +1825,7 @@ static positive build_profile_add(string_address address_to into, positive count
 
         path = build_join(build_setting_get("profile_root"), "/", name, null);
 
-        if (build_is_file(path) &&
+        if (build_is_type(path, S_IFREG) &&
             file_slurp(path, build_file_two, BUILD_FILE_ROOM) >= 0)
         {
                 string_address parts[BUILD_ARGUMENT_ROOM];
@@ -1855,8 +1848,8 @@ static positive build_profile_add(string_address address_to into, positive count
         {
                 string_address beside = build_join(name, ".", architecture, null);
 
-                if (build_is_file(build_join(build_setting_get("profile_root"), "/",
-                                             beside, null)))
+                if (build_is_type(build_join(build_setting_get("profile_root"), "/",
+                                             beside, null), S_IFREG))
                         count = build_profile_add(into, count, beside, architecture,
                                                   depth + 1);
         }
@@ -1924,7 +1917,7 @@ static b32 build_config(string_address address_to profiles, positive count)
                 string_address path = build_join(build_setting_get("profile_root"),
                                                  "/", profiles[at], null);
 
-                if (build_is_file(path))
+                if (build_is_type(path, S_IFREG))
                         continue;
 
                 string_format(log_error, "config: no such profile: profile/%s\n",
@@ -2118,7 +2111,7 @@ static b32 build_verify_config(string_address config,
                 profiles = build_profile_all;
         }
 
-        refuse_if(!build_is_file(config), 1, "verify_config: no such config: %s\n", config);
+        refuse_if(!build_is_type(config, S_IFREG), 1, "verify_config: no such config: %s\n", config);
 
         if (file_slurp(config, build_file_one, BUILD_FILE_ROOM) < 0)
                 return string_report(log_error, 1, "verify_config: cannot read %s\n",
@@ -2156,7 +2149,7 @@ static b32 build_verify_config(string_address config,
                                                  "/", profiles[at], null);
                 build_lines profile_walk;
 
-                if (!build_is_file(path))
+                if (!build_is_type(path, S_IFREG))
                         continue;
 
                 if (file_slurp(path, build_file_two, BUILD_FILE_ROOM) < 0)
@@ -2631,7 +2624,7 @@ static b32 build_asm(string_address arch, string_address input,
                                      "asm: nothing in the kernel config names an architecture this knows\n");
         }
 
-        refuse_if(!build_is_file(input), 1, "asm: no such file: %s\n", input);
+        refuse_if(!build_is_type(input, S_IFREG), 1, "asm: no such file: %s\n", input);
 
         target = build_asm_normalize(arch);
 
@@ -3086,7 +3079,7 @@ static b32 build_spark(string_address source, string_address output,
         if (!objdump || !readelf || !objcopy)
                 return 1;
 
-        refuse_if(!build_is_file(script), 1, "spark: missing linker script at %s\n", script);
+        refuse_if(!build_is_type(script, S_IFREG), 1, "spark: missing linker script at %s\n", script);
 
         build_label(BUILD_YELLOW, "EXPERIMENTAL! C compiled to spark format");
         string_format(log, BUILD_BOLD "Compiling %s" BUILD_RESET "\n", output);
@@ -3554,7 +3547,7 @@ static b32 build_freestanding(string_address address_to arguments, positive coun
                                    (output[1] == '.' && output[2] == '/'))))
                 output = build_join("./", output, null);
 
-        refuse_if(!build_is_file(source), 1, "build: no such source file: %s\n", source);
+        refuse_if(!build_is_type(source, S_IFREG), 1, "build: no such source file: %s\n", source);
 
         if (!watch)
         {
@@ -3979,17 +3972,17 @@ static bool build_install(string_address what)
         bool privileged = true;
         b32 status;
 
-        if (build_is_file("/etc/debian_version"))
+        if (build_is_type("/etc/debian_version", S_IFREG))
                 command = "apt-get install";
-        else if (build_is_file("/etc/redhat-release"))
+        else if (build_is_type("/etc/redhat-release", S_IFREG))
                 command = "yum install";
-        else if (build_is_file("/etc/arch-release"))
+        else if (build_is_type("/etc/arch-release", S_IFREG))
                 command = "pacman -S";
-        else if (build_is_file("/etc/alpine-release"))
+        else if (build_is_type("/etc/alpine-release", S_IFREG))
                 command = "apk add";
-        else if (build_is_file("/etc/SuSE-release"))
+        else if (build_is_type("/etc/SuSE-release", S_IFREG))
                 command = "zypper install";
-        else if (build_is_file("/etc/gentoo-release"))
+        else if (build_is_type("/etc/gentoo-release", S_IFREG))
                 command = "emerge";
         else if (build_have("brew"))
         {
@@ -4743,7 +4736,7 @@ static b32 build_gpu_kernels(string_address input, string_address output)
         string_address temporary = build_join(output, ".gpu_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
         bipolar got;
 
-        refuse_if(!build_is_file(input), 1, "gpu-kernels: no such file: %s\n", input);
+        refuse_if(!build_is_type(input, S_IFREG), 1, "gpu-kernels: no such file: %s\n", input);
 
         got = file_slurp(input, build_gpu_source, sizeof(build_gpu_source));
 
@@ -4838,7 +4831,7 @@ static b32 build_config_header_write(string_address config, string_address outpu
         string_address record;
         string_address text;
 
-        refuse_if(!build_is_file(config), 1, "config-header: no such file: %s\n", config);
+        refuse_if(!build_is_type(config, S_IFREG), 1, "config-header: no such file: %s\n", config);
 
         if (kind && !word_is(kind, "utility"))
                 return string_report(log_error, 1,
@@ -5107,7 +5100,7 @@ static b32 build_switches(string_address mode)
 //      configuration links, one path a line, relative to the image root.
 static b32 build_surface(string_address config, string_address kind)
 {
-        refuse_if(!build_is_file(config), 1, "surface: no such file: %s\n", config);
+        refuse_if(!build_is_type(config, S_IFREG), 1, "surface: no such file: %s\n", config);
 
         refuse_if(kind && !word_is(kind, "utility"), 1, "surface: '%s' is not utility\n", kind);
 
@@ -5224,7 +5217,7 @@ static b32 build_kernel_source()
         //      A Makefile is the marker that the tree is really there. Testing
         //      only for the directory treated an empty or half extracted tree
         //      as a finished extraction.
-        present = build_is_file(build_join(tree, "/Makefile", null));
+        present = build_is_type(build_join(tree, "/Makefile", null), S_IFREG);
 
         //      And it has to be the release pinned. A cache that built 7.2
         //      kept its tree when the pin moved to 7.3, and the next build
@@ -5262,7 +5255,7 @@ static b32 build_kernel_source()
         if (present)
                 return 0;
 
-        if (!build_is_file(archive))
+        if (!build_is_type(archive, S_IFREG))
         {
                 //      curl, and not our own fetch: fetch speaks HTTP without
                 //      TLS and does not follow redirects, and this URL is
@@ -5776,7 +5769,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                         string_address path = build_join(image, "/", names[at],
                                                          null);
 
-                        if (build_is_file(path) || build_is_directory(path) ||
+                        if (build_is_type(path, S_IFREG) || build_is_type(path, S_IFDIR) ||
                             access(path, 0) >= 0)
                                 continue;
 
@@ -6041,7 +6034,7 @@ static b32 build_local(string_address address_to profiles, positive count,
                 return_if(build_execute(address_of what), build_die("kernel build"));
         }
 
-        if (!build_is_file(kernel_image))
+        if (!build_is_type(kernel_image, S_IFREG))
                 return build_die(build_join("expected image '", kernel_image,
                                             "' was not produced", null));
 
@@ -7108,8 +7101,8 @@ static b32 build_boot(string_address image, bool console, string_address arch,
 */
 static fn build_is_safe()
 {
-        if (build_is_directory("src") && build_is_directory("kernel") &&
-            build_is_file("build.sh"))
+        if (build_is_type("src", S_IFDIR) && build_is_type("kernel", S_IFDIR) &&
+            build_is_type("build.sh", S_IFREG))
                 return;
 
         string_format(log_error, "ERROR: not in the repository root.\n");
@@ -7264,7 +7257,7 @@ b32 main()
                 string_address profile = build_join(build_setting_get("profile_root"),
                                                     "/", command, null);
 
-                if (build_is_file(profile))
+                if (build_is_type(profile, S_IFREG))
                         command = null;
         }
 
@@ -7512,7 +7505,7 @@ b32 main()
                         image = build_boot_setting("default_image",
                                                    target ? target : (string_address)"x64");
 
-                if (!build_is_file(image))
+                if (!build_is_type(image, S_IFREG))
                         return build_die(build_join("no image at ", image,
                                                     " -- build one first, or drop --boot",
                                                     null));
