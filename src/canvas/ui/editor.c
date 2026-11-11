@@ -30,7 +30,6 @@
 #define EDITOR_MAP_FROM (8u << 20)
 #define EDITOR_READ_MOST (64u << 20)
 #define EDITOR_PATH 512
-#define EDITOR_BAR UI_PAGE_FOOT // the status bar: the kit's status line band, logical pixels
 
 struct editor_tab
 {
@@ -56,6 +55,9 @@ static struct
         int width, height, shown;
         struct ui_findbar find; // the kit's find bar: its field, its mode (find, replace, go to a line) and its flags
         struct ui_control strip; // the file tabs, the kit's segmented tabs
+        struct ui_view view;     // the window as a view (editor_layout): the bands, the code view's box and the status bar
+        struct ui_rect tabs_box, find_box, text_box; // the device pixels the view gave them
+        char bar_text[256];      // the status bar's line at the left, which the view measures
         char status[160];
         struct ui_popup menu;
         struct ui_confirm confirm; // the kit's press again to confirm: Ctrl+W of a file with changes, Ctrl+S of one changed on disk
@@ -601,10 +603,11 @@ static b32 editor_tab_dirty(int at)
 static fn editor_tabs_layout(struct ui address_to ui)
 {
         struct ui_control address_to c = &editor.strip;
+        struct ui_rect address_to box = &editor.tabs_box;
 
         if (c->kind != UI_TABS)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = 0, c->y = 0, c->w = editor.width * 100 / ui->scale, c->h = UI_TABS_H;
+        c->x = box->x * 100 / ui->scale, c->y = box->y * 100 / ui->scale, c->w = box->w * 100 / ui->scale, c->h = UI_TABS_H;
         ui_tabs_fill(c, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
 }
 
@@ -669,62 +672,53 @@ static positive editor_status_text(char address_to text, positive room, struct d
         return at;
 }
 
+/*
+        The window as a view, laid out each draw and event: the tabs' band (none with one file), the find bar's (none while closed),
+        the code view below them, and the status bar at the foot. Its words are made first, so the view measures them.
+*/
+static fn editor_layout(void)
+{
+        struct editor_tab address_to tab = editor_now();
+
+        editor_status_text(editor.bar_text, sizeof(editor.bar_text), &tab->view.doc);
+        ui_view_begin(&editor.view, &editor.ui, editor.width, -editor.height);
+        ui_host(&editor.tabs_box, .h = UI_TABS_H, .hidden = editor.count <= 1);
+        ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
+        ui_host(&editor.text_box, .grow = 1);
+        ui_row(.class = "bar")
+        {
+                ui_text(editor.bar_text, .class = "status");
+                ui_host(null, .grow = 1);
+                if (tab->changed_on_disk)
+                        ui_text(WORDS(editor_changed_on_disk), .class = "warning");
+                if (editor.status[0])
+                        ui_text(editor.status, .class = "status");
+        }
+        ui_view_end(&editor.view);
+}
+
 static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
         struct editor_tab address_to tab = editor_now();
-        int bar = ui_px(ui, EDITOR_BAR), find = ui_findbar_band(ui, &editor.find), tabs = editor.count > 1 ? ui_px(ui, UI_TABS_H) : 0;
         unsigned int paper = ui_role(UI_SURFACE) & 0xffffffu;
 
         // ui_begin clears the window to the kit's surface (the editor is an opaque app), so the ground is not painted again here.
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
-        if (tabs)
+        editor_layout();
+        if (editor.count > 1)
         {
                 editor_tabs_layout(ui);
                 ui_control_draw(ui, &editor.strip);
         }
-        if (find)
+        if (editor.find.mode != UI_FINDBAR_CLOSED)
         {
                 const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
 
-                ui_findbar_draw(ui, &editor.find, tabs, editor.width, hints[editor.find.mode]);
+                ui_findbar_draw(ui, &editor.find, editor.find_box.y, editor.width, hints[editor.find.mode]);
         }
-        ui_text_draw(ui, &tab->view, 0, tabs + find, editor.width, editor.height - tabs - find - bar, paper);
-        // The status bar.
-        {
-                struct doc address_to doc = &tab->view.doc;
-                char text[256];
-                int y = editor.height - bar;
-
-                ui_fill(ui, 0, y, editor.width, bar, ui_role(UI_SURFACE_CONTAINER) | 0xff000000u);
-                editor_status_text(text, sizeof(text), doc);
-                ui_kit_text_flipped(ui, ui_px(ui, UI_INSET), ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM),
-                                    (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
-                if (tab->changed_on_disk || editor.status[0])
-                {
-                        int edge = editor.width - ui_px(ui, UI_INSET), baseline = ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);
-
-                        /*
-                                What the status says (a key's ask, a save's failure) is at the right end, and the warning of a file changed on
-                                disk beside it: neither hides the other, so a save that asks again or fails is said on a changed file too.
-                        */
-                        if (editor.status[0])
-                        {
-                                int width = ui_kit_measure(ui, (string_address)editor.status, UI_LABEL_MEDIUM);
-
-                                ui_kit_text_flipped(ui, edge - width, baseline, (string_address)editor.status, UI_LABEL_MEDIUM,
-                                                    ui_role(UI_ON_SURFACE_VARIANT), 0, 0, editor.width);
-                                edge -= width + ui_px(ui, UI_INSET);
-                        }
-                        if (tab->changed_on_disk)
-                        {
-                                int width = ui_kit_measure(ui, (string_address)WORDS(editor_changed_on_disk), UI_LABEL_MEDIUM);
-
-                                ui_kit_text_flipped(ui, edge - width, baseline, (string_address)WORDS(editor_changed_on_disk), UI_LABEL_MEDIUM,
-                                                    ui_role(UI_WARNING), 0, 0, editor.width);
-                        }
-                }
-        }
+        ui_text_draw(ui, &tab->view, editor.text_box.x, editor.text_box.y, editor.text_box.w, editor.text_box.h, paper);
+        ui_view_draw(ui, &editor.view, false);
         // A finger's selection: its handles and actions bar, over everything, the find bar's and then the code view's.
         ui_findbar_overlay(ui, &editor.find);
         ui_text_overlay(ui, &tab->view);
@@ -778,6 +772,7 @@ static b32 editor_event(const struct window_event address_to event)
              (event->type == WINDOW_EVENT_KEY && !ui_key_modifier(event->a) &&
               (editor_reload_key(event) ? EDITOR_RELOAD : ui_key_command(event)) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
+        editor_layout();
         if (editor_tabs_event(event))
                 return true;
         // What was typed since the file was read goes with the read: over unsaved changes the first press says so and the second reads.

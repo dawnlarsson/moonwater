@@ -8480,12 +8480,15 @@ static const struct ui_class ui_classes[] = {
         {"scroll", .scroll = 1, .shrink = 1},                                            // overflow: auto
         {"keys", .pad = {UI_PAD, UI_PAD, UI_PAD, UI_PAD}, .gap = UI_KEY_GAP, .grow = 1}, // the on-screen keyboard's rows, in from the margin, filling the window
         {"keyrow", .gap = UI_KEY_GAP, .grow = 1},                                        // one of them: its keys weighted by span, sharing the rows' height
+        {"bar", .h = UI_PAGE_FOOT, .pad = {UI_INSET, UI_INSET, 0, 0}, .gap = UI_INSET, .align = UI_CENTER, .fill = UI_ROLE(UI_SURFACE_CONTAINER)}, // a status bar at a window's foot: its words in a row
         {"middle", .justify = UI_CENTER},                                                // the children in the middle of the room along the main axis
         {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         // Text.
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE)},
         {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
+        {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)}, // a status bar's words
+        {"warning", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_WARNING)},           // a status bar's warning
         // Buttons: the size of an action, and the variants.
         {"action", .w = UI_BUTTONS_W, .h = UI_BUTTONS_H},
         {"plain", .variant = UI_ROLE(UI_BUTTON_DEFAULT)},
@@ -15564,7 +15567,7 @@ static p32 ui_key_command(const struct window_event address_to event)
 
 /*
         The find bar: the kit's field that finds, replaces every match, and goes to a line, and says so. It is a field in a band above
-        a code view (ui_findbar_band), with the flags that say how a query matches (case, whole words, a pattern: Alt+C, Alt+W, Alt+R
+        a code view (a band of UI_FINDBAR_H), with the flags that say how a query matches (case, whole words, a pattern: Alt+C, Alt+W, Alt+R
         while it has the keys). An app opens it (ui_findbar_command for the commands find, replace and go to a line), forwards each
         event to it (ui_findbar_event, which answers what the view must still have, and the bar's commands that are the app's), and
         shows what it said (the UI_FINDBAR_SAID_* codes, for the app's words). The app keeps the window, and its status words.
@@ -15605,12 +15608,6 @@ struct ui_findbar_said
 static fn ui_findbar_keys(struct ui_findbar address_to bar, struct ui_text address_to view, b32 window)
 {
         ui_text_focus_under(view, window, &bar->field);
-}
-
-// The band's height in device pixels, 0 while the bar is closed.
-static int ui_findbar_band(const struct ui address_to ui, const struct ui_findbar address_to bar)
-{
-        return bar->mode != UI_FINDBAR_CLOSED ? ui_px(ui, UI_FINDBAR_H) : 0;
 }
 
 // Opened for mode: its field emptied for a line, holding the view's selection for a find; the bar has the keys.
