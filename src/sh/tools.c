@@ -18448,15 +18448,6 @@ static bipolar ul_path_write(string_address path, address_any bytes,
              : (positive)wrote == length ? 0 : -ERROR_INVALID;
 }
 
-/* A usage error, as upstream spells it: the complaint and the try line.
-   A value that failed to parse is not one of these. */
-static COLD b32 ul_usage_error(string_address program, string_address message)
-{
-        return string_report(log_error, 1,
-                             "%s: %s\nTry '%s --help' for more information.\n",
-                             program, message, program);
-}
-
 static bool ul_meta(file_taking address_to taking, string_address syntax,
                     b32 address_to answer)
 {
@@ -19820,8 +19811,7 @@ static const argument_option ul_flock_options[] = {
 
 static COLD b32 ul_flock_usage()
 {
-        return string_report(log_error, 64,
-                             "flock: bad usage\n" TOOLS_TRY("flock"));
+        return file_usage((string_address) "flock", "bad usage", 64);
 }
 
 /*      Every occurrence of a valued option is checked as it is read, not
@@ -25567,7 +25557,7 @@ static b32 ul_partition_program(string_address program, b32 operation)
         positive count = (positive)program_argument_count();
         positive wanted = operation == UL_BLKPG_ADD ? 4
                           : operation == UL_BLKPG_DELETE ? 2 : 3;
-        return_if(count - taking.first != wanted, ul_usage_error(program, "not enough arguments"));
+        return_if(count - taking.first != wanted, file_usage(program, "not enough arguments", 1));
 
         string_address device = program_argument((b32)taking.first);
         positive partition;
@@ -25978,9 +25968,9 @@ static b32 util_linux_blockdev()
         positive count = (positive)program_argument_count();
         /* Nothing at all is not enough arguments; anything else that names
            no device is a device that was not named. */
-        return_if(count < 2, ul_usage_error("blockdev", "not enough arguments"));
+        return_if(count < 2, file_usage((string_address) "blockdev", "not enough arguments", 1));
         if (!report && taking.first == count)
-                return ul_usage_error("blockdev", "no device specified");
+                return file_usage((string_address) "blockdev", "no device specified", 1);
         tools_refuse(report && run.count, "blockdev", "--report cannot be combined with commands");
 
         b32 status = 0;
@@ -30055,7 +30045,7 @@ static b32 util_linux_ipcrm()
             one word it refuses before it reads anything at all. */
         if (count < 2)
         {
-                string_format(log_error, "ipcrm: bad usage\n" TOOLS_TRY("ipcrm"));
+                file_usage((string_address) "ipcrm", "bad usage", 1);
                 log_flush();
                 return 1;
         }

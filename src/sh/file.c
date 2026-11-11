@@ -5577,10 +5577,22 @@ static COLD b32 file_try_help(string_address program, b32 status)
                              "Try '%s --help' for more information.\n", program);
 }
 
+/*
+        The one plain complaint about a command line: "name: message" on
+        standard error, the try line after it, and the status back. A tool
+        that refuses its command line in one plain sentence (missing operand,
+        bad usage) says it here. Complaints that quote a word or name an
+        option keep their own text.
+*/
+static COLD b32 file_usage(string_address program, string_address message, b32 status)
+{
+        string_format(log_error, "%s: %s\n", program, message);
+        return file_try_help(program, status);
+}
+
 static COLD b32 file_need_operand(string_address program)
 {
-        string_format(log_error, "%s: missing operand\n", program);
-        return file_try_help(program, 1);
+        return file_usage(program, "missing operand", 1);
 }
 
 static COLD b32 file_need_operand_after(string_address program, string_address word)
@@ -5592,8 +5604,7 @@ static COLD b32 file_need_operand_after(string_address program, string_address w
 
 static COLD b32 file_need_file(string_address program, b32 status)
 {
-        string_format(log_error, "%s: missing file operand\n", program);
-        return file_try_help(program, status);
+        return file_usage(program, "missing file operand", status);
 }
 
 static COLD b32 file_need_destination(string_address program, string_address word,
@@ -25635,12 +25646,6 @@ static bool whereis_scan(positive want, string_address query, bool glob)
                           WHEREIS_WANT(WHEREIS_MANUAL) | \
                           WHEREIS_WANT(WHEREIS_SOURCE))
 
-static COLD b32 whereis_bad_usage()
-{
-        log_error("whereis: bad usage\n", 0);
-        return file_try_help((string_address) "whereis", 1);
-}
-
 static bool whereis_lookup(string_address name, positive want, bool glob,
                            bool unusual)
 {
@@ -25735,7 +25740,7 @@ static b32 file_whereis()
                         }
                         else if (option == 'B' || option == 'M' || option == 'S')
                         {
-                                return_if(word[at + 1], whereis_bad_usage());
+                                return_if(word[at + 1], file_usage((string_address) "whereis", "bad usage", 1));
 
                                 positive kind = option == 'B' ? WHEREIS_BINARY
                                                 : option == 'M' ? WHEREIS_MANUAL
@@ -25813,7 +25818,7 @@ static b32 file_whereis()
                                 return 0;
                         }
                         else
-                                return whereis_bad_usage();
+                                return file_usage((string_address) "whereis", "bad usage", 1);
 
                         //      A letter that ate words of its own ends the
                         //      cluster it was written in.
@@ -43631,6 +43636,13 @@ static b32 file_false()
         return 1;
 }
 
+/* sleep's intervals are read below, after every option has been: this is the
+   operand callback that lets the shared reader scan past them. */
+static fn file_sleep_interval(b32 index)
+{
+        (void)index;
+}
+
 static b32 file_sleep()
 {
         positive count = (positive)program_argument_count();
@@ -43639,46 +43651,19 @@ static b32 file_sleep()
 
         //      GNU's getopt reads every option before any interval is read,
         //      so a bad option is the error whatever interval came before it.
-        bool intervals_only = false;
+        //      sleep takes none, so the shared reader refuses each dashed word
+        //      it meets, and "--" closes the scan as it always did.
+        file_taking taking = {.program = (string_address) "sleep",
+                              .options = file_no_options,
+                              .operand = file_sleep_interval};
 
-        for (positive i = 1; i < count; i++)
-        {
-                string_address word = program_argument((b32)i);
-
-                //      Two dashes close the options: they are not an
-                //      interval themselves, and every word after them is
-                //      one however it begins.
-                if (!intervals_only && string_equals(word, "--"))
-                {
-                        intervals_only = true;
-                        continue;
-                }
-
-                // sleep takes no options, so a word that begins with a dash
-                // is one the option reader refuses rather than an interval.
-                if (!intervals_only && string_is(word, '-') && string_get(word + 1))
-                {
-                        //      Two dashes name the whole word, one names
-                        //      the letter, and either way the reference says
-                        //      where to look next.
-                        if (string_is(word + 1, '-'))
-                                string_format(log_error,
-                                    "sleep: unrecognized option '%s'\n", word);
-                        else
-                        {
-                                p8 named[2] = {string_get(word + 1), end};
-
-                                string_format(log_error,
-                                    "sleep: invalid option -- '%s'\n", named);
-                        }
-                        return file_try_help((string_address) "sleep", 1);
-                }
-        }
+        if (!file_take(address_of taking))
+                return 1;
 
         bool refused = false;
         positive total = 0;
+        bool intervals_only = false;
 
-        intervals_only = false;
         for (positive i = 1; i < count; i++)
         {
                 p64 wanted[2] = {0, 0};
@@ -50734,11 +50719,7 @@ static b32 file_cal()
         positive operands = file_operand_count;
         string_address word = operands ? file_operand_at(0) : null;
 
-        if (operands > 3)
-        {
-                log_error("cal: bad usage\n", 0);
-                return file_try_help((string_address) "cal", 1);
-        }
+        return_if(operands > 3, file_usage((string_address) "cal", "bad usage", 1));
 
         //      One word that is not a number is a moment, or else a month
         //      of this year; two or three are day, month and year.
