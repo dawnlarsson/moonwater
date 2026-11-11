@@ -4,6 +4,7 @@
                 link                    who this machine is linked with and
                                         what each may do
                 link pair [NAME]        a code, and wait for a machine to use it
+                link cancel             end every wait for a code
                 link NAME CODE          link to the machine called NAME
                 link NAME [COMMAND...]  a terminal on NAME, or one command
                 link push NAME FILE PATH   a file there, whole or not at all
@@ -16,6 +17,8 @@
                 link group ...          machines on one network that link
                                         themselves
                 link on | off           the listener, kept across boots
+                link doctor             the listener, port, addresses, route and
+                                        discovery: each pass or fail, and the fix
                 link transport [network|modem]   how machines reach each other
                 link modem key          the modem's key, made on first use, in hex
                 link modem send FILE    FILE over the sound card, to the receiver
@@ -128,6 +131,8 @@ static b32 link_status(void)
         positive state_length = 0;
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
         p8 key[48];
+        p8 word[16];
+        b32 on;
 
         //      A listener that is off, or older than this, left no state. One
         //      that was killed left its state behind, and it says nothing of
@@ -139,22 +144,25 @@ static b32 link_status(void)
             state_length != sizeof state)
                 memory_zero(address_of state, sizeof state);
 
-        {
-                p8 word[16];
-
-                host_read_word(LINK_SWITCH_PATH, word, sizeof word);
-                string_format(
-                        log, host_label "link %s%s, udp %p\n",
-                        owner > 0 ? "on" : "off",
-                        owner > 0 && string_equals((string_address)word, "on")
-                                ? ""
-                        : owner > 0 && !word[0] ? ", run by hand"
-                        : owner > 0             ? ", switched off but still running"
-                        : string_equals((string_address)word, "on")
-                                ? ", switched on but not running"
-                                : "",
-                        (positive)link_port());
-        }
+        //      The first line is the listener, and the switch and the process
+        //      are two things: each pairing of them says what is wrong and the
+        //      command that answers it.
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        on = string_equals((string_address)word, "on");
+        if (owner > 0 && on)
+                string_format(log, "link on, udp %p  next: moonwater link pair\n",
+                              (positive)link_port());
+        else if (owner > 0 && !word[0])
+                string_format(log, "link on, run by hand  next: moonwater link on, "
+                                   "to keep it across boots\n");
+        else if (owner > 0)
+                string_format(log, "link off, but still running  next: moonwater link off\n");
+        else if (on)
+                string_format(log, "link on, but not running  next: moonwater link on, "
+                                   "which says why it did not start\n");
+        else
+                string_format(log, "link off, udp %p  next: moonwater link on\n",
+                              (positive)link_port());
 
         if (link_identity(address_of me, false) >= 0)
         {
@@ -162,18 +170,20 @@ static b32 link_status(void)
 
                 link_key_text(me.public, key);
                 link_machine_name(own);
-                string_format(log, "  this machine  %s  %s\n",
+                string_format(log, "  this machine  %s  %s  next: moonwater link pair\n",
                               (string_address)own, (string_address)key);
                 crypto_forget(address_of me, sizeof me);
         }
         else
-                string_format(log, "  this machine  no key yet: moonwater link on\n");
+                string_format(log, "  this machine  no key yet  next: moonwater link on, "
+                                   "which makes one\n");
 
         //      The groups: which, what members get, and whether the secret
         //      sits in the machine script, where /dev/spark shows it to any
         //      user on the machine.
         if (!link_groups_for_change(address_of groups))
-                string_format(log, "  %s could not be read\n", LINK_GROUPS_PATH);
+                string_format(log, "  %s could not be read  next: ls -l %s\n",
+                              LINK_GROUPS_PATH, LINK_GROUPS_PATH);
         {
                 p8 script[16384];
                 bipolar script_length = file_slurp_regular_at(
@@ -196,12 +206,23 @@ static b32 link_status(void)
                                                    : 0;
 
                                 //      A code is not a group: what it linked
-                                //      is not said to be in one.
+                                //      is not said to be in one. A code that is
+                                //      still there once it has run out is one
+                                //      nothing has cleared: cancel clears it.
                                 if (!(groups.record[g].flags & LINK_GROUP_DONE))
-                                        string_format(log, "  a pairing code for %s is waiting, "
-                                                           "%p seconds left\n",
-                                                      (string_address)groups.record[g].namespace,
-                                                      (positive)left);
+                                {
+                                        if (left)
+                                                string_format(log, "  a pairing code for %s is "
+                                                                   "waiting, %p seconds left  "
+                                                                   "next: moonwater link cancel\n",
+                                                              (string_address)groups.record[g].namespace,
+                                                              (positive)left);
+                                        else
+                                                string_format(log, "  a pairing code for %s ran out "
+                                                                   "and was not cleared  next: "
+                                                                   "moonwater link cancel\n",
+                                                              (string_address)groups.record[g].namespace);
+                                }
                                 continue;
                         }
                         shown = link_script_names_secret(
@@ -216,9 +237,11 @@ static b32 link_status(void)
                         link_grants_text(groups.record[g].may, grants,
                                          sizeof grants);
                         string_format(log, "  group %s: machines on this network "
-                                           "link themselves, and may %s\n",
+                                           "link themselves, and may %s  next: "
+                                           "moonwater link group leave %s\n",
                                       (string_address)groups.record[g].namespace,
-                                      (string_address)grants);
+                                      (string_address)grants,
+                                      (string_address)groups.record[g].namespace);
                         if (shown)
                                 string_format(log,
                                               "    the machine script holds "
@@ -236,7 +259,8 @@ static b32 link_status(void)
         //      A file that is there and cannot be read is not an empty list:
         //      nobody linked is said only of one that is empty.
         if (!link_peers_for_change(address_of peers))
-                string_format(log, "  %s could not be read\n", LINK_PEERS_PATH);
+                string_format(log, "  %s could not be read  next: ls -l %s\n",
+                              LINK_PEERS_PATH, LINK_PEERS_PATH);
         else if (!peers.count)
                 string_format(log, "  nobody linked yet: moonwater link pair, "
                                    "and on the other machine moonwater link NAME CODE\n");
@@ -248,6 +272,7 @@ static b32 link_status(void)
                 p8 place[64];
                 p8 short_key[12];
                 link_seen_entry address_to seen = null;
+                b32 other = false;
 
                 link_key_text(peer->key, key);
                 memory_copy(short_key, key, 8);
@@ -274,12 +299,18 @@ static b32 link_status(void)
                 }
 
                 //      The listener's word on where it was last heard, over
-                //      the address it was paired with.
+                //      the address it was paired with. Another key heard at that
+                //      address is a machine that is not this one any more.
                 for (positive s_at = 0; s_at < state.seen_count &&
                                         s_at < LINK_PEERS_MAX;
                      s_at++)
+                {
                         if (crypto_same(state.seen[s_at].key, peer->key, 32))
                                 seen = state.seen + s_at;
+                        else if (peer->port && state.seen[s_at].port == peer->port &&
+                                 crypto_same(state.seen[s_at].address, peer->address, 16))
+                                other = true;
+                }
 
                 if (seen)
                 {
@@ -287,19 +318,44 @@ static b32 link_status(void)
 
                         link_ago(seen->seen, when);
                         link_place_text(seen->address, seen->port, place);
-                        string_format(log, "      heard %s from %s\n",
-                                      (string_address)when,
-                                      (string_address)place);
+                        if (!peer->may)
+                                string_format(log, "      heard %s from %s  next: "
+                                                   "moonwater link allow %s run\n",
+                                              (string_address)when,
+                                              (string_address)place,
+                                              (string_address)peer->name);
+                        else
+                                string_format(log, "      heard %s from %s  next: "
+                                                   "moonwater link %s\n",
+                                              (string_address)when,
+                                              (string_address)place,
+                                              (string_address)peer->name);
+                }
+                else if (owner <= 0)
+                        string_format(log, "      not heard: the listener is not running  "
+                                           "next: moonwater link on\n");
+                else if (other)
+                {
+                        link_place_text(peer->address, peer->port, place);
+                        string_format(log, "      its key does not match: %s answers with "
+                                           "another key  next: moonwater link remove %s, "
+                                           "then moonwater link pair\n",
+                                      (string_address)place,
+                                      (string_address)peer->name);
                 }
                 else if (peer->port)
                 {
                         link_place_text(peer->address, peer->port, place);
-                        string_format(log, "      at %s, not heard this boot\n",
+                        string_format(log, "      not heard at its last address %s this boot: "
+                                           "it may be off, or on another network  next: "
+                                           "moonwater link doctor\n",
                                       (string_address)place);
                 }
                 else
-                        string_format(log, "      no address; it can reach "
-                                           "this machine, not the other way\n");
+                        string_format(log, "      no address; it can reach this machine, not "
+                                           "the other way  next: moonwater link add %s KEY "
+                                           "HOST[:PORT]\n",
+                                      (string_address)peer->name);
         }
 
         positive shown = 0;
@@ -1135,12 +1191,30 @@ static p64 link_pair_seconds(void)
 
 /*      This machine's side of a code in the groups file, under the lock the
         listener takes for it: a code for this namespace made before is
-        replaced, and so is anything that has run out. Answers the mark the
-        machines it links will carry, or why not: -ENOSPC when the file holds
-        its eight groups, -ENODATA when it is there and cannot be read,
-        which leaves it as it is. */
+        replaced once it has run out, and while it still waits the new one is
+        refused with LINK_PAIR_WAITING, and made says when that one runs out.
+        Answers 0, or why not: -ENOSPC when the file holds its eight groups,
+        -ENODATA when it is there and cannot be read, which leaves it as it
+        is, and -EIO when it cannot be written. */
+#define LINK_PAIR_WAITING 1
+
+typedef struct
+{
+        p32 mark;
+        p64 expires; // seconds since boot
+} link_pair_made;
+
+static p8 link_pair_waiting(struct link_group_record address_to record,
+                            string_address namespace, p64 now)
+{
+        return (record->flags & LINK_GROUP_ONCE) &&
+               !(record->flags & LINK_GROUP_DONE) &&
+               record->expires > now &&
+               string_equals(record->namespace, namespace);
+}
+
 static bipolar link_pair_open(string_address namespace, p8 address_to code,
-                              string_address expect, p32 address_to mark)
+                              string_address expect, link_pair_made address_to made)
 {
         link_groups groups;
         struct link_group_record address_to record;
@@ -1163,6 +1237,12 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
         if (!link_groups_for_change(address_of groups))
                 return -ENODATA;
         for (positive at = 0; at < groups.count; at++)
+                if (link_pair_waiting(groups.record + at, namespace, now))
+                {
+                        made->expires = groups.record[at].expires;
+                        return LINK_PAIR_WAITING;
+                }
+        for (positive at = 0; at < groups.count; at++)
                 if (link_group_spent(groups.record + at, now) ||
                     ((groups.record[at].flags & LINK_GROUP_ONCE) &&
                      string_equals(groups.record[at].namespace, namespace)))
@@ -1181,7 +1261,8 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
                                         : 0;
                 answer = link_groups_save(address_of groups) < 0 ? -EIO : 0;
                 waterlink_group_keys_from(address_of keys, key, namespace);
-                address_to mark = keys.mark;
+                made->mark = keys.mark;
+                made->expires = record->expires;
                 crypto_forget(address_of keys, sizeof keys);
         }
         return answer;
@@ -1294,19 +1375,38 @@ static fn link_pair_release(void)
         link_pair_leash = -1;
 }
 
-//      Whether the listener has closed this namespace's code on a machine.
-static p8 link_pair_closed(string_address namespace)
+//      What the groups file says of this namespace's codes: closed when one was
+//      used and is kept its half minute, and live while one still waits. A
+//      file that cannot be read says nothing, so it is taken as live.
+static fn link_pair_look(string_address namespace, p8 address_to closed,
+                         p8 address_to live)
 {
         link_groups groups;
-        p8 closed = false;
 
-        link_groups_load(address_of groups);
-        for (positive at = 0; at < groups.count; at++)
-                if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
-                    string_equals(groups.record[at].namespace, namespace))
-                        closed = (groups.record[at].flags & LINK_GROUP_DONE) != 0;
+        address_to closed = false;
+        address_to live = false;
+        if (!link_groups_for_change(address_of groups))
+                address_to live = true;
+        else
+                for (positive at = 0; at < groups.count; at++)
+                        if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                            string_equals(groups.record[at].namespace, namespace))
+                        {
+                                if (groups.record[at].flags & LINK_GROUP_DONE)
+                                        address_to closed = true;
+                                else
+                                        address_to live = true;
+                        }
         crypto_forget(address_of groups, sizeof groups);
-        return closed;
+}
+
+/*      The countdown on a terminal, once a second: the line goes back to its
+        start and is written over, so the wait is one line that counts down. */
+static fn link_pair_show(p64 left)
+{
+        string_format(log, "\r" host_label "waiting for the other machine: %p "
+                           "seconds left   ", (positive)left);
+        log_flush();
 }
 
 /*      Until a machine carrying the mark is among the ones this machine
@@ -1315,14 +1415,22 @@ static p8 link_pair_closed(string_address namespace)
         The listener closes the code after it has written the machine, so the
         code is read first and the machines after: a closed code with no
         machine behind it is one used by a machine that was already linked,
-        which keeps what it had. */
-static b32 link_pair_wait(p32 mark, string_address namespace,
+        which keeps what it had.
+
+        The wait ends in one of three ways, and says which: linked (0),
+        expired (the code's five minutes ran out with nobody using it), or no
+        answer (stopped, cancelled with link cancel, or used by a machine that
+        was already linked). A code that a cancel removed is seen gone within a
+        quarter of a second; one that runs out is removed by the listener. */
+static b32 link_pair_wait(link_pair_made address_to made, string_address namespace,
                           link_before address_to before)
 {
-        p64 until = link_boot_seconds() + link_pair_seconds() + 2;
         bipolar signals = link_signals_open(false);
         b32 stopped = 0;
         p8 closed = false;
+        p8 live = true;
+        p8 tty = stream_is_terminal(1);
+        p64 shown = 0;
 
         scope_exit(if (signals >= 0) link_signals_close(signals));
         scope_exit(link_pair_release());
@@ -1331,12 +1439,15 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         {
                 link_peers peers;
                 timespec limit = {0, 250000000};
+                p64 now = link_boot_seconds();
 
-                closed = link_pair_closed(namespace);
+                link_pair_look(namespace, address_of closed, address_of live);
                 link_peers_load(address_of peers);
                 for (positive at = 0; at < peers.count; at++)
-                        if (peers.peer[at].group == mark)
+                        if (peers.peer[at].group == made->mark)
                         {
+                                if (tty && shown)
+                                        host_say(log, "\n");
                                 host_say(log, host_label "linked with %s: it and "
                                                          "this machine may each "
                                                          "use a terminal, "
@@ -1345,8 +1456,13 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
                                          (string_address)peers.peer[at].name);
                                 return 0;
                         }
-                if (closed || link_boot_seconds() >= until)
+                if (closed || !live || now >= made->expires)
                         break;
+                if (tty && now != shown)
+                {
+                        link_pair_show(made->expires - now);
+                        shown = now;
+                }
                 if (signals < 0)
                         host_pause(250000000);
                 else
@@ -1358,25 +1474,45 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
                 }
         }
 
+        if (tty && shown)
+                host_say(log, "\n");
         link_before_restore(before);
         if (closed)
-                return host_refuse("the machine that used the code was already "
-                                   "linked, and keeps what it may do: "
+                return host_refuse("no answer: a machine used the code, but it is "
+                                   "already linked, and keeps what it may do: "
                                    "moonwater link shows it\n");
-        link_pair_close(mark);
+        link_pair_close(made->mark);
         if (stopped)
-                return host_refuse("stopped, and the code no longer works\n");
-        return host_refuse("nobody used the code: both machines have to be on "
-                           "one network, and a code lasts five minutes\n");
+                return host_refuse("no answer: stopped, and the code no longer "
+                                   "works: moonwater link pair makes another\n");
+        if (!live && link_boot_seconds() < made->expires)
+                return host_refuse("no answer: moonwater link cancel ended the wait, "
+                                   "and the code no longer works\n");
+        return host_refuse("expired: nobody used the code in %p seconds, so the "
+                           "machines were not linked. Both need to be on one "
+                           "network, and the code typed as it was printed; "
+                           "moonwater link doctor says what this machine can "
+                           "reach\n",
+                           (positive)link_pair_seconds());
 }
 
 //      The code in the groups file and the listener on, or why not.
 static b32 link_pair_start(string_address namespace, p8 address_to code,
-                           string_address expect, p32 address_to mark,
+                           string_address expect, link_pair_made address_to made,
                            link_before address_to before)
 {
-        bipolar opened = link_pair_open(namespace, code, expect, mark);
+        bipolar opened = link_pair_open(namespace, code, expect, made);
 
+        if (opened == LINK_PAIR_WAITING)
+        {
+                p64 now = link_boot_seconds();
+                p64 left = made->expires > now ? made->expires - now : 0;
+
+                return host_refuse("a code for %s is already waiting, %p seconds "
+                                   "left: moonwater link cancel ends that wait, "
+                                   "then pair again\n",
+                                   namespace, (positive)left);
+        }
         if (opened == -ENOSPC)
                 return host_refuse("this machine is in 8 groups already\n");
         if (opened == -ENODATA)
@@ -1386,12 +1522,45 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
         link_before_take(before);
         if (!link_switch(true, false))
         {
-                link_pair_guard(address_to mark, before);
+                link_pair_guard(made->mark, before);
                 return 0;
         }
-        link_pair_close(address_to mark);
+        link_pair_close(made->mark);
         link_before_restore(before);
         return 1;
+}
+
+//      The symbols a code is typed as: all but the hyphens and spaces that may
+//      be put among them, which are not counted.
+static positive link_code_symbols(string_address text)
+{
+        positive used = 0;
+
+        for (positive at = 0; text[at]; at++)
+                if (text[at] != '-' && text[at] != ' ')
+                        used++;
+        return used;
+}
+
+/*      Whether this machine has a route to the discovery group. A datagram
+        socket connected to it sends nothing: the connect fails only when the
+        kernel has no route, which is the answer. */
+static p8 link_has_route(void)
+{
+        socket_address_internet to = {
+            .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
+            .host = network_order_32(WATERLINK_MDNS_GROUP)};
+        bipolar handle = link_datagram_socket(AF_INET);
+        p8 routed;
+
+        if (handle < 0)
+                return false;
+#if defined(MACOS)
+        to.length = sizeof to;
+#endif
+        routed = socket_connect((b32)handle, address_of to, sizeof to) >= 0;
+        socket_close((b32)handle);
+        return routed;
 }
 
 static b32 link_pair_here(string_address expect)
@@ -1399,9 +1568,9 @@ static b32 link_pair_here(string_address expect)
         p8 name[WATERLINK_NAME_MAX];
         p8 code[LINK_CODE_LENGTH + 1];
         p8 said[8];
-        p32 mark;
         b32 refused;
         p8 only[WATERLINK_NAME_MAX];
+        link_pair_made made;
         link_before before;
 
         //      Names are lowercase on both machines. One too long for a name
@@ -1429,21 +1598,30 @@ static b32 link_pair_here(string_address expect)
         return_if(!link_code_make(code), host_fail("randomness", -EIO));
 
         refused = link_pair_start((string_address)name, code, expect,
-                                  address_of mark, address_of before);
+                                  address_of made, address_of before);
         if (refused)
         {
                 crypto_forget(code, sizeof code);
                 return refused;
         }
 
+        //      The name the other machine is given is this machine's own, in
+        //      full, so it is typed as it is printed here.
         link_code_text(code, said);
-        host_say(log, host_label "%s %s: on the other machine, moonwater "
-                                 "link %s %s\n"
-                           host_label "waiting five minutes for it\n",
-                 (string_address)name, (string_address)said,
+        host_say(log, host_label "code %s; this machine is called %s\n",
+                 (string_address)said, (string_address)name);
+        if (expect)
+                host_say(log, host_label "only the machine called %s may use it\n",
+                         (string_address)expect);
+        host_say(log, host_label "on the other machine, run: moonwater link %s %s\n",
                  (string_address)name, (string_address)said);
+        host_say(log, host_label "waiting five minutes for it; the code runs out "
+                                 "after %p seconds, and moonwater link cancel ends "
+                                 "the wait\n",
+                 (positive)link_pair_seconds());
         crypto_forget(code, sizeof code);
-        return link_pair_wait(mark, (string_address)name, address_of before);
+        return link_pair_wait(address_of made, (string_address)name,
+                              address_of before);
 }
 
 static b32 link_pair_there(string_address typed_name, string_address typed)
@@ -1451,30 +1629,100 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
         p8 code[LINK_CODE_LENGTH + 1];
         p8 name[WATERLINK_NAME_MAX];
         p8 own[WATERLINK_NAME_MAX];
-        p32 mark;
+        p8 transport[16];
+        positive symbols = link_code_symbols(typed);
+        link_pair_made made;
         b32 refused;
         link_before before;
 
+        //      The name, the code and the route are judged here, before
+        //      anything goes on the air: a refusal that comes after the wait
+        //      says nothing of what was wrong with them.
+        if (string_length(typed_name) >= WATERLINK_NAME_MAX)
+                return host_refuse("unknown name: %s is not a machine name; "
+                                   "letters, digits, . - _, up to 31\n", typed_name);
         link_fold_name(typed_name, name);
+        if (!link_name_good((string_address)name))
+                return host_refuse("unknown name: %s is not a machine name; "
+                                   "letters, digits, . - _, up to 31, and not one "
+                                   "of the words link uses\n", typed_name);
         link_machine_name(own);
         if (string_equals((string_address)own, (string_address)name))
                 return host_refuse("%s is this machine's own name\n",
                                    (string_address)name);
-
+        if (symbols != LINK_CODE_LENGTH)
+                return host_refuse("wrong code length: %s has %p symbols, and a code "
+                                   "has %p, as moonwater link pair prints it: "
+                                   "abc-def\n",
+                                   typed, (positive)symbols,
+                                   (positive)LINK_CODE_LENGTH);
         if (!link_code_clean(typed, code))
-                return host_refuse("%s is not a code: six letters and digits, as "
-                                   "moonwater link pair prints them\n",
+                return host_refuse("code not accepted: %s has a character that no "
+                                   "code uses; a code is letters and digits, and "
+                                   "no u. Copy it again from moonwater link pair\n",
                                    typed);
+        host_read_word(LINK_TRANSPORT_PATH, transport, sizeof transport);
+        if (!string_equals((string_address)transport, "modem") && !link_has_route())
+                return host_refuse("peer not reachable: this machine has no route to "
+                                   "a network, so %s cannot be reached from here; "
+                                   "moonwater link doctor says why\n",
+                                   (string_address)name);
+
         refused = link_pair_start((string_address)name, code, null,
-                                  address_of mark, address_of before);
+                                  address_of made, address_of before);
         crypto_forget(code, sizeof code);
         if (refused)
                 return refused;
 
         host_say(log, host_label "looking for %s on this network, for five "
-                                 "minutes at most\n",
-                 (string_address)name);
-        return link_pair_wait(mark, (string_address)name, address_of before);
+                                 "minutes at most; the code runs out after %p "
+                                 "seconds\n",
+                 (string_address)name, (positive)link_pair_seconds());
+        return link_pair_wait(address_of made, (string_address)name,
+                              address_of before);
+}
+
+/*      The codes this machine has waiting, cleared: a pairing that is waiting
+        ends with no answer, and the switch goes back as it was, which the
+        waiting command does when it sees its code gone. A code that was taken
+        keeps its half minute, as the listener keeps it. */
+static b32 link_cancel(void)
+{
+        link_groups groups;
+        positive cleared = 0;
+        bipolar lock = link_peers_lock();
+
+        if (lock < 0)
+                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
+        if (!link_groups_for_change(address_of groups))
+        {
+                link_peers_unlock(lock);
+                return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
+        }
+        for (positive at = 0; at < groups.count;)
+                if ((groups.record[at].flags & LINK_GROUP_ONCE) &&
+                    !(groups.record[at].flags & LINK_GROUP_DONE))
+                {
+                        groups.record[at] = groups.record[--groups.count];
+                        cleared++;
+                }
+                else
+                        at++;
+        if (cleared && link_groups_save(address_of groups) < 0)
+        {
+                link_peers_unlock(lock);
+                crypto_forget(address_of groups, sizeof groups);
+                return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
+        }
+        link_peers_unlock(lock);
+        crypto_forget(address_of groups, sizeof groups);
+        if (!cleared)
+                host_say(log, host_label "no code is waiting\n");
+        else
+                host_say(log, host_label "%p code%s cleared: a wait for one ends with "
+                                         "no answer\n",
+                         (positive)cleared, cleared == 1 ? "" : "s");
+        return 0;
 }
 
 // Whether a name is a machine this one is linked with.
@@ -1484,6 +1732,190 @@ static p8 link_known(string_address name)
 
         link_peers_load(address_of peers);
         return link_peer_named(address_of peers, name) != null;
+}
+
+/*      link doctor's checks: read only. The listener's state and the port
+        are read; the addresses come from the same walk the network setup
+        uses; the route is a connect that sends nothing; discovery is one
+        multicast join on a socket closed again. No pairing request is sent. */
+static p8 link_doctor_list[96];
+static positive link_doctor_used;
+
+static fn link_doctor_add(p32 host)
+{
+        if ((host >> 24) == 127 || link_doctor_used + 20 >= sizeof link_doctor_list)
+                return;
+        if (link_doctor_used)
+                link_doctor_list[link_doctor_used++] = ' ';
+        link_doctor_used += host_into(link_doctor_list + link_doctor_used, host);
+        link_doctor_list[link_doctor_used] = 0;
+}
+
+#if !defined(MACOS)
+/* The netlink walk's callback: one IPv4 address of the dump. */
+static p8 link_doctor_address(netlink_header address_to header,
+                              address_any context)
+{
+        netlink_address address_to body =
+            netlink_message_body(header, sizeof(netlink_address));
+        positive size = 0;
+        p8 address_to host;
+
+        (void)context;
+        if (header->type != RTM_NEWADDR || !body)
+                return true;
+        host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
+                            address_of size);
+        if (body->family != AF_INET || !host || size < 4)
+                return true;
+        link_doctor_add(network_load_32(host));
+        return true;
+}
+
+static fn link_doctor_walk(void)
+{
+        bipolar handle = netlink_open_groups(0);
+
+        if (handle < 0)
+                return;
+        (void)netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                           AF_INET, link_doctor_address, null);
+        system_close((b32)handle);
+}
+#else
+static fn link_doctor_walk(void)
+{
+        struct ifaddrs *list = null;
+
+        if (getifaddrs(&list) < 0)
+                return;
+        for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
+        {
+                p8 address_to raw;
+
+                if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
+                        continue;
+                //      A sockaddr_in is sin_len, sin_family, sin_port, then the
+                //      address in network order at offset 4.
+                raw = (p8 address_to)(void address_to)entry->ifa_addr;
+                link_doctor_add(network_load_32(raw + 4));
+        }
+        freeifaddrs(list);
+}
+#endif
+
+/*      Whether a multicast join takes on this machine: the join discovery
+        makes, on a socket that is closed straight after. */
+static b32 link_doctor_multicast(void)
+{
+#if defined(MACOS)
+        link_ip_mreq join = {network_order_32(WATERLINK_MDNS_GROUP), 0};
+#else
+        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
+#endif
+        bipolar handle = link_datagram_socket(AF_INET);
+        bipolar joined;
+
+        if (handle < 0)
+                return false;
+        joined = link_option_set((b32)handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                                 address_of join, sizeof join);
+        socket_close((b32)handle);
+        return joined >= 0 || joined == -EADDRINUSE;
+}
+
+/*      Whether the port is free to take: a socket bound to it, closed again. */
+static b32 link_doctor_port_free(void)
+{
+        bipolar handle = link_socket_open(link_port(), true);
+
+        if (handle < 0)
+                return false;
+        socket_close((b32)handle);
+        return true;
+}
+
+static b32 link_doctor(void)
+{
+        p8 word[16];
+        bipolar owner = host_lock_owner(LINK_LOCK_PATH);
+        b32 on;
+        positive failed = 0;
+        positive port = (positive)link_port();
+
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        on = string_equals((string_address)word, "on");
+
+        if (owner > 0)
+                string_format(log, "  pass  listener: running\n");
+        else if (on)
+        {
+                failed++;
+                string_format(log, "  fail  listener: switched on, but not running\n"
+                                   "        fix: moonwater link on, which says why it "
+                                   "did not start\n");
+        }
+        else
+        {
+                failed++;
+                string_format(log, "  fail  listener: off\n"
+                                   "        fix: moonwater link on\n");
+        }
+
+        if (owner > 0)
+                string_format(log, "  pass  udp %p: the listener has it\n", port);
+        else if (link_doctor_port_free())
+                string_format(log, "  pass  udp %p: free for the listener\n", port);
+        else
+        {
+                failed++;
+                string_format(log, "  fail  udp %p: another program has it\n"
+                                   "        fix: moonwater link port N, for a N that "
+                                   "is free, then moonwater link on\n",
+                              port);
+        }
+
+        link_doctor_used = 0;
+        link_doctor_list[0] = 0;
+        link_doctor_walk();
+        if (link_doctor_used)
+                string_format(log, "  pass  addresses: %s\n",
+                              (string_address)link_doctor_list);
+        else
+        {
+                failed++;
+                string_format(log, "  fail  addresses: none but loopback\n"
+                                   "        fix: join a network (moonwater wifi, or the "
+                                   "cable), then moonwater link doctor\n");
+        }
+
+        if (link_has_route())
+                string_format(log, "  pass  route: this machine has a route to a network\n");
+        else
+        {
+                failed++;
+                string_format(log, "  fail  route: no route to a network\n"
+                                   "        fix: join a network (moonwater wifi, or the "
+                                   "cable), then moonwater link doctor\n");
+        }
+
+        if (link_doctor_multicast())
+                string_format(log, "  pass  discovery: multicast works, so machines "
+                                   "find each other with no address\n");
+        else
+        {
+                failed++;
+                string_format(log, "  fail  discovery: multicast is refused here\n"
+                                   "        fix: moonwater link add NAME KEY HOST[:PORT], "
+                                   "with the other machine's address; that needs no "
+                                   "discovery\n");
+        }
+
+        if (failed)
+                return host_refuse("%p of the five checks fail; each fix is above\n",
+                                   (positive)failed);
+        host_say(log, host_label "all five checks pass\n");
+        return 0;
 }
 
 /*
@@ -1675,6 +2107,7 @@ static const struct
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
     {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
+    {"cancel", 3, 3}, {"doctor", 3, 3},
 };
 
 //      The code as it is printed, abc-def: a word of six letters is as likely
@@ -1750,6 +2183,10 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 return link_serve(count == 4 ? arguments[3] : null);
         if (string_equals(verb, "pair"))
                 return link_pair_here(count == 4 ? arguments[3] : null);
+        if (string_equals(verb, "cancel"))
+                return link_cancel();
+        if (string_equals(verb, "doctor"))
+                return link_doctor();
 
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.
@@ -1826,7 +2263,11 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         //      A code after a name pairs, linked or not: a code is never a
         //      command, and the Settings pairing field sends NAME CODE for any
         //      name, so a linked name would otherwise run the code as a command.
-        if (count == 4 && link_code_shaped(arguments[3]))
+        //      A word with a hyphen after a name that is not linked is a code
+        //      that was meant: link_pair_there says what is wrong with it, and
+        //      nothing goes on the air.
+        if (count == 4 && (link_code_shaped(arguments[3]) ||
+                           (!link_known(verb) && string_first_of(arguments[3], '-'))))
                 return link_pair_there(verb, arguments[3]);
         if (link_known(verb))
                 return link_client_run(verb,
@@ -1849,7 +2290,8 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 static b32 link_main(string_address address_to arguments, positive count)
 {
         static const string_address changes[] = {"on",  "off",    "port", "pair", "add",
-                                                 "remove", "allow", "deny", "group"};
+                                                 "remove", "allow", "deny", "group",
+                                                 "cancel"};
         string_address verb = count > 2 ? arguments[2] : null;
         positive previous[4];
         p8 ignored = false;
