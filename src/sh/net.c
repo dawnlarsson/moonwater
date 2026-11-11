@@ -2882,17 +2882,6 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         such file, and the write is refused as the others would be.
 */
 #if MOONWATER_STRICT_NET >= STRICT_SAFE
-static COLD fn net_sysctl(string_address path, string_address value)
-{
-        bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
-
-        if (handle < 0)
-                return;
-        system_write_all((positive)handle, (p8 address_to)value,
-                         string_length(value));
-        system_close((positive)handle);
-}
-
 //      "directory/name/leaf" into `to`, or the empty path when it would not
 //      fit: the open of that path then fails, and nothing is written.
 static COLD fn net_sysctl_path(p8 address_to to, positive size,
@@ -2934,7 +2923,7 @@ static COLD fn net_sysctl_family(string_address directory, string_address leaf,
         for (positive at = 0; wide[at]; at++)
         {
                 net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
-                net_sysctl((string_address)path, value);
+                system_sysctl((string_address)path, value);
         }
         if (each)
         {
@@ -2960,7 +2949,7 @@ static COLD fn net_sysctl_family(string_address directory, string_address leaf,
                                 continue;
                         net_sysctl_path(path, sizeof path, directory, name,
                                         leaf);
-                        net_sysctl((string_address)path, value);
+                        system_sysctl((string_address)path, value);
                 }
                 system_close((positive)handle);
         }
@@ -2990,10 +2979,10 @@ static COLD fn net_kernel_defaults(void)
         for (positive at = 0; quiet_v6[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
                                   "0\n", true);
-        net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
-        net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
-        net_sysctl("/proc/sys/net/ipv4/moonwater_silent", "1\n");
+        system_sysctl("/proc/sys/net/ipv4/moonwater_silent", "1\n");
 #endif
 }
 #endif

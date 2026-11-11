@@ -378,7 +378,7 @@ static fn link_dev_fd()
         desktop's max_map_count is written below, on every tier that is not
         hardened or locked, reference included.
 */
-#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || MOONWATER_STRICT_NET >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
 static COLD fn system_sysctl(string_address path, string_address value)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);

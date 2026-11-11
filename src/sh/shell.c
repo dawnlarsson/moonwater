@@ -855,6 +855,10 @@ bool exec_function_environment_fill(string_address address_to environment,
                                     positive count);
 fn exec_function_import_environment(string_address address_to environment);
 static fn shell_spawn_device_disable();
+#if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || MOONWATER_STRICT_NET >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
+/* system.c's sysctl writer, which net.c calls as well: net.c is included before system.c. */
+static COLD fn system_sysctl(string_address path, string_address value);
+#endif
 
 /* Nested-command utilities are included before the policy engine that owns
    their final exec decision.  Declare the shared handoff here so every

@@ -43644,8 +43644,9 @@ def harness_net_sysctl(argv):
     container's veth) left the later ones on the kernel's own value, router
     advertisements and SLAAC on, which is what the default exists to refuse.
 
-    net_sysctl, net_sysctl_path and net_sysctl_family are cut out of
-    src/sh/net.c with file_directory_next from src/sh/file.c, and run over a
+    system_sysctl is cut out of src/sh/system.c, net_sysctl_path is cut out
+    of src/sh/net.c with file_directory_next from src/sh/file.c, and
+    net_sysctl_family is the parent's walk, run over a
     scratch tree of seventy interface directories beside all and default,
     each holding the leaf as the kernel's files do. Every leaf has to say
     what was asked; a name that starts with a dot and a name too long for
@@ -43662,13 +43663,16 @@ def harness_net_sysctl(argv):
         print("net sysctl: NOT RUN -- the fixture reads directories with Linux's getdents64")
         return 0
     net = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    system = (HARNESS_ROOT / "src/sh/system.c").read_text()
     files = (HARNESS_ROOT / "src/sh/file.c").read_text()
     try:
-        walk = src_slice(net, "static COLD fn net_sysctl(string_address path, string_address value)",
+        writer = src_slice(system, "static COLD fn system_sysctl(string_address path, string_address value)",
+                           "#endif", "net sysctl")
+        walk = src_slice(net, "static COLD fn net_sysctl_path(",
                          "static COLD fn net_kernel_defaults(void)", "net sysctl")
         listing = src_slice(files, "static inline struct linux_dirent64 address_to file_directory_next(",
                             "struct linux_dirent64 address_to file_walk_next(", "net sysctl")
-        head = walk[:walk.index("static COLD fn net_sysctl_family(")]
+        head = writer + walk[:walk.index("static COLD fn net_sysctl_family(")]
     except ValueError as error:
         print("  FAIL net sysctl lift: " + str(error))
         write_tally("net-sysctl", 0, 1)
@@ -43683,7 +43687,7 @@ static COLD fn net_sysctl_family(string_address directory, string_address leaf,
         for (positive at = 0; wide[at]; at++)
         {
                 net_sysctl_path(path, sizeof path, directory, wide[at], leaf);
-                net_sysctl((string_address)path, value);
+                system_sysctl((string_address)path, value);
         }
         if (each)
         {
@@ -43710,7 +43714,7 @@ static COLD fn net_sysctl_family(string_address directory, string_address leaf,
                         {
                                 net_sysctl_path(path, sizeof path, directory,
                                                 name, leaf);
-                                net_sysctl((string_address)path, value);
+                                system_sysctl((string_address)path, value);
                         }
                         at += length;
                 }

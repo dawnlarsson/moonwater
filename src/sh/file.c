@@ -22938,30 +22938,14 @@ static fn chmod_tree_enter(address_any context, address_any node_address,
         }
 }
 
-static bool chmod_tree_sink(address_any context, address_any node_address,
-                            address_any data, positive length, bool finished)
-{
-        p8 address_to bytes = data;
-        positive at = 0;
-
-        (void)context;
-        if (finished)
-        {
-                memory_give(node_address);
-                return true;
-        }
-
-        while (at < length)
-        {
-                chmod_outcome outcome;
-
-                memory_copy(address_of outcome, bytes + at, sizeof(outcome));
-                chmod_report((string_address)bytes + at + sizeof(outcome),
-                             address_of outcome);
-                at += sizeof(outcome) + outcome.path_bytes;
-        }
-        return true;
-}
+//      Which outcome walk a job's records belong to. The sink is shared by
+//      chmod -R and chown -R; the context a walk hands parallel_tree points at
+//      one of these, and says which struct and report the records are read as.
+typedef enum { OUTCOME_CHMOD, OUTCOME_CHOWN } outcome_walk;
+static outcome_walk outcome_walk_chmod = OUTCOME_CHMOD;
+static outcome_walk outcome_walk_chown = OUTCOME_CHOWN;
+static bool outcome_tree_sink(address_any context, address_any node_address,
+                              address_any data, positive length, bool finished);
 
 //      One operand of chmod -R: the operand itself on this thread, as the
 //      serial walk visits it, and everything under it on the pool.
@@ -23015,7 +22999,8 @@ static fn chmod_tree(string_address path)
             (top->expected = facts,
              top->trusted = (opened.owner == file_change_user || opened.owner == 0) &&
                             !(opened.mode & 0022),
-             !parallel_tree(chmod_tree_enter, null, chmod_tree_sink, null, handle, top,
+             !parallel_tree(chmod_tree_enter, null, outcome_tree_sink,
+                            address_of outcome_walk_chmod, handle, top,
                             O_NOFOLLOW)))
         {
                 log_error("chmod: out of memory while walking the tree\n", 0);
@@ -23593,6 +23578,45 @@ static fn chown_one(bipolar directory, string_address name, string_address shown
         read; where its bytes land is what the output shows.
 */
 
+//      The sink of both outcome walks: each record a job wrote is an outcome,
+//      then the path it is about, and is reported as its walk reports it.
+static bool outcome_tree_sink(address_any context, address_any node_address,
+                              address_any data, positive length, bool finished)
+{
+        outcome_walk address_to walk = context;
+        p8 address_to bytes = data;
+        positive at = 0;
+
+        if (finished)
+        {
+                memory_give(node_address);
+                return true;
+        }
+
+        while (at < length)
+        {
+                if (*walk == OUTCOME_CHMOD)
+                {
+                        chmod_outcome outcome;
+
+                        memory_copy(address_of outcome, bytes + at, sizeof(outcome));
+                        chmod_report((string_address)bytes + at + sizeof(outcome),
+                                     address_of outcome);
+                        at += sizeof(outcome) + outcome.path_bytes;
+                }
+                else
+                {
+                        chown_outcome outcome;
+
+                        memory_copy(address_of outcome, bytes + at, sizeof(outcome));
+                        chown_report((string_address)bytes + at + sizeof(outcome),
+                                     address_of outcome);
+                        at += sizeof(outcome) + outcome.path_bytes;
+                }
+        }
+        return true;
+}
+
 //      An outcome and the whole path it is about: head, then name when
 //      there is one, written straight into the output.
 static bool chown_tree_put(parallel_output address_to output,
@@ -23795,31 +23819,6 @@ static fn chown_tree_enter(address_any context, address_any node_address,
         }
 }
 
-static bool chown_tree_sink(address_any context, address_any node_address,
-                            address_any data, positive length, bool finished)
-{
-        p8 address_to bytes = data;
-        positive at = 0;
-
-        (void)context;
-        if (finished)
-        {
-                memory_give(node_address);
-                return true;
-        }
-
-        while (at < length)
-        {
-                chown_outcome outcome;
-
-                memory_copy(address_of outcome, bytes + at, sizeof(outcome));
-                chown_report((string_address)bytes + at + sizeof(outcome),
-                             address_of outcome);
-                at += sizeof(outcome) + outcome.path_bytes;
-        }
-        return true;
-}
-
 // Whether the walk follows the links it meets: -L, below STRICT_TIGHT.
 static bool chown_tree_follows(void)
 {
@@ -23890,7 +23889,8 @@ static fn chown_tree(string_address path)
                     (top->expected = facts,
                      top->trusted = (opened.owner == file_change_user || opened.owner == 0) &&
                                     !(opened.mode & 0022),
-                     !parallel_tree(chown_tree_enter, null, chown_tree_sink, null, handle, top,
+                     !parallel_tree(chown_tree_enter, null, outcome_tree_sink,
+                                    address_of outcome_walk_chown, handle, top,
                                     chown_tree_follows() ? 0 : O_NOFOLLOW)))
                 {
                         string_format(log_error, "%s: out of memory while walking the tree\n",
