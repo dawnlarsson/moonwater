@@ -252,9 +252,11 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         }
         {
                 positive room = 0;
-                b32 failed = false;
+                // A regular file past the read cap is refused, not cut to it: a save would write the cut bytes over the rest of the file.
+                // (/proc's files say nothing of their size, so they are read up to the cap as they always were.)
+                b32 failed = (p64)facts.st_size > EDITOR_READ_MOST;
 
-                while (tab->length < EDITOR_READ_MOST)
+                while (!failed && tab->length < EDITOR_READ_MOST)
                 {
                         if (!array_store_reserve(tab->bytes, room, tab->length, tab->length + 65536, 65536))
                         {
