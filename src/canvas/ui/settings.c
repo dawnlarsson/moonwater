@@ -1921,15 +1921,19 @@ static fn settings_rebuild(void)
                         settings.list.id[count++] = (unsigned short)row;
                         count = settings_sub_rows((int)row, count);
                 }
-        // The rows of a list come after, each in the group of its feed.
+        // The rows of a list come after, each in the group of its feed: the group is the list's, so it is found once for the list.
         for (int list = 0; list < SETTINGS_LISTS; list++)
+        {
+                int group = settings_group_of((int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS);
+
                 for (int at = 0; at < settings.item_count[list]; at++)
                 {
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
-                        if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches(row) : settings_group_of(row) == settings.page.chosen))
+                        if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches(row) : group == settings.page.chosen))
                                 settings.list.id[count++] = (unsigned short)row;
                 }
+        }
         settings.list.count = count;
         // A row typed in that is no longer listed (the group changed under it, or a window asked for another page) is not typed in any more:
         // its field closes, so the keys do not go on into a field nobody sees.
