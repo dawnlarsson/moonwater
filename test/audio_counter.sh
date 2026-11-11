@@ -6,6 +6,7 @@
 set -u
 bin=$1
 d=$2
+[ -n "$d" ] || { echo "usage: sh test/audio_counter.sh BIN DIR" >&2; exit 2; }
 me=$(cd "$(dirname "$0")" && pwd)/audio_counter.py
 status=0
 

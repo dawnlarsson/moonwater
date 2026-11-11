@@ -27,7 +27,8 @@ verdict()
         fi
 }
 
-rm -rf "$d"
+[ -n "$d" ] || { echo "usage: sh test/audio_rates.sh BIN DIR CARD" >&2; exit 2; }
+rm -rf -- "$d"
 mkdir -p "$d/settings" || exit 1
 echo 100 > "$d/settings/audio.volume"
 echo off > "$d/settings/audio.mute"

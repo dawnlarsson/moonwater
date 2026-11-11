@@ -8,12 +8,13 @@ bin=$1
 d=$2
 card=$3
 status=0
+[ -n "$d" ] || { echo "usage: sh test/audio_load.sh BIN DIR CARD" >&2; exit 2; }
 sock=$(mktemp -u /tmp/mw-load.XXXXXX)
 hogs=$(nproc)
 hogs=$((hogs - 4))
 [ "$hogs" -ge 1 ] || hogs=1
 
-rm -rf "$d"
+rm -rf -- "$d"
 mkdir -p "$d/settings" || exit 1
 echo 0 > "$d/settings/audio.volume"
 echo off > "$d/settings/audio.mute"
@@ -30,6 +31,11 @@ PY
 
 $bin $card -S "$sock" -C "$d/settings" -P "$d/state" > "$d/log" 2>&1 &
 server=$!
+# The CPU hogs are background jobs, which ignore INT in a script that is not interactive: an interrupted run would leave them spinning.
+# Whatever ends the script takes the server and the hogs with it (only the pids this script started).
+busy= busy_loops=
+trap 'kill -TERM $server $busy $busy_loops 2> /dev/null; rm -f "$sock"' EXIT
+trap 'exit 130' INT TERM
 for _ in 1 2 3 4 5 6 7 8 9 10
 do
         [ -S "$sock" ] && break
