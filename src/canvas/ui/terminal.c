@@ -3688,10 +3688,9 @@ static void terminal_leave(b32 show)
                 system_close(terminal.master);
 
         stays = !terminal.reading && term_finish(terminal.child, terminal.master, terminal.hung, terminal.oom_kills);
-        // term_finish closed the pty. A window that stays still calls the pty on a resize or a zoom, and a number that
-        // was closed may by then be another terminal's pty in this process: none is named, so every call fails.
-        if (!terminal.reading)
-                terminal.master = (b32)-1;
+        // The pty or the log is closed, and its number is named no more: a resize or a zoom after this still calls the far
+        // end, and a number that was closed may by then be another file or another terminal's pty in this process.
+        terminal.master = (b32)-1;
 
         // A program that was asked for ends in a window that waits for a key, unless the X sent the end.
         if (!terminal.reading && term_program_count && !terminal.hung)
