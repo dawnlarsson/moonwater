@@ -182,8 +182,7 @@ static b32 link_status(void)
         //      sits in the machine script, where /dev/spark shows it to any
         //      user on the machine.
         if (!link_groups_for_show(address_of groups))
-                string_format(log, "  %s could not be read  next: ls -l %s
-",
+                string_format(log, "  %s could not be read  next: ls -l %s\n",
                               LINK_GROUPS_PATH, LINK_GROUPS_PATH);
         {
                 p8 script[16384];
