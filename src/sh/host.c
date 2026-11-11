@@ -22694,12 +22694,12 @@ static fn host_debug_body(const struct windows address_to table, unsigned int ro
         unsigned int state = table->body_state[row] < 6 ? table->body_state[row] : 0, off = table->scroll_off;
 
         host_say(log, "                  scroll body %s, at %b px, drawn at %b px, %b px a second; natural direction %s, momentum %s, "
-                      "rubber band %s, speed %s\n",
+                      "rubber band %s, speed %b percent\n",
                  states[state], (bipolar)table->body_raw[row], (bipolar)table->body_drawn[row], (bipolar)table->body_speed[row],
                  off & WINDOW_SCROLL_FLIP ? (string_address) "on" : (string_address) "off",
                  off & WINDOW_SCROLL_STOPS ? (string_address) "off" : (string_address) "on",
                  off & WINDOW_SCROLL_STILL ? (string_address) "off" : (string_address) "on",
-                 table->scroll_speed == 1 ? (string_address) "slow" : table->scroll_speed == 2 ? (string_address) "fast" : (string_address) "normal");
+                 (bipolar)(table->scroll_speed ? table->scroll_speed : 100));
 }
 
 /*

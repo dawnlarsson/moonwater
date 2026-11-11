@@ -404,11 +404,14 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_NATURAL_PATH, .standard = "off", .need = "how Canvas draws",
                       .usage = "canvas scroll natural [on|off]",
                       .help = "a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]"),
-    SETTING_PLAIN_ROW(null, "Scroll speed", SETTINGS_CHOICE, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "normal", .reset = "normal",
-                      .need = "how Canvas draws", .refusal = "trackpad speed is slow, normal or fast, not %s\n",
-                      .usage = "canvas trackpad speed [slow|normal|fast]",
-                      .help = "how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]"),
+    //  A percent of the standard distance, 25 to 400: slow, normal and fast are the words of 60, 100 and 160 (setting_parse keeps
+    //  them as the number), so a file that holds a word, as the row once kept, is read as its number.
+    SETTING_PLAIN_ROW(null, "Scroll speed", SETTINGS_SLIDER, 0, ("canvas", "trackpad", "speed"), "speed ", "slow normal fast",
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TRACKPAD_SPEED_PATH, .standard = "100",
+                      .unit = "percent", .low = 25, .high = 400, .need = "how Canvas draws",
+                      .refusal = "trackpad speed is a number from 25 to 400 percent, slow, normal, fast or default, not %s\n",
+                      .usage = "canvas trackpad speed [PERCENT|slow|normal|fast|default]",
+                      .help = "how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]"),
     SETTING_PLAIN_ROW(null, "Momentum", SETTINGS_SWITCH, 0, ("canvas", "scroll", "momentum"), "momentum ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SCROLL_MOMENTUM_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas scroll momentum [on|off]",
@@ -793,6 +796,15 @@ static bool setting_parse(const struct settings_row address_to row, string_addre
                 return true;
         }
         place = setting_place(words, word);
+        // The words of a percent row (slow normal fast, the Scroll speed row's) stand for a number each and are kept as it.
+        if (row->type == SETTING_NUMBER && place >= 0 && place < 3 && setting_percent(row))
+        {
+                static const long preset[3] = {60, 100, 160};
+
+                positive_into_string((p8 address_to)kept, (positive)preset[place]);
+                address_to value = preset[place];
+                return true;
+        }
         if (row->type == SETTING_NUMBER && place < 0)
         {
                 long number;

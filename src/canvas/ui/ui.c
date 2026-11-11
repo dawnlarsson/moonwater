@@ -2292,7 +2292,7 @@ static struct ui_kit
         unsigned int mode, accent, motion; // UI_THEME_LIGHT or _DARK, 0xrrggbb, 0 full or 1 reduced
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
         unsigned int scroll_off;           // the scroll body's switches (WINDOW_SCROLL_FLIP, _STOPS, _STILL; 0 the standard), as the table keeps them
-        unsigned int scroll_speed;         // the Scroll speed row, as the table keeps it: 0 normal, 1 slow, 2 fast (ui_wheel_percent)
+        unsigned int scroll_speed;         // the Scroll speed row, as the table keeps it: a percent from 25 to 400, 0 for 100 (ui_wheel_percent)
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
         unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
@@ -6981,10 +6981,10 @@ static void ui_scroll_release(struct ui_scroll address_to s, b32 lifted)
 */
 #define UI_WHEEL_TENTHS 25
 
-// The Scroll speed row (slow, normal, fast) as the percent of a stepped notch it moves; a precise turn's is the compositor's (compositor_pad_pct)
+// The Scroll speed row (25 to 400 percent) as the percent of a stepped notch it moves; a precise turn's is the compositor's (compositor_speed)
 static b64 ui_wheel_percent(void)
 {
-        return ui_kit.scroll_speed == 1 ? 60 : ui_kit.scroll_speed == 2 ? 160 : 100;
+        return ui_kit.scroll_speed < 25 || ui_kit.scroll_speed > 400 ? 100 : ui_kit.scroll_speed;
 }
 
 static b64 ui_wheel_notch(const struct ui address_to ui, const struct ui_scroll address_to s, unsigned int flags)

@@ -903,8 +903,8 @@ struct windows
         unsigned int theme, accent, motion, themed;
         unsigned int wheel_off;
         // The compositor's: the scroll body's switches, `moonwater canvas scroll` and `canvas trackpad speed` as they are kept. scroll_off
-        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS and WINDOW_SCROLL_STILL (0 is the standard); scroll_speed is the trackpad's speed,
-        // 0 normal, 1 slow, 2 fast. A change counts themed up, as a theme's does.
+        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS and WINDOW_SCROLL_STILL (0 is the standard); scroll_speed is the trackpad's speed
+        // in percent, 25 to 400 (0 is 100). A change counts themed up, as a theme's does.
         unsigned int scroll_off, scroll_speed;
         unsigned int caret_speed, caret_thick;
         // The compositor's: the language the windows Canvas draws itself speak, `moonwater language` as /root/language keeps it,

@@ -82,7 +82,7 @@ moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the 
 moonwater canvas scroll momentum [on|off]  a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]
 moonwater canvas scroll natural [on|off]  a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]
 moonwater canvas scroll rubber [on|off]  past the top or the bottom the content stretches and springs back; off, it stops at the end [on]
-moonwater canvas trackpad speed [slow|normal|fast]  how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]
+moonwater canvas trackpad speed [PERCENT|slow|normal|fast|default]  how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]
 
 
 # Sound

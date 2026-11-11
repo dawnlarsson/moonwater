@@ -138899,8 +138899,8 @@ static fn check_settings(string_address regular, string_address bold)
 "  canvas scroll momentum [on|off]   a drag or a trackpad hand carries on past its release and slows; off, the content stops where the fingers leave it, for the guest only: momentum from a patched host is not stopped (no phase signal yet) [on]\n"
 "  canvas scroll natural [on|off]    a wheel and a trackpad move the content with the fingers, as on a touch screen; off, the other way, as a wheel mouse does [off]\n"
 "  canvas scroll rubber [on|off]     past the top or the bottom the content stretches and springs back; off, it stops at the end [on]\n"
-"  canvas trackpad speed [slow|normal|fast]\n"
-"                                    how far a wheel notch and a trackpad scroll move the content: a notch is two and a half rows, a stream notch of a trackpad 8 px at normal and more as its notches come faster; slow and fast scale both [normal]\n"
+"  canvas trackpad speed [PERCENT|slow|normal|fast|default]\n"
+"                                    how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]\n"
 "\n"
 "\n"
 "Sound\n"
@@ -152528,15 +152528,17 @@ static fn check_trackpad_speed(void)
         memory_zero(&compositor, sizeof(compositor));
         for (unsigned int speed = 0; speed < 3; speed++)
         {
-                compositor.trackpad_speed = speed;
+                compositor.trackpad_speed = speed == 0 ? 100 : speed == 1 ? 60 : 160;
                 pads[speed] = pad_swipe_sum();
                 compositor.wheel_rest[0][0] = 0;
                 stream[speed] = (long)compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0);
         }
         ok = pads[0] == 480 && pads[1] == 280 && pads[2] == 760 && stream[0] == 24 && stream[1] == 14 && stream[2] == 38;
-        check("trackpad speed: normal is 480 of 120ths for 40 mm and 24 a stream notch at rest; slow 280 and 14 (0.6 x 8 px); fast 760 and 38 (1.6 x)", ok);
+        check("trackpad speed: 100 percent is 480 of 120ths for 40 mm and 24 a stream notch at rest; 60 is 280 and 14 (0.6 x 8 px); 160 is 760 and 38 (1.6 x)", ok);
         compositor.trackpad_speed = 7;
-        check("trackpad speed: a value that is none of the three is normal", pad_swipe_sum() == 480 && compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0) == 24);
+        check("trackpad speed: a percent outside 25 to 400 is 100", pad_swipe_sum() == 480 && compositor_stream_turn(0, 120, COMPOSITOR_GAIN_BASE, 0) == 24);
+        compositor.trackpad_speed = 0;
+        check("trackpad speed: none read (0) is 100", pad_swipe_sum() == 480);
         compositor.trackpad_speed = 0;
 }
 
