@@ -452,17 +452,17 @@ static fn mixer_device_name(struct ui address_to ui, struct ui_strips address_to
         for (int k = 0; k <= shown && (k < shown || dots); k++)
         {
                 char glyph[8] = "...";
-                int end = at, width;
+                int next = at, width;
 
                 if (k < shown)
                 {
-                        end = mixer_unit_next(name, at);
-                        memory_copy(glyph, name + at, (positive)(end - at));
-                        glyph[end - at] = 0;
+                        next = mixer_unit_next(name, at);
+                        memory_copy(glyph, name + at, (positive)(next - at));
+                        glyph[next - at] = 0;
                 }
                 width = ui_kit_measure(ui, (string_address)glyph, UI_LABEL_MEDIUM);
                 ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, bottom - (k + 1) * line, UI_LABEL_MEDIUM), (string_address)glyph, UI_LABEL_MEDIUM, ink, 0);
-                at = end;
+                at = next;
         }
 }
 
