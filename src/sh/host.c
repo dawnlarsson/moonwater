@@ -360,17 +360,7 @@ static fn host_verdict_pause(bipolar notify, p64 until, p64 fallback)
         host_watch_wait(notify, limit);
 }
 
-/* The bytes of a word a file held, its newline and the blanks after it taken off
-   and the end made: how many are left. */
-static bipolar host_word_end(p8 address_to into, bipolar got)
-{
-        while (got > 0 && (into[got - 1] == '\n' || into[got - 1] == '\r' ||
-                           into[got - 1] == ' '))
-                got--;
-
-        into[got] = end;
-        return got;
-}
+#include "host_words.h"
 
 /* A small kernel file (sysfs, proc), without its trailing newline: the kernel's,
    not a name anybody plants, and a test's sandbox stands a FIFO at one to hold a
@@ -387,32 +377,6 @@ static bipolar host_read_kernel(string_address path, p8 address_to into,
                 return got;
         }
 
-        return host_word_end(into, got);
-}
-
-/* Persistent state is a regular file owned by this program. Opening it
-   nonblocking first means a FIFO planted at a state name cannot stop a root
-   command before it has a chance to reject the object; O_NOFOLLOW gives a
-   planted final symlink the same refusal as the writers. */
-static bipolar host_read_state(string_address path, p8 address_to into,
-                               positive capacity)
-{
-        return file_slurp_regular_at(AT_FDCWD, path, into, capacity, O_NOFOLLOW);
-}
-
-/* A state word as host_read_state reads it, without its newline or the blanks
-   after it; negative, and empty, when the file is not there or not a plain one.
-   A FIFO or a link planted at the name on the data partition is no word, and
-   cannot stop the command. */
-static bipolar host_read_word(string_address path, p8 address_to into, positive room)
-{
-        bipolar got = host_read_state(path, into, room);
-
-        if (got < 0)
-        {
-                into[0] = end;
-                return got;
-        }
         return host_word_end(into, got);
 }
 
