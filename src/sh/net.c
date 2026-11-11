@@ -1040,8 +1040,7 @@ static b32 net_wget(void)
                                                  "remote file exists.\n%w\n",
                                       writer_terminal_quoted_name, url);
                 string_copy(where, url);
-                status = http_spider_apart(url, check_cert, address_of code,
-                                           where);
+                status = http_run_apart(url, address_of http_manners_spider, check_cert, -1, null, address_of code, where, null);
                 if (status)
                         return net_wget_failed(status, code, where, null);
                 if (!quiet)
@@ -1111,7 +1110,7 @@ static b32 net_wget(void)
 
         string_copy(where, url);
         status = taking.flags & FILE_FLAG('s')
-                     ? http_spider_apart(url, check_cert, address_of code, where)
+                     ? http_run_apart(url, address_of http_manners_spider, check_cert, -1, null, address_of code, where, null)
                      : http_fetch_to_apart(url, dest, check_cert,
                                            address_of code, where);
         if (own_stream)
@@ -1271,10 +1270,6 @@ static COLD positive net_resolver_choose_at(string_address path, p32 nameserver,
         return count;
 }
 
-static COLD positive net_dns_kept(p32 address_to into)
-{
-        return net_dns_kept_at(NET_DNS_PATH, into);
-}
 
 static COLD positive net_resolver_choose(p32 nameserver, p32 address_to into)
 {

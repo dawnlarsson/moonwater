@@ -14079,10 +14079,6 @@ static bipolar tune_cpu_boost(bool on)
                                  : failed;
 }
 
-static bipolar tune_cpu_smt(bool on)
-{
-        return tune_write(TUNE_SYS_CPU "/smt/control", on ? "on" : "off");
-}
 
 /* A processor with no switch to read is online: cpu0 has none. */
 static bool tune_online_visit(string_address directory, string_address name, address_any context)
@@ -14134,7 +14130,7 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 bipolar failed;
 
                 host_need_root();
-                failed = boost ? tune_cpu_boost(on) : tune_cpu_smt(on);
+                failed = boost ? tune_cpu_boost(on) : tune_write(TUNE_SYS_CPU "/smt/control", ((bool)(on)) ? "on" : "off");
                 if (failed == -ENOENT)
                         return host_refuse(boost ? "this machine has no boost switch\n"
                                                  : "this machine has no SMT switch\n");
@@ -14596,7 +14592,7 @@ static fn tune_restore(void)
                 (void)tune_cpu_boost(false);
         if (tune_find(text, (positive)got, "cpu.smt", value, sizeof(value)) &&
             string_equals((string_address)value, "off"))
-                (void)tune_cpu_smt(false);
+                (void)tune_write(TUNE_SYS_CPU "/smt/control", false ? "on" : "off");
         if (tune_find(text, (positive)got, "charge.limit", value, sizeof(value)))
                 (void)tune_charge_apply((string_address)value);
         //      Airplane mode is every radio off, and the modem has no word of its own.
@@ -16068,10 +16064,6 @@ static positive usb_rules_left(usb_policy address_to policy, usb_rule address_to
         return left;
 }
 
-static b32 usb_rules_full(void)
-{
-        return host_refuse("the policy keeps %p rules at most; device forget one first\n", (positive)USB_RULES_MOST);
-}
 
 /*
         The watcher: a process of its own for as long as the policy holds
@@ -16561,7 +16553,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                 failed = usb_policy_whole(address_of policy);
         //      Before anything is configured: a rule the policy has no room for changes nothing.
         if (!failed && usb_rules_left(address_of policy, address_of rule, device) >= USB_RULES_MOST)
-                failed = usb_rules_full();
+                failed = (b32)(host_refuse("the policy keeps %p rules at most; device forget one first\n", (positive)USB_RULES_MOST));
         if (!failed && kind == USB_ALLOW && device && !device->authorized && usb_set_device(device, "1") >= 0)
         {
                 p8 port[USB_PORT_ROOM];
@@ -16584,7 +16576,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         if (!failed)
                 (void)usb_rules_drop(address_of policy, address_of rule, device);
         if (!failed && policy.count == USB_RULES_MOST)
-                failed = usb_rules_full();
+                failed = (b32)(host_refuse("the policy keeps %p rules at most; device forget one first\n", (positive)USB_RULES_MOST));
         if (!failed)
         {
                 policy.rule[policy.count++] = rule;
@@ -17276,11 +17268,6 @@ static bool usb_part_visit(string_address directory, string_address name, addres
         return true;
 }
 
-// The segments of a disk of total bytes, in order, free room between and after its partitions included.
-static fn usb_list_more(positive count)
-{
-        host_say(log, "    more %p\n", count);
-}
 
 static fn usb_list_strip(string_address name, unsigned long long total, usb_parts address_to parts)
 {
@@ -17319,7 +17306,8 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
         if (!parts->unknown && span_end > cursor)
                 usb_list_segment(cursor, span_end - cursor, USB_ROLE_FREE, null);
         if (parts->more)
-                usb_list_more(parts->more);
+                // The segments of a disk of total bytes, in order, free room between and after its partitions included.
+                host_say(log, "    more %p\n", (positive)(parts->more));
 }
 
 // A name as one line carries it: the blanks and controls of the kernel's name are underscores.
@@ -18761,10 +18749,6 @@ static bool locale_ntp_wanted(void)
         return locale_switch_on(LOCALE_NTP_PATH);
 }
 
-static bool locale_ntp_sampling_wanted(void)
-{
-        return locale_switch_on(LOCALE_NTP_SAMPLING_PATH);
-}
 
 static bool locale_clock_synced(void)
 {
@@ -19037,19 +19021,6 @@ static bool locale_zone_read(p8 address_to title, positive title_room,
         return true;
 }
 
-//      The zone's title and how it came to be, on the line a verb opens with.
-//      Both are read from /root (the zone from /root/timezone, the country of
-//      an auto mode from /root/timezone.mode) and are a disk's to choose, so
-//      they are spelled through writer_terminal_name: a planted newline, tab,
-//      control or high byte reaches the terminal as \xNN, not as the line, the
-//      column or the bidi override it names. A legitimate zone is ASCII and is
-//      shown unchanged.
-static fn locale_zone_line(string_address title, string_address how)
-{
-        string_format(log, host_label "timezone %w " TERM_DIM "%w" TERM_RESET
-                                      "\n", writer_terminal_name, title,
-                      writer_terminal_name, how);
-}
 
 static b32 locale_zone_status(void)
 {
@@ -19063,7 +19034,14 @@ static b32 locale_zone_status(void)
                 return 0;
         }
         locale_zone_moment(when, sizeof(when));
-        locale_zone_line(title, how);
+        //      The zone's title and how it came to be, on the line a verb opens with.
+        //      Both are read from /root (the zone from /root/timezone, the country of
+        //      an auto mode from /root/timezone.mode) and are a disk's to choose, so
+        //      they are spelled through writer_terminal_name: a planted newline, tab,
+        //      control or high byte reaches the terminal as \xNN, not as the line, the
+        //      column or the bidi override it names. A legitimate zone is ASCII and is
+        //      shown unchanged.
+        string_format(log, host_label "timezone %w " TERM_DIM "%w" TERM_RESET "\n", writer_terminal_name, (string_address)(title), writer_terminal_name, (string_address)(how));
         host_say(log, "  local %s\n", when);
         return 0;
 }
@@ -19237,7 +19215,7 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         locale_zone_moment(after, sizeof(after));
         locale_zone_title(zone, title, sizeof(title));
         locale_zone_how(how, sizeof(how));
-        locale_zone_line(title, how);
+        string_format(log, host_label "timezone %w " TERM_DIM "%w" TERM_RESET "\n", writer_terminal_name, (string_address)(title), writer_terminal_name, (string_address)(how));
         string_format(log, "  before  %s  " TERM_DIM "%s" TERM_RESET "\n",
                       before, old_shown);
         string_format(log, "  after   %s\n", after);
@@ -20803,7 +20781,7 @@ static bipolar locale_nts_walk(bool address_to heard_any, bool address_to reache
 {
         p8 servers[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
         positive count = locale_nts_servers(servers, LOCALE_NTS_ENTRY_ROOM);
-        bool filter = locale_ntp_sampling_wanted();
+        bool filter = locale_switch_on(LOCALE_NTP_SAMPLING_PATH);
         sntp_sample row[SNTP_SERVERS];
         positive from[SNTP_SERVERS];
         positive heard = 0;
@@ -20851,7 +20829,7 @@ static bipolar locale_ntp_plain(bool by_hand)
         p8 server[LOCALE_NTP_SERVER_ROOM];
         bipolar failed = SNTP_NO_SERVER;
         positive at;
-        bool filter = locale_ntp_sampling_wanted();
+        bool filter = locale_switch_on(LOCALE_NTP_SAMPLING_PATH);
         bipolar now = sntp_now_ns();
         //      A clock nobody has set has no time of its own to be moved
         //      from, and the window bounds what it can be told.
@@ -22478,7 +22456,7 @@ static bipolar name_apply(string_address name)
                                         string_length(name));
 
         if (applied >= 0)
-                bowl_hosts_write(name);
+                bowl_hosts_write_in("", name, false);
         return applied;
 }
 
@@ -24101,7 +24079,7 @@ static fn dns_say(bool label)
         else if (!locale_readable(NET_DNS_PATH, held, sizeof(held)))
                 string_format(log, " " LOCALE_NEEDS_ROOT);
         else
-                string_format(log, "%s", net_dns_kept(kept) ? " (kept)" : " (the network's)");
+                string_format(log, "%s", net_dns_kept_at(NET_DNS_PATH, kept) ? " (kept)" : " (the network's)");
         //      The label's escapes are format text: as an argument %s would
         //      print them as the characters they are spelt with.
         host_say(log, label ? "\n" host_label "dns tls %s\n" : "\n  dns tls %s\n",
@@ -24190,7 +24168,7 @@ static b32 dns_auto(void)
 static fn dns_restore(void)
 {
         p32 servers[DNS_SERVERS_MAX];
-        positive count = net_dns_kept(servers);
+        positive count = net_dns_kept_at(NET_DNS_PATH, servers);
 
         (void)dns_tls_publish();
         if (count)

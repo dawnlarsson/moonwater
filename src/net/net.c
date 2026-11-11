@@ -16788,12 +16788,6 @@ static bipolar http_get_apart(string_address url, http_buffer address_to body,
                               body, code, null, null);
 }
 
-static bipolar http_spider_apart(string_address start, bool check_cert,
-                                 b32 address_to code, p8 address_to where)
-{
-        return http_run_apart(start, address_of http_manners_spider, check_cert,
-                              -1, null, code, where, null);
-}
 
 static bipolar http_fetch_to_apart(string_address start, bipolar dest,
                                    bool check_cert, b32 address_to code,
