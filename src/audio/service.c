@@ -685,7 +685,12 @@ static void audio_file_write(const char *name, const char *text, long length)
                 audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
                 return;
         }
-        audio_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0);
+        // A rename that fails leaves the old file in place, and the new one is taken away rather than left beside it.
+        if (audio_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) < 0)
+        {
+                audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
+                return;
+        }
         // The directory's entry for the new name: O_RDONLY | O_DIRECTORY, fsync, close.
         fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.settings, 0x10000 | 0x80000, 0, 0, 0);
         if (fd >= 0)
