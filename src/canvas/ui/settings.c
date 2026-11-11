@@ -4303,11 +4303,6 @@ static b32 settings_filter_typed(void)
         return settings.filter_open && doc_length(&settings.filter_edit.doc) != 0;
 }
 
-// Whether the filter's key changed with the last event (the kit keeps the key it last answered: a blank typed at the end is none).
-static b32 settings_filter_take(void)
-{
-        return ui_text_search_changed(settings_filter_field());
-}
 
 // The filter emptied: its field, and the rows of the group chosen again.
 static fn settings_filter_clear(void)
@@ -4329,7 +4324,8 @@ static fn settings_filter_asked(p32 asks)
                 settings_say((string_address)settings.filter_edit.refused);
         if (!asks || (asks & (UI_TEXT_SUBMIT | UI_TEXT_CANCEL)))
                 return;
-        if (!settings_filter_take())
+        // Whether the filter's key changed with the last event (the kit keeps the key it last answered: a blank typed at the end is none).
+        if (!ui_text_search_changed(settings_filter_field()))
         {
                 ui_page_redraw(&settings.page);
                 return;
@@ -5278,7 +5274,7 @@ static fn settings_language(void)
 }
 
 // -n: the start that the notices popup makes (notices.c): Settings opens on its System group, where the kernel's notices are. A Settings
-// already up is lifted and asked for the same page (ui_lift_page), its page hook choosing it.
+// already up is lifted and asked for the same page (ui_lift_row), its page hook choosing it.
 static b32 settings_notices_asked;
 static int settings_system_group(void)
 {
@@ -5298,7 +5294,7 @@ static int settings_open(void)
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
 
-        if (!gallery.on && (settings_notices_asked ? ui_lift_page(&settings.own, (string_address) "settings", (unsigned int)settings_system_group())
+        if (!gallery.on && (settings_notices_asked ? ui_lift_row(&settings.own, (string_address) "settings", false, ((unsigned int)((unsigned int)settings_system_group())) + 1)
                                                    : ui_lift_other(&settings.own, (string_address) "settings", false)))
                 return 0;
 

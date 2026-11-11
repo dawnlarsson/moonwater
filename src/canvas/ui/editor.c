@@ -805,7 +805,7 @@ static b32 editor_event(const struct window_event address_to event)
         }
         tab = editor_now();
         editor_keys();
-        asks = ui_text_send(&editor.ui, &tab->view, event);
+        asks = ui_text_event(&editor.ui, &tab->view, event, ui_kit.pointer_x, ui_kit.pointer_y);
         if (asks & UI_TEXT_COMMAND)
                 editor_command(tab->view.command);
         if (asks & UI_TEXT_MENU)
@@ -861,7 +861,7 @@ static int editor_start(void)
 
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
         // A pinch on the text zooms it (ui_text_pinch): the window takes the pinch, and is not sent it as a wheel with Ctrl.
-        windows_pinch(&editor.own, true);
+        __atomic_store_n(&((const struct window_row *)(&editor.own))->table->pinch_wanted[((const struct window_row *)(&editor.own))->row], true ? 1u : 0u, __ATOMIC_RELEASE);
         editor.width = screen_w * 3 / 5, editor.height = screen_h * 3 / 4;
         ui_centre(table, editor.own.row, editor.width, editor.height, 0);
         ui_scratch_fit(&editor.ui, (unsigned int)screen_w);

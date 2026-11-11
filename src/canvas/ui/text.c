@@ -3522,10 +3522,6 @@ static fn doc_move_vertical(struct doc address_to doc, b64 lines, b32 extend)
         doc->closer_count = 0;
 }
 
-static fn doc_select_all(struct doc address_to doc)
-{
-        doc_select_set(doc, 0, doc_length(doc));
-}
 
 // Every selection made whole lines, line ends included; a second press takes the next line too.
 static fn doc_select_lines(struct doc address_to doc)
@@ -4686,7 +4682,7 @@ static b32 doc_command(struct doc address_to doc, p32 command, const char addres
                 doc_redo(doc);
                 return true;
         case DOC_CMD_SELECT_ALL:
-                doc_select_all(doc);
+                doc_select_set(doc, 0, doc_length(((struct doc *)(doc))));
                 return true;
         case DOC_CMD_SELECT_LINE:
                 doc_select_lines(doc);

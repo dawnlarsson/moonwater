@@ -3529,11 +3529,6 @@ static int ui_kit_text_between(struct ui address_to ui, int x, int baseline, str
         return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, low, high, stroke);
 }
 
-static int ui_kit_text_width(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
-                             unsigned int stroke, int high)
-{
-        return ui_kit_text_between(ui, x, baseline, text, type, argb, stroke, 0, high);
-}
 
 // Whether any of the rows top to bottom (device pixels) may be written: in the picture, the region and a repaint's band.
 static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom)
@@ -3589,7 +3584,7 @@ static int ui_kit_text_flipped(struct ui address_to ui, int x, int baseline, str
         int width;
 
         if (!ui_rtl())
-                return ui_kit_text_width(ui, x, baseline, text, type, argb, stroke, ui->width);
+                return ui_kit_text_between(ui, x, baseline, text, type, argb, stroke, 0, ui->width);
         width = ui_kit_measure(ui, text, type);
         ui_kit_text(ui, ui_mirror(x, width, left, span), baseline, text, type, argb, stroke);
         return width;
@@ -5609,7 +5604,7 @@ static unsigned int ui_kit_shape_sent;
 static struct windows address_to ui_kit_table;
 static unsigned int ui_kit_row;
 
-// The window's pointer is the last motion's place: a press or a key carries none, so an app asks the kit for it (ui_text_send).
+// The window's pointer is the last motion's place: a press or a key carries none, so an app asks the kit for it (ui_text_event).
 static fn ui_kit_track(const struct window_event address_to event)
 {
         if (event->type == WINDOW_EVENT_MOTION)
@@ -7319,10 +7314,6 @@ static b32 ui_engine_open_sized(struct ui address_to ui, positive atlas)
         return true;
 }
 
-static b32 ui_engine_open(struct ui address_to ui)
-{
-        return ui_engine_open_sized(ui, 512);
-}
 
 // A face from a font file, loaded into the engine's face. False when there is no path, the file, or a font in it.
 static b32 ui_face_load(font_face address_to face, string_address path)
@@ -8535,11 +8526,6 @@ struct ui_view
 
 static struct ui_view address_to ui_view_now; // the view being declared: the last ui_view_begin's
 
-// A size of a class in device pixels: its logical pixels at the window's scale, or a row.
-static int ui_view_px(const struct ui address_to ui, int logical)
-{
-        return ui_px(ui, logical == UI_H_ROW ? UI_ROW : logical);
-}
 
 static inline short ui_pick(short before, short said)
 {
@@ -8700,9 +8686,10 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
                 s->max = high[a] ? ui_px(ui, high[a]) : UI_TREE_MOST;
                 s->shrink = p->shrink ? p->shrink : look.shrink;
                 if (grow && a == along)
-                        s->kind = UI_GROW, s->value = grow, s->min = fixed[a] ? ui_view_px(ui, fixed[a]) : s->min; // its size is its basis, the least it has
+                        // A size of a class in device pixels: its logical pixels at the window's scale, or a row.
+                        s->kind = UI_GROW, s->value = grow, s->min = fixed[a] ? ui_px(ui, ((int)(fixed[a])) == UI_H_ROW ? UI_ROW : ((int)(fixed[a]))) : s->min; // its size is its basis, the least it has
                 else if (fixed[a])
-                        s->kind = UI_FIXED, s->value = ui_view_px(ui, fixed[a]);
+                        s->kind = UI_FIXED, s->value = ui_px(ui, ((int)(fixed[a])) == UI_H_ROW ? UI_ROW : ((int)(fixed[a])));
         }
         type = look.type ? look.type - 1 : kind == UI_ITEM_BUTTON ? UI_LABEL_LARGE : UI_BODY_MEDIUM;
         if (kind == UI_ITEM_TEXT && p->text)
@@ -9421,10 +9408,6 @@ static b32 ui_level_moving(const struct ui_level address_to l)
 #define UI_METER_AMBER UI_Q2(75) // three quarters of the meter: -15 dB
 #define UI_METER_RED UI_Q2(92)   // and -5 dB
 
-static unsigned int ui_meter_ink(b64 share)
-{
-        return ui_role(share > UI_METER_RED ? UI_ERROR : share > UI_METER_AMBER ? UI_WARNING : UI_SUCCESS);
-}
 
 static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, const b64 address_to shown, const b64 address_to hold)
 {
@@ -9444,14 +9427,14 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
                         if (high <= low)
                                 break;
                         piece = (struct ui_box){track.x0, track.y1 - (b32)ui_qmul(high, height), track.x1, track.y1 - (b32)ui_qmul(low, height), 0, 0};
-                        ui_kit_fill(ui, &piece, ui_meter_ink(low + 1), &track);
+                        ui_kit_fill(ui, &piece, ui_role(((b64)(low + 1)) > UI_METER_RED ? UI_ERROR : ((b64)(low + 1)) > UI_METER_AMBER ? UI_WARNING : UI_SUCCESS), &track);
                 }
                 if (hold[channel] > 0)
                 {
                         b32 line = track.y1 - (b32)ui_qmul(hold[channel], height), thick = ui_q8(ui, 2);
 
                         piece = (struct ui_box){track.x0, line - thick / 2, track.x1, line + thick - thick / 2, 0, 0};
-                        ui_kit_fill(ui, &piece, ui_meter_ink(hold[channel]), &track);
+                        ui_kit_fill(ui, &piece, ui_role(((b64)(hold[channel])) > UI_METER_RED ? UI_ERROR : ((b64)(hold[channel])) > UI_METER_AMBER ? UI_WARNING : UI_SUCCESS), &track);
                 }
         }
 }
@@ -12336,7 +12319,7 @@ struct ui_app
         b32 own_title;                  // the app names its window itself as it runs (the terminal): the kit sets the title once, at the start
         b32 dismiss;                    // a popup: the loop ends when the keys go elsewhere after they have been its (had_keys is the kit's)
         b32 had_keys;
-        void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_page), the one a tab press would show
+        void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_row), the one a tab press would show
         void (*language)(void);         // optional: run when the language changes; the kit listens for it, once, as the app starts
 };
 
@@ -12359,7 +12342,7 @@ static fn ui_app_changed(struct ui_app address_to app)
                 app->changed();
 }
 
-// A second start asked this window for a page (ui_lift_page): the app is told once, as a press on that page's tab would tell it.
+// A second start asked this window for a page (ui_lift_row): the app is told once, as a press on that page's tab would tell it.
 static fn ui_app_asked(struct ui_app address_to app)
 {
         unsigned int asked = app->page ? __atomic_exchange_n(&app->own->table->page[app->own->row], 0u, __ATOMIC_ACQ_REL) : 0;
@@ -12465,7 +12448,7 @@ static int ui_app_run(struct ui_app address_to app)
                          : table->scale >= 25 && table->scale <= 800 ? (int)table->scale : 100;
         if (!app->own_faces)
         {
-                if (!ui_engine_open(app->ui) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
+                if (!ui_engine_open_sized(app->ui, 512) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
                 {
                         compositor_kmsg(app->nofont, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                         windows_leave(app->own);
@@ -12798,7 +12781,7 @@ static b32 ui_is_program(unsigned int pid, string_address name)
         Another window of the program name that has shown a picture is lifted: the compositor is told to raise it, as a
         second start asks. With put_away, the program is sent SIGTERM instead, and the compositor sees its door close as
         it does any program's end. The window own is not another. True when there was one. With ask not 0 the window is
-        asked for a page as well (ask - 1, ui_lift_page), which it takes once.
+        asked for a page as well (ask - 1, ui_lift_row), which it takes once.
 */
 static b32 ui_lift_row(const struct window_row address_to own, string_address name, b32 put_away, unsigned int ask)
 {
@@ -12839,11 +12822,6 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
         return ui_lift_row(own, name, put_away, 0);
 }
 
-// The same, and the other window is asked to show page (0 up) as well: the window's page hook (ui_app) is told.
-static b32 ui_lift_page(const struct window_row address_to own, string_address name, unsigned int page)
-{
-        return ui_lift_row(own, name, false, page + 1);
-}
 
 /* ---- text: a field, a text area and the code view, over text.c's documents ---- */
 /*
@@ -15536,10 +15514,6 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
         The same two, with the place the window's pointer is at (ui_kit.pointer_x/y, the last motion's, taken in ui_event_context):
         an app forwards the event and keeps no pointer of its own. The places are the ones ui_text_event and ui_field_event take.
 */
-static p32 ui_text_send(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
-{
-        return ui_text_event(ui, t, event, ui_kit.pointer_x, ui_kit.pointer_y);
-}
 
 static p32 ui_field_send(struct ui address_to ui, struct ui_text address_to t, struct ui_popup address_to menu, const struct window_event address_to event)
 {
@@ -15550,10 +15524,6 @@ static p32 ui_field_send(struct ui address_to ui, struct ui_text address_to t, s
         Which of a window's text widgets has the keys: t has them when the window has them and the widget over it (a find bar above a
         code view, which has them while it is open and was the last pressed) does not. Every app's focus of its views is this rule.
 */
-static fn ui_text_focus_under(struct ui_text address_to t, b32 window, const struct ui_text address_to above)
-{
-        ui_field_focus(t, window && !(above && above->focused));
-}
 
 // The keymap's command for a key, whoever has the keys: none for AltGr (it types), and none for a key the map does not bind.
 static p32 ui_key_command(const struct window_event address_to event)
@@ -15604,10 +15574,10 @@ struct ui_findbar_said
         p32 command;                 // a command the bar does not do: the app's (the files, the tabs, save)
 };
 
-// The keys go to the view when the window has them and the bar does not (ui_text_focus_under).
+// The keys go to the view when the window has them and the bar does not (ui_field_focus).
 static fn ui_findbar_keys(struct ui_findbar address_to bar, struct ui_text address_to view, b32 window)
 {
-        ui_text_focus_under(view, window, &bar->field);
+        ui_field_focus(view, ((b32)(window)) && !(((const struct ui_text *)(&bar->field)) && ((const struct ui_text *)(&bar->field))->focused));
 }
 
 // Opened for mode: its field emptied for a line, holding the view's selection for a find; the bar has the keys.
@@ -15630,7 +15600,7 @@ static fn ui_findbar_open(const struct window_row address_to own, struct ui_find
         }
         if (mode == UI_FINDBAR_LINE || length)
                 ui_text_set(&bar->field, selected, length);
-        doc_select_all(&bar->field.doc);
+        doc_select_set(&bar->field.doc, 0, doc_length(((struct doc *)(&bar->field.doc))));
         bar->mode = mode;
         ui_field_focus(&bar->field, true);
         ui_findbar_keys(bar, view, window);

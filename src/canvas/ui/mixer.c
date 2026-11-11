@@ -552,7 +552,8 @@ static int mixer_open(void)
         long mapped;
 
         // The popup is not lifted by a second start: pressed again, the cell puts it away.
-        if (!mixer.quick && (mixer.recording ? ui_lift_page(&mixer.own, (string_address) "mixer", 1) : ui_lift_other(&mixer.own, (string_address) "mixer", false)))
+        // The same, and the other window is asked to show page (0 up) as well: the window's page hook (ui_app) is told.
+        if (!mixer.quick && (mixer.recording ? ui_lift_row(&mixer.own, (string_address) "mixer", false, 1 + 1) : ui_lift_other(&mixer.own, (string_address) "mixer", false)))
                 return 0;
         mapped = ui_map(sizeof(struct mixer_big));
         if (mapped < 0 && mapped > -4096)

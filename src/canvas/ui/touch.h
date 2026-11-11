@@ -124,10 +124,6 @@ static inline void ui_touch_put(struct ui_touch_out *out, enum ui_touch_kind kin
         ui_touch_emit(out, kind, x, y, 0, 0, 0);
 }
 
-static inline void ui_touch_put_wheel(struct ui_touch_out *out, int v120, int horizontal)
-{
-        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, v120, horizontal, 0);
-}
 
 static inline void ui_touch_put_pinch(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int scale)
 {
@@ -329,9 +325,9 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                                 t->left_x = (int)(right - (long)turn_x * per);
                                 t->mid_x = mid_x, t->mid_y = mid_y;
                                 if (turn_y)
-                                        ui_touch_put_wheel(out, turn_y, 0);
+                                        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, turn_y, 0, 0);
                                 if (turn_x)
-                                        ui_touch_put_wheel(out, turn_x, 1);
+                                        ui_touch_emit(out, UI_TOUCH_WHEEL, 0, 0, turn_x, 1, 0);
                         }
                 }
                 else

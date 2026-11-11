@@ -2073,11 +2073,11 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
 
         // A shell at its prompt has no use for the pointer's motion, and each report of it is a wakeup: asked for
         // only while a program has a mouse mode (the loop says when that changes).
-        windows_hover(&terminal.own, false);
+        __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->hover_off[((const struct window_row *)(&terminal.own))->row], false ? 0u : 1u, __ATOMIC_RELEASE);
         terminal.hovering = false;
 
         // A pinch zooms the text (terminal_pinch), and is not sent to the program as a wheel with Ctrl.
-        windows_pinch(&terminal.own, true);
+        __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->pinch_wanted[((const struct window_row *)(&terminal.own))->row], true ? 1u : 0u, __ATOMIC_RELEASE);
 
         // The primary screen is where it opens, its shares of that screen, and no larger than a window may be.
         table = terminal.own.table;
@@ -3771,7 +3771,7 @@ static long terminal_tick(long timeout, long address_to other)
         if (!terminal.reading && (mouse_mode != 0) != terminal.hovering)
         {
                 terminal.hovering = mouse_mode != 0;
-                windows_hover(&terminal.own, terminal.hovering);
+                __atomic_store_n(&((const struct window_row *)(&terminal.own))->table->hover_off[((const struct window_row *)(&terminal.own))->row], ((unsigned int)(terminal.hovering)) ? 0u : 1u, __ATOMIC_RELEASE);
         }
 
         // The title is read when the far end has said something, at most once a frame period; a title a program sets is read as it is set.

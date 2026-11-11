@@ -593,18 +593,13 @@ static unsigned int taskbar_turn(unsigned int position)
         cut to fit the slot less the margin either end (the room above and
         below a capital) with dots after it.
 */
-static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
-                                int height, const char *text, unsigned int ink, unsigned int ground)
-{
-        ui_cell_turned(taskbar_cell(view, bw), x - bx, y - by, width, height, text, taskbar_turn(view->position), ink, ground);
-}
 
 // One line of text in a slot of the band: upright on a bottom or top band, turned on a side one.
 static void taskbar_say(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height,
                         const char *text, unsigned int ink, unsigned int ground)
 {
         if (lay->vertical)
-                taskbar_text_turned(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+                ui_cell_turned(taskbar_cell(((const struct taskbar_view *)(view)), ((int)(lay->bw))), ((int)(x)) - ((int)(lay->bx)), ((int)(y)) - ((int)(lay->by)), width, height, text, taskbar_turn(((const struct taskbar_view *)(view))->position), ink, ground);
         else
                 taskbar_text_line(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
 }
