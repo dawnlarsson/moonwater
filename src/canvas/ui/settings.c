@@ -860,7 +860,7 @@ static b32 settings_key_of(int row, char address_to key, positive room)
         // The kernel's notices row has no verb: its key is the one the feeder files them under.
         if (which && which->output == SETTINGS_OUT_NOTICES)
         {
-                string_copy_bounded((string_address)key, (string_address)"system notices", room);
+                string_copy_bounded((string_address)key, (string_address)WINDOWS_KEY_NOTICES, room);
                 return true;
         }
         if (!which || !which->read[0])
@@ -1040,14 +1040,9 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
         case WINDOWS_ISSUE_AUDIO_OPEN: language_format(into, room, WORDS(settings_issue_audio_open), (long)issue->a); break;
         case WINDOWS_ISSUE_AUDIO_RATE: language_format(into, room, WORDS(settings_issue_audio_rate), (long)issue->a, (long)issue->b); break;
         // A kernel notice's words are the kernel's own, as its line says them (not translated yet: the detail is English).
-        case WINDOWS_ISSUE_KERNEL_GPU:
-        case WINDOWS_ISSUE_KERNEL_USB:
-        case WINDOWS_ISSUE_KERNEL_WIFI:
-        case WINDOWS_ISSUE_KERNEL_BLUETOOTH:
-        case WINDOWS_ISSUE_KERNEL_AUDIO:
-        case WINDOWS_ISSUE_KERNEL_STORAGE:
-        case WINDOWS_ISSUE_KERNEL_SYSTEM:
-        case WINDOWS_ISSUE_KERNEL_PROGRAM:
+#define SETTINGS_KERNEL_CASE(name, key, text) case WINDOWS_ISSUE_KERNEL_##name:
+        WINDOWS_KERNEL_CLASSES(SETTINGS_KERNEL_CASE)
+#undef SETTINGS_KERNEL_CASE
         case WINDOWS_ISSUE_RADIO: string_copy_bounded((string_address)into, (string_address)issue->detail, room); break;
         default: language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code); break;
         }
@@ -4551,7 +4546,7 @@ static b32 settings_key(const struct window_event address_to event)
         {
                 unsigned int code = settings_sub[settings.list.focus - (int)SETTINGS_ALL].code;
 
-                if (code >= WINDOWS_ISSUE_KERNEL_GPU && code <= WINDOWS_ISSUE_KERNEL_PROGRAM)
+                if (windows_issue_kernel(code))
                         windows_kernel_dismiss(settings.own.table, 1u << (code - WINDOWS_ISSUE_KERNEL_GPU));
                 return true;
         }
@@ -5089,7 +5084,7 @@ static fn settings_press_at(void)
                 int at = row - (int)SETTINGS_ALL;
 
                 if (at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_DISMISS_ALL)
-                        windows_kernel_dismiss(settings.own.table, (1u << KERNEL_NOTICE_CLASSES) - 1);
+                        windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
                 else
                         settings_copy(at);
                 ui_page_redraw(&settings.page);

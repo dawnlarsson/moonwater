@@ -545,6 +545,20 @@ static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
 #define WINDOWS_ISSUE_WARNING 1u
 #define WINDOWS_ISSUE_ERROR 2u
 #define WINDOWS_ISSUE_ANY 0u      // windows_issue_clear's code: every issue of the key
+#define WINDOWS_KEY_GPU "canvas gpu"            // the keys, as Settings' rows for the GPU option and the system notices have them
+#define WINDOWS_KEY_NOTICES "system notices"
+// The kernel's notice classes, each once: its name in WINDOWS_ISSUE_KERNEL_*, the key its issue is filed under and its name for moonwater debug, in the
+// class's index order (its bit in the dismiss mask, its place on the board). The codes, keys, names and Settings' cases are expanded from it; the
+// words that raise a class are kernel_notice_rules'.
+#define WINDOWS_KERNEL_CLASSES(X)                                          \
+        X(GPU, WINDOWS_KEY_GPU, "a kernel notice about the GPU")           \
+        X(USB, "usb", "a kernel notice about USB")                         \
+        X(WIFI, "wifi", "a kernel notice about Wi-Fi")                     \
+        X(BLUETOOTH, "bluetooth", "a kernel notice about Bluetooth")       \
+        X(AUDIO, "audio device", "a kernel notice about audio")            \
+        X(STORAGE, "storage", "a kernel notice about storage")             \
+        X(SYSTEM, WINDOWS_KEY_NOTICES, "a kernel notice about the system") \
+        X(PROGRAM, WINDOWS_KEY_NOTICES, "a program crashed")
 // The messages (Settings words each in the reader's language, language.inc's WINDOWS_ISSUE_* ids). a and b are the numbers the message
 // formats, and detail is shown after it, copyable. The numbers are per code: see the comment on each.
 enum windows_issue_code
@@ -565,26 +579,27 @@ enum windows_issue_code
         WINDOWS_ISSUE_GPU_FAULT,     // the card faulted reading GPU memory: a the jobs that found a fault; the detail is the fault's text (what the address was in)
         WINDOWS_ISSUE_GPU_HUNG,      // the card hung twice within a minute: the processor draws the desktop for the rest of the session (no numbers)
         // The kernel's own notices (the feeder below): a the records of the class seen, b the seconds since the last, the detail the last line.
-        WINDOWS_ISSUE_KERNEL_GPU,       // amdgpu, drm and i915 (under canvas gpu)
-        WINDOWS_ISSUE_KERNEL_USB,       // usb and xhci (under usb)
-        WINDOWS_ISSUE_KERNEL_WIFI,      // the wireless drivers (under wifi)
-        WINDOWS_ISSUE_KERNEL_BLUETOOTH, // bluetooth (under bluetooth)
-        WINDOWS_ISSUE_KERNEL_AUDIO,     // the sound drivers (under audio device)
-        WINDOWS_ISSUE_KERNEL_STORAGE,   // nvme, the filesystems and the block layer (under storage)
-        WINDOWS_ISSUE_KERNEL_SYSTEM,    // memory (out of memory, BUG, Oops), thermal and machine checks (under system notices)
-        WINDOWS_ISSUE_KERNEL_PROGRAM,   // a program that crashed (under system notices)
+#define WINDOWS_KERNEL_CODE(name, key, text) WINDOWS_ISSUE_KERNEL_##name,
+        WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_CODE)
+#undef WINDOWS_KERNEL_CODE
         WINDOWS_ISSUE_RADIO,            // a radio is blocked by rfkill (under wifi or bluetooth): the detail says which switch
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
+// The classes are the codes before the radio's; the dismiss mask has a bit for each, and a code is a kernel notice's when it is one of them.
+#define KERNEL_NOTICE_CLASSES (WINDOWS_ISSUE_RADIO - WINDOWS_ISSUE_KERNEL_GPU)
+#define KERNEL_NOTICE_ALL ((1u << KERNEL_NOTICE_CLASSES) - 1u)
+#define windows_issue_kernel(code) ((unsigned int)(code) - WINDOWS_ISSUE_KERNEL_GPU < KERNEL_NOTICE_CLASSES)
 // The codes' names, for moonwater debug (the Settings words are the reader's own).
 static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
         "none", "the kernel refused to map window pictures", "the card refused presents", "the lists are off", "the card is cooling down",
         "the card's self-test drew wrong", "the GPU family is not supported", "apps lost frames to the processor", "the card refused direct scan-out",
         "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate",
-        "a prerequisite of the GPU path failed", "a kernel notice about the GPU", "a kernel notice about USB", "a kernel notice about Wi-Fi",
-        "a kernel notice about Bluetooth", "a kernel notice about audio", "a kernel notice about storage", "a kernel notice about the system",
-        "a program crashed", "a radio is blocked (rfkill)"};
+        "a prerequisite of the GPU path failed", "the card faulted reading GPU memory", "the card hung twice within a minute",
+#define WINDOWS_KERNEL_NAME(name, key, text) [WINDOWS_ISSUE_KERNEL_##name] = text,
+        WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_NAME)
+#undef WINDOWS_KERNEL_NAME
+        [WINDOWS_ISSUE_RADIO] = "a radio is blocked (rfkill)"};
 
 struct windows_issue
 {
@@ -1458,8 +1473,6 @@ static unsigned int windows_metric_rate(unsigned long long count, unsigned long 
         return nanoseconds ? (unsigned int)(count * 1000000000ull / nanoseconds) : 0;
 }
 
-// The key of the GPU option's issues, as Settings' row for "canvas gpu" has it.
-#define WINDOWS_KEY_GPU "canvas gpu"
 // The codes the GPU raises under its key, in the order the board shows them (windows_gpu_wanted says which hold now).
 static const unsigned int windows_gpu_codes[] = {
         WINDOWS_ISSUE_GPU_USERPTR, WINDOWS_ISSUE_GPU_MAP, WINDOWS_ISSUE_GPU_UNTRUSTED, WINDOWS_ISSUE_GPU_FAMILY, WINDOWS_ISSUE_GPU_COOLING,
@@ -1580,12 +1593,14 @@ static unsigned int windows_gpu_judge(const struct windows *table, unsigned int 
         class is still one issue, and a warning not seen again for KERNEL_NOTICE_AGE_NS is cleared; an error is kept until it is dismissed.
 */
 #define KMSG_FILE "/dev/kmsg"
-#define KERNEL_NOTICE_CLASSES 8
 #define KERNEL_NOTICE_MOST 256
 #define KERNEL_NOTICE_LINE 1024
 #define KERNEL_NOTICE_AGE_NS (600ull * 1000000000ull)
-static const char *const kernel_notice_key[KERNEL_NOTICE_CLASSES] = {"canvas gpu", "usb", "wifi", "bluetooth", "audio device", "storage", "system notices",
-                                                                    "system notices"};
+static const char *const kernel_notice_key[KERNEL_NOTICE_CLASSES] = {
+#define WINDOWS_KERNEL_KEY(name, key, text) key,
+    WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_KEY)
+#undef WINDOWS_KERNEL_KEY
+};
 // The lines the kernel prints on normal boots that are not faults (every one is here for a reason the box's log showed).
 static const char *const kernel_notice_quiet[] = {
     "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
@@ -1606,65 +1621,54 @@ struct kernel_notices
 };
 static struct kernel_notices kernel_notice_state = {.fd = -1};
 
-// Whether text (length bytes, not ended) has word (ended).
-static int kernel_notice_has(const char *text, unsigned int length, const char *word)
+// Whether text (length bytes, not ended) has any of words (ended): the alternatives, split at a bar.
+static int kernel_notice_has(const char *text, unsigned int length, const char *words)
 {
-        for (unsigned int at = 0; at < length; at++)
+        for (unsigned int from = 0, to = 0, k; words[from]; from = to + (words[to] == '|'))
         {
-                unsigned int k = 0;
-
-                while (word[k] && at + k < length && text[at + k] == word[k])
-                        k++;
-                if (!word[k])
-                        return 1;
+                for (to = from; words[to] && words[to] != '|'; to++)
+                        ;
+                for (unsigned int at = 0; at + to - from <= length; at++)
+                {
+                        for (k = 0; k < to - from && text[at + k] == words[from + k]; k++)
+                                ;
+                        if (k == to - from)
+                                return 1;
+                }
         }
         return 0;
 }
+
+// What makes a line a class's, asked in this order, the first that holds wins (the system's crashes and a program's segfault come before the drivers').
+// words: one of these alternatives is in the line; needs, when there are some: so is one of these (a line of level 3 or less needs none). severity is
+// the one it is raised at, or 0 for the level's: an error up to level 3, else a warning. A line none holds is the system's error at level 3 or less.
+static const struct { unsigned int code, severity; const char *words, *needs; } kernel_notice_rules[] = {
+    {WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR, "Out of memory|oom_kill_process|Killed process|BUG:|Oops|Kernel panic|WARNING: CPU", null},
+    {WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING, "segfault at", null},
+    {WINDOWS_ISSUE_KERNEL_GPU, 0, "amdgpu|drm|i915", "timeout|reset|fault|failed"},
+    {WINDOWS_ISSUE_KERNEL_USB, 0, "xhci|usb", "overrun|disconnect|failed"},
+    {WINDOWS_ISSUE_KERNEL_WIFI, 0, "iwlwifi|ath1|ath9|mt76|brcm|cfg80211", "firmware|timeout|error"},
+    {WINDOWS_ISSUE_KERNEL_BLUETOOTH, 0, "Bluetooth:", "failed|error"},
+    {WINDOWS_ISSUE_KERNEL_AUDIO, 0, "snd_|hda", "no codecs|error|failed"},
+    {WINDOWS_ISSUE_KERNEL_STORAGE, 0, "nvme|ext4|btrfs|xfs|mmc|FAT-fs|I/O error|Buffer I/O", "I/O error|Buffer I/O|not properly unmounted|error|timeout"},
+    {WINDOWS_ISSUE_KERNEL_SYSTEM, 0, "thermal|throttl|Hardware Error|mce:|EDAC", null}};
 
 // The class of a line of the kernel's log at level, and the severity it is raised at (WINDOWS_ISSUE_*), or 0 when it is not raised: quiet lines,
 // and a level of 4 or more without the words that make a class of its own. Written as the table of the box's real lines it is checked against.
 static unsigned int kernel_notice_class(const char *text, unsigned int length, unsigned int level, unsigned int *severity)
 {
-        unsigned int error = level <= 3 ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING;
-
         *severity = 0;
         for (int q = 0; kernel_notice_quiet[q]; q++)
                 if (kernel_notice_has(text, length, kernel_notice_quiet[q]))
                         return 0;
-        if (kernel_notice_has(text, length, "Out of memory") || kernel_notice_has(text, length, "oom_kill_process") ||
-            kernel_notice_has(text, length, "Killed process") || kernel_notice_has(text, length, "BUG:") || kernel_notice_has(text, length, "Oops") ||
-            kernel_notice_has(text, length, "Kernel panic") || kernel_notice_has(text, length, "WARNING: CPU"))
-                return *severity = WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_KERNEL_SYSTEM;
-        if (kernel_notice_has(text, length, "segfault at"))
-                return *severity = WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_KERNEL_PROGRAM;
-        if ((kernel_notice_has(text, length, "amdgpu") || kernel_notice_has(text, length, "drm") || kernel_notice_has(text, length, "i915")) &&
-            (level <= 3 || kernel_notice_has(text, length, "timeout") || kernel_notice_has(text, length, "reset") || kernel_notice_has(text, length, "fault") ||
-             kernel_notice_has(text, length, "failed")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_GPU;
-        if ((kernel_notice_has(text, length, "xhci") || kernel_notice_has(text, length, "usb")) &&
-            (level <= 3 || kernel_notice_has(text, length, "overrun") || kernel_notice_has(text, length, "disconnect") || kernel_notice_has(text, length, "failed")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_USB;
-        if ((kernel_notice_has(text, length, "iwlwifi") || kernel_notice_has(text, length, "ath1") || kernel_notice_has(text, length, "ath9") ||
-             kernel_notice_has(text, length, "mt76") || kernel_notice_has(text, length, "brcm") || kernel_notice_has(text, length, "cfg80211")) &&
-            (level <= 3 || kernel_notice_has(text, length, "firmware") || kernel_notice_has(text, length, "timeout") || kernel_notice_has(text, length, "error")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_WIFI;
-        if (kernel_notice_has(text, length, "Bluetooth:") && (level <= 3 || kernel_notice_has(text, length, "failed") || kernel_notice_has(text, length, "error")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_BLUETOOTH;
-        if ((kernel_notice_has(text, length, "snd_") || kernel_notice_has(text, length, "hda")) &&
-            (level <= 3 || kernel_notice_has(text, length, "no codecs") || kernel_notice_has(text, length, "error") || kernel_notice_has(text, length, "failed")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_AUDIO;
-        if ((kernel_notice_has(text, length, "nvme") || kernel_notice_has(text, length, "ext4") || kernel_notice_has(text, length, "btrfs") ||
-             kernel_notice_has(text, length, "xfs") || kernel_notice_has(text, length, "mmc") || kernel_notice_has(text, length, "FAT-fs") ||
-             kernel_notice_has(text, length, "I/O error") || kernel_notice_has(text, length, "Buffer I/O")) &&
-            (level <= 3 || kernel_notice_has(text, length, "I/O error") || kernel_notice_has(text, length, "Buffer I/O") ||
-             kernel_notice_has(text, length, "not properly unmounted") || kernel_notice_has(text, length, "error") || kernel_notice_has(text, length, "timeout")))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_STORAGE;
-        if (kernel_notice_has(text, length, "thermal") || kernel_notice_has(text, length, "throttl") || kernel_notice_has(text, length, "Hardware Error") ||
-            kernel_notice_has(text, length, "mce:") || kernel_notice_has(text, length, "EDAC"))
-                return *severity = error, WINDOWS_ISSUE_KERNEL_SYSTEM;
-        if (level <= 3)
-                return *severity = error, WINDOWS_ISSUE_KERNEL_SYSTEM;
-        return 0;
+        for (unsigned int r = 0; r < sizeof(kernel_notice_rules) / sizeof(kernel_notice_rules[0]); r++)
+                if (kernel_notice_has(text, length, kernel_notice_rules[r].words) &&
+                    (!kernel_notice_rules[r].needs || level <= 3 || kernel_notice_has(text, length, kernel_notice_rules[r].needs)))
+                {
+                        *severity = kernel_notice_rules[r].severity ? kernel_notice_rules[r].severity : level <= 3 ? WINDOWS_ISSUE_ERROR : WINDOWS_ISSUE_WARNING;
+                        return kernel_notice_rules[r].code;
+                }
+        return level <= 3 ? (*severity = WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_KERNEL_SYSTEM) : 0;
 }
 
 // One record of /dev/kmsg: "priority,sequence,time,flags;message", the message ended by a newline (the lines after it, which begin with a blank,

@@ -41,12 +41,6 @@ static struct
         string_address bold;     // and the bold face (-b)
 } notices;
 
-// The kernel's notices are the classes the feeder files (window.c's KERNEL_NOTICE_CLASSES); every other issue is an option's.
-static int notices_kernel(unsigned int code)
-{
-        return code >= WINDOWS_ISSUE_KERNEL_GPU && code <= WINDOWS_ISSUE_KERNEL_PROGRAM;
-}
-
 // Reads the board and makes the menu: the items (errors before warnings, the board's order within each), then the two rows.
 static void notices_board(void)
 {
@@ -68,7 +62,7 @@ static void notices_board(void)
                                 continue;
                         settings_issue_text(issue, message, sizeof(message));
                         key = (const char *)language_of(issue->key);
-                        if (notices_kernel(issue->code))
+                        if (windows_issue_kernel(issue->code)) // the classes the feeder files; every other issue is an option's
                                 language_format(notices.text[count], sizeof(notices.text[count]), WORDS(notices_item_times), (long)key,
                                                 (long)message, (long)issue->a, (long)(issue->b / 60));
                         else
@@ -148,7 +142,7 @@ static b32 notices_settings(void)
 // Dismiss all: every kernel notice leaves the board, and the feeder starts each class again from nothing.
 static void notices_dismiss(void)
 {
-        windows_kernel_dismiss(notices.own.table, (1u << KERNEL_NOTICE_CLASSES) - 1u);
+        windows_kernel_dismiss(notices.own.table, KERNEL_NOTICE_ALL);
 }
 
 static b32 notices_event(const struct window_event address_to event)

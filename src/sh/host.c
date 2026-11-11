@@ -22750,7 +22750,7 @@ static b32 host_notices(string_address address_to arguments, positive count)
 
                 if (!table)
                         return host_refuse("moonwater notices: the board is not there (the desktop is not running)\n");
-                cleared = windows_kernel_dismiss(table, (1u << KERNEL_NOTICE_CLASSES) - 1);
+                cleared = windows_kernel_dismiss(table, KERNEL_NOTICE_ALL);
                 host_say(log, "moonwater notices: %p cleared\n", (positive)cleared);
                 log_flush();
                 return true;
@@ -22769,7 +22769,7 @@ static b32 host_notices(string_address address_to arguments, positive count)
                 return host_refuse("moonwater notices: the board is not there, or busy; try again\n");
         }
         for (int at = 0; at < WINDOWS_ISSUES; at++)
-                if (board.issue[at].used && board.issue[at].code >= WINDOWS_ISSUE_KERNEL_GPU && board.issue[at].code <= WINDOWS_ISSUE_KERNEL_PROGRAM)
+                if (board.issue[at].used && windows_issue_kernel(board.issue[at].code))
                 {
                         shown++;
                         host_say(log, "%s: %s, %p records, last %p s ago: %s\n", board.issue[at].key,
