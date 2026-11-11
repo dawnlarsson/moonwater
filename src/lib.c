@@ -57629,6 +57629,13 @@ typedef b64 ptrdiff_t;
 #define syscall_macos_arm64_debug_syscall_reject 0x223
 #define syscall_macos_arm64_MAXSYSCALL 0x224
 #define syscall_macos_arm64_invalid 0x3f
+// Linux names that Darwin makes the same call under, with the same
+// arguments: pwrite is pwrite64 (the offset is a full 64 bits on arm64), and
+// _exit ends the process, which is exit_group. The other Linux-only names have
+// no Darwin number, or take other arguments; waterlink's call sites are
+// written per platform for those.
+#define syscall_macos_arm64_pwrite64 0x9a
+#define syscall_macos_arm64_exit_group 0x1
 #define MS_NONE 0
 #define MS_RDONLY 1
 #define MS_NOSUID 2
