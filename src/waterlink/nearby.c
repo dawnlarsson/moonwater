@@ -121,6 +121,16 @@ static p8 link_groups_for_change(link_groups address_to groups)
         return read >= 0 || read == -ENOENT;
 }
 
+/* The groups to show: read and not changed, so a status never scrubs the
+   file. False when an old file cannot be read, as for a change. */
+static p8 link_groups_for_show(link_groups address_to groups)
+{
+        positive old;
+        bipolar read = link_groups_read(groups, address_of old);
+
+        return read >= 0 || read == -ENOENT;
+}
+
 /* The groups as the file says, with no groups and the reason when it cannot
    be read: -ENOENT for a file never written, the refusal of a file that is not
    root's own, private and whole, or what the read said. A record's old check

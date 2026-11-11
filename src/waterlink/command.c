@@ -181,8 +181,9 @@ static b32 link_status(void)
         //      The groups: which, what members get, and whether the secret
         //      sits in the machine script, where /dev/spark shows it to any
         //      user on the machine.
-        if (!link_groups_for_change(address_of groups))
-                string_format(log, "  %s could not be read  next: ls -l %s\n",
+        if (!link_groups_for_show(address_of groups))
+                string_format(log, "  %s could not be read  next: ls -l %s
+",
                               LINK_GROUPS_PATH, LINK_GROUPS_PATH);
         {
                 p8 script[16384];
