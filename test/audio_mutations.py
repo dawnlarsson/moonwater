@@ -15,7 +15,7 @@ import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c'),
-           'control': os.path.join(root, 'src/audio/control.c'), 'socket': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c'), 'service': os.path.join(root, 'src/audio/service.c'), 'state': os.path.join(root, 'src/audio/state.c')}
+           'control': os.path.join(root, 'src/audio/control.c'), 'socket': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c'), 'service': os.path.join(root, 'src/audio/service.c'), 'state': os.path.join(root, 'src/audio/state.c'), 'wire': os.path.join(root, 'src/audio/wire.c')}
 # 'socket' is control.c's own socket transport, built into CHECK_audio_control (which takes the system's socket, not the engine's).
 target_file = {'socket': 'control'}
 check_of = {'control': 'pulse', 'socket': 'control'}
@@ -95,7 +95,7 @@ M = [
     ("alsa", "44100 tried before 48000", "{48000, 44100, 96000, 192000,", "{44100, 48000, 96000, 192000,"),
     ("alsa", "period not scaled to the rate", "period = audio_alsa_clamp(period_at_48000 * got_rate / 48000, 16, 1 << 16);", "period = audio_alsa_clamp(period_at_48000, 16, 1 << 16);"),
     ("alsa", "an underrun not prepared again", "        result = audio_sys_ioctl(pcm->fd, AUDIO_ALSA_PREPARE, 0);\n        if (result == AUDIO_ENODEV)", "        result = 0;\n        if (result == AUDIO_ENODEV)"),
-    ("alsa", "bytes returned as frames", "return result < 0 ? result : result / pcm->frame_bytes;\n}\n\nAUDIO_API long audio_pcm_read", "return result;\n}\n\nAUDIO_API long audio_pcm_read"),
+    ("alsa", "bytes returned as frames", "return result < 0 ? result : result / pcm->frame_bytes;\n}\n\n// frames of the interleaved buffer", "return result;\n}\n\n// frames of the interleaved buffer"),
     ("alsa", "PCM_INFO number", "AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x31,", "AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x32,"),
     ("alsa", "access other than read/write", "audio_alsa_only(&hw, AUDIO_ALSA_ACCESS, AUDIO_ALSA_ACCESS_RW_INTERLEAVED);", "audio_alsa_only(&hw, AUDIO_ALSA_ACCESS, 0);"),
     ("alsa", 'a switch written off, not on', '                        want = 1;\n                }\n                else if (kind == 2 || kind == 4)', '                        want = 0;\n                }\n                else if (kind == 2 || kind == 4)'),
@@ -150,7 +150,7 @@ M = [
     ("alsa", 'analog with nothing in it heard', '                return 6;\n        return 3;\n}', '                return 6;\n        return 6;\n}'),
     ("alsa", "the jacks' control file left open", '        audio_sys_close((int)fd);\n        return 0;\n}\n\n/*\n        How well a playback device', '        return 0;\n}\n\n/*\n        How well a playback device'),
     # ---- pulse.c ----
-    ("pulse", "shared memory offered", "pulse_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag", "pulse_w_u32(&w, PULSE_VERSION | 0x80000000u);"),
+    ("pulse", "shared memory offered", "wire_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag", "wire_w_u32(&w, PULSE_VERSION | 0x80000000u);"),
     ("pulse", "commands served before the handshake", "if (!c->authorized && command != PULSE_COMMAND_AUTH && command != PULSE_COMMAND_SET_CLIENT_NAME)", "if (0 && command != PULSE_COMMAND_AUTH)"),
     ("pulse", "any program sets the sink volume", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != 2)", "if (n != 2)"),
     ("pulse", "any program sets any stream's volume", "if (!pulse_may(c, s->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != s->map_channels)", "if (n != s->map_channels)"),
@@ -161,7 +161,7 @@ M = [
     ("pulse", "data off the frame accepted", "if (length % (long)s->voice.frame)\n                return PULSE_DEAD;", ""),
     ("pulse", "frame length not capped", "if (channel == PULSE_INVALID ? length > PULSE_FRAME_COMMAND : length > PULSE_FRAME_DATA)", "if (0)"),
     ("pulse", "a full queue written past", "if (pulse_out_fill(c) + 20 + length > PULSE_OUT)\n                return PULSE_DEAD;", ""),
-    ("pulse", "base volume with the wrong tag", "pulse_w_volume(w, AUDIO_VOLUME_NORM);              // base volume", "pulse_w_u32(w, AUDIO_VOLUME_NORM);"),
+    ("pulse", "base volume with the wrong tag", "pulse_w_volume(w, AUDIO_VOLUME_NORM);              // base volume", "wire_w_u32(w, AUDIO_VOLUME_NORM);"),
     ("pulse", "sink volume not a mean", "return audio_volume_gain(n ? sum / (unsigned long)n : 0);", "return audio_volume_gain(sum);"),
     ("pulse", "mute does not mute", "if (s->muted || s->corked || s->dying)\n                left = right = 0.0f;", "if (s->corked || s->dying)\n                left = right = 0.0f;"),
     ("pulse", "a muted stream stands still", "s->voice.flows = !s->corked;", "s->voice.flows = 0;"),
@@ -211,7 +211,7 @@ M = [
     ("pulse", 'record resampler tables the wrong way round', 'table = audio_table_take(p->source[source].rate, rate);', 'table = audio_table_take(rate, p->source[source].rate);'),
     ("pulse", 'record peaks get a filter', 'if (!peak && rate != p->source[source].rate)', 'if (rate != p->source[source].rate)'),
     ("pulse", 'record capture device not the default over a monitor', 'if (p->default_source < 0 || p->default_source < PULSE_SINKS)', 'if (p->default_source < 0)'),
-    ("pulse", 'record kill not told', 'if (tell && c)\n        {\n                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                pulse_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);', 'if (0 && c)\n        {\n                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                pulse_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);'),
+    ("pulse", 'record kill not told', 'if (tell && c)\n        {\n                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                wire_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);', 'if (0 && c)\n        {\n                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                wire_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);'),
     ("pulse", 'record end not announced', '        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index);\n        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);', '        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);'),
     ("pulse", "record another user's output shown", 'if (p->record[i].used && (list || p->record[i].index == index) && pulse_may(c, p->record[i].uid))', 'if (p->record[i].used && (list || p->record[i].index == index))'),
     ("pulse", 'record source volume set by anyone', '                if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != 2)\n                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n                p->source[source].volume[0] = volume[0];', '                if (n != 2)\n                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n                p->source[source].volume[0] = volume[0];'),
@@ -221,9 +221,9 @@ M = [
     ("pulse", 'record move leaves the filter', '        if (!r->peak_detect)\n        {\n                audio_table_give(r->table);\n                r->table = table;\n                if (table)\n                        audio_rs_open(&r->rs, table);\n        }\n        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);', '        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);'),
     ("pulse", 'record fragment longer than the buffer', '        if (fragsize > maxlength)\n                fragsize = maxlength;\n        fragsize -= fragsize % frame;', '        fragsize -= fragsize % frame;'),
     ("pulse", 'record buffer under one frame', '        if (maxlength < frame)\n                maxlength = frame;\n', ''),
-    ("pulse", 'record source not idle', 'pulse_w_u32(w, busy ? 0 : 1); // running, or idle', 'pulse_w_u32(w, 0); // running, or idle'),
-    ("pulse", 'record capture device called a monitor', 'pulse_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);', 'pulse_w_u32(w, (unsigned long)(s->sink < 0 ? 0 : s->sink));'),
-    ("pulse", 'record name not kept', 'pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);\n                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:', 'pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:'),
+    ("pulse", 'record source not idle', 'wire_w_u32(w, busy ? 0 : 1); // running, or idle', 'wire_w_u32(w, 0); // running, or idle'),
+    ("pulse", 'record capture device called a monitor', 'wire_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);', 'wire_w_u32(w, (unsigned long)(s->sink < 0 ? 0 : s->sink));'),
+    ("pulse", 'record name not kept', 'pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, wire_len(name) + 1);\n                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:', 'pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:'),
     ("pulse", 'record default falls to nothing', 'return p->default_sink >= 0 && p->source[p->default_sink].used ? p->default_sink : -1;', 'return -1;'),
     ("pulse", 'record default sink does not move a monitor default', '                        if (p->default_source >= 0 && p->default_source < PULSE_SINKS)\n                                pulse_source_default(p, sink);', ''),
     ("pulse", 'record default source does not move its followers', '                if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move)\n                        pulse_record_move(p, p->record + i, slot);', ''),
@@ -261,10 +261,10 @@ M = [
     ("pulse", 'sink named and numbered for a sound', '                return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n        if (sink_name && sink_name[0])\n                sink = pulse_sink_named(p, sink_name);\n        else if (sink_index != PULSE_INVALID)\n                sink = pulse_find_sink(p, sink_index, 0);\n        else\n                sink = p->default_sink;\n        sample = pulse_sample_named(p, name);', '                (void)0;\n        if (sink_name && sink_name[0])\n                sink = pulse_sink_named(p, sink_name);\n        else if (sink_index != PULSE_INVALID)\n                sink = pulse_find_sink(p, sink_index, 0);\n        else\n                sink = p->default_sink;\n        sample = pulse_sample_named(p, name);'),
     ("pulse", "sound's stream owned by the program that asked", '        s->client = -1;\n        s->index = p->next_input++;\n        s->sink = sink;\n        s->format = sample->format;', '        s->client = slot;\n        s->index = p->next_input++;\n        s->sink = sink;\n        s->format = sample->format;'),
     ("pulse", "sound's own properties not on its stream", '        pulse_props_update(&s->props, &sample->props, 1);\n', ''),
-    ("pulse", "sound's stream not named for its program", '        if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))\n                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);\n        if (!pulse_props_text(&s->props, "media.name"', '        if (!pulse_props_text(&s->props, "media.name"'),
+    ("pulse", "sound's stream not named for its program", '        if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))\n                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, wire_len(value) + 1);\n        if (!pulse_props_text(&s->props, "media.name"', '        if (!pulse_props_text(&s->props, "media.name"'),
     ("pulse", 'sample out of the cache still shown', 'if (p->sample[i].used && !p->sample[i].condemned && (list ||', 'if (p->sample[i].used && (list ||'),
     ("pulse", 'sample out of the cache still found', 'if (p->sample[i].used && !p->sample[i].condemned && pulse_equal(p->sample[i].name, name))', 'if (p->sample[i].used && pulse_equal(p->sample[i].name, name))'),
-    ("pulse", "cache's size not said", 'pulse_w_u32(&w, p->sample_total);', 'pulse_w_u32(&w, 0);'),
+    ("pulse", "cache's size not said", 'wire_w_u32(&w, p->sample_total);', 'wire_w_u32(&w, 0);'),
     ("pulse", "a client's uploads kept after it goes", '        for (int i = 0; i < PULSE_UPLOADS; i++)\n                if (p->upload[i].used && p->upload[i].client == slot)\n                        pulse_upload_free(p, p->upload + i);\n', ''),
     ("pulse", 'an upload finished by another client', 'if (p->upload[i].used && p->upload[i].client == client && p->upload[i].channel == channel)', 'if (p->upload[i].used && p->upload[i].channel == channel)'),
     ("pulse", 'sample duration wrong', "pulse_w_64(w, 'U', (long long)frames * 1000000 / (long long)s->rate);", "pulse_w_64(w, 'U', (long long)frames * 1000 / (long long)s->rate);"),
@@ -289,7 +289,7 @@ M = [
     ("pulse", "peak window one frame long","++r->window_count >= window", "++r->window_count > window"),
     ("pulse", "mono peaks never joined", "if (r->channels == 1)", "if (r->channels == 3)"),
     ("pulse", 'a move ignores the no-move request', 'if (s->no_move && !c->root)\n                                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                        if (audio_voice_retarget', 'if (audio_voice_retarget'),
-    ("pulse", 'remembered volumes keyed by name alone', "        key[n++] = '/';\n        if (n + pulse_len(app) + 1 > room)", "        n = 0;\n        key[n++] = '/';\n        if (n + pulse_len(app) + 1 > room)"),
+    ("pulse", 'remembered volumes keyed by name alone', "        key[n++] = '/';\n        if (n + wire_len(app) + 1 > room)", "        n = 0;\n        key[n++] = '/';\n        if (n + wire_len(app) + 1 > room)"),
     ("pulse", 'events about a stream sent to every client', 'if (uid >= 0 && !pulse_may(c, uid))\n                        continue;', ''),
     ("pulse", "sample info shows every user's sounds", 'pulse_may(c, p->sample[i].uid) && (list ||', '(list ||'),
     ("pulse", 'a source volume looks the source up before the right', 'if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there\n                source = pulse_find_source(p, index, name);\n                if (source < 0)\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);', 'source = pulse_find_source(p, index, name);\n                if (source < 0)\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);\n                if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);'),
@@ -298,14 +298,14 @@ M = [
     ("pulse", 'a record move ignores the no-move request', 'if (rec->no_move && !c->root && source != rec->source)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (pulse_record_move', 'if (pulse_record_move'),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
-    ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),
+    ("control", "a mute turned over", "wire_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream muted or not, by the command that names its kind.", "wire_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream muted or not, by the command that names its kind."),
     ("control", "the channel count not kept", "        c->kept[c->kept_next].index = index;\n        c->kept[c->kept_next].channels = channels;\n        c->kept_next = (c->kept_next + 1) % CTL_CACHE;", "        c->kept_next = (c->kept_next + 1) % CTL_CACHE;"),
     ("control", "a wrong count not mended", "                if (got != CTL_INVALID)\n                        return got < 0 ? got : 0;", "                return got < 0 ? got : 0;"),
     ("control", "an access error as a failure", "return code == CTL_ERR_ACCESS ? CTL_ACCESS :", "return code == CTL_ERR_ACCESS ? CTL_FAILED :"),
     ("control", "a missing stream as a failure", "code == CTL_ERR_NOENTITY ? CTL_NOENTITY", "code == CTL_ERR_NOENTITY ? CTL_FAILED"),
     ("control", "any tag taken for ours", "if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)", "if (frame[20] != 'L' || frame[25] != 'L')"),
     ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
-    ("control", "the device named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, name);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
+    ("control", "the device named by nothing", "wire_w_u32(&w, CTL_NONE);\n        wire_w_string(&w, name);\n        ctl_w_cvolume(&w, both, 2);", "wire_w_u32(&w, CTL_NONE);\n        wire_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
     ("control", "the timeout of the connection ignored", "c->deadline = ctl_now(c) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "c->deadline = ctl_now(c) + CTL_TIMEOUT_MS;"),
     ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
     # ---- bowl.c (the sound server a bowl's program is offered, checked by the bowl_session harness) ----
@@ -326,7 +326,7 @@ M = [
     ("control", "a record stream's counts not tried", 'static const signed char guess[] = {2, 1, 4, 6, 8};', 'static const signed char guess[] = {2};'),
     ("control", "a record stream's wrong count not mended", 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != CTL_INVALID)', 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != 12345)'),
     ("control", "a record stream's refusal for its count taken for one for access", '                if (got == CTL_INVALID)\n                        continue;', '                if (got < 0)\n                        continue;'),
-    ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index + 1);"),
+    ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        wire_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        wire_w_u32(&w, index + 1);"),
     # ---- control.c's socket and budget (CHECK_audio_control: the system's socket, to forked servers) ----
     ("socket", "one socket shared by every connection", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n        c->socket.fd = (int)fd;\n        c->socket.linked = 1;\n        c->transport = (struct ctl_transport){&c->socket,", "        static struct ctl_socket shared;\n        ctl_disconnect(c);\n        shared.fd = (int)fd;\n        shared.linked = 1;\n        c->transport = (struct ctl_transport){&shared,"),
     ("socket", "a reconnect leaks the socket it replaces", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n", ""),
@@ -348,8 +348,8 @@ M = [
     ("state", "an output_why that names no reason kept", "copy->output_why = 0;", "(void)0;"),
     ("state", "the trust not applied to a read", "audio_state_trust(copy);\n                        return", "return"),
     # ---- alsa.c: a negative count is refused before the card is asked (CHECK_audio_alsa) ----
-    ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_write("),
-    ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        result = audio_sys_read("),
+    ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_write("),
+    ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_read("),
     # ---- service.c: the server's loop and settings, CHECK_audio_service (Linux, the box) ----
     ("service", 'clock pass scales its frames by the rate', 'audio_produce((long)expirations * AUDIO_PERIOD);', 'audio_produce((long)expirations * (AUDIO_PERIOD * audio_service.rate / 48000));'),
     ("service", "a saved volume is the exact one, not the file's percent", 'audio_service.applied_volume = percent * AUDIO_VOLUME_NORM / 100;', 'audio_service.applied_volume = sink->volume[0];'),

@@ -51,6 +51,8 @@
 #ifndef AUDIO_PULSE_INCLUDED
 #define AUDIO_PULSE_INCLUDED
 
+#include "wire.c"
+
 #ifndef AUDIO_MIX_INCLUDED
 #error "pulse.c follows mix.c, whose voices and sinks it drives"
 #endif
@@ -407,48 +409,11 @@ struct pulse
         unsigned long records_made, records_freed;
 };
 
-/* ---- reading a tag structure ---- */
+/* ---- reading a tag structure (its primitives are in wire.c) ---- */
 
-struct pulse_reader
+static unsigned long pulse_r_u8(struct wire_r *r)
 {
-        const unsigned char *p;
-        long length, at;
-        int bad;
-};
-
-static unsigned long pulse_be32(const unsigned char *p)
-{
-        return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
-}
-
-static int pulse_tag(struct pulse_reader *r, unsigned char tag)
-{
-        if (r->bad || r->at >= r->length || r->p[r->at] != tag)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        r->at++;
-        return 1;
-}
-
-static unsigned long pulse_r_u32(struct pulse_reader *r)
-{
-        unsigned long v;
-
-        if (!pulse_tag(r, 'L') || r->length - r->at < 4)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        v = pulse_be32(r->p + r->at);
-        r->at += 4;
-        return v;
-}
-
-static unsigned long pulse_r_u8(struct pulse_reader *r)
-{
-        if (!pulse_tag(r, 'B') || r->length - r->at < 1)
+        if (!wire_r_tag(r, 'B') || r->length - r->at < 1)
         {
                 r->bad = 1;
                 return 0;
@@ -456,7 +421,7 @@ static unsigned long pulse_r_u8(struct pulse_reader *r)
         return r->p[r->at++];
 }
 
-static int pulse_r_bool(struct pulse_reader *r)
+static int pulse_r_bool(struct wire_r *r)
 {
         if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
         {
@@ -467,7 +432,7 @@ static int pulse_r_bool(struct pulse_reader *r)
 }
 
 // A string of the tag structure: NULL for the null string (and *isnull set), else a pointer into the frame, whose limit is checked.
-static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
+static const char *pulse_r_string(struct wire_r *r, int *isnull)
 {
         long start, avail;
         const unsigned char *nul;
@@ -506,24 +471,24 @@ static const char *pulse_r_string(struct pulse_reader *r, int *isnull)
         return (const char *)(r->p + start);
 }
 
-static void pulse_r_sample_spec(struct pulse_reader *r, long *format, long *channels, long *rate)
+static void pulse_r_sample_spec(struct wire_r *r, long *format, long *channels, long *rate)
 {
-        if (!pulse_tag(r, 'a') || r->length - r->at < 6)
+        if (!wire_r_tag(r, 'a') || r->length - r->at < 6)
         {
                 r->bad = 1;
                 return;
         }
         *format = r->p[r->at];
         *channels = r->p[r->at + 1];
-        *rate = (long)pulse_be32(r->p + r->at + 2);
+        *rate = (long)wire_be32(r->p + r->at + 2);
         r->at += 6;
 }
 
-static long pulse_r_channel_map(struct pulse_reader *r, signed char *map)
+static long pulse_r_channel_map(struct wire_r *r, signed char *map)
 {
         long n;
 
-        if (!pulse_tag(r, 'm') || r->length - r->at < 1)
+        if (!wire_r_tag(r, 'm') || r->length - r->at < 1)
         {
                 r->bad = 1;
                 return 0;
@@ -541,11 +506,11 @@ static long pulse_r_channel_map(struct pulse_reader *r, signed char *map)
         return n;
 }
 
-static long pulse_r_cvolume(struct pulse_reader *r, unsigned long *volume)
+static long pulse_r_cvolume(struct wire_r *r, unsigned long *volume)
 {
         long n;
 
-        if (!pulse_tag(r, 'v') || r->length - r->at < 1)
+        if (!wire_r_tag(r, 'v') || r->length - r->at < 1)
         {
                 r->bad = 1;
                 return 0;
@@ -558,7 +523,7 @@ static long pulse_r_cvolume(struct pulse_reader *r, unsigned long *volume)
         }
         for (long i = 0; i < n; i++)
         {
-                volume[i] = pulse_be32(r->p + r->at + 4 * i);
+                volume[i] = wire_be32(r->p + r->at + 4 * i);
                 if (volume[i] > AUDIO_VOLUME_MAX)
                         volume[i] = AUDIO_VOLUME_MAX;
         }
@@ -566,24 +531,24 @@ static long pulse_r_cvolume(struct pulse_reader *r, unsigned long *volume)
         return n;
 }
 
-static void pulse_r_timeval(struct pulse_reader *r, unsigned long *seconds, unsigned long *microseconds)
+static void pulse_r_timeval(struct wire_r *r, unsigned long *seconds, unsigned long *microseconds)
 {
-        if (!pulse_tag(r, 'T') || r->length - r->at < 8)
+        if (!wire_r_tag(r, 'T') || r->length - r->at < 8)
         {
                 r->bad = 1;
                 return;
         }
-        *seconds = pulse_be32(r->p + r->at);
-        *microseconds = pulse_be32(r->p + r->at + 4);
+        *seconds = wire_be32(r->p + r->at);
+        *microseconds = wire_be32(r->p + r->at + 4);
         r->at += 8;
 }
 
 // An arbitrary block of exactly n bytes.
-static const unsigned char *pulse_r_arbitrary(struct pulse_reader *r, unsigned long n)
+static const unsigned char *pulse_r_arbitrary(struct wire_r *r, unsigned long n)
 {
         const unsigned char *at;
 
-        if (!pulse_tag(r, 'x') || r->length - r->at < 4 || pulse_be32(r->p + r->at) != n || (unsigned long)(r->length - r->at - 4) < n)
+        if (!wire_r_tag(r, 'x') || r->length - r->at < 4 || wire_be32(r->p + r->at) != n || (unsigned long)(r->length - r->at - 4) < n)
         {
                 r->bad = 1;
                 return 0;
@@ -593,7 +558,7 @@ static const unsigned char *pulse_r_arbitrary(struct pulse_reader *r, unsigned l
         return at;
 }
 
-static int pulse_r_eof(const struct pulse_reader *r)
+static int pulse_r_eof(const struct wire_r *r)
 {
         return !r->bad && r->at == r->length;
 }
@@ -607,15 +572,6 @@ static int pulse_key_ok(const char *key, long length)
                 if ((unsigned char)key[i] <= ' ' || (unsigned char)key[i] >= 127)
                         return 0;
         return 1;
-}
-
-static long pulse_len(const char *s)
-{
-        long n = 0;
-
-        while (s[n])
-                n++;
-        return n;
 }
 
 static int pulse_equal(const char *a, const char *b)
@@ -642,7 +598,7 @@ static void pulse_copy(char *to, long room, const char *from)
 
 static int pulse_props_set(struct pulse_props *props, const char *key, const unsigned char *value, long length)
 {
-        long k = pulse_len(key);
+        long k = wire_len(key);
 
         props->version++;
 
@@ -749,9 +705,9 @@ static long pulse_props_text(const struct pulse_props *props, const char *key, c
         return 0;
 }
 
-static void pulse_r_proplist(struct pulse_reader *r, struct pulse_props *props)
+static void pulse_r_proplist(struct wire_r *r, struct pulse_props *props)
 {
-        if (!pulse_tag(r, 'P'))
+        if (!wire_r_tag(r, 'P'))
                 return;
         for (;;)
         {
@@ -762,7 +718,7 @@ static void pulse_r_proplist(struct pulse_reader *r, struct pulse_props *props)
 
                 if (r->bad || isnull)
                         return;
-                length = pulse_r_u32(r);
+                length = wire_r_u32(r);
                 if (r->bad || length > 65536)
                 {
                         r->bad = 1;
@@ -779,123 +735,71 @@ static void pulse_r_proplist(struct pulse_reader *r, struct pulse_props *props)
 
 /* ---- writing one ---- */
 
-struct pulse_writer
-{
-        unsigned char *p;
-        long cap, len;
-        int bad;
-};
-
-static void pulse_w_raw(struct pulse_writer *w, const void *data, long n)
-{
-        if (w->len + n > w->cap)
-        {
-                w->bad = 1;
-                return;
-        }
-        memory_copy_apart(w->p + w->len, data, (unsigned long)n);
-        w->len += n;
-}
-
-static void pulse_w_byte(struct pulse_writer *w, unsigned char c)
-{
-        pulse_w_raw(w, &c, 1);
-}
-
-static void pulse_w_be32(struct pulse_writer *w, unsigned long v)
-{
-        unsigned char b[4] = {(unsigned char)(v >> 24), (unsigned char)(v >> 16), (unsigned char)(v >> 8), (unsigned char)v};
-
-        pulse_w_raw(w, b, 4);
-}
-
-static void pulse_w_u32(struct pulse_writer *w, unsigned long v)
-{
-        pulse_w_byte(w, 'L');
-        pulse_w_be32(w, v);
-}
-
 // A volume on its own (the base volume of a device) has a tag of its own.
-static void pulse_w_volume(struct pulse_writer *w, unsigned long v)
+static void pulse_w_volume(struct wire_w *w, unsigned long v)
 {
-        pulse_w_byte(w, 'V');
-        pulse_w_be32(w, v);
+        wire_w_byte(w, 'V');
+        wire_w_be32(w, v);
 }
 
-static void pulse_w_u8(struct pulse_writer *w, unsigned long v)
+static void pulse_w_u8(struct wire_w *w, unsigned long v)
 {
-        pulse_w_byte(w, 'B');
-        pulse_w_byte(w, (unsigned char)v);
+        wire_w_byte(w, 'B');
+        wire_w_byte(w, (unsigned char)v);
 }
 
-static void pulse_w_bool(struct pulse_writer *w, int v)
+static void pulse_w_64(struct wire_w *w, unsigned char tag, long long v)
 {
-        pulse_w_byte(w, v ? '1' : '0');
+        wire_w_byte(w, tag);
+        wire_w_be32(w, (unsigned long)((unsigned long long)v >> 32));
+        wire_w_be32(w, (unsigned long)((unsigned long long)v & 0xffffffffu));
 }
 
-static void pulse_w_64(struct pulse_writer *w, unsigned char tag, long long v)
+static void pulse_w_sample_spec(struct wire_w *w, long format, long channels, long rate)
 {
-        pulse_w_byte(w, tag);
-        pulse_w_be32(w, (unsigned long)((unsigned long long)v >> 32));
-        pulse_w_be32(w, (unsigned long)((unsigned long long)v & 0xffffffffu));
+        wire_w_byte(w, 'a');
+        wire_w_byte(w, (unsigned char)format);
+        wire_w_byte(w, (unsigned char)channels);
+        wire_w_be32(w, (unsigned long)rate);
 }
 
-static void pulse_w_string(struct pulse_writer *w, const char *s)
+static void pulse_w_channel_map(struct wire_w *w, const signed char *map, long channels)
 {
-        if (!s)
-        {
-                pulse_w_byte(w, 'N');
-                return;
-        }
-        pulse_w_byte(w, 't');
-        pulse_w_raw(w, s, pulse_len(s) + 1);
-}
-
-static void pulse_w_sample_spec(struct pulse_writer *w, long format, long channels, long rate)
-{
-        pulse_w_byte(w, 'a');
-        pulse_w_byte(w, (unsigned char)format);
-        pulse_w_byte(w, (unsigned char)channels);
-        pulse_w_be32(w, (unsigned long)rate);
-}
-
-static void pulse_w_channel_map(struct pulse_writer *w, const signed char *map, long channels)
-{
-        pulse_w_byte(w, 'm');
-        pulse_w_byte(w, (unsigned char)channels);
+        wire_w_byte(w, 'm');
+        wire_w_byte(w, (unsigned char)channels);
         for (long i = 0; i < channels; i++)
-                pulse_w_byte(w, (unsigned char)(i < AUDIO_CHANNELS_MAX ? map[i] : AUDIO_POSITION_AUX0 + i));
+                wire_w_byte(w, (unsigned char)(i < AUDIO_CHANNELS_MAX ? map[i] : AUDIO_POSITION_AUX0 + i));
 }
 
-static void pulse_w_cvolume(struct pulse_writer *w, const unsigned long *volume, long channels)
+static void pulse_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
 {
-        pulse_w_byte(w, 'v');
-        pulse_w_byte(w, (unsigned char)channels);
+        wire_w_byte(w, 'v');
+        wire_w_byte(w, (unsigned char)channels);
         for (long i = 0; i < channels; i++)
-                pulse_w_be32(w, volume[i]);
+                wire_w_be32(w, volume[i]);
 }
 
-static void pulse_w_proplist(struct pulse_writer *w, const struct pulse_props *props)
+static void pulse_w_proplist(struct wire_w *w, const struct pulse_props *props)
 {
-        pulse_w_byte(w, 'P');
+        wire_w_byte(w, 'P');
         for (int i = 0; i < props->count; i++)
         {
-                pulse_w_string(w, props->entry[i].key);
-                pulse_w_u32(w, (unsigned long)props->entry[i].length);
-                pulse_w_byte(w, 'x');
-                pulse_w_be32(w, (unsigned long)props->entry[i].length);
-                pulse_w_raw(w, props->entry[i].value, props->entry[i].length);
+                wire_w_string(w, props->entry[i].key);
+                wire_w_u32(w, (unsigned long)props->entry[i].length);
+                wire_w_byte(w, 'x');
+                wire_w_be32(w, (unsigned long)props->entry[i].length);
+                wire_w_raw(w, props->entry[i].value, props->entry[i].length);
         }
-        pulse_w_byte(w, 'N');
+        wire_w_byte(w, 'N');
 }
 
-static void pulse_w_format_info(struct pulse_writer *w)
+static void pulse_w_format_info(struct wire_w *w)
 {
         // PCM, with no properties: the only encoding served.
-        pulse_w_byte(w, 'f');
+        wire_w_byte(w, 'f');
         pulse_w_u8(w, 1);
-        pulse_w_byte(w, 'P');
-        pulse_w_byte(w, 'N');
+        wire_w_byte(w, 'P');
+        wire_w_byte(w, 'N');
 }
 
 /* ---- the queue to a client ---- */
@@ -991,16 +895,16 @@ static void pulse_event_to(struct pulse *p, unsigned long facility, unsigned lon
         for (int i = 0; i < PULSE_CLIENTS; i++)
         {
                 struct pulse_client *c = p->client[i];
-                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
                 if (!c || !c->authorized || !(c->subscribe & (1ul << facility)))
                         continue;
                 if (uid >= 0 && !pulse_may(c, uid))
                         continue;
-                pulse_w_u32(&w, PULSE_COMMAND_SUBSCRIBE_EVENT);
-                pulse_w_u32(&w, PULSE_INVALID);
-                pulse_w_u32(&w, facility | kind);
-                pulse_w_u32(&w, index);
+                wire_w_u32(&w, PULSE_COMMAND_SUBSCRIBE_EVENT);
+                wire_w_u32(&w, PULSE_INVALID);
+                wire_w_u32(&w, facility | kind);
+                wire_w_u32(&w, index);
                 // A client that cannot take an event is dropped by the next call that finds its queue full; here it is only skipped.
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
@@ -1013,25 +917,25 @@ static void pulse_event(struct pulse *p, unsigned long facility, unsigned long k
 
 static int pulse_error(struct pulse *p, struct pulse_client *c, unsigned long tag, unsigned long code)
 {
-        struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+        struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
-        pulse_w_u32(&w, PULSE_COMMAND_ERROR);
-        pulse_w_u32(&w, tag);
-        pulse_w_u32(&w, code);
+        wire_w_u32(&w, PULSE_COMMAND_ERROR);
+        wire_w_u32(&w, tag);
+        wire_w_u32(&w, code);
         return pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
 }
 
-static void pulse_reply_begin(struct pulse *p, struct pulse_writer *w, unsigned long tag)
+static void pulse_reply_begin(struct pulse *p, struct wire_w *w, unsigned long tag)
 {
         w->p = p->scratch;
         w->cap = PULSE_SCRATCH;
         w->len = 0;
         w->bad = 0;
-        pulse_w_u32(w, PULSE_COMMAND_REPLY);
-        pulse_w_u32(w, tag);
+        wire_w_u32(w, PULSE_COMMAND_REPLY);
+        wire_w_u32(w, tag);
 }
 
-static int pulse_reply_end(struct pulse_client *c, struct pulse_writer *w)
+static int pulse_reply_end(struct pulse_client *c, struct wire_w *w)
 {
         // A reply that did not fit is a bug in the caps, and the client is dropped rather than sent half of it.
         if (w->bad)
@@ -1041,7 +945,7 @@ static int pulse_reply_end(struct pulse_client *c, struct pulse_writer *w)
 
 static int pulse_ack(struct pulse *p, struct pulse_client *c, unsigned long tag)
 {
-        struct pulse_writer w;
+        struct wire_w w;
 
         pulse_reply_begin(p, &w, tag);
         return pulse_reply_end(c, &w);
@@ -1268,10 +1172,10 @@ static void pulse_monitor_set(struct pulse *p, long slot)
         m->sink = slot;
         m->rate = s->rate;
         pulse_copy(m->name, (long)sizeof(m->name), s->name);
-        n = pulse_len(m->name);
+        n = wire_len(m->name);
         pulse_copy(m->name + n, (long)sizeof(m->name) - n, ".monitor");
         pulse_copy(m->description, (long)sizeof(m->description), "Monitor of ");
-        n = pulse_len(m->description);
+        n = wire_len(m->description);
         pulse_copy(m->description + n, (long)sizeof(m->description) - n, s->description);
 }
 
@@ -1333,11 +1237,11 @@ static void pulse_record_end(struct pulse *p, struct pulse_record *r, int tell)
 
         if (tell && c)
         {
-                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
-                pulse_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);
-                pulse_w_u32(&w, PULSE_INVALID);
-                pulse_w_u32(&w, r->channel);
+                wire_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);
+                wire_w_u32(&w, PULSE_INVALID);
+                wire_w_u32(&w, r->channel);
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
         pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index, r->uid);
@@ -1725,7 +1629,7 @@ static void pulse_drop(struct pulse *p, long slot)
 
 /* ---- introspection ---- */
 
-static void pulse_fill_sink(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, long slot)
+static void pulse_fill_sink(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
 {
         struct pulse_sink *s = p->sink + slot;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
@@ -1734,23 +1638,23 @@ static void pulse_fill_sink(struct pulse *p, struct pulse_writer *w, struct puls
         long latency = s->delay_frames * 1000000l / (s->rate ? s->rate : 1);
 
         pulse_copy(monitor, sizeof(monitor), s->name);
-        pulse_copy(monitor + pulse_len(monitor), (long)sizeof(monitor) - pulse_len(monitor), ".monitor");
-        pulse_w_u32(w, (unsigned long)slot);
-        pulse_w_string(w, s->name);
-        pulse_w_string(w, s->description);
+        pulse_copy(monitor + wire_len(monitor), (long)sizeof(monitor) - wire_len(monitor), ".monitor");
+        wire_w_u32(w, (unsigned long)slot);
+        wire_w_string(w, s->name);
+        wire_w_string(w, s->description);
         pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, s->rate);
         pulse_w_channel_map(w, stereo, 2);
-        pulse_w_u32(w, PULSE_INVALID);
+        wire_w_u32(w, PULSE_INVALID);
         pulse_w_cvolume(w, s->volume, 2);
-        pulse_w_bool(w, s->muted);
-        pulse_w_u32(w, (unsigned long)slot);
-        pulse_w_string(w, monitor);
+        wire_w_bool(w, s->muted);
+        wire_w_u32(w, (unsigned long)slot);
+        wire_w_string(w, monitor);
         pulse_w_64(w, 'U', latency);
-        pulse_w_string(w, "moonwater audio");
-        pulse_w_u32(w, 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40); // HW_VOLUME_CTRL is not set: the volume is the mixer's, in software
+        wire_w_string(w, "moonwater audio");
+        wire_w_u32(w, 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40); // HW_VOLUME_CTRL is not set: the volume is the mixer's, in software
         if (c->version >= 13)
         {
-                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, pulse_len(s->description) + 1);
+                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, wire_len(s->description) + 1);
                 pulse_props_set(&props, "device.class", (const unsigned char *)"sound", 6);
                 pulse_w_proplist(w, &props);
                 pulse_w_64(w, 'U', 0);
@@ -1762,14 +1666,14 @@ static void pulse_fill_sink(struct pulse *p, struct pulse_writer *w, struct puls
                 for (int i = 0; i < PULSE_STREAMS; i++)
                         busy |= p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot;
                 pulse_w_volume(w, AUDIO_VOLUME_NORM);              // base volume
-                pulse_w_u32(w, s->suspended ? 2 : busy ? 0 : 1);   // running, idle or suspended
-                pulse_w_u32(w, 256);                               // volume steps
-                pulse_w_u32(w, PULSE_INVALID);                     // card
+                wire_w_u32(w, s->suspended ? 2 : busy ? 0 : 1);   // running, idle or suspended
+                wire_w_u32(w, 256);                               // volume steps
+                wire_w_u32(w, PULSE_INVALID);                     // card
         }
         if (c->version >= 16)
         {
-                pulse_w_u32(w, 0); // no ports
-                pulse_w_string(w, 0);
+                wire_w_u32(w, 0); // no ports
+                wire_w_string(w, 0);
         }
         if (c->version >= 21)
         {
@@ -1778,7 +1682,7 @@ static void pulse_fill_sink(struct pulse *p, struct pulse_writer *w, struct puls
         }
 }
 
-static void pulse_fill_source(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, long slot)
+static void pulse_fill_source(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
 {
         const struct pulse_source *s = p->source + slot;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
@@ -1788,22 +1692,22 @@ static void pulse_fill_source(struct pulse *p, struct pulse_writer *w, struct pu
 
         for (int i = 0; i < PULSE_RECORDS; i++)
                 busy |= p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
-        pulse_w_u32(w, (unsigned long)slot);
-        pulse_w_string(w, s->name);
-        pulse_w_string(w, s->description);
+        wire_w_u32(w, (unsigned long)slot);
+        wire_w_string(w, s->name);
+        wire_w_string(w, s->description);
         pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, s->rate);
         pulse_w_channel_map(w, stereo, 2);
-        pulse_w_u32(w, PULSE_INVALID);
+        wire_w_u32(w, PULSE_INVALID);
         pulse_w_cvolume(w, s->volume, 2);
-        pulse_w_bool(w, s->muted);
-        pulse_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);
-        pulse_w_string(w, s->capture ? 0 : p->sink[s->sink].name);
+        wire_w_bool(w, s->muted);
+        wire_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);
+        wire_w_string(w, s->capture ? 0 : p->sink[s->sink].name);
         pulse_w_64(w, 'U', latency);
-        pulse_w_string(w, "moonwater audio");
-        pulse_w_u32(w, s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10);
+        wire_w_string(w, "moonwater audio");
+        wire_w_u32(w, s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10);
         if (c->version >= 13)
         {
-                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, pulse_len(s->description) + 1);
+                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, wire_len(s->description) + 1);
                 pulse_props_set(&props, "device.class", (const unsigned char *)(s->capture ? "sound" : "monitor"), s->capture ? 6 : 8);
                 pulse_w_proplist(w, &props);
                 pulse_w_64(w, 'U', 0);
@@ -1811,14 +1715,14 @@ static void pulse_fill_source(struct pulse *p, struct pulse_writer *w, struct pu
         if (c->version >= 15)
         {
                 pulse_w_volume(w, AUDIO_VOLUME_NORM);
-                pulse_w_u32(w, busy ? 0 : 1); // running, or idle
-                pulse_w_u32(w, 256);
-                pulse_w_u32(w, PULSE_INVALID);
+                wire_w_u32(w, busy ? 0 : 1); // running, or idle
+                wire_w_u32(w, 256);
+                wire_w_u32(w, PULSE_INVALID);
         }
         if (c->version >= 16)
         {
-                pulse_w_u32(w, 0);
-                pulse_w_string(w, 0);
+                wire_w_u32(w, 0);
+                wire_w_string(w, 0);
         }
         if (c->version >= 22)
         {
@@ -1827,21 +1731,21 @@ static void pulse_fill_source(struct pulse *p, struct pulse_writer *w, struct pu
         }
 }
 
-static void pulse_fill_client(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, struct pulse_client *of)
+static void pulse_fill_client(struct pulse *p, struct wire_w *w, struct pulse_client *c, struct pulse_client *of)
 {
         char name[PULSE_VALUE + 1];
 
         (void)p;
         pulse_props_text(&of->props, "application.name", name, sizeof(name));
-        pulse_w_u32(w, of->index);
-        pulse_w_string(w, name);
-        pulse_w_u32(w, PULSE_INVALID);
-        pulse_w_string(w, "protocol-native");
+        wire_w_u32(w, of->index);
+        wire_w_string(w, name);
+        wire_w_u32(w, PULSE_INVALID);
+        wire_w_string(w, "protocol-native");
         if (c->version >= 13)
                 pulse_w_proplist(w, &of->props);
 }
 
-static void pulse_fill_input(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, struct pulse_stream *s)
+static void pulse_fill_input(struct pulse *p, struct wire_w *w, struct pulse_client *c, struct pulse_stream *s)
 {
         char name[PULSE_VALUE + 1];
         long latency = p->sink[s->sink].delay_frames * 1000000l / (p->sink[s->sink].rate ? p->sink[s->sink].rate : 1);
@@ -1851,35 +1755,35 @@ static void pulse_fill_input(struct pulse *p, struct pulse_writer *w, struct pul
         pulse_props_text(&s->props, "media.name", name, sizeof(name));
         for (long i = 0; i < n; i++)
                 volume[i] = s->volume[i];
-        pulse_w_u32(w, s->index);
-        pulse_w_string(w, name);
-        pulse_w_u32(w, PULSE_INVALID);
-        pulse_w_u32(w, s->client >= 0 && p->client[s->client] ? p->client[s->client]->index : PULSE_INVALID);
-        pulse_w_u32(w, (unsigned long)s->sink);
+        wire_w_u32(w, s->index);
+        wire_w_string(w, name);
+        wire_w_u32(w, PULSE_INVALID);
+        wire_w_u32(w, s->client >= 0 && p->client[s->client] ? p->client[s->client]->index : PULSE_INVALID);
+        wire_w_u32(w, (unsigned long)s->sink);
         pulse_w_sample_spec(w, s->format, s->channels, s->rate);
         pulse_w_channel_map(w, s->map, s->map_channels);
         pulse_w_cvolume(w, volume, n);
         pulse_w_64(w, 'U', (long long)(s->voice.ring.limit - s->voice.ring.read) * 1000000 / (long long)(s->voice.frame * (unsigned long)s->rate));
         pulse_w_64(w, 'U', latency);
-        pulse_w_string(w, "copy");
-        pulse_w_string(w, "protocol-native");
+        wire_w_string(w, "copy");
+        wire_w_string(w, "protocol-native");
         if (c->version >= 11)
-                pulse_w_bool(w, s->muted);
+                wire_w_bool(w, s->muted);
         if (c->version >= 13)
                 pulse_w_proplist(w, &s->props);
         if (c->version >= 19)
-                pulse_w_bool(w, s->corked);
+                wire_w_bool(w, s->corked);
         if (c->version >= 20)
         {
-                pulse_w_bool(w, 1);
-                pulse_w_bool(w, 1);
+                wire_w_bool(w, 1);
+                wire_w_bool(w, 1);
         }
         if (c->version >= 21)
                 pulse_w_format_info(w);
 }
 
 // A record stream as introspection shows it: the source output.
-static void pulse_fill_output(struct pulse *p, struct pulse_writer *w, struct pulse_client *c, struct pulse_record *r)
+static void pulse_fill_output(struct pulse *p, struct wire_w *w, struct pulse_client *c, struct pulse_record *r)
 {
         char name[PULSE_VALUE + 1];
         const struct pulse_source *s = p->source + r->source;
@@ -1892,27 +1796,27 @@ static void pulse_fill_output(struct pulse *p, struct pulse_writer *w, struct pu
         pulse_props_text(&r->props, "media.name", name, sizeof(name));
         for (long i = 0; i < r->map_channels; i++)
                 volume[i] = r->volume[i];
-        pulse_w_u32(w, r->index);
-        pulse_w_string(w, name);
-        pulse_w_u32(w, PULSE_INVALID);
-        pulse_w_u32(w, r->client >= 0 && p->client[r->client] ? p->client[r->client]->index : PULSE_INVALID);
-        pulse_w_u32(w, (unsigned long)r->source);
+        wire_w_u32(w, r->index);
+        wire_w_string(w, name);
+        wire_w_u32(w, PULSE_INVALID);
+        wire_w_u32(w, r->client >= 0 && p->client[r->client] ? p->client[r->client]->index : PULSE_INVALID);
+        wire_w_u32(w, (unsigned long)r->source);
         pulse_w_sample_spec(w, r->format, r->channels, r->rate);
         pulse_w_channel_map(w, r->map, r->map_channels);
         pulse_w_64(w, 'U', queued);
         pulse_w_64(w, 'U', source_latency);
-        pulse_w_string(w, "copy");
-        pulse_w_string(w, "protocol-native");
+        wire_w_string(w, "copy");
+        wire_w_string(w, "protocol-native");
         if (c->version >= 13)
                 pulse_w_proplist(w, &r->props);
         if (c->version >= 19)
-                pulse_w_bool(w, r->corked);
+                wire_w_bool(w, r->corked);
         if (c->version >= 22)
         {
                 pulse_w_cvolume(w, volume, r->map_channels);
-                pulse_w_bool(w, r->muted);
-                pulse_w_bool(w, 1);
-                pulse_w_bool(w, 1);
+                wire_w_bool(w, r->muted);
+                wire_w_bool(w, 1);
+                wire_w_bool(w, 1);
                 pulse_w_format_info(w);
         }
 }
@@ -1924,7 +1828,7 @@ static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
 {
         struct pulse_client *c;
         unsigned long queued, target, missing;
-        struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+        struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
         if (!s->used || s->dying || s->client < 0 || !(c = p->client[s->client]))
                 return;
@@ -1936,10 +1840,10 @@ static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
         missing -= missing % s->voice.frame;
         if (!missing || (missing < s->minreq && (queued + s->outstanding) != 0))
                 return;
-        pulse_w_u32(&w, PULSE_COMMAND_REQUEST);
-        pulse_w_u32(&w, PULSE_INVALID);
-        pulse_w_u32(&w, s->channel);
-        pulse_w_u32(&w, missing);
+        wire_w_u32(&w, PULSE_COMMAND_REQUEST);
+        wire_w_u32(&w, PULSE_INVALID);
+        wire_w_u32(&w, s->channel);
+        wire_w_u32(&w, missing);
         if (pulse_enqueue(c, PULSE_INVALID, w.p, w.len) == PULSE_DONE)
                 s->outstanding += missing;
 }
@@ -1947,13 +1851,13 @@ static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
 static void pulse_stream_signal(struct pulse *p, struct pulse_stream *s, unsigned long command, int with_offset)
 {
         struct pulse_client *c = s->client >= 0 ? p->client[s->client] : 0;
-        struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+        struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
         if (!c || (command == PULSE_COMMAND_STARTED && c->version < 13))
                 return;
-        pulse_w_u32(&w, command);
-        pulse_w_u32(&w, PULSE_INVALID);
-        pulse_w_u32(&w, s->channel);
+        wire_w_u32(&w, command);
+        wire_w_u32(&w, PULSE_INVALID);
+        wire_w_u32(&w, s->channel);
         if (with_offset && c->version >= 23)
                 pulse_w_64(&w, 'r', (long long)s->voice.ring.read);
         pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
@@ -2097,13 +2001,13 @@ static int pulse_app_key(const struct pulse_client *c, char *key, long room)
         while (count)
                 key[n++] = digits[--count];
         key[n++] = '/';
-        if (n + pulse_len(app) + 1 > room)
+        if (n + wire_len(app) + 1 > room)
                 return 0;
         pulse_copy(key + n, room - n, app);
         return 1;
 }
 
-static int pulse_command_create_playback(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+static int pulse_command_create_playback(struct pulse *p, long slot, struct wire_r *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
         struct pulse_props props = {0};
@@ -2115,20 +2019,20 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
         int corked, muted = 0, adjust = 0, early = 0, volume_set = 1, muted_set = 0, variable = 0, no_move = 0, isnull;
         long volume_channels;
         struct pulse_stream *s;
-        struct pulse_writer w;
+        struct wire_w w;
         int err;
 
         PULSE_NEED_AUTH();
         pulse_r_sample_spec(r, &format, &channels, &rate);
         map_channels = pulse_r_channel_map(r, map);
-        sink_index = pulse_r_u32(r);
+        sink_index = wire_r_u32(r);
         sink_name = pulse_r_string(r, &isnull);
-        maxlength = pulse_r_u32(r);
+        maxlength = wire_r_u32(r);
         corked = pulse_r_bool(r);
-        tlength = pulse_r_u32(r);
-        prebuf = pulse_r_u32(r);
-        minreq = pulse_r_u32(r);
-        pulse_r_u32(r); // sync id
+        tlength = wire_r_u32(r);
+        prebuf = wire_r_u32(r);
+        minreq = wire_r_u32(r);
+        wire_r_u32(r); // sync id
         volume_channels = pulse_r_cvolume(r, volume);
         if (c->version >= 12)
         {
@@ -2168,7 +2072,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
                 // Formats the program offers are PCM or nothing: any of them is read and none is used (the sample spec stands).
                 for (unsigned long i = 0; i < formats && !r->bad; i++)
                 {
-                        pulse_tag(r, 'f');
+                        wire_r_tag(r, 'f');
                         pulse_r_u8(r);
                         {
                                 struct pulse_props ignored = {0};
@@ -2225,25 +2129,25 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
                 char value[PULSE_VALUE + 1];
 
                 if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))
-                        pulse_props_set(&s->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);
+                        pulse_props_set(&s->props, "application.name", (const unsigned char *)value, wire_len(value) + 1);
         }
         pulse_stream_apply(s);
         // The program is asked for its first data before the answer, as the answer's "missing" says.
         pulse_reply_begin(p, &w, tag);
-        pulse_w_u32(&w, s->channel);
-        pulse_w_u32(&w, s->index);
-        pulse_w_u32(&w, s->tlength);
-        pulse_w_u32(&w, s->maxlength);
-        pulse_w_u32(&w, s->tlength);
-        pulse_w_u32(&w, s->prebuf);
-        pulse_w_u32(&w, s->minreq);
+        wire_w_u32(&w, s->channel);
+        wire_w_u32(&w, s->index);
+        wire_w_u32(&w, s->tlength);
+        wire_w_u32(&w, s->maxlength);
+        wire_w_u32(&w, s->tlength);
+        wire_w_u32(&w, s->prebuf);
+        wire_w_u32(&w, s->minreq);
         if (c->version >= 12)
         {
                 pulse_w_sample_spec(&w, s->format, s->channels, s->rate);
                 pulse_w_channel_map(&w, s->map, s->map_channels);
-                pulse_w_u32(&w, (unsigned long)sink);
-                pulse_w_string(&w, p->sink[sink].name);
-                pulse_w_bool(&w, 0);
+                wire_w_u32(&w, (unsigned long)sink);
+                wire_w_string(&w, p->sink[sink].name);
+                wire_w_bool(&w, 0);
         }
         if (c->version >= 13)
                 pulse_w_64(&w, 'U', 20000);
@@ -2256,9 +2160,9 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
         return err;
 }
 
-static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r)
 {
-        unsigned long index = pulse_r_u32(r), volume[PULSE_CHANNEL_MAX];
+        unsigned long index = wire_r_u32(r), volume[PULSE_CHANNEL_MAX];
         const char *name = 0;
         long n;
         int isnull;
@@ -2346,9 +2250,9 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
         return pulse_ack(p, c, tag);
 }
 
-static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r)
 {
-        unsigned long index = pulse_r_u32(r);
+        unsigned long index = wire_r_u32(r);
         const char *name = 0;
         int mute, isnull;
 
@@ -2476,7 +2380,7 @@ static void pulse_record_attributes(struct pulse_record *r, unsigned long maxlen
         r->fragsize = fragsize;
 }
 
-static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
         struct pulse_props props = {0};
@@ -2487,7 +2391,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
         int corked, no_move = 0, variable = 0, peak = 0, adjust = 0, early = 0, muted = 0, volume_set = 0, muted_set = 0, isnull;
         struct pulse_record *rec = 0;
         struct audio_table *table = 0;
-        struct pulse_writer w;
+        struct wire_w w;
         int err;
 
         PULSE_NEED_AUTH();
@@ -2495,11 +2399,11 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 pulse_r_string(r, &isnull); // the name of the stream, which version 13 put in the properties
         pulse_r_sample_spec(r, &format, &channels, &rate);
         map_channels = pulse_r_channel_map(r, map);
-        source_index = pulse_r_u32(r);
+        source_index = wire_r_u32(r);
         source_name = pulse_r_string(r, &isnull);
-        maxlength = pulse_r_u32(r);
+        maxlength = wire_r_u32(r);
         corked = pulse_r_bool(r);
-        fragsize = pulse_r_u32(r);
+        fragsize = wire_r_u32(r);
         if (c->version >= 12)
         {
                 pulse_r_bool(r); // no remap
@@ -2515,7 +2419,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 peak = pulse_r_bool(r);
                 adjust = pulse_r_bool(r);
                 pulse_r_proplist(r, &props);
-                direct = pulse_r_u32(r);
+                direct = wire_r_u32(r);
         }
         if (c->version >= 14)
                 early = pulse_r_bool(r);
@@ -2532,7 +2436,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 {
                         struct pulse_props ignored = {0};
 
-                        pulse_tag(r, 'f');
+                        wire_r_tag(r, 'f');
                         pulse_r_u8(r);
                         pulse_r_proplist(r, &ignored);
                 }
@@ -2623,21 +2527,21 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
                 char value[PULSE_VALUE + 1];
 
                 if (!pulse_props_text(&rec->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))
-                        pulse_props_set(&rec->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);
+                        pulse_props_set(&rec->props, "application.name", (const unsigned char *)value, wire_len(value) + 1);
         }
         p->records_made++;
         pulse_reply_begin(p, &w, tag);
-        pulse_w_u32(&w, rec->channel);
-        pulse_w_u32(&w, rec->index);
-        pulse_w_u32(&w, rec->maxlength);
-        pulse_w_u32(&w, rec->fragsize);
+        wire_w_u32(&w, rec->channel);
+        wire_w_u32(&w, rec->index);
+        wire_w_u32(&w, rec->maxlength);
+        wire_w_u32(&w, rec->fragsize);
         if (c->version >= 12)
         {
                 pulse_w_sample_spec(&w, rec->format, rec->channels, rec->rate);
                 pulse_w_channel_map(&w, rec->map, rec->map_channels);
-                pulse_w_u32(&w, (unsigned long)source);
-                pulse_w_string(&w, p->source[source].name);
-                pulse_w_bool(&w, 0);
+                wire_w_u32(&w, (unsigned long)source);
+                wire_w_string(&w, p->source[source].name);
+                wire_w_bool(&w, 0);
         }
         if (c->version >= 13)
                 pulse_w_64(&w, 'U', p->source[source].delay_frames * 1000000l / (p->source[source].rate ? p->source[source].rate : 1));
@@ -2650,12 +2554,12 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct pulse_
 }
 
 // The commands on one record stream by its channel: delete, cork, flush, latency, name, rate, attributes, properties.
-static int pulse_command_record(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_record(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct wire_r *r)
 {
         struct pulse_client *c = p->client[slot];
-        unsigned long channel = pulse_r_u32(r);
+        unsigned long channel = wire_r_u32(r);
         struct pulse_record *rec;
-        struct pulse_writer w;
+        struct wire_w w;
 
         PULSE_NEED_AUTH();
         if (command == PULSE_COMMAND_DELETE_RECORD_STREAM || command == PULSE_COMMAND_FLUSH_RECORD_STREAM)
@@ -2712,13 +2616,13 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 pulse_reply_begin(p, &w, tag);
                 pulse_w_64(&w, 'U', latency);
                 pulse_w_64(&w, 'U', source_latency);
-                pulse_w_bool(&w, !rec->corked);
-                pulse_w_byte(&w, 'T');
-                pulse_w_be32(&w, sec);
-                pulse_w_be32(&w, usec);
-                pulse_w_byte(&w, 'T');
-                pulse_w_be32(&w, (unsigned long)now_sec);
-                pulse_w_be32(&w, (unsigned long)now_usec);
+                wire_w_bool(&w, !rec->corked);
+                wire_w_byte(&w, 'T');
+                wire_w_be32(&w, sec);
+                wire_w_be32(&w, usec);
+                wire_w_byte(&w, 'T');
+                wire_w_be32(&w, (unsigned long)now_sec);
+                wire_w_be32(&w, (unsigned long)now_usec);
                 pulse_w_64(&w, 'r', (long long)rec->produced);
                 pulse_w_64(&w, 'r', (long long)rec->sent);
                 return pulse_reply_end(c, &w);
@@ -2732,13 +2636,13 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);
+                pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, wire_len(name) + 1);
                 pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:
         {
-                unsigned long rate = pulse_r_u32(r);
+                unsigned long rate = wire_r_u32(r);
                 struct audio_table *table = 0;
 
                 if (!pulse_r_eof(r))
@@ -2765,7 +2669,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
         }
         case PULSE_COMMAND_SET_RECORD_STREAM_BUFFER_ATTR:
         {
-                unsigned long maxlength = pulse_r_u32(r), fragsize = pulse_r_u32(r);
+                unsigned long maxlength = wire_r_u32(r), fragsize = wire_r_u32(r);
                 int adjust = 0, early = 0;
 
                 if (c->version >= 13)
@@ -2780,15 +2684,15 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
                 rec->adjust_latency = adjust;
                 rec->early_requests = early;
                 pulse_reply_begin(p, &w, tag);
-                pulse_w_u32(&w, rec->maxlength);
-                pulse_w_u32(&w, rec->fragsize);
+                wire_w_u32(&w, rec->maxlength);
+                wire_w_u32(&w, rec->fragsize);
                 if (c->version >= 13)
                         pulse_w_64(&w, 'U', p->source[rec->source].delay_frames * 1000000l / (p->source[rec->source].rate ? p->source[rec->source].rate : 1));
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_UPDATE_RECORD_STREAM_PROPLIST:
         {
-                unsigned long mode = pulse_r_u32(r);
+                unsigned long mode = wire_r_u32(r);
                 struct pulse_props props = {0};
 
                 pulse_r_proplist(r, &props);
@@ -2844,7 +2748,7 @@ static int pulse_sample_name_ok(const char *name)
 
         if (!name)
                 return 0;
-        n = pulse_len(name);
+        n = wire_len(name);
         if (n < 1 || n >= PULSE_NAME)
                 return 0;
         for (long i = 0; i < n; i++)
@@ -2903,27 +2807,27 @@ static void pulse_upload_free(struct pulse *p, struct pulse_upload *u)
         u->data = 0;
 }
 
-static void pulse_fill_sample(struct pulse_writer *w, struct pulse_client *c, const struct pulse_sample *s)
+static void pulse_fill_sample(struct wire_w *w, struct pulse_client *c, const struct pulse_sample *s)
 {
         unsigned long volume[AUDIO_CHANNELS_MAX];
         unsigned long frames = s->bytes / (unsigned long)(audio_format_bytes(s->format) * s->channels);
 
         for (long i = 0; i < s->map_channels; i++)
                 volume[i] = AUDIO_VOLUME_NORM;
-        pulse_w_u32(w, s->index);
-        pulse_w_string(w, s->name);
+        wire_w_u32(w, s->index);
+        wire_w_string(w, s->name);
         pulse_w_cvolume(w, volume, s->map_channels);
         pulse_w_64(w, 'U', (long long)frames * 1000000 / (long long)s->rate);
         pulse_w_sample_spec(w, s->format, s->channels, s->rate);
         pulse_w_channel_map(w, s->map, s->map_channels);
-        pulse_w_u32(w, s->bytes);
-        pulse_w_bool(w, 0); // not lazy: the data is in the cache
-        pulse_w_string(w, 0);
+        wire_w_u32(w, s->bytes);
+        wire_w_bool(w, 0); // not lazy: the data is in the cache
+        wire_w_string(w, 0);
         if (c->version >= 13)
                 pulse_w_proplist(w, &s->props);
 }
 
-static int pulse_command_create_upload(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+static int pulse_command_create_upload(struct pulse *p, long slot, struct wire_r *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
         struct pulse_props props = {0};
@@ -2933,14 +2837,14 @@ static int pulse_command_create_upload(struct pulse *p, long slot, struct pulse_
         const char *name;
         struct pulse_upload *u = 0;
         unsigned char *memory;
-        struct pulse_writer w;
+        struct wire_w w;
         int isnull;
 
         PULSE_NEED_AUTH();
         name = pulse_r_string(r, &isnull);
         pulse_r_sample_spec(r, &format, &channels, &rate);
         map_channels = pulse_r_channel_map(r, map);
-        length = pulse_r_u32(r);
+        length = wire_r_u32(r);
         if (c->version >= 13)
                 pulse_r_proplist(r, &props);
         if (!pulse_r_eof(r))
@@ -2978,16 +2882,16 @@ static int pulse_command_create_upload(struct pulse *p, long slot, struct pulse_
         u->uid = c->uid;
         p->upload_total += length;
         pulse_reply_begin(p, &w, tag);
-        pulse_w_u32(&w, u->channel);
-        pulse_w_u32(&w, length);
+        wire_w_u32(&w, u->channel);
+        wire_w_u32(&w, length);
         return pulse_reply_end(c, &w);
 }
 
 // DELETE_UPLOAD_STREAM and FINISH_UPLOAD_STREAM: the upload is given up, or its sample is put in the cache (the one of its name replaced).
-static int pulse_command_upload(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_upload(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct wire_r *r)
 {
         struct pulse_client *c = p->client[slot];
-        unsigned long channel = pulse_r_u32(r);
+        unsigned long channel = wire_r_u32(r);
         struct pulse_upload *u;
         struct pulse_sample *old, *s = 0;
         unsigned long index = 0;
@@ -3060,7 +2964,7 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
         return pulse_ack(p, c, tag);
 }
 
-static int pulse_command_remove_sample(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+static int pulse_command_remove_sample(struct pulse *p, long slot, struct wire_r *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
         int isnull;
@@ -3086,7 +2990,7 @@ static int pulse_command_remove_sample(struct pulse *p, long slot, struct pulse_
         requester goes), that ends when its frames have been played. The ring of its voice is the sample's own memory, with
         everything in it to be read. The volume is the program's if it gave one, else what is remembered of its name.
 */
-static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+static int pulse_command_play_sample(struct pulse *p, long slot, struct wire_r *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
         struct pulse_props props = {0}, extra = {0};
@@ -3096,13 +3000,13 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         struct pulse_sample *sample;
         struct pulse_stream *s = 0;
         long sink, mine = 0;
-        struct pulse_writer w;
+        struct wire_w w;
         char value[PULSE_VALUE + 1];
 
         PULSE_NEED_AUTH();
-        sink_index = pulse_r_u32(r);
+        sink_index = wire_r_u32(r);
         sink_name = pulse_r_string(r, &isnull);
-        volume = pulse_r_u32(r);
+        volume = wire_r_u32(r);
         name = pulse_r_string(r, &isnull);
         if (c->version >= 13)
                 pulse_r_proplist(r, &props);
@@ -3168,17 +3072,17 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         s->props = props;
         pulse_props_update(&s->props, &sample->props, 1);
         if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))
-                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);
+                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, wire_len(value) + 1);
         if (!pulse_props_text(&s->props, "media.name", value, sizeof(value)))
         {
-                pulse_props_set(&extra, "media.name", (const unsigned char *)sample->name, pulse_len(sample->name) + 1);
+                pulse_props_set(&extra, "media.name", (const unsigned char *)sample->name, wire_len(sample->name) + 1);
                 pulse_props_update(&s->props, &extra, 1);
         }
         pulse_stream_apply(s);
         p->streams_made++;
         pulse_reply_begin(p, &w, tag);
         if (c->version >= 13)
-                pulse_w_u32(&w, s->index);
+                wire_w_u32(&w, s->index);
         {
                 int err = pulse_reply_end(c, &w);
 
@@ -3189,12 +3093,12 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
 }
 
 // The commands on one stream by its channel: delete, cork, flush, trigger, prebuf, drain, latency, name, rate, attributes, properties.
-static int pulse_command_stream(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_stream(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct wire_r *r)
 {
         struct pulse_client *c = p->client[slot];
-        unsigned long channel = pulse_r_u32(r);
+        unsigned long channel = wire_r_u32(r);
         struct pulse_stream *s;
-        struct pulse_writer w;
+        struct wire_w w;
 
         PULSE_NEED_AUTH();
         switch (command)
@@ -3302,13 +3206,13 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 pulse_reply_begin(p, &w, tag);
                 pulse_w_64(&w, 'U', latency);
                 pulse_w_64(&w, 'U', 0);
-                pulse_w_bool(&w, !s->underrun && !s->corked);
-                pulse_w_byte(&w, 'T');
-                pulse_w_be32(&w, sec);
-                pulse_w_be32(&w, usec);
-                pulse_w_byte(&w, 'T');
-                pulse_w_be32(&w, (unsigned long)now_sec);
-                pulse_w_be32(&w, (unsigned long)now_usec);
+                wire_w_bool(&w, !s->underrun && !s->corked);
+                wire_w_byte(&w, 'T');
+                wire_w_be32(&w, sec);
+                wire_w_be32(&w, usec);
+                wire_w_byte(&w, 'T');
+                wire_w_be32(&w, (unsigned long)now_sec);
+                wire_w_be32(&w, (unsigned long)now_usec);
                 pulse_w_64(&w, 'r', (long long)s->voice.ring.write);
                 pulse_w_64(&w, 'r', (long long)s->voice.ring.read);
                 if (c->version >= 13)
@@ -3327,13 +3231,13 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                pulse_props_set(&s->props, "media.name", (const unsigned char *)name, pulse_len(name) + 1);
+                pulse_props_set(&s->props, "media.name", (const unsigned char *)name, wire_len(name) + 1);
                 pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_SAMPLE_RATE:
         {
-                unsigned long rate = pulse_r_u32(r);
+                unsigned long rate = wire_r_u32(r);
 
                 if (!pulse_r_eof(r))
                         return PULSE_DEAD;
@@ -3346,7 +3250,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
         }
         case PULSE_COMMAND_SET_PLAYBACK_STREAM_BUFFER_ATTR:
         {
-                unsigned long maxlength = pulse_r_u32(r), tlength = pulse_r_u32(r), prebuf = pulse_r_u32(r), minreq = pulse_r_u32(r);
+                unsigned long maxlength = wire_r_u32(r), tlength = wire_r_u32(r), prebuf = wire_r_u32(r), minreq = wire_r_u32(r);
                 int adjust = 0, early = 0;
 
                 if (c->version >= 13)
@@ -3387,17 +3291,17 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         s->early_requests = early;
                 }
                 pulse_reply_begin(p, &w, tag);
-                pulse_w_u32(&w, s->maxlength);
-                pulse_w_u32(&w, s->tlength);
-                pulse_w_u32(&w, s->prebuf);
-                pulse_w_u32(&w, s->minreq);
+                wire_w_u32(&w, s->maxlength);
+                wire_w_u32(&w, s->tlength);
+                wire_w_u32(&w, s->prebuf);
+                wire_w_u32(&w, s->minreq);
                 if (c->version >= 13)
                         pulse_w_64(&w, 'U', 20000);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST:
         {
-                unsigned long mode = pulse_r_u32(r);
+                unsigned long mode = wire_r_u32(r);
                 struct pulse_props props = {0};
 
                 pulse_r_proplist(r, &props);
@@ -3437,17 +3341,17 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
 }
 
 // A list is built in the scratch. One that did not fit is refused as too large, rather than dropping the client that asked.
-static int pulse_list_end(struct pulse *p, struct pulse_client *c, unsigned long tag, struct pulse_writer *w)
+static int pulse_list_end(struct pulse *p, struct pulse_client *c, unsigned long tag, struct wire_w *w)
 {
         if (w->bad)
                 return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
         return pulse_reply_end(c, w);
 }
 
-static int pulse_command_info(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_info(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct wire_r *r)
 {
         struct pulse_client *c = p->client[slot];
-        struct pulse_writer w;
+        struct wire_w w;
         unsigned long index = PULSE_INVALID;
         const char *name = 0;
         int list = 0, isnull;
@@ -3465,7 +3369,7 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                 list = 1;
                 break;
         default:
-                index = pulse_r_u32(r);
+                index = wire_r_u32(r);
                 if (command == PULSE_COMMAND_GET_SINK_INFO || command == PULSE_COMMAND_GET_SOURCE_INFO || command == PULSE_COMMAND_GET_CARD_INFO || command == PULSE_COMMAND_GET_SAMPLE_INFO)
                         name = pulse_r_string(r, &isnull);
                 break;
@@ -3568,23 +3472,23 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
         }
 }
 
-static int pulse_command_server_info(struct pulse *p, struct pulse_client *c, unsigned long tag, struct pulse_reader *r)
+static int pulse_command_server_info(struct pulse *p, struct pulse_client *c, unsigned long tag, struct wire_r *r)
 {
-        struct pulse_writer w;
+        struct wire_w w;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
 
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
         PULSE_NEED_AUTH();
         pulse_reply_begin(p, &w, tag);
-        pulse_w_string(&w, "Moonwater audio");
-        pulse_w_string(&w, "1.0");
-        pulse_w_string(&w, "moonwater");
-        pulse_w_string(&w, "moonwater");
+        wire_w_string(&w, "Moonwater audio");
+        wire_w_string(&w, "1.0");
+        wire_w_string(&w, "moonwater");
+        wire_w_string(&w, "moonwater");
         pulse_w_sample_spec(&w, AUDIO_FORMAT_S16LE, 2, p->default_sink >= 0 ? p->sink[p->default_sink].rate : 48000);
-        pulse_w_string(&w, p->default_sink >= 0 ? p->sink[p->default_sink].name : 0);
-        pulse_w_string(&w, p->default_source >= 0 ? p->source[p->default_source].name : 0);
-        pulse_w_u32(&w, 0);
+        wire_w_string(&w, p->default_sink >= 0 ? p->sink[p->default_sink].name : 0);
+        wire_w_string(&w, p->default_source >= 0 ? p->source[p->default_source].name : 0);
+        wire_w_u32(&w, 0);
         if (c->version >= 15)
                 pulse_w_channel_map(&w, stereo, 2);
         return pulse_reply_end(c, &w);
@@ -3594,8 +3498,8 @@ static int pulse_command_server_info(struct pulse *p, struct pulse_client *c, un
 static int pulse_command(struct pulse *p, long slot, const unsigned char *payload, long length)
 {
         struct pulse_client *c = p->client[slot];
-        struct pulse_reader r = {payload, length, 0, 0};
-        unsigned long command = pulse_r_u32(&r), tag = pulse_r_u32(&r);
+        struct wire_r r = {payload, length, 0, 0};
+        unsigned long command = wire_r_u32(&r), tag = wire_r_u32(&r);
 
         if (r.bad)
                 return PULSE_DEAD;
@@ -3606,8 +3510,8 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         {
         case PULSE_COMMAND_AUTH:
         {
-                unsigned long version = pulse_r_u32(&r);
-                struct pulse_writer w;
+                unsigned long version = wire_r_u32(&r);
+                struct wire_w w;
 
                 pulse_r_arbitrary(&r, 256);
                 if (!pulse_r_eof(&r))
@@ -3618,13 +3522,13 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 c->version = (unsigned)(version < PULSE_VERSION ? version : PULSE_VERSION);
                 c->authorized = 1;
                 pulse_reply_begin(p, &w, tag);
-                pulse_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag
+                wire_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_SET_CLIENT_NAME:
         {
                 struct pulse_props props = {0};
-                struct pulse_writer w;
+                struct wire_w w;
 
                 if (c->version >= 13)
                         pulse_r_proplist(&r, &props);
@@ -3634,7 +3538,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         const char *name = pulse_r_string(&r, &isnull);
 
                         if (name)
-                                pulse_props_set(&props, "application.name", (const unsigned char *)name, pulse_len(name) + 1);
+                                pulse_props_set(&props, "application.name", (const unsigned char *)name, wire_len(name) + 1);
                 }
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
@@ -3657,12 +3561,12 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_NEW, c->index);
                 pulse_reply_begin(p, &w, tag);
                 if (c->version >= 13)
-                        pulse_w_u32(&w, c->index);
+                        wire_w_u32(&w, c->index);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_UPDATE_CLIENT_PROPLIST:
         {
-                unsigned long mode = pulse_r_u32(&r);
+                unsigned long mode = wire_r_u32(&r);
                 struct pulse_props props = {0};
 
                 pulse_r_proplist(&r, &props);
@@ -3681,7 +3585,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         pulse_props_update(&c->props, &props, mode);
                         if (id[0])
                         {
-                                pulse_props_set(&pid, "application.process.id", (const unsigned char *)id, pulse_len(id) + 1);
+                                pulse_props_set(&pid, "application.process.id", (const unsigned char *)id, wire_len(id) + 1);
                                 pulse_props_update(&c->props, &pid, 2);
                         }
                 }
@@ -3714,14 +3618,14 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 return pulse_command_server_info(p, c, tag, &r);
         case PULSE_COMMAND_STAT:
         {
-                struct pulse_writer w;
+                struct wire_w w;
 
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
                 pulse_reply_begin(p, &w, tag);
                 for (int i = 0; i < 4; i++)
-                        pulse_w_u32(&w, 0);
-                pulse_w_u32(&w, p->sample_total);
+                        wire_w_u32(&w, 0);
+                wire_w_u32(&w, p->sample_total);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_LOOKUP_SINK:
@@ -3729,7 +3633,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         {
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
-                struct pulse_writer w;
+                struct wire_w w;
                 long found = -1;
 
                 if (!pulse_r_eof(&r) || !name)
@@ -3749,12 +3653,12 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 if (found < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 pulse_reply_begin(p, &w, tag);
-                pulse_w_u32(&w, (unsigned long)found);
+                wire_w_u32(&w, (unsigned long)found);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_SUBSCRIBE:
         {
-                unsigned long mask = pulse_r_u32(&r);
+                unsigned long mask = wire_r_u32(&r);
 
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
@@ -3862,7 +3766,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         }
         case PULSE_COMMAND_MOVE_SINK_INPUT:
         {
-                unsigned long index = pulse_r_u32(&r), device = pulse_r_u32(&r);
+                unsigned long index = wire_r_u32(&r), device = wire_r_u32(&r);
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
                 struct pulse_stream *s;
@@ -3892,7 +3796,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         }
         case PULSE_COMMAND_MOVE_SOURCE_OUTPUT:
         {
-                unsigned long index = pulse_r_u32(&r), device = pulse_r_u32(&r);
+                unsigned long index = wire_r_u32(&r), device = wire_r_u32(&r);
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
                 struct pulse_record *rec;
@@ -3934,7 +3838,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         case PULSE_COMMAND_KILL_SINK_INPUT:
         case PULSE_COMMAND_KILL_SOURCE_OUTPUT:
         {
-                unsigned long index = pulse_r_u32(&r);
+                unsigned long index = wire_r_u32(&r);
 
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
@@ -3953,16 +3857,16 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 {
                         struct pulse_stream *s = pulse_input_of(p, index);
                         struct pulse_client *owner;
-                        struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+                        struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
                         if (!s)
                                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                         owner = s->client >= 0 ? p->client[s->client] : 0;
                         if (owner)
                         {
-                                pulse_w_u32(&w, PULSE_COMMAND_PLAYBACK_STREAM_KILLED);
-                                pulse_w_u32(&w, PULSE_INVALID);
-                                pulse_w_u32(&w, s->channel);
+                                wire_w_u32(&w, PULSE_COMMAND_PLAYBACK_STREAM_KILLED);
+                                wire_w_u32(&w, PULSE_INVALID);
+                                wire_w_u32(&w, s->channel);
                                 pulse_enqueue(owner, PULSE_INVALID, w.p, w.len);
                         }
                         pulse_stream_end(p, s);
@@ -3982,7 +3886,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         case PULSE_COMMAND_SUSPEND_SINK:
         case PULSE_COMMAND_SUSPEND_SOURCE:
         {
-                unsigned long index = pulse_r_u32(&r);
+                unsigned long index = wire_r_u32(&r);
                 int isnull;
                 const char *name = pulse_r_string(&r, &isnull);
 
@@ -4064,11 +3968,11 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
         took = audio_ring_put(&s->voice.ring, data, (unsigned long)length);
         if (took < (unsigned long)length)
         {
-                struct pulse_writer w = {p->scratch, PULSE_SCRATCH, 0, 0};
+                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
-                pulse_w_u32(&w, PULSE_COMMAND_OVERFLOW);
-                pulse_w_u32(&w, PULSE_INVALID);
-                pulse_w_u32(&w, s->channel);
+                wire_w_u32(&w, PULSE_COMMAND_OVERFLOW);
+                wire_w_u32(&w, PULSE_INVALID);
+                wire_w_u32(&w, s->channel);
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
         s->outstanding = s->outstanding > took ? s->outstanding - took : 0;
@@ -4140,10 +4044,10 @@ AUDIO_API int pulse_client_feed(struct pulse *p, long slot, const unsigned char 
 
                         if (c->in_have - at < 20)
                                 break;
-                        length = pulse_be32(frame);
-                        channel = pulse_be32(frame + 4);
-                        offset = (long long)((unsigned long long)pulse_be32(frame + 8) << 32 | pulse_be32(frame + 12));
-                        flags = pulse_be32(frame + 16);
+                        length = wire_be32(frame);
+                        channel = wire_be32(frame + 4);
+                        offset = (long long)((unsigned long long)wire_be32(frame + 8) << 32 | wire_be32(frame + 12));
+                        flags = wire_be32(frame + 16);
                         if (channel == PULSE_INVALID ? length > PULSE_FRAME_COMMAND : length > PULSE_FRAME_DATA)
                         {
                                 p->protocol_errors++;

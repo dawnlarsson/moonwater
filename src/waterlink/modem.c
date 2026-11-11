@@ -1014,9 +1014,9 @@ static bipolar modem_play_samples(struct ctl *c, unsigned long channel, const b1
                         tone[2 * i + 1] = right ? right[at + i] : 0;
                 }
                 ctl_budget(c);
-                ctl_put_be(modem_frame, (unsigned long)(frames * 4));
-                ctl_put_be(modem_frame + 4, channel);
-                ctl_put_be(modem_frame + 8, 0), ctl_put_be(modem_frame + 12, 0), ctl_put_be(modem_frame + 16, 0);
+                wire_put_be(modem_frame, (unsigned long)(frames * 4));
+                wire_put_be(modem_frame + 4, channel);
+                wire_put_be(modem_frame + 8, 0), wire_put_be(modem_frame + 12, 0), wire_put_be(modem_frame + 16, 0);
                 if (c->transport.send(c->transport.context, modem_frame, 20 + frames * 4, ctl_left(c)) < 0)
                         return -1;
                 at += frames;
@@ -1168,7 +1168,7 @@ static b32 modem_send_file(string_address path)
         modem_tx tx;
         unsigned long channel, sent_bytes = 0, sent_datagrams = 0;
         sized samples;
-        struct ctl_w w;
+        struct wire_w w;
         struct audio_state page;
         p32 first_seq;
         p16 first_id;
@@ -1206,7 +1206,7 @@ static b32 modem_send_file(string_address path)
         if (audio_test_page(&page) && page.rate != MODEM_RATE)
         {
                 ctl_begin(&modem_ctl, &w, 4);
-                ctl_w_u32(&w, channel);
+                wire_w_u32(&w, channel);
                 ctl_exchange(&modem_ctl, w.len);
                 ctl_disconnect(&modem_ctl);
                 return host_refuse("the sound card runs at %p Hz, and the modem's symbols are timed for %p Hz: nothing is sent on a card at another rate\n",
@@ -1269,11 +1269,11 @@ static b32 modem_send_file(string_address path)
         //      The drain: the sound server answers when the last of it is played, which is the only time the sender knows it is
         //      done. The stream is then deleted and the connection closed.
         ctl_begin(&modem_ctl, &w, 12);
-        ctl_w_u32(&w, channel);
+        wire_w_u32(&w, channel);
         if (ctl_exchange(&modem_ctl, w.len) < 0)
                 host_say(log, host_label "the sound server did not say the last of it was played\n");
         ctl_begin(&modem_ctl, &w, 4);
-        ctl_w_u32(&w, channel);
+        wire_w_u32(&w, channel);
         ctl_exchange(&modem_ctl, w.len);
         ctl_disconnect(&modem_ctl);
         host_say(log, host_label "sent %p bytes in %p datagrams over the audio modem, the file as %s (the receiver writes it back as it was); nothing is acknowledged; the last frame is %p (a receiver for a later recording takes --after %p)\n",
@@ -1499,7 +1499,7 @@ static void modem_streams_set(int streams)
                 return;
         modem_streams = streams;
         host_say(log, host_label "%s", said[streams]);
-        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)ctl_length(word[streams]), 0);
+        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)wire_len(word[streams]), 0);
 }
 
 /*
@@ -1577,8 +1577,8 @@ static p8 modem_read_frames(struct ctl *c, unsigned long channel, p8 capture)
                         return 1;
                 if (c->transport.receive(c->transport.context, head, 20, MODEM_IO_MS) < 0)
                         return 0;
-                size = ctl_be(head);
-                got = ctl_be(head + 4);
+                size = wire_be32(head);
+                got = wire_be32(head + 4);
                 if (size > MODEM_FRAME_IN)
                         return 0;
                 if (size && c->transport.receive(c->transport.context, modem_frame_in, (long)size, MODEM_IO_MS) < 0)
@@ -1595,56 +1595,56 @@ static p8 modem_read_frames(struct ctl *c, unsigned long channel, p8 capture)
 */
 static p8 modem_record_create(struct ctl *c, unsigned long *channel)
 {
-        struct ctl_w w;
-        struct ctl_r r;
+        struct wire_w w;
+        struct wire_r r;
         long got;
         static const char name[] = "Waterlink modem";
         static const unsigned long both[2] = {0x10000, 0x10000};
 
         ctl_begin(c, &w, 5); // CREATE_RECORD_STREAM
-        ctl_w_byte(&w, 'a');
-        ctl_w_byte(&w, 3);
-        ctl_w_byte(&w, 2);
-        ctl_w_be32(&w, MODEM_RATE);
-        ctl_w_byte(&w, 'm');
-        ctl_w_byte(&w, 2);
-        ctl_w_byte(&w, 1);
-        ctl_w_byte(&w, 2);
-        ctl_w_u32(&w, CTL_NONE); // the source's index: the default source
-        ctl_w_string(&w, 0);     // the source's name: none
-        ctl_w_u32(&w, CTL_NONE); // the buffer's length: the server's
-        ctl_w_bool(&w, 0);       // not corked
-        ctl_w_u32(&w, CTL_NONE); // the fragment's size: the server's
+        wire_w_byte(&w, 'a');
+        wire_w_byte(&w, 3);
+        wire_w_byte(&w, 2);
+        wire_w_be32(&w, MODEM_RATE);
+        wire_w_byte(&w, 'm');
+        wire_w_byte(&w, 2);
+        wire_w_byte(&w, 1);
+        wire_w_byte(&w, 2);
+        wire_w_u32(&w, CTL_NONE); // the source's index: the default source
+        wire_w_string(&w, 0);     // the source's name: none
+        wire_w_u32(&w, CTL_NONE); // the buffer's length: the server's
+        wire_w_bool(&w, 0);       // not corked
+        wire_w_u32(&w, CTL_NONE); // the fragment's size: the server's
         for (int i = 0; i < 5; i++)
-                ctl_w_bool(&w, 0); // remap, remix, format, rate and channels are the server's to keep
-        ctl_w_bool(&w, 0);         // may move
-        ctl_w_bool(&w, 0);         // variable rate
-        ctl_w_bool(&w, 0);         // peak detection
-        ctl_w_bool(&w, 0);         // latency adjustment
-        ctl_w_byte(&w, 'P');
-        ctl_w_string(&w, "media.name");
-        ctl_w_u32(&w, (unsigned long)ctl_length(name));
-        ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, (unsigned long)ctl_length(name));
-        ctl_w_raw(&w, name, ctl_length(name));
-        ctl_w_byte(&w, 'N');
-        ctl_w_u32(&w, CTL_NONE); // direct: no meter of another's
-        ctl_w_bool(&w, 0);       // early requests
-        ctl_w_bool(&w, 0);       // may inhibit auto suspend
-        ctl_w_bool(&w, 0);       // fails on suspend
-        ctl_w_byte(&w, 'B');     // formats: none
-        ctl_w_byte(&w, 0);
+                wire_w_bool(&w, 0); // remap, remix, format, rate and channels are the server's to keep
+        wire_w_bool(&w, 0);         // may move
+        wire_w_bool(&w, 0);         // variable rate
+        wire_w_bool(&w, 0);         // peak detection
+        wire_w_bool(&w, 0);         // latency adjustment
+        wire_w_byte(&w, 'P');
+        wire_w_string(&w, "media.name");
+        wire_w_u32(&w, (unsigned long)wire_len(name));
+        wire_w_byte(&w, 'x');
+        wire_w_be32(&w, (unsigned long)wire_len(name));
+        wire_w_raw(&w, name, wire_len(name));
+        wire_w_byte(&w, 'N');
+        wire_w_u32(&w, CTL_NONE); // direct: no meter of another's
+        wire_w_bool(&w, 0);       // early requests
+        wire_w_bool(&w, 0);       // may inhibit auto suspend
+        wire_w_bool(&w, 0);       // fails on suspend
+        wire_w_byte(&w, 'B');     // formats: none
+        wire_w_byte(&w, 0);
         ctl_w_cvolume(&w, both, 2);
         for (int i = 0; i < 5; i++)
-                ctl_w_bool(&w, 0); // muted, volume set, mute set, relative, passthrough: all off
+                wire_w_bool(&w, 0); // muted, volume set, mute set, relative, passthrough: all off
         if (w.bad)
                 return 0;
         ctl_budget(c);
         got = ctl_exchange(c, w.len);
         if (got < 15)
                 return 0;
-        r = (struct ctl_r){c->frame + 20 + 10, got - 10, 0, 0};
-        *channel = ctl_r_u32(&r);
+        r = (struct wire_r){c->frame + 20 + 10, got - 10, 0, 0};
+        *channel = wire_r_u32(&r);
         return 1;
 }
 

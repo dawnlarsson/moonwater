@@ -2036,54 +2036,54 @@ static int audio_test_page(struct audio_state *copy)
 */
 static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, long rate, unsigned long *channel)
 {
-        struct ctl_w w;
-        struct ctl_r r;
+        struct wire_w w;
+        struct wire_r r;
         long got, total = rate * 4;
         static const unsigned long both[2] = {0x10000, 0x10000};
 
         ctl_begin(c, &w, 3);
-        ctl_w_byte(&w, 'a');
-        ctl_w_byte(&w, 3);
-        ctl_w_byte(&w, 2);
-        ctl_w_be32(&w, (unsigned long)rate);
-        ctl_w_byte(&w, 'm');
-        ctl_w_byte(&w, 2);
-        ctl_w_byte(&w, 1);
-        ctl_w_byte(&w, 2);
-        ctl_w_u32(&w, CTL_NONE);
-        ctl_w_string(&w, 0);
-        ctl_w_u32(&w, CTL_NONE);
-        ctl_w_bool(&w, 0);
-        ctl_w_u32(&w, (unsigned long)total);
-        ctl_w_u32(&w, (unsigned long)total);
-        ctl_w_u32(&w, CTL_NONE);
-        ctl_w_u32(&w, 0);
+        wire_w_byte(&w, 'a');
+        wire_w_byte(&w, 3);
+        wire_w_byte(&w, 2);
+        wire_w_be32(&w, (unsigned long)rate);
+        wire_w_byte(&w, 'm');
+        wire_w_byte(&w, 2);
+        wire_w_byte(&w, 1);
+        wire_w_byte(&w, 2);
+        wire_w_u32(&w, CTL_NONE);
+        wire_w_string(&w, 0);
+        wire_w_u32(&w, CTL_NONE);
+        wire_w_bool(&w, 0);
+        wire_w_u32(&w, (unsigned long)total);
+        wire_w_u32(&w, (unsigned long)total);
+        wire_w_u32(&w, CTL_NONE);
+        wire_w_u32(&w, 0);
         ctl_w_cvolume(&w, both, 2);
         for (int i = 0; i < 7; i++)
-                ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_byte(&w, 'P');
-        ctl_w_string(&w, "media.name");
-        ctl_w_u32(&w, (unsigned long)ctl_length(name));
-        ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, (unsigned long)ctl_length(name));
-        ctl_w_raw(&w, name, ctl_length(name));
-        ctl_w_string(&w, "media.role");
-        ctl_w_u32(&w, (unsigned long)ctl_length(role));
-        ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, (unsigned long)ctl_length(role));
-        ctl_w_raw(&w, role, ctl_length(role));
-        ctl_w_byte(&w, 'N');
-        ctl_w_bool(&w, 1);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_bool(&w, 0);
-        ctl_w_byte(&w, 'B');
-        ctl_w_byte(&w, 0);
+                wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_byte(&w, 'P');
+        wire_w_string(&w, "media.name");
+        wire_w_u32(&w, (unsigned long)wire_len(name));
+        wire_w_byte(&w, 'x');
+        wire_w_be32(&w, (unsigned long)wire_len(name));
+        wire_w_raw(&w, name, wire_len(name));
+        wire_w_string(&w, "media.role");
+        wire_w_u32(&w, (unsigned long)wire_len(role));
+        wire_w_byte(&w, 'x');
+        wire_w_be32(&w, (unsigned long)wire_len(role));
+        wire_w_raw(&w, role, wire_len(role));
+        wire_w_byte(&w, 'N');
+        wire_w_bool(&w, 1);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_bool(&w, 0);
+        wire_w_byte(&w, 'B');
+        wire_w_byte(&w, 0);
         got = w.bad ? CTL_FAILED : ctl_exchange(c, w.len);
         if (got < 10)
         {
@@ -2091,8 +2091,8 @@ static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, 
                 log_flush();
                 return 0;
         }
-        r = (struct ctl_r){c->frame + 20 + 10, got - 10, 0, 0};
-        *channel = ctl_r_u32(&r);
+        r = (struct wire_r){c->frame + 20 + 10, got - 10, 0, 0};
+        *channel = wire_r_u32(&r);
         return 1;
 }
 
@@ -2102,7 +2102,7 @@ static b32 audio_test(void)
         static struct audio_state page;
         static unsigned char frame[20 + 65536];
         static short samples[48000 * 2];
-        struct ctl_w w;
+        struct wire_w w;
         unsigned long channel;
         long got, sent = 0, total = 48000 * 4;
         short *tone = (short *)(frame + 20);
@@ -2134,9 +2134,9 @@ static b32 audio_test(void)
         {
                 long n = total - sent < 65536 ? total - sent : 65536;
 
-                ctl_put_be(frame, (unsigned long)n);
-                ctl_put_be(frame + 4, channel);
-                ctl_put_be(frame + 8, 0), ctl_put_be(frame + 12, 0), ctl_put_be(frame + 16, 0);
+                wire_put_be(frame, (unsigned long)n);
+                wire_put_be(frame + 4, channel);
+                wire_put_be(frame + 8, 0), wire_put_be(frame + 12, 0), wire_put_be(frame + 16, 0);
                 memory_copy(tone, (unsigned char *)samples + sent, (unsigned long)n);
                 if (c.transport.send(c.transport.context, frame, 20 + n, ctl_left(&c)) < 0)
                 {
@@ -2149,11 +2149,11 @@ static b32 audio_test(void)
         }
         // Wait until it has been played out (drained), at most the connection's timeout.
         ctl_begin(&c, &w, 12);
-        ctl_w_u32(&w, channel);
+        wire_w_u32(&w, channel);
         got = ctl_exchange(&c, w.len);
         have_page = audio_test_page(&page);
         ctl_begin(&c, &w, 4);
-        ctl_w_u32(&w, channel);
+        wire_w_u32(&w, channel);
         ctl_exchange(&c, w.len);
         ctl_disconnect(&c);
         if (got < 0)

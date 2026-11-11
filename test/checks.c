@@ -129356,7 +129356,7 @@ static long mixer_fake_send(void *context, const unsigned char *bytes, long coun
         const unsigned char *payload = bytes + 20;
         struct mixer_sent *sent = &mixer_log[mixer_logged < 16 ? mixer_logged : 15];
         long at = 10;
-        unsigned long command = pulse_be32(payload + 1), tag = pulse_be32(payload + 6);
+        unsigned long command = wire_be32(payload + 1), tag = wire_be32(payload + 6);
 
         (void)context, (void)count, (void)timeout_ms;
         if (mixer_fail_send)
@@ -129364,14 +129364,14 @@ static long mixer_fake_send(void *context, const unsigned char *bytes, long coun
         memory_zero(sent, sizeof(*sent));
         sent->command = command;
         if (payload[at] == 'L')
-                sent->index = pulse_be32(payload + at + 1), at += 5;
+                sent->index = wire_be32(payload + at + 1), at += 5;
         if (payload[at] == 't')
         {
                 string_copy_bounded((string_address)sent->text, (string_address)(payload + at + 1), sizeof(sent->text));
                 at += 2 + (long)string_length((string_address)(payload + at + 1));
         }
         if (payload[at] == 'v')
-                sent->channels = payload[at + 1], sent->volume = pulse_be32(payload + at + 2);
+                sent->channels = payload[at + 1], sent->volume = wire_be32(payload + at + 2);
         else if (payload[at] == '1' || payload[at] == '0')
                 sent->mute = payload[at] == '1';
         mixer_logged++;
@@ -188329,7 +188329,7 @@ static void pt_collect(long slot)
         }
         while (total - used >= 20)
         {
-                unsigned long length = pulse_be32(joined + used), channel = pulse_be32(joined + used + 4);
+                unsigned long length = wire_be32(joined + used), channel = wire_be32(joined + used + 4);
                 struct pt_frame *f;
 
                 if ((long)length > total - used - 20)
@@ -188341,8 +188341,8 @@ static void pt_collect(long slot)
                         f->channel = channel;
                         f->data = channel != PULSE_INVALID;
                         memcpy(f->payload, joined + used + 20, length < sizeof(f->payload) ? length : sizeof(f->payload));
-                        f->command = length >= 5 ? pulse_be32(f->payload + 1) : 0;
-                        f->tag = length >= 10 ? pulse_be32(f->payload + 6) : 0;
+                        f->command = length >= 5 ? wire_be32(f->payload + 1) : 0;
+                        f->tag = length >= 10 ? wire_be32(f->payload + 6) : 0;
                 }
                 used += 20 + (long)length;
         }
@@ -188382,7 +188382,7 @@ static unsigned long pt_ru32(struct pt_r *r)
                 r->bad = 1;
                 return 0;
         }
-        v = pulse_be32(r->p + r->at + 1);
+        v = wire_be32(r->p + r->at + 1);
         r->at += 5;
         return v;
 }
@@ -188396,7 +188396,7 @@ static long long pt_r64(struct pt_r *r, int tag)
                 r->bad = 1;
                 return 0;
         }
-        v = (unsigned long long)pulse_be32(r->p + r->at + 1) << 32 | pulse_be32(r->p + r->at + 5);
+        v = (unsigned long long)wire_be32(r->p + r->at + 1) << 32 | wire_be32(r->p + r->at + 5);
         r->at += 9;
         return (long long)v;
 }
@@ -188410,7 +188410,7 @@ static unsigned long pt_rvolume(struct pt_r *r)
                 r->bad = 1;
                 return 0;
         }
-        v = pulse_be32(r->p + r->at + 1);
+        v = wire_be32(r->p + r->at + 1);
         r->at += 5;
         return v;
 }
@@ -188455,7 +188455,7 @@ static void pt_rspec(struct pt_r *r, int *format, int *channels, unsigned long *
         }
         *format = r->p[r->at + 1];
         *channels = r->p[r->at + 2];
-        *rate = pulse_be32(r->p + r->at + 3);
+        *rate = wire_be32(r->p + r->at + 3);
         r->at += 7;
 }
 
@@ -188496,7 +188496,7 @@ static int pt_rvol(struct pt_r *r, unsigned long *v)
                 return 0;
         }
         for (int i = 0; i < n; i++)
-                v[i] = pulse_be32(r->p + r->at + 2 + 4 * i);
+                v[i] = wire_be32(r->p + r->at + 2 + 4 * i);
         r->at += 2 + 4 * n;
         return n;
 }
@@ -188520,7 +188520,7 @@ static int pt_rprops(struct pt_r *r, const char *want, char *value, long room)
                 if (r->bad || !key)
                         break;
                 length = pt_ru32(r);
-                if (r->bad || r->at + 5 + (long)length > r->n || r->p[r->at] != 'x' || pulse_be32(r->p + r->at + 1) != length)
+                if (r->bad || r->at + 5 + (long)length > r->n || r->p[r->at] != 'x' || wire_be32(r->p + r->at + 1) != length)
                 {
                         r->bad = 1;
                         break;
@@ -189074,7 +189074,7 @@ static void pt_test_stream(void)
                         pt_collect(slot);
                         PTCHECK(pt_count(PULSE_COMMAND_STARTED) == 1, "it starts at the target");
                         f = pt_find(PULSE_COMMAND_STARTED);
-                        PTCHECK(f && f->length == 15 && pulse_be32(f->payload + 11) == channel, "STARTED names the channel");
+                        PTCHECK(f && f->length == 15 && wire_be32(f->payload + 11) == channel, "STARTED names the channel");
                 }
                 memcpy(heard + heard_frames * 2, got, 256 * 4);
                 heard_frames += 256;
@@ -189106,9 +189106,9 @@ static void pt_test_stream(void)
                 sink_usec = pt_r64(&r, 'U');
                 pt_r64(&r, 'U');
                 playing = pt_rbool(&r);
-                PTCHECK(r.p[r.at] == 'T' && pulse_be32(r.p + r.at + 1) == 123 && pulse_be32(r.p + r.at + 5) == 456, "the request's time is echoed");
+                PTCHECK(r.p[r.at] == 'T' && wire_be32(r.p + r.at + 1) == 123 && wire_be32(r.p + r.at + 5) == 456, "the request's time is echoed");
                 r.at += 9;
-                PTCHECK(r.p[r.at] == 'T' && pulse_be32(r.p + r.at + 1) == 1700000001, "and the server's wall clock follows");
+                PTCHECK(r.p[r.at] == 'T' && wire_be32(r.p + r.at + 1) == 1700000001, "and the server's wall clock follows");
                 r.at += 9;
                 wr = pt_r64(&r, 'r');
                 rd = pt_r64(&r, 'r');
@@ -189130,8 +189130,8 @@ static void pt_test_stream(void)
         f = pt_find(PULSE_COMMAND_UNDERFLOW);
         if (f)
         {
-                PTCHECK(f->length == 24 && pulse_be32(f->payload + 11) == channel, "UNDERFLOW names the channel and carries the read index");
-                PTCHECK((long long)((unsigned long long)pulse_be32(f->payload + 16) << 32 | pulse_be32(f->payload + 20)) == fed * 4, "at the end of what was written: %lld", (long long)((unsigned long long)pulse_be32(f->payload + 16) << 32 | pulse_be32(f->payload + 20)));
+                PTCHECK(f->length == 24 && wire_be32(f->payload + 11) == channel, "UNDERFLOW names the channel and carries the read index");
+                PTCHECK((long long)((unsigned long long)wire_be32(f->payload + 16) << 32 | wire_be32(f->payload + 20)) == fed * 4, "at the end of what was written: %lld", (long long)((unsigned long long)wire_be32(f->payload + 16) << 32 | wire_be32(f->payload + 20)));
         }
         (void)consumed_requests;
         // A drain is answered once what is played has left the card.
@@ -189208,9 +189208,9 @@ static void pt_test_requests(void)
                 for (int i = 0; i < pt_logged; i++)
                         if (pt_log[i].command == PULSE_COMMAND_REQUEST)
                         {
-                                unsigned long bytes = pulse_be32(pt_log[i].payload + 16);
+                                unsigned long bytes = wire_be32(pt_log[i].payload + 16);
 
-                                PTCHECK(pulse_be32(pt_log[i].payload + 11) == channel && bytes % 4 == 0 && bytes >= 4800 && bytes <= 19200, "request of %lu", bytes);
+                                PTCHECK(wire_be32(pt_log[i].payload + 11) == channel && bytes % 4 == 0 && bytes >= 4800 && bytes <= 19200, "request of %lu", bytes);
                                 asked += bytes;
                                 requested_total += bytes;
                                 requests++;
@@ -189225,7 +189225,7 @@ static void pt_test_requests(void)
                 pt_collect(slot);
                 for (int i = 0; i < pt_logged; i++)
                         if (pt_log[i].command == PULSE_COMMAND_REQUEST)
-                                requested_total += pulse_be32(pt_log[i].payload + 16);
+                                requested_total += wire_be32(pt_log[i].payload + 16);
         }
         PTCHECK(requested_total <= pt_engine.stream[0].voice.ring.read + 19200, "a program that stops answering is asked for no more than was played and the target: %lu asked, %lu played", requested_total,
                 pt_engine.stream[0].voice.ring.read);
@@ -189807,15 +189807,15 @@ static void pt_test_events(void)
         {
                 const struct pt_frame *f = pt_find(PULSE_COMMAND_SUBSCRIBE_EVENT);
 
-                PTCHECK(f && f->length == 20 && pulse_be32(f->payload + 6) == PULSE_INVALID && pulse_be32(f->payload + 11) == (5 | PULSE_EVENT_NEW), "a new client is announced as a client event: %lx",
-                        f ? pulse_be32(f->payload + 11) : 0);
+                PTCHECK(f && f->length == 20 && wire_be32(f->payload + 6) == PULSE_INVALID && wire_be32(f->payload + 11) == (5 | PULSE_EVENT_NEW), "a new client is announced as a client event: %lx",
+                        f ? wire_be32(f->payload + 11) : 0);
         }
         PTCHECK(pt_create(player, 35, 20, 19200, 19200, 4800, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "stream");
         pt_collect(watcher);
         {
                 const struct pt_frame *f = pt_find(PULSE_COMMAND_SUBSCRIBE_EVENT);
 
-                PTCHECK(f && pulse_be32(f->payload + 11) == (2 | PULSE_EVENT_NEW) && pulse_be32(f->payload + 16) == index, "a new sink input: %lx %lu", f ? pulse_be32(f->payload + 11) : 0, f ? pulse_be32(f->payload + 16) : 0);
+                PTCHECK(f && wire_be32(f->payload + 11) == (2 | PULSE_EVENT_NEW) && wire_be32(f->payload + 16) == index, "a new sink input: %lx %lu", f ? wire_be32(f->payload + 11) : 0, f ? wire_be32(f->payload + 16) : 0);
         }
         w.n = 0;
         pt_u32(&w, index);
@@ -189825,7 +189825,7 @@ static void pt_test_events(void)
         {
                 const struct pt_frame *f = pt_find(PULSE_COMMAND_SUBSCRIBE_EVENT);
 
-                PTCHECK(f && pulse_be32(f->payload + 11) == (2 | PULSE_EVENT_CHANGE), "a mute is a change of the sink input");
+                PTCHECK(f && wire_be32(f->payload + 11) == (2 | PULSE_EVENT_CHANGE), "a mute is a change of the sink input");
         }
         // A client that subscribed to the sinks only does not hear the streams.
         w.n = 0;
@@ -189847,7 +189847,7 @@ static void pt_test_events(void)
         {
                 const struct pt_frame *f = pt_find(PULSE_COMMAND_SUBSCRIBE_EVENT);
 
-                PTCHECK(f && pulse_be32(f->payload + 11) == (0 | PULSE_EVENT_CHANGE), "a sink mute is a change of the sink");
+                PTCHECK(f && wire_be32(f->payload + 11) == (0 | PULSE_EVENT_CHANGE), "a sink mute is a change of the sink");
         }
         PTCHECK(pt_changed_calls >= 2, "the host is told of stream and sink changes");
         pulse_client_close(&pt_engine, player);
@@ -190690,7 +190690,7 @@ static void pt_test_record_policy(void)
                 {
                         const struct pt_frame *f = pt_find(PULSE_COMMAND_RECORD_STREAM_KILLED);
 
-                        PTCHECK(f && f->length == 15 && pulse_be32(f->payload + 11) == pt_rec_reply.channel, "capture turned off tells the program its stream is killed");
+                        PTCHECK(f && f->length == 15 && wire_be32(f->payload + 11) == pt_rec_reply.channel, "capture turned off tells the program its stream is killed");
                 }
                 pt_collect(watcher);
                 {
@@ -190699,7 +190699,7 @@ static void pt_test_record_policy(void)
                         for (int i = 0; i < pt_logged; i++)
                                 if (pt_log[i].command == PULSE_COMMAND_SUBSCRIBE_EVENT)
                                 {
-                                        unsigned long what = pulse_be32(pt_log[i].payload + 11);
+                                        unsigned long what = wire_be32(pt_log[i].payload + 11);
 
                                         removed += what == (PULSE_FACILITY_SOURCE_OUTPUT | PULSE_EVENT_REMOVE);
                                         server += what == (PULSE_FACILITY_SERVER | PULSE_EVENT_CHANGE);
@@ -190732,8 +190732,8 @@ static int pt_events(unsigned long *what, unsigned long *index, int room)
         for (int i = 0; i < pt_logged && n < room; i++)
                 if (pt_log[i].command == PULSE_COMMAND_SUBSCRIBE_EVENT)
                 {
-                        what[n] = pulse_be32(pt_log[i].payload + 11);
-                        index[n++] = pulse_be32(pt_log[i].payload + 16);
+                        what[n] = wire_be32(pt_log[i].payload + 11);
+                        index[n++] = wire_be32(pt_log[i].payload + 16);
                 }
         return n;
 }
@@ -190794,9 +190794,9 @@ static void pt_test_record_data(void)
                 pt_sig(l, r, 0, 512);
                 pulse_source_feed(&pt_engine, 0, l, r, 512);
                 got = pulse_client_out(&pt_engine, slot, &bytes);
-                PTCHECK(got == 3 * 20 + 2048 && pulse_be32(bytes) == 1000 && pulse_be32(bytes + 4) == pt_rec_reply.channel && pulse_be32(bytes + 8) == 0 && pulse_be32(bytes + 12) == 0 &&
-                            pulse_be32(bytes + 16) == 0,
-                        "the first frame is a fragment on the channel, offset 0, flags 0: %ld bytes, length %lu", got, got > 4 ? pulse_be32(bytes) : 0);
+                PTCHECK(got == 3 * 20 + 2048 && wire_be32(bytes) == 1000 && wire_be32(bytes + 4) == pt_rec_reply.channel && wire_be32(bytes + 8) == 0 && wire_be32(bytes + 12) == 0 &&
+                            wire_be32(bytes + 16) == 0,
+                        "the first frame is a fragment on the channel, offset 0, flags 0: %ld bytes, length %lu", got, got > 4 ? wire_be32(bytes) : 0);
                 pt_rec_clear();
                 pt_rec_pull(slot, pt_rec_reply.channel);
                 PTCHECK(pt_rec_len == 2048 && pt_rec_frames == 3 && pt_rec_longest == 1000, "2048 bytes in three frames of 1000, 1000 and 48: %ld in %ld, the longest %ld", pt_rec_len, pt_rec_frames, pt_rec_longest);
@@ -191401,9 +191401,9 @@ static void pt_test_record_commands(void)
                 latency = pt_r64(&rd, 'U');
                 source_latency = pt_r64(&rd, 'U');
                 running = pt_rbool(&rd);
-                PTCHECK(rd.p[rd.at] == 'T' && pulse_be32(rd.p + rd.at + 1) == 123 && pulse_be32(rd.p + rd.at + 5) == 456, "the request's time is echoed");
+                PTCHECK(rd.p[rd.at] == 'T' && wire_be32(rd.p + rd.at + 1) == 123 && wire_be32(rd.p + rd.at + 5) == 456, "the request's time is echoed");
                 rd.at += 9;
-                PTCHECK(rd.p[rd.at] == 'T' && pulse_be32(rd.p + rd.at + 1) == 1700000001, "and the server's wall clock follows");
+                PTCHECK(rd.p[rd.at] == 'T' && wire_be32(rd.p + rd.at + 1) == 1700000001, "and the server's wall clock follows");
                 rd.at += 9;
                 wr = pt_r64(&rd, 'r');
                 rdx = pt_r64(&rd, 'r');
@@ -191589,7 +191589,7 @@ static void pt_test_record_commands(void)
         PTCHECK(pt_expect_ack(64), "root kills it");
         pt_collect(slot);
         f = pt_find(PULSE_COMMAND_RECORD_STREAM_KILLED);
-        PTCHECK(f && f->length == 15 && pulse_be32(f->payload + 11) == channel, "and the program is told which of its streams it was");
+        PTCHECK(f && f->length == 15 && wire_be32(f->payload + 11) == channel, "and the program is told which of its streams it was");
         pt_command(root, PULSE_COMMAND_KILL_SOURCE_OUTPUT, 65, &w);
         pt_collect(root);
         PTCHECK(pt_expect_error(65, PULSE_ERR_NOENTITY), "a second kill finds nothing");
@@ -191766,13 +191766,13 @@ static void pt_test_record_sources(void)
         pt_command(root, PULSE_COMMAND_LOOKUP_SOURCE, 20, &w);
         pt_collect(root);
         f = pt_find(PULSE_COMMAND_REPLY);
-        PTCHECK(f && f->tag == 20 && f->length == 15 && pulse_be32(f->payload + 11) == (unsigned long)mic, "lookup of a source by its name");
+        PTCHECK(f && f->tag == 20 && f->length == 15 && wire_be32(f->payload + 11) == (unsigned long)mic, "lookup of a source by its name");
         w.n = 0;
         pt_str(&w, "other.monitor");
         pt_command(root, PULSE_COMMAND_LOOKUP_SOURCE, 21, &w);
         pt_collect(root);
         f = pt_find(PULSE_COMMAND_REPLY);
-        PTCHECK(f && f->tag == 21 && pulse_be32(f->payload + 11) == 1, "and of a monitor");
+        PTCHECK(f && f->tag == 21 && wire_be32(f->payload + 11) == 1, "and of a monitor");
         w.n = 0;
         pt_str(&w, "alsa_input.test.00");
         pt_command(root, PULSE_COMMAND_LOOKUP_SINK, 22, &w);
@@ -192297,7 +192297,7 @@ static void pt_test_samples(void)
                 pt_command(slot, PULSE_COMMAND_STAT, 26, 0);
                 pt_collect(slot);
                 f = pt_find(PULSE_COMMAND_REPLY);
-                PTCHECK(f && f->length == 35 && pulse_be32(f->payload + 31) == 4800 * 4, "version %u: STAT says how much the cache holds", versions[v]);
+                PTCHECK(f && f->length == 35 && wire_be32(f->payload + 31) == 4800 * 4, "version %u: STAT says how much the cache holds", versions[v]);
                 // Play: its stream announced, the frames out as they went in after the fade-in, then it ends by itself.
                 played = pt_play(slot, versions[v], 27, PULSE_INVALID, 0, PULSE_INVALID, "bell");
                 PTCHECK(played >= 0, "version %u: played: %ld", versions[v], played);
@@ -193051,11 +193051,11 @@ static void pt_test_session(void)
                 {
                         long at = 0, answers = 0;
 
-                        while (at + 20 <= total && at + 20 + (long)pulse_be32(collected + at) <= total)
+                        while (at + 20 <= total && at + 20 + (long)wire_be32(collected + at) <= total)
                         {
-                                long length = (long)pulse_be32(collected + at);
+                                long length = (long)wire_be32(collected + at);
 
-                                if (length >= 10 && pulse_be32(collected + at + 4) == PULSE_INVALID && pulse_be32(collected + at + 20 + 6) != PULSE_INVALID)
+                                if (length >= 10 && wire_be32(collected + at + 4) == PULSE_INVALID && wire_be32(collected + at + 20 + 6) != PULSE_INVALID)
                                         answers += 20 + length;
                                 at += 20 + length;
                         }
@@ -193695,8 +193695,8 @@ static int pt_saw_event(long slot, unsigned long what, unsigned long index)
 {
         pt_collect(slot);
         for (int i = 0; i < pt_logged; i++)
-                if (pt_log[i].command == PULSE_COMMAND_SUBSCRIBE_EVENT && pt_log[i].length >= 20 && pulse_be32(pt_log[i].payload + 11) == what &&
-                    pulse_be32(pt_log[i].payload + 16) == index)
+                if (pt_log[i].command == PULSE_COMMAND_SUBSCRIBE_EVENT && pt_log[i].length >= 20 && wire_be32(pt_log[i].payload + 11) == what &&
+                    wire_be32(pt_log[i].payload + 16) == index)
                         return 1;
         return 0;
 }
@@ -194155,27 +194155,27 @@ static void pt_test_reference_loops(void)
         // terminator is refused (the search for the terminator stops at the frame and at PULSE_STRING + 1 bytes).
         {
                 static unsigned char frame[PULSE_STRING + 8];
-                struct pulse_reader rd;
+                struct wire_r rd;
                 const char *s;
                 int exact, too_long, unfinished;
 
                 memset(frame, 'a', sizeof(frame));
                 frame[0] = 't';
                 frame[PULSE_STRING + 1] = 0;
-                rd = (struct pulse_reader){frame, PULSE_STRING + 2, 0, 0};
+                rd = (struct wire_r){frame, PULSE_STRING + 2, 0, 0};
                 s = pulse_r_string(&rd, 0);
                 exact = s != 0 && !rd.bad && rd.at == PULSE_STRING + 2;
 
                 memset(frame, 'a', sizeof(frame));
                 frame[0] = 't';
                 frame[PULSE_STRING + 2] = 0;
-                rd = (struct pulse_reader){frame, PULSE_STRING + 3, 0, 0};
+                rd = (struct wire_r){frame, PULSE_STRING + 3, 0, 0};
                 s = pulse_r_string(&rd, 0);
                 too_long = s == 0 && rd.bad;
 
                 memset(frame, 'a', 11);
                 frame[0] = 't';
-                rd = (struct pulse_reader){frame, 11, 0, 0};
+                rd = (struct wire_r){frame, 11, 0, 0};
                 s = pulse_r_string(&rd, 0);
                 unfinished = s == 0 && rd.bad;
                 PTCHECK(exact && too_long && unfinished, "a string of %d bytes is read, one more is refused, and an unterminated frame is refused", PULSE_STRING);

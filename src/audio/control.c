@@ -1,7 +1,7 @@
 /*
         A client of the sound server for the programs that control it: the mixer, the compositor's volume keys and its tray, and
         whatever else of the person's session changes a program's volume or mute. It speaks the PulseAudio native protocol
-        (src/audio/pulse.c is the other end) with the few writers and readers of the tag structure it needs written here, so that
+        (src/audio/pulse.c is the other end) with the writers and readers of the tag structure it needs (wire.c, shared with pulse.c), so that
         it stands alone and any file may include it without the server's engine before it, and is synchronous: one request at a
         time, and its answer waited for at most the connection's timeout (CTL_TIMEOUT_MS, which a caller that must not wait
         shortens: the compositor), so a server that stalls costs a window a fraction of a second and not its life.
@@ -24,6 +24,8 @@
 */
 #ifndef AUDIO_CONTROL_INCLUDED
 #define AUDIO_CONTROL_INCLUDED
+
+#include "wire.c"
 
 #define CTL_SOCKET "/run/moonwater/pulse/native"
 #define CTL_TIMEOUT_MS 300
@@ -56,115 +58,15 @@
 #define CTL_ERR_INVALID 3
 #define CTL_ERR_NOENTITY 5
 
-struct ctl_w
+static void ctl_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
 {
-        unsigned char *p;
-        long cap, len;
-        int bad;
-};
-
-struct ctl_r
-{
-        const unsigned char *p;
-        long length, at;
-        int bad;
-};
-
-static unsigned long ctl_be(const unsigned char *p)
-{
-        return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
-}
-
-static void ctl_put_be(unsigned char *to, unsigned long v)
-{
-        to[0] = (unsigned char)(v >> 24), to[1] = (unsigned char)(v >> 16), to[2] = (unsigned char)(v >> 8), to[3] = (unsigned char)v;
-}
-
-static void ctl_w_raw(struct ctl_w *w, const void *data, long n)
-{
-        if (w->len + n > w->cap)
-        {
-                w->bad = 1;
-                return;
-        }
-        memory_copy(w->p + w->len, data, (unsigned long)n);
-        w->len += n;
-}
-
-static void ctl_w_byte(struct ctl_w *w, unsigned char c)
-{
-        ctl_w_raw(w, &c, 1);
-}
-
-static void ctl_w_be32(struct ctl_w *w, unsigned long v)
-{
-        unsigned char b[4];
-
-        ctl_put_be(b, v);
-        ctl_w_raw(w, b, 4);
-}
-
-static void ctl_w_u32(struct ctl_w *w, unsigned long v)
-{
-        ctl_w_byte(w, 'L');
-        ctl_w_be32(w, v);
-}
-
-static void ctl_w_bool(struct ctl_w *w, int v)
-{
-        ctl_w_byte(w, v ? '1' : '0');
-}
-
-static long ctl_length(const char *s)
-{
-        return (long)string_length(s);
-}
-
-static void ctl_w_string(struct ctl_w *w, const char *s)
-{
-        if (!s)
-        {
-                ctl_w_byte(w, 'N');
-                return;
-        }
-        ctl_w_byte(w, 't');
-        ctl_w_raw(w, s, ctl_length(s) + 1);
-}
-
-static void ctl_w_cvolume(struct ctl_w *w, const unsigned long *volume, long channels)
-{
-        ctl_w_byte(w, 'v');
-        ctl_w_byte(w, (unsigned char)channels);
+        wire_w_byte(w, 'v');
+        wire_w_byte(w, (unsigned char)channels);
         for (long i = 0; i < channels; i++)
-                ctl_w_be32(w, volume[i]);
+                wire_w_be32(w, volume[i]);
 }
 
-static int ctl_r_tag(struct ctl_r *r, unsigned char tag)
-{
-        if (r->bad || r->at >= r->length || r->p[r->at] != tag)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        r->at++;
-        return 1;
-}
-
-static unsigned long ctl_r_u32(struct ctl_r *r)
-{
-        unsigned long v;
-
-        if (!ctl_r_tag(r, 'L') || r->length - r->at < 4)
-        {
-                r->bad = 1;
-                return 0;
-        }
-        v = ctl_be(r->p + r->at);
-        r->at += 4;
-        return v;
-}
-
-static int ctl_r_bool(struct ctl_r *r)
+static int ctl_r_bool(struct wire_r *r)
 {
         if (r->bad || r->at >= r->length || (r->p[r->at] != '1' && r->p[r->at] != '0'))
         {
@@ -175,7 +77,7 @@ static int ctl_r_bool(struct ctl_r *r)
 }
 
 // A string, passed over (the null string 'N' or one that ends in its null inside the answer).
-static void ctl_r_string(struct ctl_r *r)
+static void ctl_r_string(struct wire_r *r)
 {
         void *nul;
 
@@ -205,9 +107,9 @@ static void ctl_r_string(struct ctl_r *r)
 }
 
 // A field of fixed size behind its tag, passed over: a sample spec ('a', 6), a 64-bit time ('U', 8).
-static void ctl_r_fixed(struct ctl_r *r, unsigned char tag, long bytes)
+static void ctl_r_fixed(struct wire_r *r, unsigned char tag, long bytes)
 {
-        if (!ctl_r_tag(r, tag) || r->length - r->at < bytes)
+        if (!wire_r_tag(r, tag) || r->length - r->at < bytes)
         {
                 r->bad = 1;
                 return;
@@ -216,11 +118,11 @@ static void ctl_r_fixed(struct ctl_r *r, unsigned char tag, long bytes)
 }
 
 // A channel map ('m', a count, that many positions), passed over.
-static void ctl_r_map(struct ctl_r *r)
+static void ctl_r_map(struct wire_r *r)
 {
         long n;
 
-        if (!ctl_r_tag(r, 'm') || r->length - r->at < 1)
+        if (!wire_r_tag(r, 'm') || r->length - r->at < 1)
         {
                 r->bad = 1;
                 return;
@@ -235,11 +137,11 @@ static void ctl_r_map(struct ctl_r *r)
 }
 
 // A volume ('v', a count, that many 32-bit numbers): the count, and the first volume.
-static long ctl_r_cvolume(struct ctl_r *r, unsigned long *first)
+static long ctl_r_cvolume(struct wire_r *r, unsigned long *first)
 {
         long n;
 
-        if (!ctl_r_tag(r, 'v') || r->length - r->at < 1)
+        if (!wire_r_tag(r, 'v') || r->length - r->at < 1)
         {
                 r->bad = 1;
                 return 0;
@@ -250,7 +152,7 @@ static long ctl_r_cvolume(struct ctl_r *r, unsigned long *first)
                 r->bad = 1;
                 return 0;
         }
-        *first = n ? ctl_be(r->p + r->at) : 0;
+        *first = n ? wire_be32(r->p + r->at) : 0;
         r->at += 4 * n;
         return n;
 }
@@ -339,9 +241,9 @@ static long ctl_exchange(struct ctl *c, long length)
         unsigned char *frame = c->frame;
         unsigned long tag = c->tag;
 
-        ctl_put_be(frame, (unsigned long)length);
-        ctl_put_be(frame + 4, CTL_NONE); // a command is on the channel -1
-        ctl_put_be(frame + 8, 0), ctl_put_be(frame + 12, 0), ctl_put_be(frame + 16, 0);
+        wire_put_be(frame, (unsigned long)length);
+        wire_put_be(frame + 4, CTL_NONE); // a command is on the channel -1
+        wire_put_be(frame + 8, 0), wire_put_be(frame + 12, 0), wire_put_be(frame + 16, 0);
         if (c->transport.send(c->transport.context, frame, 20 + length, ctl_left(c)) < 0)
         {
                 c->open = 0;
@@ -354,21 +256,21 @@ static long ctl_exchange(struct ctl *c, long length)
 
                 if (c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0)
                         break;
-                size = ctl_be(frame), channel = ctl_be(frame + 4);
+                size = wire_be32(frame), channel = wire_be32(frame + 4);
                 if (size > CTL_FRAME)
                         break;
                 if (size && c->transport.receive(c->transport.context, frame + 20, (long)size, ctl_left(c)) < 0)
                         break;
                 if (channel != CTL_NONE || size < 10)
                         continue;
-                command = ctl_be(frame + 21), answered = ctl_be(frame + 26);
+                command = wire_be32(frame + 21), answered = wire_be32(frame + 26);
                 if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)
                         continue;
                 if (command == CTL_COMMAND_REPLY)
                         return (long)size;
                 if (command == CTL_COMMAND_ERROR && size >= 15 && frame[30] == 'L')
                 {
-                        unsigned long code = ctl_be(frame + 31);
+                        unsigned long code = wire_be32(frame + 31);
 
                         return code == CTL_ERR_ACCESS ? CTL_ACCESS : code == CTL_ERR_NOENTITY ? CTL_NOENTITY
                                : code == CTL_ERR_INVALID ? CTL_INVALID : CTL_FAILED;
@@ -380,21 +282,21 @@ static long ctl_exchange(struct ctl *c, long length)
 }
 
 // A request begun: its writer over the frame's payload, the command and a fresh tag put in.
-static void ctl_begin(struct ctl *c, struct ctl_w *w, unsigned long command)
+static void ctl_begin(struct ctl *c, struct wire_w *w, unsigned long command)
 {
         c->tag++;
         w->p = c->frame + 20;
         w->cap = CTL_FRAME;
         w->len = 0;
         w->bad = 0;
-        ctl_w_u32(w, command);
-        ctl_w_u32(w, c->tag);
+        wire_w_u32(w, command);
+        wire_w_u32(w, c->tag);
 }
 
 // The handshake: AUTH at the newest version (the cookie is nothing here), then the client's name. 0, or CTL_FAILED.
 static long ctl_start(struct ctl *c)
 {
-        struct ctl_w w;
+        struct wire_w w;
         unsigned char cookie[256];
         long got;
 
@@ -406,22 +308,22 @@ static long ctl_start(struct ctl *c)
         memory_zero(cookie, sizeof(cookie));
         ctl_budget(c);
         ctl_begin(c, &w, CTL_COMMAND_AUTH);
-        ctl_w_u32(&w, CTL_VERSION);
-        ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, 256);
-        ctl_w_raw(&w, cookie, 256);
+        wire_w_u32(&w, CTL_VERSION);
+        wire_w_byte(&w, 'x');
+        wire_w_be32(&w, 256);
+        wire_w_raw(&w, cookie, 256);
         if (w.bad || (got = ctl_exchange(c, w.len)) < 0)
                 return CTL_FAILED;
         c->open = 1;
         ctl_begin(c, &w, CTL_COMMAND_SET_CLIENT_NAME);
         // The property list: application.name, its value a string with its null, and the end.
-        ctl_w_byte(&w, 'P');
-        ctl_w_string(&w, "application.name");
-        ctl_w_u32(&w, (unsigned long)sizeof(CTL_NAME));
-        ctl_w_byte(&w, 'x');
-        ctl_w_be32(&w, (unsigned long)sizeof(CTL_NAME));
-        ctl_w_raw(&w, CTL_NAME, (long)sizeof(CTL_NAME));
-        ctl_w_byte(&w, 'N');
+        wire_w_byte(&w, 'P');
+        wire_w_string(&w, "application.name");
+        wire_w_u32(&w, (unsigned long)sizeof(CTL_NAME));
+        wire_w_byte(&w, 'x');
+        wire_w_be32(&w, (unsigned long)sizeof(CTL_NAME));
+        wire_w_raw(&w, CTL_NAME, (long)sizeof(CTL_NAME));
+        wire_w_byte(&w, 'N');
         if (w.bad || ctl_exchange(c, w.len) < 0)
         {
                 c->open = 0;
@@ -466,23 +368,23 @@ static void ctl_keep_channels(struct ctl *c, unsigned long index, long channels)
 */
 static long ctl_get_input_now(struct ctl *c, unsigned long index, struct ctl_input *into)
 {
-        struct ctl_w w;
-        struct ctl_r r;
+        struct wire_w w;
+        struct wire_r r;
         long size = 0, count;
         unsigned long volume;
 
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, CTL_COMMAND_GET_SINK_INPUT_INFO);
-        ctl_w_u32(&w, index);
+        wire_w_u32(&w, index);
         if (w.bad || (size = ctl_exchange(c, w.len)) < 0)
                 return size < 0 ? size : CTL_FAILED;
-        r = (struct ctl_r){c->frame + 20, size, 10, 0};
-        into->index = ctl_r_u32(&r);
+        r = (struct wire_r){c->frame + 20, size, 10, 0};
+        into->index = wire_r_u32(&r);
         ctl_r_string(&r);                        // media.name
-        (void)ctl_r_u32(&r);                     // the module
-        (void)ctl_r_u32(&r);                     // the client
-        (void)ctl_r_u32(&r);                     // the sink
+        (void)wire_r_u32(&r);                     // the module
+        (void)wire_r_u32(&r);                     // the client
+        (void)wire_r_u32(&r);                     // the sink
         ctl_r_fixed(&r, 'a', 6);                 // the sample spec
         ctl_r_map(&r);
         count = ctl_r_cvolume(&r, &volume);
@@ -510,7 +412,7 @@ static long ctl_get_input(struct ctl *c, unsigned long index, struct ctl_input *
 
 static long ctl_volume_once(struct ctl *c, unsigned long command, unsigned long index, unsigned long volume, long channels)
 {
-        struct ctl_w w;
+        struct wire_w w;
         unsigned long all[CTL_CHANNELS];
 
         if (channels < 1 || channels > CTL_CHANNELS)
@@ -518,7 +420,7 @@ static long ctl_volume_once(struct ctl *c, unsigned long command, unsigned long 
         for (long i = 0; i < channels; i++)
                 all[i] = volume;
         ctl_begin(c, &w, command);
-        ctl_w_u32(&w, index);
+        wire_w_u32(&w, index);
         ctl_w_cvolume(&w, all, channels);
         if (w.bad)
                 return CTL_FAILED;
@@ -584,21 +486,31 @@ static long ctl_set_output_volume(struct ctl *c, unsigned long index, unsigned l
 }
 
 // A stream muted or not, by the command that names its kind. The same answers as the volume's.
-static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long index, int muted)
+// A mute on the wire: a stream named by its index (named is 0), or a device named by the page (CTL_NONE, then its name when named
+// is 1), then the flag. The same answers as the volume's.
+static long ctl_mute_send(struct ctl *c, unsigned long command, unsigned long index, int named, const char *name, int muted)
 {
-        struct ctl_w w;
+        struct wire_w w;
         long got;
 
         ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, command);
-        ctl_w_u32(&w, index);
-        ctl_w_bool(&w, muted != 0);
+        wire_w_u32(&w, index);
+        if (named)
+                wire_w_string(&w, name);
+        wire_w_bool(&w, muted != 0);
         if (w.bad)
                 return CTL_FAILED;
         got = ctl_exchange(c, w.len);
         return got < 0 ? got : 0;
+}
+
+// A stream muted or not, by the command that names its kind. The same answers as the volume's.
+static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long index, int muted)
+{
+        return ctl_mute_send(c, command, index, 0, 0, muted);
 }
 
 static long ctl_set_input_mute(struct ctl *c, unsigned long index, int muted)
@@ -615,14 +527,14 @@ static long ctl_set_output_mute(struct ctl *c, unsigned long index, int muted)
 // A stream ended: its program is told its stream is gone (the server only lets the person's own session do it).
 static long ctl_kill_input(struct ctl *c, unsigned long index)
 {
-        struct ctl_w w;
+        struct wire_w w;
         long got;
 
         ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);
-        ctl_w_u32(&w, index);
+        wire_w_u32(&w, index);
         if (w.bad)
                 return CTL_FAILED;
         got = ctl_exchange(c, w.len);
@@ -636,7 +548,7 @@ static long ctl_kill_input(struct ctl *c, unsigned long index)
 */
 static long ctl_device_volume(struct ctl *c, unsigned long command, const char *name, unsigned long volume)
 {
-        struct ctl_w w;
+        struct wire_w w;
         unsigned long both[2];
         long got;
 
@@ -645,8 +557,8 @@ static long ctl_device_volume(struct ctl *c, unsigned long command, const char *
                 return CTL_FAILED;
         both[0] = both[1] = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
         ctl_begin(c, &w, command);
-        ctl_w_u32(&w, CTL_NONE);
-        ctl_w_string(&w, name);
+        wire_w_u32(&w, CTL_NONE);
+        wire_w_string(&w, name);
         ctl_w_cvolume(&w, both, 2);
         if (w.bad)
                 return CTL_FAILED;
@@ -656,20 +568,7 @@ static long ctl_device_volume(struct ctl *c, unsigned long command, const char *
 
 static long ctl_device_mute(struct ctl *c, unsigned long command, const char *name, int muted)
 {
-        struct ctl_w w;
-        long got;
-
-        ctl_budget(c);
-        if (!c->open)
-                return CTL_FAILED;
-        ctl_begin(c, &w, command);
-        ctl_w_u32(&w, CTL_NONE);
-        ctl_w_string(&w, name);
-        ctl_w_bool(&w, muted != 0);
-        if (w.bad)
-                return CTL_FAILED;
-        got = ctl_exchange(c, w.len);
-        return got < 0 ? got : 0;
+        return ctl_mute_send(c, command, CTL_NONE, 1, name, muted);
 }
 
 static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long volume)
