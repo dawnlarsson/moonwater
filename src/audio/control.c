@@ -499,20 +499,15 @@ static long ctl_index_send(struct ctl *c, unsigned long command, unsigned long i
 }
 
 // A stream muted or not, by the command that names its kind. The same answers as the volume's.
-static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long index, int muted)
-{
-        return ctl_index_send(c, command, index, 0, 0, muted);
-}
-
 static long ctl_set_input_mute(struct ctl *c, unsigned long index, int muted)
 {
-        return ctl_stream_mute(c, CTL_COMMAND_SET_SINK_INPUT_MUTE, index, muted);
+        return ctl_index_send(c, CTL_COMMAND_SET_SINK_INPUT_MUTE, index, 0, 0, muted);
 }
 
 // A record stream muted or not: the one program's microphone, which is the person's (root's) or the program's own.
 static long ctl_set_output_mute(struct ctl *c, unsigned long index, int muted)
 {
-        return ctl_stream_mute(c, CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE, index, muted);
+        return ctl_index_send(c, CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE, index, 0, 0, muted);
 }
 
 // A stream ended: its program is told its stream is gone (the server only lets the person's own session do it).
@@ -546,11 +541,6 @@ static long ctl_device_volume(struct ctl *c, unsigned long command, const char *
         return got < 0 ? got : 0;
 }
 
-static long ctl_device_mute(struct ctl *c, unsigned long command, const char *name, int muted)
-{
-        return ctl_index_send(c, command, CTL_NONE, 1, name, muted);
-}
-
 static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long volume)
 {
         return ctl_device_volume(c, CTL_COMMAND_SET_SINK_VOLUME, sink, volume);
@@ -558,7 +548,7 @@ static long ctl_set_sink_volume(struct ctl *c, const char *sink, unsigned long v
 
 static long ctl_set_sink_mute(struct ctl *c, const char *sink, int muted)
 {
-        return ctl_device_mute(c, CTL_COMMAND_SET_SINK_MUTE, sink, muted);
+        return ctl_index_send(c, CTL_COMMAND_SET_SINK_MUTE, CTL_NONE, 1, sink, muted);
 }
 
 static long ctl_set_source_volume(struct ctl *c, const char *source, unsigned long volume)
@@ -568,7 +558,7 @@ static long ctl_set_source_volume(struct ctl *c, const char *source, unsigned lo
 
 static long ctl_set_source_mute(struct ctl *c, const char *source, int muted)
 {
-        return ctl_device_mute(c, CTL_COMMAND_SET_SOURCE_MUTE, source, muted);
+        return ctl_index_send(c, CTL_COMMAND_SET_SOURCE_MUTE, CTL_NONE, 1, source, muted);
 }
 
 #ifndef CTL_NO_SYSTEM
