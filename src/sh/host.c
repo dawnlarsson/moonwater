@@ -5705,6 +5705,17 @@ static bipolar host_efi_get(string_address path, p64 address_to value)
         return 0;
 }
 
+/* Whether efivarfs is the filesystem at HOST_EFI_DIRECTORY already. */
+static bool host_efi_mounted(void)
+{
+        file_mount_facts facts;
+
+        if (system_call_2(syscall(statfs), (positive)HOST_EFI_DIRECTORY,
+                          (positive)address_of facts) < 0)
+                return false;
+        return facts.type == 0xDE5E81E4;
+}
+
 /* Whether the firmware offers its setup at the next boot: 1 yes, 0 not, and
    negative when this is not UEFI or the variables cannot be read. */
 static bipolar host_efi_setup_offered(void)
@@ -5718,9 +5729,12 @@ static bipolar host_efi_setup_offered(void)
         system_close((positive)handle);
 
         failed = host_efi_get(HOST_EFI_SUPPORTED, address_of value);
-        if (failed < 0)
+        //      A machine that has not mounted efivarfs yet. Only that: a mount
+        //      on one already there stacks, and a read that fails for another
+        //      reason (the variable is absent) would stack one more at every
+        //      ask, a status read included.
+        if (failed < 0 && !host_efi_mounted())
         {
-                //      A machine that has not mounted efivarfs yet.
                 system_mount("efivarfs", HOST_EFI_DIRECTORY, "efivarfs", 0, 0);
                 failed = host_efi_get(HOST_EFI_SUPPORTED, address_of value);
         }
