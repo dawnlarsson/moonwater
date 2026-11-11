@@ -7957,11 +7957,6 @@ static PURE bool shell_physical_on()
         return shell_extra_on(SHELL_EXTRA_PHYSICAL);
 }
 
-PURE bool shell_onecmd_on()
-{
-        return shell_extra_on(SHELL_EXTRA_ONECMD);
-}
-
 #define shell_hashall_on() shell_extra_on(SHELL_EXTRA_HASHALL)
 #define shell_keyword_on() shell_extra_on(SHELL_EXTRA_KEYWORD)
 
@@ -8086,14 +8081,6 @@ static bool shell_extra_told(string_address word, bool on)
                 shell_extra_state &= ~((positive)1 << index);
 
         return true;
-}
-
-//      Whether the lines the reader hands over are remembered: a person's
-//      at a terminal, and a script's once it has said set -o history.
-PURE bool shell_history_recording()
-{
-        return shell_bash_compat ? shell_extra_on(SHELL_EXTRA_HISTORY)
-                                 : shell_is_interactive;
 }
 
 PURE bool shell_histexpand_on()
@@ -27472,23 +27459,6 @@ COLD string_address shell_prompt_expand(string_address text, bool nested)
         own = shell_store_copy(address_of expand_store, decoded.bytes,
                                decoded.used);
         return own ? expand_capture_prompt(own, nested) : text;
-}
-
-/*
-        The prompt this shell prints, which is PS1 when a script has set one.
-
-        The built-in prompt stays the default rather than Bash's, because it
-        is what this shell has always printed and nothing in a script depends
-        on the bytes of a prompt it did not set.
-*/
-COLD fn shell_prompt_write(writer write, bool more)
-{
-        string_address text = env_get(more ? "PS2" : "PS1");
-
-        if (!text)
-                return write(more ? "> " : PROMPT, more ? 2 : sizeof(PROMPT) - 1);
-
-        shell_prompt_written(write, text);
 }
 
 fn shell_help(writer write)

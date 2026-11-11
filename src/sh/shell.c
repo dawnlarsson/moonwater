@@ -109,38 +109,6 @@ HOT fn shell_signals_start()
         }
 }
 
-/*
-        Only a shell somebody is typing at stays deaf to control-C.
-
-        Every shell starts ignoring interrupt and quit, because until the
-        options are read nobody knows whether this one is interactive. A
-        script or a -c string that went on ignoring them could not be stopped
-        from the terminal at all: control-C took the command it was running
-        and the shell went on to the next line, a loop of builtins ran for
-        ever, and a utility run as the last command in the shell's own process
-        kept that deafness too. dash and bash leave a non-interactive shell
-        interruptible; what was already ignored when it started stays ignored.
-*/
-HOT fn shell_signals_settle(bool interactive)
-{
-        b32 numbers[2] = {SIGNAL_INTERRUPT, SIGNAL_QUIT};
-
-        if (shell_signals_deferred)
-        {
-                shell_signals_deferred = false;
-                if (interactive)
-                        shell_signals_start();
-                return;
-        }
-
-        if (interactive)
-                return;
-
-        for (positive at = 0; at < 2; at++)
-                if (!(shell_signals_ignored & ((positive)1 << numbers[at])))
-                        shell_default(numbers[at]);
-}
-
 // Set where the signal landed, read where a command ends. A handler that ran
 // the action itself would be running the parser on top of whatever the parser
 // was already in the middle of.
@@ -794,21 +762,6 @@ positive shell_shopt_state = SHELL_SHOPT_STARTED;
         ((shell_shopt_state & SHELL_SHOPT(which)) != 0)
 
 /*
-        rbash, -r, --restricted and set -r all enter the same state: the
-        restriction itself, and the shopt that reports how the shell was
-        started. shopt -u restricted_shell is a no-op, and set +r is an
-        error once this has run. The one thing that can still drop the
-        restriction itself (not the shopt) is -c's $0 operand: bash
-        restricts a shell whose $0 is rbash and lifts an argv0-only
-        restriction when $0 is any other name. -r is sticky through that.
-*/
-fn shell_restricted_enter()
-{
-        shell_restricted = true;
-        shell_shopt_state |= SHELL_SHOPT(RESTRICTED_SHELL);
-}
-
-/*
         The names that answer without being stored.
 
         Declared here because the expander is included first and is where the
@@ -1425,17 +1378,6 @@ static string_address shell_command_name_address HOT_STATE;
 /* parse_program reuses word slots. A remembered builtin is only the same
    command while this generation is unchanged -- a kept loop tree. */
 static positive shell_parse_generation HOT_STATE;
-
-fn token_push(p8 value)
-{
-        if (!token_room(token_used + 2))
-        {
-                token_overflow = true;
-                return;
-        }
-
-        token_storage[token_used++] = value;
-}
 
 static fn token_push_bytes(address_any data, positive length)
 {

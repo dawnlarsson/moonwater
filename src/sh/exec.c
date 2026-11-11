@@ -5791,47 +5791,6 @@ static fn history_load()
         history_saved = history_used;
 }
 
-// What was there before this session, at a terminal and nowhere else: a
-// script's history is a history nobody will ever read back.
-fn history_start()
-{
-        if (!shell_is_interactive)
-                return;
-
-        //      An interactive bash keeps its history in ~/.bash_history
-        //      unless told otherwise, and remembers five hundred lines.
-        if (shell_bash_compat && !env_get("HISTFILE"))
-        {
-                string_address home = env_get("HOME");
-
-                if (home && string_get(home))
-                {
-                        p8 address_to made = null;
-                        positive room = 0;
-                        positive length = string_length(home);
-
-                        if (shell_array_room(made, room, length + 16))
-                        {
-                                memory_copy(made, home, length);
-                                memory_copy_end(made + length, "/.bash_history",
-                                                14);
-                                env_assign("HISTFILE", made);
-                                memory_free(made, room);
-                        }
-                }
-                //      Not for -c, which reads no lines to remember.
-                if (!string_is(shell_option_flags, 'c'))
-                {
-                        if (!env_get("HISTSIZE"))
-                                env_assign("HISTSIZE", "500");
-                        if (!env_get("HISTFILESIZE"))
-                                env_assign("HISTFILESIZE", "500");
-                }
-        }
-
-        history_load();
-}
-
 //      The history file is read when history is first turned on in a shell
 //      that started with it off, which is what a script's set -o history is.
 fn history_enabled()

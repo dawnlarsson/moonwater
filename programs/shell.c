@@ -3,6 +3,135 @@
 #include "../src/moonwater/spark.c"
 #include "../src/sh/shell.c"
 
+PURE bool shell_onecmd_on()
+{
+        return shell_extra_on(SHELL_EXTRA_ONECMD);
+}
+
+//      Whether the lines the reader hands over are remembered: a person's
+//      at a terminal, and a script's once it has said set -o history.
+PURE bool shell_history_recording()
+{
+        return shell_bash_compat ? shell_extra_on(SHELL_EXTRA_HISTORY)
+                                 : shell_is_interactive;
+}
+
+/*
+        The prompt this shell prints, which is PS1 when a script has set one.
+
+        The built-in prompt stays the default rather than Bash's, because it
+        is what this shell has always printed and nothing in a script depends
+        on the bytes of a prompt it did not set.
+*/
+COLD fn shell_prompt_write(writer write, bool more)
+{
+        string_address text = env_get(more ? "PS2" : "PS1");
+
+        if (!text)
+                return write(more ? "> " : PROMPT, more ? 2 : sizeof(PROMPT) - 1);
+
+        shell_prompt_written(write, text);
+}
+
+// What was there before this session, at a terminal and nowhere else: a
+// script's history is a history nobody will ever read back.
+fn history_start()
+{
+        if (!shell_is_interactive)
+                return;
+
+        //      An interactive bash keeps its history in ~/.bash_history
+        //      unless told otherwise, and remembers five hundred lines.
+        if (shell_bash_compat && !env_get("HISTFILE"))
+        {
+                string_address home = env_get("HOME");
+
+                if (home && string_get(home))
+                {
+                        p8 address_to made = null;
+                        positive room = 0;
+                        positive length = string_length(home);
+
+                        if (shell_array_room(made, room, length + 16))
+                        {
+                                memory_copy(made, home, length);
+                                memory_copy_end(made + length, "/.bash_history",
+                                                14);
+                                env_assign("HISTFILE", made);
+                                memory_free(made, room);
+                        }
+                }
+                //      Not for -c, which reads no lines to remember.
+                if (!string_is(shell_option_flags, 'c'))
+                {
+                        if (!env_get("HISTSIZE"))
+                                env_assign("HISTSIZE", "500");
+                        if (!env_get("HISTFILESIZE"))
+                                env_assign("HISTFILESIZE", "500");
+                }
+        }
+
+        history_load();
+}
+
+fn token_push(p8 value)
+{
+        if (!token_room(token_used + 2))
+        {
+                token_overflow = true;
+                return;
+        }
+
+        token_storage[token_used++] = value;
+}
+
+/*
+        rbash, -r, --restricted and set -r all enter the same state: the
+        restriction itself, and the shopt that reports how the shell was
+        started. shopt -u restricted_shell is a no-op, and set +r is an
+        error once this has run. The one thing that can still drop the
+        restriction itself (not the shopt) is -c's $0 operand: bash
+        restricts a shell whose $0 is rbash and lifts an argv0-only
+        restriction when $0 is any other name. -r is sticky through that.
+*/
+fn shell_restricted_enter()
+{
+        shell_restricted = true;
+        shell_shopt_state |= SHELL_SHOPT(RESTRICTED_SHELL);
+}
+
+/*
+        Only a shell somebody is typing at stays deaf to control-C.
+
+        Every shell starts ignoring interrupt and quit, because until the
+        options are read nobody knows whether this one is interactive. A
+        script or a -c string that went on ignoring them could not be stopped
+        from the terminal at all: control-C took the command it was running
+        and the shell went on to the next line, a loop of builtins ran for
+        ever, and a utility run as the last command in the shell's own process
+        kept that deafness too. dash and bash leave a non-interactive shell
+        interruptible; what was already ignored when it started stays ignored.
+*/
+HOT fn shell_signals_settle(bool interactive)
+{
+        b32 numbers[2] = {SIGNAL_INTERRUPT, SIGNAL_QUIT};
+
+        if (shell_signals_deferred)
+        {
+                shell_signals_deferred = false;
+                if (interactive)
+                        shell_signals_start();
+                return;
+        }
+
+        if (interactive)
+                return;
+
+        for (positive at = 0; at < 2; at++)
+                if (!(shell_signals_ignored & ((positive)1 << numbers[at])))
+                        shell_default(numbers[at]);
+}
+
 /*
         A complete -c program which needs no state once the caller has ruled
         out inherited startup work and function overrides.
