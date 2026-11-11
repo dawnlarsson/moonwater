@@ -298,6 +298,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Pair a machine	b39b	Sparuj maszynę
 =Plain Text	2bbe	Zwykły tekst
+=Pointer squeezes on click	ad88	Wskaźnik kurczy się przy kliknięciu
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik

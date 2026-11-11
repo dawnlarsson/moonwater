@@ -298,6 +298,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Output device (name, or default)	d73c	Dispositivo di uscita (nome o default)
 =Pair a machine	b39b	Abbina una macchina
 =Plain Text	2bbe	Testo semplice
+=Pointer squeezes on click	ad88	Il puntatore si restringe al clic
 =Power	a5e6	Alimentazione
 =Power profile	8def	Profilo energetico
 =Predict touch and pen	e2b7	Prevedi tocco e penna

@@ -298,6 +298,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
 =Plain Text	2bbe	Απλό κείμενο
+=Pointer squeezes on click	ad88	Ο δείκτης συρρικνώνεται στο κλικ
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας

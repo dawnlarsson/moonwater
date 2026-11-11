@@ -298,6 +298,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Pair a machine	b39b	Associer une machine
 =Plain Text	2bbe	Texte brut
+=Pointer squeezes on click	ad88	Le pointeur se contracte au clic
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet

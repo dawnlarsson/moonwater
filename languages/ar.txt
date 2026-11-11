@@ -299,6 +299,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Pair a machine	b39b	إقران حاسوب
 =Plain Text	2bbe	نص عادي
+=Pointer squeezes on click	ad88	ينكمش المؤشر عند النقر
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
 =Predict touch and pen	e2b7	توقع اللمس والقلم

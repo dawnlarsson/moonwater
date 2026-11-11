@@ -91,6 +91,7 @@
 #define SETTING_CURSOR_LOOK_PATH "/root/canvas.cursor.look"
 #define SETTING_SHAKE_PATH "/root/canvas.cursor.shake"
 #define SETTING_SHAKE_DELAY_PATH "/root/canvas.cursor.shake.delay"
+#define SETTING_CURSOR_CLICK_PATH "/root/canvas.cursor.click"
 #define SETTING_REPEAT_DELAY_PATH "/root/keyboard.repeat.delay"
 #define SETTING_ONSCREEN_PATH "/root/keyboard.onscreen"
 #define SETTING_REPEAT_RATE_PATH "/root/keyboard.repeat.rate"
@@ -373,6 +374,11 @@ static const struct settings_row settings_rows[] = {
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+    //  A press of the left button squeezes the pointer for two frames (compositor.c's compositor_click_press): on by default.
+    SETTING_PLAIN_ROW(null, "Pointer squeezes on click", SETTINGS_SWITCH, 0, ("canvas", "cursor", "click"), "click ", null,
+                      .path = SETTING_CURSOR_CLICK_PATH, .standard = "on",
+                      .usage = "canvas cursor click [on|off]",
+                      .help = "a press of the left button makes the pointer smaller for two frames [on]"),
     //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
     //  pointer is always predicted, so it has no row.
     SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,

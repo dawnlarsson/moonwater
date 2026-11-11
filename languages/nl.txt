@@ -298,6 +298,7 @@ ui_field_full	fe02	meer past er niet in
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Pair a machine	b39b	Een machine koppelen
 =Plain Text	2bbe	Platte tekst
+=Pointer squeezes on click	ad88	Aanwijzer krimpt bij klikken
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen

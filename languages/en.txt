@@ -298,6 +298,7 @@ ui_field_full	fe02	that is as much as it holds
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Pair a machine	b39b	Pair a machine
 =Plain Text	2bbe	Plain Text
+=Pointer squeezes on click	ad88	Pointer squeezes on click
 =Power	a5e6	Power
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen

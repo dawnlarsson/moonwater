@@ -4534,6 +4534,8 @@ static struct
                 positive magnified_until;
                 int magnify;            // the hand shook it since the last motion
                 int shake_off;          // `moonwater canvas cursor shake off`: a shake finds nothing
+                int click_off;          // `moonwater canvas cursor click off`: a press does not squeeze the pointer (on by default)
+                int squeeze;            // frames left at the squeezed scale, after a press of the left button (compositor_click_press)
                 positive shake_ns;      // how long a shaken pointer stays large (0 is COMPOSITOR_MAGNIFIED_NS)
                 int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
@@ -11241,12 +11243,36 @@ static b32 compositor_card_open(void)
 */
 
 // The scale a pointer is drawn at: its own size when `moonwater canvas cursor size` gave one, and the desktop's
-// when it did not, three times that while it is shaken large.
+// when it did not, three times that while it is shaken large, and three quarters of that (never less than one
+// pixel) for the frames a press squeezes it. Whole pixels only, so the hot spot stays on its pixel at either scale.
 static int compositor_cursor_scale(void)
 {
         int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
+        int scale = compositor.cursor.magnified ? 3 * base : base, squeezed = 3 * scale / 4;
 
-        return compositor.cursor.magnified ? 3 * base : base;
+        if (compositor.cursor.squeeze)
+                scale = squeezed < 1 ? 1 : squeezed;
+        return scale;
+}
+
+// A press of the left button squeezes the pointer for two frames, when the setting is on (it is by default).
+static void compositor_click_press(unsigned int code, int down)
+{
+        if (down && code == COMPOSITOR_BTN_LEFT && !compositor.cursor.click_off)
+        {
+                compositor.cursor.squeeze = 2;
+                compositor_cursor_move();
+        }
+}
+
+// Each frame drawn is one of the squeezed frames left, and the last of them is followed by the full size.
+static void compositor_click_frame(void)
+{
+        if (compositor.cursor.squeeze)
+        {
+                compositor.cursor.squeeze--;
+                compositor_cursor_move();
+        }
 }
 
 static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int scale)
@@ -12170,6 +12196,16 @@ static void compositor_taskbar_settings_read(void)
 static void compositor_touch_settings_read(void);
 static void compositor_predict_read(void);
 
+// `moonwater canvas cursor click`: on unless the file says off, read when the compositor starts and again when it is written.
+static void compositor_click_read(void)
+{
+        char word[16];
+        long value;
+
+        compositor_word(SETTING_CURSOR_CLICK_PATH, word, sizeof(word));
+        compositor.cursor.click_off = compositor_setting_kept(SETTING_CURSOR_CLICK_PATH, word, &value) && value == 1;
+}
+
 // Read when the compositor starts and again when a file of them is written.
 static void compositor_input_settings_read(void)
 {
@@ -12183,6 +12219,7 @@ static void compositor_input_settings_read(void)
         compositor_taskbar_settings_read();
         compositor_touch_settings_read();
         compositor_predict_read();
+        compositor_click_read();
 }
 
 _Static_assert(COMPOSITOR_INPUTS == WINDOWS_INPUTS, "an input slot is a row of the table's");
@@ -17701,6 +17738,7 @@ static void compositor_press(unsigned int code, int down)
 
 static void compositor_press_at(unsigned int code, int down)
 {
+        compositor_click_press(code, down);
         if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
         {
                 int at = compositor_assist_at(compositor.pointer_x, compositor.pointer_y);
@@ -20902,6 +20940,7 @@ static b32 compositor_main()
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
+                                compositor_click_frame();
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
                                 compositor_wl_presented();

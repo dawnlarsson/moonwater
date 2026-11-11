@@ -127614,6 +127614,67 @@ static void check_compositor_look(void)
 }
 
 /*
+        The click squeeze: a press of the left button makes the pointer a step smaller for two frames, unless the setting says
+        off (it is on by default). Each frame drawn is one of the squeezed ones (compositor_click_frame counts them down), then
+        comes full size. A release, or a press of another button, starts nothing, and the hot spot stays on its pixel.
+*/
+static void check_compositor_click(void)
+{
+    int seen[3], hot = 1;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.scale = 200;
+    compositor.card = -1;
+
+    compositor.cursor.click_off = 1;
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
+    seen[0] = compositor_cursor_scale();
+    compositor_click_frame();
+    seen[1] = compositor_cursor_scale();
+    compositor_click_frame();
+    seen[2] = compositor_cursor_scale();
+    check("click: off, a press of the left button changes no scale, frame after frame",
+          seen[0] == 2 && seen[1] == 2 && seen[2] == 2 && compositor.cursor.squeeze == 0);
+
+    compositor.cursor.click_off = 0;
+    compositor_click_press(COMPOSITOR_BTN_RIGHT, 1);
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 0);
+    check("click: on, a press of another button or a release starts nothing", compositor.cursor.squeeze == 0);
+
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
+    seen[0] = compositor_cursor_scale();
+    compositor_click_frame();
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 0);
+    check("click: a release in the middle does not restart the squeeze", compositor.cursor.squeeze == 1);
+    seen[1] = compositor_cursor_scale();
+    compositor_click_frame();
+    seen[2] = compositor_cursor_scale();
+    check("click: on, a press is two squeezed frames (three quarters of the scale) and then full size",
+          seen[0] == 1 && seen[1] == 1 && seen[2] == 2 && compositor.cursor.squeeze == 0);
+
+    compositor.scale = 100;
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
+    check("click: a pointer of one pixel is squeezed to one pixel, not to nothing", compositor_cursor_scale() == 1);
+    compositor_click_frame();
+    compositor_click_frame();
+    compositor.scale = 200;
+
+    compositor_click_press(COMPOSITOR_BTN_LEFT, 1);
+    for (unsigned int shape = 0; shape < CP_SHAPES; shape++)
+    {
+        int left, top, scale = compositor_cursor_scale(), x = 300, y = 200;
+
+        compositor_cursor_cell(&left, &top, x, y, shape, scale);
+        hot &= left + compositor_cursor_hot[shape][0] * scale == x && top + compositor_cursor_hot[shape][1] * scale == y;
+    }
+    check("click: the squeezed pointer's hot spot is on the pixel it was pointed at, for every shape", hot);
+    compositor.cursor.squeeze = 0;
+    compositor.cursor.click_off = 0;
+}
+
+/*
         A window that asked for no close button (WINDOW_NO_CLOSE) has none drawn or hit, and one that asked to be put
         away by a press outside it (WINDOW_DISMISS) is asked to go by a press on the desktop or on another window, and
         by none inside it.
@@ -142077,6 +142138,7 @@ static fn check_settings_groups(void)
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
             {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
+            {"Pointer squeezes on click", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
             {"Natural direction", "Scrolling"}, {"Scroll speed", "Scrolling"}, {"Momentum", "Scrolling"}, {"Rubber band", "Scrolling"},
             {"Time zone", "Time"},
@@ -164617,6 +164679,7 @@ b32 main()
         check_launcher_anchor();
 #endif
         check_compositor_look();
+        check_compositor_click();
         check_taskbar_geometry();
         check_rtl_chrome();
         check_taskbar_tray();

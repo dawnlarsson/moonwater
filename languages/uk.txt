@@ -298,6 +298,7 @@ ui_field_full	fe02	більше не вміщається
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Pair a machine	b39b	Зв'язати комп'ютер
 =Plain Text	2bbe	Звичайний текст
+=Pointer squeezes on click	ad88	Вказівник стискається під час клацання
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
 =Predict touch and pen	e2b7	Передбачати дотик і перо

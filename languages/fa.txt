@@ -299,6 +299,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Pair a machine	b39b	جفت کردن یک رایانه
 =Plain Text	2bbe	متن ساده
+=Pointer squeezes on click	ad88	نشانگر با کلیک کوچک می‌شود
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم

@@ -299,6 +299,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
 =Plain Text	2bbe	טקסט פשוט
+=Pointer squeezes on click	ad88	המצביע מתכווץ בלחיצה
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
 =Predict touch and pen	e2b7	חיזוי מגע ועט

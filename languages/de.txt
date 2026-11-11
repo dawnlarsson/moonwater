@@ -298,6 +298,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Output device (name, or default)	d73c	Ausgabegerät (Name oder default)
 =Pair a machine	b39b	Maschine koppeln
 =Plain Text	2bbe	Nur-Text
+=Pointer squeezes on click	ad88	Zeiger schrumpft beim Klicken
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen

@@ -298,6 +298,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Pair a machine	b39b	Bir makine eşleştir
 =Plain Text	2bbe	Düz Metin
+=Pointer squeezes on click	ad88	Tıklamada imleç küçülür
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et

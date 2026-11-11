@@ -298,6 +298,7 @@ ui_field_full	fe02	mer ryms inte
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Pair a machine	b39b	Para ihop en maskin
 =Plain Text	2bbe	Oformaterad text
+=Pointer squeezes on click	ad88	Pekaren krymper vid klick
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
 =Predict touch and pen	e2b7	Förutse touch och penna

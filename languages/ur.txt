@@ -299,6 +299,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Pair a machine	b39b	ایک کمپیوٹر جوڑیں
 =Plain Text	2bbe	سادہ متن
+=Pointer squeezes on click	ad88	کلک پر پوائنٹر سکڑ جاتا ہے
 =Power	a5e6	پاور
 =Power profile	8def	پاور پروفائل
 =Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
