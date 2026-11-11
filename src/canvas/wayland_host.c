@@ -2308,20 +2308,20 @@ static void compositor_wl_flush(long slot)
         if (length)
         {
                 positive control[2 + WAYLAND_OUT_FDS], message[7], vector[2] = {(positive)bytes, (positive)length};
-                int pass[WAYLAND_OUT_FDS];
 
                 memory_zero(message, sizeof message);
                 memory_zero(control, sizeof control);
                 message[2] = (positive)vector;
                 message[3] = 1;
+                // The queue takes at most WAYLAND_OUT_FDS (the keymap, the format table and a copy's pipe each check it); the control buffer is sized for that.
+                if (fd_count > WAYLAND_OUT_FDS)
+                        fd_count = WAYLAND_OUT_FDS;
                 if (fd_count > 0)
                 {
-                        for (long at = 0; at < fd_count && at < WAYLAND_OUT_FDS; at++)
-                                pass[at] = (int)fds[at];
                         control[0] = 16 + (positive)fd_count * 4;
                         control[1] = 1 | (positive)1 << 32; // SOL_SOCKET, SCM_RIGHTS
                         for (long at = 0; at < fd_count; at++)
-                                ((int *)(control + 2))[at] = pass[at];
+                                ((int *)(control + 2))[at] = (int)fds[at];
                         message[4] = (positive)control;
                         message[5] = ((16 + (positive)fd_count * 4) + 7) & ~(positive)7;
                 }
