@@ -417,9 +417,12 @@ static bool text_write_error_worded()
                           string_equals(text_name, (string_address)names[i]));
 }
 
+static fn text_close();
+
 static HOT b32 text_done(b32 code)
 {
         text_flush();
+        text_close();
 
         if (text_out_failed)
         {
@@ -10364,7 +10367,6 @@ static inline INLINE b32 text_head_tail(bool tail)
 
                 if (!tail_input(count, by_bytes, marked))
                 {
-                        text_close();
                         return text_done(1);
                 }
 
@@ -12267,7 +12269,6 @@ static b32 text_nl()
                                 // the count again and is not the end.
                                 if (overflowed)
                                 {
-                                        text_close();
                                         return text_done(string_diagnostic(&text_diagnostic, 1, null, "line number overflow"));
                                 }
 
@@ -20612,19 +20613,16 @@ static b32 text_look()
                                 found = look_mapped((p8 address_to)mapped,
                                                     size);
                                 memory_free((address_any)mapped, size);
-                                text_close();
                                 return text_done(found ? 0 : 1);
                         }
                 }
                 else
                 {
-                        text_close();
                         return text_done(1);
                 }
         }
 
         found = look_streamed();
-        text_close();
         return text_done(text_status ? 1 : found ? 0 : 1);
 }
 
@@ -20675,13 +20673,11 @@ static b32 text_line_command()
                                             (positive)(-(bipolar)unread),
                                             FILE_SEEK_CUR);
 
-                        text_close();
                         return text_done(0);
                 }
         }
 
         text_put_character('\n');
-        text_close();
         return text_done(1);
 }
 
@@ -20931,7 +20927,6 @@ static b32 text_fold()
                                 text_fold_held = 0;
                                 if (!fold_gather(utf8, address_of more, address_of ended))
                                 {
-                                        text_close();
                                         return text_done(string_diagnostic(&text_diagnostic, 1, null,
                                                                            "memory exhausted"));
                                 }
@@ -22658,7 +22653,6 @@ static b32 text_cut()
                                 {
                                         if (!byte_store_reserve(address_of first_line, length + 1, 4096))
                                         {
-                                                text_close();
                                                 return text_done(string_diagnostic(&text_diagnostic, 1, null,
                                                                                    "memory exhausted"));
                                         }
@@ -22805,7 +22799,6 @@ static b32 text_cut()
                                         if (!byte_store_reserve(address_of cut_record,
                                                                 cut_record.used + left, 1 << 16))
                                         {
-                                                text_close();
                                                 return text_done(string_diagnostic(&text_diagnostic, 1, null,
                                                                                    "memory exhausted"));
                                         }
@@ -24896,7 +24889,6 @@ static b32 text_uniq()
             (gap == UNIQ_GROUP_APPEND || gap == UNIQ_GROUP_BOTH))
                 text_put_character(text_delimiter);
 
-        text_close();
         return text_done_closing(text_status, target);
 }
 
