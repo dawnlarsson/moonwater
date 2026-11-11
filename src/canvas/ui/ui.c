@@ -12381,12 +12381,11 @@ static fn ui_app_moved(struct ui_app address_to app, int top, int bottom, b32 al
 
 /*
         An app's frame, the same for every window: the buffer the window does not show is drawn at the app's size (draw), the table
-        takes that size, the app's knock with its picture (before, optional) is made, the buffer is shown and the picture is no longer
-        due. False while the window still shows a buffer the
+        takes that size, the buffer is shown and the picture is no longer due. False while the window still shows a buffer the
         compositor has not read (windows_ready), and the picture stays due.
 */
 static b32 ui_app_present(struct window_row address_to own, int address_to shown, b32 address_to dirty, int width, int height,
-                          void (*draw)(unsigned int address_to pixels), void (*before)(void))
+                          void (*draw)(unsigned int address_to pixels))
 {
         struct windows address_to table = own->table;
         unsigned int row = own->row;
@@ -12397,7 +12396,7 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         if (ui_list_wanted(own) && ui_list_frame_begin())
         {
                 draw(windows_buffer(table, row, (unsigned int)slot));
-                if (ui_list_frame_end(own, width, height, before))
+                if (ui_list_frame_end(own, width, height, null))
                 {
                         *shown = 0;
                         *dirty = false;
@@ -12408,9 +12407,6 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         table->width[row] = (unsigned int)width;
         table->height[row] = (unsigned int)height;
         table->damage_width[row] = 0;
-        // An app's knock that comes with its picture (before, optional): the size and damage are set, the buffer is not shown yet.
-        if (before)
-                before();
         windows_show(own, (unsigned int)slot);
         *shown = slot;
         *dirty = false;

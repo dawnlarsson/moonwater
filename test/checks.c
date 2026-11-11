@@ -229373,7 +229373,7 @@ static void dl_app_rows(void)
         check("app list: the row's list takes its room", ui_draw_list_init(&ui_app_list, window_list_of(table, 0), WINDOW_LIST_BYTES, WINDOW_LIST_ROOM));
 
         // A frame in list mode: recorded, published and knocked from buffer 0, the pixels of the picture untouched.
-        check("app list: the frame is taken", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw, null));
+        check("app list: the frame is taken", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw));
         check("app list: the frame's picture is buffer 0 and its frame counted up", shown == 0 && table->buffer_index[0] == 0 && table->frame[0] == 1);
         check("app list: the frame is clean, and nothing is due", !dirty && dl_app_ui.scene == null);
         check("app list: no pixel of the pictures is written", dl_zero_words(windows_buffer(table, 0, 0), DL_BUFFER / 4) && dl_zero_words(windows_buffer(table, 0, 1), DL_BUFFER / 4));
@@ -229386,14 +229386,14 @@ static void dl_app_rows(void)
         table->shown[0] = table->frame[0];
         gen_before = ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN];
         dirty = 1;
-        check("app list: a frame that records nothing is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_nothing, null) && shown == 1 && !dirty);
+        check("app list: a frame that records nothing is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_nothing) && shown == 1 && !dirty);
         check("app list: a discarded frame publishes no list", ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN] == gen_before && dl_app_ui.scene == null);
 
         // A row the compositor refused: the next frame is painted as pixels, and no list is published for it.
         table->shown[0] = table->frame[0];
         table->list_state[0] = 2;
         dirty = 1;
-        check("app list: a refused row's frame is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw, null) && shown == 0 && !dirty);
+        check("app list: a refused row's frame is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw) && shown == 0 && !dirty);
         check("app list: and no list is published for it", ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN] == gen_before);
         table->list_state[0] = 0;
 
@@ -229401,7 +229401,7 @@ static void dl_app_rows(void)
         table->list_mode = 0;
         table->shown[0] = table->frame[0];
         dirty = 1;
-        check("app list: with list mode 0 a frame is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw, null) && !dirty);
+        check("app list: with list mode 0 a frame is painted as pixels", ui_app_present(&own, &shown, &dirty, DL_W, DL_H, dl_app_draw) && !dirty);
         check("app list: and no list is published with list mode 0", ((unsigned int address_to)window_list_of(table, 0))[UI_DRAW_LIST_GEN] == gen_before);
         table->list_mode = 1;
 }

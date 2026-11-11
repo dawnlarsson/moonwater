@@ -954,12 +954,13 @@ static fn launcher_draw(unsigned int address_to pixels)
 
 // The bar's picture, drawn whole into the buffer the kit gives (every frame is due whole: the bar has no rows to draw apart).
 
-// A new height of a bar that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
-static fn launcher_placed(void)
+// The bar's picture, and a new height of it that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
+static fn launcher_paint(unsigned int address_to pixels)
 {
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
 
+        launcher_draw(pixels);
         if (launcher.moved)
         {
                 ui_anchor_set(&launcher.anchor, table, row, launcher.width, launcher.height);
@@ -972,7 +973,7 @@ static fn launcher_placed(void)
 // asked with the picture, before the buffer is shown).
 static b32 launcher_frame(void)
 {
-        return ui_app_present(&launcher.own, &launcher.buffers.shown, &launcher.dirty, launcher.width, launcher.height, launcher_draw, launcher_placed);
+        return ui_app_present(&launcher.own, &launcher.buffers.shown, &launcher.dirty, launcher.width, launcher.height, launcher_paint);
 }
 
 /* ---- the program ---- */

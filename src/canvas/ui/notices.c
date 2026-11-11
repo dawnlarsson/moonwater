@@ -102,7 +102,7 @@ static void notices_draw(unsigned int address_to pixels)
 
 static b32 notices_frame(void)
 {
-        return ui_app_present(&notices.own, &notices.shown, &notices.dirty, notices.width, notices.height, notices_draw, null);
+        return ui_app_present(&notices.own, &notices.shown, &notices.dirty, notices.width, notices.height, notices_draw);
 }
 
 // Settings on its System notices page: started with -n, which lifts a Settings already up and asks it for that page.

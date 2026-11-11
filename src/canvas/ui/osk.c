@@ -322,7 +322,7 @@ static void osk_draw(unsigned int address_to pixels)
 
 static b32 osk_frame(void)
 {
-        return ui_app_present(&osk.own, &osk.shown, &osk.dirty, osk.width, osk.height, osk_draw, null);
+        return ui_app_present(&osk.own, &osk.shown, &osk.dirty, osk.width, osk.height, osk_draw);
 }
 
 // A capital or a symbol that is a shifted key on the US keyboard: its key is sent with Shift, so a client that makes its character from

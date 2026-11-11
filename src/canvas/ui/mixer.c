@@ -454,7 +454,7 @@ static void mixer_draw_whole(unsigned int address_to pixels)
 
 static b32 mixer_frame(void)
 {
-        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole, null);
+        return ui_app_present(&mixer.own, &mixer.shown, &mixer.dirty, mixer.width, mixer.height, mixer_draw_whole);
 }
 
 static b32 mixer_event(const struct window_event address_to event)

@@ -141,7 +141,7 @@ static fn identify_draw(unsigned int address_to pixels)
 
 static b32 identify_frame(void)
 {
-        return ui_app_present(&identify.own, &identify.buffers.shown, &identify.dirty, identify.width, identify.height, identify_draw, null);
+        return ui_app_present(&identify.own, &identify.buffers.shown, &identify.dirty, identify.width, identify.height, identify_draw);
 }
 
 /*
