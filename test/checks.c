@@ -170804,7 +170804,7 @@ static void check_compositor_pointer(void) {
               compositor_cursor_by_edges[CP_EDGE_BOTTOM|CP_EDGE_LEFT]==CP_RESIZE_NESW&&
               compositor_cursor_by_edges[CP_EDGE_LEFT|CP_EDGE_RIGHT]==CP_ARROW);
         /* The click hand is hand-drawn with its index finger up: the pointer is the fingertip, the top row of the finger. */
-        ck_ok(compositor_cursor_hot[CP_HAND][0]==12&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(0,CP_HAND,0,12)==2);
+        ck_ok(compositor_cursor_hot[CP_HAND][0]==10&&compositor_cursor_hot[CP_HAND][1]==0&&compositor_cursor_pixel(0,CP_HAND,0,10)==2);
     }
 }
 
