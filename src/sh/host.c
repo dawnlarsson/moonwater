@@ -24198,6 +24198,14 @@ static bipolar dns_tls_publish(void)
         bipolar failed;
 
         host_read_word(DNS_TLS_KEPT, word, sizeof(word));
+        //      A word that is none of the three is not published: the resolver takes an unknown word for the tier's default
+        //      and says nothing, so a kept word damaged by hand would have its setting dropped with no line to say why.
+        if (word[0] && !string_equals(word, "on") && !string_equals(word, "off") && !string_equals(word, "only"))
+        {
+                host_say(log_error, host_label "dns tls: %s in %s is not on, off or only; the tier's default holds\n",
+                         word, DNS_TLS_KEPT);
+                word[0] = end;
+        }
         if (!word[0])
         {
                 failed = system_remove_at(AT_FDCWD, DNS_TLS_PATH, 0);
