@@ -942,26 +942,16 @@ static bool zstd_window_room(positive need)
                    : zstd_fail("zstd window overflow");
 }
 
-static bool zstd_put(p8 address_to p, positive n)
+static bool zstd_put(p8 address_to p, b32 fill, p8 value, positive n)
 {
         if (!n)
                 return true;
         if (!zstd_window_room(n))
                 return false;
-        memory_copy(zstd_window + zstd_pos, p, n);
-        if (!zstd_hold_emit && !zstd_emit_window(zstd_window + zstd_pos, n))
-                return false;
-        zstd_pos += n;
-        return true;
-}
-
-static bool zstd_put_fill(p8 value, positive n)
-{
-        if (!n)
-                return true;
-        if (!zstd_window_room(n))
-                return false;
-        memory_fill(zstd_window + zstd_pos, value, n);
+        if (fill)
+                memory_fill(zstd_window + zstd_pos, value, n);
+        else
+                memory_copy(zstd_window + zstd_pos, p, n);
         if (!zstd_hold_emit && !zstd_emit_window(zstd_window + zstd_pos, n))
                 return false;
         zstd_pos += n;
@@ -1192,7 +1182,7 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
         {
                 return_if(p != stop, zstd_fail("zstd extra bytes after no sequences"));
                 return_if(lit_len > zstd_block_limit, zstd_fail("zstd block output is too large"));
-                return zstd_put(lit, lit_len);
+                return zstd_put(lit, false, 0, lit_len);
         }
 
         return_if(p >= stop, zstd_fail("zstd truncated sequence tables"));
@@ -2206,7 +2196,7 @@ static bipolar zstd_par_execute(zstd_par_head address_to head)
                 bool ok;
 
                 zstd_hold_emit = true;
-                ok = zstd_put(lits, head->lit_len);
+                ok = zstd_put(lits, false, 0, head->lit_len);
                 zstd_hold_emit = false;
                 return ok && zstd_emit_window(zstd_window + at, zstd_pos - at) ? 1 : -1;
         }
@@ -2314,9 +2304,9 @@ static bool zstd_par_sink(address_any context, positive index, address_any data,
         bipolar done;
 
         if (b->type == 0)
-                return zstd_put(b->src, b->size);
+                return zstd_put(b->src, false, 0, b->size);
         if (b->type == 1)
-                return zstd_put_fill(b->src[0], b->size);
+                return zstd_put(null, true, b->src[0], b->size);
         done = length >= ZSTD_PAR_HEAD ? zstd_par_execute((zstd_par_head address_to)data) : 0;
         return done ? done > 0 : zstd_par_serial(b);
 }
@@ -2751,12 +2741,12 @@ zstd_frame_blocks:
                                 {
                                         string_address why = zstd_why;
 
-                                        zstd_put(zstd_in_at(), zstd_src.have - zstd_src.at);
+                                        zstd_put(zstd_in_at(), false, 0, zstd_src.have - zstd_src.at);
                                         zstd_why = why;
                                 }
                                 return false;
                         }
-                        if (!zstd_put(zstd_in_at(), size))
+                        if (!zstd_put(zstd_in_at(), false, 0, size))
                                 return false;
                         zstd_in_skip(size);
                         if (zstd_paused)
@@ -2770,7 +2760,7 @@ zstd_frame_blocks:
                         p8 value[1];
 
                         return_if(size > zstd_block_limit, zstd_fail("zstd RLE block too large"));
-                        if (!zstd_in_take(value, 1) || !zstd_put_fill(value[0], size))
+                        if (!zstd_in_take(value, 1) || !zstd_put(null, true, value[0], size))
                                 return false;
                         if (zstd_paused)
                         {
