@@ -26480,60 +26480,59 @@ static b32 math_reduce_quadrant(decimal value, decimal address_to reduced)
         one extra subtraction is the difference between a cosine good to two
         ulp and one good to a half.
 */
-#define MATH_SIN_C3 -0.16666666666666666
-#define MATH_SIN_C5 0.008333333333333333
-#define MATH_SIN_C7 -0.0001984126984126984
-#define MATH_SIN_C9 2.7557319223985893e-06
-#define MATH_SIN_C11 -2.505210838544172e-08
-#define MATH_SIN_C13 1.6059043836821613e-10
-#define MATH_SIN_C15 -7.647163731819816e-13
-#define MATH_SIN_C17 2.8114572543455206e-15
+/*
+        The sine and cosine coefficients, highest power first. MATH_POLYNOMIAL
+        walks a table in that order. They are f64 because they were double
+        literals: a decimal of f32 adds them in double, and a table of f32
+        would round each one before the add.
+*/
+static const f64 math_sine_coefficients[] = {
+        2.8114572543455206e-15,
+        -7.647163731819816e-13,
+        1.6059043836821613e-10,
+        -2.505210838544172e-08,
+        2.7557319223985893e-06,
+        -0.0001984126984126984,
+        0.008333333333333333,
+        -0.16666666666666666,
+};
 
-#define MATH_COS_C4 0.041666666666666664
-#define MATH_COS_C6 -0.001388888888888889
-#define MATH_COS_C8 2.48015873015873e-05
-#define MATH_COS_C10 -2.755731922398589e-07
-#define MATH_COS_C12 2.08767569878681e-09
-#define MATH_COS_C14 -1.1470745597729725e-11
-#define MATH_COS_C16 4.779477332387385e-14
+static const f64 math_cosine_coefficients[] = {
+        4.779477332387385e-14,
+        -1.1470745597729725e-11,
+        2.08767569878681e-09,
+        -2.755731922398589e-07,
+        2.48015873015873e-05,
+        -0.001388888888888889,
+        0.041666666666666664,
+};
 
-static inline INLINE decimal math_sine_polynomial(decimal squared)
+/*
+        Horner's rule over a coefficient table, highest power first: the first
+        entry starts the walk and each step adds the next one down.
+*/
+static inline INLINE decimal math_polynomial(const f64 *coefficients, b64 count,
+                                             decimal squared)
 {
         decimal walked;
+        b64 index;
 
-        walked = MATH_SIN_C17;
-        walked = MATH_SIN_C15 + squared * walked;
-        walked = MATH_SIN_C13 + squared * walked;
-        walked = MATH_SIN_C11 + squared * walked;
-        walked = MATH_SIN_C9 + squared * walked;
-        walked = MATH_SIN_C7 + squared * walked;
-        walked = MATH_SIN_C5 + squared * walked;
-        walked = MATH_SIN_C3 + squared * walked;
+        walked = coefficients[0];
+        for (index = 1; index < count; index++)
+                walked = coefficients[index] + squared * walked;
 
         return walked;
 }
 
-static inline INLINE decimal math_cosine_polynomial(decimal squared)
-{
-        decimal walked;
-
-        walked = MATH_COS_C16;
-        walked = MATH_COS_C14 + squared * walked;
-        walked = MATH_COS_C12 + squared * walked;
-        walked = MATH_COS_C10 + squared * walked;
-        walked = MATH_COS_C8 + squared * walked;
-        walked = MATH_COS_C6 + squared * walked;
-        walked = MATH_COS_C4 + squared * walked;
-
-        return walked;
-}
+#define MATH_POLYNOMIAL(table, squared) \
+        math_polynomial(table, sizeof (table) / sizeof ((table)[0]), squared)
 
 static decimal math_sine_reduced(decimal reduced)
 {
         decimal squared = reduced * reduced;
 
         return reduced + (reduced * squared) *
-                             math_sine_polynomial(squared);
+                             MATH_POLYNOMIAL(math_sine_coefficients, squared);
 }
 
 static decimal math_cosine_reduced(decimal reduced)
@@ -26544,7 +26543,8 @@ static decimal math_cosine_reduced(decimal reduced)
         decimal lost = (1.0 - front) - half;
 
         return front +
-               (lost + (squared * squared) * math_cosine_polynomial(squared));
+               (lost + (squared * squared) *
+                           MATH_POLYNOMIAL(math_cosine_coefficients, squared));
 }
 
 /*
@@ -26657,13 +26657,13 @@ static decimal math_tangent_reduced(decimal reduced, bool cotangent)
         decimal numerator_high, numerator_low;
         decimal denominator_high, denominator_low;
 
-        walked = math_sine_polynomial(squared);
+        walked = MATH_POLYNOMIAL(math_sine_coefficients, squared);
         sine_high = math_fast_two_sum(reduced, (reduced * squared) * walked,
                                       address_of sine_low);
 
         front = 1.0 - 0.5 * squared;
         lost = (1.0 - front) - 0.5 * squared;
-        walked = math_cosine_polynomial(squared);
+        walked = MATH_POLYNOMIAL(math_cosine_coefficients, squared);
         cosine_high = math_fast_two_sum(front, lost + (squared * squared) * walked,
                                         address_of cosine_low);
 
@@ -26735,72 +26735,40 @@ static decimal tangent(decimal value)
         the sine: it carries the whole of the value for a small argument and
         must not round.
 */
-#define MATH_ASIN_C1 0.16666666666666666
-#define MATH_ASIN_C2 0.075
-#define MATH_ASIN_C3 0.044642857142857144
-#define MATH_ASIN_C4 0.030381944444444444
-#define MATH_ASIN_C5 0.022372159090909092
-#define MATH_ASIN_C6 0.017352764423076924
-#define MATH_ASIN_C7 0.01396484375
-#define MATH_ASIN_C8 0.011551800896139705
-#define MATH_ASIN_C9 0.009761609529194078
-#define MATH_ASIN_C10 0.008390335809616815
-#define MATH_ASIN_C11 0.0073125258735988454
-#define MATH_ASIN_C12 0.006447210311889649
-#define MATH_ASIN_C13 0.005740037670841924
-#define MATH_ASIN_C14 0.005153309682319905
-#define MATH_ASIN_C15 0.004660143486915096
-#define MATH_ASIN_C16 0.004240907093679363
-#define MATH_ASIN_C17 0.003880964558837669
-#define MATH_ASIN_C18 0.0035692053938259347
-#define MATH_ASIN_C19 0.003297059503473485
-#define MATH_ASIN_C20 0.0030578216492580306
-#define MATH_ASIN_C21 0.002846178401108942
-#define MATH_ASIN_C22 0.00265787063820729
-#define MATH_ASIN_C23 0.0024894486782468836
-#define MATH_ASIN_C24 0.002338091892111975
-#define MATH_ASIN_C25 0.0022014739737101384
-#define MATH_ASIN_C26 0.0020776610325181676
-#define MATH_ASIN_C27 0.0019650336162772837
-#define MATH_ASIN_C28 0.0018622264064031275
-
-//      The series without its leading term: asin(x) is x + x*u*this(u),
-//      with u the square of x and |x| no more than a half.
-static decimal math_arc_sine_series(decimal squared)
-{
-        decimal walked;
-
-        walked = MATH_ASIN_C28;
-        walked = MATH_ASIN_C27 + squared * walked;
-        walked = MATH_ASIN_C26 + squared * walked;
-        walked = MATH_ASIN_C25 + squared * walked;
-        walked = MATH_ASIN_C24 + squared * walked;
-        walked = MATH_ASIN_C23 + squared * walked;
-        walked = MATH_ASIN_C22 + squared * walked;
-        walked = MATH_ASIN_C21 + squared * walked;
-        walked = MATH_ASIN_C20 + squared * walked;
-        walked = MATH_ASIN_C19 + squared * walked;
-        walked = MATH_ASIN_C18 + squared * walked;
-        walked = MATH_ASIN_C17 + squared * walked;
-        walked = MATH_ASIN_C16 + squared * walked;
-        walked = MATH_ASIN_C15 + squared * walked;
-        walked = MATH_ASIN_C14 + squared * walked;
-        walked = MATH_ASIN_C13 + squared * walked;
-        walked = MATH_ASIN_C12 + squared * walked;
-        walked = MATH_ASIN_C11 + squared * walked;
-        walked = MATH_ASIN_C10 + squared * walked;
-        walked = MATH_ASIN_C9 + squared * walked;
-        walked = MATH_ASIN_C8 + squared * walked;
-        walked = MATH_ASIN_C7 + squared * walked;
-        walked = MATH_ASIN_C6 + squared * walked;
-        walked = MATH_ASIN_C5 + squared * walked;
-        walked = MATH_ASIN_C4 + squared * walked;
-        walked = MATH_ASIN_C3 + squared * walked;
-        walked = MATH_ASIN_C2 + squared * walked;
-        walked = MATH_ASIN_C1 + squared * walked;
-
-        return walked;
-}
+/*
+        The series without its leading term, highest power first: asin(x) is
+        x + x*u*this(u), with u the square of x and |x| no more than a half.
+*/
+static const f64 math_arc_sine_coefficients[] = {
+        0.0018622264064031275,
+        0.0019650336162772837,
+        0.0020776610325181676,
+        0.0022014739737101384,
+        0.002338091892111975,
+        0.0024894486782468836,
+        0.00265787063820729,
+        0.002846178401108942,
+        0.0030578216492580306,
+        0.003297059503473485,
+        0.0035692053938259347,
+        0.003880964558837669,
+        0.004240907093679363,
+        0.004660143486915096,
+        0.005153309682319905,
+        0.005740037670841924,
+        0.006447210311889649,
+        0.0073125258735988454,
+        0.008390335809616815,
+        0.009761609529194078,
+        0.011551800896139705,
+        0.01396484375,
+        0.017352764423076924,
+        0.022372159090909092,
+        0.030381944444444444,
+        0.044642857142857144,
+        0.075,
+        0.16666666666666666,
+};
 
 /*
         The inverse sine.
@@ -26845,14 +26813,14 @@ static decimal arc_sine(decimal value)
                 if (magnitude < MATH_TWO_TO_MINUS_27)
                         return value;
                 squared = value * value;
-                return value + (value * squared) * math_arc_sine_series(squared);
+                return value + (value * squared) * MATH_POLYNOMIAL(math_arc_sine_coefficients, squared);
         }
 
         //      Exact for every magnitude in the upper half, by Sterbenz.
         squared = (1.0 - magnitude) * 0.5;
         root = square_root(squared);
         root_low = math_root_residual(root, squared);
-        correction = (root * squared) * math_arc_sine_series(squared);
+        correction = (root * squared) * MATH_POLYNOMIAL(math_arc_sine_coefficients, squared);
 
         head = math_two_sum(MATH_PI_OVER_TWO, -2.0 * root, address_of head_error);
         answer = head + ((head_error + MATH_PI_OVER_TWO_TAIL) -
@@ -26889,7 +26857,7 @@ static decimal arc_cosine(decimal value)
         if (math_magnitude(value) <= 0.5)
         {
                 squared = value * value;
-                correction = (value * squared) * math_arc_sine_series(squared);
+                correction = (value * squared) * MATH_POLYNOMIAL(math_arc_sine_coefficients, squared);
                 head = math_two_sum(MATH_PI_OVER_TWO, -value, address_of head_error);
                 return head + ((head_error + MATH_PI_OVER_TWO_TAIL) - correction);
         }
@@ -26902,14 +26870,14 @@ static decimal arc_cosine(decimal value)
                 squared = (1.0 - value) * 0.5;
                 root = square_root(squared);
                 root_low = math_root_residual(root, squared);
-                correction = (root * squared) * math_arc_sine_series(squared);
+                correction = (root * squared) * MATH_POLYNOMIAL(math_arc_sine_coefficients, squared);
                 return 2.0 * (root + (root_low + correction));
         }
 
         squared = (1.0 + value) * 0.5;
         root = square_root(squared);
         root_low = math_root_residual(root, squared);
-        correction = (root * squared) * math_arc_sine_series(squared);
+        correction = (root * squared) * MATH_POLYNOMIAL(math_arc_sine_coefficients, squared);
         head = math_two_sum(MATH_PI, -2.0 * root, address_of head_error);
         return head + ((head_error + MATH_PI_TAIL) - 2.0 * (root_low + correction));
 }
