@@ -376,6 +376,10 @@ function desktop_start {
 # Canvas's again when this returns.
 function desktop_stop {
   kill $(cat /run/moonwater/supervisor.pid) 2> /dev/null
+  # The programs the session started (the log, the terminals, the keyboard and the key answerer) are ended by desktop_session
+  # only when the compositor ends by itself; the supervisor that would have done it is gone, so they are ended here.
+  kill $(cat /run/moonwater/desktop.kids 2> /dev/null) 2> /dev/null
+  rm -f /run/moonwater/desktop.kids
   desktop_pid=$(cat /run/moonwater/compositor.pid 2> /dev/null)
   kill $desktop_pid 2> /dev/null
   desktop_wait=0
