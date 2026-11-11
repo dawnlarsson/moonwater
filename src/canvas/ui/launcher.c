@@ -933,7 +933,7 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search->items[0] = WORDS(launcher_search_hint);
                         search->edit = launcher_field();
                 }
-                search->focused = (launcher.focused || !launcher_app.had_keys) && !launcher.view.group.keys;
+                search->focused = launcher.focused && !launcher.view.group.keys; // the caret is drawn only with the keys (not before the window has them)
                 // The field runs edge to edge, as the list's rows do, from the panel's top to where the list begins: its text keeps its inset.
                 search->x = launcher.field_box.x * 100 / ui->scale, search->y = launcher.field_box.y * 100 / ui->scale;
                 search->w = launcher.field_box.w * 100 / ui->scale, search->h = launcher.field_box.h * 100 / ui->scale;

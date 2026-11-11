@@ -135280,7 +135280,7 @@ static void caret_fade_check(void)
     ui_kit.caret_speed = UI_CARET_NORMAL;
     while (now < stop)
     {
-        unsigned int cover = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_caret_at(since, since, &due));
+        unsigned int cover = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_caret_at(since, &due));
 
         mids += cover > 0 && cover < UI_CARET_FULL;
         if (!due)
@@ -135304,18 +135304,91 @@ static void caret_step_check(void)
     positive at_496 = since + 496000000ull - 265000000ull;
 
     ui_kit.caret_speed = UI_CARET_NORMAL;
-    step_start = (ui_kit.now = ui_kit.test_clock = (b64)(at_496), ui_caret_at(since, since, &due));
-    in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 4000000ull), ui_caret_at(since, since, &due));
+    step_start = (ui_kit.now = ui_kit.test_clock = (b64)(at_496), ui_caret_at(since, &due));
+    in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 4000000ull), ui_caret_at(since, &due));
     due_in = due - (at_496 + 4000000ull);
-    late_in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 15900000ull), ui_caret_at(since, since, &due));
-    next_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 16000000ull), ui_caret_at(since, since, &due));
-    solid = (ui_kit.now = ui_kit.test_clock = (b64)(since + 100000000ull), ui_caret_at(since, since, &due));
-    gone = (ui_kit.now = ui_kit.test_clock = (b64)(since + 400000000ull), ui_caret_at(since, since, &due));
+    late_in_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 15900000ull), ui_caret_at(since, &due));
+    next_step = (ui_kit.now = ui_kit.test_clock = (b64)(at_496 + 16000000ull), ui_caret_at(since, &due));
+    solid = (ui_kit.now = ui_kit.test_clock = (b64)(since + 100000000ull), ui_caret_at(since, &due));
+    gone = (ui_kit.now = ui_kit.test_clock = (b64)(since + 400000000ull), ui_caret_at(since, &due));
     ui_kit.caret_speed = saved;
     check("caret: a fade in the middle of a step shows the cover the step drew", step_start == in_step && step_start == late_in_step);
     check("caret: the next step is another cover, and a fading caret is between solid and gone", next_step != step_start && step_start > 0 && step_start < UI_CARET_FULL);
     check("caret: the loop's wait in a fade ends at the next step", due_in == 12000000ull);
     check("caret: away from the fades it is solid, then gone", solid == UI_CARET_FULL && gone == 0);
+}
+
+/*
+        A field's caret as the loop has it. A focused field blinks for as long as it has the keys: over one period it goes solid, then
+        gone, then solid where the period began, and each toggle asks for a frame. It still blinks after a long idle (the caret used to
+        stop ten seconds after the last key). A field without the keys draws no caret, whatever its phase, and asks for no frame.
+*/
+static unsigned int caret_field_tick(struct ui_text address_to t, positive now, positive address_to due, b32 address_to redraw)
+{
+    *redraw = false;
+    ui_kit.now = ui_kit.test_clock = (b64)now;
+    *due = ui_text_tick(t, redraw);
+    return UI_CARET_FULL - t->caret_fade;
+}
+
+static void caret_field_check(struct ui address_to wui)
+{
+    static unsigned int plain[400 * 60], drawn[400 * 60], shown[400 * 60];
+    static struct ui_text t;
+    unsigned int *kept_pixels = wui->pixels;
+    int kept_pitch = wui->pitch, kept_width = wui->width, kept_height = wui->height, toggles = 0, waits = 0, seen_solid = 0, seen_gone = 0, differ_off = 0, differ_on = 0;
+    positive since = 1000000000ull, now = since, due = 0, off_due = 0, period_end = since + 1060000000ull, idle = since + 30000000000ull;
+    b64 kept_clock = ui_kit.test_clock, kept_now = ui_kit.now;
+    unsigned int saved = ui_kit.caret_speed, start, end, cover, i;
+    b32 redraw = false;
+
+    ui_kit.caret_speed = UI_CARET_NORMAL;
+    ui_kit.test_clock = since;
+    ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "alpha", 5, ui_text_keymap());
+    t.focused = true;
+    start = caret_field_tick(&t, now, &due, &redraw);
+    while (due && due < period_end)
+    {
+        now = due;
+        cover = caret_field_tick(&t, now, &due, &redraw);
+        seen_solid += cover == UI_CARET_FULL;
+        seen_gone += cover == 0;
+        toggles += redraw;
+        waits += due != 0;
+    }
+    end = caret_field_tick(&t, period_end, &due, &redraw);
+    check("caret field: a focused field's caret goes solid, then gone, then solid where the period began, over one period",
+          start == UI_CARET_FULL && seen_solid && seen_gone && end == start);
+    check("caret field: each toggle of a focused field asks for a redraw, and it keeps asking for the next", toggles >= 2 && waits >= 4);
+
+    caret_field_tick(&t, idle, &due, &redraw);
+    check("caret field: a focused field still blinks after thirty seconds idle, with a frame due at its next toggle", due > idle && due - idle <= 1060000000ull);
+
+    t.focused = false;
+    t.caret_fade = 0;
+    caret_field_tick(&t, idle + 100000000ull, &off_due, &redraw);
+    check("caret field: a field without the keys asks for no frame, and nothing redraws it", off_due == 0 && !redraw);
+
+    ui_begin(wui, plain, 400, 400, 60);
+    ui_text_draw(wui, &t, 10, 10, 380, 40, 0);
+    t.focused = true, t.caret_fade = UI_CARET_FULL;
+    ui_begin(wui, drawn, 400, 400, 60);
+    ui_text_draw(wui, &t, 10, 10, 380, 40, 0);
+    t.caret_fade = 0;
+    ui_begin(wui, shown, 400, 400, 60);
+    ui_text_draw(wui, &t, 10, 10, 380, 40, 0);
+    for (i = 0; i < 400 * 60; i++)
+    {
+        differ_off += plain[i] != drawn[i];
+        differ_on += plain[i] != shown[i];
+    }
+    check("caret field: a field without the keys draws no caret: its picture is a focused field's with the caret gone", differ_off == 0);
+    check("caret field: a focused field draws its caret solid, in pixels the unfocused field does not have", differ_on > 0);
+
+    ui_text_close(&t);
+    ui_kit.caret_speed = saved;
+    ui_kit.test_clock = kept_clock, ui_kit.now = kept_now;
+    wui->pixels = kept_pixels, wui->pitch = kept_pitch, wui->width = kept_width, wui->height = kept_height;
 }
 
 /*
@@ -158962,6 +159035,7 @@ static fn field_check(struct ui address_to wui)
         check_doc_crlf_pieces();
         caret_fade_check();
     caret_step_check();
+        caret_field_check(wui);
         check_code_finger(wui);
         switch_cancel_check(wui);
         fling_scale_check();

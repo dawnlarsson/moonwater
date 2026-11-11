@@ -20849,8 +20849,9 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
         kit's lists do), a finger's long press or double tap selects a word and shows handles and an actions bar (the
         finger's selection, below), and the wheel scrolls (Ctrl and the wheel zoom the code view). The keys are the keymap's
         (text.c, overridden by /root/canvas.text.keys); a key that is no binding types its character, and AltGr always
-        types. The caret blinks only while the widget has the keys, never while it moves, and ui_text_tick says when
-        it next needs a frame, so an idle widget wakes nothing. Colours are the kit's roles: the selection, the caret
+        types. The caret blinks while the widget has the keys, and a key or a move restarts it solid; ui_text_tick says when
+        it next needs a frame (each toggle), so an idle focused widget wakes only then, and one without the keys wakes nothing
+        and draws no caret. Colours are the kit's roles: the selection, the caret
         (the accent), the text, the placeholder (the text at 36%), an error's underline.
 
         Glyphs land on whole pixels: the code view lays its characters on a grid of whole cells (font_cells, and
@@ -20872,7 +20873,6 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_COMMAND 32u   // a command the app does (find, save, ...): command
 #define UI_TEXT_PASTE 64u     // a paste was asked of the compositor
 #define UI_TEXT_REFUSED 128u  // a field refused what was typed or pasted: refused says why, in the field's own words
-#define UI_TEXT_BLINK_FOR_NS 10000000000ull // the caret blinks this long after the last key or move, then stays
 #define UI_TEXT_COMMIT 256u   // a press outside a field that has the keys: the field's plain value is kept (the app commits it)
 
 /*
@@ -20901,18 +20901,17 @@ struct ui_edge
 };
 
 /*
-        A caret's blink (ui_caret_cover): since is when its phase restarted and awake the last key or move, from which it blinks a
-        while. A field and the terminal each keep one; a key or a move wakes it (ui_caret_wake).
+        A caret's blink (ui_caret_cover): since is when its phase restarted (a key or a move, ui_caret_wake), from which it blinks
+        for as long as it has the keys. A field and the terminal each keep one.
 */
 struct ui_caret
 {
-        positive since, awake;
+        positive since;
 };
 
 static void ui_caret_wake(struct ui_caret address_to c)
 {
-        positive now = (positive)ui_kit_clock();
-        c->since = c->awake = now;
+        c->since = (positive)ui_kit_clock();
 }
 
 #define UI_TEXT_SEARCH 64 // a search key's room: the folded text of a field, at most this many bytes less one
@@ -21041,7 +21040,7 @@ struct ui_text
         b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
-        struct ui_caret caret;                  // the caret's blink: its phase, and the last key or move it blinks a while after (ui_caret_wake)
+        struct ui_caret caret;                  // the caret's blink: its phase, restarted by a key or a move (ui_caret_wake)
 };
 
 /*
@@ -21227,6 +21226,7 @@ static fn ui_text_set(struct ui_text address_to t, const p8 address_to text, pos
 {
         doc_replace(&t->doc, 0, doc_length(&t->doc), text, length);
         doc_select_set(&t->doc, doc_length(&t->doc), doc_length(&t->doc));
+        ui_caret_wake(&t->caret), t->caret_fade = 0;
 }
 
 /*
@@ -21879,21 +21879,21 @@ static fn ui_text_wake(struct ui_text address_to t)
 
 /*
         The blink: when the widget next needs a frame (0 for never: it has not the keys), the caret's cover as its phase
-        says. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys. Ten seconds
-        after the last key or move the caret stops blinking and stays drawn, so a field left alone wakes nothing.
+        says. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys, and a focused
+        caret blinks for as long as it has them (no timeout: an idle focused field asks for a frame at each toggle).
 */
 /*
-        A caret's cover at now, for a phase that restarted at since and an awake time (a key or a move, the last of them),
-        and when that cover next changes (0 for never). Every caret runs this: a field's and the terminal's.
+        A caret's cover at now, for a phase that restarted at since, and when that cover next changes (0 for never, the
+        caret being solid with no blink). Every caret runs this: a field's and the terminal's.
 */
-static unsigned int ui_caret_at(positive since, positive awake, positive address_to due)
+static unsigned int ui_caret_at(positive since, positive address_to due)
 {
         positive now = (positive)ui_kit_clock();
         b64 cycle = ui_caret_cycle(), q;
         unsigned int cover;
 
         *due = 0;
-        if (!cycle || (now > awake && now - awake >= UI_TEXT_BLINK_FOR_NS))
+        if (!cycle)
                 return UI_CARET_FULL;
         q = now < since ? cycle / 4 : (now - since + cycle / 4) % cycle;
         // A fade is drawn on the steps of UI_CARET_STEP_NS and at no other time: its cover is the one at the step's start, so a wake between two steps (the compositor's
@@ -21901,17 +21901,13 @@ static unsigned int ui_caret_at(positive since, positive awake, positive address
         // and each frame's knock woke the next: Settings with its filter focused and the pointer still drew 52 to 202 frames a second, a frame a millisecond through each fade.
         cover = ui_caret_wave(ui_caret_flat(q, cycle) ? q : q - q % UI_CARET_STEP_NS, cycle);
         *due = now + ui_caret_until(q, cycle);
-        // The caret stops at ten seconds, whatever phase it is in: the wait ends there, so a caret gone then is drawn then.
-        if (now >= awake && awake + UI_TEXT_BLINK_FOR_NS < *due)
-                *due = awake + UI_TEXT_BLINK_FOR_NS;
         return cover;
 }
 
 // A caret's cover at now (ui_caret_at) for its own blink.
 static unsigned int ui_caret_cover(const struct ui_caret address_to c, positive address_to due)
 {
-        positive now = (positive)ui_kit_clock();
-        return ui_caret_at(c->since, c->awake, due);
+        return ui_caret_at(c->since, due);
 }
 
 static positive ui_text_tick(struct ui_text address_to t, b32 address_to redraw)
