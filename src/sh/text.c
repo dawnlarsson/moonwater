@@ -16556,7 +16556,6 @@ typedef struct
 {
         byte_span text;
         string_address name;
-        positive lines;
         // Newlines the reference scan passed over, as GNU's file_line_count
         // counts them: up to the last keyword it kept.
         positive counted;
@@ -16567,10 +16566,6 @@ typedef struct
         positive file;
         positive start;
         positive finish;
-        positive content;
-        positive reference;
-        positive reference_length;
-        positive line;
 } ptx_context;
 
 typedef struct
@@ -16648,11 +16643,6 @@ static bool text_blob_read_as(string_address path, byte_span address_to blob, bo
 static bool text_blob_read(string_address path, byte_span address_to blob)
 {
         return text_blob_read_as(path, blob, false);
-}
-
-static positive ptx_count_lines(byte_span address_to text)
-{
-        return (text->length != 0) + memory_count(text->bytes, text->length, '\n');
 }
 
 static positive ptx_skip_white(ptx_file address_to file, positive at,
@@ -16786,7 +16776,6 @@ static positive ptx_plan_contexts(bool fill)
         {
                 ptx_file address_to file = ptx_files + file_index;
                 positive cursor = 0;
-                positive line = 1;
 
                 while (cursor < file->text.length && !ptx_failed)
                 {
@@ -16801,14 +16790,7 @@ static positive ptx_plan_contexts(bool fill)
                                 context->file = file_index;
                                 context->start = cursor;
                                 context->finish = visible;
-                                context->content = cursor;
-                                context->reference = cursor;
-                                context->reference_length = 0;
-                                context->line = line;
                         }
-
-                        line += memory_count(file->text.bytes + cursor,
-                                             after - cursor, '\n');
 
                         made++;
 
@@ -17990,9 +17972,6 @@ static b32 text_ptx()
                 if (!text_blob_read(name,
                                    address_of ptx_files[input].text))
                         return text_done_closing_ptx(1);
-
-                ptx_files[input].lines =
-                    ptx_count_lines(address_of ptx_files[input].text);
         }
 
         if (ptx_custom_sentence && ptx_sentence_pattern[0] &&
