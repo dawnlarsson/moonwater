@@ -16797,7 +16797,8 @@ static int ui_view_end(struct ui_view address_to v)
                 {
                         struct ui_control address_to c = &v->group.button[item->button];
 
-                        c->x = n->x * 100 / scale, c->y = n->y * 100 / scale, c->w = n->w * 100 / scale, c->h = n->h * 100 / scale;
+                        // 64-bit: a node may sit up to 2^30 device pixels out (a long scroll), and times 100 that is past an int
+                        c->x = (int)((b64)n->x * 100 / scale), c->y = (int)((b64)n->y * 100 / scale), c->w = (int)((b64)n->w * 100 / scale), c->h = (int)((b64)n->h * 100 / scale);
                         c->variant = v->group.confirm.armed && v->group.confirm.what == item->button + 1 ? UI_BUTTON_PRIMARY
                                      : item->look.variant ? item->look.variant - 1 : UI_BUTTON_DEFAULT;
                         low = first < 0 || n->x < low ? n->x : low, high = first < 0 || n->x + n->w > high ? n->x + n->w : high;
@@ -16813,8 +16814,8 @@ static int ui_view_end(struct ui_view address_to v)
                 struct ui_control address_to line = &v->group.line;
 
                 line->kind = UI_HEADING, line->variant = UI_BODY_MEDIUM, line->role = UI_ON_SURFACE_VARIANT;
-                line->x = from * 100 / scale, line->w = (to > from ? to - from : 0) * 100 / scale;
-                line->y = (row->y + (row->h - ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)) / 2) * 100 / scale;
+                line->x = (int)((b64)from * 100 / scale), line->w = (int)((to > from ? (b64)to - from : 0) * 100 / scale);
+                line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[UI_BODY_MEDIUM].line)) / 2) * 100 / scale);
         }
         v->group.keys = v->group.keys > v->group.count ? 0 : v->group.keys;
         return v->tree.node[0].h;
