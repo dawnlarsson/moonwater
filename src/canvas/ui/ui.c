@@ -10360,23 +10360,14 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
 #define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
 
-static int ui_strip_role(unsigned int role)
+// A strip role's colour in a table of them by role: a role past the free room takes the last entry, the info container's.
+static int ui_strip_colour(unsigned int role, const int address_to table)
 {
-        return role == UI_STRIP_EFI ? UI_PRIMARY
-               : role == UI_STRIP_LINUX ? UI_SUCCESS_CONTAINER
-               : role == UI_STRIP_SWAP ? UI_SECONDARY_CONTAINER
-               : role == UI_STRIP_OTHER ? UI_WARNING_CONTAINER
-               : role == UI_STRIP_FREE ? UI_OUTLINE_VARIANT : UI_INFO_CONTAINER;
+        return table[role <= UI_STRIP_FREE ? role : UI_STRIP_FREE + 1];
 }
 
-static int ui_strip_ink(unsigned int role)
-{
-        return role == UI_STRIP_EFI ? UI_ON_PRIMARY
-               : role == UI_STRIP_LINUX ? UI_ON_SUCCESS_CONTAINER
-               : role == UI_STRIP_SWAP ? UI_ON_SECONDARY_CONTAINER
-               : role == UI_STRIP_OTHER ? UI_ON_WARNING_CONTAINER
-               : role == UI_STRIP_FREE ? UI_ON_SURFACE : UI_ON_INFO_CONTAINER;
-}
+static const int ui_strip_role_colours[] = {[UI_STRIP_EFI] = UI_PRIMARY, [UI_STRIP_LINUX] = UI_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_SECONDARY_CONTAINER, [UI_STRIP_OTHER] = UI_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_OUTLINE_VARIANT, [UI_STRIP_FREE + 1] = UI_INFO_CONTAINER};
+static const int ui_strip_ink_colours[] = {[UI_STRIP_EFI] = UI_ON_PRIMARY, [UI_STRIP_LINUX] = UI_ON_SUCCESS_CONTAINER, [UI_STRIP_SWAP] = UI_ON_SECONDARY_CONTAINER, [UI_STRIP_OTHER] = UI_ON_WARNING_CONTAINER, [UI_STRIP_FREE] = UI_ON_SURFACE, [UI_STRIP_FREE + 1] = UI_ON_INFO_CONTAINER};
 
 /*
         The strip's segments from left to right, each as wide as its share of the bytes: a pill of its own, its ends rounded, with
@@ -10404,11 +10395,11 @@ static fn ui_strip(struct ui address_to ui, int left, int top, int width, int he
                         const char address_to text = row->strip_text ? row->strip_text + at * UI_STRIP_TEXT : null;
                         int size_w = text && text[0] ? ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM) : 0;
 
-                        ui_kit_fill(ui, &box, ui_role(ui_strip_role(row->strip_roles[at])), null);
+                        ui_kit_fill(ui, &box, ui_role(ui_strip_colour(row->strip_roles[at], ui_strip_role_colours)), null);
                         // The strip is in the window's own order already (left is mirrored by the row), so its text goes at device x as it is.
                         if (size_w && size_w + ui_dev(ui, 8) <= to - from)
                                 ui_kit_text(ui, from + (to - from - size_w) / 2, ui_kit_baseline(ui, top + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM),
-                                            (string_address)text, UI_LABEL_MEDIUM, ui_text_colour(ui, ui_strip_ink(row->strip_roles[at])), 0);
+                                            (string_address)text, UI_LABEL_MEDIUM, ui_text_colour(ui, ui_strip_colour(row->strip_roles[at], ui_strip_ink_colours)), 0);
                 }
                 cursor = stop;
         }
