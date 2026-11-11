@@ -26493,9 +26493,13 @@ static b32 host_canvas_identify(positive count)
         table = host_windows_header();
         return_if(!table, host_refuse("the compositor's window table cannot be read\n"));
         // windows_screen_numbers counts a table with no screen as one, for the window it has to draw: none is asked for here.
-        return_if(!__atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE),
-                  host_refuse("no screen is connected, so there is none to identify\n"));
+        if (!__atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE))
+        {
+                host_windows_unmap(table);
+                return host_refuse("no screen is connected, so there is none to identify\n");
+        }
         screens = windows_screen_numbers(table, numbers);
+        host_windows_unmap(table);
         for (unsigned int at = 0; at < screens; at++)
         {
                 p8 index[16];
