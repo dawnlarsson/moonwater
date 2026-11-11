@@ -4187,7 +4187,7 @@ static struct
         struct compositor_keymap keymap;
         // The keys whose press went to keys_to, one bit a code: their repeats and
         // their release follow the press, and a focus change ends them (see compositor_keys_release).
-        unsigned char keys_down[16];
+        unsigned char keys_down[32];
         int keys_to;
         struct
         {
@@ -11971,7 +11971,7 @@ static void compositor_keys_release(void)
         if (to < 0)
                 return;
 
-        for (unsigned int code = 0; code < 128; code++)
+        for (unsigned int code = 0; code < 256; code++)
                 if (compositor.keys_down[code >> 3] & (1u << (code & 7)))
                         compositor_post(to, WINDOW_EVENT_KEY, compositor_modifiers(), (int)code, 0);
         memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
@@ -16116,7 +16116,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         // since the press would otherwise get a release it never had the press of, and the window the press went
         // to would be left holding the key down.
         target = compositor_popup_top(compositor.focus);
-        if (code < 128)
+        if (code < 256)
         {
                 unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[code >> 3];
 
