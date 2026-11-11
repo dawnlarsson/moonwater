@@ -2298,8 +2298,12 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         }
         if (s->kind == LINK_KIND_PUSH)
         {
+                //      The bits a file's own owner sets, and no more: a pushed
+                //      file made here with the set-id bits is one that runs as
+                //      its owner, root when a root receives it. The far file's
+                //      mode in a pull's answer is masked the same way.
                 memory_copy(address_of mode, payload + 1, 4);
-                s->mode = mode & 07777;
+                s->mode = mode & 0777;
         }
         if ((s->kind == LINK_KIND_PUSH || s->kind == LINK_KIND_PULL) &&
             link_path_is_own((string_address)text))
