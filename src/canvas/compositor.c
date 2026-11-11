@@ -9889,8 +9889,8 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
 // The spare: a dumb buffer as the scanout is (compositor_scanout_make), all stale until it has been composed into. Made when a present wants it.
 static void compositor_plate_make(void)
 {
-        unsigned int fb, handle, *pixels;
-        unsigned long bytes, pitch;
+        unsigned int fb = 0, handle = 0, *pixels = 0;
+        unsigned long bytes = 0, pitch = 0;
 
         if (compositor.card < 0 || compositor_spare.fb || compositor_plate_refused || !compositor.scanout_pitch)
                 return;
