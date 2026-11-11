@@ -155,6 +155,8 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_GRACE 20000000ull       // old receive keys after a rekey
 #define LINK_ATTEMPT 1000000ull      // between initiations
 #define LINK_ATTEMPTS 6
+#define LINK_QUIET 20000000ull       // of hearing nothing from an up link, its client starts trying again
+#define LINK_RETRIES 5               // such tries, backed off, before LINK_DEAD takes the link
 
 /*      The kernel's numbers for the socket options and control messages the
         listener and the greeting ask for, by the names the uapi headers give
@@ -3714,7 +3716,22 @@ static fn link_datagram(p8 address_to datagram, positive length,
         else if (!link_self.server)
         {
                 if (head.kind == WATERLINK_KIND_RESPOND)
+                {
+                        p8 pending = link_client.ours != 0;
+                        struct link_session address_to s = link_self.session;
+
                         link_client_answered(datagram, length);
+                        //      The answer proved the keys and says where the
+                        //      peer is now: the session is heard and moved there.
+                        if (pending && !link_client.ours)
+                        {
+                                s->moved |= memory_compare(s->address, address, 16) ||
+                                            s->port != port;
+                                memory_copy(s->address, address, 16);
+                                s->port = port;
+                                s->heard = now;
+                        }
+                }
                 else if (head.kind == WATERLINK_KIND_COOKIE)
                         link_client_cookie(datagram, length, now);
         }
@@ -3883,6 +3900,9 @@ typedef struct
         p8 cookied;  // it carried a cookie
         p8 cookie[16]; // what the machine last handed out, under load
         p64 cookie_at; // when; 0 for never
+        positive tries;   // initiations sent: they alternate between the known addresses
+        positive retries; // tries made while the up link was quiet
+        p64 gap;          // the wait before the next of those, doubled each time
 } link_client_state;
 
 static link_client_state link_client;
@@ -3892,6 +3912,28 @@ static link_client_state link_client;
 static p8 edit_terminal_raw();
 static fn edit_terminal_restore();
 
+/*
+        The peer's other known address: the one its record has, when that is
+        not where the session is. A roam or a discovery writes the record, so
+        it is read again rather than kept.
+*/
+static p8 link_client_other(struct link_session address_to s, p8 address_to into,
+                            p16 address_to port)
+{
+        link_peers peers;
+        struct waterlink_peer address_to peer;
+
+        link_peers_load(address_of peers);
+        peer = link_peer_keyed(address_of peers, s->peer);
+        if (!peer || !peer->port ||
+            (!memory_compare(peer->address, s->address, 16) &&
+             peer->port == s->port))
+                return false;
+        memory_copy(into, peer->address, 16);
+        address_to port = peer->port;
+        return true;
+}
+
 // The initiator's half of the handshake, for a new session or a rekey.
 static p8 link_client_initiate(struct link_session address_to s, p64 now)
 {
@@ -3899,7 +3941,16 @@ static p8 link_client_initiate(struct link_session address_to s, p64 now)
         p8 hello[WATERLINK_HELLO_BYTES];
         p8 ephemeral[32];
         p64 wall = system_clock_ns(0);
+        p8 target[16];
+        p16 port = s->port;
         p8 sent;
+
+        //      Every other try goes to the record's address, when it has one
+        //      that is not the session's: the last address heard and the one
+        //      the peer was paired at, in turn.
+        memory_copy(target, s->address, 16);
+        if (link_client.tries++ & 1)
+                (void)link_client_other(s, target, address_of port);
 
         /* A failed index or entropy draw leaves no initiation.  Do not retain
            an earlier MAC, and do not read the still-uninitialized datagram in
@@ -3929,8 +3980,8 @@ static p8 link_client_initiate(struct link_session address_to s, p64 now)
                         waterlink_mac2(link_client.cookie, datagram);
                 memory_copy(link_client.mac1,
                             datagram + 16 + WATERLINK_INITIATE_BYTES - 16, 16);
-                sent = link_send_to(datagram, WATERLINK_DATAGRAM, s->address,
-                                    s->port) >= 0;
+                sent = link_send_to(datagram, WATERLINK_DATAGRAM, target,
+                                    port) >= 0;
         }
         crypto_forget(ephemeral, sizeof ephemeral);
         if (!sent)
@@ -4259,6 +4310,22 @@ static b32 link_client_run(string_address name, p8 kind,
                           link_age(now, link_client.initiated) > LINK_ATTEMPT) &&
                          !link_client_initiate(s, now))
                         break;
+
+                //      An up link that has heard nothing for LINK_QUIET is tried
+                //      again, from both known addresses, a wait longer each
+                //      time, until LINK_RETRIES or LINK_DEAD ends it. A heard
+                //      datagram starts the count again.
+                if (s->now.live && asked && link_age(now, s->heard) <= LINK_QUIET)
+                        link_client.retries = 0;
+                else if (s->now.live && asked && link_client.retries < LINK_RETRIES &&
+                         link_age(now, s->heard) > LINK_QUIET &&
+                         (!link_client.ours ||
+                          link_age(now, link_client.initiated) >= link_client.gap))
+                {
+                        link_client.gap = LINK_ATTEMPT << link_client.retries;
+                        link_client.retries++;
+                        (void)link_client_initiate(s, now);
+                }
 
                 if (input_waiting && s->answered && !s->refused)
                 {
