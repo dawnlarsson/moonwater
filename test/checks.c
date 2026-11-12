@@ -149924,6 +149924,50 @@ static fn check_kit_place(void)
                 ui.top = 0, ui.bottom = 300;
         }
 
+        // The hover is the row under the mouse as the rows are drawn. Rows that move under a mouse that stays where it is (put two rows
+        // on at once, then a wheel's notch that runs to its step over some frames) are told by no motion: the draw lights the row that
+        // has come under the pointer, and the one that left it is lit no more. A finger hovers nothing: the row it pressed keeps what
+        // the press gave it, and the place it lifted from lights no other row as the rows go by.
+        {
+                static struct ui_list hovered;
+                struct window_event notch = {WINDOW_EVENT_WHEEL, 0, -120, 0};
+                int row = ui_dev(&ui, UI_ROW), x, y, first, kept, after, glided, under, tapped, passed;
+
+                bounds_list_make(&ui, &hovered, 40, 120 * ui.scale / 100);
+                x = hovered.x + 20 * ui.scale / 100, y = hovered.y + row / 2;
+                ui_kit_touch = 0;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_list_pointer(&ui, &hovered, WINDOW_EVENT_MOTION, x, y, false);
+                first = hovered.hover;
+                ui_scroll_set(&hovered.scroll, 2 * row);
+                kept = hovered.hover;
+                ui_list_draw(&ui, &hovered);
+                after = hovered.hover;
+                ui_wheel_turn(&ui, &hovered.scroll, &notch);
+                for (int frame = 0; frame < 240 && (frame == 0 || scroll_gliding(&hovered.scroll)); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_list_draw(&ui, &hovered);
+                }
+                glided = hovered.hover;
+                check("kit list: rows that scroll under a mouse that stays where it is leave the hover on the row now under it, as they are drawn",
+                      first == 0 && kept == 0 && after == 2 && hovered.scroll.scroll > 2 * row && glided > 2 &&
+                          glided == ui_list_hit(&ui, &hovered, x, y));
+                under = ui_list_hit(&ui, &hovered, x, y);
+                ui_kit_touch = 1;
+                ui_list_pointer(&ui, &hovered, WINDOW_EVENT_BUTTON, x, y, true);
+                ui_list_pointer(&ui, &hovered, WINDOW_EVENT_BUTTON, x, y, false);
+                tapped = hovered.hover;
+                ui_kit_touch = 0;
+                ui_scroll_set(&hovered.scroll, 0);
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_list_draw(&ui, &hovered);
+                passed = hovered.hover;
+                check("kit list: a finger hovers nothing: the rows that go by the place it lifted from are not lit for it",
+                      under > 0 && tapped == under && passed == tapped && ui_list_hit(&ui, &hovered, x, y) == 0);
+                ui.top = 0, ui.bottom = 300;
+        }
+
         // A finger's flick: its velocity is fitted over its last 60 ms, and the throw it sets falls by a time that grows with the
         // region's length, so a fast flick on a long list travels further than a slow one, a flick on a short list stops at its
         // end, and the throw never passes the end it stops at.

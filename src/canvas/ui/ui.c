@@ -18110,6 +18110,8 @@ struct ui_list
         int slid, slid_value;              // the row (plus one) whose slider was let go, and the value the hand left it at: the app takes them and clears slid
         struct ui_press press;             // the press on a row (ui_list_click): where it went down, and whether it is a drag
         int pointer_x, pointer_y;
+        b32 pointer_mouse;                 // that place is a mouse's, which stays over the list while it is still (a finger's hovers nothing)
+        int hover_at;                      // where the rows were scrolled to when the hover was last hit: moved since, it is hit again (ui_list_draw)
         struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
 };
 
@@ -18723,6 +18725,13 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest;
 
         ui_scroll_frame(ui, &l->scroll);
+        // The rows have moved under a mouse that has not (a wheel's turn, a throw, a key's reveal, the bar): no motion says so, and the row
+        // lit is the one under the pointer as the rows are drawn now, not the one that was there and has gone from under it.
+        if (l->pointer_mouse && l->scroll.scroll != l->hover_at)
+        {
+                l->hover = ui_list_hit(ui, l, l->pointer_x, l->pointer_y);
+                l->hover_at = l->scroll.scroll;
+        }
         // The rows are drawn at rest, inside the list's ends, and a pull past an end is the picture stretched (ui_scroll_pull), as Android 12's is.
         drawn = l->scroll.scroll;
         rest = ui_scroll_rest(&l->scroll, drawn, l->h);
@@ -18762,7 +18771,8 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 }
 
 /*
-        The pointer on a list. Motion lights the row under it; a press is on a row (the keys go to it, it shows pressed
+        The pointer on a list. Motion lights the row under it, and so does the draw when the rows have moved under a mouse
+        that has not (ui_list_draw); a press is on a row (the keys go to it, it shows pressed
         and ripples from the press, edge to edge), and the release lets it go. A press answers its row, with part the
         item of a tabs or swatches row it was on (-1 none) and way -1 when it was on the left half of a step's value;
         everything else answers -1. A finger's press shows pressed the same way (touch), and is done when the app says.
@@ -18803,9 +18813,10 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         int id = ui_list_hit(ui, l, x, y);
         struct ui_control address_to own, address_to trailing;
 
-        l->pointer_x = x, l->pointer_y = y;
+        l->pointer_x = x, l->pointer_y = y, l->pointer_mouse = !ui_kit_touch;
         if (type == WINDOW_EVENT_MOTION)
         {
+                l->hover_at = l->scroll.scroll;
                 if (id != l->hover)
                 {
                         ui_list_damage(ui, l, l->hover);
@@ -18849,7 +18860,7 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 ui_list_row_press(ui, own, x, y);
         }
         ui_list_damage(ui, l, l->focus);
-        l->focus = id, l->down = id, l->hover = id;
+        l->focus = id, l->down = id, l->hover = id, l->hover_at = l->scroll.scroll;
         ui_list_damage(ui, l, id);
         return id;
 }
