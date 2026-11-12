@@ -65,7 +65,10 @@ mixer_recording_off	9c09	A gravação está desativada
 mixer_unplugged	3ed9	Nada conectado
 notices_dismiss	9a10	Descartar tudo
 notices_item	56a6	%1$s: %2$s
+notices_item_once	8d59	%1$s: %2$s (uma vez, há %3$d min)
+notices_item_once_now	e604	%1$s: %2$s (uma vez, agora mesmo)
 notices_item_times	36d7	%1$s: %2$s (%3$d vezes, há %4$d min)
+notices_item_times_now	8cbd	%1$s: %2$s (%3$d vezes, agora mesmo)
 notices_open	c9cf	Abrir avisos do sistema
 settings_already_joined	71fb	já conectado a %s
 settings_already_set	0053	já definido

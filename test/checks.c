@@ -131280,6 +131280,22 @@ static void check_notices_dot(void)
                   string_equals((string_address)notices.menu.items[1].keys, (string_address)"Warning") &&
                   notices.menu.items[2].flags == UI_MENU_SEPARATOR && notices.menu.items[3].id == NOTICES_ID_OPEN &&
                   notices.menu.items[4].id == NOTICES_ID_DISMISS);
+        // How often and how long ago, in the form the number takes: the error came once 0 s ago and the warning twice 30 s ago.
+        {
+            char said[4][96];
+
+            notices_said(said[0], sizeof(said[0]), "wifi", "wlan0: firmware crashed", 1, 59);
+            notices_said(said[1], sizeof(said[1]), "wifi", "wlan0: firmware crashed", 1, 125);
+            notices_said(said[2], sizeof(said[2]), "usb", "read error", 2, 0);
+            notices_said(said[3], sizeof(said[3]), "usb", "read error", 12, 3600);
+            check("notices: a kernel notice says once or N times, and just now or N min ago, never 1 times or 0 min ago",
+                  string_equals((string_address)said[0], (string_address) "wifi: wlan0: firmware crashed (once, just now)") &&
+                      string_equals((string_address)said[1], (string_address) "wifi: wlan0: firmware crashed (once, 2 min ago)") &&
+                      string_equals((string_address)said[2], (string_address) "usb: read error (2 times, just now)") &&
+                      string_equals((string_address)said[3], (string_address) "usb: read error (12 times, 60 min ago)") &&
+                      memory_search((address_any)notices.menu.items[0].label, string_length((string_address)notices.menu.items[0].label), (address_any) "(once, just now)", 16) &&
+                      memory_search((address_any)notices.menu.items[1].label, string_length((string_address)notices.menu.items[1].label), (address_any) "(2 times, just now)", 19));
+        }
 
         /*
                 The popup's labels are drawn through its own kit's scratch line, which only ui_scratch_fit maps, and each app maps its
@@ -131312,6 +131328,61 @@ static void check_notices_dot(void)
                     hover += (picture[y * GLASS_SIDE + x] >> 24) != 0;
             check("notices: a hovered item keeps its label drawn", hover >= ink);
             notices.menu.hot = -1;
+
+            /*
+                    The severity is the item's colour: the error's and the warning's, the taskbar's dot in it at the item's start and the
+                    word in it at the item's end, on a light glass of the light theme and a dark glass of the dark one, each from its
+                    lightest to its dimmest, at rest and hot. The word stands out 4.5 to 1 from what it is drawn on and the dot, a shape,
+                    3 to 1; both are red or amber (the dot more so), and the word is not the quiet grey of the menu's other keys.
+            */
+            {
+                struct ui_theme kept = ui_kit.shown;
+                static unsigned int shot[720 * 240];
+                static const unsigned int grounds[2][3] = {{0xf7f7f8u, 0xe0e0e2u, 0xb4b4b4u}, {0x101012u, 0x2a2a2eu, 0x5c5c5cu}};
+                b32 readable = true, coloured = true, drawn = notices.width <= 720 && notices.height <= 240;
+
+                for (unsigned int dark = 0; dark < 2 && drawn; dark++)
+                    for (int g = 0; g < 3; g++)
+                        for (int hot = -1; hot < 2; hot++)
+                        {
+                            // The popup drawn as notices_draw draws it, into a picture as wide as it is, with no item hot and with each.
+                            ui_theme_make(&ui_kit.shown, dark, UI_ACCENT_STANDARD);
+                            ui_inks(&notices.ui, grounds[dark][g]);
+                            ui_begin(&notices.ui, shot, 720, notices.width, notices.height);
+                            notices.menu.hot = hot;
+                            ui_popmenu_draw(&notices.ui, &notices.menu);
+                            for (int k = 0; k < 2; k++)
+                            {
+                                const struct ui_menu_item address_to item = &notices.menu.items[k];
+                                const struct ui_node address_to n = &notices.menu.tree.node[item->node];
+                                unsigned int word = ui_popmenu_tone(&notices.ui, item->flags, hot == k, UI_READABLE);
+                                unsigned int mark = ui_popmenu_tone(&notices.ui, item->flags, hot == k, UI_MENU_SEEN);
+                                unsigned int ground = notices.ui.ground, well = ui_popmenu_hot_fill(&notices.ui), cover = well >> 24;
+                                unsigned int under = hot == k ? window_mix(ground, well & 0xffffffu, cover + (cover >> 7)) : ground;
+                                int cx = n->x + ui_dev(&notices.ui, UI_MENU_PAD + 15), cy = n->y + n->h / 2, inked = 0;
+
+                                readable = readable && word && ui_contrast(word, under) >= 450 && ui_contrast(mark, under) >= 300;
+                                for (int which = 0; which < 2; which++)
+                                {
+                                    unsigned int tone = which ? mark : word, r = tone >> 16 & 255, gr = tone >> 8 & 255, b = tone & 255;
+                                    unsigned int by = which ? 60 : 24;
+
+                                    coloured = coloured && (k ? r > b + by && gr > b + by / 2 && r >= gr : r > gr + by && r > b + by);
+                                }
+                                coloured = coloured && (word & 0xffffffu) != (notices.ui.quiet & 0xffffffu);
+                                for (int y = n->y; y < n->y + n->h; y++)
+                                    for (int x = n[2].x; x < n[2].x + n[2].w && x < notices.width; x++)
+                                        inked += shot[y * 720 + x] == (0xff000000u | (word & 0xffffffu));
+                                drawn = drawn && shot[cy * 720 + cx] == (0xff000000u | (mark & 0xffffffu)) && inked > 8;
+                            }
+                        }
+                notices.menu.hot = -1;
+                ui_kit.shown = kept;
+                check("notices: an item's severity is the error's or the warning's colour, red or amber and not the quiet grey of other keys",
+                      coloured && notices.menu.items[0].flags == UI_MENU_ERROR && notices.menu.items[1].flags == UI_MENU_WARNING);
+                check("notices: its word stands out 4.5 to 1 and its dot 3 to 1 from a light and a dark glass, the lightest to the dimmest, at rest and hot", readable);
+                check("notices: the taskbar's dot is drawn in it at the item's start, and the severity's word at the item's end", drawn);
+            }
         }
 
         notices_dismiss();

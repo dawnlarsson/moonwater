@@ -65,7 +65,10 @@ mixer_recording_off	9c09	Запись отключена
 mixer_unplugged	3ed9	Ничего не подключено
 notices_dismiss	9a10	Скрыть все
 notices_item	56a6	%1$s: %2$s
-notices_item_times	36d7	%1$s: %2$s (%3$d раз, %4$d мин назад)
+notices_item_once	8d59	%1$s: %2$s (один случай, %3$d мин назад)
+notices_item_once_now	e604	%1$s: %2$s (один случай, только что)
+notices_item_times	36d7	%1$s: %2$s (случаев: %3$d, %4$d мин назад)
+notices_item_times_now	8cbd	%1$s: %2$s (случаев: %3$d, только что)
 notices_open	c9cf	Открыть системные уведомления
 settings_already_joined	71fb	уже подключено к %s
 settings_already_set	0053	уже установлено

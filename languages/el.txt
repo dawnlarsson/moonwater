@@ -65,7 +65,10 @@ mixer_recording_off	9c09	Η εγγραφή είναι απενεργοποιημ
 mixer_unplugged	3ed9	Δεν υπάρχει σύνδεση
 notices_dismiss	9a10	Απόρριψη όλων
 notices_item	56a6	%1$s: %2$s
-notices_item_times	36d7	%1$s: %2$s (%3$d φορές, πριν %4$d λεπτά)
+notices_item_once	8d59	%1$s: %2$s (μία φορά, πριν %3$d λεπ.)
+notices_item_once_now	e604	%1$s: %2$s (μία φορά, μόλις τώρα)
+notices_item_times	36d7	%1$s: %2$s (%3$d φορές, πριν %4$d λεπ.)
+notices_item_times_now	8cbd	%1$s: %2$s (%3$d φορές, μόλις τώρα)
 notices_open	c9cf	Άνοιγμα ειδοποιήσεων συστήματος
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_already_set	0053	ήδη ορισμένο

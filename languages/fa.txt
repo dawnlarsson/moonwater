@@ -66,7 +66,10 @@ mixer_recording_off	9c09	ضبط خاموش است
 mixer_unplugged	3ed9	چیزی وصل نیست
 notices_dismiss	9a10	رد کردن همه
 notices_item	56a6	%1$s: %2$s
+notices_item_once	8d59	%1$s: %2$s (یک بار، %3$d دقیقه پیش)
+notices_item_once_now	e604	%1$s: %2$s (یک بار، لحظاتی پیش)
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d دقیقه پیش)
+notices_item_times_now	8cbd	%1$s: %2$s (%3$d بار، لحظاتی پیش)
 notices_open	c9cf	باز کردن اعلان‌های سیستم
 settings_already_joined	71fb	از قبل به %s متصل است
 settings_already_set	0053	از قبل تنظیم شده است

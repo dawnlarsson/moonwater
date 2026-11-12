@@ -66,7 +66,10 @@ mixer_recording_off	9c09	ההקלטה כבויה
 mixer_unplugged	3ed9	שום דבר לא מחובר
 notices_dismiss	9a10	דחה הכול
 notices_item	56a6	%1$s: %2$s
-notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דקות)
+notices_item_once	8d59	%1$s: %2$s (פעם אחת, לפני %3$d דק׳)
+notices_item_once_now	e604	%1$s: %2$s (פעם אחת, הרגע)
+notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דק׳)
+notices_item_times_now	8cbd	%1$s: %2$s (%3$d פעמים, הרגע)
 notices_open	c9cf	פתיחת הודעות המערכת
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_already_set	0053	כבר מוגדר

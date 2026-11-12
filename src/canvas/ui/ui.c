@@ -7648,7 +7648,10 @@ LANGUAGE_ID(mixer_recording_off, "Recording is off") \
 LANGUAGE_ID(mixer_unplugged, "Nothing plugged in") \
 LANGUAGE_ID(notices_dismiss, "Dismiss all") \
 LANGUAGE_ID(notices_item, "%1$s: %2$s") \
+LANGUAGE_ID(notices_item_once, "%1$s: %2$s (once, %3$d min ago)") \
+LANGUAGE_ID(notices_item_once_now, "%1$s: %2$s (once, just now)") \
 LANGUAGE_ID(notices_item_times, "%1$s: %2$s (%3$d times, %4$d min ago)") \
+LANGUAGE_ID(notices_item_times_now, "%1$s: %2$s (%3$d times, just now)") \
 LANGUAGE_ID(notices_open, "Open System notices") \
 LANGUAGE_ID(settings_already_joined, "already joined to %s") \
 LANGUAGE_ID(settings_already_set, "already set") \
@@ -15662,8 +15665,9 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         A menu is a popup row of its own (window.c's popup columns), so it reaches past its window's edges and the compositor
         places it, flipping it where the screen ends. It is glass, a temporary overlay: no face and no outline, its inks are
         the ground's. Its items are labels with an optional accelerator's text, a mnemonic marked with & (the letter typed
-        chooses it), check and radio marks, separators, section headers and disabled items; a submenu item is answered
-        UI_MENU_OPEN, for the app to open another popup against the item (WINDOW_POPUP_RIGHT).
+        chooses it), check and radio marks, a notice's severity (its dot and its word in the error's or the warning's colour),
+        separators, section headers and disabled items; a submenu item is answered UI_MENU_OPEN, for the app to open another
+        popup against the item (WINDOW_POPUP_RIGHT).
 
         A menu chooses on a release, as a button does: a press on an item shows it pressed, and the release chooses it when it
         is over that same item. A press released anywhere else chooses nothing. The hot item (the hand's or the keys') is lit.
@@ -15682,6 +15686,9 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 #define UI_MENU_ON 16u
 #define UI_MENU_HEADER 32u
 #define UI_MENU_SUBMENU 64u // id names the submenu the app opens for it
+#define UI_MENU_ERROR 128u  // a notice of an error: the taskbar's dot at the item's start, where a check would be, and its keys in the error's ink
+#define UI_MENU_WARNING 256u // a notice of a warning: the same in the warning's ink
+#define UI_MENU_SEEN 300     // a notice's dot stands out 3 to 1 from its ground (WCAG's for a shape that is not text), its word UI_READABLE
 #define UI_MENU_ROW 28
 #define UI_MENU_TOUCH_ROW 44
 #define UI_MENU_PAD 6
@@ -15867,6 +15874,47 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
                                      (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), &rect);
 }
 
+/*
+        The ink of a notice's item (UI_MENU_ERROR, UI_MENU_WARNING), straight with alpha 255: the theme's error or warning colour, as much
+        of it as still stands out least from the ground it is drawn on (the menu's, or a hot item's well over it), the rest the black or
+        the white that stands out from that ground. Its word asks UI_READABLE and its dot, a shape and not text, UI_MENU_SEEN, so the dot
+        keeps more of the colour where a glass is near the middle grey. 0 for an item that is no notice.
+*/
+// A menu's hot item's fill, straight: on a light glass the step toward white a lit row is (ui_kit_lit), never a darker grey; else the
+// selection's well.
+static unsigned int ui_popmenu_hot_fill(const struct ui address_to ui)
+{
+        return ui->glass && ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SELECTION, 28);
+}
+
+static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b32 hot, unsigned int least)
+{
+        unsigned int ground, toward, colour, low = 0, high = 100;
+
+        if (!(flags & (UI_MENU_ERROR | UI_MENU_WARNING)))
+                return 0;
+        ground = (ui->glass ? ui->ground : ui_role(UI_SURFACE)) & 0xffffffu;
+        if (hot)
+        {
+                unsigned int well = ui_popmenu_hot_fill(ui), cover = well >> 24;
+
+                ground = window_mix(ground, well & 0xffffffu, cover + (cover >> 7));
+        }
+        toward = window_light(ground) ? 0xff000000u : 0xffffffffu;
+        colour = 0xff000000u | ui_role(flags & UI_MENU_ERROR ? UI_ERROR : UI_WARNING);
+        // The most percent of the colour that stands out least: none of it (the black or the white) is the start, which always does.
+        while (low < high)
+        {
+                unsigned int mid = (low + high + 1) / 2;
+
+                if (ui_contrast(ui_mix(colour, mid, toward), ground) >= least)
+                        low = mid;
+                else
+                        high = mid - 1;
+        }
+        return ui_mix(colour, low, toward);
+}
+
 // The menu drawn: every item that shows, in its element as the tree placed it, and a row's marks (a check, a dot, a submenu's) in its pads.
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
 {
@@ -15882,7 +15930,8 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 p8 shown[96];
                 p32 mnemonic;
                 int baseline = n[1].y + n[1].h; // the label's element is a capital tall in the middle of the row: its foot is the baseline
-                unsigned int alpha = item->flags & UI_MENU_DISABLED ? 97 : 255;
+                b32 lit = ui_popmenu_choosable(m, at) && at == m->hot;
+                unsigned int alpha = item->flags & UI_MENU_DISABLED ? 97 : 255, tone = ui_popmenu_tone(ui, item->flags, lit, UI_READABLE);
 
                 // What is scrolled out of the menu is not drawn: the tree places it and cuts nothing.
                 if (n->y >= root->y + root->h || n->y + n->h <= root->y)
@@ -15895,9 +15944,8 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 // The hot item's rect: ui_fill lays a premultiplied tone, and the well is straight (its alpha is its cover), so it is
                 // premultiplied first. On a light glass it is the step toward white a lit row is (ui_kit_lit), never a darker grey; on
                 // a dark one the well. The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
-                if (ui_popmenu_choosable(m, at) && at == m->hot)
-                        ui_fill(ui, n->x, n->y, n->w, n->h,
-                                ui_premultiplied(ui->glass && ui_kit_light(ui) ? ui_kit_lift(ui, 100) : ui_well(ui, UI_SELECTION, 28), UI_FULL));
+                if (lit)
+                        ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_popmenu_hot_fill(ui), UI_FULL));
                 if (at == m->ripple_at)
                         ui_popmenu_ripple(ui, m, n);
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
@@ -15919,9 +15967,17 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                                 ui_kit_text(ui, tick_x, baseline, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
                         }
                 }
+                // A notice's severity: the taskbar's dot in its colour where a check would be, and its keys (the severity's word) in its ink.
+                if (tone)
+                {
+                        int dot = ui_px(ui, UI_DOT), cx = n->x + ui_dev(ui, UI_MENU_PAD + 15);
+
+                        ui_kit_dot(ui, ui_mirror(cx - dot / 2, dot, 0, m->width), n->y + (n->h - dot) / 2,
+                                   (alpha << 24) | (ui_popmenu_tone(ui, item->flags, lit, UI_MENU_SEEN) & 0xffffffu));
+                }
                 if (item->keys)
                         ui_kit_text_flipped(ui, n[2].x, baseline, (string_address)item->keys, UI_BODY_MEDIUM,
-                                            (alpha << 24) | ((ui->glass && at == m->hot ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT)) & 0xffffffu), 0, 0, m->width);
+                                            (alpha << 24) | ((tone ? tone : ui->glass && at == m->hot ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT)) & 0xffffffu), 0, 0, m->width);
                 if (item->flags & UI_MENU_SUBMENU)
                         ui_kit_text_flipped(ui, n->x + n->w - ui_dev(ui, UI_MENU_PAD + 14), baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
                                             (alpha << 24) | (ink & 0xffffffu), 0, 0, m->width);

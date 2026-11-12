@@ -1,7 +1,8 @@
 /*
         The notices popup: the tray's notices dot, pressed, opens it beside the dot (the machine script starts it with -a, when the compositor
         says notices_button). It lists what the board holds (the kernel's notices and the options' issues, the most urgent first, up to six),
-        each with its severity word at its right and, for a kernel notice, its count and the minutes since its last record; then two rows:
+        each with its severity in its colour (the taskbar's dot at its start and the word at its right) and, for a kernel notice, how often
+        it came and how long since it last did (once or N times, just now or N min ago); then two rows:
         Open System notices, which starts Settings on its System notices page (-n), and Dismiss all, which dismisses the kernel's notices
         (windows_kernel_dismiss; an option's issue stays until it is cleared by its own program). Choosing an item opens Settings the same
         way. The menu is the kit's (ui_popmenu_*), drawn in this window, which is put away by a press anywhere but on it, by losing the keys
@@ -41,7 +42,24 @@ static struct
         string_address bold;     // and the bold face (-b)
 } notices;
 
-// Reads the board and makes the menu: the items (errors before warnings, the board's order within each), then the two rows.
+/*
+        A kernel notice's line: its key and its message, then how often it came and how long ago it last did, each in the form its
+        number takes: once or N times, just now (under a minute) or N min ago. times is its count and seconds the time since its last.
+*/
+static fn notices_said(char address_to into, positive room, const char address_to key, const char address_to message, unsigned int times,
+                       unsigned int seconds)
+{
+        long minutes = (long)(seconds / 60);
+
+        if (times <= 1)
+                language_format(into, room, minutes ? WORDS(notices_item_once) : WORDS(notices_item_once_now), (long)key, (long)message, minutes);
+        else
+                language_format(into, room, minutes ? WORDS(notices_item_times) : WORDS(notices_item_times_now), (long)key, (long)message,
+                                (long)times, minutes);
+}
+
+// Reads the board and makes the menu: the items (errors before warnings, the board's order within each), then the two rows, each item
+// marked with its severity (the taskbar's dot in its colour, and the word).
 static void notices_board(void)
 {
         int count = 0;
@@ -63,13 +81,13 @@ static void notices_board(void)
                         settings_issue_text(issue, message, sizeof(message));
                         key = (const char *)language_of(issue->key);
                         if (windows_issue_kernel(issue->code)) // the classes the feeder files; every other issue is an option's
-                                language_format(notices.text[count], sizeof(notices.text[count]), WORDS(notices_item_times), (long)key,
-                                                (long)message, (long)issue->a, (long)(issue->b / 60));
+                                notices_said(notices.text[count], sizeof(notices.text[count]), key, message, issue->a, issue->b);
                         else
                                 language_format(notices.text[count], sizeof(notices.text[count]), WORDS(notices_item), (long)key, (long)message);
                         language_format(notices.keys[count], sizeof(notices.keys[count]), issue->severity == WINDOWS_ISSUE_ERROR
                                         ? WORDS(settings_badge_error) : WORDS(settings_badge_warning));
-                        ui_popmenu_add(&notices.menu, notices.text[count], notices.keys[count], 0, NOTICES_ID_ITEM + count);
+                        ui_popmenu_add(&notices.menu, notices.text[count], notices.keys[count],
+                                       issue->severity == WINDOWS_ISSUE_ERROR ? UI_MENU_ERROR : UI_MENU_WARNING, NOTICES_ID_ITEM + count);
                         count++;
                 }
         if (count)

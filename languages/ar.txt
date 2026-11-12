@@ -66,7 +66,10 @@ mixer_recording_off	9c09	التسجيل متوقف
 mixer_unplugged	3ed9	لا شيء متصل
 notices_dismiss	9a10	تجاهل الكل
 notices_item	56a6	%1$s: %2$s
-notices_item_times	36d7	%1$s: %2$s (%3$d مرة، قبل %4$d دقيقة)
+notices_item_once	8d59	%1$s: %2$s (مرة واحدة، قبل %3$d د)
+notices_item_once_now	e604	%1$s: %2$s (مرة واحدة، الآن)
+notices_item_times	36d7	%1$s: %2$s (عدد المرات: %3$d، قبل %4$d د)
+notices_item_times_now	8cbd	%1$s: %2$s (عدد المرات: %3$d، الآن)
 notices_open	c9cf	فتح إشعارات النظام
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_already_set	0053	معيّن بالفعل
