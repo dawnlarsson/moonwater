@@ -123373,9 +123373,43 @@ static fn card_fake_close(void)
 static void rtl_keep_add(int x, int y, int w, int h);
 #define UI_KEEP(x, y, w, h) rtl_keep_add((x), (y), (w), (h))
 #endif
+/*
+        A popup's row, for the checks of a menu an app opens for itself (a choice's in the settings, ui_popmenu_open). No
+        compositor runs here, so the table a program takes its row from is not there, and a menu that cannot take a row
+        does not open. The kit's take goes through popup_fake_take: while a check has said how tall a screen its popups
+        stand on, the take gives row 0 of a table made for it (an anonymous mapping with no door and no wake, which
+        windows_leave unmaps as it does the compositor's), and with none said it is the take it always was.
+*/
+static struct
+{
+        unsigned int screen; // the screen's height, in pixels, or 0: no check stands in for the compositor
+        unsigned int themed; // the theme's count the table says: the kit's own, so that the popup takes no theme from the table
+} popup_fake;
+
+static long popup_fake_take(struct window_row address_to own)
+{
+        const unsigned int stride = 2048; // wider than any menu a check opens, and whole pages a row
+        unsigned long buffer = (unsigned long)stride * popup_fake.screen * 4, bytes = WINDOWS_HEADER + 2 * buffer;
+        struct windows address_to table;
+        long mapped;
+
+        if (!popup_fake.screen)
+                return windows_take(own);
+        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+                return mapped;
+        table = (struct windows address_to)mapped;
+        table->stride = stride, table->buffer = buffer;
+        table->output_width = stride, table->output_height = popup_fake.screen;
+        table->themed = popup_fake.themed;
+        address_to own = (struct window_row){table, 0, -1, -1, bytes, buffer, stride, stride, popup_fake.screen};
+        return 0;
+}
+#define windows_take(own) popup_fake_take(own)
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
 #endif
+#undef windows_take
 #include "../src/canvas/ui/terminal.c"
 #if MOONWATER_UI_SETTINGS
 #include "../src/canvas/ui/gallery.c"
@@ -140590,6 +140624,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.list.focus = kb;
                         settings.state[kb] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[kb], (string_address) "uk", SETTINGS_VALUE);
+                        // The list is a popup, a window of its own on a row the compositor gives it, and one that takes no row does
+                        // not open: the check stands in for the compositor (popup_fake), with a screen as tall as the settings window.
+                        popup_fake.screen = SETTINGS_HEIGHT, popup_fake.themed = ui_kit.themed;
 
                         settings_press(UI_KEY_LEFT);
                         check("settings: Left on a closed choice goes back to the groups and does not move it",
@@ -140710,8 +140747,8 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event_at(&lift);
                                 check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
                                       settings.page.menu_row == kb && settings.popup.menu.touch && !ui_pressed(&settings.page.press, kb) &&
-                                          settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > settings.height
-                                                                         ? settings.height
+                                          settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > (int)popup_fake.screen
+                                                                         ? (int)popup_fake.screen
                                                                          : 13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD)));
                                 row = ui_popmenu_row(&settings.ui, &settings.popup.menu);
                                 settings_menu_point(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0},
@@ -140795,11 +140832,14 @@ static fn check_settings(string_address regular, string_address bold)
 #endif
 
                         // A list taller than the room is cut, and its bar shows what is cut: the keys' choice and the first in view go together.
+                        // The room is its screen's and not the settings window's (the popup is sized to the screen it stands on,
+                        // ui_popmenu_shows), so the screen is made as short as the window here.
                         settings.height = 220;
+                        popup_fake.screen = 220;
                         settings_refilter();
                         settings_press(UI_KEY_ENTER);
-                        check("settings: a list with less room than it needs shows what fits, within the window",
-                              settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 13 && settings.popup.menu.height <= settings.height);
+                        check("settings: a list with less room than it needs shows what fits, within the screen",
+                              settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 13 && settings.popup.menu.height <= (int)popup_fake.screen);
                         settings_menu_press(UI_KEY_END);
                         check("settings: End on it scrolls to the last, which then shows",
                               settings.popup.menu.hot == 12 && settings.popup.menu.top == 13 - settings.popup.menu.rows_shown);
@@ -140809,6 +140849,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                         // Only a choice with a state to read opens, and a value that is none of its words starts the keys on the first.
                         settings.height = SETTINGS_HEIGHT;
+                        popup_fake.screen = SETTINGS_HEIGHT;
                         settings.state[kb] = SETTINGS_ABSENT;
                         settings_press(UI_KEY_ENTER);
                         check("settings: a choice the machine has none of opens no list", settings.page.menu_row < 0);
@@ -140900,6 +140941,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.page.chosen = 0;
                                 settings_refilter();
                         }
+                        popup_fake.screen = 0;
                         settings.child = 0;
                         settings.queued = 0;
                 }
