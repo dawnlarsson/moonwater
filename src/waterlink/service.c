@@ -1112,9 +1112,13 @@ static p8 link_part_owned(bipolar handle, p8 address_to path)
 
 /*
         Whether a path is one of the files the link is made of: its key, the
-        machines and groups it knows, the stamps it keeps, what the listener
-        says of itself and the lock it holds, and the script the machine runs
-        at boot. `files` is every file root has, bar these: the key is this
+        machines and groups it knows and the places it heard them at, the
+        stamps it keeps, what the listener says of itself and the lock it
+        holds, whether it is on, its port and its transport, and the script
+        the machine runs at boot. (The places, the switch, the port and the
+        transport were not among them: a peer with files alone pulled the
+        keys and addresses of every other machine from the places, and could
+        write where this machine dials them, or switch its link off.) `files` is every file root has, bar these: the key is this
         machine to every machine that knows it, the machines and groups say
         who else may be anything here, which no peer is to be handed by a
         grant for files, and what the listener writes is its own to write,
@@ -1129,7 +1133,9 @@ static p8 link_path_is_own(string_address path)
         string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT,
-            LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH};
+            LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH,
+            LINK_PLACES_PATH, LINK_SWITCH_PATH, LINK_PORT_PATH,
+            LINK_TRANSPORT_PATH};
         file_facts target;
         p8 exists = file_look_at(path, address_of target);
         positive leaf_at = memory_after_last(path, '/', string_length(path));

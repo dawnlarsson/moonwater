@@ -90263,7 +90263,9 @@ static fn own_files(void)
 {
         static const string_address own[] = {
             LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
-            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
+            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT,
+            LINK_PLACES_PATH, LINK_SWITCH_PATH, LINK_PORT_PATH,
+            LINK_TRANSPORT_PATH};
         struct link_session address_to s = link_self.session;
         file_facts before[array_count(own)];
         p8 named = true, linked = true, doubled = true, spelled = true;
@@ -90386,7 +90388,8 @@ static fn missing_own_files(void)
 {
         static const string_address own[] = {
             LINK_KEY_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH,
-            LINK_LOCK_PATH, HOST_MACHINE_SCRIPT};
+            LINK_LOCK_PATH, HOST_MACHINE_SCRIPT, LINK_PLACES_PATH,
+            LINK_SWITCH_PATH, LINK_PORT_PATH, LINK_TRANSPORT_PATH};
         p8 key[32];
         struct link_session address_to s = link_self.session;
 
