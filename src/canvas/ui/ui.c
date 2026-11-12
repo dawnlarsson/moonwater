@@ -34,7 +34,7 @@
 //   UI_LIST_ONLY    the window list's format (window.c reads it before the compositor and the fonts exist);
 //   UI_SWITCHES_ONLY  the switches alone, which are nothing but #defines, so a table may read them where no
 //                   declaration can stand (tools.inc, inside the tool tables);
-//   UI_SHARED_ONLY  the list, the switches, the theme, the motion, the touch recogniser and the taskbar's geometry
+//   UI_SHARED_ONLY  the list, the switches, the theme, the motion, the touch recogniser and what the taskbar is called by
 //                   (compositor.c, which draws the chrome with them);
 //   neither         all of it: the kit, the text engine, the language, the battery reader.
 // Each part is in the file once, however many times it is included.
@@ -1147,11 +1147,13 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
         each window, and the tray at the far end of it with the time and, when
         the settings name one, the battery. The edge is the position: bottom
         (the default), top, left or right. compositor.c keeps the windows, the
-        glass and the frames; taskbar.c has the band's geometry, its hit test,
-        its damage and the painting of its tabs and tray, all read from the
+        glass and the frames; taskbar.c has the band's layout (a tree of the
+        kit's layout, below, which it comes after in the shell), its hit test,
+        its damage and the painting of its tabs and tray, all from the
         struct taskbar_view the compositor fills for each call.
 
-        Included by compositor.c. With MOONWATER_UI_TASKBAR 0 taskbar.c is not
+        This part is taken by compositor.c, which calls the band by these
+        declarations. With MOONWATER_UI_TASKBAR 0 taskbar.c is not
         built, and these stubs answer as if there were no band at all: nothing
         is drawn, nothing is hit and nothing is damaged.
 */
@@ -1250,7 +1252,6 @@ static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *w
 static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
 static int taskbar_hit(const struct taskbar_view *view, int px, int py);
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach);
-static int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages);
 static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
                         int *rect);
@@ -1293,8 +1294,6 @@ static inline int taskbar_hit(const struct taskbar_view *view, int px, int py)
 { (void)view, (void)px, (void)py; return TASKBAR_HIT_NONE; }
 static inline int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 { (void)view, (void)px, (void)py, (void)reach; return TASKBAR_HIT_NONE; }
-static inline int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages)
 { (void)view, (void)damage, (void)damages; return 0; }
 static inline int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,

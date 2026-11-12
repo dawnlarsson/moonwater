@@ -122,7 +122,7 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_MINIMIZE_IN 3
 #define COMPOSITOR_RADIUS_MOST 64
 
-// The kit's shared part (ui/ui.c): the switches, the theme's roles, the motion, the touch recogniser and the taskbar's geometry.
+// The kit's shared part (ui/ui.c): the switches, the theme's roles, the motion, the touch recogniser and what the taskbar is called by.
 // The rest of the kit reads the compositor, so it is taken after this file (shell.c).
 #define UI_SHARED_ONLY
 #include "ui/ui.c"
@@ -9978,12 +9978,11 @@ static void compositor_present_frames(void)
                 for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
                 {
                         struct taskbar_view view;
-                        int span[4];
                         unsigned long redo = stale ? COMPOSITOR_TABS_ALL : 0;
 
                         compositor_band_frame(&band);
                         view = compositor_taskbar_view();
-                        if (!redo && view.pixels && taskbar_span(&view, &span[0], &span[1], &span[2], &span[3]))
+                        if (!redo && view.pixels)
                                 redo = taskbar_meets(&view, compositor.damage, compositor.damages);
                         if (redo)
                                 compositor_band_draw(frames, windows, redo);

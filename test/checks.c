@@ -127014,7 +127014,7 @@ static void launcher_oracle(unsigned int position, int scale, int count, const u
 
 static unsigned int launcher_band_pixels[BAND_W * 2 * COMPOSITOR_PANEL];
 
-// The launcher tab's length along the edge at a screen scale, the taskbar's own at 100: the grid of its mark (taskbar_launcher_grid, written out
+// The launcher tab's length along the edge at a screen scale, the taskbar's own at 100: the grid of its mark (taskbar_lay's, written out
 // again) and the standard padding either side of it, never under the tab's height.
 static int launcher_tab_length(int scale)
 {
@@ -127169,7 +127169,6 @@ static void check_taskbar_launcher(void)
             // button to a pixel, and (from a dot of 3 pixels) the middle of each dot the ink whole.
             {
                 struct taskbar_view alone = view;
-                struct taskbar_layout lay;
                 unsigned int ink = 0xffe0d0c0u;
                 int side = w < h ? w : h, pitch = (side * 28 + 50) / 100, dot, span, left, top, count[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, stray = 0, whole = 1;
                 int least_x = 1 << 30, least_y = 1 << 30, most_x = -1, most_y = -1;
@@ -127185,8 +127184,7 @@ static void check_taskbar_launcher(void)
                 alone.pixels = launcher_band_pixels;
                 alone.band_bytes = sizeof(launcher_band_pixels);
                 alone.scene = null;
-                taskbar_layout(&alone, &lay);
-                taskbar_launcher_glyph(&alone, &lay, x, y, w, h, ink);
+                taskbar_launcher_glyph(&alone, taskbar_tree(&alone), taskbar_node(&alone, TASKBAR_LAUNCHER), ink);
                 for (int row = 0; row < bh; row++)
                     for (int column = 0; column < bw; column++)
                     {
@@ -127316,6 +127314,51 @@ static void check_taskbar_centre(void)
     check("taskbar centre: the tabs of a bottom and a top band are centred on the band, to a pixel, with any tray and the launcher button on or off, from the left and from the right", centred);
     check("taskbar centre: a tray of more cells, or a long format, does not move the tabs", still);
     check("taskbar centre: tabs too many to be centred are kept clear of the launcher button and of the tray", clear);
+}
+
+/*
+        The band's tree is kept, not made at every question: asked again with nothing changed, a slot, a point and the band are read from the tree
+        that is there (a number left in it is still in it), and it is made again when what it was made from is not what it is: a title's length, a
+        view that no longer says the lengths, its screen's place in the space. A band on a second screen has a tree of its own.
+*/
+static void check_taskbar_tree(void)
+{
+    static unsigned char lengths[3] = {5, 15, 30};
+    struct taskbar_view view;
+    struct ui_tree address_to tree, address_to other;
+    int x, y, w, h, first, bx, by, bw, bh;
+    b32 kept, grew, bare, moved;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(&view, sizeof(view));
+    view.width = BAND_W, view.height = BAND_H, view.scale = 100, view.count = 3, view.lengths = lengths;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_slot(&view, 0, &x, &y, &first, &h);
+    tree = taskbar_tree(&view);
+    tree->node[0].spare = 77;
+    kept = taskbar_slot(&view, 1, &x, &y, &w, &h) && taskbar_hit_reach(&view, x + 1, y + 1, 0) == 1 && taskbar_tree(&view) == tree;
+    taskbar_band(&view, &bx, &by, &bw, &bh);
+    check("taskbar tree: asked again with nothing changed, the band is read from the tree it has, which is not made again", kept && bw == BAND_W && tree->node[0].spare == 77);
+
+    lengths[0] = 30;
+    grew = taskbar_slot(&view, 0, &x, &y, &w, &h) && w > first && !tree->node[0].spare;
+    lengths[0] = 5, view.lengths = null, tree->node[0].spare = 77;
+    bare = taskbar_slot(&view, 0, &x, &y, &w, &h) && w == 8 * COMPOSITOR_PANEL && !tree->node[0].spare;
+    view.lengths = lengths;
+    taskbar_band(&view, &bx, &by, &bw, &bh);
+    view.x = 2560, view.y = 100, tree->node[0].spare = 77;
+    taskbar_band(&view, &bx, &by, &bw, &bh);
+    moved = bx == 2560 && by == 100 + BAND_H - COMPOSITOR_PANEL && !tree->node[0].spare && taskbar_slot(&view, 0, &x, &y, &w, &h) && w == first && x > 2560;
+    check("taskbar tree: a title that grew, a view that no longer says the lengths and a screen put elsewhere are each a tree made again: the tab longer, as long as a tab may be, and on that screen",
+          grew && bare && moved);
+
+    view.x = view.y = 0;
+    taskbar_tree(&view)->node[0].spare = 77;
+    compositor.band_at = 1, view.x = BAND_W;
+    other = taskbar_tree(&view);
+    compositor.band_at = 0, view.x = 0;
+    check("taskbar tree: a band on a second screen has a tree of its own, and asking of it leaves the first band's as it is",
+          other != tree && taskbar_tree(&view) == tree && tree->node[0].spare == 77);
 }
 
 /*
@@ -127535,9 +127578,9 @@ static void check_taskbar_text(string_address face_path)
 
         fitted[n] = 0;
         view.pixels = slot_long;
-        taskbar_text_line(&view, 0, 0, 200, 0, 0, 60, 20, title, 0xffffffu, 0x202020u);
+        ui_cell_line(taskbar_cell(&view, 200), 0, 0, 60, 20, title, 0xffffffu, 0x202020u);
         view.pixels = slot_fit;
-        taskbar_text_line(&view, 0, 0, 200, 0, 0, 60, 20, fitted, 0xffffffu, 0x202020u);
+        ui_cell_line(taskbar_cell(&view, 200), 0, 0, 60, 20, fitted, 0xffffffu, 0x202020u);
         for (int at = 0; at < 200 * 20; at++)
             same &= slot_long[at] == slot_fit[at];
         check("taskbar text: a bottom band's title too long for its tab is cut with dots, as a side band's is",
@@ -166271,6 +166314,7 @@ b32 main()
         check_taskbar_tray();
         check_taskbar_launcher();
         check_taskbar_centre();
+        check_taskbar_tree();
         check_taskbar_fullscreen();
 #if MOONWATER_UI_ANY
         check_kit_motion();
@@ -231133,7 +231177,6 @@ static void dl_probes(void)
         static struct ui probe;
         static struct ui_control control;
         static struct taskbar_view view;
-        static struct taskbar_layout lay;
         static unsigned int cpu[DL_W * DL_H];
         const unsigned int scales[4] = {100, 150, 200, 300};
         int failed = 0;
@@ -231156,36 +231199,37 @@ static void dl_probes(void)
 
         // The launcher's grid of dots at four scales: nine kit boxes (round corners, in 256ths: the replay above reads plain pixel rectangles, which these
         // are not; the GPU's kit boxes are proven by CHECK_gpu_kit) are recorded and nothing is painted, and the same call with no scene paints the nine
-        // dots on the processor.
+        // dots on the processor. The button is the one of a band along the bottom of the picture, where the band's layout puts it and its dots.
+        taskbar_launcher_set(1);
         for (int k = 0; k < 4; k++)
         {
                 unsigned int s = scales[k], painted = 0;
-                int x = (int)(s / 10), y = (int)(s / 10), w = (int)(6 * s / 10), h = (int)(4 * s / 10);
 
                 memory_zero(&view, sizeof(view));
-                memory_zero(&lay, sizeof(lay));
-                view.scale = (int)s, view.pixels = cpu, lay.bx = 0, lay.by = 0, lay.bw = DL_W, lay.bh = DL_H;
+                view.width = DL_W, view.height = DL_H, view.scale = (int)s, view.pixels = cpu;
                 memory_zero(cpu, sizeof(cpu));
-                taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
+                taskbar_launcher_glyph(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_LAUNCHER), 0xff3a8f5cu);
                 for (unsigned long i = 0; i < DL_W * DL_H; i++)
                         painted += cpu[i] != 0;
                 dl_probe_reset();
                 view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene;
-                taskbar_launcher_glyph(&view, &lay, x, y, w, h, 0xff3a8f5cu);
+                taskbar_launcher_glyph(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_LAUNCHER), 0xff3a8f5cu);
                 failed += dl_probe_writes() != 0 || dl_probe_scene.lost || dl_probe_scene.count != 9 || painted == 0;
         }
+        taskbar_launcher_set(0);
         check("draw list: the launcher's grid of dots records its nine dots at 100, 150, 200 and 300 percent and paints nothing, and paints them with no scene", failed == 0);
 
         // The speaker and the microphone cells: their rings and boxes are recorded (kit boxes, proven on the GPU by CHECK_gpu_kit).
+        // The cells are those of the same band's tray, with the sound server there and a program recording.
         memory_zero(&view, sizeof(view));
-        memory_zero(&lay, sizeof(lay));
         dl_probe_reset();
-        view.scale = 100, view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene, lay.bx = 0, lay.by = 0, lay.bw = DL_W, lay.bh = DL_H;
-        taskbar.volume_flash = 0, taskbar.volume_muted = 0, taskbar.volume_percent = 60, taskbar.mic_muted = 0;
-        taskbar_volume_cell(&view, &lay, 10, 10, 40, 40, 0xffffffffu, 0xff000000u);
+        view.width = DL_W, view.height = DL_H, view.scale = 100, view.pixels = dl_probe_pixels, view.scene = &dl_probe_scene;
+        taskbar_volume_set(1, 60, 0, 0);
+        taskbar_mic_set(1, 0);
+        taskbar_volume_cell(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_VOLUME), 0xffffffffu, 0xff000000u);
         check("draw list: the speaker cell records, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
         dl_probe_reset();
-        taskbar_mic_cell(&view, &lay, 60, 10, 40, 40);
+        taskbar_mic_cell(&view, taskbar_tree(&view), taskbar_node(&view, TASKBAR_MIC));
         check("draw list: the microphone cell records, painting nothing", dl_probe_writes() == 0 && !dl_probe_scene.lost && dl_probe_scene.count > 0);
 
         // The painters that are still the processor's (R3 and R4): named known diffs. Their frames fall back to the processor.
