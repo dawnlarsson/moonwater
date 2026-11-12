@@ -2119,6 +2119,16 @@ static COLD bipolar dns_build_request(p8 address_to request, positive room,
         if (address_to mixed)
                 address_to mixed = dns_mix_case(request + DNS_HEADER,
                                                 (positive)written);
+        //      Not mixed, the name is asked in lower case, not as typed: this
+        //      question follows a reply that came back folded, and a name
+        //      typed with a capital, sent as typed, never matched the folded
+        //      echo of itself either, so it resolved nowhere behind such a
+        //      resolver. A length octet is at most 63 and no capital.
+        if (!address_to mixed)
+                for (positive at = 0; at < (positive)written; at++)
+                        if (request[DNS_HEADER + at] >= 'A' &&
+                            request[DNS_HEADER + at] <= 'Z')
+                                request[DNS_HEADER + at] |= 0x20;
 
         memory_fill(request, 0, DNS_HEADER);
         network_store_16(request, id);

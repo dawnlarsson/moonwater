@@ -64130,6 +64130,13 @@ static fn resolving_policy(void)
               (notes[0] & 1) && !(notes[3] & 1));
 
         memory_fill(notes, 0, sizeof notes);
+        check("and so is a name typed with capitals: the second question is "
+              "asked in lower case, which its folded echo matches",
+              dns_policy_case(1, 1, 2, (string_address)"Folded.Example.COM",
+                              notes, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+
+        memory_fill(notes, 0, sizeof notes);
         check("a server that answers EDNS0 with FORMERR is asked again without it",
               dns_policy_case(2, 1, 2, (string_address)"formerr.example.com",
                               notes, address_of found) == DNS_OK &&
