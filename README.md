@@ -341,6 +341,26 @@ USB has settled, and a /root it takes later with no policy of its own; a lock th
 be written to /root, or finds a policy there it cannot read (which it does not write over), is in
 force from /run until the machine restarts, and `device` says why.
 
+An installed machine takes a newer build from a stick without starting it. `sh build.sh
+--usb-update DIR` copies the image onto the FAT stick mounted at DIR as
+`moonwater/bootx64.efi` (`bootaa64.efi`, `bootriscv64.efi`), with its SHA-256 beside it,
+erases nothing and says the build it wrote; copying `dist/bootx64.efi` to that path on any
+FAT stick by hand does the same, and a stick written to start a machine serves too. With it
+plugged in, `moonwater setup` names the build it carries beside the one running (a newer
+build, the same, an older one), and `moonwater setup update usb` asks and writes it over the
+install: the image is judged by its bytes (an EFI application for this machine, whole, naming
+its build, and the sum beside it when there is one) on the stick, again before anything on the
+disk changes and again as the copy, which is read back from the disk unmounted before it is the
+one that starts. The disk keeps its data and its settings, the build it had is kept as
+`\EFI\moonwater\previous.efi`, and `reboot` starts the new one. `moonwater setup rollback`
+starts the build kept from before again, and a second rollback undoes the first. The loader is
+only ever replaced by a rename from a copy that is whole and synced, so a power cut at any
+moment of either leaves the build it had or the new one, whole. A build that does not start at
+all is got past from the firmware's boot menu or shell, which can start `previous.efi`, or from
+any Moonwater stick, whose session runs `setup rollback` too. A stick the device policy holds
+is not read. Nothing checks who made a build: root with a stick can write any image that passes,
+as `setup install` always could (`OUT-D5` in .github/SECURITY.md).
+
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, display, input, taskbar, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
 listed at the left and the rows of the one chosen at the right, each row a setting a

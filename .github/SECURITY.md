@@ -36,7 +36,8 @@ never a pass.
 6. **Physical disk or image access:** somebody who can read or replace what is
    on the disk or the stick the machine boots from while it is off.
 7. **Supply chain and update:** a changed source, firmware blob, trust anchor,
-   package or update image that the build or `setup update` takes in.
+   package or update image that the build, `setup update` or `setup update usb`
+   takes in.
 8. **Compromised program:** a program of a bowl, or one started by the shell,
    that has been taken over and now acts as its own user, with whatever doors
    (sockets, FIFOs, files, ioctls) the machine leaves open to it.
@@ -376,6 +377,36 @@ attacker gets its invariants here once there is a lane that proves them.
   for SSIDs, `usb_shown`/`usb_key` for USB strings, `link_name_good` for peer
   names, `name_valid` for the machine name, `host_plain_line` for an image's
   build). Found and fixed 2026-10-26 (MW-2026-030).
+- **OUT-D5, a build from a stick is taken by its bytes, and nobody vouches for
+  them (attackers 5, 6 and 7; `moonwater setup update usb` and `setup
+  rollback`, src/sh/host.c).** What is checked before a stick's build is written
+  over the disk the machine starts from: the command is root's, as every verb
+  that changes the machine is, and at a terminal it asks for yes (a script says
+  yes in its words); the stick is on a USB device the device policy lets in
+  (`host_stick_let`: every device on its sysfs path authorized by the kernel
+  and let in by `usb_judge`, its storage interface by `usb_interface_let`, so a
+  device the policy holds is not mounted even in the moments the kernel has it
+  configured; a disk on no USB bus is not the policy's); the image is a PE32+
+  EFI application whose header names this machine, that runs as far as its own
+  sections say and that names a build, its build read from its bytes and never
+  from a file name (`host_image_fit`), judged when the sticks are looked at,
+  again once mounted for the write, before anything on the system partition
+  changes (the update's first step), and again as the copy on the disk; the
+  copy is the stick's bytes but for the settings slots, read back from the disk
+  unmounted; and where the stick carries a SHA-256 beside the image (`build.sh
+  --usb-update` writes one) the image is that sum. The sum is the stick's word
+  about its own bytes: it catches a copy that went wrong, not a stick made to
+  lie. **Who made the build is not checked.** Moonwater has no signing key for
+  its images (the kernel is not signed, and Secure Boot has to be off to start
+  it), so nothing is verified against one: anybody with root and a stick can
+  put any image that passes the checks above on the disk, as `setup install`
+  and `setup update` always could with whatever image the session started
+  from. The disk keeps its data and its settings (OUT-D1 is unchanged: the new
+  build boots the disk as its own because it carries the disk's medium), and
+  the build it had is kept as `\EFI\moonwater\previous.efi`, which `setup
+  rollback` starts again by the same written-beside, synced, read-back and
+  renamed steps; a build that does not start at all is got past by the
+  firmware starting `previous.efi` from its boot menu or shell, or by a stick.
 - **OUT-D3, unprivileged user namespaces stay as the kernel has them:** bowls
   need them, no tool here creates one otherwise, and `user.max_user_namespaces`
   0 would take them from the test harnesses on the same kernel; a kiosk tier
@@ -1015,6 +1046,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Secrets, boot choice | `history_secret_line` rows including what the denylist does not see (`CHECK_bowl`); `link group NAME -` and `wifi add` at a terminal (`moonwater_cli`, `link`); the tight tier's refusal of both argument forms (`CHECK_bowl` again at `MOONWATER_STRICT` 2); `host_link_external`, `host_disk_external` failing closed and `host_lone_taken` (`CHECK_bowl`); a fixed NVMe install still taken and another build still asked about (`install` lane) | a USB install in a guest (found only when it enumerates before the census, racy in QEMU); the `removable` files of a real PCI port need hardware |
 | USB devices (USB-D1) | `moonwater_cli` over a sysfs of files: what lock keeps (classes, places, a long serial's hash, nothing fixed, a device behind an unfixed hub not fixed), a held device configured and kept as its classes, held, allow, deny, ambiguity, class, a known stick grown a keyboard held, an old `-@PORT` pin read and rewritten, places across renumbered buses, a no-serial clone of a hashed serial held, a lock that cannot be written, or a policy that cannot be read and is not written over, in force from `/run`, a bounded wait for a held lock, a failing default logged, unlock with the deny kept, the file's grammar and its 64-rule cap, the watcher alone and ending, hostile product and serial spelled with no control byte anywhere (`cli` lane); the `usb` lane against a booted kernel with QMP hot-plug: a stick held with no SCSI host or disk, a keyboard with no input device, allow PORT, class storage, the deny across unlock and again at a replug, hostile serials, the policy read at a second boot from an install (33 rows, 23 red on an image without it), and with `MOONWATER_USB_TIER` a `sec_host_locked` image's first boot: every device held from the start, the lock taken once USB has settled keeping the tablet and the keyboard as hid, a later stick held, then an install of the tier booted not from its disk so that it asks, the disk (left with no policy) taken after the session's lock and locked, usb saying lock with the watcher running and the kernel at 0 0 0 (13 rows; 46 of 46 on images built with 4db51897, 42 of 46 on images from before this review's fixes: the long serial's hash, the hid rules and two of the ask rows) | a real port's `removable` and ACPI's hard-wired ports (QEMU says unknown for every port, so what `authorized_default=2` admits as internal and the fixed exemption are not proved in a guest); hostile descriptors (fuzzed apart); the boot window without the command line word; Thunderbolt and other buses |
 | Terminal, JSON reader | `term_fuzz` (grid, write cuts, resizes, keys, pointer between writes; the cursor stays on the grid; it fails on a planted clamp bug) and `bowl_json_fuzz`, ASan/UBSan, smoke in `term` and `bowl` | KERNEL_MODE emulator build, MSan |
+| Updates from a stick (OUT-D5) | `CHECK_storage_format` on three machines, on a system partition that is a directory: the judge (this machine's image taken and its build read; another machine's, a PE32, a console program, no optional header, no PE header, one cut short of its sections, a header shorter than a page, no build named, a FIFO: each refused for what it is, and an update from it changes no byte of the partition); the order of builds (a later link, the same build, a count within one second, two zones of the table, words that say no moment); the stick's file (the loader of a `--usb` stick, the update file of a plain FAT stick, the update file first, nothing, another machine's); which stick an update takes (held, refused, the disk's own build, two at once); the sum beside it (none, its own, another, words that are none); an update and a rollback whole (the build, the one kept byte for byte, the settings a generation on, nothing staged, a second rollback undoing the first, none kept, one kept for another machine); and both cut after every step and inside each copy, the loader whole and the old build or the new as the switch says, the next write ending as an uncut one; `moonwater_cli`: a stick the kernel holds and one the policy denies said to be held and not read, one let in looked at, the words of `update usb` and `rollback` | the install lane's guest scene (boot the install, plug a stick with a newer build, update, reboot into it with the data kept) and its power cuts on these steps were not run where this was written: no image could be built there; FAT's own rename across a cut is the guest's to prove, a directory here is not FAT; no signature |
 | Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
 | Faults, resources | seccomp entropy failure; partial I/O, EINTR, ENOSPC, deadline and clock-jump faults; TLS 1.2/1.3 handshake writes and KeyUpdate replies share the operation deadline, including buffered writev batching; deferred read budgets are clamped to the enclosing body deadline; buffered payload cannot escape that body deadline; ordinary HTTP/TLS writes use one bounded nonblocking slow path, and queued whole writes need no clock or poll; interrupted output writev resumes its spans under one absolute retry budget, without a clock on uninterrupted writes; fatal TLS protocol errors spend both keys and cannot publish later buffered data (unexpected record types swept over both versions and sequence boundaries); descriptor and mmap exhaustion; once-armed `memory_reserve`, writev and socket faults mid-path; namespaces with netem (`sh test/run netem`) | SNTP allocation faults; a writev syscall that itself blocks on a disk or pipe is outside the interruption budget |
 | Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies, `rp_filter` and the ARP settings (`sh test/run boot`, `net_sysctl`) | the `rp_filter` and ARP row of the boot lane has not run on an image yet |
@@ -1320,6 +1352,17 @@ architecture gate above.
   not found. CHECK_waterlink_service needs a loopback IPv6 socket and a
   kernel of 6.10 or later inside a user namespace (the staged publish links
   an unnamed file by its descriptor).
+- **Update images are not signed (OUT-D5).** A build from a stick is taken by
+  its shape and the build it names, the stick by the device policy, the bytes
+  by the sum the stick carries; nothing ties an image to whoever builds
+  Moonwater, so root with a stick can install any image, as `setup install`
+  could. A signing key for builds, its signature checked before the write and
+  an unsigned image refused unless the person says so in words, is what closes
+  it, and there is none yet. Nor has the install lane run on these steps: its
+  power cuts kill a guest part way through `setup update`, whose steps `setup
+  update usb` and `setup rollback` now share, and no image could be built
+  where they were written, so neither that lane nor a guest scene of the update
+  from a stick has run on them.
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.
