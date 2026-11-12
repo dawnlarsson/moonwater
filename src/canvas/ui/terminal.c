@@ -693,15 +693,17 @@ static b32 terminal_bar_takes(void)
         return ui_scroll_reach(&kit, &terminal.bar, ui_kit.pointer_x, ui_kit.pointer_y);
 }
 
-// The bar's pointer, through the kit's own (ui_scroll_pointer): a press, a release or a motion at x, y in the window.
+// The bar's pointer, through the kit's own (ui_scroll_bar): a press, a release or a motion at x, y in the window.
 // A button's event carries its code and no place, so a press passes where the pointer is. Answers whether the bar took
-// it, and sets moved when the view or the bar's lit state went somewhere (the bar is drawn again).
+// it, and sets moved when the view or the bar's lit state went somewhere (the bar is drawn again). The view is where the
+// body is, to the nearest row, and the body is left as the bar has it: a thumb pulled past an end is the grid's stretch
+// (terminal_grid_pull) while it is held, and springs home in the body's frames (terminal_bar_step) when it is let go.
 static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to moved)
 {
         unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
         unsigned int lit;
-        int scroll, most;
+        b32 taken;
 
         *moved = false;
         if (!terminal_extent(&first, &shown, &total) || total <= shown)
@@ -711,15 +713,11 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to
         }
         terminal_bar_place(first, shown, total);
         lit = terminal_bar_key();
-        scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down);
+        taken = ui_scroll_bar(&kit, &terminal.bar, type, x, y, down);
         *moved = terminal_bar_key() != lit;
-        if (scroll < 0)
-                return false;
-        most = (int)(total - shown) * (int)terminal.cell_h;
-        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
-        *moved = terminal_view_put((unsigned int)(scroll / (int)terminal.cell_h)) || *moved;
-        terminal_bar_follow();
-        return true;
+        if (taken)
+                *moved = terminal_bar_out() || ui_body_going(&terminal.bar.body) || *moved;
+        return taken;
 }
 
 static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from);
@@ -3038,6 +3036,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         if (!s->dragging)
                                 return false;
                         s->dragging = false;
+                        ui_kit_shape = WINDOW_POINTER_ARROW;
                         if (terminal_selecting())
                                 terminal_copy(WINDOWS_CLIP_PRIMARY);
                         address_to dirty = true;
@@ -3060,6 +3059,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         ui_select_start(s, place, clicks, true);
                 }
                 s->dragging = true;
+                ui_kit_shape = WINDOW_POINTER_TEXT; // a selection being dragged wears the text pointer, from its press to its release
                 s->edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
                 terminal.sel.handles = terminal.sel.bar = false;
                 address_to dirty = true;
@@ -3068,6 +3068,8 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         if (event->type == WINDOW_EVENT_MOTION && s->dragging)
         {
                 p64 to = ui_select_track(&kit, s, terminal_at_x(), terminal_at_y(), terminal_at_x(), terminal_at_y(), 0, false);
+
+                ui_kit_shape = WINDOW_POINTER_TEXT; // a motion made it the arrow again (ui_kit_track)
 
                 if (to != terminal.sel_active)
                 {

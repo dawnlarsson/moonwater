@@ -11816,7 +11816,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
 #define UI_SLIDER_VERTICAL 4 // stood on its end, with no label or number: the mixer's strips (ui_slider_draw turns it)
-#define UI_SLIDER_BARE 8     // a track and its thumb alone, in the middle of its box: no label, no number, no spot (a list row's slider)
+#define UI_SLIDER_BARE 8     // a track and its thumb alone, in the middle of its box: no label and no number (a list row's slider)
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
 #define UI_TABS_VERTICAL 2 // the segmented strip stood on its end: a column of items h tall, the pip travelling along y
@@ -11856,8 +11856,6 @@ struct ui_control
         struct ui_slide slide;
         b32 sliding, bounce;
         int hover_x;                       // where the pointer hovers over it, device pixels, or -1
-        struct ui_tween spot;              // the spot's opacity
-        int spot_x;
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
         struct ui_text address_to edit;    // a field's text: the engine's widget, which types, selects, pastes and draws it
@@ -11898,7 +11896,6 @@ static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE 
 static fn ui_control_start(struct ui_control address_to c)
 {
         ui_tween_put(&c->extent, c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
-        ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
         for (int k = 0; k < UI_ITEMS; k++)
                 ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
         if (c->kind == UI_PROGRESS && c->value >= 0)
@@ -12404,7 +12401,7 @@ static fn ui_radios_choose(struct ui_control address_to c, int item)
         kit's unregistered properties do. Hovered, a ghost previews where a
         press would land (the accent at 40% on the control-off); a press slides
         there and lands with a squish; a drag follows the hand and stretches
-        past an end like a band; the spot under the hand fades in .3s. Stood on its end (UI_SLIDER_VERTICAL) it is the same, turned:
+        past an end like a band. Nothing is drawn round the thumb or under the hand: no halo, no glow. Stood on its end (UI_SLIDER_VERTICAL) it is the same, turned:
         see ui_slider_point.
 */
 static b64 ui_slider_ratio(const struct ui_control address_to c, b64 value)
@@ -12482,14 +12479,6 @@ static fn ui_slider_fill(struct ui address_to ui, const struct ui_control addres
                 ui_kit_fill(ui, &box, argb, clip);
         else
                 ui_kit_fill_in(ui, box, argb, clip, sum);
-}
-
-// The press's place along a slider as spot_x keeps it: logical, from the left, or from the bottom of a stood one.
-static int ui_slider_spot(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
-{
-        if (c->variant & UI_SLIDER_VERTICAL)
-                return c->y + c->h - y * 100 / ui->scale;
-        return ui_point(x, ui_dev(ui, c->x), ui_dev(ui, c->w)) * 100 / ui->scale - c->x;
 }
 
 // A box's across edges taken from a bar's, so a ghost runs along the bar it is in.
@@ -12590,28 +12579,6 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 int turn = vertical ? c->squish_origin : ui_rtl() ? -c->squish_origin : c->squish_origin;
 
                 origin = turn > 0 ? zero : turn < 0 ? far : ui_slider_point(vertical, zero, span / 2);
-        }
-
-        // The spot under the hand: the press's place along the track, across the bars' middle (a flat one's is 24 above the row's bottom).
-        {
-                b64 spot = ui_kit_tween(&c->spot);
-
-                if (spot > 0)
-                {
-                        // spot_x is the press's logical place along the slider: scaled with the rest, not added in device pixels as it was.
-                        b32 sa = vertical ? zero - ui_q8(ui, c->spot_x) : ui_q8(ui, c->x + c->spot_x), sc = vertical || bare ? mid : ry + rh - ui_q8(ui, 24);
-
-                        // A radial ellipse 180 by 80 (stood on its end, 80 by 180), the accent at its middle to nothing at 70%: rings of it, outermost first.
-                        for (int ring = 7; ring >= 0; ring--)
-                        {
-                                b32 hw = ui_q8(ui, 90) * (ring + 1) / 8 * 7 / 10, hh = ui_q8(ui, 40) * (ring + 1) / 8 * 7 / 10;
-                                struct ui_box e = ui_slider_box(vertical, sa - hw, sa + hw, sc - hh, sc + hh, hw, hh);
-                                unsigned int share = (unsigned int)((spot * 100 + UI_HALF) >> UI_Q) * 100 / 8 / 100;
-
-                                e = ui_box_transform(e, sx, sy, ox, oy, tx, ty);
-                                ui_slider_fill(ui, c, e, ui_mix(accent, share ? share : 1, 0), null, sum);
-                        }
-                }
         }
 
         // The bars: the fill from the low end up to the thumb, the rest from the thumb to the high end, the thumb being the gap between them.
@@ -13408,7 +13375,6 @@ static fn ui_control_place(struct ui_control address_to c)
                 c->extent.placed = 0;
         else
                 ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : ui_progress_whole(c->value)) : c->on || (c->kind == UI_INPUT && c->focused) ? UI_ONE : 0, UI_TWEEN_NUMBER);
-        ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
         for (int k = 0; k < 3; k++)
                 c->ripple[k].live = 0;
         ui_spring_stop(&c->squish.x);
@@ -13688,8 +13654,6 @@ static void ui_kit_let_go_held(struct ui_control address_to c)
         ui_squish_release(&c->squish);
         if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
                 ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
-        if (c->kind == UI_SLIDER)
-                ui_kit_number_to(&c->spot, 0, 300, &ui_ease); // the press's ring goes out, as a release's does
         if (c->bend > UI_REST_SCALE && !ui_kit.motion)
                 ui_spring_go(&c->held_squish, c->bend, 0);
         c->bend = c->bend_target = 0;
@@ -13789,7 +13753,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->moved = 1;
                                 c->sliding = 0;
                                 c->value = ui_slider_at(ui, c, x, y);
-                                c->spot_x = ui_slider_spot(ui, c, x, y);
                                 changed = c;
                                 // Past an end the bars are stretched like a band, by how far past; the release springs them home.
                                 over = pos < lo ? ui_q(lo - pos) : pos > hi ? ui_q(pos - hi) : 0;
@@ -13911,8 +13874,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                         c->value = to;
                                 if (c->value != from || c->sliding)
                                         changed = c;
-                                c->spot_x = ui_slider_spot(ui, c, x, y); // logical, as the motion's is
-                                ui_tween_put(&c->spot, UI_Q2(10), UI_TWEEN_NUMBER);
                                 c->hover_x = -1; // v(B): the hover preview is over till the pointer moves again
                         }
                         break;
@@ -14023,7 +13984,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->squish_origin = 0;
                         c->bend = c->bend_target = 0;
                         c->moved = 0;
-                        ui_kit_number_to(&c->spot, 0, 300, &ui_ease);
                         ui_squish_release(&c->squish); // pressSpring(B, 0, vy, 0, vyT): the drag's vertical press only
                 }
                 // The release is where the pointer is: a press dragged off the control and let go there is not hovered
@@ -14833,10 +14793,12 @@ static void ui_scroll_hold(struct ui_scroll address_to s)
 }
 
 /*
-        The pointer on a scrollbar: motion (a held thumb follows the hand; hover lights it), a press (on the thumb it is
-        held, on the track it pages) and a release. A finger (touch) takes the bar within its reach (ui_scroll_reach) and
-        the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was not its own
-        (a press off it, a motion with nothing held); a press on it that pages answers the new scroll. A held thumb is the
+        The pointer on a scrollbar: motion (a held thumb follows the hand; hover lights it), a press and a release. A press
+        on the thumb holds it where it was pressed. A press on the track off the thumb puts the thumb's middle under the
+        pointer and holds it there, so the content jumps to the place pressed and the hand has the thumb from the press on
+        (it did page a view towards the press, and held nothing). A finger (touch) takes the bar within its reach
+        (ui_scroll_reach) and the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was
+        not its own (a press off it, a motion with nothing held). A held thumb is the
         body's track: a place past an end is drawn by the rubber band, and the thumb goes off its track with it. The answer
         is never past the top, whatever the band draws and wherever a page would land: a negative one is "not the bar's" to
         every caller, which would send the press to what lies under the track and leave a thumb pulled past the top held there.
@@ -14872,19 +14834,24 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 s->held = 0;
                 return !was ? -1 : s->scroll < 0 ? 0 : s->scroll;
         }
-        if (!on_track)
+        // A finger beside the bar but off its thumb is on the content it means to drag or press, not the track: only a pointer's press
+        // on the track is the bar's.
+        if (!on_track || (touch && !on_thumb))
                 return -1;
-        if (on_thumb)
+        s->held = 1;
+        s->grab = on_thumb ? y - top : length / 2;
+        ui_scroll_hold(s);
+        if (!on_thumb && track - length > 0)
         {
-                s->held = 1;
-                s->grab = y - top;
-                ui_scroll_hold(s);
-                return s->scroll;
+                // The thumb's middle goes under the pointer, as far as its track lets it: a press alone pulls nothing past an end.
+                b64 to = (b64)(y - s->grab - at) * rest / (track - length);
+
+                to = to < 0 ? 0 : to > rest ? rest : to;
+                ui_body_track(&s->body, (to << UI_Q) - s->body.raw, ui_kit_time());
+                s->precise = 0;
+                s->scroll = ui_body_px(&s->body);
         }
-        // A finger beside the bar but off its thumb is on the content it means to drag or press, not the track: only a pointer pages.
-        if (touch)
-                return -1;
-        return y >= top ? s->scroll + s->view : s->scroll > s->view ? s->scroll - s->view : 0;
+        return s->scroll < 0 ? 0 : s->scroll;
 }
 
 /*
@@ -14972,6 +14939,24 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, long speed)
         ui_body_let_go(&s->body, (b64)speed * UI_ONE, ui_kit_time(), s->scale, !s->precise);
         s->precise = 0;
         s->scroll = ui_body_px(&s->body);
+}
+
+/*
+        The pointer on a region's bar, as every region takes it (ui_scroll_pointer's answer put to use): a thumb pulled past an end
+        keeps the pull, which the body draws as its rubber band and the region as its stretch, and the thumb's release lets the body
+        go, so the pull springs home; anywhere else the region rests at the scroll the bar asked for. True when the event was the bar's.
+*/
+static b32 ui_scroll_bar(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
+{
+        b32 held = s->held;
+        int scroll = ui_scroll_pointer(ui, s, type, x, y, down);
+
+        if (scroll >= 0 && s->body.state != BODY_TRACK)
+                ui_scroll_set(s, scroll);
+        // Only a thumb that was held lets go: a finger dragging the content has the region tracking too, and its own release throws it.
+        if (type == WINDOW_EVENT_BUTTON && !down && held && s->body.state == BODY_TRACK && !s->precise)
+                ui_scroll_let_go(s, 0);
+        return scroll >= 0;
 }
 
 // The trackpad's hand let go (lifted, or a gap with no report): its release is the fit over its last reports, and it throws on it. A
@@ -17061,15 +17046,9 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         for (int k = 0; k < v->scrolls && (motion || button); k++)
         {
                 struct ui_scroll address_to s = &v->scroll[k];
-                b32 lit = s->hover, held = s->held;
-                int to = ui_scroll_pointer(ui, s, (int)event->type, x, y, down);
+                b32 lit = s->hover;
 
-                // A thumb that pulls its region past an end keeps the pull, and its release lets the region go, as a page's bars do.
-                if (to >= 0 && s->body.state != BODY_TRACK)
-                        ui_scroll_set(s, to);
-                if (button && !down && held && s->body.state == BODY_TRACK && !s->precise)
-                        ui_scroll_let_go(s, 0);
-                asks |= to >= 0 ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit != s->hover ? UI_VIEW_DRAW : 0;
+                asks |= ui_scroll_bar(ui, s, (int)event->type, x, y, down) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit != s->hover ? UI_VIEW_DRAW : 0;
         }
         if (asks & UI_VIEW_TAKEN)
                 return asks;

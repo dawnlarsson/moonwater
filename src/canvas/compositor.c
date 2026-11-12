@@ -2976,8 +2976,8 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 
 /*
         The dynamic cursor (`moonwater canvas cursor style dynamic`, and every pointer a touch uses) is one filled shape with a line at its
-        edge and nothing in it: a circle of CP_DYN_RADIUS cells, which over text is a rounded rectangle in a terminal cell's proportions
-        (one wide, two tall), the one easing into the other. A fast hand stretches it along its motion and squashes it across by as much,
+        edge and nothing in it: a circle of CP_DYN_RADIUS cells, which over text is a rounded rectangle a touch taller than a terminal
+        cell (one wide, two and a half tall), the one easing into the other. A fast hand stretches it along its motion and squashes it across by as much,
         so its area stays: nothing under CP_DYN_SLOW logical pixels a second, all of CP_DYN_STRETCH from CP_DYN_FAST up, and it lets go
         CP_DYN_IDLE_NS after the last motion. Its cell is CP_DYN_CELL square with the pointer at its middle, so the plane holds it at twice
         its size with the longest stretch.
@@ -2989,7 +2989,7 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 #define CP_DYN_CELL 32
 #define CP_DYN_RADIUS 8
 #define CP_DYN_TEXT_W 4         // the rectangle over text: its half width, half height and corner radius, in cells
-#define CP_DYN_TEXT_H 8
+#define CP_DYN_TEXT_H 10
 #define CP_DYN_TEXT_R 2
 #define CP_DYN_SLOW 1500
 #define CP_DYN_FAST 6000
@@ -17358,13 +17358,16 @@ static void compositor_motion(void)
         // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
         // the shape its client asked for with wp_cursor_shape, or the program's controls publish (the arrow when it has none).
         {
-                unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 ? 0
+                // A window a button is held in (compositor.grab) has the pointer for as long as it is held: its shape is worn wherever the
+                // hand has gone, off the window and over another included, so a selection dragged past its window's edge keeps its pointer.
+                int held = compositor.resize < 0 && compositor.drag < 0 ? compositor.grab : COMPOSITOR_NONE;
+                unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 || held >= 0 ? 0
                                     : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
-                int of = compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? under : COMPOSITOR_NONE;
+                int of = held >= 0 ? held : compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? under : COMPOSITOR_NONE;
                 int asked = of >= 0 ? compositor_asked_shape(of) : -1;
 
                 compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
-                                          : compositor.drag >= 0 || under < 0 ? CP_ARROW
+                                          : compositor.drag >= 0 ? CP_ARROW
                                           : zone ? compositor_cursor_by_edges[zone & 15]
                                           : asked >= 0 ? (unsigned int)asked
                                           : CP_ARROW;

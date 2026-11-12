@@ -124388,7 +124388,54 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &mouse_at, &dirty);
                 terminal_deliver(-1, &mouse_down, &dirty);
                 check("pointer: a mouse 8 pixels left of the bar is the grid's, and takes no thumb", !terminal.bar.held);
-                terminal_deliver(-1, &mouse_up, &dirty);
+                // That press began a selection: it wears the text pointer from its press, through its drag, to its release.
+                {
+                        b32 pressed = ui_kit_shape == WINDOW_POINTER_TEXT, dragged;
+
+                        ui_kit_shape = WINDOW_POINTER_ARROW; // what a motion makes it before the terminal has the event (ui_kit_track)
+                        mouse_at.a -= 40 * scale;
+                        terminal_deliver(-1, &mouse_at, &dirty);
+                        dragged = ui_kit_shape == WINDOW_POINTER_TEXT;
+                        terminal_deliver(-1, &mouse_up, &dirty);
+                        check("pointer: a selection dragged on the grid wears the text pointer from its press, and the arrow again when it is let go",
+                              pressed && dragged && ui_kit_shape == WINDOW_POINTER_ARROW);
+                }
+                // A mouse's press on the track off the thumb: the thumb goes there and is held (the view jumps to the top, the press being
+                // at the track's top). Pulled above the track the grid stretches, the view still the top; let go, it springs home.
+                {
+                        b64 kept_now = ui_kit.now, kept_clock = ui_kit.test_clock;
+                        b32 jumped, pulled, home;
+                        int frames = 0;
+
+                        ui_kit.now = ui_kit.test_clock = 7000000000000ll;
+                        terminal_view_live();
+                        terminal_extent(&first, &shown, &total);
+                        terminal_bar_place(first, shown, total);
+                        mouse_at.a = terminal.bar.x + 5 * scale, mouse_at.b = terminal.bar.y + (UI_CLOSE_BOTTOM + 2) * scale;
+                        terminal_deliver(-1, &mouse_at, &dirty);
+                        terminal_deliver(-1, &mouse_down, &dirty);
+                        terminal_extent(&first, &shown, &total);
+                        jumped = terminal.bar.held && first == 0 && terminal_grid_pull() == 0;
+                        mouse_at.b = terminal.bar.y - 60 * scale;
+                        ui_kit.now += 16666667ll, ui_kit.test_clock = ui_kit.now;
+                        terminal_deliver(-1, &mouse_at, &dirty);
+                        terminal_extent(&first, &shown, &total);
+                        pulled = terminal.bar.held && first == 0 && terminal_grid_pull() < 0 && ui_body_going(&terminal.bar.body);
+                        terminal_deliver(-1, &mouse_up, &dirty);
+                        while (ui_body_going(&terminal.bar.body) && frames++ < 600)
+                        {
+                                ui_kit.now += 16666667ll, ui_kit.test_clock = ui_kit.now;
+                                terminal_bar_step();
+                        }
+                        terminal_extent(&first, &shown, &total);
+                        home = !terminal.bar.held && frames > 0 && frames < 600 && first == 0 && terminal_grid_pull() == 0;
+                        check("pointer: a mouse's press on the track off the thumb puts the thumb there and holds it: the view jumps to the place pressed", jumped);
+                        check("pointer: the thumb pulled above its track stretches the grid, as a finger's pull past the oldest line does", pulled);
+                        check("pointer: let go there, the stretch springs home and the grid rests on its oldest line", home);
+                        ui_kit.now = kept_now, ui_kit.test_clock = kept_clock;
+                        terminal_view_live();
+                        terminal_bar_follow();
+                }
                 terminal_select_clear();
                 terminal_view_live();
         }
@@ -128072,13 +128119,14 @@ static void check_compositor_cursor_style(void)
     check("cursor style: over text the shape is on its way to the rectangle", compositor.cursor.morph.to == 256 && compositor.cursor.morph.at != 0);
     compositor.cursor.morph.at = 0;
     compositor_pointer_now(&other);
-    check("cursor style: which is a terminal cell's shape, one wide and two tall, with round corners",
-          other.hw == 4 * 256 && other.hh == 8 * 256 && other.c == 2 * 256);
+    check("cursor style: which is a touch taller than a terminal cell, one wide and two and a half tall, with round corners",
+          other.hw == 4 * 256 && other.hh == 10 * 256 && other.c == 2 * 256);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: it is filled, 4 from the middle across and 8 up and down, clear past that and at its corner",
-          plane[32 * 64 + 32] == fill && plane[38 * 64 + 34] == fill && (plane[32 * 64 + 36] >> 24) && plane[32 * 64 + 37] == 0 &&
-              (plane[40 * 64 + 32] >> 24) && plane[41 * 64 + 32] == 0 && plane[40 * 64 + 36] == 0);
+    check("cursor style: it is filled, 4 from the middle across and 10 up and down, clear past that and at its corner",
+          plane[32 * 64 + 32] == fill && plane[40 * 64 + 34] == fill && (plane[32 * 64 + 36] >> 24) && plane[32 * 64 + 37] == 0 &&
+              (plane[42 * 64 + 32] >> 24) && plane[43 * 64 + 32] == 0 && plane[42 * 64 + 36] == 0 && (plane[22 * 64 + 32] >> 24) &&
+              plane[21 * 64 + 32] == 0);
     compositor.cursor.shape = CP_ARROW;
     compositor.cursor.morph = (struct compositor_sway){0, 0, 0};
 
@@ -149681,9 +149729,16 @@ static fn check_kit_place(void)
                 bar.scroll = scroll;
                 dragged = dragged && pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false, 0) == 400 && !bar.held &&
                           pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false, 0) == -1;
-                paged = pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true, 0) == 600 &&
-                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true, 0) == 200 &&
-                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true, 0) == -1;
+                /* A press on the track off the thumb (the thumb is at 90 to 130): its middle goes under the pointer, 150, which is the
+                   scroll 600, and it is held there, so the hand drags on from the press; near the track's end the thumb stops at the end. */
+                paged = pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 150, true, 0) == 600 && bar.held &&
+                        ui_scroll_thumb(&ui, &bar, &top, &length) && top + length / 2 == 150 &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 104, 170, true, 0) == 700 &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 170, false, 0) == 700 && !bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 208, true, 0) == 800 && bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 208, false, 0) == 800 && !bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true, 0) == -1 && !bar.held;
+                ui_body_set(&bar.body, 200ll << UI_Q, 1000ll << UI_Q, 400ll << UI_Q, 0);
                 /* A finger's reach: UI_TARGET each way of the 10-wide track at 100, so 90 is the bar's and 60 is not. A finger on the thumb
                    within it holds the thumb; a finger on the track off the thumb is on the content (it is not paged, as a pointer's press is),
                    and a mouse's 90 is not the bar's. */
@@ -149702,7 +149757,8 @@ static fn check_kit_place(void)
                 drawn = drawn && pixels[80 * 600 + 105] == paper;
                 check("kit scrollbar: the thumb is the view's share of the track where the scroll puts it, 24 at least, none when all shows",
                       geometry && none && least);
-                check("kit scrollbar: dragged it scrolls by the content's share of the move, and a press on the track pages a view", dragged && paged);
+                check("kit scrollbar: dragged it scrolls by the content's share of the move", dragged);
+                check("kit scrollbar: a press on the track puts the thumb's middle under the pointer and holds it, to drag on from there, and a finger's is not the bar's", paged);
                 {
                         // Within a view of the top a page lands on the top, and a thumb pulled above its track answers the top while it is held
                         // and when it is let go: neither answer is the negative one that says the event was not the bar's.
@@ -149718,7 +149774,7 @@ static fn check_kit_place(void)
                                  pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, -30, false, 0) == 0 && !bar.held;
                         bar.scroll = 0;
                         ui_body_set(&bar.body, 200ll << UI_Q, 1000ll << UI_Q, 0, 0);
-                        check("kit scrollbar: a press on the track within a view of the top pages to the top, and is the bar's", to_top);
+                        check("kit scrollbar: a press on the track nearer its top than half a thumb lands on the top, and is the bar's", to_top);
                         check("kit scrollbar: a thumb pulled above its track answers the top, held and let go, and is the bar's", pulled);
                 }
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
@@ -152443,14 +152499,21 @@ static fn check_kit_view_scroll(void)
         check("kit view scroll: and its bar's thumb is painted over them, where its place puts it", view_scroll_pixels[75 * 200 + 195] != 0xff000012u &&
                                                                                                    view_scroll_pixels[130 * 200 + 195] == 0xff000013u);
 
-        // The bar: a press on its track under the thumb pages; reading from the right it is down the other edge.
+        // The bar: a press on its track under the thumb puts the thumb there and holds it; reading from the right it is down the other edge.
         ui_scroll_set(s, 0);
         view_scroll_send(WINDOW_EVENT_MOTION, 0, s->x + UI_SCROLL_WIDTH / 2, 185);
         asks = view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
-        view_scroll_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
-        view_scroll_build();
-        check("kit view scroll: a press on its bar's track under the thumb is the view's and pages it a view down", asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) &&
-                                                                                                                     s->scroll == 150 && row[0].y == 40 - 150);
+        {
+                int thumb_top = 0, thumb_length = 0, track_at = 0, track = 0, jumped = s->scroll, held = s->held;
+
+                ui_scroll_thumb(&view_check_ui, s, &thumb_top, &thumb_length);
+                ui_scroll_track(&view_check_ui, s, &track_at, &track);
+                view_scroll_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+                view_scroll_build();
+                check("kit view scroll: a press on its bar's track under the thumb is the view's, puts the thumb there (at its end, the press being nearer the end than half a thumb) and holds it",
+                      asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && held && !s->held && jumped == ui_scroll_most(s) && jumped > 0 && s->scroll == jumped &&
+                          thumb_top + thumb_length == track_at + track && row[0].y == 40 - jumped);
+        }
         ui_kit.rtl = 1;
         view_scroll_build();
         check("kit view scroll: reading from the right its bar is down the other edge", s->x == 0 && box->x == 0 && box->w == 200);
@@ -156839,7 +156902,7 @@ static fn check_kit_states(void)
                       frames > 0 && sw.on && sweep_value(&sw.extent) == UI_ONE);
         }
 
-        // A slider pressed, dragged and let go: its spot fades to nothing and the frame goes idle.
+        // A slider pressed, dragged and let go: nothing of the press is left moving and the frame goes idle.
         {
                 struct ui_control sl;
                 int frames;
@@ -156854,8 +156917,8 @@ static fn check_kit_states(void)
                 ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_MOTION, 230, 156, false, 0);
                 ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_BUTTON, 230, 156, false, 0);
                 frames = sweep_settle(&ui, &sl);
-                check("kit states: a slider dragged and let go fades its spot and settles idle",
-                      frames > 0 && !sl.down && !sl.sliding && sweep_value(&sl.spot) == 0);
+                check("kit states: a slider dragged and let go settles idle",
+                      frames > 0 && !sl.down && !sl.sliding);
         }
 
         // A slider clicked well away from its value slides there, lands, and goes idle; it is not left sliding.
