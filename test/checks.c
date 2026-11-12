@@ -134673,8 +134673,8 @@ static void check_compositor_screen_chord(void)
         The preview's motion and shape. Entering a target it is drawn there at full strength at once; a new target (the left
         half's corner) is reached from where it is drawn, between the two half way and on the quarter exactly at the end;
         dragged off, its target is gone at once and what is drawn fades out where it was; let go on a target, it fades out
-        under the window gliding into it, over the same time. A tile's preview is square with the window's line, stronger than
-        its fill; a filled screen's is square with none. Reduced motion cuts. A glide that starts while another
+        under the window gliding into it, over the same time. A tile's preview has a window's round corners and the window's
+        line, stronger than its fill; a filled screen's has the round corners and no line. Reduced motion cuts. A glide that starts while another
         runs starts from where the window is drawn.
 */
 static void check_compositor_preview_motion(void)
@@ -134729,17 +134729,17 @@ static void check_compositor_preview_motion(void)
     ink = compositor_snap_ink();
     fill = compositor_mix(compositor_ground, ink & 0xffffffu, ink >> 24) & 0xffffffu;
     corner_at = layout_pixels[0] & 0xffffffu, fill_at = layout_pixels[30 * 256 + 64] & 0xffffffu, line_at = layout_pixels[30 * 256 + 127] & 0xffffffu;
-    check("preview shape: a half's preview is square as the window will be (its corner pixel is its line, not the wallpaper), its fill "
-          "inside, and a line stronger than the fill along its edge",
-          corner_at == line_at && corner_at != (compositor_ground & 0xffffffu) && fill_at == fill && line_at != fill &&
-              line_at != (compositor_ground & 0xffffffu));
+    check("preview shape: a half's preview has a window's round corners (its corner pixel is the wallpaper), its fill inside, and a "
+          "line stronger than the fill along its edge",
+          corner_at == (compositor_ground & 0xffffffu) && fill_at == fill && line_at != fill && line_at != (compositor_ground & 0xffffffu));
     snap_hand(1, 60, 0, 50, 40);
     compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
     compositor_preview_keep();
     compositor_damage(0, 0, 256, 256);
     compositor_present();
-    check("preview shape: filling the screen it is square and has no line: its corner pixel is the fill",
-          (layout_pixels[0] & 0xffffffu) == fill && (layout_pixels[30 * 256 + 255] & 0xffffffu) == fill);
+    check("preview shape: filling the screen it has a window's round corners and no line: its corner pixel is the wallpaper, its "
+          "edge the fill",
+          (layout_pixels[0] & 0xffffffu) == (compositor_ground & 0xffffffu) && (layout_pixels[30 * 256 + 255] & 0xffffffu) == fill);
     snap_let_go(60, 0, 50, 40);
 
     /* Let go on a target: the window glides into it and the preview fades out over the same time. */
@@ -134751,8 +134751,10 @@ static void check_compositor_preview_motion(void)
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.glide[1] && compositor.preview_fading && alpha == 100 &&
               !memory_compare(rect, half, sizeof(rect)) && compositor.preview_draw == 2);
     compositor_frame_of(1, &frame);
-    check("preview motion: the window's frame carries the fading preview, square with the window's line as the window is",
-          frame.preview[2] == 128 && frame.preview_radius == 0 && frame.preview_line == frame.line && frame.line > 0 && frame.radius == 0);
+    check("preview motion: the window's frame carries the fading preview, with a window's round corners and the line of the window, "
+          "which is square",
+          frame.preview[2] == 128 && frame.preview_radius == UI_RADIUS && frame.preview_line == frame.line && frame.line > 0 &&
+              frame.radius == 0);
 
     /* Reduced motion cuts: off a target, nothing is drawn at once. */
     snap_fresh();
@@ -134782,7 +134784,7 @@ static void check_compositor_preview_motion(void)
         A window arranged is square, as a maximized one is: a half, a quarter, the bottom half, the whole screen and the room a
         placement fills, at every scale; a floating window is round, and the line is what it was (a tile has the window's, a
         window filling its screen has none). The tile is square where it is drawn too, at its four corners and at the corners of
-        its line; its preview is square before the drop, with the line the window will have; a window torn off a tile floats
+        its line; its preview before the drop has a window's round corners and the line the window will have; a window torn off a tile floats
         and is round again; a tile resized by an inner edge stays a tile and stays square; the Super chords walk the states and
         the shape follows each; a window moved to another screen is square or round at that screen's scale; and a tile that
         glides or lands is square from its first frame.
@@ -134871,7 +134873,7 @@ static void check_compositor_tile_square(void)
     }
     check("tile square: drawn, the four corners of every tile's picture are the picture", drawn == ~0u);
 
-    // The preview of a tile and of the whole screen, at every scale: square, with the window's line for a tile and none to fill.
+    // The preview of a tile and of the whole screen, at every scale: a window's round corners, with the window's line for a tile and none to fill.
     for (unsigned int at = 0; at < array_count(corner_scales); at++)
     {
         int scale = corner_scales[at], bad = 0;
@@ -134880,15 +134882,17 @@ static void check_compositor_tile_square(void)
         compositor.scale = scale;
         snap_hand(1, 0, 60, 50, 40);
         compositor_frame_of(1, &frame);
-        bad |= !(frame.preview[2] > 0 && frame.preview_radius == 0 && frame.preview_line == square_line(scale) &&
+        bad |= !(frame.preview[2] > 0 && frame.preview_radius == UI_RADIUS * scale / 100 && frame.preview_line == square_line(scale) &&
                  frame.preview_line == frame.line && (frame.preview_edge >> 24) > 0);
         snap_hand(1, 60, 0, 50, 40);
         compositor_frame_of(1, &frame);
-        bad |= (!(frame.preview[2] > 0 && frame.preview_radius == 0 && frame.preview_line == 0 && frame.preview_edge == 0)) << 1;
+        bad |= (!(frame.preview[2] > 0 && frame.preview_radius == UI_RADIUS * scale / 100 && frame.preview_line == 0 &&
+                  frame.preview_edge == 0)) << 1;
         snap_let_go(60, 0, 50, 40);
         previews &= bad ? ~(1u << at) : ~0u;
     }
-    check("tile square: at every scale the preview of a tile is square with the window's line, and of the whole screen square with none",
+    check("tile square: at every scale the preview of a tile has a window's round corners and the window's line, and of the whole "
+          "screen the round corners and no line",
           previews == ~0u);
 
     // Torn off: a tile is square, and pulled off by its top past the slop the window floats and is round again.
@@ -135013,12 +135017,13 @@ static void check_compositor_tile_square(void)
 }
 
 /*
-        The snap preview is over every window: the one being dragged, a window above it, a glass window and the tabs of the
-        band, so where the target is stays clear under whatever lies there; and under the overlays only (the assist's thumbnails
-        and the grid's tints), which are meant to lie over it. At each place the pixel is the scene's own pixel with the tint
-        mixed over it, the scene being what the screen shows with no preview, and the tint changes no pixel outside the target.
-        Four windows, the second glass, the band, the preview on the right half held and fading, and then on two screens at
-        100 and 200 percent; and a preview that goes leaves nothing of itself behind.
+        The snap preview lies under the window being dragged, which a press raised over the rest, and over every window under
+        it, a glass one too; the tabs of the band and the overlays (the assist's thumbnails and the grid's tints) are over it.
+        Where it lies over a window under the one dragged the pixel is the scene's own pixel with the tint mixed over it, the
+        scene being what the screen shows with no preview; the window dragged and the tray's tab are their own pixels; and the
+        tint changes no pixel outside the target. Four windows, the second glass and the first dragged and on top, the band,
+        the preview on the right half held and fading, and then on two screens at 100 and 200 percent; and a preview that goes
+        leaves nothing of itself behind.
 */
 #define OVER_SIDE GLASS_SIDE
 
@@ -135048,6 +135053,9 @@ static void over_setup(unsigned int *made, unsigned int *band)
         table->glass[row] = row == 2 ? WINDOW_GLASS : 0;
         glass_paint(row, 0, 0, 100, 100, row == 1 ? 0x2060c0u : row == 2 ? 0xc04020u : row == 3 ? 0x20c060u : 0xa0a0a0u, true);
     }
+    // The first is the one dragged: a press raised it over the rest and gave it the keys.
+    compositor.stack[0] = 2, compositor.stack[1] = 3, compositor.stack[2] = 4, compositor.stack[3] = 1, compositor.stacked = 4;
+    compositor.focus = 1;
 }
 
 static void over_render(unsigned int *into)
@@ -135130,6 +135138,15 @@ static unsigned int over_compare(const unsigned int *plain, const unsigned int *
     return outside ? 0u : good;
 }
 
+// Whether every point is the plain pixel, as with no preview: what lies over the tint.
+static int over_clear(const unsigned int *plain, const unsigned int *with, const int (*points)[2], unsigned int count)
+{
+    for (unsigned int at = 0; at < count; at++)
+        if (with[points[at][1] * OVER_SIDE + points[at][0]] != plain[points[at][1] * OVER_SIDE + points[at][0]])
+            return 0;
+    return 1;
+}
+
 static void check_compositor_preview_over(void)
 {
     static unsigned int made[OVER_SIDE * OVER_SIDE], band[OVER_SIDE * OVER_SIDE], plain[OVER_SIDE * OVER_SIDE],
@@ -135147,12 +135164,12 @@ static void check_compositor_preview_over(void)
     }
     first_map = (unsigned int address_to)compositor.table;
     over_render(plain);
-    // Where each kind of thing is, in the target: the window dragged (row 1) alone, row 3 alone, row 4 alone (above the dragged
-    // one), the glass window (row 2) alone, and a tab of the band.
-    found += over_only(1, target, &points[0][0], &points[0][1]);
-    found += over_only(3, target, &points[1][0], &points[1][1]);
-    found += over_only(4, target, &points[2][0], &points[2][1]);
-    found += over_only(2, target, &points[3][0], &points[3][1]);
+    // Where each kind of thing is, in the target: row 3 alone, row 4 alone and the glass window (row 2) alone, all under the window
+    // dragged; the window dragged (row 1) alone; and a tab of the band.
+    found += over_only(3, target, &points[0][0], &points[0][1]);
+    found += over_only(4, target, &points[1][0], &points[1][1]);
+    found += over_only(2, target, &points[2][0], &points[2][1]);
+    found += over_only(1, target, &points[3][0], &points[3][1]);
     view = compositor_taskbar_view();
     {
         int x, y, w, h;
@@ -135164,7 +135181,8 @@ static void check_compositor_preview_over(void)
             found += (plain[tab_y * OVER_SIDE + tab_x] & 0xffffffu) != (compositor_ground & 0xffffffu);
         }
     }
-    check("preview over: the places are found: the window dragged, two above it, the glass window and the tray's tab in the target",
+    check("preview over: the places are found: two windows and the glass window under the one dragged, the window dragged and the "
+          "tray's tab in the target",
           found == 5);
     if (found != 5)
     {
@@ -135174,17 +135192,21 @@ static void check_compositor_preview_over(void)
 
     over_preview(1, target, 100, 0, COMPOSITOR_RIGHT);
     over_render(with);
-    held = over_compare(plain, with, target, 100, points, 5);
-    check("preview over: held, the tint is over the window dragged, a window above it, a window above that, the glass window and "
-          "the tray's tab, each the pixel it had with the tint mixed over it, and over nothing outside the target",
-          held == 5);
-    if (held != 5)
-        string_format(log, "  preview over: held: %p of 5 as they should be\n", (positive)held);
+    held = over_compare(plain, with, target, 100, points, 3);
+    check("preview over: held, the tint is over the windows under the one dragged, the glass one too, each the pixel it had with the "
+          "tint mixed over it, and over nothing outside the target",
+          held == 3);
+    check("preview over: held, the window dragged and the tray's tab are over the tint, each the pixel it has with no preview",
+          over_clear(plain, with, points + 3, 2));
+    if (held != 3)
+        string_format(log, "  preview over: held: %p of 3 as they should be\n", (positive)held);
 
     over_preview(1, target, 60, 1, COMPOSITOR_RIGHT);
     over_render(with);
-    fading = over_compare(plain, with, target, 60, points, 5);
-    check("preview over: fading, it is as faint over all five and as clear (the tint at the percent it fades to)", fading == 5);
+    fading = over_compare(plain, with, target, 60, points, 3);
+    check("preview over: fading, it is as faint over the three under the window dragged and as clear (the tint at the percent it fades "
+          "to), and the window and the tab are still over it",
+          fading == 3 && over_clear(plain, with, points + 3, 2));
 
     // A thumbnail of the assist is over the preview: its pixels are what they are with no preview.
     over_preview_off();
@@ -135218,11 +135240,11 @@ static void check_compositor_preview_over(void)
     }
     corner_scene_end(first_map);
 
-    // Two screens at 100 and 200 percent: a window on the second, above the dragged one on the first, under the tint of the
-    // second's left half, which has the second's line.
+    // Two screens at 100 and 200 percent: a window on the second, under the dragged one on the first (a press raised it), under the
+    // tint of the second's left half, which has the second's line and a window's corners at the second's scale.
     {
         static unsigned int pair[OVER_SIDE * OVER_SIDE];
-        int rect[4] = {128, 0, 64, 256}, point[1][2] = {{170, 70}}, seen, line;
+        int rect[4] = {128, 0, 64, 256}, point[1][2] = {{170, 70}}, seen, line, radius;
         unsigned int address_to mapped = corner_scene(pair, 2, 100, 200, 80);
         struct compositor_frame frame;
 
@@ -135231,15 +135253,17 @@ static void check_compositor_preview_over(void)
             check("preview over: the table is mapped for two screens", false);
             return;
         }
+        compositor.stack[0] = 2, compositor.stack[1] = 1, compositor.stacked = 2;
         over_render(scene);
         over_preview(1, rect, 100, 0, COMPOSITOR_RIGHT);
         over_render(with);
         compositor_frame_of(1, &frame);
         seen = over_compare(scene, with, rect, 100, point, 1) == 1;
-        line = frame.preview_line;
+        line = frame.preview_line, radius = frame.preview_radius;
         corner_scene_end(mapped);
-        check("preview over: on the second of two screens (at 200 percent) the tint is over its window, and has that screen's line (2 px)",
-              seen && line == 2);
+        check("preview over: on the second of two screens (at 200 percent) the tint is over a window under the one dragged, and has "
+              "that screen's line (2 px) and a window's corners there (16 px)",
+              seen && line == 2 && radius == 2 * UI_RADIUS);
     }
 }
 
@@ -135567,8 +135591,9 @@ static void check_compositor_divider_scales(void)
 }
 
 /*
-        A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
-        tinted where the grid's row lies across it.
+        The grid is over a window dragged under it, so its tiles, the targets the hand aims at, stay seen: the window being
+        moved is tinted where the grid's row lies across it. The snap preview of the tile under the hand is under the window:
+        below the row, inside the preview, the window is its own picture.
 */
 static void check_compositor_grid_drag(void)
 {
@@ -135592,8 +135617,24 @@ static void check_compositor_grid_drag(void)
     compositor_present();
     check("grid drag: the grid is up while the window is held over the top, and the window is moved with the hand",
           compositor.grid_on && compositor.drag == 2 && compositor.y[2] < 25);
-    check("grid drag: the window being moved is over the grid, not tinted by it where the row lies across it",
-          (layout_pixels[12 * 256 + 130] & 0xffffffu) == (picture & 0xffffffu));
+    check("grid drag: the grid is over the window being moved, which is tinted by it where the row lies across it",
+          (layout_pixels[12 * 256 + 130] & 0xffffffu) != (picture & 0xffffffu));
+    {
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int tile[4], rect[4], below = 0, inside = 0;
+
+        if (compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        {
+            compositor_grid_tile(screens[compositor.grid_screen], 0, tile);
+            below = tile[1] + tile[3] + 2;
+            inside = compositor_preview_shown(rect) && compositor.preview_draw == 3 && 130 >= rect[0] && 130 < rect[0] + rect[2] &&
+                     below >= rect[1] && below < rect[1] + rect[3] && below < (int)(compositor.y[2] + compositor.h[2]);
+        }
+        check("grid drag: the snap preview of the tile under the hand is under the window being moved: below the row, inside the "
+              "preview, the window is its own picture",
+              inside && (layout_pixels[below * 256 + 130] & 0xffffffu) == (picture & 0xffffffu));
+    }
     screens_hand(120, 4, -1);
     compositor.press = COMPOSITOR_NONE;
 }

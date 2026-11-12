@@ -103,8 +103,10 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
         wallpaper, up to COMPOSITOR_SNAP_PERCENT_MOST), its colour deepened till its edge reads COMPOSITOR_SNAP_READ
         (compositor_snap_ink; ui_contrast's hundredths, so 300 is 3 to 1). A thumbnail and a grid tile have the window's
         line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways. A window arranged, a tile or
-        filling its screen, is square, as the preview of it is: a tile has the window's line and a preview of one a line of
-        the tint at COMPOSITOR_SNAP_LINE percent of the tint's own strength, a window filling its screen has none.
+        filling its screen, is square: a tile has the window's line, a window filling its screen has none. The preview of
+        either has the round corners of the window being dragged, so where it lies over another window it is a window's
+        shape and not a cut through it; a preview of a tile has a line of the tint at COMPOSITOR_SNAP_LINE percent of the
+        tint's own strength, and one filling the screen none. It lies under the window being dragged (compositor_preview_lift).
 */
 #define COMPOSITOR_SNAP_PERCENT 40
 #define COMPOSITOR_SNAP_PERCENT_MOST 60
@@ -284,14 +286,16 @@ struct compositor_frame
         // picture scaled (compositor_scaled). 0 for a frame drawn at its picture's size.
         int source_w, source_h;
         // The snap preview of the window being dragged: its target's rectangle on the output (width 0 for none) and
-        // the kit's selection, 0xaarrggbb, whose alpha is the tint's (compositor_scene draws it); shaped as the window will be
-        // there, its corners' radius and its line in device pixels (0 for square, or none) and the line's ink, 0xaarrggbb.
-        // The preview is over every window and the tabs, so compositor_present takes it off the window's frame into a frame
-        // of its own after them (compositor_preview_lift); only the overlays (the grid, the assist) are over it.
+        // the kit's selection, 0xaarrggbb, whose alpha is the tint's (compositor_scene draws it); its corners' radius, the
+        // window's, and its line in device pixels (0 for none) and the line's ink, 0xaarrggbb. compositor_present takes it
+        // off the window's frame into a frame of its own after the tabs (compositor_preview_lift), which names the window's
+        // frame in preview_under, one more than its place in the list (0: the preview lies under its own frame). It is drawn
+        // under that window and what is over it, and over the windows under it; the overlays (the grid, the assist) are over it.
         int preview[4];
         unsigned int preview_ink;
         int preview_radius, preview_line;
         unsigned int preview_edge;
+        int preview_under;
         // The shared edge's indicator over this window (compositor_mark_set): the rectangle and the kit's selection.
         int mark[4];
         unsigned int mark_ink;
@@ -1430,8 +1434,9 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, int edge_line, unsigned int edge);
 
 // The frames, in order, over a ground, then the tints as compositor_preview_draw draws them: every frame's snap preview, then every frame's mark, each
-// over the scene and the frames it lies under drawn again over it (from the frame itself when it is no window, the lifted preview, which has no area
-// and draws nothing; from the frame above it otherwise). The scene's records; false (and none) if any is not one the GPU draws.
+// over the scene and the frames it lies under drawn again over it (for the lifted preview, which has no area and draws nothing, from the window it names,
+// drawn again whole over the tint, which leaves the pixels compositor_tint leaves by not tinting its contents; from a frame with no area itself, a grid
+// region's; from the frame above it for a mark). The scene's records; false (and none) if any is not one the GPU draws.
 static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned int count, unsigned int ground)
 {
         struct compositor_gscene *g = &compositor_gscene;
@@ -1449,12 +1454,12 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
                 {
                         const struct compositor_frame *f = &frames[k];
                         const int *rect = pass ? f->mark : f->preview;
-                        unsigned int from = pass ? k + 1 : k;
+                        unsigned int from = pass ? k + 1 : f->preview_under > 0 ? (unsigned int)f->preview_under - 1 : k;
 
                         if (rect[2] <= 0 || rect[3] <= 0)
                                 continue;
-                        // A window under a snap preview is the owner of its own ring and hide (compositor_tint), which these records do not make: a
-                        // preview lifted to a frame of no area and no line is the one case the owner draws nothing for.
+                        // A window carrying its own snap preview is the owner of its ring and hide (compositor_tint), which these records do not make:
+                        // a preview lifted to a frame of no area and no line has its window drawn again whole over the tint instead.
                         if (!pass && !f->builtin && ((f->width > 0 && f->height > 0) || f->line > 0 || compositor_radius(f) > 0))
                         {
                                 g->why = COMPOSITOR_GPU_WHY_PREVIEW;
@@ -1843,8 +1848,8 @@ static unsigned int compositor_gpu_shape(int r, int line, int fa, int ea, int co
 }
 
 /*
-        A tint as compositor_tint draws it over the whole scene, with no owner (a snap preview lifted into a frame of its own, or a shared edge's mark), as
-        records. The clamps are compositor_tint's. A round tint's four corner squares are records with their covers' tables. Each run of rows that are alike
+        A tint as compositor_tint draws it over the whole scene, with nothing of it left out (a snap preview lifted into a frame of its own, whose window is
+        drawn again over it, or a shared edge's mark), as records. The clamps are compositor_tint's. A round tint's four corner squares are records with their covers' tables. Each run of rows that are alike
         (round corner rows, the edge's rows, the rest) is one record for the middle of the run, mixed with the ink (the edge's on the edge rows), and, on the
         rows past the corners, the line's two sides mixed with the fill at the edge's alpha, as compositor_shape_row does it. A flat tint is the middle alone.
 */
@@ -1909,16 +1914,18 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
 #endif
 
 /*
-        The tints of a scene, drawn after it is composed: a tint (frame->preview) over what lies under it, from its own
-        frame up, so the frames after it are as they are over the tint (the snap preview is a frame of its own after every
-        window and tab, so only the overlays are over it); and a shared edge's indicator (frame->mark) from the frame above
-        its own, so the window it is drawn over is under it, not over it.
+        The tints of a scene, drawn after it is composed: a tint (frame->preview) over what lies under it, from the frame it
+        lies under up, so the frames from there on are as they are over the tint (the snap preview is a frame of its own after
+        every window and tab that names the window being dragged, so that window, what is over it and the overlays are over
+        it, and the windows under it are under it); and a shared edge's indicator (frame->mark) from the frame above its own,
+        so the window it is drawn over is under it, not over it.
 */
 static void compositor_preview_draw(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
                                     const int *radii)
 {
         for (unsigned int at = 0; at < count; at++)
-                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink, at, 1, frames[at].preview_radius,
+                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink,
+                                frames[at].preview_under > 0 ? (unsigned int)frames[at].preview_under - 1 : at, 1, frames[at].preview_radius,
                                 frames[at].preview_line, frames[at].preview_edge);
         for (unsigned int at = 0; at < count; at++)
                 compositor_tint(t, frames, count, radii, frames[at].mark, frames[at].mark_ink, at + 1, 0, 0, 0, 0);
@@ -1926,10 +1933,11 @@ static void compositor_preview_draw(const struct compositor_target *t, const str
 
 /*
         The snap preview of the frames of the windows, taken off the window it belongs to into a frame of its own, none
-        for no preview: the tint is over every window, the one dragged and the ones above it, a glass one and the tabs, so
-        where the target is stays clear under whatever lies there. The frame goes into the list after the tabs and before
-        the overlays, which lie over it: the grid's tints and the assist's thumbnails. It is not in the windows' frames,
-        so the glass is made from the windows alone, and the tint is over the glass once and not also in what it shows.
+        for no preview. The frame goes into the list after the tabs and before the overlays (the grid's tints and the
+        assist's thumbnails), and names the window's frame (preview_under), so the tint is drawn under the window being
+        dragged, which a press raised over the rest, and under what is over it, the tabs and the overlays; and over every
+        window under it, a glass one too. It is not in the windows' frames, so the glass is made from the windows alone,
+        and the tint is over a glass window under it once and not also in what it shows.
 */
 static int compositor_preview_lift(struct compositor_frame *frames, unsigned int windows, struct compositor_frame *tint)
 {
@@ -1944,6 +1952,7 @@ static int compositor_preview_lift(struct compositor_frame *frames, unsigned int
                 tint->preview_radius = frames[at].preview_radius;
                 tint->preview_line = frames[at].preview_line;
                 tint->preview_edge = frames[at].preview_edge;
+                tint->preview_under = (int)at + 1;
                 memory_zero(frames[at].preview, sizeof(frames[at].preview));
                 return 1;
         }
@@ -5803,10 +5812,10 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
                 frame->lit_w = compositor_lit_px(scale);
         }
-        // The snap preview is the dragged window's, carried here for compositor_preview_lift to take over every window: where
-        // it is drawn now (compositor_preview_shown), shaped as
-        // the window will be there -- square, a tile with the window's line, filling the screen with none -- at the scale of
-        // the screen it is on, its line the tint's colour at COMPOSITOR_SNAP_LINE percent of its strength (compositor_scene).
+        // The snap preview is the dragged window's, carried here for compositor_preview_lift to put under the window: where it
+        // is drawn now (compositor_preview_shown), with a window's round corners (UI_RADIUS) and, for a tile, the window's line,
+        // filling the screen with none, at the scale of the screen it is on, its line the tint's colour at COMPOSITOR_SNAP_LINE
+        // percent of its strength (compositor_scene).
         if (row == compositor.preview_draw - 1)
         {
                 int rect[4];
@@ -5824,7 +5833,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         edge = (ink >> 24) * COMPOSITOR_SNAP_LINE / 100 > 255 ? 255 : (ink >> 24) * COMPOSITOR_SNAP_LINE / 100;
                         memory_copy(frame->preview, rect, sizeof(rect));
                         frame->preview_ink = (ink & 0xffffffu) | a << 24;
-                        frame->preview_radius = 0;
+                        frame->preview_radius = UI_RADIUS * scale / 100;
                         frame->preview_line = fills ? 0 : compositor_line_px(scale);
                         frame->preview_edge = fills ? 0 : (ink & 0xffffffu) | (edge * alpha / 100) << 24;
                 }
@@ -9977,7 +9986,7 @@ static void compositor_present_frames(void)
                 }
         windows = count;
         compositor_record_scene(frames, windows); // the window pictures of this present, for the record's frames
-        // The snap preview is over every window and the tabs: it leaves its window's frame for one of its own, after the tabs.
+        // The snap preview leaves its window's frame for one of its own, after the tabs, that is drawn under the window and over the windows under it.
         tinted = compositor_preview_lift(frames, windows, &preview);
         // A window the card shows straight has what the tabs covered put back, so the glass is made from the window.
         compositor_direct_unpatch();
@@ -10015,7 +10024,7 @@ static void compositor_present_frames(void)
         if (tinted)
                 frames[count++] = preview;
 
-        // The snap assist and the grid, over the windows, the tabs and the snap preview: a thumbnail's picture is drawn again each present. They
+        // The snap assist and the grid, over the windows (the one held too), the tabs and the snap preview: a thumbnail's picture is drawn again each present. They
         // fade in when they come up and out when they go (compositor_overlay_fade), a thumbnail with them.
         if ((unsigned int)compositor_overlays_up() != compositor.overlays_up)
         {
@@ -10036,21 +10045,8 @@ static void compositor_present_frames(void)
                                 compositor_damage(compositor.assist_rect[thumb][0], compositor.assist_rect[thumb][1],
                                                   compositor.assist_rect[thumb][2], compositor.assist_rect[thumb][3]);
                 }
+                // The grid is over the window held too, so its tiles, the targets the hand is aiming at, stay seen.
                 count += compositor_overlays(frames, count);
-                // The window held is over the grid: its frame is drawn again above the grid's tints, so the grid lies under it.
-                // (The snap preview is under the grid and so under this copy too: with the grid up the grid is the aim, and the
-                // window held lies over what it aims at.)
-                if (compositor.grid_on && compositor.drag >= 0 && count < COMPOSITOR_FRAMES)
-                        for (unsigned int at = 0; at < windows; at++)
-                                if (rows[at] == compositor.drag)
-                                {
-                                        frames[count] = frames[at];
-                                        // The copy is the window only: the indicator it may carry is drawn once.
-                                        memory_zero(frames[count].preview, sizeof(frames[count].preview));
-                                        memory_zero(frames[count].mark, sizeof(frames[count].mark));
-                                        count++;
-                                        break;
-                                }
         }
 
         compositor_corner_masks_ready(frames, count);
