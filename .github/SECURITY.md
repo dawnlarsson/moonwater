@@ -1309,8 +1309,17 @@ architecture gate above.
   drifted past a marker fix (they need the modem's and the keeper's functions
   stubbed and their sections re-cut); one row of CHECK_net, "fragmented HTTP
   header search work stays linear", whose byte counter reads zero since
-  `memory_search` became a macro in lib.util.c; and the hosted fuzz lifts
-  that need a clang newer than 18 (`offset_of`, `__builtin_cpu_supports`).
+  `memory_search` became a macro in lib.util.c; the hosted fuzz lifts
+  that need a clang newer than 18 (`offset_of`, `__builtin_cpu_supports`);
+  and two scenes of the link lane (177 of 181 on a kernel with no netem and
+  no IPv6): "status names the peer, its grants, and where it was heard",
+  written for the status page before it said one state a line, and "the code
+  is taken in capitals", where the typing machine waits out its time in the
+  lane though the same pairing links in under two seconds when run by
+  itself, with or without the wait's own change of 2026-11-12; its cause is
+  not found. CHECK_waterlink_service needs a loopback IPv6 socket and a
+  kernel of 6.10 or later inside a user namespace (the staged publish links
+  an unnamed file by its descriptor).
 - **Evidence:** a corpus beyond generated seeds; ASan/UBSan and native
   namespace runs as required jobs; MSan beyond hosted lifts; a second oracle for
   DNS; an independent review once those are reproducible.
