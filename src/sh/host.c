@@ -32,6 +32,15 @@
         this build first, or leave the disk alone. `moonwater setup use`,
         `update` and `live` answer the same question from any shell.
 
+        An installed machine also takes a build from a stick without starting
+        it. `moonwater setup` names what each stick plugged in carries beside
+        the build running, `setup update usb` writes the one stick's build
+        over the install, judged by its bytes and kept with the disk's data
+        and settings, and `setup rollback` starts the build the install had
+        before it again. The loader is only ever replaced by a rename from a
+        copy beside it that was written, synced and read back, so a machine
+        that loses power at any moment starts one build or the other.
+
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
 
