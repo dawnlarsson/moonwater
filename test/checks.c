@@ -79340,6 +79340,32 @@ static fn tls_ct_real(void)
                 check("the fixture has three SCTs to rebuild its list from", found == 3);
                 check("no more than sixteen SCTs of a list are read",
                       !tls_ct_holds(certs, chain, 1, certs + 1));
+                //      One log's SCT twice in the list is one log's word: the
+                //      three as they are hold, and two with a copy of one of
+                //      them are two logs, which a leaf of 355 days is not
+                //      logged by.
+                for (positive pass = 0; found == 3 && pass < 2; pass++)
+                {
+                        used = 2;
+                        for (positive at = 0; at < 3; at++)
+                        {
+                                positive which = pass && at == 2 ? 1 : at;
+
+                                network_store_16(list + used, (p16)real_length[which]);
+                                memory_copy(list + used + 2, real[which], real_length[which]);
+                                used += 2 + real_length[which];
+                        }
+                        network_store_16(list, (p16)(used - 2));
+                        certs[0].scts = list;
+                        certs[0].scts_length = used;
+                        if (!pass)
+                                check("the fixture's three SCTs, rebuilt, hold",
+                                      tls_ct_holds(certs, chain, 1, certs + 1));
+                        else
+                                check("sec: two logs' SCTs and a copy of one are "
+                                      "not three logs",
+                                      !tls_ct_holds(certs, chain, 1, certs + 1));
+                }
                 certs[0].scts = null;
                 check("a leaf with no SCTs is not logged", !tls_ct_holds(certs, chain, 1, certs + 1));
                 certs[0].scts = kept;

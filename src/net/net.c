@@ -14252,6 +14252,7 @@ static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_
         p8 operators[TLS_CT_SCTS_MOST];
         positive counted = 0;
         positive distinct = 0;
+        const tls_ct_log address_to logs[TLS_CT_SCTS_MOST];
         bool current = false;
         p64 now_ms;
         p64 not_before_ms;
@@ -14306,7 +14307,14 @@ static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_
                     !tls_ct_sct_verifies(address_of sct, log, issuer_key_hash, precert.bytes,
                                          length, address_of signed_bytes))
                         continue;
-                counted++;
+                //      Once a log: its SCT twice in the list is one log's word,
+                //      and counted twice it met the three a long-lived leaf
+                //      is asked for with two.
+                for (positive at = 0; at < counted; at++)
+                        known |= logs[at] == log;
+                if (known)
+                        continue;
+                logs[counted++] = log;
                 current |= !log->retired;
                 for (positive at = 0; at < distinct; at++)
                         known |= operators[at] == log->operator;
