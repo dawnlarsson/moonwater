@@ -124182,6 +124182,40 @@ static long popup_fake_take(struct window_row address_to own)
         return 0;
 }
 #define windows_take(own) popup_fake_take(own)
+#ifdef CHECK_terminal
+/*
+        What the kit hands the font engine to draw, heard while a check listens (kit_seen.on): each run's text, its length, size,
+        flags and faces, for the run's order on the screen to be read back (kit_bidi_check). Every run is drawn as it was.
+*/
+#define KIT_SEEN_RUNS 8
+#define KIT_SEEN_TEXT 256
+static struct
+{
+        b32 on;
+        int count;
+        p8 text[KIT_SEEN_RUNS][KIT_SEEN_TEXT];
+        positive length[KIT_SEEN_RUNS];
+        p32 size[KIT_SEEN_RUNS], flags[KIT_SEEN_RUNS], faces_count[KIT_SEEN_RUNS];
+        const font_face address_to faces[KIT_SEEN_RUNS][2];
+} kit_seen;
+
+static b64 kit_seen_draw(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p8 address_to text,
+                         positive length, p32 size, p32 flags, const font_target address_to target, b32 x, b32 baseline, p32 colour,
+                         p32 background)
+{
+        if (kit_seen.on && kit_seen.count < KIT_SEEN_RUNS && length < KIT_SEEN_TEXT && count >= 1 && count <= 2)
+        {
+                int k = kit_seen.count++;
+
+                memory_copy(kit_seen.text[k], text, length);
+                kit_seen.text[k][length] = 0;
+                kit_seen.length[k] = length, kit_seen.size[k] = size, kit_seen.flags[k] = flags, kit_seen.faces_count[k] = count;
+                kit_seen.faces[k][0] = faces[0], kit_seen.faces[k][1] = count > 1 ? faces[1] : faces[0];
+        }
+        return font_draw(e, faces, count, text, length, size, flags, target, x, baseline, colour, background);
+}
+#define font_draw kit_seen_draw
+#endif
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
 // A menu's row as its tree laid it out: the height of its first item's element, which is a row in every menu a check makes.
@@ -124189,6 +124223,9 @@ static int popmenu_row(const struct ui_popmenu address_to m)
 {
         return m->tree.node[m->items[0].node].h;
 }
+#endif
+#ifdef CHECK_terminal
+#undef font_draw
 #endif
 #undef windows_take
 #include "../src/canvas/ui/terminal.c"
@@ -162606,6 +162643,225 @@ static fn text_bidi_check(string_address inter)
 }
 
 /*
+        The kit's runs in a window that reads from the right, in the real faces (Inter, with Noto Sans Arabic and Noto Sans Hebrew
+        behind it), as the kit hands them to the engine (kit_seen) and read back as they land on the screen, left to right: each
+        glyph's character, mirrored where the engine lays it at an odd level. A label in English is a paragraph that reads from the
+        left, so a path, a number with its unit and a phrase in brackets read as they are written; in Arabic and Hebrew a run of Latin
+        text with its numbers and punctuation reads in its own order inside the sentence (UAX #9's HL3: as if it were between LRI and
+        PDI); a text that wraps is broken in logical order and each line is laid out with its paragraph's direction, islands and open
+        isolates; and a text that is wholly one way is handed to the engine as it always was.
+*/
+// The run k a check heard, as it reads on the screen left to right, as UTF-8 into into.
+static string_address kit_seen_read(font_engine address_to engine, int k, char address_to into, positive room)
+{
+        static font_place places[KIT_SEEN_TEXT];
+        positive count, used = 0;
+
+        into[0] = 0;
+        if (k >= kit_seen.count)
+                return (string_address)into;
+        count = font_layout(engine, kit_seen.faces[k], kit_seen.faces_count[k], kit_seen.text[k], kit_seen.length[k], kit_seen.size[k],
+                            kit_seen.flags[k], places, KIT_SEEN_TEXT);
+        for (positive at = 0; at < count && used + 4 < room; at++)
+        {
+                p32 code = 0;
+
+                // A letter the face draws as more than one glyph (an Arabic final form and its dots) is one character on the screen.
+                if (at && places[at].cluster == places[at - 1].cluster)
+                        continue;
+                font_decode(kit_seen.text[k], kit_seen.length[k], places[at].cluster, &code);
+                code = places[at].level & 1 ? font_mirror_of(code) : code;
+                if (code < 0x80)
+                        into[used++] = (char)code;
+                else if (code < 0x800)
+                        into[used++] = (char)(0xc0 | code >> 6), into[used++] = (char)(0x80 | (code & 63));
+                else
+                        into[used++] = (char)(0xe0 | code >> 12), into[used++] = (char)(0x80 | (code >> 6 & 63)), into[used++] = (char)(0x80 | (code & 63));
+        }
+        into[used] = 0;
+        return (string_address)into;
+}
+
+// A label drawn as a row's part is (ui_kit_text_flipped), the window reading from the right or not: whether the kit handed the engine one
+// run and it reads on the screen as want.
+static b32 kit_bidi_reads(struct ui address_to ui, const char address_to text, b32 rtl, const char address_to want)
+{
+        static char read[KIT_SEEN_TEXT * 2];
+
+        kit_seen.count = 0, kit_seen.on = 1, ui_kit.rtl = rtl;
+        ui_kit_text_flipped(ui, 10, 40, (string_address)text, UI_BODY_MEDIUM, 0xffffffffu, 0, 0, 800);
+        kit_seen.on = 0, ui_kit.rtl = 0;
+        return kit_seen.count == 1 && string_equals(kit_seen_read(ui->engine, 0, read, sizeof(read)), (string_address)want);
+}
+
+// The same label handed to the engine byte for byte as it is written, with the paragraph direction right to left or not.
+static b32 kit_bidi_handed(struct ui address_to ui, const char address_to text, b32 rtl, b32 right_to_left)
+{
+        positive length = string_length((string_address)text);
+
+        kit_seen.count = 0, kit_seen.on = 1, ui_kit.rtl = rtl;
+        ui_kit_text_flipped(ui, 10, 40, (string_address)text, UI_BODY_MEDIUM, 0xffffffffu, 0, 0, 800);
+        kit_seen.on = 0, ui_kit.rtl = 0;
+        return kit_seen.count == 1 && kit_seen.length[0] == length && !memory_compare(kit_seen.text[0], text, length) &&
+               !(kit_seen.flags[0] & FONT_RTL) == !right_to_left;
+}
+
+// A label's width in a window that reads from the right, as the kit measures it.
+static int kit_bidi_width(struct ui address_to ui, const char address_to text)
+{
+        int width;
+
+        ui_kit.rtl = 1;
+        width = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
+        ui_kit.rtl = 0;
+        return width;
+}
+
+static unsigned int address_to kit_bidi_pixels; // the picture the checks draw in, 800 by 600
+
+// A text of the view in a column width wide, at the right of a window 800 wide that reads from the right, laid out and drawn: whether it is
+// the lines given, each reading on the screen as its want.
+static b32 kit_bidi_wraps(struct ui address_to ui, const char address_to words, int width, int lines, const char address_to const address_to want)
+{
+        static struct ui_view view;
+        static char read[KIT_SEEN_TEXT * 2];
+        b32 same = true;
+
+        ui_kit.rtl = 1;
+        memory_zero(&view, sizeof(view));
+        ui_view_begin(&view, ui, 800, 0);
+        ui_col(.w = width)
+                ui_text(words, .class = "quiet");
+        ui_view_end(&view);
+        kit_seen.count = 0, kit_seen.on = 1;
+        ui_begin(ui, kit_bidi_pixels, 800, 800, 600);
+        ui_view_draw(ui, &view, false);
+        kit_seen.on = 0, ui_kit.rtl = 0;
+        for (int k = 0; k < lines; k++)
+                same &= string_equals(kit_seen_read(ui->engine, k, read, sizeof(read)), (string_address)want[k]);
+        return kit_seen.count == lines && same;
+}
+
+static fn kit_bidi_check(string_address inter)
+{
+        static struct ui kui;
+        static font_face regular, arabic, hebrew;
+        static char read[KIT_SEEN_TEXT * 2], fitted[64];
+        positive size = 0, bytes;
+        b32 loaded;
+        long pixels;
+
+        memory_zero(&kui, sizeof(kui));
+        bytes = compositor_map_file(inter, &size);
+        loaded = bytes && font_load(&regular, (const p8 address_to)bytes, size, 0) == 0;
+        bytes = compositor_map_file((string_address) "fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf", &size);
+        loaded = loaded && bytes && font_load(&arabic, (const p8 address_to)bytes, size, 0) == 0;
+        bytes = compositor_map_file((string_address) "fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf", &size);
+        loaded = loaded && bytes && font_load(&hebrew, (const p8 address_to)bytes, size, 0) == 0;
+        check("kit bidi: Inter, Noto Sans Arabic and Noto Sans Hebrew load", loaded);
+        if (!loaded || !ui_engine_open_sized(&kui, 256))
+                return;
+        font_fallback(kui.engine, &arabic, null);
+        font_fallback(kui.engine, &hebrew, null);
+        kui.regular = &regular, kui.bold = null, kui.scale = 100;
+        pixels = ui_map(800 * 600 * 4);
+        kit_bidi_pixels = (unsigned int address_to)pixels;
+        ui_scratch_fit(&kui, 800);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 1);
+        ui_begin(&kui, kit_bidi_pixels, 800, 800, 600);
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+
+        // English labels in a window that reads from the right: each reads as it is written.
+        check("kit bidi: a path in a window that reads from the right reads /usr/bin, its slash at its start", kit_bidi_reads(&kui, "/usr/bin", 1, "/usr/bin"));
+        check("kit bidi: a number and its unit read 250 ms, the number first", kit_bidi_reads(&kui, "250 ms", 1, "250 ms"));
+        check("kit bidi: a number and a unit of two words read 30 per second, the number first",
+              kit_bidi_reads(&kui, "30 per second", 1, "30 per second"));
+        check("kit bidi: a phrase in brackets reads (percent, or default), each bracket the right way round",
+              kit_bidi_reads(&kui, "(percent, or default)", 1, "(percent, or default)"));
+        check("kit bidi: an English label with a unit in brackets reads as it is written",
+              kit_bidi_reads(&kui, "Key repeat delay (ms, or default)", 1, "Key repeat delay (ms, or default)"));
+        check("kit bidi: an English label is handed to the engine as it is written, a paragraph that reads from the left",
+              kit_bidi_handed(&kui, "Key repeat delay (ms, or default)", 1, false));
+
+        // Arabic and Hebrew sentences with Latin in them: the Latin runs keep their own order, the sentence reads from the right.
+        check("kit bidi: an Arabic sentence with 250 ms and a path reads 250 ms and /usr/bin inside it, the sentence from the right",
+              kit_bidi_reads(&kui, "\xd9\x85\xd8\xaf\xd8\xa9 250 ms \xd9\x85\xd9\x86 /usr/bin", 1,
+                             "/usr/bin \xd9\x86\xd9\x85 250 ms \xd8\xa9\xd8\xaf\xd9\x85"));
+        check("kit bidi: a Hebrew sentence with -5 dB and C++ in it reads them as written",
+              kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 -5 dB \xd7\xa9\xd7\x9c C++", 1,
+                             "C++ \xd7\x9c\xd7\xa9 -5 dB \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94"));
+        check("kit bidi: a Latin phrase in brackets inside Hebrew keeps its brackets round it the right way",
+              kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 (ms, or default)", 1,
+                             "(ms, or default) \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94"));
+        check("kit bidi: a Latin run with a bracket pair in it keeps the pair whole and the right way round, its bracket first or last",
+              kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 Settings (beta) \xd7\xa9\xd7\x9c", 1,
+                             "\xd7\x9c\xd7\xa9 Settings (beta) \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94") &&
+                  kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 (beta) Settings \xd7\xa9\xd7\x9c", 1,
+                                 "\xd7\x9c\xd7\xa9 (beta) Settings \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94"));
+        check("kit bidi: a sentence that ends in a Latin word ends at its left with its full stop",
+              kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 Bluetooth.", 1, ".Bluetooth \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94"));
+        check("kit bidi: an explicit first strong isolate in a string is the engine's, and its path reads as written",
+              kit_bidi_reads(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 \xe2\x81\xa8/usr/bin\xe2\x81\xa9", 1, "/usr/bin \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94") &&
+                  kit_bidi_handed(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 \xe2\x81\xa8/usr/bin\xe2\x81\xa9", 1, true));
+
+        // Text wholly one way is handed to the engine as it always was.
+        check("kit bidi: Hebrew with a number and a full stop and no Latin is handed to the engine as it is, right to left",
+              kit_bidi_handed(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 3 \xd7\xa9\xd7\x9c.", 1, true));
+        check("kit bidi: a number alone is handed to the engine as it is, right to left in a window that reads from the right",
+              kit_bidi_handed(&kui, "1 - 3%", 1, true));
+        check("kit bidi: in a window that reads from the left every label is handed to the engine as it is, left to right",
+              kit_bidi_handed(&kui, "/usr/bin", 0, false) && kit_bidi_handed(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 250 ms", 0, false));
+
+        // A text that wraps: broken in logical order, then each line laid out with its paragraph's direction and islands.
+        {
+                static const char address_to brackets[2] = {"Mouse sensitivity (percent, or", "default)"};
+                static const char address_to stop[2] = {"Volume is now at", "30%."};
+                static const char address_to hebrew_lines[2] = {"250 \xd7\x9d\xd7\x99\xd7\xa9\xd7\xa7\xd7\x9e\xd7\x94 \xd7\xaa\xd7\xa8\xd7\x96\xd7\x97 \xd7\x9c\xd7\xa9 \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94",
+                                                                 "/usr/bin \xd7\x99\xd7\xa0\xd7\xa4\xd7\x9c ms"};
+                static const char address_to kept[2] = {"ms, or) \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94", "(default"};
+                static const char address_to opened[2] = {"Delay \xd7\x94\xd7\x99\xd7\x94\xd7\xa9\xd7\x94", "ms 250 set"};
+
+                check("kit bidi: a wrapped English label's last line reads default), its bracket closing it",
+                      kit_bidi_wraps(&kui, "Mouse sensitivity (percent, or default)", kit_bidi_width(&kui, "Mouse sensitivity (percent, or") + 4, 2,
+                                     brackets));
+                check("kit bidi: a wrapped English sentence's last line of no letters reads 30 percent and a full stop as its paragraph does, left to right",
+                      kit_bidi_wraps(&kui, "Volume is now at 30%.", kit_bidi_width(&kui, "Volume is now at") + 4, 2, stop));
+                check("kit bidi: a Hebrew sentence broken between 250 and ms reads 250 at the end of its first line and ms then /usr/bin on its second",
+                      kit_bidi_wraps(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 \xd7\xa9\xd7\x9c \xd7\x97\xd7\x96\xd7\xa8\xd7\xaa \xd7\x94\xd7\x9e\xd7\xa7\xd7\xa9\xd7\x99\xd7\x9d 250 ms \xd7\x9c\xd7\xa4\xd7\xa0\xd7\x99 /usr/bin",
+                                     kit_bidi_width(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 \xd7\xa9\xd7\x9c \xd7\x97\xd7\x96\xd7\xa8\xd7\xaa \xd7\x94\xd7\x9e\xd7\xa7\xd7\xa9\xd7\x99\xd7\x9d 250") + 4,
+                                     2, hebrew_lines));
+                check("kit bidi: a Hebrew sentence's line of Latin alone keeps the sentence's direction, its bracket closing at the left",
+                      kit_bidi_wraps(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 (ms, or default)",
+                                     kit_bidi_width(&kui, "\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 (ms, or") + 4, 2, kept));
+                check("kit bidi: a line that starts inside a right to left isolate is laid out inside it, as the paragraph is (ms 250 set)",
+                      kit_bidi_wraps(&kui, "Delay \xe2\x81\xa7\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 250 ms\xe2\x81\xa9 set",
+                                     kit_bidi_width(&kui, "Delay \xe2\x81\xa7\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94") + 4, 2, opened));
+                check("kit bidi: a line that starts inside a first strong isolate takes the direction the isolate's first letter gave it on the line before",
+                      kit_bidi_wraps(&kui, "Delay \xe2\x81\xa8\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94 250 ms\xe2\x81\xa9 set",
+                                     kit_bidi_width(&kui, "Delay \xe2\x81\xa8\xd7\x94\xd7\xa9\xd7\x94\xd7\x99\xd7\x94") + 4, 2, opened));
+        }
+
+        // A cut keeps the direction of the text it is cut from: a Hebrew label whose kept start is Latin has its dots at its left end.
+        {
+                int room = kit_bidi_width(&kui, "UTF-8...") + 2;
+                string_address shown;
+
+                ui_kit.rtl = 1;
+                shown = ui_fit(&kui, (string_address) "UTF-8 \xd7\xa2\xd7\x9d BOM", UI_BODY_MEDIUM, room, fitted, sizeof(fitted));
+                kit_seen.count = 0, kit_seen.on = 1;
+                ui_kit_text_flipped(&kui, 10, 40, shown, UI_BODY_MEDIUM, 0xffffffffu, 0, 0, 800);
+                kit_seen.on = 0, ui_kit.rtl = 0;
+                kit_seen_read(kui.engine, 0, read, sizeof(read));
+                check("kit bidi: a Hebrew label cut to its Latin start reads with its three dots at its left end",
+                      kit_seen.count == 1 && !memory_compare(read, "...UTF", 6));
+        }
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
+}
+
+/*
         The kit's field (ui_field_event over the engine), the one every input of Canvas is, driven as a window drives
         it: keys as the compositor sends them, the pointer on its well, a paste's text. A blank and any character are
         typed anywhere; the caret moves by characters (whole ones of several bytes), words and ends; Shift selects and
@@ -169703,6 +169959,8 @@ b32 main()
         if (program_argument_count() > 3)
                 text_widget_check(program_argument(3), program_argument(1));
                 text_bidi_check(program_argument(3));
+        if (program_argument_count() > 3)
+                kit_bidi_check(program_argument(3));
         text_menu_keys_check();
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);

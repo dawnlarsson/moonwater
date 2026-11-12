@@ -8756,15 +8756,449 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
         out by start and end and not by left and right, through these three and nothing else: a box of w that is `in` from the
         start edge of a container (ui_start_x), or from its end (ui_end_x), and a box already placed in LTR coordinates mirrored
         inside its container (ui_mirror). Mirroring is in the layout, before a painter is called: no painter knows a direction.
-        The text is the font engine's (FONT_RTL is the paragraph's direction, so a label and its neighbours read in order).
+        The text is the font engine's, laid out by UAX #9 with the paragraph direction and the isolates the kit gives it (ui_bidi).
 */
 static inline b32 ui_rtl(void);
 static inline int ui_dir(void);
 
-// The font engine's flags for a run of the kit's: its paragraph direction, and bold for the fallback faces of a bold run.
+// The font engine's flags for a run of the kit's: the window's direction (which ui_bidi_run makes the run's own), and bold for the
+// fallback faces of a bold run.
 static inline p32 ui_font_flags(const struct ui address_to ui, const font_face address_to face)
 {
         return (ui_rtl() ? FONT_RTL : 0) | (face && face == ui->bold && ui->bold != ui->regular ? FONT_BOLD : 0);
+}
+
+/*
+        Bidirectional text in the kit's runs. The engine lays every run out by UAX #9 whole (font.c: the explicit levels and isolates,
+        W1 to W7, N0 to N2, I1 and I2, L1 and L2, mirroring); the kit gives it what UAX #9 leaves to a higher-level protocol, for what a
+        label is.
+
+        A run's paragraph direction (HL1). In a window that reads from the left it is left to right, as it always was. In one that
+        reads from the right it is right to left where the text has a letter that reads from the right outside its isolates (Arabic,
+        Hebrew, an RLM), left to right where its letters all read from the left (an English label, a path, a device's name), and right
+        to left where it has no letter (a number). A string translated into Arabic that starts with a Latin word ("UTF-8 مع BOM") is
+        still Arabic, which P2's first strong letter would not say.
+
+        Its islands (HL3, each as if it were between an LRI and a PDI). In a paragraph that reads from the right, a run of text from its
+        first Latin letter or European digit to its last, with the digits, blanks and punctuation between them and no letter, digit
+        or mark of a script that reads from the right, reads in its own order inside the paragraph: "250 ms", "/usr/bin", "-5 dB" and
+        "Moonwater OS 2.0" read as they are written, where UAX #9 alone lays out "ms 250", "usr/bin/" and "dB 5-". A run with no Latin
+        letter is no island: a number between two Arabic words is the engine's, as it was. An island's edges: a prefix glued to its
+        first letter or digit at the start of a word is in it (the / of a path, the - of -5, the ~ of ~/notes), and so is a suffix of
+        number signs and slashes glued to its last (C++, 5%, a path's last /); a bracket pair (BD16) is never split, so a pair with one
+        bracket in an island takes the other in too, and a pair round a letter that reads from the right ends the islands at its
+        brackets. Sentence punctuation after an island (. , : ; ! ?) is the paragraph's, so an Arabic sentence that ends in a Latin
+        word ends at its left with its full stop, and a bracket pair round an island is mirrored round it by the engine (N0, N1).
+
+        The explicit marks a string brings (LRE, RLE, LRO, RLO, PDF, LRI, RLI, FSI, PDI) are the engine's: no island is made inside one
+        or across one, and what is inside an isolate does not decide the paragraph's direction (as in P2).
+
+        A part of a paragraph (a wrapped line, the start a cut keeps) is laid out as a line of that paragraph: the text is broken in
+        logical order first, and each part is then given the paragraph's direction where its own letters would say otherwise (an RLM
+        before it, or an LRI round it: an LRM would be a glyph of a plain run), the islands it cuts through (opened at its start and
+        closed at its end), and the isolates and embeddings open where it starts (an FSI as the LRI or RLI it resolved to over the
+        whole paragraph); the engine reorders the part as one line. A part handed to the kit again is laid out the same: its Latin is
+        isolated already, and its marks say its direction.
+*/
+#define UI_BIDI_MOST 1024 // the code points of a paragraph whose islands are found: a longer one is laid out by the engine's UAX #9 alone
+#define UI_BIDI_ROOM 3072 // the bytes of a run with its islands' marks: a run whose marks do not fit is laid out by UAX #9 alone
+#define UI_BIDI_DEEP 128  // the explicit marks open at once that are followed (UAX #9's 125, and room past it)
+#define UI_BIDI_PAIRS 63  // BD16's stack: a paragraph with more brackets open than this pairs none past them
+
+// What a code point of a paragraph is to the islands.
+#define UI_BIDI_BREAK 1   // ends an island: a letter, digit or mark of a script that reads from the right, a separator, an explicit mark or what
+                          // is inside one, or a bracket of a pair round any of those
+#define UI_BIDI_LETTER 2  // a letter that reads from the left, or a mark on one
+#define UI_BIDI_DIGIT 4   // a European digit, or a mark on one
+#define UI_BIDI_ISLAND 8  // in an island
+#define UI_BIDI_SHUT 16   // inside an explicit isolate: P2 does not look at it
+#define UI_BIDI_INSIDE 32 // an explicit mark, or inside an isolate or an embedding one opened
+
+static struct
+{
+        p32 code[UI_BIDI_MOST];
+        p16 at[UI_BIDI_MOST + 1]; // the byte each code point starts at in the paragraph, and the paragraph's length after the last
+        p16 pair[UI_BIDI_MOST];   // the other bracket of its pair, UI_BIDI_MOST for none
+        p16 breaks[UI_BIDI_MOST + 1]; // how many code points before each end an island
+        p8 type[UI_BIDI_MOST], kind[UI_BIDI_MOST];
+        p32 n;                    // the code points read, 0 for a paragraph longer than UI_BIDI_MOST
+        char shown[UI_BIDI_ROOM]; // a run with its islands' marks
+} ui_bidi;
+
+// A code point of a script that reads from the right, whatever its class: Hebrew, Arabic, Syriac, Thaana, N'Ko and the rest to U+08FF,
+// their presentation forms, and the blocks of the right to left planes. An Arabic comma (a common separator) is one, and ends an island.
+static inline b32 ui_bidi_right_script(p32 code)
+{
+        return (code >= 0x590 && code < 0x900) || (code >= 0xfb1d && code < 0xfe00) || (code >= 0xfe70 && code < 0xfeff) ||
+               (code >= 0x10800 && code < 0x11000) || (code >= 0x1e800 && code < 0x1f000);
+}
+
+// A quotation mark, which pairs with another by no rule of UAX #9: an island never takes one in at its start.
+static inline b32 ui_bidi_quote(p32 code)
+{
+        return code == '"' || code == '\'' || code == 0xab || code == 0xbb || (code >= 0x2018 && code <= 0x201f) || code == 0x2039 || code == 0x203a;
+}
+
+// What may start a word before an island's prefix: the paragraph's start, a blank, a separator, an opening bracket or a quotation mark.
+static b32 ui_bidi_word_start(p32 i)
+{
+        p32 partner;
+        p8 opens = 0;
+
+        return !i || ui_bidi.type[i - 1] == FONT_BIDI_WS || ui_bidi.type[i - 1] == FONT_BIDI_S || ui_bidi.type[i - 1] == FONT_BIDI_B ||
+               ui_bidi_quote(ui_bidi.code[i - 1]) || (font_bracket(ui_bidi.code[i - 1], &partner, &opens) && opens);
+}
+
+/*
+        Reads the paragraph of length bytes at text into ui_bidi: each code point, its class, and what it is to the islands (none for a
+        paragraph past UI_BIDI_MOST code points, n then 0). Answers the paragraph's direction as the kit lays it out: 1 right to left.
+        Explicit marks nest as X1 to X8 nest them: a PDI closes the last isolate open and what was opened inside it, one with none open
+        closes nothing; a PDF closes the last embedding, unless an isolate was opened after it.
+*/
+static b32 ui_bidi_read(const char address_to text, positive length)
+{
+        p8 stack[UI_BIDI_DEEP];
+        p32 depth = 0, over = 0, isolates = 0, n = 0, before = 0;
+        b32 left = false, right = false;
+
+        for (positive at = 0; at < length;)
+        {
+                p32 code, type, kind = 0;
+                positive next = font_decode((const p8 address_to)text, length, at, &code);
+
+                type = font_bidi_class(code);
+                if (type >= FONT_BIDI_LRE)
+                {
+                        // An explicit mark: inside what it closes, and opening what it opens.
+                        if (type == FONT_BIDI_PDI && isolates)
+                        {
+                                if (over)
+                                        over--;
+                                else
+                                {
+                                        while (depth && !stack[depth - 1])
+                                                depth--;
+                                        depth -= depth > 0;
+                                }
+                                isolates--;
+                        }
+                        else if (type == FONT_BIDI_PDF && (over || (depth && !stack[depth - 1])))
+                                over ? over-- : depth--;
+                        kind = UI_BIDI_INSIDE | UI_BIDI_BREAK | (isolates ? UI_BIDI_SHUT : 0);
+                        if (type != FONT_BIDI_PDI && type != FONT_BIDI_PDF)
+                        {
+                                if (depth < UI_BIDI_DEEP)
+                                        stack[depth++] = (p8)font_bidi_initiator(type);
+                                else
+                                        over++;
+                                isolates += font_bidi_initiator(type);
+                        }
+                }
+                else if (depth || over)
+                        kind = UI_BIDI_INSIDE | UI_BIDI_BREAK | (isolates ? UI_BIDI_SHUT : 0);
+                else if (type == FONT_BIDI_R || type == FONT_BIDI_AL || type == FONT_BIDI_AN || type == FONT_BIDI_B || type == FONT_BIDI_S ||
+                         ui_bidi_right_script(code))
+                        kind = UI_BIDI_BREAK;
+                else if (type == FONT_BIDI_L && code != 0x200e)
+                        kind = UI_BIDI_LETTER;
+                else if (type == FONT_BIDI_EN)
+                        kind = UI_BIDI_DIGIT;
+                else if (type == FONT_BIDI_NSM || type == FONT_BIDI_BN)
+                        kind = before & (UI_BIDI_BREAK | UI_BIDI_LETTER | UI_BIDI_DIGIT); // a mark or a joiner goes with what it is on
+                right |= !isolates && (type == FONT_BIDI_R || type == FONT_BIDI_AL);
+                left |= !isolates && type == FONT_BIDI_L;
+                if (n < UI_BIDI_MOST)
+                {
+                        ui_bidi.code[n] = code, ui_bidi.at[n] = (p16)at, ui_bidi.type[n] = (p8)type, ui_bidi.kind[n] = (p8)kind;
+                        ui_bidi.at[n + 1] = (p16)next;
+                }
+                n++, before = kind, at = next;
+        }
+        ui_bidi.n = n <= UI_BIDI_MOST ? n : 0;
+        return right || !left;
+}
+
+/*
+        The islands of the paragraph in ui_bidi (one that reads from the right), each code point of them marked UI_BIDI_ISLAND: answers
+        whether there is one. The brackets are paired as BD16 pairs them, over what no explicit mark holds; a pair round anything that
+        ends an island ends islands itself, so a span between two of what ends one holds whole pairs only.
+*/
+static b32 ui_bidi_islands(void)
+{
+        p32 n = ui_bidi.n, open = 0;
+        p16 opened[UI_BIDI_PAIRS];
+        b32 any = false;
+
+        ui_bidi.breaks[0] = 0;
+        for (p32 i = 0; i < n; i++)
+        {
+                ui_bidi.pair[i] = UI_BIDI_MOST;
+                ui_bidi.breaks[i + 1] = (p16)(ui_bidi.breaks[i] + (ui_bidi.kind[i] & UI_BIDI_BREAK ? 1 : 0));
+        }
+        for (p32 i = 0; i < n; i++)
+        {
+                p32 partner;
+                p8 opens = 0;
+
+                if ((ui_bidi.kind[i] & UI_BIDI_INSIDE) || ui_bidi.type[i] != FONT_BIDI_ON || !font_bracket(ui_bidi.code[i], &partner, &opens))
+                        continue;
+                if (opens)
+                {
+                        if (open == UI_BIDI_PAIRS)
+                                break;
+                        opened[open++] = (p16)i;
+                        continue;
+                }
+                for (p32 k = open; k-- > 0;)
+                {
+                        p32 wanted;
+                        p8 opening = 0;
+
+                        font_bracket(ui_bidi.code[opened[k]], &wanted, &opening);
+                        if (wanted == font_bracket_form(ui_bidi.code[i]))
+                        {
+                                ui_bidi.pair[opened[k]] = (p16)i, ui_bidi.pair[i] = opened[k];
+                                open = k;
+                                break;
+                        }
+                }
+        }
+        for (p32 i = 0; i < n; i++)
+                if (ui_bidi.pair[i] > i && ui_bidi.pair[i] < n && ui_bidi.breaks[ui_bidi.pair[i]] != ui_bidi.breaks[i + 1])
+                        ui_bidi.kind[i] |= UI_BIDI_BREAK, ui_bidi.kind[ui_bidi.pair[i]] |= UI_BIDI_BREAK;
+
+        // Each span between what ends an island is one island where it has a Latin letter: from its first letter or digit to its last.
+        for (p32 start = 0; start < n;)
+        {
+                p32 stop = start, first = n, last = 0;
+                b32 letter = false;
+
+                if (ui_bidi.kind[start] & UI_BIDI_BREAK)
+                {
+                        start++;
+                        continue;
+                }
+                for (; stop < n && !(ui_bidi.kind[stop] & UI_BIDI_BREAK); stop++)
+                        if (ui_bidi.kind[stop] & (UI_BIDI_LETTER | UI_BIDI_DIGIT))
+                        {
+                                first = first == n ? stop : first, last = stop;
+                                letter |= (ui_bidi.kind[stop] & UI_BIDI_LETTER) != 0;
+                        }
+                if (letter)
+                {
+                        p32 from = first;
+                        b32 grown = true;
+
+                        // A prefix glued to the first at a word's start: punctuation that is no bracket and no quotation mark.
+                        while (from > start && !ui_bidi.kind[from - 1])
+                        {
+                                p32 type = ui_bidi.type[from - 1], partner;
+                                p8 opens = 0;
+
+                                if ((type != FONT_BIDI_ES && type != FONT_BIDI_ET && type != FONT_BIDI_CS && type != FONT_BIDI_ON) ||
+                                    ui_bidi_quote(ui_bidi.code[from - 1]) || font_bracket(ui_bidi.code[from - 1], &partner, &opens))
+                                        break;
+                                from--;
+                        }
+                        first = from < first && ui_bidi_word_start(from) ? from : first;
+                        // A suffix glued to the last: number signs and slashes.
+                        while (last + 1 < stop && !ui_bidi.kind[last + 1] &&
+                               (ui_bidi.type[last + 1] == FONT_BIDI_ES || ui_bidi.type[last + 1] == FONT_BIDI_ET || ui_bidi.code[last + 1] == '/' ||
+                                ui_bidi.code[last + 1] == '\\'))
+                                last++;
+                        // A bracket pair is never split: one bracket in, the other comes in too, and what is between them.
+                        while (grown)
+                        {
+                                grown = false;
+                                for (p32 i = start; i < stop; i++)
+                                {
+                                        p32 other = ui_bidi.pair[i];
+
+                                        if (other >= n || (i >= first && i <= last) == (other >= first && other <= last))
+                                                continue;
+                                        first = i < first ? i : first, first = other < first ? other : first;
+                                        last = i > last ? i : last, last = other > last ? other : last;
+                                        grown = true;
+                                }
+                        }
+                        for (p32 i = first; i <= last; i++)
+                                ui_bidi.kind[i] |= UI_BIDI_ISLAND;
+                        any = true;
+                }
+                start = stop;
+        }
+        return any;
+}
+
+// Writes a code point's bytes (or a mark's) into into at *used when they fit with the NUL and keep more bytes after them: false when not.
+static b32 ui_bidi_put(char address_to into, positive room, positive address_to used, const char address_to bytes, positive count, positive keep)
+{
+        if (*used + count + keep >= room)
+                return false;
+        memory_copy(into + *used, bytes, count);
+        *used += count;
+        return true;
+}
+
+/*
+        The code points from to stop of the paragraph in ui_bidi (at text) written into into (room bytes, NUL-terminated), each island
+        between an LRI and a PDI. First an RLM where rlm (a part of a paragraph that reads from the right whose own letters would say
+        otherwise), or an LRI where round, whose PDI is last (a part of one that reads from the left with no letter of its own), then
+        the explicit marks open at from opened again. What does not fit is cut between code points, its isolates closed; whole says
+        whether all of it fit. Answers the bytes written.
+*/
+static positive ui_bidi_write(const char address_to text, p32 from, p32 stop, b32 rlm, b32 round, char address_to into, positive room,
+                              b32 address_to whole)
+{
+        p16 stack[UI_BIDI_DEEP];
+        p32 depth = 0, isolates = 0;
+        positive used = 0, closing = round ? 3 : 0; // the bytes the round's PDI keeps at the end
+        b32 fits = (!rlm || ui_bidi_put(into, room, &used, "\xe2\x80\x8f", 3, 0)) && (!round || ui_bidi_put(into, room, &used, "\xe2\x81\xa6", 3, 3));
+
+        // The isolates and embeddings open at from, as X1 to X8 nest them; an FSI as the LRI or RLI it resolved to (P2, P3 over its own text).
+        for (p32 i = 0; i < from; i++)
+        {
+                p32 type = ui_bidi.type[i];
+
+                if (type == FONT_BIDI_PDI && isolates)
+                {
+                        while (depth && !font_bidi_initiator(ui_bidi.type[stack[depth - 1]]))
+                                depth--;
+                        depth -= depth > 0, isolates--;
+                }
+                else if (type == FONT_BIDI_PDF && depth && !font_bidi_initiator(ui_bidi.type[stack[depth - 1]]))
+                        depth--;
+                else if (type >= FONT_BIDI_LRE && type != FONT_BIDI_PDI && type != FONT_BIDI_PDF && depth < UI_BIDI_DEEP)
+                        stack[depth++] = (p16)i, isolates += font_bidi_initiator(type);
+        }
+        for (p32 k = 0; k < depth && fits; k++)
+        {
+                p32 at = stack[k], code = ui_bidi.code[at];
+
+                if (ui_bidi.type[at] == FONT_BIDI_FSI)
+                {
+                        p32 nested = 0;
+
+                        code = 0x2066;
+                        for (p32 i = at + 1; i < ui_bidi.n; i++)
+                        {
+                                p32 type = ui_bidi.type[i];
+
+                                if (type == FONT_BIDI_PDI && !nested)
+                                        break;
+                                nested += font_bidi_initiator(type), nested -= type == FONT_BIDI_PDI && nested;
+                                if (!nested && (type == FONT_BIDI_L || type == FONT_BIDI_R || type == FONT_BIDI_AL))
+                                {
+                                        code = type == FONT_BIDI_L ? 0x2066 : 0x2067;
+                                        break;
+                                }
+                        }
+                }
+                fits = ui_bidi_put(into, room, &used, (const char[]){(char)0xe2, (char)(0x80 | (code >> 6 & 63)), (char)(0x80 | (code & 63))}, 3,
+                                   closing);
+        }
+        for (p32 i = from; i < stop && fits; i++)
+        {
+                b32 island = (ui_bidi.kind[i] & UI_BIDI_ISLAND) != 0, opens = island && (i == from || !(ui_bidi.kind[i - 1] & UI_BIDI_ISLAND));
+                positive keep = (island ? 3 : 0) + closing, mark = used;
+
+                fits = (!opens || ui_bidi_put(into, room, &used, "\xe2\x81\xa6", 3, keep)) &&
+                       ui_bidi_put(into, room, &used, text + ui_bidi.at[i], (positive)(ui_bidi.at[i + 1] - ui_bidi.at[i]), keep);
+                if (!fits)
+                {
+                        // Cut before this code point: an island it would have opened is not opened, one it is in is closed.
+                        used = mark;
+                        if (island && !opens)
+                                ui_bidi_put(into, room, &used, "\xe2\x81\xa9", 3, closing);
+                }
+                else if (island && (i + 1 == stop || !(ui_bidi.kind[i + 1] & UI_BIDI_ISLAND)))
+                        ui_bidi_put(into, room, &used, "\xe2\x81\xa9", 3, closing);
+        }
+        if (round)
+                ui_bidi_put(into, room, &used, "\xe2\x81\xa9", 3, 0);
+        into[used] = 0;
+        *whole = fits;
+        return used;
+}
+
+/*
+        A kit run as the engine is to lay it out: in a window that reads from the right, flags says its own direction (FONT_RTL only
+        for a paragraph that reads from the right), and a run with islands is answered with them isolated (ui_bidi.shown, length its
+        bytes); any other run, and one whose marks do not fit, is the text itself.
+*/
+static string_address ui_bidi_run(string_address text, positive address_to length, p32 address_to flags)
+{
+        positive used;
+        b32 whole = false;
+
+        if (!(*flags & FONT_RTL))
+                return text;
+        if (!ui_bidi_read((const char address_to)text, *length))
+        {
+                *flags &= ~(p32)FONT_RTL;
+                return text;
+        }
+        if (!ui_bidi.n || !ui_bidi_islands())
+                return text;
+        used = ui_bidi_write((const char address_to)text, 0, ui_bidi.n, false, false, ui_bidi.shown, UI_BIDI_ROOM, &whole);
+        if (!whole)
+                return text;
+        *length = used;
+        return (string_address)ui_bidi.shown;
+}
+
+/*
+        The part from to stop (bytes) of the paragraph of text (length bytes) that holds it -- the text between the newlines round it --
+        as a line of that paragraph is laid out (above), written into into (room bytes, cut to them, NUL-terminated); its length. In a
+        window that reads from the left it is the bytes themselves.
+*/
+static positive ui_bidi_part(const char address_to text, positive length, positive from, positive stop, char address_to into, positive room)
+{
+        positive start = from, finish = stop, used;
+        p32 first = 0, last = 0;
+        b32 rtl = false, right = false, left = false, whole;
+
+        if (!room)
+                return 0;
+        if (ui_rtl())
+        {
+                while (start && text[start - 1] != '\n')
+                        start--;
+                while (finish < length && text[finish] != '\n')
+                        finish++;
+        }
+        if (!ui_rtl() || !(rtl = ui_bidi_read(text + start, finish - start), ui_bidi.n))
+        {
+                // A part of a window that reads from the left, or of a paragraph too long to find islands in: its bytes, cut to the room,
+                // with the paragraph's direction where its own letters would not say it (an RLM before them, or an LRI round them).
+                b32 own = ui_rtl() && ui_bidi_read(text + from, stop - from), rlm = ui_rtl() && rtl && !own, round = ui_rtl() && !rtl && own;
+                positive at = (rlm || round) && room > 7 ? 3 : 0, closing = round && at ? 3 : 0;
+
+                if (at)
+                        memory_copy(into, rlm ? "\xe2\x80\x8f" : "\xe2\x81\xa6", 3);
+                used = stop - from < room - at - closing ? stop - from : room - 1 - at - closing;
+                while (used && used < stop - from && ((unsigned char)text[from + used] & 0xc0) == 0x80)
+                        used--;
+                memory_copy(into + at, text + from, used);
+                used += at;
+                if (closing)
+                        memory_copy(into + used, "\xe2\x81\xa9", 3), used += 3;
+                into[used] = 0;
+                return used;
+        }
+        if (rtl)
+                ui_bidi_islands();
+        while (first < ui_bidi.n && ui_bidi.at[first] < from - start)
+                first++;
+        for (last = first; last < ui_bidi.n && ui_bidi.at[last] < stop - start; last++)
+        {
+                p32 type = ui_bidi.type[last], kind = ui_bidi.kind[last];
+
+                right |= !(kind & UI_BIDI_SHUT) && (type == FONT_BIDI_R || type == FONT_BIDI_AL);
+                left |= !(kind & (UI_BIDI_SHUT | UI_BIDI_ISLAND)) && type == FONT_BIDI_L;
+        }
+        // The part says the paragraph's direction where its own letters would not.
+        return ui_bidi_write(text + start, first, last, rtl && !right && left, !rtl && (right || !left), into, room, &whole);
 }
 
 struct ui_pen
@@ -9376,11 +9810,16 @@ static int ui_run_flagged(struct ui address_to ui, const font_face address_to co
         return width;
 }
 
+// A kit run: its paragraph's direction and its islands are the kit's (ui_bidi_run), the rest of its layout the engine's.
 static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                      string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                      unsigned int stroke)
 {
-        return ui_run_flagged(ui, faces, x, baseline, text, size, colour, alpha, low, high, stroke, ui_font_flags(ui, faces[0]));
+        p32 flags = ui_font_flags(ui, faces[0]);
+        positive length = string_length(text);
+
+        text = ui_bidi_run(text, &length, &flags);
+        return ui_run_flagged(ui, faces, x, baseline, text, size, colour, alpha, low, high, stroke, flags);
 }
 
 // A run's capital height at size, in whole pixels: font.c's metrics are 16.16.
@@ -11774,7 +12213,8 @@ static fn ui_kit_text_stood(struct ui address_to ui, int x, int start, string_ad
         p32 em = ui_em(ui, t->size), flags = ui_font_flags(ui, faces[0]);
         positive length = string_length(text);
         font_metrics metrics = font_metrics_at(faces[0], em);
-        int room = 2 * ui->scale / 100, wide = ui_advance_flagged(ui, faces, text, length, em, flags) + 2 * room, rows = metrics.cell_height + 2 * room;
+        string_address shown = ui_bidi_run(text, &length, &flags); // its direction and its islands, as a run lying down has them
+        int room = 2 * ui->scale / 100, wide = ui_advance_flagged(ui, faces, shown, length, em, flags) + 2 * room, rows = metrics.cell_height + 2 * room;
         int held = ui->scratch_scale && ui->scratch_scale < ui->scale ? ui->scratch_scale : ui->scale, lead = (t->line * ui->scale / 100 - metrics.cell_height) / 2 - room;
         b32 light = window_light(argb & 0xffffffu), down = ui_rtl();
         unsigned int address_to turned;
@@ -11783,7 +12223,7 @@ static fn ui_kit_text_stood(struct ui address_to ui, int x, int start, string_ad
         if (!(argb >> 24) || !ui->scratch || 2 * rows > UI_SCRATCH_ROWS * held / 100)
                 return;
         memory_fill_u32_rect(ui->scratch, (positive)wide, (positive)wide, (positive)rows, light ? 0 : 0xffffffu);
-        font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, flags, &(font_target){ui->scratch, (positive)wide, wide, rows}, (b32)room << 16,
+        font_draw(ui->engine, faces, 2, (const p8 address_to)shown, length, em, flags, &(font_target){ui->scratch, (positive)wide, wide, rows}, (b32)room << 16,
                   metrics.baseline + room, light ? 0xffffffu : 0, light ? 0 : 0xffffffu);
         // Turned: upward, the line's first row is the column's left and the run's start its foot; downward, the other way about.
         turned = ui->scratch + (positive)wide * (positive)rows;
@@ -16779,11 +17219,12 @@ static positive ui_wrap_fit(ui_wrap_width width, address_any by, const char addr
         return fit;
 }
 
-// A run of a text of a role at a size, as it is drawn: measured in pieces, each cut between characters, so a run longer than a probe is
-// its whole width.
-static int ui_wrap_span(struct ui address_to ui, const char address_to text, positive from, positive to, int type, int size)
+// A run of a text (length bytes) of a role at a size, as it is drawn: a line of its paragraph (ui_bidi_part), measured in pieces, each cut
+// between characters, so a run longer than a probe is its whole width. A piece's marks (its direction, its islands) take at most three times
+// its bytes.
+static int ui_wrap_span_of(struct ui address_to ui, const char address_to text, positive length, positive from, positive to, int type, int size)
 {
-        char probe[UI_WRAP_PROBE];
+        char probe[4 * UI_WRAP_PROBE];
         int width = 0;
 
         while (to - from >= UI_WRAP_PROBE)
@@ -16792,20 +17233,25 @@ static int ui_wrap_span(struct ui address_to ui, const char address_to text, pos
 
                 while (cut > from + 1 && ((unsigned char)text[cut] & 0xc0) == 0x80)
                         cut--;
-                memory_copy(probe, text + from, cut - from);
-                probe[cut - from] = 0;
+                ui_bidi_part(text, length, from, cut, probe, sizeof(probe));
                 width += ui_kit_measure_at(ui, (string_address)probe, type, size);
                 from = cut;
         }
-        memory_copy(probe, text + from, to - from);
-        probe[to - from] = 0;
+        ui_bidi_part(text, length, from, to, probe, sizeof(probe));
         return width + ui_kit_measure_at(ui, (string_address)probe, type, size);
+}
+
+// The same of a text that ends at its NUL.
+static int ui_wrap_span(struct ui address_to ui, const char address_to text, positive from, positive to, int type, int size)
+{
+        return ui_wrap_span_of(ui, text, string_length((string_address)text), from, to, type, size);
 }
 
 struct ui_wrap_role
 {
         struct ui address_to ui;
         const char address_to text;
+        positive length;
         int type, size;
 };
 
@@ -16813,7 +17259,7 @@ static int ui_wrap_role_width(address_any by, positive from, positive to)
 {
         const struct ui_wrap_role address_to role = by;
 
-        return ui_wrap_span(role->ui, role->text, from, to, role->type, role->size);
+        return ui_wrap_span_of(role->ui, role->text, role->length, from, to, role->type, role->size);
 }
 
 // The lines of a text of a role at a size in room (device pixels): how many, and with at given, where each of the first most starts in
@@ -16821,8 +17267,8 @@ static int ui_wrap_role_width(address_any by, positive from, positive to)
 static int ui_wrap_lines(struct ui address_to ui, const char address_to text, int type, int size, int room, positive address_to at, positive address_to bytes,
                          int most)
 {
-        struct ui_wrap_role role = {ui, text, type, size};
         positive length = string_length((string_address)text), from = 0;
+        struct ui_wrap_role role = {ui, text, length, type, size};
         int count = 0;
 
         while (from <= length)
@@ -17713,12 +18159,25 @@ static struct ui_cut address_to ui_cuts;
         text (a NUL-terminated string) with whatever it is asked with, by. Answers the kind: 1 whole, the text fits; 2 the
         longest start that ends before a whole character and fits with three dots after it, found by halving (a start grows
         with its length); 3 its first character alone, whole, with no dots. *cut is the bytes of text kept, and fitted (room
-        for capacity bytes) is the scratch the candidates are written in.
+        for capacity bytes) is the scratch the candidates are written in. A kit run's start (part) is written as the start of
+        its paragraph is laid out (ui_bidi_part): with the paragraph's direction, so its dots are at the end it reads to.
 */
 typedef int (*ui_cut_width)(address_any by, string_address text);
 
+// The first at bytes of text, as a cut keeps them, into fitted.
+static fn ui_cut_start(char address_to fitted, string_address text, positive length, positive at, positive capacity, b32 part)
+{
+        if (part)
+        {
+                ui_bidi_part((const char address_to)text, length, 0, at, fitted, capacity);
+                return;
+        }
+        memory_copy(fitted, text, at);
+        fitted[at] = 0;
+}
+
 static unsigned char ui_cut_by(ui_cut_width width, address_any by, string_address text, positive length, int room, char address_to fitted,
-                               positive capacity, positive address_to cut)
+                               positive capacity, positive address_to cut, b32 part)
 {
         positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0, first = 1;
 
@@ -17731,8 +18190,7 @@ static unsigned char ui_cut_by(ui_cut_width width, address_any by, string_addres
 
                 while (at > 1 && (((unsigned char)text[at]) & 0xc0) == 0x80)
                         at--;
-                memory_copy(fitted, text, at);
-                fitted[at] = 0;
+                ui_cut_start(fitted, text, length, at, capacity, part);
                 string_append_bounded((string_address)fitted, (string_address) "...", capacity);
                 if (width(by, (string_address)fitted) <= room)
                         best = at, low = mid + 1;
@@ -17746,14 +18204,15 @@ static unsigned char ui_cut_by(ui_cut_width width, address_any by, string_addres
         return *cut = first < n ? first : n, 3;
 }
 
-// The text a cut of it is, written to fitted: its kept bytes, and the three dots after them for kind 2. Answers its length.
-static positive ui_cut_write(char address_to fitted, string_address text, positive length, positive cut, unsigned char kind, positive capacity)
+// The text a cut of it is, written to fitted: its kept bytes (a kit run's as ui_cut_start keeps them), and the three dots after them for
+// kind 2. Answers its length.
+static positive ui_cut_write(char address_to fitted, string_address text, positive length, positive cut, unsigned char kind, positive capacity,
+                             b32 part)
 {
         positive keep = kind == 1 ? length : cut;
 
         keep = keep < capacity ? keep : capacity - 1;
-        memory_copy(fitted, text, keep);
-        fitted[keep] = 0;
+        ui_cut_start(fitted, text, length, keep, capacity, part && kind != 1);
         if (kind == 2)
                 string_append_bounded((string_address)fitted, (string_address) "...", capacity);
         return string_length((string_address)fitted);
@@ -17806,7 +18265,7 @@ static string_address ui_fit_at(struct ui address_to ui, string_address text, in
         {
                 struct ui_cut_role role = {ui, type, size};
 
-                kind = ui_cut_by(ui_cut_kit, &role, text, length, room, fitted, capacity, &cut);
+                kind = ui_cut_by(ui_cut_kit, &role, text, length, room, fitted, capacity, &cut, true);
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
@@ -17816,7 +18275,7 @@ static string_address ui_fit_at(struct ui address_to ui, string_address text, in
         }
         if (kind == 1)
                 return text;
-        ui_cut_write(fitted, text, length, cut, kind, capacity);
+        ui_cut_write(fitted, text, length, cut, kind, capacity, true);
         return (string_address)fitted;
 }
 
@@ -17857,10 +18316,7 @@ static fn ui_view_words(struct ui address_to ui, const struct ui_node address_to
         top = n->y + (n->h - (line + (count - 1) * pitch)) / 2;
         for (int k = 0; k < count && k < UI_WRAP_MOST; k++)
         {
-                positive keep = bytes[k] < sizeof(shown) ? bytes[k] : sizeof(shown) - 1;
-
-                memory_copy(shown, item->text + at[k], keep);
-                shown[keep] = 0;
+                ui_bidi_part(item->text, string_length(text), at[k], at[k] + bytes[k], shown, sizeof(shown));
                 ui_kit_start_at(ui, edge, ui_kit_baseline(ui, top + k * pitch, type), (string_address)shown, type, size, argb, 0, low, high);
         }
 }
@@ -17891,9 +18347,9 @@ static positive ui_cell_fit(struct ui address_to ui, const font_face address_to 
 {
         struct ui_cell_cut by = {ui, faces, em};
         positive length = string_length((string_address)text), cut = length;
-        unsigned char kind = ui_cut_by(ui_cell_cut_width, &by, (string_address)text, length, room, fitted, capacity, &cut);
+        unsigned char kind = ui_cut_by(ui_cell_cut_width, &by, (string_address)text, length, room, fitted, capacity, &cut, false);
 
-        return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity);
+        return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity, false);
 }
 
 static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int ink, unsigned int ground)
@@ -19885,10 +20341,7 @@ static fn ui_row_text(struct ui address_to ui, struct ui_row_parts address_to p,
         top = n->y + (n->h - (ui_dev(ui, ui_types[type].line) + (count - 1) * pitch)) / 2;
         for (int k = 0; k < count && k < UI_WRAP_MOST; k++)
         {
-                positive keep = bytes[k] < sizeof(line) ? bytes[k] : sizeof(line) - 1;
-
-                memory_copy(line, text + at[k], keep);
-                line[keep] = 0;
+                ui_bidi_part(text, string_length((string_address)text), at[k], at[k] + bytes[k], line, sizeof(line));
                 ui_row_words(ui, n, closing ? n->w - ui_kit_measure(ui, (string_address)line, type) : 0, ui_kit_baseline(ui, top + k * pitch, type), line, type, ink);
         }
 }
@@ -21274,7 +21727,7 @@ static fn ui_lines_set(struct ui_lines address_to l, const char address_to text,
 // A run of the text, measured as it is drawn: in pieces, so a line of more than a probe's bytes does not run past the window.
 static int ui_lines_width(struct ui address_to ui, const struct ui_lines address_to l, positive from, positive to)
 {
-        return ui_wrap_span(ui, l->text, from, to, UI_BODY_MEDIUM, ui_types[UI_BODY_MEDIUM].size);
+        return ui_wrap_span_of(ui, l->text, l->length, from, to, UI_BODY_MEDIUM, ui_types[UI_BODY_MEDIUM].size);
 }
 
 // A run of the text laid on as it is measured: the pen after the bytes from its start to at, so a wider prefix costs its new
@@ -21357,14 +21810,10 @@ static fn ui_lines_wrap(struct ui address_to ui, struct ui_lines address_to l, i
         l->made = true, l->width = width, l->scale = ui->scale, l->percent = ui_text_percent;
 }
 
-// The text of line at, into room bytes (cut to them), as it is drawn.
+// The text of line at, into room bytes (cut to them), as it is drawn: a line of its paragraph (ui_bidi_part).
 static const char address_to ui_lines_copy(const struct ui_lines address_to l, int at, char address_to into, positive room)
 {
-        positive size = l->size[at];
-
-        size = size >= room ? room - 1 : size;
-        memory_copy(into, l->text + l->at[at], size);
-        into[size] = 0;
+        ui_bidi_part(l->text, l->length, l->at[at], (positive)l->at[at] + l->size[at], into, room);
         return into;
 }
 
