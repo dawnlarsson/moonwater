@@ -76621,6 +76621,37 @@ WIRE_FILES = ("src/net/net.c", "src/net/wait.c", "src/sh/net.c", "src/sh/host.c"
               "src/waterlink/service.c")
 
 
+def wire_linux_side(text):
+    """A source as the Linux build reads it: what a MACOS conditional keeps
+    for Darwin is left out, and what it keeps for everything else stays.
+
+    The link's listener builds on a Mac too, and there the socket options
+    carry Darwin's numbers beside the kernel's under `#if defined(MACOS)`.
+    The headers this harness reads are Linux's, so Darwin's side is not theirs
+    to judge, and the two spellings of one name are not a disagreement. Other
+    conditionals are kept whole, both sides, as they were.
+    """
+    kept = []
+    stack = []  # for each open conditional: None, or whether its lines are Linux's
+    for line in text.split("\n"):
+        word = line.strip()
+        if re.match(r"#\s*if", word):
+            if re.match(r"#\s*(ifdef\s+MACOS\b|if\s+defined\s*\(?\s*MACOS\s*\)?\s*$)", word):
+                stack.append(False)
+            elif re.match(r"#\s*(ifndef\s+MACOS\b|if\s+!\s*defined\s*\(?\s*MACOS\s*\)?\s*$)", word):
+                stack.append(True)
+            else:
+                stack.append(None)
+        elif re.match(r"#\s*(else|elif)\b", word) and stack:
+            if stack[-1] is not None:
+                stack[-1] = not stack[-1]
+        elif re.match(r"#\s*endif\b", word) and stack:
+            stack.pop()
+        elif all(side is not False for side in stack):
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def harness_wire_constants(argv):
     """Every kernel number the network stack writes as its own #define, against
     the kernel's uapi headers.
@@ -76642,7 +76673,7 @@ def harness_wire_constants(argv):
                          r"[ \t]*(?://[^\n]*|/\*[^\n]*)?$", re.M)
     seen = {}
     for path in WIRE_FILES:
-        for name, raw in pattern.findall((HARNESS_ROOT / path).read_text()):
+        for name, raw in pattern.findall(wire_linux_side((HARNESS_ROOT / path).read_text())):
             value = int(raw, 0)
             kernel = WIRE_ALIASES.get(name, name)
             if name not in WIRE_ALIASES and not name.startswith(WIRE_FAMILIES):
@@ -76696,6 +76727,15 @@ def harness_wire_constants(argv):
     #   A parse that found nothing would agree with everything: the source
     #   has well over a hundred of these, and every alias must be one.
     checks(len(known) >= 120, "only %d kernel numbers were compared" % len(known))
+    #   The filter is proved on the file that needs it: Darwin's SO_REUSEPORT
+    #   is 0x0200 there, and what is compared is the kernel's 15.
+    service = (HARNESS_ROOT / "src/waterlink/service.c").read_text()
+    checks("#define SO_REUSEPORT 0x0200" in service and
+           "#define SO_REUSEPORT 0x0200" not in wire_linux_side(service) and
+           "#define SO_REUSEPORT 15" in wire_linux_side(service) and
+           wire_linux_side("#ifndef MACOS\nA\n#else\nB\n#endif\n#if X\nC\n#else\nD\n#endif") ==
+           "A\nC\nD",
+           "a MACOS conditional's Darwin side is left out and nothing else is")
     checks(all(WIRE_ALIASES[a] in kernel for a in WIRE_ALIASES if a in
                {s[2] for s in seen.values()}),
            "an alias names something the kernel's headers do not declare")
@@ -89089,6 +89129,7 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key *key, const p8 *iv, const p8 *a
               "/* GNU ld repairs")
 
     svc = read("src/waterlink/service.c")
+    push = read("src/waterlink/push_dictionary.h")
     net = read("src/net/net.c")
     disc = read("src/waterlink/discover.c")
     hs = read("src/waterlink/handshake.c")
@@ -89118,6 +89159,8 @@ struct link_session {
         p8 peer[32];
         p32 may;
         bool exit_sent;
+        bool packed; // a push that comes packed with the shared dictionary
+        p32 mode;    // a push's mode, its low nine bits
         /*      What the stubs record for the model to check. */
         int started;      // 1 shell, 2 command, 3 push, 0 none
         int refused;
@@ -89318,6 +89361,20 @@ int main(int argc, char **argv)
                 if (length > 1 && draw(3) == 0)
                         payload[1 + draw(length - 1)] = 0;
 
+                /*      A push's format is usually one of the two this build
+                        knows or the first it does not, and a packed one
+                        names the right dictionary half the time: random
+                        bytes alone would reach neither yes. */
+                if (ask == LINK_ASK_PUSH && length >= 10 && draw(4))
+                {
+                        payload[5] = (p8)draw(3);
+                        if (payload[5] == 1 && draw(2))
+                        {
+                                payload[6] = 0x3A; payload[7] = 0xB0;
+                                payload[8] = 0x8F; payload[9] = 0xD1;
+                        }
+                }
+
                 link_request(&s, payload, length);
 
                 if (length < 1)
@@ -89377,6 +89434,40 @@ int main(int argc, char **argv)
                                                 model_bad++;
                                 }
                                 else if (!s.refused || s.started)
+                                        model_bad++;
+                        }
+                        /*      A push is its ask, four bytes of mode, a format,
+                                four of dictionary, then a path of 1 to 1024
+                                bytes with no NUL: 0 is raw, 1 is packed and
+                                names the one dictionary this build holds, and
+                                any other format or dictionary is refused
+                                before anything is staged. */
+                        else if (ask == LINK_ASK_PUSH)
+                        {
+                                bool well = length >= 10 && length - 10 <= 1024;
+                                p32 named = 0;
+                                p32 bits = 0;
+
+                                for (positive at = 10; well && at < length; at++)
+                                        if (!payload[at])
+                                                well = false;
+                                if (well)
+                                {
+                                        named = (p32)payload[6] << 24 | (p32)payload[7] << 16 |
+                                                (p32)payload[8] << 8 | payload[9];
+                                        bits = ((p32)payload[1] | (p32)payload[2] << 8) & 0777;
+                                }
+                                if (!well || payload[5] > 1 ||
+                                    (payload[5] == 1 && named != 0x3AB08FD1u) ||
+                                    length == 10)
+                                {
+                                        if (!s.refused || s.started)
+                                                model_bad++;
+                                }
+                                else if (s.started != 3 || s.refused ||
+                                         s.push_length != length - 10 ||
+                                         s.push_mode != bits || s.mode != bits ||
+                                         s.packed != (payload[5] == 1))
                                         model_bad++;
                         }
                 }
@@ -89971,7 +90062,7 @@ static void wl_alarm(int sig) { (void)sig; _exit(3); }
 static struct waterlink_link link_a, link_b;
 static positive heard_count;
 static bool sink_pause;
-static bool sink_hear(address_any context, struct waterlink_frame *head, p8 *payload)
+static p8 sink_hear(address_any context, struct waterlink_frame *head, p8 *payload)
 {
         (void)context; (void)head; (void)payload;
         heard_count++;
@@ -90311,7 +90402,8 @@ int main(int argc, char **argv)
             sec(svc, "static winsize link_size_unpack(", "// The streams"),
             "static positive string_span_of_set(const void *text, const char *set)\n"
             "{\n        return strspn(text, set);\n}\n",
-            sec(svc, "#define LINK_NAME_CHARACTERS", "static bool link_name_good("),
+            sec(push, "#define PUSH_DICTIONARY_ID", "\n") + "\n",
+            sec(svc, "#define LINK_NAME_CHARACTERS", "static p8 link_name_good("),
             sec(svc, "static fn link_term_word(", "static DEAD_END fn link_child_exec("),
             head, region, tail])
 
@@ -90343,7 +90435,7 @@ int main(int argc, char **argv)
                     "#endif // WATERLINK_LINK_INCLUDED")
     fill_c = "#else\npositive waterlink_fill(" in core_text
     apply_c = "#else\nfn waterlink_apply(" in core_text
-    jmodel = sec(checks, "static bool judge_model_number(",
+    jmodel = sec(checks, "static p8 judge_model_number(",
                  "/*\n        Delivery as it was before the judge")
     jgen = sec(checks, "static p64 judge_state = 0x6a09e667f3bcc909ull;",
                "static struct waterlink_link judge_one, judge_two;")
@@ -90419,6 +90511,12 @@ static void *memory_copy_apart(void *into, const void *from, positive size)
             built = subprocess.run(command, capture_output=True, text=True)
             if built.returncode:
                 (work / (name + ".log")).write_text(built.stderr)
+                #   A build that fails says why: the first errors, not only
+                #   that it failed, so a lift that drifted is found from the
+                #   lane's own words.
+                errors = [l for l in built.stderr.splitlines() if "error" in l]
+                for line in errors[:6]:
+                    print("    " + line[:240])
                 return None, built.stderr
             return work / name, ""
 
@@ -91013,7 +91111,7 @@ static bipolar link_groups_read(link_groups address_to groups,
     parts = [
         SHIM, waterlink_lift_cursors(), wl,
         sec(link, "// The largest frame that can share", "fn waterlink_link_reset("),
-        sec(link, "typedef bool (address_to waterlink_sink)",
+        sec(link, "typedef p8 (address_to waterlink_sink)",
             "// Hand one frame to the application"),
         sec(link, "struct waterlink_part\n{", "/*\n        Judge an authenticated body whole"),
         sec(link, "#define WATERLINK_REPLAY_BLOCKS", "#endif // WATERLINK_LINK_INCLUDED"),
@@ -91035,14 +91133,14 @@ static bipolar link_groups_read(link_groups address_to groups,
             "static p16 link_port(void)"),
         sec(svc, "static fn link_address_v4(", "/*\n        An address one machine can be at"),
         sec(svc, "static fn link_socket_address(", "// The lock ----"),
-        sec(svc, "// Sessions ----", "static bool link_part_owned("),
+        sec(svc, "// Sessions ----", "static p8 link_part_owned("),
         sec(svc, "static fn link_keys_install(", "// Sending ----"),
         sec(svc, "static positive link_destination(",
             "/*\n        A run of full datagrams to one place"),
         sec(svc, "typedef struct\n{\n        address_any base;", "static fn link_batch_flush(void)"),
         sec(svc, "// A sealed datagram of nothing", "/*      A frame whose payload is made already"),
         SERVICE_STUBS,
-        sec(near, "#define LINK_PEERS_LOCK", "bool link_groups_load("),
+        sec(near, "#define LINK_PEERS_LOCK", "p8 link_groups_load("),
         NEARBY_STUBS,
         sec(near, "static p64 link_boot_seconds(void)", "/*\n        The peers file has two writers now"),
         sec(near, "static fn link_name_for(", "// The listener's side of it"),
@@ -91050,7 +91148,7 @@ static bipolar link_groups_read(link_groups address_to groups,
         NEARBY_GROUP_STUBS,
         sec(near, "typedef struct\n{\n        p32 multiaddr;",
             "/*\n        Every interface with an IPv4 address"),
-        sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
+        sec(near, "static p8 link_nearby_send(", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
             "/*\n        The mDNS reader, apart."),
         #   The listener reads mDNS in a confined child; the fuzz reads it in
@@ -91062,7 +91160,7 @@ static bipolar link_groups_read(link_groups address_to groups,
             "/*\n        The listener's turn:"),
         sec(near, "// Read what is waiting on the mDNS socket",
             "#endif // WATERLINK_NEARBY_INCLUDED"),
-        "static bool link_hear(address_any context, struct waterlink_frame *head, "
+        "static p8 link_hear(address_any context, struct waterlink_frame *head, "
         "p8 *payload)\n{\n        (void)context; (void)head; (void)payload;\n"
         "        return true;\n}\n",
         sec(svc, "// The handshake, at the machine's end", "// The state file, for"),
@@ -91072,10 +91170,10 @@ static bipolar link_groups_read(link_groups address_to groups,
             "//      Never more than once a fifth"),
         sec(svc, "typedef struct\n{\n        struct waterlink_noise noise;",
             "/*      The client's terminal goes raw"),
-        sec(svc, "// The initiator's half of the handshake", "static bool link_client_answer("),
+        sec(svc, "// The initiator's half of the handshake", "static p8 link_client_answer("),
         sec(svc, "static fn link_client_answered(p8 address_to datagram, positive length);",
             "/*\n        `moonwater link serve`"),
-        sec(svc, "static bool link_client_answer(", "static p64 link_rekey_after(void)"),
+        sec(svc, "static p8 link_client_answer(", "static p64 link_rekey_after(void)"),
         WATERLINK_PRE_DRIVER,
     ]
     return "\n".join(parts)
@@ -92260,7 +92358,7 @@ static p8 stamp(p8 key, p32 sequence, positive at)
         return (p8)(key * 131u + sequence * 7u + (sequence >> 8) + at * 13u);
 }
 
-static bool state_sink(address_any context, struct waterlink_frame *head,
+static p8 state_sink(address_any context, struct waterlink_frame *head,
                        p8 *payload)
 {
         p8 key = head->key;
@@ -92682,7 +92780,7 @@ def waterlink_script_scan(shim):
     import tempfile
     command = (HARNESS_ROOT / "src/waterlink/command.c").read_text()
     host = (HARNESS_ROOT / "src/sh/host.c").read_text()
-    scan = src_slice(command, "static bool link_script_names_secret(",
+    scan = src_slice(command, "static p8 link_script_names_secret(",
                         "static b32 link_status(void)")
     #   The scan uses both prefix tests: string_has_prefix, lib.util.c's,
     #   spelled as it is there (the length of the literal), for the words it
