@@ -152394,6 +152394,183 @@ static fn check_kit_view_scroll(void)
         ui_kit.test_clock = 0, ui_kit.busy = 0;
 }
 
+/*
+        Controls as elements of the view: under a band of 30, a column that scrolls, and in it a card of the kit's as the surface of a column
+        of a painted box, a switch, a badge (its size the kit's own), a slider, 400 of nothing, a second switch that is out of sight until
+        it is scrolled to, and three radios. The controls are this check's own, as an app's are its; where each is, its picture and the
+        pointer on it are the view's. A window 300 by 330 at 100 percent, and twice that at 200.
+*/
+static struct ui view_control_ui;
+static struct ui_control view_control[6]; // the card, the switch, the badge, the slider, the far switch, the radios
+static int view_control_changes, view_control_last;
+
+static b32 view_control_changed(int value)
+{
+        view_control_changes++, view_control_last = value;
+        return value != 9;
+}
+
+static fn view_control_build(void)
+{
+        ui_view_begin(&view_check, &view_control_ui, 300 * view_control_ui.scale / 100, -330 * view_control_ui.scale / 100);
+        ui_host(&view_check_head, .h = 30);
+        ui_col(.class = "scroll", .grow = 1)
+                ui_col(.control = &view_control[0], .class = "card")
+                {
+                        ui_col(.h = 20, .paint = 0xff102030u);
+                        ui_control(&view_control[1], .h = 48, .on = view_control_changed, .arg = 3);
+                        ui_row()
+                                ui_control(&view_control[2]);
+                        ui_control(&view_control[3], .h = 88);
+                        ui_host(null, .h = 400);
+                        ui_control(&view_control[4], .h = 48, .on = view_control_changed, .arg = 9);
+                        ui_control(&view_control[5], .h = 2 * UI_RADIO_PITCH + 48);
+                }
+        ui_view_end(&view_check);
+}
+
+// An event at the check's time, 8 ms after the last: the screen declared again, then the view's.
+static p32 view_control_send(unsigned int type, unsigned int flags, int a, int b)
+{
+        struct window_event event = {type, flags, a, b};
+
+        ui_kit.test_clock += 8000000;
+        ui_event_context(&event);
+        view_control_build();
+        return ui_view_event(&view_control_ui, &view_check, &event);
+}
+
+static unsigned int view_control_pixel(const unsigned int address_to pixels, int x, int y)
+{
+        return pixels[y * 300 + x] & 0xffffffu;
+}
+
+static fn check_kit_view_controls(void)
+{
+        static unsigned int pixels[300 * 330], scratch[300 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui address_to ui = &view_control_ui;
+        struct ui_control address_to card = &view_control[0], address_to toggle = &view_control[1], address_to badge = &view_control[2];
+        struct ui_control address_to slider = &view_control[3], address_to far = &view_control[4], twin;
+        struct ui_scroll address_to s = &view_check.scroll[0];
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        int pad = UI_GAP4, gap = UI_GAP3, top = 30 + pad + 20 + gap, lit = 0, rows_top = 0, rows_bottom = 0, ghost;
+        b32 same;
+        p32 asks, lifted;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit view controls: the face loads", false);
+                return;
+        }
+        *ui = terminal.ui;
+        ui->pixels = pixels, ui->pitch = 300, ui->width = 300, ui->height = 330, ui->scale = 100;
+        ui->scratch = scratch, ui->scratch_width = 300, ui->band_top = ui->band_bottom = 0, ui->mono = null, ui->scene = null;
+        ui->regular = ui->bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = ui_kit.test_clock = 9000000000ll;
+        ui_kit.rtl = 0, ui_kit_held = null;
+        ui_kit_settle();
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(view_control, sizeof(view_control));
+        card->kind = UI_CARD;
+        toggle->kind = far->kind = UI_SWITCH, toggle->label = "Wired", far->label = "Far";
+        badge->kind = UI_BADGE, badge->label = "New", badge->role = UI_PRIMARY;
+        slider->kind = UI_SLIDER, slider->label = "Level", slider->high = ui_q(100), slider->step = ui_q(1), slider->value = ui_q(50);
+        view_control[5].kind = UI_RADIOS, view_control[5].count = 3, view_control[5].items[0] = "One", view_control[5].items[1] = "Two", view_control[5].items[2] = "Three";
+        for (int k = 0; k < 6; k++)
+                ui_control_start(&view_control[k]);
+        view_control_changes = 0;
+
+        // Placed: each control's box is its element's rectangle, in logical pixels, the same at any scale.
+        view_control_build();
+        twin = *badge, twin.w = twin.h = 0;
+        ui_control_size(ui, &twin);
+        same = card->x == 0 && card->y == 30 && card->w == 300 && card->h == s->content && toggle->x == pad && toggle->y == top && toggle->w == 300 - 2 * pad &&
+               toggle->h == 48 && badge->x == pad && badge->y == top + 48 + gap && badge->w == twin.w && badge->h == 22 && twin.w > 18 &&
+               slider->y == badge->y + 22 + gap && slider->h == 88 && far->y == slider->y + 88 + gap + 400 + gap && view_control[5].h == 48;
+        check("kit view controls: a control's box is its element's rectangle: its size its props', or the kit's own for a badge, a card its children's and its pad, and a group of radios one row's height",
+              same && view_check.dropped == 0 && view_check.unknown == 0);
+        ui->scale = 200;
+        view_control_build();
+        check("kit view controls: at 200 percent every box is the same logical pixels, from a rectangle twice the size",
+              view_check.tree.node[5].x == 2 * pad && view_check.tree.node[5].y == 2 * top && card->w == 300 && toggle->x == pad && toggle->y == top && toggle->w == 300 - 2 * pad &&
+                  toggle->h == 48 && slider->y == top + 48 + gap + 22 + gap && far->y == slider->y + 88 + gap + 400 + gap);
+        ui->scale = 100;
+
+        // Drawn where they are declared: the card first, its children over it; and what is wholly out of sight is not drawn at all.
+        view_control_build();
+        ui_begin(ui, pixels, 300, 300, 330);
+        ui_view_draw(ui, &view_check, false);
+        for (int y = top; y < top + 48; y++)
+                for (int x = pad; x < 300 - pad; x++)
+                        lit += view_control_pixel(pixels, x, y) != (ui_role(UI_SURFACE_LOW) & 0xffffffu);
+        check("kit view controls: they are drawn in the order they are declared: the card, the painted box over the card's face, the switch on it",
+              view_control_pixel(pixels, 150, 30 + pad / 2) == (ui_role(UI_SURFACE_LOW) & 0xffffffu) && view_control_pixel(pixels, 150, 30 + pad + 10) == 0x102030u && lit > 200);
+        check("kit view controls: a control wholly below what its scroll container shows is not drawn, and one that shows is",
+              toggle->placed == ui_kit.epoch && slider->placed == ui_kit.epoch && far->placed != ui_kit.epoch);
+
+        // The pointer: the hover of what is under it, a press and its release on the switch throw it and call its handler, once.
+        asks = view_control_send(WINDOW_EVENT_MOTION, 0, 150, top + 24);
+        check("kit view controls: the pointer over a control lights it, and the picture is due", toggle->hover && !slider->hover && (asks & UI_VIEW_DRAW));
+        asks = view_control_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        same = asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && ui_kit_held == toggle && toggle->down && !toggle->on && !view_control_changes;
+        lifted = view_control_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        check("kit view controls: a press on a switch is the view's and the switch holds the pointer; its release there throws it and calls its handler once, with its argument",
+              same && lifted == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && !ui_kit_held && toggle->on && view_control_changes == 1 && view_control_last == 3);
+
+        // Capture: the control that holds the pointer has the motions and the release, wherever they are.
+        view_control_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        asks = view_control_send(WINDOW_EVENT_MOTION, 0, 150, slider->y + 60);
+        same = ui_kit_held == toggle && !slider->hover && toggle->moved && (asks & UI_VIEW_DRAW);
+        lifted = view_control_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        check("kit view controls: a held switch keeps the pointer as it moves onto a slider: the slider is not lit and is not moved, and the release, a drag straight down, throws nothing",
+              same && (lifted & UI_VIEW_TAKEN) && !ui_kit_held && toggle->on && view_control_changes == 1 && slider->value == ui_q(50));
+
+        // A slider's ghost: a motion along it that lights nothing new puts its own rows due and asks for no whole picture.
+        view_control_send(WINDOW_EVENT_MOTION, 0, 100, slider->y + 60);
+        ui_view_moved(&view_check, &rows_top, &rows_bottom);
+        ghost = slider->hover_x;
+        asks = view_control_send(WINDOW_EVENT_MOTION, 0, 180, slider->y + 60);
+        check("kit view controls: a motion along a slider that moves only its ghost asks for no picture and puts the slider's rows due, once",
+              slider->hover && slider->hover_x != ghost && !(asks & UI_VIEW_DRAW) && ui_view_moved(&view_check, &rows_top, &rows_bottom) && rows_top == slider->y - 8 &&
+                  rows_bottom == slider->y + slider->h + 8 && !ui_view_moved(&view_check, &rows_top, &rows_bottom));
+
+        // What a scroll container has scrolled out of sight is not under the pointer, though its box is.
+        ui_scroll_set(s, 60);
+        asks = view_control_send(WINDOW_EVENT_MOTION, 0, 150, 25);
+        same = toggle->y == top - 60 && toggle->y < 25 && !toggle->hover;
+        asks = view_control_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        view_control_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        same = same && !(asks & UI_VIEW_TAKEN) && toggle->on && view_control_changes == 1;
+        view_control_send(WINDOW_EVENT_MOTION, 0, 150, 40);
+        check("kit view controls: the part of a switch scrolled above its container is not under the pointer there (no hover, no press), and the part that shows is",
+              same && toggle->hover);
+
+        // Scrolled to its end: the far switch shows and is drawn, the first is out of sight and is not; a handler's false ends the window.
+        view_control_send(WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_END, 0);
+        ui_kit_settle();
+        view_control_build();
+        ui_begin(ui, pixels, 300, 300, 330);
+        ui_view_draw(ui, &view_check, false);
+        check("kit view controls: scrolled to the end, the far switch is drawn and the first, wholly above, is not", s->scroll == s->content - 300 && far->placed == ui_kit.epoch &&
+                                                                                                                   toggle->placed != ui_kit.epoch);
+        view_control_send(WINDOW_EVENT_MOTION, 0, 150, far->y + 24);
+        view_control_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        asks = view_control_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        check("kit view controls: a control whose handler answers false ends the window", far->on && view_control_changes == 2 && view_control_last == 9 && (asks & UI_VIEW_QUIT));
+
+        // Reading from the right: the controls' boxes and the bar are the mirror.
+        ui_scroll_set(s, 0);
+        ui_kit.rtl = 1;
+        view_control_build();
+        check("kit view controls: reading from the right a control is at the mirror of its place, and the bar is down the left edge",
+              badge->x == 300 - pad - badge->w && badge->w == twin.w && toggle->x == pad && toggle->w == 300 - 2 * pad && s->x == 0);
+        ui_kit.rtl = 0;
+        ui_kit_held = null;
+        ui_kit.test_clock = 0, ui_kit.busy = 0;
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -166060,6 +166237,7 @@ b32 main()
         check_kit_layout();
         check_kit_view();
         check_kit_view_scroll();
+        check_kit_view_controls();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();

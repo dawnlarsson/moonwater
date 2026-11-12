@@ -16406,8 +16406,9 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
 
             ui_view_begin(&view, ui, width, most);   // a window width wide (device pixels), at most most tall (-most: exactly)
             ui_host(&field, .class = "head");        // the box of a widget the view does not draw: its place is written to field
-            ui_col(.class = "inset") { ... }         // a container: ui_row or ui_col; ui_text and ui_button are leaves
-            height = ui_view_end(&view);             // laid out: the window's height, and every host's rectangle
+            ui_col(.class = "inset") { ... }         // a container: ui_row or ui_col; ui_text, ui_button and ui_control are leaves
+            ui_control(&tabs, .class = "tabs");      // a control of the kit's that the app keeps: placed, drawn and pressed by the view
+            height = ui_view_end(&view);             // laid out: the window's height, every host's rectangle and every control's box
             ui_view_draw(ui, &view, keys);           // painted (the window has the keys: the focused button shows its ring)
             asks = ui_view_event(ui, &view, event);  // an event: UI_VIEW_DRAW (due again), _TAKEN (the view's), _QUIT (a handler said stop)
 
@@ -16425,6 +16426,16 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         ui_view_moved or ui_view_begin and puts only the rows of its readers due again. The buttons of a view are one row of the
         kit's (ui_buttons: its keys, its confirm, its pointer), in the order they are declared, at most UI_BUTTONS_MOST.
 
+        A control (ui_control(&c, ...)) is an element bound to a struct ui_control the app keeps: the control is what it is by its
+        address, what it holds and the motion it is in stay in it, and the view does the rest. Its size is its class's or its props',
+        else the kit's own for the kinds that have a rule (a badge, a tag, a key: ui_control_size); its box is written from its
+        rectangle by ui_view_box, the one conversion to a control's logical pixels; it is drawn where it is declared among the boxes
+        and the text (ui_control_draw), and it has the pointer as an array of controls has it (ui_kit_pointer): the hover of what
+        shows under it, a press to the first control it is on, and every motion and the release to the one that holds it. .on is
+        called with .arg when the control changed (a tab chosen, a switch thrown, a slider moved, a button pressed). A container
+        takes a control too (.control): the kit's card or window is then the surface its children are on. The kit has no keys for
+        a lone control, so the keys the view hands on are the buttons' row's and a scroll container's.
+
         A column whose class says scroll is a scroll container, and scrolls: the view owns its scroller (a struct ui_scroll, found by
         its order among the build's scroll containers as a button is by its, at most UI_VIEW_SCROLLS; one past them is a plain box),
         so an app keeps no scroll state. The build steps the body (ui_scroll_frame, which keeps the kit busy while it moves, as a
@@ -16434,14 +16445,14 @@ static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_t
         is over it. The wheel turns the container under the pointer, the deepest of them; the bar takes the pointer on it; a finger's
         drag moves it and its lift throws it; and Up, Down, Page Up, Page Down, Home and End move it (ui_lines_key).
 
-        A leaf is one line of text, a button, or a host; the field, the list and the page are the old composites and are hosts
-        until they are elements. What removing the old way needs: every app's place, draw and event moved onto a view (the launcher
-        is), the list, the page and the lines given elements, the text field given one, the checks that read the old structs' fields
-        (launcher.power, settings.page, mixer.row) read the view's, and then ui_buttons, ui_control placed by hand and the apps'
-        damage marking deleted.
+        What is still a host: the list, the page, the lines and the strips, the old composites with a scroller of their own, and the
+        text of a field (a field's control is an element; what is typed in it is still handed to its engine by its app). What
+        removing the old way needs: those given elements, the checks that read the old structs' fields (settings.page, mixer.row)
+        read the view's, and then ui_buttons and the apps' damage marking deleted.
 */
 #define UI_VIEW_WATCHES 16
 #define UI_VIEW_SCROLLS 4         // the scroll containers of one build
+#define UI_VIEW_REACH 40          // what a control paints past its box, logical pixels: its ripple, its shadow, its stretch (ui_kit_mark's room)
 #define UI_ITEM_BOX 0
 #define UI_ITEM_TEXT 1
 #define UI_ITEM_BUTTON 2
@@ -16472,9 +16483,10 @@ struct ui_props
         int drop;                         // a text's baseline: the middle of its box plus this many hundredths of its size (0: centred)
         const char address_to text;       // a text's words, a button's label
         const char address_to says;       // a button that is not undone: what its next press does, said while it is armed
-        b32 (*on)(int value);             // a button's act: false ends the window
+        b32 (*on)(int value);             // a button's act, a control's change: false ends the window
         int arg;                          // what the handler is given
         struct ui_rect address_to host;   // a host's rectangle, device pixels, written by ui_view_end
+        struct ui_control address_to control; // the app's control the element is (ui_control), or the surface of a container
 };
 
 // A class: what its name stands for, in logical pixels. A zero is not said, so a class that says nothing of a thing leaves
@@ -16529,6 +16541,9 @@ struct ui_item
         int size, drop;                   // a text's size in points and its baseline (ui_props)
         const char address_to text;
         struct ui_rect address_to host;
+        struct ui_control address_to control;
+        b32 (*on)(int value);             // a button's or a control's handler, and what it is given
+        int arg;
 };
 
 // A variable of the app's that a build read (ui_value), and what it held then.
@@ -16546,8 +16561,6 @@ struct ui_view
         struct ui_tree tree;
         struct ui_item item[UI_TREE_NODES], discard;
         struct ui_buttons group;          // the buttons of the build, in order: hover, press, keys, confirm
-        b32 (*on[UI_BUTTONS_MOST])(int value);
-        int arg[UI_BUTTONS_MOST];
         int width, limit;                 // the viewport: its width, and the most height (device pixels; 0 for none)
         int unknown, dropped;             // class names the table lacks, and elements refused (what a check reads)
         unsigned int generation;          // counted up by each build
@@ -16628,6 +16641,13 @@ static b64 ui_view_read(const void address_to at, unsigned int size)
         return *(const long long address_to)at;
 }
 
+// Rows put due again (device pixels), joined to the rows that already are.
+static fn ui_view_due(struct ui_view address_to v, int top, int bottom)
+{
+        v->moved_top = v->moved_bottom > v->moved_top && v->moved_top < top ? v->moved_top : top;
+        v->moved_bottom = v->moved_bottom > bottom ? v->moved_bottom : bottom;
+}
+
 // The variables the build read that are not what they were: the rows of their readers are due again (moved_top, moved_bottom).
 // True when any such reader is on screen. A variable that no build of the view read last shows nowhere, and moves nothing.
 static b32 ui_view_poll(struct ui_view address_to v)
@@ -16649,10 +16669,7 @@ static b32 ui_view_poll(struct ui_view address_to v)
                 any = true;
                 if (w->node >= 0 && w->node < v->tree.count)
                 {
-                        const struct ui_node address_to n = &v->tree.node[w->node];
-
-                        v->moved_top = v->moved_bottom > v->moved_top && v->moved_top < n->y ? v->moved_top : n->y;
-                        v->moved_bottom = v->moved_bottom > n->y + n->h ? v->moved_bottom : n->y + n->h;
+                        ui_view_due(v, v->tree.node[w->node].y, v->tree.node[w->node].y + v->tree.node[w->node].h);
                 }
                 else
                         v->moved_top = 0, v->moved_bottom = UI_TREE_MOST;
@@ -16682,7 +16699,7 @@ static b64 ui_view_value(const void address_to at, unsigned int size)
 #define ui_value(at) ui_view_value((const void address_to)(at), (unsigned int)sizeof(*(at)))
 #define ui_set(at, value) ((*(at) = (value)), ui_view_poll(ui_view_now))
 
-// The rows of the changed variables' readers since the last call (device pixels); false when none.
+// The rows due again since the last call (device pixels), the changed variables' readers' and a slider's whose ghost moved; false when none.
 static b32 ui_view_moved(struct ui_view address_to v, int address_to top, int address_to bottom)
 {
         ui_view_poll(v);
@@ -16743,8 +16760,16 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
                 n->content[0] = fixed[0] ? 0 : ui_kit_measure(ui, (string_address)p->text, type) + 2 * ui_px(ui, UI_GAP3);
                 n->content[1] = ui_px(ui, 36);
         }
+        else if (p->control)
+        {
+                // A control's own size, for a kind the kit has a rule for (ui_control_size): what the rule does not say stays nothing.
+                p->control->w = p->control->h = 0;
+                ui_control_size(ui, p->control);
+                n->content[0] = fixed[0] ? 0 : ui_px(ui, p->control->w), n->content[1] = ui_px(ui, p->control->h);
+        }
         item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = item->scroll = -1;
         item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop;
+        item->control = p->control, item->on = p->on, item->arg = p->arg;
         // A column that scrolls: its scroller is the view's, by its order among the build's. Its body is stepped to the kit's time, and
         // its children are laid out at the place it rests at (a pull past an end is drawn by ui_view_draw, on the picture).
         if (look.scroll && dir == 1 && item != &v->discard && v->scrolls < UI_VIEW_SCROLLS)
@@ -16759,7 +16784,6 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         if (kind == UI_ITEM_BUTTON && item != &v->discard && v->group.count < UI_BUTTONS_MOST)
         {
                 item->button = v->group.count;
-                v->on[item->button] = p->on, v->arg[item->button] = p->arg;
                 ui_buttons_set(&v->group, item->button, p->text, p->says);
         }
         return item;
@@ -16803,6 +16827,7 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 #define ui_text(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_TEXT, .text = (words), __VA_ARGS__})
 #define ui_button(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BUTTON, .text = (words), __VA_ARGS__})
 #define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
+#define ui_control(c, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .control = (c), __VA_ARGS__})
 
 // A screen begun: a window width wide (device pixels) and at most limit tall (0: as tall as it comes to; below 0: exactly -limit tall, a
 // height the window was given). The root is a column the width of the window; what is declared after this is its children, until ui_view_end.
@@ -16826,8 +16851,21 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
         v->item[0].button = v->item[0].scroll = -1;
 }
 
-// The screen laid out: the window's height, every host's rectangle written, the buttons placed in the kit's row and every scroller given
-// its region. Reading from the right the whole tree is turned over the window's width, as a page is, and a bar is at the other edge.
+// A control's box from its element's rectangle: the one conversion of the view's device pixels to a control's logical ones, in 64 bits
+// (a node may sit up to 2^30 device pixels out, a long scroll, and times 100 that is past an int). A group of radios is its rows
+// UI_RADIO_PITCH apart, and its control's height is one row's.
+static fn ui_view_box(const struct ui address_to ui, const struct ui_node address_to n, struct ui_control address_to c)
+{
+        int scale = ui->scale > 0 ? ui->scale : 100;
+
+        c->x = (int)((b64)n->x * 100 / scale), c->y = (int)((b64)n->y * 100 / scale), c->w = (int)((b64)n->w * 100 / scale), c->h = (int)((b64)n->h * 100 / scale);
+        if (c->kind == UI_RADIOS && c->count > 1)
+                c->h -= (c->count - 1) * UI_RADIO_PITCH;
+}
+
+// The screen laid out: the window's height, every host's rectangle and every control's box written, the buttons placed in the kit's row and
+// every scroller given its region. Reading from the right the whole tree is turned over the window's width, as a page is, and a bar is
+// at the other edge.
 static int ui_view_end(struct ui_view address_to v)
 {
         struct ui address_to ui = v->ui;
@@ -16854,14 +16892,15 @@ static int ui_view_end(struct ui_view address_to v)
                         s->inset = (ui_rtl() ? n->x <= 0 : n->x + n->w >= v->tree.node[0].w) ? UI_CLOSE_BOTTOM : 0;
                         ui_scroll_clamp(s);
                 }
+                if (item->control)
+                        ui_view_box(ui, n, item->control);
                 if (item->kind == UI_ITEM_HOST && item->host)
                         *item->host = (struct ui_rect){n->x, n->y, n->w, n->h};
                 else if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
                 {
                         struct ui_control address_to c = &v->group.button[item->button];
 
-                        // 64-bit: a node may sit up to 2^30 device pixels out (a long scroll), and times 100 that is past an int
-                        c->x = (int)((b64)n->x * 100 / scale), c->y = (int)((b64)n->y * 100 / scale), c->w = (int)((b64)n->w * 100 / scale), c->h = (int)((b64)n->h * 100 / scale);
+                        ui_view_box(ui, n, c);
                         c->variant = v->group.confirm.armed && v->group.confirm.what == item->button + 1 ? UI_BUTTON_PRIMARY
                                      : item->look.variant ? item->look.variant - 1 : UI_BUTTON_DEFAULT;
                         low = first < 0 || n->x < low ? n->x : low, high = first < 0 || n->x + n->w > high ? n->x + n->w : high;
@@ -16925,9 +16964,9 @@ static struct ui_scroll address_to ui_view_scroll_at(struct ui_view address_to v
         return found;
 }
 
-// The screen painted: the boxes and the text in the order they were declared, each in the rows its scroll containers show and not at all
-// when it is wholly outside them; after the last of what is in a scroll container, its pull past an end and its bar; then the buttons
-// over them (keys: the window has the keys).
+// The screen painted: the boxes, the text and the controls in the order they were declared, each in the rows its scroll containers show and
+// not at all when it is wholly outside them (a control, when all it paints is: UI_VIEW_REACH); after the last of what is in a scroll
+// container, its pull past an end and its bar; then the buttons over them (keys: the window has the keys).
 static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32 keys)
 {
         UI_CALL();
@@ -16950,13 +16989,15 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                         break;
                 const struct ui_node address_to n = &v->tree.node[at];
                 const struct ui_item address_to item = &v->item[at];
-                int type = item->look.type ? item->look.type - 1 : UI_BODY_MEDIUM;
+                int type = item->look.type ? item->look.type - 1 : UI_BODY_MEDIUM, reach = item->control ? ui_px(ui, UI_VIEW_REACH) : 0;
 
                 ui_view_rows(v, n->parent, &top, &bottom);
-                if (n->y + n->h <= top || n->y >= bottom)
+                if (n->y + n->h + reach <= top || n->y - reach >= bottom)
                         continue;
                 ui->top = top < 0 ? 0 : top, ui->bottom = bottom > ui->height ? ui->height : bottom;
-                if (item->kind == UI_ITEM_BOX && item->paint)
+                if (item->control)
+                        ui_control_draw(ui, item->control);
+                else if (item->kind == UI_ITEM_BOX && item->paint)
                         ui_fill(ui, n->x, n->y, n->w, n->h, item->paint);
                 else if (item->kind == UI_ITEM_BOX && item->look.fill && item->look.radius)
                         ui_round(ui, n->x, n->y, n->w, n->h, ui_px(ui, item->look.radius), ui_role(item->look.fill - 1) | 0xff000000u);
@@ -16979,18 +17020,28 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
         ui_buttons_draw(ui, &v->group, keys);
 }
 
+// An element's handler called with what it is given: UI_VIEW_QUIT when it answers false.
+static p32 ui_view_act(const struct ui_item address_to item)
+{
+        return item->on && !item->on(item->arg) ? UI_VIEW_QUIT : 0;
+}
+
 /*
         An event for the view. The wheel turns the scroll container under the pointer (ui_wheel_turn); a container's bar takes the pointer
         on it (ui_scroll_pointer: its thumb is dragged, its track pages); a finger's press in a container is a drag of it past the slop, and
-        its lift throws it (ui_press_follow, ui_press_lift), unless a control holds the finger. The buttons take the pointer and the keys
-        (ui_buttons_event), and the one that acted has its handler called; a key they leave moves the scroll container under the pointer, or
-        the first when the pointer is on none (ui_lines_key).
+        its lift throws it (ui_press_follow, ui_press_lift), unless a control holds the finger. A control of the view's that holds the
+        pointer has every motion and the release, wherever the pointer is (capture); else the buttons take the pointer and the keys
+        (ui_buttons_event), and then the controls the pointer as an array of them does (ui_kit_pointer): a motion lights what shows under
+        it, and a press takes the focus from every control and is the first one's it is on. The button that acted and the control that
+        changed have their handlers called. A motion that moved nothing but a slider's ghost puts that slider's rows due (ui_view_moved) and
+        asks for no picture. A key the buttons leave moves the scroll container under the pointer, or the first when the pointer is on
+        none (ui_lines_key).
 */
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
         b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
-        int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, lone;
+        int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y, own = -1, top, bottom;
         struct ui_scroll address_to under = ui_view_scroll_at(v, x, y);
         p32 asks = 0;
 
@@ -17011,14 +17062,47 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         }
         if (asks & UI_VIEW_TAKEN)
                 return asks;
-        asks |= ui_buttons_event(ui, &v->group, event, ui_kit.pointer_x, ui_kit.pointer_y);
-        if (asks & UI_BUTTONS_FIRED)
+        for (int at = 0; at < v->tree.count && ui_kit_held && (motion || (button && !down)); at++)
+                own = v->item[at].control == ui_kit_held ? at : own;
+        if (own >= 0)
         {
-                int fired = v->group.fired;
-
+                asks |= UI_VIEW_DRAW | (button ? UI_VIEW_TAKEN : 0);
+                if (ui_kit_pointer(ui, ui_kit_held, 1, (int)event->type, x, y, down, event->flags))
+                        asks |= ui_view_act(&v->item[own]);
+        }
+        else
+        {
+                asks |= ui_buttons_event(ui, &v->group, event, ui_kit.pointer_x, ui_kit.pointer_y);
+                for (int at = 0; at < v->tree.count && (asks & UI_BUTTONS_FIRED); at++)
+                        if (v->item[at].kind == UI_ITEM_BUTTON && v->item[at].button == v->group.fired)
+                                asks = (asks & ~UI_BUTTONS_FIRED) | ui_view_act(&v->item[at]);
                 asks &= ~UI_BUTTONS_FIRED;
-                if (fired >= 0 && fired < UI_BUTTONS_MOST && v->on[fired] && !v->on[fired](v->arg[fired]))
-                        asks |= UI_VIEW_QUIT;
+        }
+        lone = own < 0 && !ui_kit_held && !(asks & UI_VIEW_TAKEN) && (motion || (button && down));
+        for (int at = 0; lone && at < v->tree.count; at++)
+        {
+                struct ui_control address_to c = v->item[at].control;
+                int look, ghost;
+
+                if (!c)
+                        continue;
+                // The pointer is on what shows of a control: not on a part its scroll container has scrolled out of sight.
+                ui_view_rows(v, v->tree.node[at].parent, &top, &bottom);
+                look = c->hover << 9 | c->focused << 8 | (c->item & 255), ghost = c->hover_x;
+                if (motion)
+                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, y >= top && y < bottom ? y : -UI_TREE_MOST, false, event->flags);
+                else
+                        c->focused = 0;
+                if (button && !ui_kit_held && y >= top && y < bottom && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
+                {
+                        asks |= UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                        if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, y, true, event->flags))
+                                asks |= ui_view_act(&v->item[at]);
+                }
+                if (look != (c->hover << 9 | c->focused << 8 | (c->item & 255)))
+                        asks |= UI_VIEW_DRAW;
+                else if (ghost != c->hover_x)
+                        ui_view_due(v, ui_dev(ui, c->y - 8) < 0 ? 0 : ui_dev(ui, c->y - 8), ui_dev(ui, c->y + c->h + 8));
         }
         // A finger: where it lands is the scroll container's too, a drag that no control holds moves the container, and its lift throws it.
         if (button && down && (event->flags & WINDOW_KEY_TOUCH) && under)
