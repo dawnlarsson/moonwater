@@ -142951,31 +142951,50 @@ static fn check_settings_device_strip(void)
                   items[0].segment_role[0] == 0 && items[0].segment_role[1] == 1 && items[0].segment_role[2] == 2 &&
                   items[0].segment_role[3] == 4 && items[0].segment_bytes[1] == 1073741824ull);
         // The drive's line is not one label: its name is at the row's left, and its size and its state are the row's right.
-        check("settings: a drive's line is its name, its size in GB from 1000 MB, and after the word drive what the line says of it",
-              string_equals((string_address)items[0].label, (string_address) "vda") && string_equals((string_address)items[0].size, (string_address) "2 GB") &&
-                  string_equals((string_address)items[0].state, (string_address) "drive, view only") &&
-                  string_equals((string_address)items[1].label, (string_address) "sdb") && string_equals((string_address)items[1].size, (string_address) "512 MB"));
+        {
+                struct ui_row line;
+
+                memory_zero(&line, sizeof(line));
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                check("settings: a drive's line is its name, its size in GB from 1000 MB, and after the word drive what the line says of it",
+                      string_equals((string_address)items[0].label, (string_address) "vda") && string_equals((string_address)items[0].size, (string_address) "2 GB") &&
+                          line.note && string_equals((string_address)line.note, (string_address) "drive, view only") && line.value == items[0].size &&
+                          string_equals((string_address)items[1].label, (string_address) "sdb") && string_equals((string_address)items[1].size, (string_address) "512 MB"));
+        }
         check("settings: a drive with no partition table is one unpartitioned segment",
               items[1].kind == SETTINGS_NOTE && items[1].segment_count == 1 && items[1].segment_role[0] == 5 &&
                   items[1].segment_bytes[0] == 536870912ull);
         check("settings: a USB device's line has no strip, and is a port a press allows or blocks",
               items[2].kind == SETTINGS_PORT && items[2].segment_count == 0 && (items[2].flags & SETTINGS_ITEM_JOINED) != 0);
-        check("settings: a drive's legend says its roles in words, and free room among them",
-              string_find((string_address)items[0].legend, (string_address) "EFI") != null &&
-                  string_find((string_address)items[0].legend, (string_address) "EFI system 536 MB") != null &&
-                  string_find((string_address)items[0].legend, (string_address) "Linux data 1 GB") != null);
         {
-                // The host shows one partition of this drive and says one more is not shown: the note comes first in the legend.
+                struct ui_row line;
+
+                memory_zero(&line, sizeof(line));
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                check("settings: a drive's legend has an entry for each segment, its role's word where the partition has no name, and its size",
+                      line.tall && line.strip_count == 4 && line.strip_names && line.strip_kinds && line.strip_text &&
+                          string_equals((string_address)line.strip_names[0], (string_address) "EFI system") && !line.strip_kinds[0] &&
+                          string_equals((string_address)line.strip_text, (string_address) "536 MB") &&
+                          string_equals((string_address)line.strip_names[1], (string_address) "Linux data") &&
+                          string_equals((string_address)(line.strip_text + UI_STRIP_TEXT), (string_address) "1 GB") &&
+                          string_equals((string_address)line.strip_names[3], (string_address) "Free space") && !line.strip_more);
+        }
+        {
+                // The host shows one partition of this drive and says three more are not shown: they are the legend's last entry.
                 static const char more[] = "  vde drive 1 MB view only\n    part 2048 1048576 linux -\n    more 3\n";
                 positive length = sizeof(more) - 1;
+                struct ui_row line;
 
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = more[at];
                 settings.said_length = length;
                 settings_feed_hardware();
-                check("settings: a drive's partitions the host did not show are said first in its legend",
-                      settings.item_count[2] == 1 && items[0].segment_more == 3 && items[0].segment_count == 1 &&
-                          string_equals((string_address)items[0].legend, (string_address) "3 more not shown; Linux data 1 MB"));
+                memory_zero(&line, sizeof(line));
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                check("settings: the partitions the host did not show are said in the drive's legend",
+                      settings.item_count[2] == 1 && items[0].segment_more == 3 && items[0].segment_count == 1 && line.strip_count == 1 &&
+                          line.strip_more && string_equals((string_address)line.strip_more, (string_address) "3 more not shown") &&
+                          string_equals((string_address)line.strip_names[0], (string_address) "Linux data"));
         }
         {
                 //      Twenty-three ports fill the rows: the drive after them has no row, so its parts are no one's strip, and the
@@ -143023,6 +143042,29 @@ static fn check_settings_device_strip(void)
                 check("settings: free room no bigger than a MiB, the alignment a partition table keeps, is no segment, and free room larger than that is one",
                       settings.item_count[2] == 1 && items[0].segment_count == 2 && items[0].segment_role[0] == 0 && items[0].segment_role[1] == 4 &&
                           items[0].segment_bytes[1] == 2097152ull);
+                // A partition's name is the host's, a blank of it an underscore on the line; "-" is no name.
+                length = 0;
+                for (const char address_to line = "  vdg drive 1024 MB view only\n    part 1048576 536870912 efi EFI_system_partition\n"
+                                                  "    part 537919488 4096000000 other Basic_data_partition\n    part 4633919488 1000000 linux -\n";
+                     *line; line++)
+                        rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                {
+                        struct ui_row line;
+
+                        memory_zero(&line, sizeof(line));
+                        settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                        check("settings: a legend entry is the partition's name, and its role's word after a name that does not say it",
+                              line.strip_count == 3 && string_equals((string_address)items[0].segment_name[0], (string_address) "EFI system partition") &&
+                                  string_equals((string_address)line.strip_names[0], (string_address) "EFI system partition") && !line.strip_kinds[0] &&
+                                  string_equals((string_address)line.strip_names[1], (string_address) "Basic data partition") && line.strip_kinds[1] &&
+                                  string_equals((string_address)line.strip_kinds[1], (string_address) "Other") &&
+                                  string_equals((string_address)line.strip_names[2], (string_address) "Linux data") && !line.strip_kinds[2] &&
+                                  string_equals((string_address)(line.strip_text + 1 * UI_STRIP_TEXT), (string_address) "4 GB"));
+                }
                 length = 0;
                 for (const char address_to line = "  1-2 usb 0627:0001 "; *line; line++)
                         rows[length++] = *line;
@@ -143054,13 +143096,14 @@ static fn check_settings_device_strip(void)
         A drive's row as the kit lays it out and draws it, in the window with the shipped faces. Every segment of a disk of sixteen
         partitions and the free room round them has a leaf at least UI_SEGMENT_LEAST wide where the strip has the room for that, and
         each is the strip over the count where it has not; a partition of 512 MB on a disk of 1 TB is drawn in its colour; free room
-        is in no partition's colour, a ring round the ground; and reading from the right the strip is where it is reading from the
-        left, turned over.
+        is in no partition's colour, a ring round the ground; the legend has an entry for each segment, the partition's name and its
+        size, and the partitions not shown are its last entry; the row is as tall as its legend, at the window's width and at a narrow
+        one; and reading from the right the strip and the legend are where they are reading from the left, turned over.
 */
 static struct
 {
-        struct ui_node segment[UI_STRIP_MOST];
-        b32 has_segment[UI_STRIP_MOST];
+        struct ui_node segment[UI_STRIP_MOST], entry[UI_STRIP_MOST + 1];
+        b32 has_segment[UI_STRIP_MOST], has_entry[UI_STRIP_MOST + 1];
         struct ui_row row;
         int at, id, top, height, strip_x, strip_w;
 } drive;
@@ -143095,7 +143138,7 @@ static fn drive_show(int width, int scale, b32 rtl)
         settings_draw_rows(settings_frames_whole, 0, 0);
 }
 
-// The first drive's row laid out where the list has it: its line's and its strip's parts kept in drive. False: no drive.
+// The first drive's row laid out where the list has it: its line, its strip and its legend's parts kept in drive. False: no drive.
 static b32 drive_lay(void)
 {
         memory_zero(&drive, sizeof(drive));
@@ -143108,9 +143151,13 @@ static b32 drive_lay(void)
                 drive.top = ui_list_row_y(&settings.list, at), drive.height = settings.list.tall[at];
                 ui_row_tree(&settings.ui, &settings.list, drive.id, &drive.row, drive.height, true);
                 ui_tree_origin(&ui_row_parts.tree, settings.list.x, drive.top);
-                for (int k = 0; k < UI_STRIP_MOST; k++)
-                        if (ui_row_parts.segment[k])
+                for (int k = 0; k <= UI_STRIP_MOST; k++)
+                {
+                        if (k < UI_STRIP_MOST && ui_row_parts.segment[k])
                                 drive.segment[k] = *ui_row_parts.segment[k], drive.has_segment[k] = true;
+                        if (ui_row_parts.entry[k])
+                                drive.entry[k] = *ui_row_parts.entry[k], drive.has_entry[k] = true;
+                }
                 drive.strip_x = settings.list.x + ui_dev(&settings.ui, UI_INSET), drive.strip_w = settings.list.w - 2 * ui_dev(&settings.ui, UI_INSET);
                 return true;
         }
@@ -143132,8 +143179,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
         long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
         struct windows address_to window = (struct windows address_to)table;
-        b32 least = true, fills = true, equal = true, drawn = false, free_ring = false, mirrored = true;
-        int widths[] = {SETTINGS_WIDTH, 420, 300};
+        b32 least = true, fills = true, equal = true, drawn = false, free_ring = false, listed = false, last = false, tall = true, mirrored = true;
+        int heights[2] = {0, 0}, widths[] = {SETTINGS_WIDTH, 420, 300};
 
         if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
             font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
@@ -143160,7 +143207,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
 
-        // A disk of 2 TB: sixteen partitions, the free room before each and after the last (33 segments), one of 1 TB and some of 1 MiB.
+        // A disk of 2 TB: sixteen partitions, the free room before each and after the last (33 segments), one of 1 TB and some of 1 MiB,
+        // and four partitions more that the host does not show.
         {
                 unsigned long long at = 0, sizes[16] = {1048576ull, 536870912ull, 1000000000000ull, 1048576ull, 8000000000ull, 200000000000ull,
                                                         4000000000ull, 60000000000ull, 33554432ull, 300000000000ull, 2000000000ull, 120000000000ull,
@@ -143195,6 +143243,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                         string_append_bounded((string_address)sixteen, (string_address)(k == 1 ? " EFI_system_partition\n" : " -\n"), sizeof(sixteen));
                         at += sizes[k];
                 }
+                string_append_bounded((string_address)sixteen, (string_address) "    more 4\n", sizeof(sixteen));
         }
         // A disk of 1 TB with an EFI partition of 512 MB, its data, and the free room after them.
         string_copy_bounded((string_address)nvme,
@@ -143235,16 +143284,39 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                                 least &= smallest >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && largest > 10 * smallest;
                         else
                                 equal &= largest - smallest <= 1;
+                        // The legend is as tall as its lines: the row ends a gap and the hairline under its lowest entry.
+                        {
+                                int lowest = 0;
+
+                                for (int k = 0; k <= 33; k++)
+                                        lowest = drive.has_entry[k] && drive.entry[k].y + drive.entry[k].h > lowest ? drive.entry[k].y + drive.entry[k].h : lowest;
+                                tall &= drive.height == lowest - drive.top + ui_dev(&settings.ui, UI_GAP3) + 1 &&
+                                        (drive.at + 1 >= settings.list.count || settings.list.top[drive.at + 1] == settings.list.top[drive.at] + drive.height);
+                                if (scale == 1 && w < 2)
+                                        heights[w] = drive.height;
+                        }
+                        // The partitions not shown are the last entry: after every other one, down the columns and then across.
+                        if (w == 0 && scale == 1)
+                        {
+                                last = drive.row.strip_more && string_equals((string_address)drive.row.strip_more, (string_address) "4 more not shown") &&
+                                       drive.has_entry[33];
+                                for (int k = 0; k < 33 && last; k++)
+                                        last = drive.has_entry[k] && (drive.entry[k].x < drive.entry[33].x ||
+                                                                      (drive.entry[k].x == drive.entry[33].x && drive.entry[k].y < drive.entry[33].y));
+                        }
                 }
         check("settings drive rows: every segment of a drive of 16 partitions and the free room round them has a leaf, at least the least wide where the strip has room for that",
               least);
         check("settings drive rows: where 33 segments at the least do not fit, each is the strip over the count, and the segments and their gaps are the strip whole",
               equal && fills);
+        check("settings drive rows: the partitions the host did not show are the legend's last entry, after every segment's", last);
+        check("settings drive rows: a drive's row is as tall as its legend, and taller where the window is narrow and the legend has one column",
+              tall && heights[1] > heights[0] && heights[0] > 0);
 
-        // Reading from the right, the strip is where it is reading from the left, turned over the window.
+        // Reading from the right, the strip and the legend are where they are reading from the left, turned over the window.
         for (int w = 0; w < 2; w++)
         {
-                struct ui_node ltr[UI_STRIP_MOST];
+                struct ui_node ltr[2 * UI_STRIP_MOST + 1];
                 int count = 0;
 
                 drive_show(widths[w], 1, false);
@@ -143255,20 +143327,22 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 }
                 for (int k = 0; k < UI_STRIP_MOST; k++)
                         ltr[k] = drive.segment[k];
+                for (int k = 0; k <= UI_STRIP_MOST; k++)
+                        ltr[UI_STRIP_MOST + k] = drive.entry[k];
                 drive_show(widths[w], 1, true);
                 mirrored &= drive_lay();
-                for (int k = 0; k < UI_STRIP_MOST && mirrored; k++)
+                for (int k = 0; k < 2 * UI_STRIP_MOST + 1 && mirrored; k++)
                 {
-                        const struct ui_node address_to was = &ltr[k], address_to now = &drive.segment[k];
+                        const struct ui_node address_to was = &ltr[k], address_to now = k < UI_STRIP_MOST ? &drive.segment[k] : &drive.entry[k - UI_STRIP_MOST];
 
                         count += was->w > 0;
                         mirrored &= now->x == settings.width - was->x - was->w && now->y == was->y && now->w == was->w && now->h == was->h;
                 }
-                mirrored &= count == 33;
+                mirrored &= count == 2 * 33 + 1;
         }
-        check("settings drive rows: reading from the right a drive's strip is its strip from the left, turned over", mirrored);
+        check("settings drive rows: reading from the right a drive's strip and its legend are its strip and legend from the left, turned over", mirrored);
 
-        // A partition of 512 MB on a disk of 1 TB is drawn: its pill is in the accent at its middle.
+        // A partition of 512 MB on a disk of 1 TB is drawn: its pill is in the accent at its middle. The legend names each partition with its size.
         drive_feed(nvme);
         drive_show(SETTINGS_WIDTH, 1, false);
         if (drive_lay() && drive.row.strip_count == 5 && drive.has_segment[0])
@@ -143276,8 +143350,20 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 const struct ui_node address_to efi = &drive.segment[0];
 
                 drawn = efi->w >= ui_dev(&settings.ui, UI_SEGMENT_LEAST) && drive_pixel(efi->x + efi->w / 2, efi->y + efi->h / 2) == (ui_role(UI_PRIMARY) & 0xffffffu);
+                listed = drive.row.strip_names && drive.row.strip_text;
+                for (int k = 0; k < 5 && listed; k++)
+                {
+                        static const char address_to const names[5] = {"EFI system partition", "Microsoft reserved partition", "Basic data partition",
+                                                                         "Linux filesystem", "Free space"};
+                        static const char address_to const sizes[5] = {"536 MB", "16 MB", "900 GB", "69 GB", "30 GB"};
+
+                        listed = drive.has_entry[k] && drive.entry[k].w > 0 && string_equals((string_address)drive.row.strip_names[k], (string_address)names[k]) &&
+                                 string_equals((string_address)(drive.row.strip_text + k * UI_STRIP_TEXT), (string_address)sizes[k]);
+                }
+                listed &= !drive.has_entry[5];
         }
         check("settings drive rows: a partition of 512 MB on a disk of 1 TB is drawn, at least the least wide, in its role's colour", drawn);
+        check("settings drive rows: the legend has an entry for each segment, the partition's name or its role's word, and its size", listed);
 
         // Free room is no partition's colour: a free segment of the least width is the ground at its middle, as the gap beside it is, and its
         // ring is drawn at its top.
@@ -144829,10 +144915,10 @@ static fn check_rtl_mirror(void)
                            "  sdb drive 64000 MB view only\n    part 0 2097152 free -\n    part 2097152 1048576 other BIOS_boot_partition\n"
                            "    part 3145728 536870912 efi -\n    part 540016640 8000000000 swap Linux_swap\n    part 8540016640 4000000 free -\n"
                            "    part 8544016640 40000000000 linux Linux_root\n    part 48544016640 15000000000 other Media\n    more 2\n");
-                drives = rtl_view("a drive's strip", devices, 1) && rtl_view("a drive's strip", devices, 2);
+                drives = rtl_view("a drive's strip and its legend", devices, 1) && rtl_view("a drive's strip and its legend", devices, 2);
                 memory_copy(settings_large->item[2], kept, sizeof(kept));
                 settings.item_count[2] = count;
-                check("rtl mirror: a drive's strip, right to left, is its picture left to right flipped, at scales 1 and 2", drives);
+                check("rtl mirror: a drive's strip and its legend, right to left, are their picture left to right flipped, at scales 1 and 2", drives);
         }
         check_text_scale();
         // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.

@@ -7636,8 +7636,6 @@ LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it") \
 LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delete forgets it") \
 LANGUAGE_ID(settings_joined, "joined") \
 LANGUAGE_ID(settings_kept, "kept") \
-LANGUAGE_ID(settings_legend_comma, ", ") \
-LANGUAGE_ID(settings_legend_semicolon, "; ") \
 LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \
 LANGUAGE_ID(settings_map_hint, "Drag a screen to move it.") \
 LANGUAGE_ID(settings_map_keys, "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.") \
@@ -7675,11 +7673,11 @@ LANGUAGE_ID(settings_req_ring, "the compute ring did not finish the self-test jo
 LANGUAGE_ID(settings_req_selftest, "the card drew the self-test picture wrong: its kernels do not match this family's ISA; the card stays on the processor") \
 LANGUAGE_ID(settings_req_udmabuf, "/dev/udmabuf would not make a dma-buf of a memfd page: CONFIG_UDMABUF=y, and /dev/udmabuf must open (the card still composes; a refused userptr then has no fallback)") \
 LANGUAGE_ID(settings_role_efi, "EFI system") \
-LANGUAGE_ID(settings_role_free, "free") \
+LANGUAGE_ID(settings_role_free, "Free space") \
 LANGUAGE_ID(settings_role_linux, "Linux data") \
-LANGUAGE_ID(settings_role_other, "other") \
-LANGUAGE_ID(settings_role_swap, "swap") \
-LANGUAGE_ID(settings_role_unpartitioned, "unpartitioned") \
+LANGUAGE_ID(settings_role_other, "Other") \
+LANGUAGE_ID(settings_role_swap, "Swap") \
+LANGUAGE_ID(settings_role_unpartitioned, "No partition table") \
 LANGUAGE_ID(settings_run_any, "Run any moonwater command") \
 LANGUAGE_ID(settings_running, "running %s (Escape stops it)") \
 LANGUAGE_ID(settings_saved, "saved") \
@@ -18357,9 +18355,11 @@ struct ui_row
         const unsigned long long address_to strip_bytes; // a drive's partition strip: the bytes of each segment, in order (none when null)
         const unsigned char address_to strip_roles;      // and each segment's role, UI_STRIP_*
         const char address_to strip_text;                // and each segment's size, drawn in it where it has room: UI_STRIP_TEXT bytes each
+        const char address_to const address_to strip_names; // and each segment's name in the legend: the partition's, or its role's word
+        const char address_to const address_to strip_kinds; // and the word of each one's role, said after a name that is not it (null: none)
         int strip_count;                   // the segments of the strip; 0 for no strip
-        b32 tall;                          // two rows high: a drive's line, its strip under it, and its legend (ui_list_strip_row)
-        const char address_to legend;      // the words under a tall row's strip: what each segment is, and its size
+        const char address_to strip_more;  // the legend's last entry, in the quiet ink: the partitions the strip does not show (null: none)
+        b32 tall;                          // a drive: its line, its strip under it and its legend, as tall as they are (ui_row_drive_height)
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
@@ -18425,6 +18425,8 @@ static struct ui_control address_to ui_list_control(struct ui_list address_to l,
         return l->controls && id >= 0 && id < l->ids ? &l->controls[2 * id + which] : null;
 }
 
+static int ui_row_drive_height(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row);
+
 // Where each row is: a header over the first of a section that has one, a gap under the last of each.
 static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_to l)
 {
@@ -18443,8 +18445,8 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
                 section = row.section;
                 l->top[at] = y;
                 // A row is its share of a row while it folds: a line under an option that is opening or shutting (the app's spring).
-                // A tall row is two rows high (a drive's strip under its line); a row that folds is its share of that.
-                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, (row.tall ? 2 : 1) * ui_dev(ui, UI_ROW));
+                // A tall row is as tall as a drive's line, its strip and its legend are (ui_row_drive_height); a row that folds is its share of that.
+                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, row.tall ? ui_row_drive_height(ui, l, &row) : ui_dev(ui, UI_ROW));
                 y += l->tall[at];
         }
         // A list in sections has the gap under its last one too; a list of rows alone ends with its last row.
@@ -18655,10 +18657,10 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 }
 
 /*
-        A drive's strip, and the roles' colours. Each role is a container of the theme and its on-colour for the size written in
-        it, so they are told apart in both themes: EFI system is the accent, Linux data the success container, swap the info
-        container, other the warning container, and a disk with no table the secondary container. Free room is no role's colour:
-        it is a ring in the outline round nothing, the room a partition could be put in, and its size is in the quiet ink.
+        A drive's strip, its legend, and the roles' colours. Each role is a container of the theme and its on-colour for the size
+        written in it, so they are told apart in both themes: EFI system is the accent, Linux data the success container, swap the
+        info container, other the warning container, and a disk with no table the secondary container. Free room is no role's
+        colour: it is a ring in the outline round nothing, the room a partition could be put in, and its size is in the quiet ink.
 
         The strip is the line's width less the gaps between its segments. Every segment is at least UI_SEGMENT_LEAST wide: at the
         strip's 16 that is a pill whose two round ends meet, four times the gap that parts it from the next one, so it reads as a
@@ -18666,12 +18668,23 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         the window gives the strip at its default width. What the segments at their least leave is shared by bytes among those
         whose share is more than the least, so the large ones are as large as they are on the disk; where the segments at their
         least do not fit (a narrow window), each is the strip over the count.
+
+        Under the strip, the legend: an entry for each segment, its mark (a small pill of its colour, or the ring of free room),
+        its name (the partition's, or its role's word), its role's word in the quiet ink where the name is not it, and its size at
+        the entry's end, so the sizes of a column are under one another; then the partitions not shown, the last entry. The
+        entries are in as many columns as the line has room for, UI_LEGEND_LEAST each and UI_LEGEND_COLUMNS at most, read down
+        and then across (mirrored reading from the right, as the strip is), and the row is as tall as its line, its strip, the
+        legend's lines and a gap under them, and the hairline that ends it (ui_row_drive_height).
 */
 #define UI_STRIP_TEXT 16 // a segment's size as the settings say it, in bytes (NUL-ended)
 #define UI_STRIP_MOST 33 // the most segments a strip takes: the host's partitions and the free room round them (settings' SETTINGS_SEGMENTS)
 #define UI_SEGMENT_GAP 2   // logical pixels between two segments, each end of the strip rounded
 #define UI_SEGMENT_LEAST 8 // the narrowest a segment is, logical pixels
 #define UI_STRIP_HIGH 16   // the strip's height, logical pixels
+#define UI_LEGEND_LINE 20  // a legend entry's line: the label's 16 and its leading
+#define UI_LEGEND_LEAST 200 // the narrowest column of the legend, logical pixels
+#define UI_LEGEND_COLUMNS 3
+#define UI_LEGEND_MARK 12  // a mark's width, logical pixels; it is 8 high
 
 // A strip role's colour in a table of them by role: a role past the free room takes the last entry, the secondary container's.
 static int ui_strip_colour(unsigned int role, const int address_to table)
@@ -18748,6 +18761,32 @@ static fn ui_strip_widths(const unsigned long long address_to bytes, int count, 
                         widths[at]++, given++;
 }
 
+// The legend's entries: one for each segment, and the partitions not shown when there are some.
+static int ui_legend_entries(const struct ui_row address_to row)
+{
+        int count = row->strip_count < 0 ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+
+        return count + (row->strip_more && row->strip_more[0]);
+}
+
+// The columns of a drive's legend in a list l wide: as many of UI_LEGEND_LEAST as its line has room for, one at least, no more than its entries.
+static int ui_legend_columns(const struct ui address_to ui, const struct ui_list address_to l, int entries)
+{
+        int gap = ui_dev(ui, UI_GAP4), inner = l->w - 2 * ui_dev(ui, UI_INSET), columns = (inner + gap) / (ui_dev(ui, UI_LEGEND_LEAST) + gap);
+
+        columns = columns > UI_LEGEND_COLUMNS ? UI_LEGEND_COLUMNS : columns < 1 ? 1 : columns;
+        return columns > entries && entries > 0 ? entries : columns;
+}
+
+// How tall a drive's row is (device pixels): its line, its strip and the gap under it, the legend's lines, the gap under them and the hairline.
+static int ui_row_drive_height(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row)
+{
+        int entries = ui_legend_entries(row), columns = ui_legend_columns(ui, l, entries), lines = (entries + columns - 1) / columns;
+
+        return ui_dev(ui, UI_ROW) + (row->strip_count > 0 ? ui_dev(ui, UI_STRIP_HIGH) + ui_dev(ui, UI_GAP2) : 0) + lines * ui_dev(ui, UI_LEGEND_LINE) +
+               ui_dev(ui, UI_GAP3) + 1;
+}
+
 /*
         A row's parts. A row is a tree of the kit's layout (ui_tree), declared again for each row that is drawn or pressed, and the
         layout places its parts; what is kept is the node of each part the row has (null: it has none). The root is the row, as wide
@@ -18755,14 +18794,15 @@ static fn ui_strip_widths(const unsigned long long address_to bytes, int count, 
         Before a switch, tabs, swatches or a slider the label grows into the room they leave. In any other row the label is as wide
         as its words and gives way to a zone that grows and keeps a third of the row from it (two thirds: a field after a verb): in
         it, at its end, a field, or the note in the room the value leaves and the value with its step marks or its chevron. A tall
-        row (a drive) is a column: that line, its strip (each segment as wide as ui_strip_widths has it), its legend and a hairline.
+        row (a drive) is a column: that line, its strip (each segment as wide as ui_strip_widths has it), its legend (a row of
+        columns, each a column of entries) and a hairline.
 */
 static struct ui_row_parts
 {
         struct ui_tree tree;
         struct ui_node address_to mark, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
                 address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars,
-                address_to legend, address_to rule, address_to segment[UI_STRIP_MOST];
+                address_to legend, address_to rule, address_to segment[UI_STRIP_MOST], address_to entry[UI_STRIP_MOST + 1];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
         char label_cut[UI_CUT_TEXT], value_cut[UI_CUT_TEXT], number[40]; // and a slider's number with its unit
 } ui_row_parts;
@@ -18865,18 +18905,32 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
         if (row->tall)
         {
                 int count = row->strip_count < 0 || !row->strip_bytes ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+                int entries = ui_legend_entries(row), columns = ui_legend_columns(ui, l, entries), lines = (entries + columns - 1) / columns;
                 int widths[UI_STRIP_MOST], segment_gap = ui_dev(ui, UI_SEGMENT_GAP);
 
                 // Under the line the strip, every segment a leaf as wide as its share (ui_strip_widths), the line's width less the gaps shared.
                 ui_tree_close(t);
-                ui_strip_widths(row->strip_bytes, count, l->w - 2 * inset - (row->sub ? ui_dev(ui, 20) : 0) - (count - 1) * segment_gap,
-                                ui_dev(ui, UI_SEGMENT_LEAST), widths);
-                n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_STRIP_HIGH), n->margin[2] = ui_dev(ui, 6);
-                n->gap = segment_gap;
-                for (int at = 0; at < count; at++)
-                        p->segment[at] = ui_row_leaf(t, UI_FIXED, widths[at]);
+                if (count)
+                {
+                        ui_strip_widths(row->strip_bytes, count, l->w - 2 * inset - (row->sub ? ui_dev(ui, 20) : 0) - (count - 1) * segment_gap,
+                                        ui_dev(ui, UI_SEGMENT_LEAST), widths);
+                        n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_STRIP_HIGH), n->margin[3] = ui_dev(ui, UI_GAP2);
+                        n->gap = segment_gap;
+                        for (int at = 0; at < count; at++)
+                                p->segment[at] = ui_row_leaf(t, UI_FIXED, widths[at]);
+                        ui_tree_close(t);
+                }
+                // The legend: a row of columns as wide as one another, the entries down the first and then the next, a line each.
+                p->legend = n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = lines * ui_dev(ui, UI_LEGEND_LINE);
+                n->margin[3] = ui_dev(ui, UI_GAP3), n->gap = ui_dev(ui, UI_GAP4);
+                for (int column = 0; column < columns; column++)
+                {
+                        n = ui_tree_open(t), n->dir = 1, n->size[0].kind = UI_GROW, n->size[0].value = 1;
+                        for (int at = column * lines; at < (column + 1) * lines && at < entries; at++)
+                                p->entry[at] = n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_LEGEND_LINE), ui_tree_close(t);
+                        ui_tree_close(t);
+                }
                 ui_tree_close(t);
-                p->legend = n = ui_row_leaf(t, UI_FIT, 0), n->size[1].kind = UI_GROW, n->size[1].value = 1, n->margin[2] = ui_dev(ui, 2);
                 p->rule = n = ui_row_leaf(t, UI_FIT, 0), n->size[1].kind = UI_FIXED, n->size[1].value = 1;
         }
         ui_tree_close(t);
@@ -18941,13 +18995,122 @@ static fn ui_row_words(struct ui address_to ui, const struct ui_node address_to 
         ui_kit_text_flipped(ui, n->x + in, baseline, (string_address)text, type, ink, 0, n->x, n->w);
 }
 
-// A segment's pill: its role's colour, or for free room a ring in the outline round nothing.
+// A segment's pill, or its mark in the legend: its role's colour, or for free room a ring in the outline round nothing.
 static fn ui_strip_pill(struct ui address_to ui, const struct ui_box address_to box, unsigned int role)
 {
         if (role == UI_STRIP_FREE)
                 ui_kit_ring(ui, box, ui_stroke(ui), ui_role(UI_OUTLINE));
         else
                 ui_kit_fill(ui, box, ui_role(ui_strip_colour(role, ui_strip_role_colours)), null);
+}
+
+// Whether a row is a drive's (its strip and its legend light what is under the pointer, so motion over it draws it again).
+static b32 ui_list_is_drive(const struct ui_list address_to l, int id)
+{
+        struct ui_row row;
+
+        ui_list_describe(l, id, &row);
+        return row.tall;
+}
+
+// The segment or the legend entry under the pointer, the one a drive's row lights in both: its number, or -1.
+static int ui_list_drive_lit(const struct ui_list address_to l, int id)
+{
+        const struct ui_row_parts address_to p = &ui_row_parts;
+
+        if (l->hover != id || !l->pointer_mouse)
+                return -1;
+        for (int at = 0; at <= UI_STRIP_MOST; at++)
+                if ((at < UI_STRIP_MOST && p->segment[at] && ui_tree_in(p->segment[at], l->pointer_x, l->pointer_y)) ||
+                    (p->entry[at] && ui_tree_in(p->entry[at], l->pointer_x, l->pointer_y)))
+                        return at;
+        return -1;
+}
+
+/*
+        A drive's strip and its legend, in the parts its row was laid out with. Each segment is a pill of its role's colour (a ring for
+        free room) with its size in its middle where it has room; each entry its mark, its name in the ink, its role's word in the quiet
+        ink where the name is not it and the room after the name holds it, and its size at its end, the name cut to what is left; the
+        partitions not shown are the last entry, in the quiet ink. The segment or the entry under the pointer lights both on the kit's
+        state layer, and that segment says its name before its size where it has room. Every place is laid out from the left and turned
+        over in its part reading from the right (ui_mirror, ui_row_words); a size in a pill is in its middle either way. The hairline ends it.
+*/
+static fn ui_list_drive(struct ui address_to ui, const struct ui_list address_to l, int id, const struct ui_row address_to row, b32 seen,
+                        unsigned int strong, unsigned int quiet)
+{
+        const struct ui_row_parts address_to p = &ui_row_parts;
+        const struct ui_node address_to n;
+        int count = row->strip_count < 0 || !row->strip_bytes ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+        int lit = ui_list_drive_lit(l, id), gap = ui_dev(ui, UI_GAP2), mark_w = ui_dev(ui, UI_LEGEND_MARK), mark_h = ui_dev(ui, 8);
+        unsigned int layer = ui_mix(ui_role(UI_ON_SURFACE), 8, 0);
+        char cut[UI_CUT_TEXT];
+
+        for (int at = 0; at < count; at++)
+                if ((n = p->segment[at]) && n->w > 0)
+                {
+                        int radius = (n->w < n->h ? n->w : n->h) / 2;
+                        const char address_to text = row->strip_text ? row->strip_text + at * UI_STRIP_TEXT : null;
+                        const char address_to name = row->strip_names ? row->strip_names[at] : null;
+                        struct ui_box box = {n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, radius * 256, radius * 256};
+                        int size_w = seen && text && text[0] ? ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM) : 0, room = n->w - ui_dev(ui, 8);
+                        unsigned int ink = ui_text_colour(ui, ui_strip_colour(row->strip_roles[at], ui_strip_ink_colours));
+
+                        ui_strip_pill(ui, &box, row->strip_roles[at]);
+                        if (at == lit)
+                                ui_kit_fill(ui, &box, layer, null);
+                        // Lit, the name and the size where both fit, a gap apart, as one run from the pill's middle.
+                        if (at == lit && size_w && name && name[0])
+                        {
+                                int name_w = ui_kit_measure(ui, (string_address)name, UI_LABEL_MEDIUM), both = name_w + gap + size_w;
+
+                                if (both <= room)
+                                {
+                                        ui_row_words(ui, n, (n->w - both) / 2, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), name, UI_LABEL_MEDIUM, ink);
+                                        ui_row_words(ui, n, (n->w - both) / 2 + name_w + gap, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM, ink);
+                                        continue;
+                                }
+                        }
+                        if (size_w && size_w <= room)
+                                ui_row_words(ui, n, (n->w - size_w) / 2, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM, ink);
+                }
+        for (int at = 0; at <= count && seen; at++)
+        {
+                int baseline, start = mark_w + gap;
+
+                if (!(n = p->entry[at]) || n->w <= 0)
+                        continue;
+                baseline = ui_row_baseline(ui, n, UI_LABEL_MEDIUM);
+                if (at == lit)
+                {
+                        int pad = ui_dev(ui, UI_GAP1), x = n->x - pad;
+
+                        ui_kit_fill(ui, &(struct ui_box){x * 256, n->y * 256, (x + n->w + 2 * pad) * 256, (n->y + n->h) * 256, ui_q8(ui, 4), ui_q8(ui, 4)}, layer, null);
+                }
+                if (at == count)
+                {
+                        ui_row_words(ui, n, start, baseline, (const char address_to)ui_fit(ui, (string_address)row->strip_more, UI_LABEL_MEDIUM, n->w - start, cut, sizeof(cut)),
+                                     UI_LABEL_MEDIUM, quiet);
+                        continue;
+                }
+                {
+                        const char address_to text = row->strip_text ? row->strip_text + at * UI_STRIP_TEXT : "";
+                        const char address_to name = row->strip_names && row->strip_names[at] ? row->strip_names[at] : "";
+                        const char address_to kind = row->strip_kinds ? row->strip_kinds[at] : null;
+                        int size_w = ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM), room = n->w - start - (size_w ? size_w + ui_dev(ui, UI_GAP3) : 0);
+                        int name_w = ui_kit_measure(ui, (string_address)name, UI_LABEL_MEDIUM), mark_x = ui_mirror(n->x, mark_w, n->x, n->w), mark_y = n->y + (n->h - mark_h) / 2;
+
+                        ui_strip_pill(ui, &(struct ui_box){mark_x * 256, mark_y * 256, (mark_x + mark_w) * 256, (mark_y + mark_h) * 256, mark_h * 128, mark_h * 128},
+                                      row->strip_roles[at]);
+                        ui_row_words(ui, n, start, baseline, (const char address_to)ui_fit(ui, (string_address)name, UI_LABEL_MEDIUM, room, cut, sizeof(cut)),
+                                     UI_LABEL_MEDIUM, strong);
+                        if (kind && kind[0] && name_w + gap + ui_kit_measure(ui, (string_address)kind, UI_LABEL_MEDIUM) <= room)
+                                ui_row_words(ui, n, start + name_w + gap, baseline, kind, UI_LABEL_MEDIUM, quiet);
+                        if (size_w)
+                                ui_row_words(ui, n, n->w - size_w, baseline, text, UI_LABEL_MEDIUM, quiet);
+                }
+        }
+        if ((n = p->rule))
+                ui_kit_fill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, 0, 0}, ui_role(UI_OUTLINE_VARIANT), null);
 }
 
 /*
@@ -18963,7 +19126,6 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), ink = strong, quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
         int across, across_w, baseline, size = ui_dev(ui, 4);
-        char cut[UI_CUT_TEXT];
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
@@ -19036,27 +19198,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
         if ((n = p->bars))
                 ui_signal(ui, n->x + n->w, n->y + n->h / 2, row.bars);
-        // A drive's strip: each segment a pill of its role's colour (a ring for free room), with its size in its middle where it has room
-        // (laid out from the left and turned over in the pill reading from the right, so it is the mirror to the pixel); then the legend,
-        // and the hairline that ends the row.
-        for (int at = 0; at < UI_STRIP_MOST; at++)
-                if ((n = p->segment[at]) && n->w > 0)
-                {
-                        int radius = (n->w < n->h ? n->w : n->h) / 2;
-                        const char address_to text = row.strip_text ? row.strip_text + at * UI_STRIP_TEXT : null;
-                        int size_w = seen && text && text[0] ? ui_kit_measure(ui, (string_address)text, UI_LABEL_MEDIUM) : 0;
-
-                        ui_strip_pill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, radius * 256, radius * 256},
-                                      row.strip_roles[at]);
-                        if (size_w && size_w + ui_dev(ui, 8) <= n->w)
-                                ui_row_words(ui, n, (n->w - size_w) / 2, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM,
-                                             ui_text_colour(ui, ui_strip_colour(row.strip_roles[at], ui_strip_ink_colours)));
-                }
-        if ((n = p->legend) && row.legend && row.legend[0] && seen)
-                ui_row_words(ui, n, 0, ui_kit_baseline(ui, n->y, UI_LABEL_MEDIUM),
-                             (const char address_to)ui_fit(ui, (string_address)row.legend, UI_LABEL_MEDIUM, n->w, cut, sizeof(cut)), UI_LABEL_MEDIUM, quiet);
-        if ((n = p->rule))
-                ui_kit_fill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, 0, 0}, ui_role(UI_OUTLINE_VARIANT), null);
+        if (row.tall)
+                ui_list_drive(ui, l, id, &row, seen, strong, quiet);
 }
 
 // Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which
@@ -19184,6 +19327,8 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 }
                 else if (id >= 0 && (trailing = ui_list_control(l, id, 1)) && (trailing->kind == UI_TABS || trailing->kind == UI_SWATCHES || trailing->kind == UI_SLIDER))
                         ui_list_damage(ui, l, id); // a segment or a swatch under it, or a slider's ghost
+                else if (id >= 0 && ui_list_is_drive(l, id))
+                        ui_list_damage(ui, l, id); // the segment and the legend entry under it (ui_list_drive_lit)
                 // A row under the pointer is the hand's, or the I-beam's over its field (ui_kit_shape_note, as the press's controls are).
                 if (id >= 0 && (own = ui_list_control(l, id, 0)))
                         ui_kit_shape_note(own);

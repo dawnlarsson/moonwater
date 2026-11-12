@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
 settings_drive_state	0bb3	disk, 
 settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	%d till visas inte
 settings_role_efi	d41a	EFI-system
 settings_role_linux	2c8f	Linux-data
-settings_role_swap	874e	swap
-settings_role_other	8df5	annat
-settings_role_free	eedb	ledigt
-settings_role_unpartitioned	61a9	opartitionerad
+settings_role_swap	d36e	Swap
+settings_role_other	ff95	Annat
+settings_role_free	ad01	Ledigt utrymme
+settings_role_unpartitioned	3c10	Ingen partitionstabell
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte

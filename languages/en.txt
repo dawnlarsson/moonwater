@@ -75,14 +75,12 @@ settings_badge_error	9cf1	Error
 settings_badge_warning	fc8f	Warning
 settings_battery_charging	5116	, Charging
 settings_drive_state	0bb3	drive, 
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_role_efi	d41a	EFI system
 settings_role_linux	2c8f	Linux data
-settings_role_swap	874e	swap
-settings_role_other	8df5	other
-settings_role_free	eedb	free
-settings_role_unpartitioned	61a9	unpartitioned
+settings_role_swap	d36e	Swap
+settings_role_other	ff95	Other
+settings_role_free	ad01	Free space
+settings_role_unpartitioned	3c10	No partition table
 settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
 settings_battery_idle	1635	, Not charging

@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Waarschuwing
 settings_battery_charging	5116	, laadt op
 settings_drive_state	0bb3	schijf, 
 settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	%d meer niet getoond
 settings_role_efi	d41a	EFI-systeem
 settings_role_linux	2c8f	Linux-gegevens
-settings_role_swap	874e	swap
-settings_role_other	8df5	overig
-settings_role_free	eedb	vrij
-settings_role_unpartitioned	61a9	niet gepartitioneerd
+settings_role_swap	d36e	Swap
+settings_role_other	ff95	Overig
+settings_role_free	ad01	Vrije ruimte
+settings_role_unpartitioned	3c10	Geen partitietabel
 settings_battery_discharging	7964	, ontlaadt
 settings_battery_full	ded8	, vol
 settings_battery_idle	1635	, laadt niet op

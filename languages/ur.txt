@@ -77,15 +77,13 @@ settings_badge_warning	fc8f	انتباہ
 settings_battery_charging	5116	، چارج ہو رہی ہے
 settings_drive_state	0bb3	ڈرائیو، 
 settings_item_drive	269a	دکھایا گیا، روکا نہیں گیا: کوئی حکم ڈرائیو نہیں بدلتا
-settings_legend_comma	00f1	، 
-settings_legend_semicolon	0b8e	؛ 
 settings_not_shown	8efd	%d مزید نہیں دکھائے گئے
 settings_role_efi	d41a	EFI سسٹم
 settings_role_linux	2c8f	Linux ڈیٹا
-settings_role_swap	874e	سویپ
-settings_role_other	8df5	دیگر
-settings_role_free	eedb	خالی
-settings_role_unpartitioned	61a9	بغیر پارٹیشن
+settings_role_swap	d36e	سویپ
+settings_role_other	ff95	دیگر
+settings_role_free	ad01	خالی جگہ
+settings_role_unpartitioned	3c10	پارٹیشن ٹیبل نہیں
 settings_battery_discharging	7964	، ڈسچارج ہو رہی ہے
 settings_battery_full	ded8	، مکمل چارج
 settings_battery_idle	1635	، چارج نہیں ہو رہی

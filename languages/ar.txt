@@ -77,15 +77,13 @@ settings_badge_warning	fc8f	تحذير
 settings_battery_charging	5116	، قيد الشحن
 settings_drive_state	0bb3	محرك، 
 settings_item_drive	269a	معروض، غير محجوز: لا يغيّر أي أمر أي محرك
-settings_legend_comma	00f1	، 
-settings_legend_semicolon	0b8e	؛ 
 settings_not_shown	8efd	%d إضافية غير معروضة
 settings_role_efi	d41a	نظام EFI
 settings_role_linux	2c8f	بيانات Linux
-settings_role_swap	874e	التبديل
-settings_role_other	8df5	أخرى
-settings_role_free	eedb	حر
-settings_role_unpartitioned	61a9	غير مقسّم
+settings_role_swap	d36e	التبديل
+settings_role_other	ff95	أخرى
+settings_role_free	ad01	مساحة حرة
+settings_role_unpartitioned	3c10	بلا جدول أقسام
 settings_battery_discharging	7964	، قيد التفريغ
 settings_battery_full	ded8	، مشحونة بالكامل
 settings_battery_idle	1635	، لا يتم الشحن

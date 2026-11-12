@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Προειδοποίηση
 settings_battery_charging	5116	, φορτίζει
 settings_drive_state	0bb3	δίσκος, 
 settings_item_drive	269a	εμφανίζεται, δεν κρατείται: καμία εντολή δεν αλλάζει δίσκο
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	%d ακόμα δεν εμφανίζονται
 settings_role_efi	d41a	Σύστημα EFI
 settings_role_linux	2c8f	Δεδομένα Linux
-settings_role_swap	874e	Ανταλλαγή
-settings_role_other	8df5	άλλο
-settings_role_free	eedb	ελεύθερο
-settings_role_unpartitioned	61a9	χωρίς διαμέριση
+settings_role_swap	d36e	Ανταλλαγή
+settings_role_other	ff95	Άλλο
+settings_role_free	ad01	Ελεύθερος χώρος
+settings_role_unpartitioned	3c10	Χωρίς πίνακα διαμερισμάτων
 settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
 settings_battery_idle	1635	, δεν φορτίζει

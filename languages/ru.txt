@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
 settings_drive_state	0bb3	диск, 
 settings_item_drive	269a	показан, не удерживается: ни одна команда не меняет диск
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	ещё %d не показано
 settings_role_efi	d41a	Системный EFI
 settings_role_linux	2c8f	Данные Linux
-settings_role_swap	874e	подкачка
-settings_role_other	8df5	прочее
-settings_role_free	eedb	свободно
-settings_role_unpartitioned	61a9	без разделов
+settings_role_swap	d36e	Подкачка
+settings_role_other	ff95	Прочее
+settings_role_free	ad01	Свободно
+settings_role_unpartitioned	3c10	Нет таблицы разделов
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
 settings_battery_idle	1635	, не заряжается

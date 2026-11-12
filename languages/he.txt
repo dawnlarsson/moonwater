@@ -77,15 +77,13 @@ settings_badge_warning	fc8f	אזהרה
 settings_battery_charging	5116	, בטעינה
 settings_drive_state	0bb3	כונן, 
 settings_item_drive	269a	מוצג, לא מוחזק: אף פקודה לא משנה כונן
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	עוד %d שלא מוצגים
 settings_role_efi	d41a	מערכת EFI
 settings_role_linux	2c8f	נתוני Linux
-settings_role_swap	874e	החלפה
-settings_role_other	8df5	אחר
-settings_role_free	eedb	פנוי
-settings_role_unpartitioned	61a9	ללא מחיצות
+settings_role_swap	d36e	החלפה
+settings_role_other	ff95	אחר
+settings_role_free	ad01	שטח פנוי
+settings_role_unpartitioned	3c10	אין טבלת מחיצות
 settings_battery_discharging	7964	, בפריקה
 settings_battery_full	ded8	, מלאה
 settings_battery_idle	1635	, לא בטעינה

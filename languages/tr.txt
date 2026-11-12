@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Uyarı
 settings_battery_charging	5116	, şarj oluyor
 settings_drive_state	0bb3	sürücü, 
 settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	%d tane daha gösterilmiyor
 settings_role_efi	d41a	EFI sistemi
 settings_role_linux	2c8f	Linux verisi
-settings_role_swap	874e	takas
-settings_role_other	8df5	diğer
-settings_role_free	eedb	boş
-settings_role_unpartitioned	61a9	bölümlenmemiş
+settings_role_swap	d36e	Takas
+settings_role_other	ff95	Diğer
+settings_role_free	ad01	Boş alan
+settings_role_unpartitioned	3c10	Bölüm tablosu yok
 settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
 settings_battery_idle	1635	, şarj olmuyor

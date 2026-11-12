@@ -77,15 +77,13 @@ settings_badge_warning	fc8f	هشدار
 settings_battery_charging	5116	، در حال شارژ
 settings_drive_state	0bb3	درایو، 
 settings_item_drive	269a	نمایش داده می‌شود، نگه‌داشته نمی‌شود: هیچ فرمانی درایوی را تغییر نمی‌دهد
-settings_legend_comma	00f1	، 
-settings_legend_semicolon	0b8e	؛ 
 settings_not_shown	8efd	%d مورد دیگر نشان داده نمی‌شود
 settings_role_efi	d41a	سیستم EFI
 settings_role_linux	2c8f	داده‌های Linux
-settings_role_swap	874e	مبادله
-settings_role_other	8df5	دیگر
-settings_role_free	eedb	آزاد
-settings_role_unpartitioned	61a9	بدون پارتیشن
+settings_role_swap	d36e	مبادله
+settings_role_other	ff95	دیگر
+settings_role_free	ad01	فضای آزاد
+settings_role_unpartitioned	3c10	بدون جدول پارتیشن
 settings_battery_discharging	7964	، در حال تخلیه
 settings_battery_full	ded8	، شارژ کامل
 settings_battery_idle	1635	، در حال شارژ نیست

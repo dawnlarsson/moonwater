@@ -76,15 +76,13 @@ settings_badge_warning	fc8f	Aviso
 settings_battery_charging	5116	, carregando
 settings_drive_state	0bb3	unidade, 
 settings_item_drive	269a	mostrado, não retido: nenhum comando altera uma unidade
-settings_legend_comma	00f1	, 
-settings_legend_semicolon	0b8e	; 
 settings_not_shown	8efd	mais %d não mostrados
 settings_role_efi	d41a	Sistema EFI
 settings_role_linux	2c8f	Dados Linux
-settings_role_swap	874e	troca
-settings_role_other	8df5	outro
-settings_role_free	eedb	livre
-settings_role_unpartitioned	61a9	sem partições
+settings_role_swap	d36e	Troca
+settings_role_other	ff95	Outro
+settings_role_free	ad01	Espaço livre
+settings_role_unpartitioned	3c10	Sem tabela de partições
 settings_battery_discharging	7964	, descarregando
 settings_battery_full	ded8	, completa
 settings_battery_idle	1635	, não está carregando

@@ -245,10 +245,10 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_DRIVE 32u  // a drive the device list shows: its strip, and no verb holds it
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
-#define SETTINGS_LEGEND 200
 #define SETTINGS_STATE 24        // a port's state word (allowed, blocked, waiting), or a drive's kind and state (drive, view only)
 #define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
 #define SETTINGS_SEGMENT_TEXT 16 // a segment's size, drawn in the segment where it has room (ui.c's UI_STRIP_TEXT is this)
+#define SETTINGS_SEGMENT_NAME 40 // a partition's name as the legend says it, cut where a character ends
 #define SETTINGS_ALIGNMENT 1048576ull // free room this small is the room a partition table and the partitions' alignment keep, and is not shown
 
 struct settings_item
@@ -261,10 +261,10 @@ struct settings_item
         unsigned short segment_more;                    // a drive's partitions the host did not show (its "more" line)
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
-        char legend[SETTINGS_LEGEND];                   // what the strip is, in words: role and size of each segment
         char state[SETTINGS_STATE];                     // a port's state word, or a drive's kind and state
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
         char segment_text[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_TEXT]; // each segment's size, as the legend says it
+        char segment_name[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
 };
 
 /*
@@ -2818,10 +2818,7 @@ static const char address_to settings_role_word(unsigned int role)
                : role == 3 ? WORDS(settings_role_other) : role == 4 ? WORDS(settings_role_free) : WORDS(settings_role_unpartitioned);
 }
 
-/*
-        A drive's legend: each segment's role and its size, in a whole number of GB (from 1 GB) or MB, in order. It is what
-        the strip's colours stand for, said in words, so the strip needs no hover to be read.
-*/
+// A size in a whole number of GB (from 1 GB) or MB, as the strip and its legend say it.
 static fn settings_size_text(unsigned long long bytes, char address_to into, positive room)
 {
         unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
@@ -2839,23 +2836,49 @@ static fn settings_size_text(unsigned long long bytes, char address_to into, pos
         string_append_bounded((string_address)into, bytes >= 1000000000ull ? (string_address)" GB" : (string_address)" MB", room);
 }
 
-static fn settings_legend(struct settings_item address_to item)
+/*
+        Whether a partition's name says its role's word already, whatever the case of its ASCII letters (EFI system partition, Linux
+        swap): its legend entry then says the role no second time.
+*/
+static b32 settings_name_says(const char address_to name, const char address_to word)
 {
-        item->legend[0] = 0;
-        // The partitions the host did not show come first, where the legend's room cannot cut them off.
-        if (item->segment_more)
-                language_format(item->legend, sizeof(item->legend), WORDS(settings_not_shown), (long)item->segment_more);
+        positive length = string_length((string_address)word);
+
+        for (; length && *name; name++)
+        {
+                positive at = 0;
+
+                while (at < length && name[at] && ((name[at] | (name[at] >= 'A' && name[at] <= 'Z' ? 32 : 0)) == (word[at] | (word[at] >= 'A' && word[at] <= 'Z' ? 32 : 0))))
+                        at++;
+                if (at == length)
+                        return true;
+        }
+        return false;
+}
+
+/*
+        A drive's legend as its row shows it: an entry for each segment, its name (the partition's, else its role's word), its role's
+        word where the name is not it, and its size; then the partitions the host did not show. The words are the language's at the
+        moment the row is described, so they are made then, into these, and the item keeps what the host said.
+*/
+static const char address_to settings_strip_names[SETTINGS_SEGMENTS];
+static const char address_to settings_strip_kinds[SETTINGS_SEGMENTS];
+static char settings_strip_more[SETTINGS_ITEM_LABEL];
+
+static fn settings_legend(const struct settings_item address_to item, struct ui_row address_to row)
+{
         for (positive at = 0; at < item->segment_count; at++)
         {
-                if (at)
-                        string_append_bounded((string_address)item->legend, (string_address)WORDS(settings_legend_comma), sizeof(item->legend));
-                else if (item->segment_more)
-                        string_append_bounded((string_address)item->legend, (string_address)WORDS(settings_legend_semicolon), sizeof(item->legend));
-                string_append_bounded((string_address)item->legend, (string_address)settings_role_word(item->segment_role[at]), sizeof(item->legend));
-                settings_size_text(item->segment_bytes[at], item->segment_text[at], sizeof(item->segment_text[at]));
-                string_append_bounded((string_address)item->legend, (string_address)" ", sizeof(item->legend));
-                string_append_bounded((string_address)item->legend, (string_address)item->segment_text[at], sizeof(item->legend));
+                const char address_to role = settings_role_word(item->segment_role[at]);
+
+                settings_strip_names[at] = item->segment_name[at][0] ? item->segment_name[at] : role;
+                settings_strip_kinds[at] = item->segment_name[at][0] && !settings_name_says(item->segment_name[at], role) ? role : null;
         }
+        settings_strip_more[0] = 0;
+        if (item->segment_more)
+                language_format(settings_strip_more, sizeof(settings_strip_more), WORDS(settings_not_shown), (long)item->segment_more);
+        row->strip_names = settings_strip_names, row->strip_kinds = settings_strip_kinds;
+        row->strip_more = settings_strip_more[0] ? settings_strip_more : null;
 }
 
 /*
@@ -2880,6 +2903,31 @@ static fn settings_item_split(struct settings_item address_to item, const char a
                 memory_copy(item->state, text + state, took);
                 item->state[took] = 0;
         }
+}
+
+/*
+        A partition's name as the host says it, into the item: the host writes a blank of the name as an underscore (its line is
+        words a blank apart), and "-" for no name. It is cut where a character ends, so a name in any script stays whole letters.
+*/
+static fn settings_segment_name(char address_to into, const char address_to text, positive size)
+{
+        positive took = 0;
+
+        into[0] = 0;
+        if (!size || (size == 1 && text[0] == '-'))
+                return;
+        for (positive at = 0; at < size;)
+        {
+                unsigned char lead = (unsigned char)text[at];
+                positive span = lead < 0x80 ? 1 : lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+
+                if (took + span >= SETTINGS_SEGMENT_NAME || at + span > size)
+                        break;
+                for (positive k = 0; k < span; k++)
+                        into[took + k] = text[at + k] == '_' ? ' ' : text[at + k];
+                took += span, at += span;
+        }
+        into[took] = 0;
 }
 
 /*
@@ -2951,11 +2999,15 @@ static fn settings_feed_hardware(void)
                                 word++;
                         role_length = word - role_at;
                         code = settings_role_code(text + role_at, role_length);
+                        while (word < size && text[word] == ' ')
+                                word++;
                         // Free room no bigger than the alignment the partitions keep is no room a person can use: it has no segment.
                         if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
                             (code != 4 || bytes > SETTINGS_ALIGNMENT))
                         {
                                 drive->segment_bytes[drive->segment_count] = bytes;
+                                settings_size_text(bytes, drive->segment_text[drive->segment_count], sizeof(drive->segment_text[0]));
+                                settings_segment_name(drive->segment_name[drive->segment_count], text + word, size - word);
                                 drive->segment_role[drive->segment_count++] = (unsigned char)code;
                         }
                         continue;
@@ -3008,9 +3060,6 @@ static fn settings_feed_hardware(void)
                 items[count].kind = SETTINGS_NOTE;
                 settings_item_label(&items[count++], note, string_length((string_address)note));
         }
-        for (positive each = 0; each < count; each++)
-                if (items[each].kind == SETTINGS_NOTE && (items[each].segment_count || items[each].segment_more))
-                        settings_legend(&items[each]);
         settings.item_count[2] = (unsigned short)count;
 }
 
@@ -4176,9 +4225,9 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_edit_begin(row, "", false);
                 settings_say((string_address)WORDS(settings_type_device));
         }
-        // A drive runs no verb: the status says that it is shown and held by none, and the legend in full when the row cut it short.
+        // A drive runs no verb: the status says that it is shown and held by none.
         else if (item->flags & SETTINGS_ITEM_DRIVE)
-                settings_say((string_address)(item->legend[0] ? item->legend : WORDS(settings_item_drive)));
+                settings_say((string_address)WORDS(settings_item_drive));
         else if (item->kind != SETTINGS_NOTE)
                 settings_say((string_address)settings_item_text(item));
         ui_page_redraw(&settings.page);
@@ -4908,14 +4957,10 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
-                        // A drive is two rows high when it has a strip (or a note of the partitions not shown): its line, then the strip, then the legend.
+                        // A drive with a strip (or a note of the partitions not shown) is as tall as its line, the strip and the legend under it.
                         row->note = item->state;
                         row->value = item->size;
-                        if (item->segment_count || item->segment_more)
-                        {
-                                row->tall = true;
-                                row->legend = item->legend;
-                        }
+                        row->tall = item->segment_count || item->segment_more;
                         if (item->segment_count)
                         {
                                 row->strip_bytes = item->segment_bytes;
@@ -4923,6 +4968,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                                 row->strip_text = &item->segment_text[0][0];
                                 row->strip_count = item->segment_count;
                         }
+                        if (row->tall)
+                                settings_legend(item, row);
                 }
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
