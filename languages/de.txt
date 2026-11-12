@@ -248,6 +248,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Devices	f320	Geräte
 =Devices in this machine	d7b8	Geräte in diesem Rechner
 =Display	d9b5	Anzeige
+=Drag lists with the mouse	4ee2	Listen mit der Maus ziehen
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-Rendering (alpha)
 =Gallery	4cdd	Galerie

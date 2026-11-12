@@ -249,6 +249,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Devices	f320	الأجهزة
 =Devices in this machine	d7b8	الأجهزة في هذا الجهاز
 =Display	d9b5	الشاشة
+=Drag lists with the mouse	4ee2	سحب القوائم بالماوس
 =Editor	bf98	المحرر
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض

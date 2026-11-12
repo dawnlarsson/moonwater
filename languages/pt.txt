@@ -248,6 +248,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Devices	f320	Dispositivos
 =Devices in this machine	d7b8	Dispositivos nesta máquina
 =Display	d9b5	Tela
+=Drag lists with the mouse	4ee2	Arrastar listas com o mouse
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	Renderização por GPU (alfa)
 =Gallery	4cdd	Galeria

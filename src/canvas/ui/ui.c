@@ -9418,6 +9418,7 @@ struct ui_press
 {
         int x, y, target;                    // where it went down and on what (-1 nothing)
         b32 down, touch, dragged;
+        b32 drags;                           // past the slop it drags its region as a finger's does: a finger's, or a mouse's that drags (ui_press_drags)
         int last;                            // where the hand was at its last report
         int samples;                         // the hand's last reports, oldest first: when, and where it was
         positive when[UI_PRESS_SAMPLES];
@@ -9576,7 +9577,9 @@ static long ui_press_velocity(const struct ui_press address_to press, positive n
             ui_pressed(press, target)                   whether target is shown pressed now
             ui_press_down, ui_press_follow, ui_press_lift   a finger: the region it drags, the pixels it moved, and its lift
 
-        How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
+        A mouse's press drags as a finger's does while `canvas scroll drag` is on (ui_press_drags): it is taken by ui_press_down too,
+        so past the slop it drags the region and no click, and its release throws the region; a press that does not pass the slop is
+        the mouse's click as before. How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
 */
 #define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
 
@@ -9584,6 +9587,7 @@ static fn ui_press_begin(struct ui_press address_to press, int x, int y, int tar
 {
         press->x = x, press->y = y, press->target = target;
         press->down = true, press->touch = touch, press->dragged = false;
+        press->drags = false;
         press->region = null;
 }
 
@@ -10398,6 +10402,13 @@ static fn ui_kit_scroll_take(const struct windows address_to table)
 {
         ui_kit.scroll_off = table->scroll_off;
         ui_kit.scroll_speed = table->scroll_speed;
+}
+
+// Whether a press of an event drags what it is on as a finger's does (ui_press_down): a finger's always, and a mouse's while `canvas scroll
+// drag` keeps it on (WINDOW_SCROLL_DRAG). A mouse's then drags a page's rows and groups, a list's rows and a view's scroll container.
+static inline b32 ui_press_drags(unsigned int flags)
+{
+        return (flags & WINDOW_KEY_TOUCH) || (ui_kit.scroll_off & WINDOW_SCROLL_DRAG);
 }
 
 // The pace of the transitions (ui_paced), taken with the wheel's: a table that says none in range leaves the pace this process has.
@@ -17089,6 +17100,19 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
         ui_buttons_draw(ui, &v->group, keys);
 }
 
+// Whether x, y is on a field of the view whose text is an engine's: a mouse's drag there selects, and moves no container.
+static b32 ui_view_text_at(struct ui address_to ui, const struct ui_view address_to v, int x, int y)
+{
+        for (int at = 0; at < v->tree.count; at++)
+        {
+                struct ui_control address_to c = v->item[at].control;
+
+                if (c && c->kind == UI_INPUT && c->edit && ui_control_hit(ui, c, x, y) >= 0)
+                        return true;
+        }
+        return false;
+}
+
 // An element's handler called with what it is given: UI_VIEW_QUIT when it answers false.
 static p32 ui_view_act(const struct ui_item address_to item)
 {
@@ -17098,7 +17122,8 @@ static p32 ui_view_act(const struct ui_item address_to item)
 /*
         An event for the view. The wheel turns the scroll container under the pointer (ui_wheel_turn); a container's bar takes the pointer
         on it (ui_scroll_pointer: its thumb is dragged, its track pages); a finger's press in a container is a drag of it past the slop, and
-        its lift throws it (ui_press_follow, ui_press_lift), unless a control holds the finger. A control of the view's that holds the
+        its lift throws it (ui_press_follow, ui_press_lift), unless a control holds the finger; a mouse's press is the same while `canvas
+        scroll drag` is on (ui_press_drags), where no control, bar or field's text takes it. A control of the view's that holds the
         pointer has every motion and the release, wherever the pointer is (capture); else the buttons take the pointer and the keys
         (ui_buttons_event), and then the controls the pointer as an array of them does (ui_kit_pointer): a motion lights what shows under
         it, and a press takes the focus from every control and is the first one's it is on. The button that acted and the control that
@@ -17171,7 +17196,10 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                         ui_view_due(v, ui_dev(ui, c->y - 8) < 0 ? 0 : ui_dev(ui, c->y - 8), ui_dev(ui, c->y + c->h + 8));
         }
         // A finger: where it lands is the scroll container's too, a drag that no control holds moves the container, and its lift throws it.
-        if (button && down && (event->flags & WINDOW_KEY_TOUCH) && under)
+        // A mouse's press that drags (canvas scroll drag) is a finger's where nothing took it: not on a control, a bar or a field's text.
+        if (button && down && under &&
+            ((event->flags & WINDOW_KEY_TOUCH) ||
+             (ui_press_drags(event->flags) && !ui_kit_held && !(asks & UI_VIEW_TAKEN) && !ui_view_text_at(ui, v, x, y))))
                 ui_press_down(&v->finger, x, y, -1, under);
         else if (motion && v->finger.down && !ui_kit_held)
         {
@@ -19095,27 +19123,32 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
 
 /*
         A list's pointer and its clicks, the one rule for a list that takes a click. Motion lights the row under the pointer
-        (ui_list_pointer); a finger past the slop is a drag and no click, and a mouse held on a row shows it pressed while the
-        pointer is on that row (ui_list_press_slide). The primary button's press goes down on a row (ui_list_pointer: shown
-        pressed, rippled from the press, the focus there) and its release is the row's click where the press went down and
-        did not slide off; a press the compositor takes back (WINDOW_KEY_CANCEL) is none. Answers the row clicked, on the
-        release, or -1. x and y are the pointer's place, which a button's event does not carry.
+        (ui_list_pointer); a press that drags (a finger's, or a mouse's while `canvas scroll drag` is on: ui_press_drags) is taken
+        as a finger's (ui_press_down), so past the slop it drags the list, one for one, and no row shows pressed or is clicked, and
+        its release throws the list (ui_press_lift); a mouse held on a row shows it pressed while the pointer is on that row
+        (ui_list_press_slide). The primary button's press goes down on a row (ui_list_pointer: shown pressed, rippled from the
+        press, the focus there) and its release is the row's click where the press went down and did not slide off or drag; a
+        press the compositor takes back (WINDOW_KEY_CANCEL) is none, and so is one that stopped the list running on. Answers the
+        row clicked, on the release, or -1. x and y are the pointer's place, which a button's event does not carry.
 */
 static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event, int x, int y)
 {
-        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
-        int row;
+        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0, cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
+        int row, clicked;
 
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 row = ui_list_hit(ui, l, x, y);
                 ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
-                if (touch)
+                if (l->press.down && l->press.drags)
                 {
-                        if (l->press.down && !l->press.dragged && ui_press_move(ui, &l->press, x, y))
+                        b32 dragged = l->press.dragged;
+
+                        ui_press_follow(ui, &l->press, x, y);
+                        if (!dragged && l->press.dragged)
                                 ui_list_let_go(ui, l);
                 }
-                else
+                else if (!touch)
                         ui_list_press_slide(ui, l, &l->press, row);
                 return -1;
         }
@@ -19123,12 +19156,20 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 return -1;
         if (event->flags & WINDOW_KEY_DOWN)
         {
-                ui_press_begin(&l->press, x, y, ui_list_hit(ui, l, x, y), touch);
+                row = ui_list_hit(ui, l, x, y);
+                if (!ui_press_drags(event->flags))
+                        ui_press_begin(&l->press, x, y, row, touch);
+                else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0)
+                        return -1; // a press on rows running on stops them, and shows and clicks nothing
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
                 return -1;
         }
         ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
-        return ui_press_release(&l->press, (event->flags & WINDOW_KEY_CANCEL) != 0, ui_list_hit(ui, l, x, y));
+        row = ui_list_hit(ui, l, x, y);
+        if (!l->press.drags)
+                return ui_press_release(&l->press, cancelled, row);
+        clicked = ui_press_lift(&l->press, cancelled);
+        return clicked >= 0 && clicked == row ? clicked : -1;
 }
 
 /* ---- a finger's press: what it drags, and what its lift throws ---- */
@@ -19159,6 +19200,7 @@ static fn ui_press_down(struct ui_press address_to press, int x, int y, int targ
         if (region)
                 ui_scroll_hold(region);
         ui_press_begin(press, x, y, stops ? -1 : target, true);
+        press->drags = true;
         press->region = region;
 }
 
@@ -19718,7 +19760,9 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
         a press shows pressed as it goes down is the kit's: a row's state layer, a group's ripple, the card nothing. A mouse's
         press is done on its release where it went down, if the release is on that target too; a press on nothing is done at
         once. A finger's is done as it lifts, where it went down, if it did not move off the target; past the slop it drags the
-        region it went down on, which follows it, and is thrown on the lift if it was moving. done is the app's action for a press
+        region it went down on, which follows it, and is thrown on the lift if it was moving. A mouse's press on a row or a group
+        drags the same way while `canvas scroll drag` is on (ui_press_drags), and one that did not pass the slop is still done on
+        its release where it went down. done is the app's action for a press
         (it reads the page's pointer), and ui_kit_touch says whether the press is a finger's (what a menu it opens is).
 */
 #define UI_PAGE_GROUP 0x1000
@@ -19940,6 +19984,13 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                         ui_page_finger_move(ui, p, l, event->a, event->b);
                         return;
                 }
+                // A mouse's press that drags (canvas scroll drag) is a finger's: past the slop the region follows it, and no row shows pressed.
+                if (p->press.down && p->press.drags)
+                {
+                        ui_page_finger_move(ui, p, l, event->a, event->b);
+                        if (p->press.dragged)
+                                return;
+                }
                 // The mouse moved with its press held: a row is shown pressed while the pointer is on the row the press went down on.
                 if (p->press.down && p->press.target < UI_PAGE_GROUP && ui_list_press_slide(ui, l, &p->press, ui_page_target(ui, p, l, event->a, event->b)))
                         ui_page_changed(p);
@@ -19964,8 +20015,14 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                 // (WINDOW_KEY_CANCEL) is no click.
                 if (!(event->flags & WINDOW_KEY_TOUCH) && p->press.down)
                 {
-                        int clicked = ui_press_release(&p->press, (event->flags & WINDOW_KEY_CANCEL) != 0, ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y));
+                        b32 cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
+                        int at = ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y), clicked;
 
+                        // One that drags lifts as a finger's does: a drag throws its region and clicks nothing.
+                        if (p->press.drags)
+                                clicked = ui_press_lift(&p->press, cancelled), clicked = clicked >= 0 && clicked == at ? clicked : -1;
+                        else
+                                clicked = ui_press_release(&p->press, cancelled, at);
                         ui_list_let_go(ui, l);
                         ui_page_changed(p);
                         if (clicked >= 0)
@@ -19987,8 +20044,13 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                         done();
                         return;
                 }
-                ui_press_begin(&p->press, x, y, target, false);
-                ui_page_press_show(ui, p, l, target, x, y);
+                // One that drags (canvas scroll drag) takes the region under it as a finger's does: a press on rows in motion stops them
+                // and has no target. A card has no rows to drag.
+                if (ui_press_drags(event->flags) && target < UI_PAGE_CARD)
+                        ui_press_down(&p->press, x, y, target, ui_page_region(ui, p, x, y));
+                else
+                        ui_press_begin(&p->press, x, y, target, false);
+                ui_page_press_show(ui, p, l, p->press.target, x, y);
                 ui_page_changed(p);
         }
 }

@@ -248,6 +248,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Devices	f320	Périphériques
 =Devices in this machine	d7b8	Périphériques de cette machine
 =Display	d9b5	Écran
+=Drag lists with the mouse	4ee2	Faire glisser les listes avec la souris
 =Editor	bf98	Éditeur
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =Gallery	4cdd	Galerie

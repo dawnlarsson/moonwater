@@ -152770,6 +152770,211 @@ static fn check_kit_view_scroll(void)
 }
 
 /*
+        A mouse that drags a list (`moonwater canvas scroll drag`, ui_press_drags). Off, the standard, a mouse's press on a settings page's rows
+        that moves 100 pixels scrolls nothing, and one that moves past the slop and stays on its row is that row's click, as it always was. On,
+        the same press drags the rows one for one as a finger's does (from where it passed the slop), shows no row pressed and clicks none, and
+        its release throws them on the hand's speed; a press with no motion is still the row's click; a pull down at the top is the rubber band,
+        which springs home after the release; a press on a slider row's slider is still the slider's and moves no row; and the launcher's list
+        (ui_list_click) and a view's scroll container drag the same way, where off they did not.
+*/
+static fn mouse_drag_send(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, unsigned int type, unsigned int flags, int x, int y)
+{
+        struct window_event event = {type, flags, type == WINDOW_EVENT_MOTION ? x : UI_POINTER_LEFT, type == WINDOW_EVENT_MOTION ? y : 0};
+
+        ui_kit.test_clock += 8000000ull, ui_kit.now = ui_kit.test_clock;
+        ui_kit_track(&event);
+        ui_event_context(&event);
+        ui_page_pointer(ui, p, l, &event, check_kit_pointer_done);
+}
+
+// A mouse's press at x, y, moved by `by` pixels down the page (up when less than 0) in steps of 10, each 8 ms after the last; not let go.
+static fn mouse_drag_hold(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int x, int y, int by)
+{
+        int step = by < 0 ? -10 : 10;
+
+        mouse_drag_send(ui, p, l, WINDOW_EVENT_MOTION, 0, x, y);
+        mouse_drag_send(ui, p, l, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, x, y);
+        for (int moved = step; by && moved * step <= by * step; moved += step)
+                mouse_drag_send(ui, p, l, WINDOW_EVENT_MOTION, 0, x, y + moved);
+}
+
+// The rows a frame on at the kit's clock, until they rest (at most two seconds): where they rest.
+static int mouse_drag_rest(struct ui address_to ui, struct ui_scroll address_to s)
+{
+        for (int frame = 0; frame < 120; frame++)
+        {
+                ui_kit.test_clock += 16000000ull, ui_kit.now = ui_kit.test_clock;
+                if (!ui_scroll_frame(ui, s) && !scroll_gliding(s) && !scroll_back(s))
+                        break;
+        }
+        return s->scroll;
+}
+
+// A list's own click rule (ui_list_click, the launcher's) given a mouse's event: the row it answers.
+static int mouse_drag_click(struct ui address_to ui, struct ui_list address_to l, unsigned int type, unsigned int flags, int x, int y)
+{
+        struct window_event event = {type, flags, type == WINDOW_EVENT_MOTION ? x : UI_POINTER_LEFT, type == WINDOW_EVENT_MOTION ? y : 0};
+
+        ui_kit.test_clock += 8000000ull, ui_kit.now = ui_kit.test_clock;
+        ui_kit_track(&event);
+        ui_event_context(&event);
+        return ui_list_click(ui, l, &event, ui_kit.pointer_x, ui_kit.pointer_y);
+}
+
+static fn check_kit_mouse_drag(void)
+{
+        static struct ui_list rows, sliders;
+        struct ui ui;
+        struct ui_page p;
+        unsigned int scroll_off = ui_kit.scroll_off, motion = ui_kit.motion;
+        int at, top, tall, thrown_at, answered = -1;
+        b32 off_still, off_unclicked, off_row, on_drags, on_unshown, on_unclicked, on_throws, on_row, on_clicks, on_pulled, on_home;
+        b32 slider_kept, list_off, list_on, view_off, view_on;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.scale = 100;
+        ui_kit.motion = 0, ui_kit_held = null;
+        ui_kit.test_clock = 6000000000ull, ui_kit.now = ui_kit.test_clock;
+        bounds_list_make(&ui, &rows, 40, 200);
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 400, p.top = 0, p.bottom = 400, p.left = 100, p.right = 400;
+        p.body = &rows.scroll;
+        // The row under 200, 150, and its top and height: a press near its top moved to near its foot stays on it.
+        at = ui_list_at(&rows, ui_list_hit(&ui, &rows, 200, 150));
+        top = ui_list_row_y(&rows, at), tall = rows.tall[at];
+
+        // Off: nothing moves the rows, and a press that stays on its row is its click.
+        ui_kit.scroll_off = 0;
+        kit_pointer_done = 0;
+        mouse_drag_hold(&ui, &p, &rows, 200, 150, -100);
+        off_still = rows.scroll.scroll == 0;
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, 50);
+        off_still = off_still && rows.scroll.scroll == 0 && mouse_drag_rest(&ui, &rows.scroll) == 0;
+        off_unclicked = kit_pointer_done == 0;
+        kit_pointer_done = 0;
+        mouse_drag_hold(&ui, &p, &rows, 200, top + 2, 0);
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_MOTION, 0, 200, top + tall - 3);
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, top + tall - 3);
+        off_row = kit_pointer_done == 1 && rows.scroll.scroll == 0 && tall - 5 >= UI_SLOP;
+        check("mouse drag: off, a mouse's press on the rows that moves 100 pixels scrolls nothing and, let go on another row, clicks none, as before",
+              off_still && off_unclicked);
+        check("mouse drag: off, a press that moves past the slop and stays on its row is still that row's click", off_row);
+
+        // On: the rows follow the hand from where it passed the slop, no row shows pressed or is clicked, and the release throws them.
+        ui_kit.scroll_off = WINDOW_SCROLL_DRAG;
+        kit_pointer_done = 0;
+        mouse_drag_hold(&ui, &p, &rows, 200, 150, -100);
+        on_drags = rows.scroll.scroll >= 100 - 10 && rows.scroll.scroll <= 100 && scroll_dragging(&rows.scroll);
+        on_unshown = rows.down < 0;
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, 50);
+        on_unclicked = kit_pointer_done == 0 && !p.press.down;
+        thrown_at = rows.scroll.scroll;
+        on_throws = scroll_gliding(&rows.scroll) && mouse_drag_rest(&ui, &rows.scroll) > thrown_at + 50;
+        check("mouse drag: on, a mouse's press on the rows drags them one for one as a finger's does, and no row shows pressed", on_drags && on_unshown);
+        check("mouse drag: on, the drag clicks no row, and its release throws the rows on the hand's speed", on_unclicked && on_throws);
+        ui_scroll_set(&rows.scroll, 0);
+        kit_pointer_done = 0;
+        mouse_drag_hold(&ui, &p, &rows, 200, top + 2, 0);
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_MOTION, 0, 200, top + tall - 3);
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, top + tall - 3);
+        on_row = kit_pointer_done == 0;
+        mouse_drag_rest(&ui, &rows.scroll);
+        ui_scroll_set(&rows.scroll, 0);
+        kit_pointer_done = 0;
+        mouse_drag_hold(&ui, &p, &rows, 200, 150, 0);
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, 150);
+        on_clicks = kit_pointer_done == 1 && rows.scroll.scroll == 0;
+        check("mouse drag: on, the press that stays on its row but passes the slop is a drag and no click, and a press with no motion is the row's click",
+              on_row && on_clicks);
+        ui_scroll_set(&rows.scroll, 0);
+        mouse_drag_hold(&ui, &p, &rows, 200, 60, 100);
+        on_pulled = scroll_shown(&rows.scroll) < 0;
+        mouse_drag_send(&ui, &p, &rows, WINDOW_EVENT_BUTTON, 0, 200, 160);
+        on_home = (scroll_back(&rows.scroll) || scroll_gliding(&rows.scroll)) && mouse_drag_rest(&ui, &rows.scroll) == 0 && scroll_shown(&rows.scroll) == 0;
+        check("mouse drag: on, a drag down at the top pulls the rubber band, and the release springs it home", on_pulled && on_home);
+
+        // A slider row's slider: a mouse's drag along it moves it, as it always did, and moves no row.
+        memory_zero(&sliders, sizeof(sliders));
+        sliders.count = 2, sliders.ids = 2, sliders.describe = slider_row, sliders.focus = sliders.hover = sliders.down = -1;
+        sliders.id[0] = 0, sliders.id[1] = 1;
+        ui_list_place(&ui, &sliders, 0, 0, 400, 200);
+        ui_list_layout(&ui, &sliders);
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 200, p.top = 0, p.bottom = 200, p.left = 0, p.right = 400;
+        p.body = &sliders.scroll;
+        {
+                struct ui_row row;
+                struct ui_control address_to c;
+                int x, y;
+
+                ui_list_describe(&sliders, 0, &row);
+                c = ui_list_row_place(&ui, &sliders, 0, &row, ui_list_row_y(&sliders, 0), sliders.tall[0], false);
+                x = ui_dev(&ui, c->x + c->w / 4), y = ui_dev(&ui, c->y + c->h / 2);
+                mouse_drag_hold(&ui, &p, &sliders, x, y, 0);
+                mouse_drag_send(&ui, &p, &sliders, WINDOW_EVENT_MOTION, 0, ui_dev(&ui, c->x + c->w / 2 + c->w / 4), y + 30);
+                slider_kept = sliders.slide == 1 && sliders.slid_value == 165 && sliders.scroll.scroll == 0 && !p.press.down;
+                mouse_drag_send(&ui, &p, &sliders, WINDOW_EVENT_BUTTON, 0, ui_dev(&ui, c->x + c->w / 2 + c->w / 4), y + 30);
+                slider_kept = slider_kept && sliders.slid == 1 && sliders.slid_value == 165 && ui_kit_held == null;
+        }
+        check("mouse drag: on, a drag that starts on a slider still moves the slider, and no row", slider_kept);
+
+        // The launcher's list (ui_list_click): off a drag moves nothing, on it moves the list and is no row's click.
+        bounds_list_make(&ui, &rows, 40, 200);
+        ui_kit.scroll_off = 0;
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_MOTION, 0, 200, 150);
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 200, 150);
+        for (int moved = 10; moved <= 100; moved += 10)
+                mouse_drag_click(&ui, &rows, WINDOW_EVENT_MOTION, 0, 200, 150 - moved);
+        answered = mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, 0, 200, 50);
+        list_off = rows.scroll.scroll == 0 && answered < 0;
+        ui_kit.scroll_off = WINDOW_SCROLL_DRAG;
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_MOTION, 0, 200, 150);
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 200, 150);
+        for (int moved = 10; moved <= 100; moved += 10)
+                mouse_drag_click(&ui, &rows, WINDOW_EVENT_MOTION, 0, 200, 150 - moved);
+        list_on = rows.scroll.scroll >= 90 && rows.down < 0;
+        answered = mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, 0, 200, 50);
+        list_on = list_on && answered < 0 && scroll_gliding(&rows.scroll);
+        mouse_drag_rest(&ui, &rows.scroll);
+        ui_scroll_set(&rows.scroll, 0);
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_MOTION, 0, 200, 150);
+        mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 200, 150);
+        answered = mouse_drag_click(&ui, &rows, WINDOW_EVENT_BUTTON, 0, 200, 150);
+        list_on = list_on && answered == ui_list_hit(&ui, &rows, 200, 150) && answered >= 0;
+        check("mouse drag: a list's own click rule (the launcher's) drags the list and clicks no row with it on, a press with no motion still its click, and off moves nothing",
+              list_off && list_on);
+
+        // A view's scroll container: off a mouse's drag in it moves nothing, on it moves it one for one past the slop, as a finger's does.
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(&view_check_ui, sizeof(view_check_ui));
+        view_check_ui.scale = 100;
+        ui_kit.rtl = 0, ui_kit_held = null;
+        ui_kit.now = ui_kit.test_clock = 7000000000ll;
+        view_scroll_nested = false;
+        view_scroll_build();
+        ui_kit.scroll_off = 0;
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150);
+        view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150 - UI_SLOP);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150 - UI_SLOP - 30);
+        view_off = view_check.scroll[0].scroll == 0;
+        view_scroll_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        ui_kit.scroll_off = WINDOW_SCROLL_DRAG;
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150);
+        view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150 - UI_SLOP);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 150 - UI_SLOP - 30);
+        view_on = view_check.scroll[0].scroll == 30;
+        view_scroll_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        view_scroll_rest();
+        view_on = view_on && !view_check.finger.down && view_check.scroll[0].scroll > 30;
+        check("mouse drag: a view's scroll container is dragged by a mouse's press with it on, and thrown by its release, and off it is not moved", view_off && view_on);
+
+        ui_kit.scroll_off = scroll_off, ui_kit.motion = motion;
+        ui_kit.test_clock = 0, ui_kit.busy = 0, ui_kit_held = null;
+}
+
+/*
         Controls as elements of the view: under a band of 30, a column that scrolls, and in it a card of the kit's as the surface of a column
         of a painted box, a switch, a badge (its size the kit's own), a slider, 400 of nothing, a second switch that is out of sight until
         it is scrolled to, and three radios. The controls are this check's own, as an app's are its; where each is, its picture and the
@@ -154205,17 +154410,21 @@ static fn check_wheel_stream(void)
 // (a release threw nothing, an end stopped dead) and turned them off by setting them on.
 static fn check_scroll_bits(void)
 {
-        b32 standard, on, off, mixed, junk;
+        b32 standard, on, off, mixed, junk, drag;
 
-        standard = compositor_scroll_bits("", "", "") == 0 && compositor_scroll_bits("default", "default", "default") == 0;
-        on = compositor_scroll_bits("on", "on", "on") == WINDOW_SCROLL_FLIP;
-        off = compositor_scroll_bits("off", "off", "off") == (WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL);
-        mixed = compositor_scroll_bits("on", "off", "") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS) &&
-                compositor_scroll_bits("", "", "off") == WINDOW_SCROLL_STILL && compositor_scroll_bits("", "off", "on") == WINDOW_SCROLL_STOPS;
-        junk = compositor_scroll_bits("sideways", "maybe", "2") == 0;
+        standard = compositor_scroll_bits("", "", "", "") == 0 && compositor_scroll_bits("default", "default", "default", "default") == 0;
+        on = compositor_scroll_bits("on", "on", "on", "") == WINDOW_SCROLL_FLIP;
+        off = compositor_scroll_bits("off", "off", "off", "") == (WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL);
+        mixed = compositor_scroll_bits("on", "off", "", "") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS) &&
+                compositor_scroll_bits("", "", "off", "") == WINDOW_SCROLL_STILL && compositor_scroll_bits("", "off", "on", "") == WINDOW_SCROLL_STOPS;
+        junk = compositor_scroll_bits("sideways", "maybe", "2", "yes") == 0;
+        // The mouse's drag on a list (canvas scroll drag): off when nothing is kept, the one bit when it is on, and none when off.
+        drag = compositor_scroll_bits("", "", "", "on") == WINDOW_SCROLL_DRAG && compositor_scroll_bits("", "", "", "off") == 0 &&
+               compositor_scroll_bits("on", "off", "off", "on") == (WINDOW_SCROLL_FLIP | WINDOW_SCROLL_STOPS | WINDOW_SCROLL_STILL | WINDOW_SCROLL_DRAG);
         check("scroll switches: nothing set is the standard (natural direction off; momentum and the rubber band on), no bits", standard);
         check("scroll switches: all three set on is natural direction alone (FLIP), and all three set off is no momentum and no rubber band", on && off);
         check("scroll switches: each is read on its own, and a word that is none of the row's is the standard", mixed && junk);
+        check("scroll switches: the mouse's drag of a list is off unless its file says on, and on is the table's WINDOW_SCROLL_DRAG", drag);
 }
 
 // The keys held are the wheel's too: a wheel turned with Control or Shift held says so in its flags, the way a key's event does (Control zooms a view,
@@ -166684,6 +166893,7 @@ b32 main()
         check_kit_layout();
         check_kit_view();
         check_kit_view_scroll();
+        check_kit_mouse_drag();
         check_kit_view_controls();
         check_kit_hand();
         check_kit_wheel_near_end();

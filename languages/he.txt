@@ -249,6 +249,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Devices	f320	התקנים
 =Devices in this machine	d7b8	התקנים במכונה זו
 =Display	d9b5	מסך
+=Drag lists with the mouse	4ee2	גרירת רשימות בעכבר
 =Editor	bf98	עורך
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה

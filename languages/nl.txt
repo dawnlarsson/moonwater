@@ -248,6 +248,7 @@ ui_field_full	fe02	meer past er niet in
 =Devices	f320	Apparaten
 =Devices in this machine	d7b8	Apparaten in deze machine
 =Display	d9b5	Scherm
+=Drag lists with the mouse	4ee2	Lijsten met de muis slepen
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij

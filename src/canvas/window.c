@@ -696,10 +696,12 @@ struct windows_issue
 // The scroll body's switches, as the table's scroll_off holds them (0 is the standard: natural direction off, momentum and the rubber
 // band on). FLIP: natural direction is on, so a wheel's notch and a pad's motion move the content the other way from the OS's sign, the way
 // the fingers go (ui_wheel_turn, ui_body_track). STOPS: momentum is off, so a release carries no coast (ui_body_let_go). STILL: the rubber
-// band is off, so past an end the content stops there (ui_body_pin, ui_body_drawn).
+// band is off, so past an end the content stops there (ui_body_pin, ui_body_drawn). DRAG: `canvas scroll drag` is on, so a mouse's press on
+// a list drags it as a finger's does and its release throws it (ui_press_drags).
 #define WINDOW_SCROLL_FLIP 1u
 #define WINDOW_SCROLL_STOPS 2u
 #define WINDOW_SCROLL_STILL 4u
+#define WINDOW_SCROLL_DRAG 8u
 /*
         A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/ui.c).
         a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
@@ -920,7 +922,7 @@ struct windows
         unsigned int theme, accent, motion, themed;
         unsigned int wheel_off;
         // The compositor's: the scroll body's switches, `moonwater canvas scroll` and `canvas trackpad speed` as they are kept. scroll_off
-        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS and WINDOW_SCROLL_STILL (0 is the standard); scroll_speed is the trackpad's speed
+        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS, WINDOW_SCROLL_STILL and WINDOW_SCROLL_DRAG (0 is the standard); scroll_speed is the trackpad's speed
         // in percent, 25 to 400 (0 is 100). A change counts themed up, as a theme's does.
         unsigned int scroll_off, scroll_speed;
         unsigned int caret_speed, caret_thick;

@@ -248,6 +248,7 @@ ui_field_full	fe02	that is as much as it holds
 =Devices	f320	Devices
 =Devices in this machine	d7b8	Devices in this machine
 =Display	d9b5	Display
+=Drag lists with the mouse	4ee2	Drag lists with the mouse
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =Gallery	4cdd	Gallery

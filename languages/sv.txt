@@ -248,6 +248,7 @@ ui_field_full	fe02	mer ryms inte
 =Devices	f320	Enheter
 =Devices in this machine	d7b8	Enheter i den här datorn
 =Display	d9b5	Skärm
+=Drag lists with the mouse	4ee2	Dra listor med musen
 =Editor	bf98	Redigerare
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =Gallery	4cdd	Galleri

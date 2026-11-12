@@ -248,6 +248,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Devices	f320	Urządzenia
 =Devices in this machine	d7b8	Urządzenia w tej maszynie
 =Display	d9b5	Ekran
+=Drag lists with the mouse	4ee2	Przeciąganie list myszą
 =Editor	bf98	Edytor
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
 =Gallery	4cdd	Galeria

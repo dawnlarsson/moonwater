@@ -248,6 +248,7 @@ ui_field_full	fe02	більше не вміщається
 =Devices	f320	Пристрої
 =Devices in this machine	d7b8	Пристрої цієї машини
 =Display	d9b5	Екран
+=Drag lists with the mouse	4ee2	Перетягувати списки мишею
 =Editor	bf98	Редактор
 =GPU rendering (alpha)	e5e6	Рендеринг на GPU (альфа)
 =Gallery	4cdd	Галерея

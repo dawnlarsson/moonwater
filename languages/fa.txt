@@ -249,6 +249,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Devices	f320	دستگاه‌ها
 =Devices in this machine	d7b8	دستگاه‌های این دستگاه
 =Display	d9b5	نمایشگر
+=Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس
 =Editor	bf98	ویرایشگر
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =Gallery	4cdd	گالری

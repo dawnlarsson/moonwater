@@ -248,6 +248,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Devices	f320	Dispositivi
 =Devices in this machine	d7b8	Dispositivi di questa macchina
 =Display	d9b5	Schermo
+=Drag lists with the mouse	4ee2	Trascina gli elenchi con il mouse
 =Editor	bf98	Editor
 =GPU rendering (alpha)	e5e6	Rendering con GPU (alpha)
 =Gallery	4cdd	Galleria

@@ -249,6 +249,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Devices	f320	ڈیوائسز
 =Devices in this machine	d7b8	اس مشین کے ڈیوائسز
 =Display	d9b5	اسکرین
+=Drag lists with the mouse	4ee2	ماؤس سے فہرستیں گھسیٹیں
 =Editor	bf98	ایڈیٹر
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
 =Gallery	4cdd	گیلری

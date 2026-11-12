@@ -869,6 +869,12 @@ static b32 launcher_event(const struct window_event address_to event)
                 moved = event->a != launcher.list.pointer_x || event->b != launcher.list.pointer_y;
                 row = ui_list_hit(&launcher.ui, &launcher.list, event->a, event->b);
                 ui_list_click(&launcher.ui, &launcher.list, event, event->a, event->b);
+                // A press that drags the list (a finger's, or the mouse's with canvas scroll drag on) moves it: it is drawn again.
+                if (launcher.list.press.down && launcher.list.press.dragged)
+                {
+                        launcher.dirty = true;
+                        break;
+                }
                 if (row >= 0 && moved && row != launcher.list.focus)
                 {
                         launcher.list.focus = row;
