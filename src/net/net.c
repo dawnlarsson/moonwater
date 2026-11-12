@@ -3183,61 +3183,6 @@ static fn crypto_aes128_encrypt(const p8 address_to round, const p8 address_to i
         crypto_forget(counter, sizeof(counter));
 }
 
-/* A CMAC subkey: the block doubled in GF(2^128), the carry folded back by
-   mask rather than by a branch on the key. */
-static fn crypto_cmac_double(p8 address_to block)
-{
-        p8 carry = (p8)(0 - (block[0] >> 7));
-
-        for (positive at = 0; at < 15; at++)
-                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
-        block[15] = (p8)((block[15] << 1) ^ (carry & 0x87));
-}
-
-/*
-        AES-CMAC (RFC 4493) under a 128-bit key: K1 is AES(0) doubled and K2
-        is K1 doubled; the blocks are chained, and the last is XORed with K1
-        when it is whole and with K2 after 10* padding when it is not or
-        there is none. The MIC of the key frames of WPA's descriptor
-        version 3 and of SAE.
-*/
-static fn crypto_aes_cmac(p8 address_to key, const p8 address_to data, positive length,
-                          p8 address_to out)
-{
-        p8 round[176];
-        p8 subkey[2][16];
-        p8 state[16];
-        p8 last[16];
-        positive blocks = length ? (length + 15) / 16 : 1;
-        positive tail = length - (blocks - 1) * 16;
-        bool whole = length && tail == 16;
-
-        crypto_aes128_expand(key, round);
-        memory_fill(state, 0, 16);
-        crypto_aes128_encrypt(round, state, subkey[0]);
-        crypto_cmac_double(subkey[0]);
-        memory_copy(subkey[1], subkey[0], 16);
-        crypto_cmac_double(subkey[1]);
-        for (positive at = 0; at + 1 < blocks; at++)
-        {
-                for (positive byte = 0; byte < 16; byte++)
-                        state[byte] ^= data[at * 16 + byte];
-                crypto_aes128_encrypt(round, state, state);
-        }
-        memory_fill(last, 0, 16);
-        if (tail)
-                memory_copy(last, data + (blocks - 1) * 16, tail);
-        if (!whole)
-                last[tail] = 0x80;
-        for (positive byte = 0; byte < 16; byte++)
-                state[byte] ^= last[byte] ^ subkey[whole ? 0 : 1][byte];
-        crypto_aes128_encrypt(round, state, out);
-        crypto_forget(round, sizeof(round));
-        crypto_forget(subkey, sizeof(subkey));
-        crypto_forget(state, sizeof(state));
-        crypto_forget(last, sizeof(last));
-}
-
 /*
         GHASH over a span, the last partial block zero padded. The multiply
         is ghash_blocks in lib.c over the table ghash_key made; GCM's
@@ -3462,6 +3407,20 @@ static fn crypto_cmac(const crypto_cmac_key address_to key,
         memory_copy(out, state, 16);
         crypto_forget(state, sizeof state);
         crypto_forget(block, sizeof block);
+}
+
+/*      AES-CMAC (RFC 4493) of a span under a 128-bit key, in one call: the
+        MIC of the key frames of WPA's descriptor version 3 and of SAE. The
+        key is prepared, used once and forgotten; it was a second CMAC and a
+        second doubling beside the ones above. */
+static fn crypto_aes_cmac(p8 address_to key, const p8 address_to data, positive length,
+                          p8 address_to out)
+{
+        crypto_cmac_key prepared;
+
+        crypto_cmac_prepare(address_of prepared, key);
+        crypto_cmac(address_of prepared, data, length, null, out);
+        crypto_forget(address_of prepared, sizeof prepared);
 }
 
 static fn crypto_siv_prepare(crypto_siv_key address_to key,
@@ -4353,21 +4312,6 @@ static fn crypto_point_scalar_private(
         crypto_forget(address_of digit, sizeof digit);
 }
 
-/* How many low bits of a nonzero x are zero, by halving the range: a public
-   value, and no count-trailing-zeros that every architecture has. */
-static positive crypto_trailing_zeros(p64 x)
-{
-        positive zeros = 0;
-
-        for (positive step = 32; step; step >>= 1)
-                if (!(x & (((p64)1 << step) - 1)))
-                {
-                        zeros += step;
-                        x >>= step;
-                }
-        return zeros;
-}
-
 /* Width-w non-adjacent form of a public scalar below 2^(64 limbs): each
    digit is zero or odd in [-(2^(w-1) - 1), 2^(w-1) - 1], a nonzero digit is
    followed by at least w - 1 zeros, and the digits weighted by 2^i sum to k.
@@ -4401,7 +4345,7 @@ static positive crypto_wnaf(b8 address_to digits, const p64 address_to k,
                         count += 64;
                         continue;
                 }
-                zeros = crypto_trailing_zeros(v[0]);
+                zeros = (positive)bits_trailing_zeros(v[0]);
                 if (zeros)
                 {
                         for (positive i = 0; i + 1 < words; i++)
@@ -6209,19 +6153,9 @@ static fn tls_record_header(p8 address_to header, p8 type, positive length)
         p32 word = (p32)type << 24 | 0x00030300u |
                    (p32)((p16)length >> 8);
 
-        /* This runs for every record. Keeping the swap and unaligned store
-           here lets x86 and AArch64 fold them into two instructions instead
-           of calling lib.c's general packet-field routine. */
-#if RISCV64
-        /* GCC lowers the builtin byte swap to __bswapsi2 at the IMAFD
-           floor, and this freestanding program has no libgcc. lib.c's
-           packet store is the compact bytewise body for that machine. */
+        //      Every record: lib.c's packet store, on every machine (the
+        //      other arm here was a big-endian store no build takes).
         network_store_32(header, word);
-#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-        memory_store_unaligned(p32, header, word);
-#else
-        network_store_32(header, word);
-#endif
         header[4] = (p8)length;
 }
 
