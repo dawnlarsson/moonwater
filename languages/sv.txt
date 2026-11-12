@@ -82,6 +82,8 @@ settings_role_swap	d36e	Swap
 settings_role_other	ff95	Annat
 settings_role_free	ad01	Ledigt utrymme
 settings_role_unpartitioned	3c10	Ingen partitionstabell
+settings_partitioned	70f5	%d %% partitionerat
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte

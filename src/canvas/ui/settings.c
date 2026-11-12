@@ -263,6 +263,7 @@ struct settings_item
         unsigned short segment_more;                    // a drive's partitions the host did not show (its "more" line)
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
+        unsigned long long total;                       // a drive's bytes: its line's size, or what its part lines add up to where that is more
         char state[SETTINGS_STATE];                     // a device's state, as the host says it
         char port[SETTINGS_PORT];                       // a port's name; none for a drive
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
@@ -2932,6 +2933,44 @@ static fn settings_legend(const struct settings_item address_to item, struct ui_
         row->strip_more = settings_strip_more[0] ? settings_strip_more : null;
 }
 
+// part of whole in parts of scale (100: a percent, 1000: tenths of one), to the nearest; none of nothing.
+static long settings_share_of(unsigned long long part, unsigned long long whole, unsigned long long scale)
+{
+        while (whole >= 1ull << 40)
+                whole >>= 1, part >>= 1;
+        return whole ? (long)((part * scale + whole / 2) / whole) : 0;
+}
+
+/*
+        A drive's heading over its strip: at its start the share of the disk its partitions take (all but the free room the host
+        lists, so the alignment no segment shows and the partitions not shown are in it), at its end how many bytes that is of the
+        whole, as the sizes are said: 97% partitioned, 917 GB / 947 GB. A disk with no partition table says so, and its size.
+*/
+static char settings_drive_share[SETTINGS_ITEM_LABEL], settings_drive_amount[2 * SETTINGS_SIZE_TEXT + 16];
+
+static fn settings_drive_heading(const struct settings_item address_to item, struct ui_row address_to row)
+{
+        char used_text[SETTINGS_SIZE_TEXT], total_text[SETTINGS_SIZE_TEXT];
+        unsigned long long free = 0, used;
+
+        for (positive at = 0; at < item->segment_count; at++)
+                free += item->segment_role[at] == UI_STRIP_FREE ? item->segment_bytes[at] : 0;
+        used = item->total > free ? item->total - free : 0;
+        settings_size_text(item->total, total_text, sizeof(total_text));
+        settings_size_text(used, used_text, sizeof(used_text));
+        if (item->segment_count == 1 && item->segment_role[0] == UI_STRIP_UNPARTITIONED)
+        {
+                string_copy_bounded((string_address)settings_drive_share, (string_address)WORDS(settings_role_unpartitioned), sizeof(settings_drive_share));
+                string_copy_bounded((string_address)settings_drive_amount, (string_address)total_text, sizeof(settings_drive_amount));
+        }
+        else
+        {
+                language_format(settings_drive_share, sizeof(settings_drive_share), WORDS(settings_partitioned), settings_share_of(used, item->total, 100));
+                language_format(settings_drive_amount, sizeof(settings_drive_amount), WORDS(settings_used_of), used_text, total_text);
+        }
+        row->share = settings_drive_share, row->amount = settings_drive_amount;
+}
+
 // A device's state in the language: the host's word for it, or what the host said when it is none of them.
 static const char address_to settings_state_word(const char address_to state)
 {
@@ -3044,7 +3083,8 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
                 at += 2;
         while (at < size && text[at] == ' ')
                 at++;
-        settings_size_text(megabytes * 1000000ull, item->size, sizeof(item->size));
+        item->total = megabytes * 1000000ull;
+        settings_size_text(item->total, item->size, sizeof(item->size));
         settings_item_word(item->state, sizeof(item->state), text + at, size - at);
 }
 
@@ -3055,6 +3095,7 @@ static fn settings_feed_hardware(void)
         char address_to text;
         positive at, size, count = 0, hidden = 0;
         b32 open = false; // the row before is a drive that is kept: the part lines after it are its strip
+        unsigned long long spanned = 0; // the bytes of the open drive's part lines so far, those no segment shows among them
 
         memory_zero(items, sizeof(settings_large->item[2]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
@@ -3082,6 +3123,12 @@ static fn settings_feed_hardware(void)
                         code = settings_role_code(text + role_at, role_length);
                         while (word < size && text[word] == ' ')
                                 word++;
+                        // The drive is as large as its line says or as its part lines add up to, whichever is more (the line's MB is cut).
+                        if (drive && drive->kind == SETTINGS_NOTE)
+                        {
+                                spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes;
+                                drive->total = spanned > drive->total ? spanned : drive->total;
+                        }
                         // Free room no bigger than the alignment the partitions keep is no room a person can use: it has no segment.
                         if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
                             (code != 4 || bytes > SETTINGS_ALIGNMENT))
@@ -3124,6 +3171,7 @@ static fn settings_feed_hardware(void)
                         items[count].flags = (size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
                                              (items[count].kind == SETTINGS_NOTE ? SETTINGS_ITEM_DRIVE : 0);
                         open = items[count].kind == SETTINGS_NOTE;
+                        spanned = 0;
                         if (open)
                                 settings_item_drive(&items[count], text, size, word);
                         else
@@ -5050,10 +5098,11 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
-                        // A drive with a strip (or a note of the partitions not shown) is as tall as its line, the strip and the legend under it.
+                        // A drive with a strip (or a note of the partitions not shown) is as tall as its line, the heading, the strip and the
+                        // legend under it; the heading says its size. A drive the host lists no partitions of says its size at its line's end.
                         language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_drive), settings_state_word(item->state));
                         row->note = settings_device_note;
-                        row->value = item->size;
+                        row->value = item->segment_count ? null : item->size;
                         row->tall = item->segment_count || item->segment_more;
                         if (item->segment_count)
                         {
@@ -5061,6 +5110,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
                                 row->strip_roles = item->segment_role;
                                 row->strip_text = &item->segment_text[0][0];
                                 row->strip_count = item->segment_count;
+                                settings_drive_heading(item, row);
                         }
                         if (row->tall)
                                 settings_legend(item, row);

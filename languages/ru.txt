@@ -82,6 +82,8 @@ settings_role_swap	d36e	Подкачка
 settings_role_other	ff95	Прочее
 settings_role_free	ad01	Свободно
 settings_role_unpartitioned	3c10	Нет таблицы разделов
+settings_partitioned	70f5	%d %% размечено
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
 settings_battery_idle	1635	, не заряжается

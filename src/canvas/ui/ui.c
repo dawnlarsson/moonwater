@@ -7709,6 +7709,7 @@ LANGUAGE_ID(settings_nothing_typed, "nothing typed") \
 LANGUAGE_ID(settings_notices_count, "%1$d notices") \
 LANGUAGE_ID(settings_notices_dismiss, "dismiss all") \
 LANGUAGE_ID(settings_notices_none, "no kernel notices") \
+LANGUAGE_ID(settings_partitioned, "%d%% partitioned") \
 LANGUAGE_ID(settings_percent, "%d%%") \
 LANGUAGE_ID(settings_rate_best, "%d Hz (recommended)") \
 LANGUAGE_ID(settings_rate_plain, "%d Hz") \
@@ -7755,6 +7756,7 @@ LANGUAGE_ID(settings_type_command, "type a command: its verb, then what follows 
 LANGUAGE_ID(settings_type_device, "type the name of a device: Enter keeps it, Escape leaves it") \
 LANGUAGE_ID(settings_type_passphrase, "type its passphrase: Enter joins it, Escape leaves it") \
 LANGUAGE_ID(settings_unknown, "unknown") \
+LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
@@ -18775,7 +18777,9 @@ struct ui_row
         const char address_to const address_to strip_kinds; // and the word of each one's role, said after a name that is not it (null: none)
         int strip_count;                   // the segments of the strip; 0 for no strip
         const char address_to strip_more;  // the legend's last entry, in the quiet ink: the partitions the strip does not show (null: none)
-        b32 tall;                          // a drive: its line, its strip under it and its legend, as tall as they are (ui_row_drive_height)
+        const char address_to share;       // a drive's heading over its strip, at its start in the ink: how much of the whole is taken (97% partitioned)
+        const char address_to amount;      // and at its end in the quiet ink: how much that is (917 GB / 947 GB)
+        b32 tall;                          // a drive: its line, its heading, its strip under it and its legend, as tall as they are (ui_row_drive_height)
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
@@ -19130,6 +19134,9 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 #define UI_SEGMENT_LEAST 8 // the narrowest a segment is, logical pixels
 #define UI_MARK_RADIUS 2  // a legend's mark's corners, logical pixels
 #define UI_STRIP_HIGH 8    // the strip's height, logical pixels: its ends are rounded to half of it
+#define UI_DRIVE_LINE 32   // a drive's line, its name and its state, logical pixels at the text's size (ui_drive_part)
+#define UI_DRIVE_HEAD 20   // the heading under it, a label's line
+#define UI_DRIVE_ABOVE 6   // between the heading and the strip
 #define UI_LEGEND_LINE 20  // a legend entry's line: the label's 16 and its leading
 #define UI_LEGEND_LEAST 200 // the narrowest column of the legend, logical pixels
 #define UI_LEGEND_COLUMNS 3
@@ -19142,6 +19149,13 @@ static const int ui_strip_colours[] = {[UI_STRIP_EFI] = UI_ON_SURFACE, [UI_STRIP
 static int ui_strip_colour(unsigned int role)
 {
         return ui_strip_colours[role <= UI_STRIP_UNPARTITIONED ? role : UI_STRIP_UNPARTITIONED];
+}
+
+// A height of a drive's row that holds text, logical pixels at 100 percent of the text's size, in device pixels: it grows with the
+// text as a row does (UI_ROW).
+static int ui_drive_part(const struct ui address_to ui, int logical)
+{
+        return ui_dev(ui, UI_ROW) * logical / UI_ROW_LEAST;
 }
 
 /*
@@ -19227,13 +19241,15 @@ static int ui_legend_columns(const struct ui address_to ui, const struct ui_list
         return columns > entries && entries > 0 ? entries : columns;
 }
 
-// How tall a drive's row is (device pixels): its line, its strip and the gap under it, the legend's lines, the gap under them and the hairline.
+// How tall a drive's row is (device pixels): its line, its heading and its strip with the gaps round it, the legend's lines, the gap
+// under them and the hairline.
 static int ui_row_drive_height(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row)
 {
         int entries = ui_legend_entries(row), columns = ui_legend_columns(ui, l, entries), lines = (entries + columns - 1) / columns;
 
-        return ui_dev(ui, UI_ROW) + (row->strip_count > 0 ? ui_dev(ui, UI_STRIP_HIGH) + ui_dev(ui, UI_GAP2) : 0) + lines * ui_dev(ui, UI_LEGEND_LINE) +
-               ui_dev(ui, UI_GAP3) + 1;
+        return ui_drive_part(ui, UI_DRIVE_LINE) +
+               (row->strip_count > 0 ? ui_drive_part(ui, UI_DRIVE_HEAD) + ui_dev(ui, UI_DRIVE_ABOVE) + ui_dev(ui, UI_STRIP_HIGH) + ui_dev(ui, UI_GAP2) : 0) +
+               lines * ui_dev(ui, UI_LEGEND_LINE) + ui_dev(ui, UI_GAP3) + 1;
 }
 
 /*
@@ -19243,8 +19259,8 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_li
         Before a switch, tabs, swatches or a slider the label grows into the room they leave. In any other row the label is as wide
         as its words and gives way to a zone that grows and keeps a third of the row from it (two thirds: a field after a verb): in
         it, at its end, a field, or the note in the room the value leaves and the value with its step marks or its chevron. A tall
-        row (a drive) is a column: that line, its strip (each segment as wide as ui_strip_widths has it), its legend (a row of
-        columns, each a column of entries) and a hairline.
+        row (a drive) is a column: that line, its heading (its share at its start and its amount at its end), its strip (each
+        segment as wide as ui_strip_widths has it), its legend (a row of columns, each a column of entries) and a hairline.
 
         In a list whose words wrap (ui_list.wrap), a label, a value and a note that do not fit the room their row gives them take as
         many lines as they need (the kit's wrapper), and the row is as tall as its lines: the root's height is what they come to (the
@@ -19252,15 +19268,15 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_li
         width at the least (ui_row_label_least, or its own where that is less) and a zone keeps its own least (a field's, or a value's
         marks and a little of the value); what gives way past that is what gave way before (a slider's number, then its control), at a
         width narrower than the rows need, which a page's window is not made (ui_row_least, ui_list_least, ui_page_least). A note
-        whose longest word does not fit its room is dropped whole, as it was. A tall row's line is a row and is cut, as every row of
-        a list whose words do not wrap is.
+        whose longest word does not fit its room is dropped whole, as it was. A tall row's line is UI_DRIVE_LINE high and is cut, as
+        every row of a list whose words do not wrap is.
 */
 static struct ui_row_parts
 {
         struct ui_tree tree;
         struct ui_node address_to mark, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
                 address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars,
-                address_to legend, address_to rule, address_to segment[UI_STRIP_MOST], address_to entry[UI_STRIP_MOST + 1];
+                address_to share, address_to amount, address_to legend, address_to rule, address_to segment[UI_STRIP_MOST], address_to entry[UI_STRIP_MOST + 1];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
         char label_cut[UI_CUT_TEXT], value_cut[UI_CUT_TEXT], number[40]; // and a slider's number with its unit
         // A row whose words wrap: what its parts' lines are asked with, its note, its zone, and its label's width on one line (0: not yet measured).
@@ -19394,9 +19410,9 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         n->size[0].kind = UI_FIXED, n->size[0].value = width;
         n->size[1] = height > 0 ? (struct ui_size){UI_FIXED, height, 0, UI_TREE_MOST, 0} : (struct ui_size){UI_FIT, 0, ui_dev(ui, UI_ROW), UI_TREE_MOST, 0};
         n->pad[0] = inset + (row->sub ? ui_dev(ui, 20) : 0), n->pad[1] = inset, n->gap = row->tall ? 0 : gap, n->dir = row->tall != 0;
-        // A tall row is a column, and the first thing in it is its line, a row high, which is laid out as any row is.
+        // A tall row is a column, and the first thing in it is its line, UI_DRIVE_LINE high, which is laid out as any row is.
         if (row->tall)
-                n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_ROW), n->gap = gap;
+                n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_LINE), n->gap = gap;
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
@@ -19481,13 +19497,22 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 int entries = ui_legend_entries(row), columns = ui_legend_columns(ui, l, entries), lines = (entries + columns - 1) / columns;
                 int widths[UI_STRIP_MOST], segment_gap = ui_dev(ui, UI_SEGMENT_GAP);
 
-                // Under the line the strip, every segment a leaf as wide as its share (ui_strip_widths), the line's width less the gaps shared.
+                // Under the line the heading, its share at its start and its amount at its end, and under it the strip, every segment a leaf as
+                // wide as its share (ui_strip_widths), the line's width less the gaps shared.
                 ui_tree_close(t);
                 if (count)
                 {
+                        n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_HEAD), n->gap = gap;
+                        n->justify = UI_BETWEEN;
+                        p->share = n = ui_row_leaf(t, UI_FIT, words && row->share ? ui_kit_measure(ui, (string_address)row->share, UI_LABEL_LARGE) : 0);
+                        n->size[0].shrink = 1;
+                        p->amount = n = ui_row_leaf(t, UI_FIT, words && row->amount ? ui_kit_measure(ui, (string_address)row->amount, UI_LABEL_MEDIUM) : 0);
+                        n->size[0].shrink = UI_TREE_WEIGHT;
+                        ui_tree_close(t);
                         ui_strip_widths(row->strip_bytes, count, l->w - 2 * inset - (row->sub ? ui_dev(ui, 20) : 0) - (count - 1) * segment_gap,
                                         ui_dev(ui, UI_SEGMENT_LEAST), widths);
                         n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_dev(ui, UI_STRIP_HIGH), n->margin[3] = ui_dev(ui, UI_GAP2);
+                        n->margin[2] = ui_dev(ui, UI_DRIVE_ABOVE);
                         n->gap = segment_gap;
                         for (int at = 0; at < count; at++)
                                 p->segment[at] = ui_row_leaf(t, UI_FIXED, widths[at]);
@@ -19527,6 +19552,9 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // A tabs row's note (a port's state) that has not the room for its words whole is dropped, and the label has its room.
         if (p->note && !p->note_room && p->note->w < p->note->content[0])
                 p->note->size[0] = (struct ui_size){UI_FIXED, 0, 0, 0, 0}, ui_tree_run(t, width, height);
+        // So is a drive's amount that has not the room for its words whole beside its share: the share is the heading.
+        if (p->amount && p->amount->w < p->amount->content[0])
+                p->amount->size[0] = (struct ui_size){UI_FIXED, 0, 0, 0, 0}, ui_tree_run(t, width, height);
         // The layout has no one to ask how wide a text is: the label and the value are cut to the nodes it gave them, to no less than 40 and 24.
         // A label that was cut is narrower than the room it was cut to, and the zone is placed from the label as it is written: run again.
         if (row->label && (words || field))
@@ -19657,7 +19685,8 @@ static fn ui_row_words(struct ui address_to ui, const struct ui_node address_to 
 }
 
 /*
-        A drive's strip and its legend, in the parts its row was laid out with. The strip is one bar, its ends rounded to half its height:
+        A drive's heading, its strip and its legend, in the parts its row was laid out with. The heading is its share in the ink at its
+        start and its amount in the quiet ink at its end, on one baseline. The strip is one bar, its ends rounded to half its height:
         the track under the whole of it, and each partition a square block of its role's colour cut to the bar's rounded box (free room is
         the track); each entry its mark, its name in the ink, its role's word in the quiet ink where the name is not it and the room after
         the name holds it, and its size at its end, the name cut to what is left; the partitions not shown are the last entry, in the quiet
@@ -19674,6 +19703,20 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_list address_to
         char cut[UI_CUT_TEXT];
 
         (void)l, (void)id;
+        // The heading: its share in the ink at its start, and on the same baseline its amount in the quiet ink at its end.
+        if (seen && (n = p->share) && row->share)
+        {
+                int baseline = ui_row_baseline(ui, n, UI_LABEL_LARGE);
+
+                ui_row_words(ui, n, 0, baseline, (const char address_to)ui_fit(ui, (string_address)row->share, UI_LABEL_LARGE, n->w, cut, sizeof(cut)),
+                             UI_LABEL_LARGE, strong);
+                if ((n = p->amount) && n->w > 0 && row->amount)
+                {
+                        const char address_to shown = (const char address_to)ui_fit(ui, (string_address)row->amount, UI_LABEL_MEDIUM, n->w, cut, sizeof(cut));
+
+                        ui_row_words(ui, n, n->w - ui_kit_measure(ui, (string_address)shown, UI_LABEL_MEDIUM), baseline, shown, UI_LABEL_MEDIUM, quiet);
+                }
+        }
         // The bar: from the leftmost segment's edge to the rightmost's, the track under it, its ends rounded to half its height.
         for (int at = 0; at < count; at++)
                 if ((n = p->segment[at]) && n->w > 0)

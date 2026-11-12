@@ -143904,15 +143904,15 @@ static fn check_settings_device_strip(void)
               settings.item_count[2] == 3 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 4 &&
                   items[0].segment_role[0] == 0 && items[0].segment_role[1] == 1 && items[0].segment_role[2] == 2 &&
                   items[0].segment_role[3] == 4 && items[0].segment_bytes[1] == 1073741824ull);
-        // The drive's line is not one label: its name is at the row's left, and its size and its state are the row's right.
+        // The drive's line is not one label: its name is at the row's left, and its state is the row's right; its size is in its heading.
         {
                 struct ui_row line;
 
                 memory_zero(&line, sizeof(line));
                 settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
-                check("settings: a drive's line is its name, its size in GB from 1000 MB, and after the word drive what the line says of it",
+                check("settings: a drive's line is its name and after the word drive what the line says of it, its size (in GB from 1000 MB) in its heading",
                       string_equals((string_address)items[0].label, (string_address) "vda") && string_equals((string_address)items[0].size, (string_address) "2 GB") &&
-                          line.note && string_equals((string_address)line.note, (string_address) "drive, view only") && line.value == items[0].size &&
+                          line.note && string_equals((string_address)line.note, (string_address) "drive, view only") && !line.value && line.tall &&
                           string_equals((string_address)items[1].label, (string_address) "sdb") && string_equals((string_address)items[1].size, (string_address) "512 MB"));
         }
         check("settings: a drive with no partition table is one unpartitioned segment",
@@ -143948,6 +143948,30 @@ static fn check_settings_device_strip(void)
                           string_equals((string_address)line.strip_names[1], (string_address) "Linux data") &&
                           string_equals((string_address)(line.strip_text + UI_STRIP_TEXT), (string_address) "1 GB") &&
                           string_equals((string_address)line.strip_names[3], (string_address) "Free space") && !line.strip_more);
+        }
+        {
+                // A drive's heading: the share its partitions take, free room not counted, and that in bytes of the whole, as the sizes are
+                // said; the whole is what the part lines add up to where that is more than the line's MB. A disk with no table says so.
+                static const char quarter[] = "  vdh drive 1000 MB view only\n    part 0 1048576 free -\n    part 1048576 248951424 efi -\n"
+                                              "    part 250000000 500000000 linux -\n    part 750000000 250000000 free -\n"
+                                              "  vdi drive 999 MB view only\n    part 0 999999999 unpartitioned -\n";
+                positive length = sizeof(quarter) - 1;
+                struct ui_row line, bare;
+                b32 said;
+
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = quarter[at];
+                settings.said_length = length;
+                settings_feed_hardware();
+                memory_zero(&line, sizeof(line)), memory_zero(&bare, sizeof(bare));
+                // The heading's words are made as the row is described, so each row's are read before the next is described.
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                said = line.share && line.amount && string_equals((string_address)line.share, (string_address) "75% partitioned") &&
+                       string_equals((string_address)line.amount, (string_address) "750 MB / 1 GB");
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 1, &bare);
+                check("settings: a drive's heading says the share its partitions take and USED / TOTAL; one with no table says so and its size",
+                      items[0].total == 1000000000ull && items[1].total == 999999999ull && said && bare.share && bare.amount &&
+                          string_equals((string_address)bare.share, (string_address) "No partition table") && string_equals((string_address)bare.amount, (string_address) "999 MB"));
         }
         {
                 // The host shows one partition of this drive and says three more are not shown: they are the legend's last entry.

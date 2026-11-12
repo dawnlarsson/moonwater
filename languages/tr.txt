@@ -82,6 +82,8 @@ settings_role_swap	d36e	Takas
 settings_role_other	ff95	Diğer
 settings_role_free	ad01	Boş alan
 settings_role_unpartitioned	3c10	Bölüm tablosu yok
+settings_partitioned	70f5	%%%d bölümlenmiş
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
 settings_battery_idle	1635	, şarj olmuyor

@@ -83,6 +83,8 @@ settings_role_swap	d36e	החלפה
 settings_role_other	ff95	אחר
 settings_role_free	ad01	שטח פנוי
 settings_role_unpartitioned	3c10	אין טבלת מחיצות
+settings_partitioned	70f5	%d%% מחולק למחיצות
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, בפריקה
 settings_battery_full	ded8	, מלאה
 settings_battery_idle	1635	, לא בטעינה

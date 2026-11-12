@@ -82,6 +82,8 @@ settings_role_swap	d36e	Swap
 settings_role_other	ff95	Overig
 settings_role_free	ad01	Vrije ruimte
 settings_role_unpartitioned	3c10	Geen partitietabel
+settings_partitioned	70f5	%d%% gepartitioneerd
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, ontlaadt
 settings_battery_full	ded8	, vol
 settings_battery_idle	1635	, laadt niet op

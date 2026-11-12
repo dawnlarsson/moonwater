@@ -82,6 +82,8 @@ settings_role_swap	d36e	Échange
 settings_role_other	ff95	Autre
 settings_role_free	ad01	Espace libre
 settings_role_unpartitioned	3c10	Aucune table de partitions
+settings_partitioned	70f5	%d %% partitionné
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, en décharge
 settings_battery_full	ded8	, pleine
 settings_battery_idle	1635	, ne charge pas

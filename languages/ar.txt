@@ -83,6 +83,8 @@ settings_role_swap	d36e	التبديل
 settings_role_other	ff95	أخرى
 settings_role_free	ad01	مساحة حرة
 settings_role_unpartitioned	3c10	بلا جدول أقسام
+settings_partitioned	70f5	%d%% مقسّم
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	، قيد التفريغ
 settings_battery_full	ded8	، مشحونة بالكامل
 settings_battery_idle	1635	، لا يتم الشحن

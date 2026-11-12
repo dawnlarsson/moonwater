@@ -82,6 +82,8 @@ settings_role_swap	d36e	Ανταλλαγή
 settings_role_other	ff95	Άλλο
 settings_role_free	ad01	Ελεύθερος χώρος
 settings_role_unpartitioned	3c10	Χωρίς πίνακα διαμερισμάτων
+settings_partitioned	70f5	%d%% διαμερισμένο
+settings_used_of	58fb	%1$s / %2$s
 settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
 settings_battery_idle	1635	, δεν φορτίζει
