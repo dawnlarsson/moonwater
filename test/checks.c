@@ -151370,6 +151370,62 @@ static fn check_kit_focus(void)
         check("kit focus: a disabled switch that is on is the ink's grey, not the accent", disabled);
 }
 
+/*
+        Words in a colour read 4.5:1: the accent as a text button's or a tag's words, every syntax colour on the paper and on a well, light
+        and dark, standard and Dawn (whose orange is 2.4:1 on white as it is); and a status badge's words on its container, measured from
+        the drawn pixels (the light theme's Failed was 3.9:1, Degraded 4.0 and Healthy 4.4).
+*/
+static fn check_kit_inks(void)
+{
+        static unsigned int pixels[200 * 40], scratch[200 * UI_SCRATCH_ROWS];
+        static font_face face;
+        static const int roles[] = {UI_ERROR, UI_WARNING, UI_SUCCESS, UI_INFO};
+        static const unsigned int accents[] = {UI_ACCENT_STANDARD, UI_ACCENT_DAWN};
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        b32 words = 1, badges = 1;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit inks: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 200, ui.width = 200, ui.height = 40, ui.top = 0, ui.bottom = 40, ui.scale = 100;
+        ui.scratch = scratch, ui.scratch_width = 200, ui.band_top = ui.band_bottom = 0, ui.mono = null, ui.glass = 0;
+        ui.regular = ui.bold = &face;
+        for (unsigned int mode = 0; mode < 2; mode++)
+                for (int a = 0; a < 2; a++)
+                {
+                        unsigned int surface, well;
+
+                        ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, accents[a], 1);
+                        surface = ui_role(UI_SURFACE) & 0xffffffu, well = ui_role(UI_SURFACE_HIGHEST) & 0xffffffu;
+                        for (int role = DOC_ROLE_KEYWORD; role <= DOC_ROLE_INVALID; role++)
+                                words &= ui_contrast(ui_text_role(role) & 0xffffffu, surface) >= 450 && ui_contrast(ui_text_role(role) & 0xffffffu, well) >= 450;
+                        words &= ui_contrast(ui_ink_readable(ui_role(UI_PRIMARY)) & 0xffffffu, surface) >= 450;
+                        for (int r = 0; r < 4; r++)
+                        {
+                                struct ui_control badge;
+                                unsigned int fill = 0, most = 0;
+
+                                for (int at = 0; at < 200 * 40; at++)
+                                        pixels[at] = 0xff000000u | surface;
+                                memory_zero(&badge, sizeof(badge));
+                                badge.kind = UI_BADGE, badge.role = roles[r], badge.x = 10, badge.y = 8, badge.label = "Degraded";
+                                ui_control_start(&badge);
+                                ui_control_draw(&ui, &badge);
+                                fill = pixels[10 * 200 + 12] & 0xffffffu;
+                                for (int at = 0; at < 200 * 40; at++)
+                                        if (ui_contrast(pixels[at] & 0xffffffu, fill) > most && (pixels[at] & 0xffffffu) != surface)
+                                                most = ui_contrast(pixels[at] & 0xffffffu, fill);
+                                badges &= fill != surface && most >= 450;
+                        }
+                }
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        check("kit inks: the accent as words and every syntax colour read 4.5:1 on the paper and on a well, light and dark, standard and Dawn", words);
+        check("kit inks: a status badge's words read 4.5:1 on its container, light and dark (the light Failed was 3.9:1)", badges);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -169039,6 +169095,7 @@ b32 main()
         check_kit_slider_below();
         check_kit_lit();
         check_kit_focus();
+        check_kit_inks();
         check_kit_place();
         check_kit_controls();
         check_kit_states();

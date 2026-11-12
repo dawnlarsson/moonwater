@@ -10596,6 +10596,22 @@ static inline unsigned int ui_role(int role)
 }
 
 /*
+        A role's colour as the ink of words on the window's grounds: the colour itself where it stands out 4.5:1 from the surface and
+        from the highest well on it (the darkest light ground, the lightest dark one), else mixed toward black (light) or white (dark) a
+        step at a time until it does, so it keeps its hue. Dawn's orange as a text button's or a keyword's words was 2.4:1 on white, and
+        the amber of numbers and the preprocessor 4.3:1 on the light surface.
+*/
+static unsigned int ui_ink_readable(unsigned int ink)
+{
+        unsigned int surface = ui_role(UI_SURFACE) & 0xffffffu, well = ui_role(UI_SURFACE_HIGHEST) & 0xffffffu;
+        unsigned int toward = ui_luminance(surface) > 32768 ? 0xff000000u : 0xffffffffu;
+
+        for (int step = 0; step < 24 && (ui_contrast(ink & 0xffffffu, surface) < 450 || ui_contrast(ink & 0xffffffu, well) < 450); step++)
+                ink = ui_mix(ink | 0xff000000u, 85, toward);
+        return ink;
+}
+
+/*
         A glass window (ui->glass, set from WINDOW_GLASS) is what is under it, so its pieces are drawn in its ground's inks
         (ui_inks), not in the surface's roles: its text is the ink that stands out from the tint, and a well, a selection
         or a row's highlight is that ink laid over the glass at a low alpha. Every other window keeps its roles, and every
@@ -12310,7 +12326,7 @@ static fn ui_button_targets(struct ui_control address_to c)
                 ink = ui_role(UI_ON_PRIMARY);
                 break;
         case UI_BUTTON_OUTLINED: ink = ui_role(UI_ON_SURFACE); break;
-        case UI_BUTTON_TEXT: ink = ui_role(UI_PRIMARY); break;
+        case UI_BUTTON_TEXT: ink = ui_ink_readable(ui_role(UI_PRIMARY)); break; // its words are the accent, as words: 4.5:1 on its ground
         default:
                 fill = ui_role(UI_SECONDARY_CONTAINER);
                 ink = ui_role(UI_ON_SECONDARY_CONTAINER);
@@ -13323,6 +13339,9 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 
         if (role == UI_SURFACE_HIGHEST)
                 fill = ui_role(UI_SURFACE_HIGHEST), ink = ui_role(UI_ON_SURFACE_VARIANT);
+        // A status's words keep its colour, deepened on its container till they read 4.5:1 (Failed was 3.9:1, Degraded 4.0, Healthy 4.4 light).
+        else if (role > 0 && fill)
+                ink = ui_ink_deepened(ink, fill, ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768 ? 0xff000000u : 0xffffffffu);
         ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(22), ui_q(6));
         if (fill)
@@ -13337,7 +13356,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
-        unsigned int ink = c->on ? ui_role(UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT);
+        unsigned int ink = c->on ? ui_ink_readable(ui_role(UI_PRIMARY)) : ui_role(UI_ON_SURFACE_VARIANT);
         struct ui_box box;
 
         ui_control_size(ui, c);
@@ -25054,19 +25073,20 @@ static fn ui_findbar_overlay(struct ui address_to ui, struct ui_findbar address_
 */
 
 // The colour of a role of the tokenizer's, from the kit's roles: the text, and the accent and status colours for the rest.
+// Each is readable as words on the paper and on a well (ui_ink_readable): the accent and the status colours keep their hues, deepened where they fall short.
 static unsigned int ui_text_role(int role)
 {
         switch (role)
         {
-        case DOC_ROLE_KEYWORD: return ui_role(UI_PRIMARY);
-        case DOC_ROLE_TYPE: return ui_role(UI_INFO);
-        case DOC_ROLE_STRING: return ui_role(UI_SUCCESS);
-        case DOC_ROLE_NUMBER: return ui_role(UI_WARNING);
+        case DOC_ROLE_KEYWORD: return ui_ink_readable(ui_role(UI_PRIMARY));
+        case DOC_ROLE_TYPE: return ui_ink_readable(ui_role(UI_INFO));
+        case DOC_ROLE_STRING: return ui_ink_readable(ui_role(UI_SUCCESS));
+        case DOC_ROLE_NUMBER: return ui_ink_readable(ui_role(UI_WARNING));
         case DOC_ROLE_COMMENT: return ui_role(UI_ON_SURFACE_VARIANT);
-        case DOC_ROLE_PREPROCESSOR: return ui_role(UI_WARNING);
+        case DOC_ROLE_PREPROCESSOR: return ui_ink_readable(ui_role(UI_WARNING));
         case DOC_ROLE_FUNCTION: return ui_role(UI_ON_SURFACE);
-        case DOC_ROLE_VARIABLE: return ui_role(UI_INFO);
-        case DOC_ROLE_INVALID: return ui_role(UI_ERROR);
+        case DOC_ROLE_VARIABLE: return ui_ink_readable(ui_role(UI_INFO));
+        case DOC_ROLE_INVALID: return ui_ink_readable(ui_role(UI_ERROR));
         default: return ui_role(UI_ON_SURFACE);
         }
 }
