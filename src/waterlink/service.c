@@ -2248,10 +2248,7 @@ static p8 push_pack(bipolar input, bipolar output)
                                          PUSH_FRAME_MAX);
                 if (frame <= 0 || (positive)frame > PUSH_FRAME_MAX)
                         return false;
-                head[0] = (p8)((frame >> 24) & 0xff);
-                head[1] = (p8)((frame >> 16) & 0xff);
-                head[2] = (p8)((frame >> 8) & 0xff);
-                head[3] = (p8)(frame & 0xff);
+                network_store_32(head, (p32)frame);
                 if (!push_put(output, head, 4) ||
                     !push_put(output, push_frame, (positive)frame))
                         return false;
@@ -2278,10 +2275,7 @@ static p8 push_unpack(bipolar input, bipolar output)
                         return true;
                 if (took != 4)
                         return false;
-                frame = ((positive)(head[0] & 0xff) << 24) |
-                        ((positive)(head[1] & 0xff) << 16) |
-                        ((positive)(head[2] & 0xff) << 8) |
-                        (positive)(head[3] & 0xff);
+                frame = network_load_32(head);
                 if (!frame || frame > PUSH_FRAME_MAX)
                         return false;
                 if (push_fill(input, push_frame, frame) != (bipolar)frame)
@@ -2468,10 +2462,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         s->packed = false;
         if (s->kind == LINK_KIND_PUSH)
         {
-                p32 dictionary = ((p32)(payload[6] & 0xff) << 24) |
-                                 ((p32)(payload[7] & 0xff) << 16) |
-                                 ((p32)(payload[8] & 0xff) << 8) |
-                                 (p32)(payload[9] & 0xff);
+                p32 dictionary = network_load_32(payload + 6);
 
                 //      The format and the dictionary are the far side's word,
                 //      checked before anything is staged: a file packed another
@@ -4794,10 +4785,8 @@ static b32 link_client_run(string_address name, p8 kind,
                         }
                         request[request_length++] = packed >= 0 ? PUSH_FORMAT_DICTIONARY
                                                                 : PUSH_FORMAT_RAW;
-                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 24) & 0xff);
-                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 16) & 0xff);
-                        request[request_length++] = (p8)((PUSH_DICTIONARY_ID >> 8) & 0xff);
-                        request[request_length++] = (p8)(PUSH_DICTIONARY_ID & 0xff);
+                        network_store_32(request + request_length, PUSH_DICTIONARY_ID);
+                        request_length += 4;
                 }
                 else if (string_length(words[1]) >= sizeof s->whole ||
                          string_length(words[1]) + 28 > sizeof s->part)

@@ -1920,22 +1920,16 @@ static p8 link_known(string_address name)
 static p8 link_doctor_list[96];
 static positive link_doctor_used;
 
-static fn link_doctor_add(p32 host)
+static fn link_doctor_add(b32 index, p32 host, p32 mask)
 {
+        (void)index;
+        (void)mask;
         if ((host >> 24) == 127 || link_doctor_used + 20 >= sizeof link_doctor_list)
                 return;
         if (link_doctor_used)
                 link_doctor_list[link_doctor_used++] = ' ';
         link_doctor_used += host_into(link_doctor_list + link_doctor_used, host);
         link_doctor_list[link_doctor_used] = 0;
-}
-
-/* One address of the walk, for the doctor's list. */
-static fn link_doctor_interface(b32 index, p32 address, p32 mask)
-{
-        (void)index;
-        (void)mask;
-        link_doctor_add(address);
 }
 
 /*      Whether the port is free to take: a socket bound to it, closed again. */
@@ -1992,7 +1986,7 @@ static b32 link_doctor(void)
 
         link_doctor_used = 0;
         link_doctor_list[0] = 0;
-        link_interfaces_each(link_doctor_interface);
+        link_interfaces_each(link_doctor_add);
         if (link_doctor_used)
                 string_format(log, "  pass  addresses: %s\n",
                               (string_address)link_doctor_list);
