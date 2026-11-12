@@ -126673,12 +126673,13 @@ static void check_rtl_chrome(void)
 
     language_directory = "languages/";
     memory_zero(&frame, sizeof(frame));
-    frame.x = 100, frame.y = 50, frame.width = 800, frame.height = 600, frame.scale = 100, frame.close = 1;
+    // The window has a tab, so it has a minimise button (compositor_frame_of: none for WINDOW_NO_TAB).
+    frame.x = 100, frame.y = 50, frame.width = 800, frame.height = 600, frame.scale = 100, frame.close = 1, frame.minimize = 1;
     language_take(0);
     compositor_close_box(&frame, &bx, &by, &side);
     compositor_minimize_box(&frame, &mx, &my, &mside);
     check("rtl chrome: reading from the left the close button is at the window's top right and the minimise button to its left",
-          side > 0 && bx + side < frame.x + frame.width && bx > frame.x + frame.width / 2 && mx < bx);
+          side > 0 && bx + side < frame.x + frame.width && bx > frame.x + frame.width / 2 && mside == side && mx < bx);
     language_take('a' | 'r' << 8);
     {
         int rx = 0, ry = 0, rside = 0, rmx = 0, rmy = 0, rmside = 0;
@@ -136702,7 +136703,7 @@ static void check_compositor_edges(void)
     edge_at(100, 56, 1, 10000);
     check("edge: lifted, the controls stay up until they fade", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
 
-    /* Each control, tapped: close, minimise, maximise. */
+    /* Each control, tapped: close, minimise, maximise. The window that is put away has a tab, which is what brings it back. */
     {
         int cells[3] = {80, 120, 160};
 
@@ -136711,6 +136712,8 @@ static void check_compositor_edges(void)
             edge_setup(0);
             table = compositor.table;
             layout_show(1, 0, 0, 240, 100);
+            if (cell == 1)
+                compositor.asks[1] &= ~WINDOW_NO_TAB;
             edge_show_controls();
             edge_at(cells[cell], 20, 0, 10000);
             edge_at(cells[cell], 20, 1, 10000);
@@ -136725,6 +136728,16 @@ static void check_compositor_edges(void)
                       compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.chip.kind == COMPOSITOR_CHIP_NONE);
         }
     }
+
+    /* A window that asked for no tab is not put away, since nothing would bring it back: the tap takes the controls and leaves the window. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    edge_show_controls();
+    edge_at(120, 20, 0, 10000);
+    edge_at(120, 20, 1, 10000);
+    check("edge: a tap on the minimise control of a window with no tab leaves the window shown, and the controls go",
+          compositor_visible(1) && !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.chip.kind == COMPOSITOR_CHIP_NONE);
 
     /* A drag that starts on a control is the window's, from its top band: the window moves with the finger. */
     edge_setup(0);
