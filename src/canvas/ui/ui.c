@@ -12151,6 +12151,8 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit_text(ui, x, baseline, (string_address)c->label, UI_LABEL_LARGE, ink, 0);
 }
 
+#define UI_SWITCH_W 52 // a switch's pill across, logical pixels: what a row of a list keeps for it at its end
+
 /*
         A switch or a checkbox (the kit draws them alike): the row's label at the
         left in body-large, half the ink, the accent hovered and full ink with a
@@ -12168,7 +12170,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         b32 tx, ty, live = 0;
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
         b32 ox = rx + rw / 2, oy = ry + rh / 2;
-        b32 bx = ui_rtl() ? rx : rx + rw - ui_q8(ui, 52), by = oy - ui_q8(ui, 14), bw = ui_q8(ui, 52), bh = ui_q8(ui, 28);
+        b32 bx = ui_rtl() ? rx : rx + rw - ui_q8(ui, UI_SWITCH_W), by = oy - ui_q8(ui, 14), bw = ui_q8(ui, UI_SWITCH_W), bh = ui_q8(ui, 28);
         b32 gap = 0, fill_w, rest_w, origin_x;
         struct ui_box fill, rest, clip;
         unsigned int label;
@@ -18269,6 +18271,7 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_FIELD 6
 #define UI_ROW_SLIDER 7 // a whole number from low to high on a slider at the row's right, its number and unit before it
 #define UI_ROW_SLIDER_W 160 // the slider's length, logical pixels
+#define UI_ROW_GAP 10 // between two parts of a row, logical pixels
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
 #define UI_ROW_BADGE_ERROR 2
@@ -18542,15 +18545,26 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
         return true;
 }
 
-// A row's trailing control where it has one, made and put in its place at the right edge, in logical pixels.
-static struct ui_control address_to ui_list_trailing(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row,
-                                                     int right, int y, int room)
+// A tree that was run, put where the window has it: turned over its root's width when the window reads from the right (as ui_view_end turns
+// a screen), then moved so that the root's corner is at x, y.
+static fn ui_tree_origin(struct ui_tree address_to t, int x, int y)
+{
+        for (int at = 0, wide = t->node[0].w; at < t->count; at++)
+                t->node[at].x = (ui_rtl() ? wide - t->node[at].x - t->node[at].w : t->node[at].x) + x, t->node[at].y += y;
+}
+
+// A length of the window in logical pixels: the one conversion of what the layout answers (device pixels) to what a control is told.
+static inline int ui_logical(const struct ui address_to ui, int device) { return device * 100 / ui->scale; }
+
+// A row's second control where it has one, made as the row says it and as large as it is (logical pixels): the control at its end (tabs,
+// swatches, a slider, a field), or in a row with none the badge of the worst issue its option has. Its part of the row places it.
+static struct ui_control address_to ui_list_trailing(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row)
 {
         struct ui_control address_to c = ui_list_control(l, id, 1);
-        unsigned char kind = row->kind == UI_ROW_TABS ? UI_TABS : row->kind == UI_ROW_SWATCHES ? UI_SWATCHES : row->kind == UI_ROW_SLIDER ? UI_SLIDER : UI_INPUT;
-        int height = ui_dev(ui, UI_ROW);
+        unsigned char kind = row->kind == UI_ROW_TABS ? UI_TABS : row->kind == UI_ROW_SWATCHES ? UI_SWATCHES : row->kind == UI_ROW_SLIDER ? UI_SLIDER
+                             : row->kind == UI_ROW_FIELD ? UI_INPUT : row->badge ? UI_BADGE : 0;
 
-        if (!c)
+        if (!c || !kind)
                 return null;
         if (c->kind != kind)
         {
@@ -18559,6 +18573,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                 c->variant = kind == UI_TABS ? UI_TABS_SEGMENTED : kind == UI_INPUT ? UI_FIELD_BARE : kind == UI_SLIDER ? UI_SLIDER_BARE : 0;
                 ui_control_start(c);
         }
+        c->h = 32;
         if (kind == UI_SLIDER)
         {
                 // The app's value is the slider's while no hand has it: one let go keeps where it was left until the app's value changes (c->at is the app's
@@ -18566,56 +18581,25 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
                 c->low = ui_q(row->low), c->high = ui_q(row->high), c->step = ui_q(row->step > 0 ? row->step : 1);
                 if (!c->down && !c->sliding && c->at != row->at)
                         c->value = ui_q(row->at), c->at = row->at;
-                c->w = UI_ROW_SLIDER_W, c->h = 32;
-                c->y = (y + height / 2) * 100 / ui->scale - 16;
-                c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
-                c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y);
-                c->hover = c->item >= 0 && l->hover == id;
-                c->hover_x = c->hover ? ui_slider_along(ui, c, l->pointer_x, l->pointer_y) : -1;
-                c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
-                return c;
+                c->w = UI_ROW_SLIDER_W;
         }
-        if (kind == UI_INPUT)
-        {
-                // The engine draws and types it; it has the keys while the list has them.
-                c->edit = row->edit, c->focused = l->keys;
-                c->items[0] = row->placeholder;
-                c->y = (y + ui_dev(ui, 6)) * 100 / ui->scale, c->h = (height - ui_dev(ui, 12)) * 100 / ui->scale;
-                c->w = (room > ui_dev(ui, UI_ROW_FIELD_W) && !row->head ? ui_dev(ui, UI_ROW_FIELD_W) : room < ui_dev(ui, UI_ROW_FIELD_LEAST) ? ui_dev(ui, UI_ROW_FIELD_LEAST) : room) * 100 / ui->scale;
-                c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
-                return c;
-        }
-        ui_items_words(c, row->words);
-        c->y = (y + height / 2) * 100 / ui->scale - 16, c->h = 32;
-        if (kind == UI_TABS)
-        {
-                // The chosen segment: placed at the first frame, the pip moving to another after.
-                if (row->at >= 0 && row->at != c->at)
-                {
-                        if (c->pip_x.placed)
-                                ui_tabs_choose(ui, c, row->at);
-                        else
-                                c->at = row->at;
-                }
-                c->x = 0;
-                c->w = ui_tabs_length(ui, c);
-        }
+        else if (kind == UI_INPUT) // the engine draws and types it; it has the keys while the list has them
+                c->edit = row->edit, c->focused = l->keys, c->items[0] = row->placeholder;
+        else if (kind == UI_BADGE)
+                c->role = row->badge == UI_ROW_BADGE_ERROR ? UI_ERROR : UI_WARNING, c->label = row->badge_words, ui_control_size(ui, c);
         else
         {
-                c->at = row->at;
-                c->w = c->count * (UI_SWATCH + UI_SWATCH_GAP) - UI_SWATCH_GAP;
+                ui_items_words(c, row->words);
+                // The chosen segment: placed at the first frame, the pip moving to another after.
+                if (kind == UI_TABS && row->at >= 0 && row->at != c->at && c->pip_x.placed)
+                        ui_tabs_choose(ui, c, row->at);
+                else if (kind != UI_TABS || row->at >= 0)
+                        c->at = row->at;
+                c->w = kind == UI_TABS ? ui_tabs_length(ui, c) : c->count * (UI_SWATCH + UI_SWATCH_GAP) - UI_SWATCH_GAP;
         }
-        c->x = ui_mirror(right * 100 / ui->scale - c->w, c->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
-        c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y);
-        c->hover = c->item >= 0 && l->hover == id;
         return c;
 }
 
-/*
-        A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
-        the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch),
-        the label at the left cut to leave its value a third of the row, and the value as its kind says at the right.
-*/
 /*
         A drive's strip, and the roles' colours. Each role is a container of the theme and its on-colour for the size written in it,
         so the six are told apart in both themes: EFI system is the accent, Linux data the success container, swap the secondary
@@ -18678,7 +18662,7 @@ static fn ui_strip(struct ui address_to ui, int left, int top, int width, int he
 */
 static fn ui_list_strip_row(struct ui address_to ui, struct ui_list address_to l, int y, int height, const struct ui_row address_to row)
 {
-        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10), band = ui_dev(ui, UI_ROW);
+        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, UI_ROW_GAP), band = ui_dev(ui, UI_ROW);
         int text_left = x + inset, right = x + w - inset, baseline, value_w = 0, note_w = 0, room;
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         char cut[UI_CUT_TEXT];
@@ -18710,26 +18694,198 @@ static fn ui_list_strip_row(struct ui address_to ui, struct ui_list address_to l
         ui_kit_fill(ui, &line, ui_role(UI_OUTLINE_VARIANT), null);
 }
 
+/*
+        A row's parts. A row is a tree of the kit's layout (ui_tree), declared again for each row that is drawn or pressed, and the
+        layout places its parts; what is kept is the node of each part the row has (null: it has none). The root is the row, as wide
+        as the list, its pad the inset of its words, and every part is as tall as the row: what is drawn in one is centred down it.
+        Before a switch, tabs, swatches or a slider the label grows into the room they leave. In any other row the label is as wide
+        as its words and gives way to a zone that grows and keeps a third of the row from it (two thirds: a field after a verb): in
+        it, at its end, a field, or the note in the room the value leaves and the value with its step marks or its chevron.
+*/
+static struct ui_row_parts
+{
+        struct ui_tree tree;
+        struct ui_node address_to mark, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
+                address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars;
+        const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
+        char label_cut[UI_CUT_TEXT], value_cut[UI_CUT_TEXT], number[40]; // and a slider's number with its unit
+} ui_row_parts;
+
+// A leaf of the tree being declared: UI_FIXED and its width, UI_GROW and its weight, or UI_FIT and what its words measure.
+static struct ui_node address_to ui_row_leaf(struct ui_tree address_to t, int kind, int value)
+{
+        struct ui_node address_to n = ui_tree_open(t);
+
+        n->size[0].kind = kind, n->size[0].value = value, n->content[0] = value;
+        ui_tree_close(t);
+        return n;
+}
+
+// The tree of a row height tall, declared and run: every part's rectangle from the row's own corner, as the row reads from the left.
+// words: its words are measured and placed (a row no pixel of which may be written has its controls placed and no word measured).
+static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row, int height, b32 words)
+{
+        struct ui_row_parts address_to p = &ui_row_parts;
+        struct ui_tree address_to t = &p->tree;
+        struct ui_node address_to n, address_to zone = null;
+        struct ui_control address_to c = ui_list_trailing(ui, l, id, row);
+        int gap = ui_dev(ui, UI_ROW_GAP), inset = ui_dev(ui, UI_INSET), lead = ui_dev(ui, 16) - gap, size = ui_dev(ui, 4), marks;
+        b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER;
+
+        memory_zero(&p->mark, sizeof(*p) - offset_of(struct ui_row_parts, mark));
+        ui_tree_begin(t);
+        n = ui_tree_open(t);
+        n->size[0].kind = n->size[1].kind = UI_FIXED, n->size[0].value = l->w, n->size[1].value = height;
+        n->pad[0] = inset + (row->sub ? ui_dev(ui, 20) : 0), n->pad[1] = inset, n->gap = gap;
+        // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
+        if (row->mark)
+                p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
+        if (row->kind == UI_ROW_SWITCH || held)
+        {
+                p->label = ui_row_leaf(t, UI_GROW, 1);
+                // A slider's number and its unit, from the slider's own value (the hand's while it holds it): a percent is written against its
+                // number (100%), any other unit after a blank (30 per second). A tabs row's note (a port's state) is where the number would be.
+                // A row too narrow for them gives up the number's node and then the control's: each ends where its node does, whole.
+                if (c && words && row->kind == UI_ROW_SLIDER)
+                {
+                        positive length = ui_slider_say(c->value, p->number);
+
+                        if (row->words && row->words[0] && row->words[0] != '%' && length + 2 < sizeof(p->number))
+                                p->number[length++] = ' ', p->number[length] = 0;
+                        if (row->words)
+                                string_append_bounded((string_address)p->number, (string_address)row->words, sizeof(p->number));
+                        p->value_shown = p->number;
+                        p->value = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)p->number, UI_BODY_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT;
+                }
+                else if (c && words && row->kind == UI_ROW_TABS && row->note)
+                        p->note = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT;
+                if (c && held)
+                        p->control = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, c->w)), n->size[0].shrink = 1;
+        }
+        else
+        {
+                p->label = n = ui_row_leaf(t, UI_FIT, row->label && (words || field) ? ui_kit_measure(ui, (string_address)row->label, UI_BODY_MEDIUM) : 0);
+                n->size[0].shrink = 1;
+                zone = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
+                n->size[0].min = (l->w - 2 * inset) * (field && row->head ? 2 : 1) / 3 - gap;
+                if (field && c)
+                {
+                        p->control = n = ui_row_leaf(t, UI_GROW, 1), n->margin[2] = n->margin[3] = ui_dev(ui, 6);
+                        n->size[0].min = ui_dev(ui, UI_ROW_FIELD_LEAST), n->size[0].max = row->head ? UI_TREE_MOST : ui_dev(ui, UI_ROW_FIELD_W);
+                }
+                // A value keeps 16 from its label, and the note the gap from the label and from the value: its room is what the value leaves.
+                if (!field && words && row->note)
+                {
+                        p->note_room = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
+                        n->pad[1] = row->value ? gap - lead : 0;
+                        p->note = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM));
+                        ui_tree_close(t);
+                }
+                if (!field && words && row->value)
+                {
+                        p->value_box = n = ui_tree_open(t), n->size[0].shrink = 1, n->margin[0] = lead, n->gap = ui_dev(ui, 8);
+                        if (row->kind == UI_ROW_STEP)
+                                p->back = ui_row_leaf(t, UI_FIXED, marks = ui_kit_measure(ui, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE));
+                        p->value = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->value, UI_BODY_MEDIUM)), n->size[0].shrink = 1;
+                        if (row->kind == UI_ROW_STEP)
+                                p->on = ui_row_leaf(t, UI_FIXED, marks);
+                        else if (row->kind == UI_ROW_CHOICE)
+                                p->more = ui_row_leaf(t, UI_FIXED, 2 * size);
+                        ui_tree_close(t);
+                }
+                ui_tree_close(t);
+        }
+        if (row->expander)
+                p->expander = ui_row_leaf(t, UI_FIXED, 2 * size);
+        if (c && c->kind == UI_BADGE)
+                p->badge = ui_row_leaf(t, UI_FIXED, ui_dev(ui, c->w));
+        if (row->kind == UI_ROW_SWITCH)
+                p->toggle = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_SWITCH_W));
+        if (row->bars > 0)
+                p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
+        ui_tree_close(t);
+        ui_tree_run(t, l->w, height);
+        // The layout has no one to ask how wide a text is: the label and the value are cut to the nodes it gave them, to no less than 40 and 24.
+        // A label that was cut is narrower than the room it was cut to, and the zone is placed from the label as it is written: run again.
+        if (row->label && (words || field))
+                p->label_shown = (const char address_to)ui_fit(ui, (string_address)row->label, UI_BODY_MEDIUM,
+                                                               p->label->w < ui_dev(ui, 40) ? ui_dev(ui, 40) : p->label->w, p->label_cut, sizeof(p->label_cut));
+        if (zone && p->label_shown && p->label_shown != row->label)
+        {
+                p->label->size[0] = (struct ui_size){UI_FIXED, ui_kit_measure(ui, (string_address)p->label_shown, UI_BODY_MEDIUM), 0, UI_TREE_MOST, 0};
+                zone->size[0].min = 0;
+                ui_tree_run(t, l->w, height);
+        }
+        if (p->value_box)
+                p->value_shown = (const char address_to)ui_fit(ui, (string_address)row->value, UI_BODY_MEDIUM,
+                                                               p->value->w < ui_dev(ui, 24) ? ui_dev(ui, 24) : p->value->w, p->value_cut, sizeof(p->value_cut));
+}
+
+// A row's control put in its part, in logical pixels (ui_logical). Across, it ends where its part ends, at the row's end side, and is its
+// own width back from there; down, it is centred on its part at its own height. A field is its part: as wide and as tall.
+static fn ui_row_control(const struct ui address_to ui, struct ui_control address_to c, const struct ui_node address_to n)
+{
+        if (c->kind == UI_INPUT)
+                c->w = ui_logical(ui, n->w), c->y = ui_logical(ui, n->y), c->h = ui_logical(ui, n->h);
+        else
+                c->y = ui_logical(ui, n->y + n->h / 2) - c->h / 2;
+        c->x = ui_rtl() ? ui_logical(ui, n->x) : ui_logical(ui, n->x + n->w) - c->w;
+}
+
+// A row's parts at its place, y its top (device pixels), and its second control put in its part: that control where it is at the row's
+// end (tabs, swatches, a slider, a field), with the item of it under the pointer and where along a slider the pointer is, or null.
+static struct ui_control address_to ui_list_row_place(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row,
+                                                      int y, int height, b32 words)
+{
+        const struct ui_row_parts address_to p = &ui_row_parts;
+        struct ui_control address_to c = ui_list_control(l, id, 1);
+
+        ui_row_tree(ui, l, id, row, height, words);
+        ui_tree_origin(&ui_row_parts.tree, l->x, y);
+        if (p->badge || p->control)
+                ui_row_control(ui, c, p->badge ? p->badge : p->control);
+        if (!p->control)
+                return null;
+        if (c->kind != UI_INPUT)
+                c->item = ui_control_hit(ui, c, l->pointer_x, l->pointer_y), c->hover = c->item >= 0 && l->hover == id;
+        if (c->kind == UI_SLIDER)
+                c->hover_x = c->hover ? ui_slider_along(ui, c, l->pointer_x, l->pointer_y) : -1, c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
+        return c;
+}
+
+// The baseline of a role's line centred down a part.
+static int ui_row_baseline(struct ui address_to ui, const struct ui_node address_to n, int type)
+{
+        return ui_kit_baseline(ui, n->y + (n->h - ui_dev(ui, ui_types[type].line)) / 2, type);
+}
+
+// A run in its part, in from the part's start: from its left end reading from the left, from its right end reading from the right.
+static fn ui_row_words(struct ui address_to ui, const struct ui_node address_to n, int in, int baseline, const char address_to text, int type, unsigned int ink)
+{
+        ui_kit_text_flipped(ui, n->x + in, baseline, (string_address)text, type, ink, 0, n->x, n->w);
+}
+
+/*
+        A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
+        the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
+        row has, drawn in its node.
+*/
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
-        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
-        int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room, across, across_w;
-        unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
-        struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null, address_to badge = null;
-        int badge_w = 0, badge_right = 0, chevron_w = 0;
-        char cut[UI_CUT_TEXT], number[40];
-        int number_w = 0, trailing_right;
+        const struct ui_row_parts address_to p = &ui_row_parts;
+        const struct ui_node address_to n;
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), ink = strong, quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+        struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing;
+        int across, across_w, baseline, size = ui_dev(ui, 4);
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
         ui_list_describe(l, id, &row);
+        trailing = ui_list_row_place(ui, l, id, &row, y, height, seen && !row.tall);
         ui_list_across(l, &across, &across_w);
-        baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM);
-        if (row.dim)
+        if (row.dim || row.sub)
                 ink = quiet;
-        if (row.sub)
-                text_left += ui_dev(ui, 20), ink = quiet;
         if (l->lit && id == l->focus)
         {
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
@@ -18746,26 +18902,21 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // The row's own control: a switch is its row's (the kit's switch is a row), any other row the list's row.
         if (own)
         {
-                unsigned char kind = row.kind == UI_ROW_SWITCH ? UI_SWITCH : UI_LIST_ROW;
+                unsigned char kind = p->toggle ? UI_SWITCH : UI_LIST_ROW;
 
                 if (own->kind != kind)
                 {
                         memory_zero(own, sizeof(*own));
-                        own->kind = kind;
-                        own->label = "";
+                        own->kind = kind, own->label = "";
                         ui_control_start(own);
                 }
                 ui_list_across_logical(ui, l, &own->row_x, &own->row_w);
-                own->row_y = y * 100 / ui->scale, own->row_h = height * 100 / ui->scale;
+                own->row_y = ui_logical(ui, y), own->row_h = ui_logical(ui, height);
                 own->x = own->row_x, own->y = own->row_y, own->w = own->row_w, own->h = own->row_h;
                 own->hover = l->hover == id, own->down = l->down == id;
                 own->disabled = row.kind == UI_ROW_FIELD;
                 if (kind == UI_SWITCH)
-                {
-                        own->on = row.on;
-                        own->x = ui_mirror(right * 100 / ui->scale - 52, 52, x * 100 / ui->scale, w * 100 / ui->scale), own->w = 52;
-                        own->y = (y + height / 2) * 100 / ui->scale - 24, own->h = 48;
-                }
+                        own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                 ui_control_draw(ui, own);
         }
         // A tall row (a drive) is laid out as its own: its line, its strip under it and its legend (ui_list_strip_row).
@@ -18774,180 +18925,52 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_list_strip_row(ui, l, y, height, &row);
                 return;
         }
-        if (row.mark)
-        {
-                int dot = ui_dev(ui, 7);
-                int dot_x = ui_mirror(text_left, dot, x, w);
-                struct ui_box box = {dot_x * 256, (y + (height - dot) / 2) * 256, (dot_x + dot) * 256, (y + (height + dot) / 2) * 256, dot * 128, dot * 128};
-
-                ui_kit_fill(ui, &box, ui_role(UI_PRIMARY), null);
-                text_left += ui_dev(ui, 17);
-        }
-        // The trailing pieces from the right: the signal, then the control or the value, then the note.
-        if (row.bars > 0)
-        {
-                // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
-                ui_signal(ui, ui_mirror(right - ui_signal_width(ui), ui_signal_width(ui), x, w) + ui_signal_width(ui), y + height / 2, row.bars);
-                right -= ui_dev(ui, 18) + gap;
-        }
-        trailing_right = right;
-        if (row.kind == UI_ROW_TABS || row.kind == UI_ROW_SWATCHES || row.kind == UI_ROW_SLIDER)
-                trailing = ui_list_trailing(ui, l, id, &row, right, y, 0);
-        // A slider row's number and its unit, from the slider's own value (the hand's while it holds it), at the slider's left.
-        if (trailing && row.kind == UI_ROW_SLIDER)
-        {
-                positive length = ui_slider_say(trailing->value, number);
-
-                if (row.words && row.words[0] && length + 2 < sizeof(number))
-                {
-                        // A percent is written against its number (100%), any other unit after a blank (30 per second).
-                        if (row.words[0] != '%')
-                                number[length++] = ' ';
-                        string_copy_bounded((string_address)number + length, (string_address)row.words, sizeof(number) - length);
-                }
-                else
-                        number[length] = 0;
-                number_w = ui_kit_measure(ui, (string_address)number, UI_BODY_MEDIUM) + gap;
-        }
-        // A tabs row's note (a port's state) is at the tabs' left, as a value is at a row's right: its room is taken from the label's.
-        else if (trailing && row.kind == UI_ROW_TABS && row.note)
-                number_w = ui_kit_measure(ui, (string_address)row.note, UI_LABEL_MEDIUM) + gap;
-        // The badge: the row's own second control, at the right (left of a switch, which is at the very right). Its width comes out of the
-        // room the label and the value have, and a row that is no switch has its right edge moved in by it.
-        if (row.badge)
-        {
-                badge = ui_list_control(l, id, 1);
-                if (badge)
-                {
-                        if (badge->kind != UI_BADGE)
-                        {
-                                memory_zero(badge, sizeof(*badge));
-                                badge->kind = UI_BADGE;
-                                ui_control_start(badge);
-                        }
-                        badge->role = row.badge == UI_ROW_BADGE_ERROR ? UI_ERROR : UI_WARNING;
-                        badge->label = row.badge_words;
-                        ui_control_size(ui, badge);
-                        badge->h = 22, badge->y = (y + height / 2) * 100 / ui->scale - 11;
-                        badge_right = row.kind == UI_ROW_SWITCH ? right - ui_dev(ui, 52) - gap : right;
-                        badge->x = ui_mirror(badge_right * 100 / ui->scale - badge->w, badge->w, l->x * 100 / ui->scale, l->w * 100 / ui->scale);
-                        badge_w = ui_dev(ui, badge->w) + gap;
-                        if (row.kind != UI_ROW_SWITCH)
-                                right -= badge_w;
-                        ui_control_draw(ui, badge);
-                }
-        }
-        // The expander's chevron, left of the badge: pointing right while the lines under the row are hidden, down while they show (left
-        // reading from the right). A row that is a switch has its chevron left of the switch and its badge.
-        if (row.expander)
-        {
-                int size = ui_dev(ui, 4), edge = row.kind == UI_ROW_SWITCH ? right - ui_dev(ui, 52) - gap - badge_w : right;
-
-                chevron_w = 2 * size + gap;
-                // Its turn is the app's while the lines fold (its spring), else the flag's rest: shut is 0, open UI_ONE.
-                b64 turn = row.turn < 0 ? (row.expander == UI_ROW_EXPANDER_OPEN ? UI_ONE : 0) : row.turn;
-
-                ui_chevron_turn(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet, turn, ui_rtl());
-                if (row.kind != UI_ROW_SWITCH)
-                        right -= chevron_w;
-        }
-        label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap + number_w
-                                         : row.kind == UI_ROW_FIELD && row.head ? (w - 2 * inset) * 2 / 3 : (w - 2 * inset) / 3);
-        // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
-        // motion is read, and no word measured: its label's width places only its value and a field's well.
-        label_room -= row.kind == UI_ROW_SWITCH ? badge_w + chevron_w : 0;
-        if (row.label && (seen || row.kind == UI_ROW_FIELD))
-                wide = ui_kit_text_flipped(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
-                                                                           label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
-                                           UI_BODY_MEDIUM, ink, 0, x, w);
+        baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
+        if ((n = p->mark))
+                ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
+                            ui_role(UI_PRIMARY), null);
+        if (p->label_shown)
+                ui_row_words(ui, p->label, 0, baseline, p->label_shown, UI_BODY_MEDIUM, ink);
+        // The note is dropped whole where the label and the value leave it no room to spare. It and the value end where their parts do: a
+        // value that was cut is narrower than the room it was cut to.
+        if ((n = p->note) && (!p->note_room || n->w < p->note_room->w - p->note_room->pad[1]))
+                ui_row_words(ui, n, n->w - n->content[0], ui_row_baseline(ui, n, UI_LABEL_MEDIUM), row.note, UI_LABEL_MEDIUM, row.mark ? strong : quiet);
+        if ((n = p->value))
+                ui_row_words(ui, n, n->w - (p->value_shown == p->value_cut ? ui_kit_measure(ui, (string_address)p->value_cut, UI_BODY_MEDIUM) : n->content[0]), baseline,
+                             p->value_shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? strong : quiet);
+        if (p->back)
+                ui_row_words(ui, p->back, 0, baseline, "\xe2\x80\xb9", UI_LABEL_LARGE, quiet), ui_row_words(ui, p->on, 0, baseline, "\xe2\x80\xba", UI_LABEL_LARGE, quiet);
+        // A chevron is a pixel wider than its part, and starts where the part does.
+        if ((n = p->more))
+                ui_chevron(ui, ui_mirror(n->x, n->w + 1, n->x, n->w) + size, baseline - ui_dev(ui, 5), size, quiet);
         if (trailing)
-        {
                 ui_control_draw(ui, trailing);
-                // A slider's number is at its left, right aligned to it; where the slider is, in the left to right layout the row is made in.
-                if (row.kind == UI_ROW_SLIDER && seen)
-                        ui_kit_text_flipped(ui, trailing_right - ui_dev(ui, trailing->w) - number_w, baseline, (string_address)number, UI_BODY_MEDIUM,
-                                            row.dim ? quiet : ui_text_colour(ui, UI_ON_SURFACE), 0, x, w);
-                else if (row.kind == UI_ROW_TABS && row.note && seen)
-                {
-                        int note_baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM);
-
-                        ui_kit_text_flipped(ui, trailing_right - ui_dev(ui, trailing->w) - number_w, note_baseline, (string_address)row.note,
-                                            UI_LABEL_MEDIUM, quiet, 0, x, w);
-                }
-                return;
-        }
-        if (row.kind == UI_ROW_FIELD)
-        {
-                int room = right - (text_left + wide + gap);
-
-                trailing = ui_list_trailing(ui, l, id, &row, right, y, room);
-                if (trailing)
-                        ui_control_draw(ui, trailing);
-                return;
-        }
-        if (row.kind == UI_ROW_SWITCH || !seen)
-                return;
-        if (row.value)
-        {
-                int room = right - (text_left + wide + ui_dev(ui, 16)), marks = 0, width;
-                string_address shown;
-
-                if (row.kind == UI_ROW_CHOICE)
-                {
-                        int size = ui_dev(ui, 4);
-
-                        ui_chevron(ui, ui_mirror(right - 2 * size, 2 * size + 1, x, w) + size, baseline - ui_dev(ui, 5), size, quiet);
-                        right -= 2 * size + ui_dev(ui, 8);
-                }
-                else if (row.kind == UI_ROW_STEP)
-                {
-                        marks = ui_kit_measure(ui, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE);
-                        ui_kit_text_flipped(ui, right - marks, baseline, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE, quiet, 0, x, w);
-                        right -= marks + ui_dev(ui, 8);
-                        room -= 2 * (marks + ui_dev(ui, 8));
-                }
-                room = row.kind == UI_ROW_CHOICE ? room - ui_dev(ui, 16) : room;
-                shown = ui_fit(ui, (string_address)row.value, UI_BODY_MEDIUM, room < ui_dev(ui, 24) ? ui_dev(ui, 24) : room, cut, sizeof(cut));
-                width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
-                ui_kit_text_flipped(ui, right - width, baseline, shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0, x, w);
-                if (row.kind == UI_ROW_STEP)
-                        ui_kit_text_flipped(ui, right - width - ui_dev(ui, 8) - marks, baseline, (string_address) "\xe2\x80\xb9", UI_LABEL_LARGE, quiet, 0, x, w);
-                right -= width + (marks ? marks + ui_dev(ui, 8) : 0) + gap;
-        }
-        if (row.note)
-        {
-                int width = ui_kit_measure(ui, (string_address)row.note, UI_LABEL_MEDIUM);
-
-                if (right - width > text_left + wide + gap)
-                        ui_kit_text_flipped(ui, right - width, ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)row.note,
-                                            UI_LABEL_MEDIUM, row.mark ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0, x, w);
-        }
+        // The expander's chevron: pointing right while the lines under the row are hidden, down while they show (left reading from the
+        // right). Its turn is the app's while the lines fold (its spring), else the flag's rest: shut is 0, open UI_ONE.
+        if ((n = p->expander))
+                ui_chevron_turn(ui, ui_mirror(n->x, n->w + 1, n->x, n->w) + size, n->y + n->h / 2, size, quiet,
+                                row.turn < 0 ? (row.expander == UI_ROW_EXPANDER_OPEN ? UI_ONE : 0) : row.turn, ui_rtl());
+        if (p->badge)
+                ui_control_draw(ui, ui_list_control(l, id, 1));
+        // The bars are not turned over reading from the right (as a signal's are not): their place is the mirror of the left to right one.
+        if ((n = p->bars))
+                ui_signal(ui, n->x + n->w, n->y + n->h / 2, row.bars);
 }
 
-// Whether a press at px (device pixels) is on the expander of row id: the strip its chevron and its badge are drawn in, at the row's end
-// (left of a switch, which sits at that end). Those open and close its lines rather than acting on the row. The strip is the one
-// ui_list_row lays out (the chevron's slot, the badge's width), so a switch, a field or a dropdown's value beside it is not in it.
-static b32 ui_list_expander_at(struct ui address_to ui, const struct ui_list address_to l, int id, int px)
+// Whether a press at px (device pixels) is on the expander of row id: its chevron and its badge, at the row's end (before a switch, which
+// sits at that end), and the gap before them. Those open and close its lines rather than acting on the row. They are the parts the row
+// is laid out with (ui_row_tree), so a switch, a field or a dropdown's value beside them is not among them.
+static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_to l, int id, int px)
 {
         struct ui_row row;
-        struct ui_control measure;
-        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10), base, strip = 2 * ui_dev(ui, 4) + gap;
+        const struct ui_node address_to first = null, address_to last;
+        int x = ui_point(px, l->x, l->w) - l->x;
 
         ui_list_describe(l, id, &row);
-        if (!row.expander)
-                return false;
-        if (row.badge)
-        {
-                memory_zero(&measure, sizeof(measure));
-                measure.kind = UI_BADGE, measure.label = row.badge_words;
-                ui_control_size(ui, &measure);
-                strip += ui_dev(ui, measure.w) + gap;
-        }
-        // The end of the row, inset, where ui_list_row starts reading; a switch is at that end, so the strip is beyond it.
-        base = ui_rtl() ? x + inset : x + w - inset;
-        if (row.kind == UI_ROW_SWITCH)
-                base += ui_rtl() ? ui_dev(ui, 52) + gap : -(ui_dev(ui, 52) + gap);
-        return ui_rtl() ? px >= base && px < base + strip : px >= base - strip && px < base;
+        if (row.expander)
+                ui_row_tree(ui, l, id, &row, ui_dev(ui, UI_ROW), false), first = ui_row_parts.expander;
+        last = first && ui_row_parts.badge ? ui_row_parts.badge : first;
+        return first && x >= first->x - ui_dev(ui, UI_ROW_GAP) && x < last->x + last->w;
 }
 
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
@@ -19084,8 +19107,13 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 struct ui_row row;
 
                 ui_list_describe(l, id, &row);
-                if (row.kind == UI_ROW_STEP && ui_point(x, l->x, l->w) < l->x + l->w - ui_dev(ui, UI_INSET + 40))
-                        l->way = -1;
+                // A step goes back from a press before the middle of its value and marks, as the row lays them out (ui_row_tree).
+                if (row.kind == UI_ROW_STEP && row.value)
+                {
+                        ui_row_tree(ui, l, id, &row, ui_dev(ui, UI_ROW), true);
+                        if (ui_point(x, l->x, l->w) - l->x < ui_row_parts.value_box->x + ui_row_parts.value_box->w / 2)
+                                l->way = -1;
+                }
         }
         own = ui_list_control(l, id, 0);
         if (own && l->part < 0)

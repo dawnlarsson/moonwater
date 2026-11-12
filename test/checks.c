@@ -151861,7 +151861,7 @@ static fn check_kit_slider_row(void)
 
         // The control as a draw makes it: a bare slider over the row's range at the app's value.
         ui_list_describe(&l, 0, &row);
-        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        c = ui_list_row_place(&ui, &l, 0, &row, ui_list_row_y(&l, 0), l.tall[0], false);
         made = c && c->kind == UI_SLIDER && (c->variant & UI_SLIDER_BARE) && c->low == ui_q(50) && c->high == ui_q(200) && c->step == ui_q(5) &&
                c->value == ui_q(100) && c->w == UI_ROW_SLIDER_W && c->x + c->w <= right;
         check("kit slider row: its slider is a bare kit slider over the row's range, at the app's value, ending at the row's right", made);
@@ -151907,11 +151907,11 @@ static fn check_kit_slider_row(void)
 
         // The app's value is not taken back while it has not changed: the slider stays where the hand left it, and follows the app when it does.
         ui_list_describe(&l, 0, &row);
-        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        c = ui_list_row_place(&ui, &l, 0, &row, ui_list_row_y(&l, 0), l.tall[0], false);
         kept = c->value == ui_q(200);
         slider_app_value[0] = 70;
         ui_list_describe(&l, 0, &row);
-        c = ui_list_trailing(&ui, &l, 0, &row, right, ui_list_row_y(&l, 0), 0);
+        c = ui_list_row_place(&ui, &l, 0, &row, ui_list_row_y(&l, 0), l.tall[0], false);
         check("kit slider row: let go, it keeps the hand's value until the app's own changes, and then follows it", kept && c->value == ui_q(70));
 
         // A release the compositor took back changes nothing.
@@ -151965,7 +151965,7 @@ static fn check_kit_slider_row(void)
                 // The row at the body's middle now, and its slider where a draw puts it.
                 id = ui_list_hit(&ui, &many, 20, 100);
                 ui_list_describe(&many, id, &row);
-                c = id < 0 ? null : ui_list_trailing(&ui, &many, id, &row, right, ui_list_row_y(&many, ui_list_at(&many, id)), 0);
+                c = id < 0 ? null : ui_list_row_place(&ui, &many, id, &row, ui_list_row_y(&many, ui_list_at(&many, id)), many.tall[ui_list_at(&many, id)], false);
                 if (c)
                 {
                         x = ui_dev(&ui, c->x + c->w / 2), y = ui_dev(&ui, c->y + c->h / 2);
