@@ -48620,6 +48620,65 @@ def harness_moonwater_cli(argv):
                   any(line.endswith(want) for line in seen[command]["out"]),
                   f"moonwater {command[:40]} looks at the disk's place under /sys/class/block", repr(seen.get(command)))
 
+        # A stick carrying a build is looked at only when the device policy lets
+        # its USB device in: a FAT partition (its boot sector at /dev/sdb1) on a
+        # disk under the USB device 1-2, as sysfs places one. The kernel holding
+        # the device (authorized 0) and the policy denying it (with the kernel
+        # still at 1, as at a boot before the policy is read) each have setup say
+        # it is held and leave it unread; let in, it is mounted to be read, which
+        # the sandbox refuses, and nothing is said of a stick that carries
+        # nothing. The words of update usb and rollback are judged before root
+        # is, and with nothing to ask and no yes they write nothing.
+        stick = bytearray(4096)
+        stick[11:14] = (512).to_bytes(2, "little") + b"\x01"
+        stick[82:90] = b"FAT32   "
+        stick[510:512] = b"\x55\xaa"
+        (sandbox / "tmp/stick.img").write_bytes(bytes(stick))
+        place = "devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sdb"
+
+        def stick_session(device, interface, policy):
+            sys_reset()
+            sys_file(place + "/sdb1/partition", "1\n")
+            sys_file(place + "/removable", "1\n")
+            for name, leaf, text in (("usb1", "idVendor", "1d6b"), ("usb1", "idProduct", "0002"),
+                                     ("usb1", "serial", "0000:00:14.0"), ("usb1", "authorized", "1"),
+                                     ("1-2", "idVendor", "46f4"), ("1-2", "idProduct", "0001"),
+                                     ("1-2", "serial", "STICK1"), ("1-2", "product", "QEMU USB HARDDRIVE"),
+                                     ("1-2", "authorized", device), ("1-2", "removable", "removable"),
+                                     ("1-2:1.0", "bInterfaceClass", "08"), ("1-2:1.0", "bInterfaceSubClass", "06"),
+                                     ("1-2:1.0", "bInterfaceProtocol", "50"), ("1-2:1.0", "authorized", interface)):
+                sys_file(f"bus/usb/devices/{name}/{leaf}", text + "\n")
+            (fake / "class/block").mkdir(parents=True, exist_ok=True)
+            (fake / "class/block/sdb").symlink_to("../../" + place)
+            (fake / "class/block/sdb1").symlink_to("../../" + place + "/sdb1")
+            return session("rm -f /root/usb.policy\n" + (f"printf '{policy}' > /root/usb.policy\n" if policy else "") +
+                           "cp /tmp/stick.img /dev/sdb1\n" + say("setup") + say("setup update usb") +
+                           say("setup update usb a b") + say("setup rollback a b") + say("setup rollback"))
+
+        held = "sdb is held by the device policy, so what it carries is not read"
+        for device, interface, policy, what in (("0", "0", "", "the kernel holds"),
+                                                ("1", "1", "mode off\\ndeny 46f4:0001/STICK1\\n", "the policy denies")):
+            got, done = stick_session(device, interface, policy)
+            seen = answers(got)
+            check(done and seen.get("setup", {"status": None})["status"] == 0 and
+                  any(line.strip() == held for line in seen["setup"]["out"]),
+                  f"setup says a stick whose USB device {what} is held, and does not read it", repr(seen.get("setup")))
+        got, done = stick_session("1", "1", "")
+        seen = answers(got)
+        check(done and seen.get("setup", {"status": None})["status"] == 0 and
+              not any("held by the device policy" in line or " on sdb1" in line for line in seen["setup"]["out"]),
+              "a stick the policy lets in is looked at, and one that carries nothing is not said", repr(seen.get("setup")))
+        check(seen.get("setup update usb a b", {}).get("status") == 2 and seen.get("setup rollback a b", {}).get("status") == 2,
+              "update usb and rollback with a word too many are a usage page", repr(seen.get("setup rollback a b")))
+        check(seen.get("setup update usb", {}).get("status") == 1 and
+              any(line.endswith("nothing here can be asked: moonwater setup update usb yes")
+                  for line in seen["setup update usb"]["out"]) and
+              seen.get("setup rollback", {}).get("status") == 1 and
+              any(line.endswith("nothing here can be asked: moonwater setup rollback yes")
+                  for line in seen["setup rollback"]["out"]),
+              "update usb and rollback with nothing to ask and no yes write nothing, and say the words that would",
+              repr((seen.get("setup update usb"), seen.get("setup rollback"))))
+
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
         # crash part way through would: a list written in place was truncated
