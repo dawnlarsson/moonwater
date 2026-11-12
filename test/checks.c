@@ -92987,6 +92987,46 @@ static fn wls_greeted(struct waterlink_identity address_to from,
 }
 
 /*
+        A greeting from a member kept already is answered too: it greets
+        because it has no record of this machine, the first greeting back
+        having been lost, and nothing else would send it another, since its
+        announcements are a known machine's here. Not sooner than
+        LINK_GREET_AGAIN after the last greeting to its place, so two members
+        do not answer each other for ever, and never for a greeting played
+        back.
+*/
+static fn greeting_answers(bipolar listener, p16 port)
+{
+        p8 back[WATERLINK_DATAGRAM + 16];
+        p64 first = 50000000;
+
+        link_self.me = wls_b;
+        wls_group_file(0, 0, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 40, port, first);
+        check("a new member is greeted back",
+              wls_peers_count() == 1 &&
+                      wls_heard(listener, back) == WATERLINK_DATAGRAM);
+        wls_greeted(address_of wls_client, "machine-a", 41, port,
+                    first + 1000000);
+        check("sec: one kept already that greets again is not answered inside "
+              "its place's interval",
+              wls_peers_count() == 1 && wls_heard(listener, back) <= 0);
+        wls_greeted(address_of wls_client, "machine-a", 42, port,
+                    first + LINK_GREET_AGAIN + 1);
+        check("and is answered once that has passed: its greeting back was "
+              "lost, and it has no other way to this machine",
+              wls_heard(listener, back) == WATERLINK_DATAGRAM);
+        wls_greeted(address_of wls_client, "machine-a", 42, port,
+                    first + 2 * LINK_GREET_AGAIN + 2);
+        check("sec: and a greeting played back is answered by nothing",
+              wls_heard(listener, back) <= 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+}
+
+/*
         A greeting is its sender's clock when it was sent, and one that is
         not about now is a recording: from a member that was forgotten and
         whose marker was dropped since, it brought that member back at the
@@ -96783,6 +96823,7 @@ b32 main(void)
         quiet_streams();
         control_records_are_canonical();
         greetings(listener, port);
+        greeting_answers(listener, port);
         greeting_freshness(listener, port);
         mdns_amplification();
         mdns_interface_selection();

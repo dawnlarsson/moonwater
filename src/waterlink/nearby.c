@@ -1450,10 +1450,19 @@ static p8 link_pair_greeted(positive group, p8 address_to key,
 
         if (!link_greeting_fresh(group, hello))
                 return false;
+        //      A new member is greeted back at once. One kept already is too,
+        //      as any place is, not sooner than LINK_GREET_AGAIN after the
+        //      last greeting sent there: it greets because it does not have
+        //      this machine, the greeting back having been lost, and nothing
+        //      else would ever send it another -- it is known here, so its
+        //      announcements are not greeted, and it stayed a peer of this
+        //      machine that refused this machine, for good.
         if (link_pair_keep(group, key, hello + WATERLINK_STAMP_BYTES,
                            network_load_32(hello + 4), address, port,
                            address_of accepted))
                 link_pair_begin(group, address, port, now, true);
+        else if (accepted && link_greet_allowed(address, now))
+                link_pair_begin(group, address, port, now, false);
         if (accepted)
                 link_nearby.linked = true;
         return accepted;
