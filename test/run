@@ -21065,7 +21065,7 @@ moonwater canvas cursor look dark
 echo m13-set
 sleep 5
 moonwater canvas background default
-moonwater canvas cursor size auto
+moonwater canvas cursor size default
 moonwater canvas cursor look auto
 echo m13-back
 sleep 5

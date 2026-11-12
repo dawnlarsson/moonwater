@@ -128024,22 +128024,22 @@ static void check_compositor_look(void)
                   settings_slider_step(size) == 5 && string_equals((string_address)size->standard, (string_address) "80") &&
                   string_equals((string_address)size->unit, (string_address) "percent") && !setting_kept(size, (string_address) "", &value) &&
                   value == 80 && compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, "", &value) == 0 && value == 80);
-        check("look: a size kept before it was a percent reads as it meant: 2 as 200, 4 as 400, 1 as 100 and auto as 100",
+        check("look: a size kept before it was a percent reads as it meant: 2 as 200, 4 as 400, 1 as 100, and auto, the standard size, as the standard 80",
               size && setting_kept(size, (string_address) "2", &value) && value == 200 && setting_kept(size, (string_address) "4", &value) &&
                   value == 400 && setting_kept(size, (string_address) "1", &value) && value == 100 &&
-                  setting_kept(size, (string_address) "auto", &value) && value == 100 &&
+                  setting_kept(size, (string_address) "auto", &value) && value == 80 &&
                   compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, "2", &value) && value == 200 &&
                   !string_compare(setting_shown(size, (string_address) "2", shown, sizeof(shown)), (string_address) "200 percent") &&
-                  !string_compare(setting_shown(size, (string_address) "auto", shown, sizeof(shown)), (string_address) "100 percent") &&
+                  !string_compare(setting_shown(size, (string_address) "auto", shown, sizeof(shown)), (string_address) "80 percent") &&
                   !string_compare(setting_shown(size, (string_address) "", shown, sizeof(shown)), (string_address) "80 percent"));
         check("look: and those words typed are refused, as a number outside 50 to 300 is",
               size && !setting_parse(size, (string_address) "2", kept, sizeof(kept), &value) &&
                   !setting_parse(size, (string_address) "auto", kept, sizeof(kept), &value) &&
                   setting_parse(size, (string_address) "125", kept, sizeof(kept), &value) && value == 125);
-        check("look: a program that draws its own pointer is told 24 pixels times the percent: 19 at 80, 24 at 100, 72 at 300, 48 for a 2 kept before",
+        check("look: a program that draws its own pointer is told 24 pixels times the percent: 19 at 80, 24 at 100, 72 at 300, 48 for a 2 kept before, 19 for an auto kept before (the standard)",
               setting_cursor_pixels((string_address) "") == 19 && setting_cursor_pixels((string_address) "100") == 24 &&
                   setting_cursor_pixels((string_address) "300") == 72 && setting_cursor_pixels((string_address) "50") == 12 &&
-                  setting_cursor_pixels((string_address) "2") == 48 && setting_cursor_pixels((string_address) "auto") == 24);
+                  setting_cursor_pixels((string_address) "2") == 48 && setting_cursor_pixels((string_address) "auto") == 19);
     }
 }
 

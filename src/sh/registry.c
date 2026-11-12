@@ -398,7 +398,8 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]"),
     //  The pointer's size (compositor.c's compositor_cursor_size): a percent of the size the desktop's scale gives it, which is 100;
-    //  the standard, 80, is a little smaller. A file kept before it was a percent says auto or 1 to 4 (setting_cursor_size_was).
+    //  the standard, 80, is a little smaller. A file kept before it was a percent says auto, which is the standard, or 1 to 4, a size
+    //  of its own (setting_cursor_size_was).
     SETTING_PLAIN_ROW(null, "Cursor size (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "size"), "size ", null,
                       .type = SETTING_NUMBER, .path = SETTING_CURSOR_SIZE_PATH,
                       .standard = "80", .unit = "percent", .low = 50, .high = 300,
@@ -939,8 +940,10 @@ static bool setting_cursor_size_was(const struct settings_row address_to row, st
 {
         if (!row->path || !string_equals((string_address)row->path, (string_address)SETTING_CURSOR_SIZE_PATH))
                 return false;
+        // auto was the standard size, and it reads as the standard is now, a little smaller than the desktop's; a number was a size of
+        // the person's own, and reads as the size it drew.
         if (string_equals(word, (string_address) "auto"))
-                address_to percent = 100;
+                address_to percent = (long)string_digits((string_address)row->standard, null);
         else if (word[0] >= '1' && word[0] <= '4' && !word[1])
                 address_to percent = (word[0] - '0') * 100;
         else
