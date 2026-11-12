@@ -705,6 +705,18 @@ static fn link_nearby_join(b32 index, p32 address, p32 mask)
         link_nearby.interfaces++;
 }
 
+/*
+        Every interface with an IPv4 address, handed to visit with its index,
+        that address in host order and its netmask: net.c's walk of the
+        addresses, which is the one the network setup already trusts. Linux
+        walks them with netlink; Darwin has no netlink, and walks them with
+        getifaddrs, which is the BSD routine for the same list. The listener
+        asks each for the membership and keeps its address for the A record
+        (link_nearby_join); the doctor and the status ask the same walk what
+        this machine can reach, so they say what the listener finds.
+*/
+typedef fn (address_to link_interface_visitor)(b32 index, p32 address, p32 mask);
+
 #if !defined(MACOS)
 /* The netmask of a prefix length, in host order; 0 for none. */
 static p32 link_prefix_mask(p8 prefix)
@@ -714,42 +726,33 @@ static p32 link_prefix_mask(p8 prefix)
         return 0xffffffffu << (32 - prefix);
 }
 
-/* The netlink walk's callback: one address of the dump, IPv4 and with a local address. */
-static p8 link_nearby_address(netlink_header address_to header,
-                                address_any context)
+/* The netlink walk's callback: one address of the dump, IPv4 and with a local address, to the visitor the context names. */
+static p8 link_interface_address(netlink_header address_to header,
+                                   address_any context)
 {
         netlink_address address_to body =
             netlink_message_body(header, sizeof(netlink_address));
         positive size = 0;
         p8 address_to host;
 
-        (void)context;
-        if (header->type != RTM_NEWADDR || !body ||
-            link_nearby.interfaces == LINK_INTERFACES)
+        if (header->type != RTM_NEWADDR || !body)
                 return true;
         host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
                              address_of size);
         if (body->family != AF_INET || !host || size < 4)
                 return true;
-        link_nearby_join((b32)body->index, network_load_32(host),
-                         link_prefix_mask(body->prefix));
+        (address_to (link_interface_visitor address_to)context)(
+            (b32)body->index, network_load_32(host),
+            link_prefix_mask(body->prefix));
         return true;
 }
 #endif
 
-/*
-        Every interface with an IPv4 address that takes the membership, and
-        that address for the A record: net.c's walk of the addresses, which
-        is the one the network setup already trusts. Linux walks them with
-        netlink; Darwin has no netlink, and walks them with getifaddrs, which
-        is the BSD routine for the same list.
-*/
-#if defined(MACOS)
-static fn link_nearby_interfaces(void)
+static fn link_interfaces_each(link_interface_visitor visit)
 {
+#if defined(MACOS)
         struct ifaddrs *list = null;
 
-        link_nearby.interfaces = 0;
         if (getifaddrs(&list) < 0)
                 return;
         for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
@@ -770,23 +773,25 @@ static fn link_nearby_interfaces(void)
                 if (entry->ifa_netmask && entry->ifa_netmask->sa_family == AF_INET)
                         mask = network_load_32((p8 address_to)(void address_to)
                                                        entry->ifa_netmask + 4);
-                link_nearby_join(index, network_load_32(raw + 4), mask);
+                visit(index, network_load_32(raw + 4), mask);
         }
         freeifaddrs(list);
-}
 #else
-static fn link_nearby_interfaces(void)
-{
         bipolar handle = netlink_open_groups(0);
 
-        link_nearby.interfaces = 0;
         if (handle < 0)
                 return;
         (void)netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
-                           AF_INET, link_nearby_address, null);
+                           AF_INET, link_interface_address, address_of visit);
         system_close((b32)handle);
-}
 #endif
+}
+
+static fn link_nearby_interfaces(void)
+{
+        link_nearby.interfaces = 0;
+        link_interfaces_each(link_nearby_join);
+}
 
 static fn link_nearby_close(void)
 {

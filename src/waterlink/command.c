@@ -1649,25 +1649,68 @@ static positive link_code_symbols(string_address text)
         return used;
 }
 
-/*      Whether this machine has a route to the discovery group. A datagram
-        socket connected to it sends nothing: the connect fails only when the
-        kernel has no route, which is the answer. */
-static p8 link_has_route(void)
+/*
+        What discovery can use on this machine, asked of every interface but
+        loopback as the listener asks it (link_nearby_join, link_nearby_send):
+        ROUTE when a datagram to the group has a way out of one, JOINS when
+        one takes the group's membership. Each is asked with the interface
+        named, on a socket closed straight after. Asked of no interface the
+        kernel answers from its routes, and a network with no default route --
+        two machines on a cable, a segment that goes nowhere else -- has none
+        to 224.0.0.251: a code was refused there with "no route to a network"
+        and nothing sent, and the doctor failed its route and its discovery,
+        on a network the listener was announcing on.
+*/
+#define LINK_REACH_ROUTE 1
+#define LINK_REACH_JOINS 2
+
+static positive link_reach_found;
+
+static fn link_reach_interface(b32 index, p32 address, p32 mask)
 {
+#if defined(MACOS)
+        struct in_addr out = {network_order_32(address)};
+        link_ip_mreq join = {network_order_32(WATERLINK_MDNS_GROUP),
+                             network_order_32(address)};
+#else
+        link_mreqn out = {0, 0, index};
+        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, index};
+#endif
         socket_address_internet to = {
             .family = AF_INET, .port = network_order_16(WATERLINK_MDNS_PORT),
             .host = network_order_32(WATERLINK_MDNS_GROUP)};
-        bipolar handle = link_datagram_socket(AF_INET);
-        p8 routed;
+        bipolar handle = (address >> 24) == 127 ? -1
+                                               : link_datagram_socket(AF_INET);
+        bipolar joined;
 
+        (void)index;
+        (void)mask;
         if (handle < 0)
-                return false;
+                return;
 #if defined(MACOS)
         to.length = sizeof to;
 #endif
-        routed = socket_connect((b32)handle, address_of to, sizeof to) >= 0;
+        if (link_option_set((b32)handle, IPPROTO_IP, IP_MULTICAST_IF,
+                            address_of out, sizeof out) >= 0 &&
+            socket_connect((b32)handle, address_of to, sizeof to) >= 0)
+                link_reach_found |= LINK_REACH_ROUTE;
+        joined = link_option_set((b32)handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                                 address_of join, sizeof join);
+        if (joined >= 0 || joined == -EADDRINUSE)
+                link_reach_found |= LINK_REACH_JOINS;
         socket_close((b32)handle);
-        return routed;
+}
+
+static positive link_reach(void)
+{
+        link_reach_found = 0;
+        link_interfaces_each(link_reach_interface);
+        return link_reach_found;
+}
+
+static p8 link_has_route(void)
+{
+        return (link_reach() & LINK_REACH_ROUTE) != 0;
 }
 
 static b32 link_pair_here(string_address expect)
@@ -1866,77 +1909,12 @@ static fn link_doctor_add(p32 host)
         link_doctor_list[link_doctor_used] = 0;
 }
 
-#if !defined(MACOS)
-/* The netlink walk's callback: one IPv4 address of the dump. */
-static p8 link_doctor_address(netlink_header address_to header,
-                              address_any context)
+/* One address of the walk, for the doctor's list. */
+static fn link_doctor_interface(b32 index, p32 address, p32 mask)
 {
-        netlink_address address_to body =
-            netlink_message_body(header, sizeof(netlink_address));
-        positive size = 0;
-        p8 address_to host;
-
-        (void)context;
-        if (header->type != RTM_NEWADDR || !body)
-                return true;
-        host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
-                            address_of size);
-        if (body->family != AF_INET || !host || size < 4)
-                return true;
-        link_doctor_add(network_load_32(host));
-        return true;
-}
-
-static fn link_doctor_walk(void)
-{
-        bipolar handle = netlink_open_groups(0);
-
-        if (handle < 0)
-                return;
-        (void)netlink_dump((b32)handle, RTM_GETADDR, sizeof(netlink_address),
-                           AF_INET, link_doctor_address, null);
-        system_close((b32)handle);
-}
-#else
-static fn link_doctor_walk(void)
-{
-        struct ifaddrs *list = null;
-
-        if (getifaddrs(&list) < 0)
-                return;
-        for (struct ifaddrs *entry = list; entry; entry = entry->ifa_next)
-        {
-                p8 address_to raw;
-
-                if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
-                        continue;
-                //      A sockaddr_in is sin_len, sin_family, sin_port, then the
-                //      address in network order at offset 4.
-                raw = (p8 address_to)(void address_to)entry->ifa_addr;
-                link_doctor_add(network_load_32(raw + 4));
-        }
-        freeifaddrs(list);
-}
-#endif
-
-/*      Whether a multicast join takes on this machine: the join discovery
-        makes, on a socket that is closed straight after. */
-static b32 link_doctor_multicast(void)
-{
-#if defined(MACOS)
-        link_ip_mreq join = {network_order_32(WATERLINK_MDNS_GROUP), 0};
-#else
-        link_mreqn join = {network_order_32(WATERLINK_MDNS_GROUP), 0, 0};
-#endif
-        bipolar handle = link_datagram_socket(AF_INET);
-        bipolar joined;
-
-        if (handle < 0)
-                return false;
-        joined = link_option_set((b32)handle, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                                 address_of join, sizeof join);
-        socket_close((b32)handle);
-        return joined >= 0 || joined == -EADDRINUSE;
+        (void)index;
+        (void)mask;
+        link_doctor_add(address);
 }
 
 /*      Whether the port is free to take: a socket bound to it, closed again. */
@@ -1960,6 +1938,7 @@ static b32 link_doctor(void)
         positive failed = 0;
         positive port = (positive)link_port();
         positive listener;
+        positive reach = link_reach();
 
         host_read_word(LINK_SWITCH_PATH, word, sizeof word);
         on = string_equals((string_address)word, "on");
@@ -1992,7 +1971,7 @@ static b32 link_doctor(void)
 
         link_doctor_used = 0;
         link_doctor_list[0] = 0;
-        link_doctor_walk();
+        link_interfaces_each(link_doctor_interface);
         if (link_doctor_used)
                 string_format(log, "  pass  addresses: %s\n",
                               (string_address)link_doctor_list);
@@ -2004,7 +1983,7 @@ static b32 link_doctor(void)
                                    "cable), then moonwater link doctor\n");
         }
 
-        if (link_has_route())
+        if (reach & LINK_REACH_ROUTE)
                 string_format(log, "  pass  route: a route to a network\n");
         else
         {
@@ -2014,7 +1993,7 @@ static b32 link_doctor(void)
                                    "cable), then moonwater link doctor\n");
         }
 
-        if (link_doctor_multicast())
+        if (reach & LINK_REACH_JOINS)
                 string_format(log, "  pass  discovery: multicast works, so machines "
                                    "find each other with no address\n");
         else

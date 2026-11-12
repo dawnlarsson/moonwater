@@ -93375,6 +93375,7 @@ static fn nearby_address(void)
         netlink_header address_to header = (netlink_header address_to)message;
         netlink_address address_to body = (netlink_address address_to)(message + 16);
         p8 refused_all = true;
+        link_interface_visitor joins = link_nearby_join;
 
         wls_group();
         link_nearby.socket = wls_quiet_socket();
@@ -93386,44 +93387,44 @@ static fn nearby_address(void)
         memory_copy(message + 24, "\x08\x00\x02\x00\x7f\x00\x00\x01", 8);
 
         check("an address of an interface is joined and kept, with its address",
-              link_nearby_address(header, null) &&
+              link_interface_address(header, address_of joins) &&
                       link_nearby.interfaces == 1 &&
                       link_nearby.interface[0] == 1 &&
                       link_nearby.interface_address[0] == 0x7f000001);
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         check("sec: the same interface again is kept once",
               link_nearby.interfaces == 1);
 
         //      The refresh starts from nothing, and the group is joined on the
         //      socket already: the kernel says so, and it is as good as new.
         link_nearby.interfaces = 0;
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         check("an interface joined already is joined",
               link_nearby.interfaces == 1);
 
         link_nearby.interfaces = 0;
         body->family = AF_INET6;
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         body->family = AF_INET;
         header->type = RTM_NEWADDR + 1;
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         header->type = RTM_NEWADDR;
         header->length = 16 + 8;
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         header->length = 16 + 8 + 8;
         message[26] = 3; // an attribute that is not the local address
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         message[26] = 2;
         message[24] = 4; // an address of two bytes
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         message[24] = 8;
         body->index = 0x7ffffff0; // an interface nobody has
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         refused_all &= link_nearby.interfaces == 0;
         check("sec: another family, another message, a short one, another "
               "attribute, a short address and an interface that is not there "
@@ -93432,7 +93433,7 @@ static fn nearby_address(void)
 
         body->index = 1;
         link_nearby.interfaces = LINK_INTERFACES;
-        (void)link_nearby_address(header, null);
+        (void)link_interface_address(header, address_of joins);
         check("sec: a table that is full takes no more",
               link_nearby.interfaces == LINK_INTERFACES);
         link_nearby_close();
