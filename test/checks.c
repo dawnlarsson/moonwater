@@ -128091,6 +128091,74 @@ static void check_compositor_cursor_style(void)
             same &= drawn_fill == fills * size * size && drawn_edge == edges * size * size && !others && edges > 0;
         }
     check("cursor style: every classic shape at once and twice its size is its bitmap's own pixels, each ink whole and nothing between, inside its cell", same);
+
+    /*
+        At a scale between, nothing of a bitmap is left out: the middle of every cell with ink is a pixel of the picture's square, and that
+        pixel has ink. The hot pixel's place was the cells before the hot cell rounded down, and at four fifths the square started a cell
+        in, past the tip of the resize arrows (CP_RESIZE_H's first column, CP_MOVE's).
+    */
+    {
+        static const int between[] = {128, 192, 205, 320, 384};
+        int whole = 1;
+
+        for (unsigned int shape = 0; shape < CP_SHAPES; shape++)
+            for (unsigned int at = 0; at < sizeof(between) / sizeof(between[0]); at++)
+            {
+                unsigned char covers[2][CP_SPAN_MOST];
+                int span;
+
+                p = (struct compositor_pointer){.shape = shape, .scale = between[at]};
+                span = compositor_pointer_span(&p, &hot_x, &hot_y);
+                for (int cy = 0; cy < CP_CELL; cy++)
+                    for (int cx = 0; cx < CP_CELL; cx++)
+                    {
+                        long long across = ((long long)(cx - compositor_cursor_hot[shape][0]) * 256 + 128) * between[at];
+                        long long down = ((long long)(cy - compositor_cursor_hot[shape][1]) * 256 + 128) * between[at];
+                        int px = hot_x + (int)(across >= 0 ? across / 65536 : -((-across + 65535) / 65536));
+                        int py = hot_y + (int)(down >= 0 ? down / 65536 : -((-down + 65535) / 65536));
+
+                        if (compositor_cursor_art[shape][cy][cx] == '.')
+                            continue;
+                        if (px < 0 || py < 0 || px >= span || py >= span)
+                        {
+                            whole = 0;
+                            continue;
+                        }
+                        compositor_pointer_row(&p, py, span, hot_x, hot_y, covers[0], covers[1]);
+                        whole &= covers[0][px] || covers[1][px];
+                    }
+            }
+        check("cursor style: at a half, three quarters, four fifths, one and a quarter and one and a half times, every cell of a bitmap with ink is in its square and drawn",
+              whole);
+    }
+
+    /*
+        Below a whole scale a line of one cell is a pixel's worth of its ink: the arrow's outline down its left side, a cell wide, is a
+        whole pixel of the edge ink at four fifths and at a half (it was 80 percent of one at four fifths), and the dynamic circle's line
+        across its outline right of its middle is a pixel's worth at a half (it was half of one).
+    */
+    {
+        unsigned char covers[2][CP_SPAN_MOST];
+        int lined = 1, span, ink = 0;
+
+        for (int scale = 128; scale <= 205; scale += 77)
+        {
+            p = (struct compositor_pointer){.shape = CP_ARROW, .scale = scale};
+            span = compositor_pointer_span(&p, &hot_x, &hot_y);
+            for (int row = 1; row < 12 * scale / 256; row++)
+            {
+                compositor_pointer_row(&p, row, span, hot_x, hot_y, covers[0], covers[1]);
+                lined &= covers[1][0] == 255;
+            }
+        }
+        p = (struct compositor_pointer){.dyn = 1, .scale = 128, .hw = 8 * 256, .hh = 8 * 256, .c = 8 * 256};
+        span = compositor_pointer_span(&p, &hot_x, &hot_y);
+        compositor_pointer_row(&p, hot_y, span, hot_x, hot_y, covers[0], covers[1]);
+        for (int column = hot_x; column < span; column++)
+            ink += covers[1][column];
+        check("cursor style: below a whole scale the arrow's outline, a cell wide, is a whole pixel of its ink at four fifths and a half", lined);
+        check("cursor style: and the dynamic circle's line at a half its size is a pixel's worth of its ink", ink >= 240 && ink <= 270);
+    }
     check("cursor style: the hand's pointer is its fingertip and the arrow's its tip, the top of each",
           compositor_cursor_hot[CP_HAND][0] == 5 && compositor_cursor_hot[CP_HAND][1] == 0 && compositor_cursor_art[CP_HAND][0][5] == '#' &&
               compositor_cursor_art[CP_HAND][0][4] == '.' && compositor_cursor_art[CP_ARROW][0][0] == '#' && compositor_cursor_art[CP_ARROW][0][1] == '.');

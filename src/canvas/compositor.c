@@ -3328,14 +3328,33 @@ static const unsigned char compositor_cursor_by_edges[16] = {
     [CP_EDGE_BOTTOM | CP_EDGE_LEFT] = CP_RESIZE_NESW,
 };
 
-// A picture's square: its side in pixels, and the pixel of it the pointer is on (the dynamic shape's middle).
+/*
+        A picture's square: its side in pixels, and the pixel of it the pointer is on (the dynamic shape's middle). A bitmap's hot pixel
+        starts at its hot cell's corner (compositor_pointer_row), so it is as many pixels in as the cells before the hot cell take, rounded
+        up, and the square reaches as many past it as the cells after it take, rounded up: the whole cell is in it at any scale. At a
+        whole scale that is the cell's own side times the scale; at a scale between, the cells before the hot cell rounded down would
+        start the square inside the first column, and the tip of a resize arrow there (CP_RESIZE_H's, CP_MOVE's) was left out.
+*/
 static int compositor_pointer_span(const struct compositor_pointer *p, int *hot_x, int *hot_y)
 {
         const signed char *hot = compositor_cursor_hot[p->shape];
-        int span = ((p->dyn ? CP_DYN_CELL : CP_CELL) * p->scale + 255) >> 8;
+        int span;
 
-        *hot_x = p->dyn ? span / 2 : hot[0] * p->scale >> 8;
-        *hot_y = p->dyn ? span / 2 : hot[1] * p->scale >> 8;
+        if (p->dyn)
+        {
+                span = (CP_DYN_CELL * p->scale + 255) >> 8;
+                *hot_x = *hot_y = span / 2;
+        }
+        else
+        {
+                int wide, tall;
+
+                *hot_x = (hot[0] * p->scale + 255) >> 8;
+                *hot_y = (hot[1] * p->scale + 255) >> 8;
+                wide = *hot_x + (((CP_CELL - hot[0]) * p->scale + 255) >> 8);
+                tall = *hot_y + (((CP_CELL - hot[1]) * p->scale + 255) >> 8);
+                span = wide > tall ? wide : tall;
+        }
         return span < CP_SPAN_MOST ? span : CP_SPAN_MOST;
 }
 
@@ -3344,14 +3363,17 @@ static int compositor_pointer_span(const struct compositor_pointer *p, int *hot_
         circle when its corner radius is its half extents): the place's distance to the outline is its distance to the nearest side, or
         to the corner's arc where it is past both of a corner's centre lines, and that distance in pixels is the cover outright, half a
         pixel either side of the outline, so the edge is as smooth as a pixel's 256 levels allow at any size. The edge ink is the cell
-        inside the outline. A stretched shape is asked where the place was before the stretch (along the motion it is divided by the
-        stretch, across it multiplied, so the area stays), and its distance there is put back in the screen's pixels by the length the
-        stretch gives the outline's normal, which keeps the edge one cell wide all the way round. A place deep inside or well outside
-        is answered without a square root.
+        inside the outline, and a pixel of it below a whole scale, where a cell is less: a line thinner than a pixel was a faint grey
+        ring round the circle at 50 percent on a light ground. A stretched shape is asked where the place was before the stretch (along
+        the motion it is divided by the stretch, across it multiplied, so the area stays), and its distance there is put back in the
+        screen's pixels by the length the stretch gives the outline's normal, which keeps the edge as wide all the way round. A place
+        deep inside or well outside is answered without a square root.
 */
 static void compositor_dyn_cover(const struct compositor_pointer *p, long long u, long long v, unsigned char *fill, unsigned char *edge)
 {
         long long a = 256 + p->grow, half = 32768 / p->scale + 1, reach = half * a / 256 + 1, x, y, away, nx = 64, ny = 0, along, across, outer, inner;
+        long long line = p->scale < 256 ? 256 : p->scale; // the edge's width, in 256ths of a pixel: a cell, and a pixel at least
+        long long lined = line * 256 / p->scale;           // and in 256ths of a cell
 
         *fill = *edge = 0;
         away = (p->hw + p->hh) * a / 256 + half; // nothing of the shape is further than this from its middle, on either axis
@@ -3366,7 +3388,7 @@ static void compositor_dyn_cover(const struct compositor_pointer *p, long long u
         x = (u < 0 ? -u : u) - (p->hw - p->c), y = (v < 0 ? -v : v) - (p->hh - p->c); // from the corner's centre
         if (x > 0 && y > 0)
         {
-                long long square = x * x + y * y, out = p->c + reach, in = p->c - 256 * a / 256 - reach;
+                long long square = x * x + y * y, out = p->c + reach, in = p->c - lined * a / 256 - reach;
 
                 if (square >= out * out)
                         return;
@@ -3391,7 +3413,7 @@ static void compositor_dyn_cover(const struct compositor_pointer *p, long long u
         }
         away = away * p->scale / 256; // 256ths of a pixel from the outline, less inside it
         outer = away < -128 ? 256 : away > 128 ? 0 : 128 - away;
-        inner = away + p->scale < -128 ? 256 : away + p->scale > 128 ? 0 : 128 - away - p->scale;
+        inner = away + line < -128 ? 256 : away + line > 128 ? 0 : 128 - away - line;
         *edge = (unsigned char)((outer - inner) * 255 / 256);
         *fill = (unsigned char)(inner ? inner * 255 / (256 - (outer - inner)) : 0);
 }
@@ -3402,7 +3424,10 @@ static void compositor_dyn_cover(const struct compositor_pointer *p, long long u
         are worked out at the pixel's middle (compositor_dyn_cover). A bitmap's pixel is n by n samples of its cell, each at its place
         (from the hot pixel's corner, over the scale) and no two in one row or one column of the pixel, so at a whole scale every sample
         of a pixel is in one cell and the covers are all or none, and at a scale between an edge along the rows is as smooth as one
-        across them.
+        across them. Below a whole scale a pixel is more than a cell, and the bitmaps' lines are a cell wide: each ink's samples count 256
+        over the scale times (the edge's first, the fill's out of what the edge leaves, neither past the whole pixel), so a line of one
+        cell is a pixel's worth of its ink wherever it falls. Counted once each, the outline of the arrow at 80 percent was a grey of 80
+        percent at best and two greys of 40 where it fell between two pixels, and at 50 percent a line was half grey all along.
 */
 static void compositor_pointer_row(const struct compositor_pointer *p, int row, int span, int hot_x, int hot_y, unsigned char *fill, unsigned char *edge)
 {
@@ -3428,6 +3453,16 @@ static void compositor_pointer_row(const struct compositor_pointer *p, int row, 
 
                                 inks[ink == '#' ? 2 : ink == 'o']++;
                         }
+                if (p->scale < 256)
+                {
+                        int lined = inks[2] * 255 * 256 / (all * p->scale), filled = inks[1] * 255 * 256 / (all * p->scale);
+
+                        lined = lined < 255 ? lined : 255;
+                        filled = filled < 255 - lined ? filled : 255 - lined;
+                        edge[column] = (unsigned char)lined;
+                        fill[column] = (unsigned char)(filled ? filled * 255 / (255 - lined) : 0);
+                        continue;
+                }
                 edge[column] = (unsigned char)(inks[2] * 255 / all);
                 fill[column] = (unsigned char)(inks[1] ? inks[1] * 255 / (all - inks[2]) : 0);
         }
