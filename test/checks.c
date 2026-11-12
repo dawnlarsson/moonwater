@@ -152243,6 +152243,157 @@ static fn check_kit_view(void)
               view_check_last == 1 && (asks & UI_VIEW_QUIT));
 }
 
+/*
+        A scroll container of the view: a band of 40 and under it a column that scrolls, twelve rows of 60 in the 150 that a window 200 by 190
+        leaves it, each row a colour of its own; nested, the third row is a scroll container too, 60 tall with four rows of 30 in it. The
+        scroller is the view's, where these rows read it: what declares the column keeps nothing. The clock is the check's, a frame at a time.
+*/
+static unsigned int view_scroll_pixels[200 * 190];
+static b32 view_scroll_nested;
+
+static fn view_scroll_build(void)
+{
+        ui_view_begin(&view_check, &view_check_ui, 200, -190);
+        ui_host(&view_check_head, .h = 40);
+        ui_col(.class = "scroll", .grow = 1)
+                for (int k = 0; k < 12; k++)
+                        ui_col(.class = view_scroll_nested && k == 2 ? "scroll" : null, .h = 60, .shrink = 1, .paint = 0xff000010u + (unsigned int)k)
+                                for (int inner = 0; inner < 4 && view_scroll_nested && k == 2; inner++)
+                                        ui_host(null, .h = 30);
+        ui_view_end(&view_check);
+}
+
+// An event at the check's time, 8 ms after the last: the screen declared again, then the view's.
+static p32 view_scroll_send(unsigned int type, unsigned int flags, int a, int b)
+{
+        struct window_event event = {type, flags, a, b};
+
+        ui_kit.test_clock += 8000000;
+        ui_event_context(&event);
+        view_scroll_build();
+        return ui_view_event(&view_check_ui, &view_check, &event);
+}
+
+// A frame: the kit's time a display period on, and the screen declared at it (which steps the scrollers). True while one of them moves.
+static b32 view_scroll_frame(void)
+{
+        ui_kit.now = ui_kit.test_clock += 16666667, ui_kit.busy = 0;
+        view_scroll_build();
+        return ui_body_going(&view_check.scroll[0].body) || ui_body_going(&view_check.scroll[1].body);
+}
+
+static fn view_scroll_rest(void)
+{
+        for (int frame = 0; frame < 400 && view_scroll_frame(); frame++)
+                ;
+}
+
+static fn check_kit_view_scroll(void)
+{
+        struct ui_scroll address_to s = &view_check.scroll[0];
+        const struct ui_node address_to box = &view_check.tree.node[2], address_to row = &view_check.tree.node[3];
+        unsigned int wheel_off = ui_kit.wheel_off, scroll_off = ui_kit.scroll_off, speed = ui_kit.scroll_speed;
+        int notch = UI_ROW * UI_WHEEL_TENTHS / 10, most = 12 * 60 - 150, outside = 0;
+        b32 held = true, busy;
+        p32 asks;
+
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(&view_check_ui, sizeof(view_check_ui));
+        view_check_ui.scale = 100;
+        ui_kit.wheel_off = ui_kit.scroll_off = ui_kit.scroll_speed = 0, ui_kit.rtl = 0, ui_kit_held = null;
+        ui_kit.now = ui_kit.test_clock = 7000000000ll;
+        view_scroll_nested = false;
+        view_scroll_build();
+        check("kit view scroll: a column that scrolls has the room its window leaves it and its rows keep their size, and its scroller is the view's: what scrolls, what shows of it, and its bar down the trailing edge",
+              view_check.scrolls == 1 && box->y == 40 && box->h == 150 && row[0].y == 40 && row[0].h == 60 && row[11].y == 40 + 11 * 60 && s->content == 12 * 60 &&
+                  s->view == 150 && s->y == 40 && s->height == 150 && s->x == 200 - UI_SCROLL_WIDTH && s->scroll == 0);
+
+        // The wheel: a notch over it glides it a notch on, the kit busy while it moves; off it the notch is nobody's.
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 100);
+        asks = view_scroll_send(WINDOW_EVENT_WHEEL, 0, -120, 0);
+        view_scroll_frame();
+        busy = ui_kit.busy;
+        view_scroll_rest();
+        check("kit view scroll: a notch of the wheel over it is the view's and moves its rows a notch up, the kit busy while it glides and idle when it rests",
+              asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && busy && !ui_kit.busy && s->scroll == notch && box->offset == notch && row[0].y == 40 - notch);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 20);
+        asks = view_scroll_send(WINDOW_EVENT_WHEEL, 0, -120, 0);
+        check("kit view scroll: a notch with the pointer off it is not the view's and moves nothing", asks == 0 && !view_scroll_frame() && s->scroll == notch);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 100);
+        for (int k = 0; k < 12; k++)
+        {
+                view_scroll_send(WINDOW_EVENT_WHEEL, 0, -120, 0);
+                view_scroll_frame();
+                held &= box->offset >= 0 && box->offset <= most;
+        }
+        view_scroll_rest();
+        check("kit view scroll: turned past its end it rests at the end, the last row's foot on its own, and its rows were never laid out past it",
+              held && s->scroll == most && box->offset == most && row[11].y + row[11].h == box->y + box->h);
+
+        // The picture: the rows are painted in the container's rows and nowhere else, and the bar is over them.
+        ui_scroll_set(s, 100);
+        view_scroll_build();
+        ui_begin(&view_check_ui, view_scroll_pixels, 200, 200, 190);
+        ui_view_draw(&view_check_ui, &view_check, false);
+        for (int y = 0; y < 40; y++)
+                for (int x = 0; x < 200; x++)
+                        outside += view_scroll_pixels[y * 200 + x] != 0;
+        check("kit view scroll: its rows are painted in its own rows and not above them: the row half scrolled out is cut at the container's top",
+              outside == 0 && view_scroll_pixels[40 * 200 + 10] == 0xff000011u && view_scroll_pixels[59 * 200 + 10] == 0xff000011u &&
+                  view_scroll_pixels[60 * 200 + 10] == 0xff000012u && view_scroll_pixels[189 * 200 + 10] == 0xff000014u);
+        check("kit view scroll: and its bar's thumb is painted over them, where its place puts it", view_scroll_pixels[75 * 200 + 195] != 0xff000012u &&
+                                                                                                   view_scroll_pixels[130 * 200 + 195] == 0xff000013u);
+
+        // The bar: a press on its track under the thumb pages; reading from the right it is down the other edge.
+        ui_scroll_set(s, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, s->x + UI_SCROLL_WIDTH / 2, 185);
+        asks = view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        view_scroll_send(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+        view_scroll_build();
+        check("kit view scroll: a press on its bar's track under the thumb is the view's and pages it a view down", asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) &&
+                                                                                                                     s->scroll == 150 && row[0].y == 40 - 150);
+        ui_kit.rtl = 1;
+        view_scroll_build();
+        check("kit view scroll: reading from the right its bar is down the other edge", s->x == 0 && box->x == 0 && box->w == 200);
+        ui_kit.rtl = 0;
+
+        // A finger: past the slop its drag moves the container with it, and its lift throws it no farther than its end.
+        ui_scroll_set(s, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 100, 150);
+        view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 100, 150 - UI_SLOP);
+        asks = view_scroll_send(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 100, 150 - UI_SLOP - 30);
+        check("kit view scroll: a finger's drag in it, past the slop, is the view's and moves it with the finger, one for one", asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) &&
+                                                                                                                                 s->scroll == 30);
+        view_scroll_send(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
+        view_scroll_rest();
+        check("kit view scroll: and its lift lets it go: thrown on, it rests inside its ends", !view_check.finger.down && s->scroll > 30 && s->scroll <= most);
+
+        // The keys: Down a line, End to the end.
+        ui_scroll_set(s, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 100);
+        asks = view_scroll_send(WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_DOWN, 0);
+        check("kit view scroll: Down is the view's and moves it a line", asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && s->scroll == UI_LINE);
+        view_scroll_send(WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_END, 0);
+        check("kit view scroll: and End takes it to its end", s->scroll == most);
+
+        // One inside another: the wheel turns the deepest under the pointer.
+        view_scroll_nested = true;
+        ui_scroll_set(s, 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 170);
+        asks = view_scroll_send(WINDOW_EVENT_WHEEL, 0, -120, 0);
+        view_scroll_rest();
+        check("kit view scroll: one scroll container inside another has a scroller of its own, and the wheel over it turns it and not the outer one",
+              view_check.scrolls == 2 && asks == (UI_VIEW_DRAW | UI_VIEW_TAKEN) && view_check.scroll[1].scroll == 60 && view_check.scroll[1].content == 120 && s->scroll == 0);
+        view_scroll_send(WINDOW_EVENT_MOTION, 0, 100, 100);
+        view_scroll_send(WINDOW_EVENT_WHEEL, 0, -120, 0);
+        view_scroll_rest();
+        check("kit view scroll: and over the outer one's own rows the wheel turns the outer one", s->scroll == notch && view_check.scroll[1].scroll == 60);
+        view_scroll_nested = false;
+        ui_kit.wheel_off = wheel_off, ui_kit.scroll_off = scroll_off, ui_kit.scroll_speed = speed;
+        ui_kit.test_clock = 0, ui_kit.busy = 0;
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -165908,6 +166059,7 @@ b32 main()
         check_kit_confirm_repeat();
         check_kit_layout();
         check_kit_view();
+        check_kit_view_scroll();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
