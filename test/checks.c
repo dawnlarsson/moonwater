@@ -166331,6 +166331,59 @@ static fn check_editor_comments(void)
         check("editor colours: every line of a block comment of twenty lines with apostrophes in its words is the comment's, opened fresh", fresh);
         check("editor colours: and after a letter typed before the comment on its first line, and the line after its close is code again", edited);
 }
+
+// Whether every line of a document has the tokens a document opened with its text has: the states its edits kept are the ones a
+// tokenizing from the start finds.
+static b32 editor_tokens_fresh(struct doc address_to doc)
+{
+        static struct doc_token one[512], two[512];
+        static p8 copy[1024];
+        struct doc fresh;
+        positive length = doc_read(doc, 0, copy, sizeof(copy));
+        b32 same = true;
+
+        doc_open(&fresh, copy, length);
+        fresh.language = doc->language;
+        for (p64 line = 0; line < doc_line_count(doc); line++)
+        {
+                positive a = doc_tokens(doc, line, one, 512), b = doc_tokens(&fresh, line, two, 512);
+
+                same = same && a == b && !memory_compare(one, two, a * sizeof(one[0]));
+        }
+        doc_close(&fresh);
+        return same;
+}
+
+/*
+        A change that takes line breaks and puts as many (three lines written over three) tokenizes again every line it put before a
+        line's state may be found as it was: the lines past it are coloured as they are now and not as they were. Three lines whose
+        third is a comment's opener, written over three of code the view has looked at, make the two lines after them the comment's;
+        and an undo that puts such three lines back over three of code does the same: each as a document opened with that text has it.
+*/
+static fn check_editor_lines_put(void)
+{
+        static const char code[] = "a\nb\nc\nd\ne\n", opener[] = "a\nb\n/*\nd\ne\n";
+        struct doc doc;
+        b32 written, undone;
+
+        doc_open(&doc, (const p8 address_to)code, sizeof(code) - 1);
+        doc.language = DOC_LANGUAGE_C;
+        // The view has looked at every line: their states are known before the change.
+        editor_tokens_fresh(&doc);
+        doc_replace(&doc, 0, 5, (const p8 address_to) "a\nb\n/*", 6);
+        written = editor_comment_lines(&doc, 2, 4) && editor_tokens_fresh(&doc);
+        doc_close(&doc);
+        // The opener written over with code before the view looked, the view looks at every line, and the undo puts the opener back.
+        doc_open(&doc, (const p8 address_to)opener, sizeof(opener) - 1);
+        doc.language = DOC_LANGUAGE_C;
+        doc_replace(&doc, 0, 6, (const p8 address_to) "a\nb\nc", 5);
+        editor_tokens_fresh(&doc);
+        doc_undo(&doc);
+        undone = editor_comment_lines(&doc, 2, 4) && editor_tokens_fresh(&doc);
+        doc_close(&doc);
+        check("editor colours: three lines written over three, the third a comment's opener, make the lines after them the comment's", written);
+        check("editor colours: and an undo that puts such three lines back over three of code does too, as a document opened with that text has it", undone);
+}
 #endif
 
 #if MOONWATER_UI_ANY
@@ -169952,6 +170005,7 @@ b32 main()
 #endif
 #if MOONWATER_UI_EDITOR
         check_editor_comments();
+        check_editor_lines_put();
 #endif
 
         // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.

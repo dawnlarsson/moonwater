@@ -3478,8 +3478,17 @@ static fn doc_changed(struct doc address_to doc, p64 at, p64 removed, p64 insert
                 doc->states_valid = edge;
         }
 #undef DOC_MOVED
-        if (edge + lines_inserted > doc->states_last_edit)
-                doc->states_last_edit = edge + lines_inserted;
+        /*
+                Every line the change put text on is tokenized again before a state may be found as it was: past the line the
+                inserted text ends on. That is more than edge + lines_inserted when the change took line breaks as well as put
+                them, which the lines' difference does not show (three lines put over three).
+        */
+        {
+                p64 put = doc_line_of(doc, at + inserted) + 1;
+
+                if (put > doc->states_last_edit)
+                        doc->states_last_edit = put;
+        }
 }
 
 // The pieces of a tree put in place of length bytes at at: the raw move undo and redo make.
