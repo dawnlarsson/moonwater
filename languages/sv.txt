@@ -95,6 +95,7 @@ settings_device_drive	8683	disk, %s
 settings_device_name	5f12	Enhetens namn
 settings_device_none	3cd5	Inga diskar eller USB-enheter hittades
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	klart
 settings_edit_keys	d161	Enter ställer in, Escape lämnar som det var, ett klick utanför ställer också in
 settings_filter_hint	4aa0	Skriv för att filtrera

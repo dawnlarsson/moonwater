@@ -95,6 +95,7 @@ settings_device_drive	8683	disque, %s
 settings_device_name	5f12	Nom de l'appareil
 settings_device_none	3cd5	Aucun disque ni périphérique USB trouvé
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	terminé
 settings_edit_keys	d161	Enter l'applique, Escape le laisse tel quel, un clic à côté l'applique aussi
 settings_filter_hint	4aa0	Saisir pour filtrer

@@ -96,6 +96,7 @@ settings_device_drive	8683	כונן, %s
 settings_device_name	5f12	שם ההתקן
 settings_device_none	3cd5	לא נמצאו כוננים או התקני USB
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	בוצע
 settings_edit_keys	d161	Enter קובע, Escape משאיר כפי שהיה, ולחיצה בחוץ קובעת גם כן
 settings_filter_hint	4aa0	הקלד כדי לסנן

@@ -96,6 +96,7 @@ settings_device_drive	8683	ڈرائیو، %s
 settings_device_name	5f12	ڈیوائس کا نام
 settings_device_none	3cd5	کوئی ڈرائیو یا USB آلہ نہیں ملا
 settings_device_usb	20ae	USB %1$s، %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	ہو گیا
 settings_edit_keys	d161	Enter اسے لاگو کرتا ہے، Escape پہلے جیسا رکھتا ہے، اور باہر کلک بھی لاگو کرتا ہے
 settings_filter_hint	4aa0	فلٹر کرنے کے لیے لکھیں

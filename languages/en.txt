@@ -93,6 +93,7 @@ settings_device_drive	8683	drive, %s
 settings_device_name	5f12	Name of the device
 settings_device_none	3cd5	No drives or USB devices found
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	done
 settings_edit_keys	d161	Enter sets it, Escape keeps it, a click outside sets it too
 settings_filter_hint	4aa0	Type to filter

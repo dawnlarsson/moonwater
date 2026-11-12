@@ -143023,9 +143023,16 @@ static fn check_settings_device_strip(void)
 
                 memory_zero(&line, sizeof(line));
                 settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 2, &line);
-                check("settings: a USB device's line is its name, then USB, its port and its state, and its port is what a press allows or blocks",
+                check("settings: a USB device's line is its name, then USB and its port, its state the tab chosen and not said again, and its port is what a press allows or blocks",
                       string_equals((string_address)items[2].label, (string_address) "Stick") && string_equals((string_address)items[2].port, (string_address) "1-1") &&
-                          line.kind == UI_ROW_TABS && line.at == 0 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1, allowed"));
+                          line.kind == UI_ROW_TABS && line.at == 0 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1"));
+                // A port held until it is allowed shows deny chosen, as one blocked does: its line says waiting, which the tabs cannot.
+                string_copy_bounded((string_address)items[2].state, (string_address) "waiting", sizeof(items[2].state));
+                items[2].flags &= ~SETTINGS_ITEM_JOINED;
+                memory_zero(&line, sizeof(line));
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 2, &line);
+                check("settings: a USB device waiting to be allowed has deny chosen and says waiting, which the tabs cannot tell from blocked",
+                      line.kind == UI_ROW_TABS && line.at == 1 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1, waiting"));
         }
         {
                 struct ui_row line;
@@ -143150,11 +143157,11 @@ static fn check_settings_device_strip(void)
 
                         memory_zero(&described, sizeof(described));
                         settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &described);
-                        check("settings: a device line too long for its label keeps its state word",
+                        check("settings: a device line too long for its label keeps its state, which deny chosen shows, and its port",
                               settings.item_count[2] == 1 && items[0].kind == SETTINGS_PORT && string_length((string_address)items[0].label) == 80 &&
                                   string_equals((string_address)items[0].state, (string_address) "blocked") &&
                                   described.kind == UI_ROW_TABS && described.at == 1 && described.note &&
-                                  string_equals((string_address)described.note, (string_address) "USB 1-2, blocked"));
+                                  string_equals((string_address)described.note, (string_address) "USB 1-2"));
                 }
         }
 }

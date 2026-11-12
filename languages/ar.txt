@@ -96,6 +96,7 @@ settings_device_drive	8683	محرك، %s
 settings_device_name	5f12	اسم الجهاز
 settings_device_none	3cd5	لم يُعثر على محركات أو أجهزة USB
 settings_device_usb	20ae	USB %1$s، %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	تم
 settings_edit_keys	d161	Enter يضبطه، Escape يبقيه كما كان، والنقر خارجه يضبطه أيضا
 settings_filter_hint	4aa0	اكتب للتصفية

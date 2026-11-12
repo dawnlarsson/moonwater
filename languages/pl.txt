@@ -95,6 +95,7 @@ settings_device_drive	8683	dysk, %s
 settings_device_name	5f12	Nazwa urządzenia
 settings_device_none	3cd5	Nie znaleziono dysków ani urządzeń USB
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	gotowe
 settings_edit_keys	d161	Enter ustawia, Escape zostawia bez zmian, kliknięcie obok też ustawia
 settings_filter_hint	4aa0	Wpisz, aby filtrować

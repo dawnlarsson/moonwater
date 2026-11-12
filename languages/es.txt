@@ -95,6 +95,7 @@ settings_device_drive	8683	unidad, %s
 settings_device_name	5f12	Nombre del dispositivo
 settings_device_none	3cd5	No se encontraron unidades ni dispositivos USB
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	hecho
 settings_edit_keys	d161	Enter lo aplica, Escape lo deja como estaba, un clic fuera también lo aplica
 settings_filter_hint	4aa0	Escriba para filtrar

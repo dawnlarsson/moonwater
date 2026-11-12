@@ -5026,18 +5026,24 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 else if (item->kind == SETTINGS_DEVICE)
                         row->value = WORDS(settings_kept);
                 /*
-                        Every device's line is one design: its name, then in the quiet ink what kind it is and its state, then its size
-                        (a drive) or the kit's two tabs, allow and deny, the one its state is selected (a port: one not allowed is denied).
+                        Every device's line is one design: its name, then in the quiet ink what kind it is, then its size and its state (a
+                        drive) or the kit's two tabs, allow and deny, the one its state is selected (a port: one not allowed is denied). The
+                        tabs say allowed and blocked, so a port's line does not say them again; it says waiting, a port held until it is
+                        allowed, which the tabs cannot tell from one denied.
                 */
                 else if (item->kind == SETTINGS_PORT)
                 {
+                        b32 waiting = string_equals((string_address)item->state, (string_address) "waiting");
+
                         row->kind = UI_ROW_TABS, row->words = settings_port_words();
                         row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
-                        if (item->flags & SETTINGS_ITEM_USB)
+                        if (item->flags & SETTINGS_ITEM_USB && waiting)
                                 language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port,
                                                 settings_state_word(item->state));
+                        else if (item->flags & SETTINGS_ITEM_USB)
+                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_port), item->port);
                         else
-                                string_copy_bounded((string_address)settings_device_note, (string_address)settings_state_word(item->state),
+                                string_copy_bounded((string_address)settings_device_note, (string_address)(waiting ? settings_state_word(item->state) : ""),
                                                     sizeof(settings_device_note));
                         row->note = settings_device_note[0] ? settings_device_note : null;
                 }

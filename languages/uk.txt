@@ -95,6 +95,7 @@ settings_device_drive	8683	диск, %s
 settings_device_name	5f12	Назва пристрою
 settings_device_none	3cd5	Диски та USB-пристрої не знайдено
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	готово
 settings_edit_keys	d161	Enter задає, Escape залишає як було, клацання поза полем теж задає
 settings_filter_hint	4aa0	Введіть для фільтрації

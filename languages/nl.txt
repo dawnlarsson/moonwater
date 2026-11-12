@@ -95,6 +95,7 @@ settings_device_drive	8683	schijf, %s
 settings_device_name	5f12	Naam van het apparaat
 settings_device_none	3cd5	Geen schijven of USB-apparaten gevonden
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	klaar
 settings_edit_keys	d161	Enter stelt het in, Escape laat het zoals het was, een klik ernaast stelt het ook in
 settings_filter_hint	4aa0	Typ om te filteren

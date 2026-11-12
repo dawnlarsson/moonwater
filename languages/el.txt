@@ -95,6 +95,7 @@ settings_device_drive	8683	δίσκος, %s
 settings_device_name	5f12	Όνομα της συσκευής
 settings_device_none	3cd5	Δεν βρέθηκαν δίσκοι ή συσκευές USB
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_port	42c3	USB %s
 settings_done	8071	έγινε
 settings_edit_keys	d161	το Enter το ορίζει, το Escape το αφήνει όπως ήταν, και ένα κλικ έξω το ορίζει
 settings_filter_hint	4aa0	Πληκτρολογήστε για φιλτράρισμα
