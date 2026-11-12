@@ -150095,7 +150095,7 @@ static void bounds_row(int id, struct ui_row address_to row)
         row->label = "Row";
 }
 
-static void bounds_list_make(const struct ui address_to ui, struct ui_list address_to l, int rows, int h)
+static void bounds_list_make(struct ui address_to ui, struct ui_list address_to l, int rows, int h)
 {
         memory_zero(l, sizeof(*l));
         l->count = rows, l->ids = rows, l->describe = bounds_row, l->empty = "", l->focus = -1, l->hover = l->down = -1;
@@ -153744,6 +153744,156 @@ static fn check_kit_view_wrap(void)
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         memory_zero(&view_check, sizeof(view_check));
+}
+
+/*
+        A list whose words wrap, in the block face (14 pixels a character), 300 wide (its words between insets of 14): a switch row whose
+        label is 19 characters (266) beside the switch, in the 210 the switch leaves it, is two lines (14 and 4), 60 tall; a switch row of
+        4 is a row; a row of 24 with a value of 4 gives the zone its third (80) and wraps in the 182 left (three lines of 9, 9 and 4), as
+        wide as its widest line after, 80 tall; a row of 4 with a value of 24 has the value wrap in the 200 the zone leaves it (14 and 9),
+        each line ending at the row's end, 60 tall; and a row of two lines folding at half is 30 of its 60.
+*/
+static const struct
+{
+        const char address_to label, address_to value;
+        int kind;
+        b64 reveal;
+} list_wrap_rows[] = {
+    {"aaaa bbbb cccc dddd", null, UI_ROW_SWITCH, UI_ONE},
+    {"aaaa", null, UI_ROW_SWITCH, UI_ONE},
+    {"aaaa bbbb cccc dddd eeee", "ffff", UI_ROW_PLAIN, UI_ONE},
+    {"aaaa", "vvvv wwww xxxx yyyy zzzz", UI_ROW_PLAIN, UI_ONE},
+    {"aaaa bbbb cccc dddd", null, UI_ROW_SWITCH, UI_ONE / 2},
+};
+static unsigned int list_wrap_pixels[300 * 400], list_wrap_other[300 * 400];
+
+static void list_wrap_row(int id, struct ui_row address_to row)
+{
+        row->label = list_wrap_rows[id].label, row->value = list_wrap_rows[id].value, row->kind = list_wrap_rows[id].kind;
+        row->reveal = list_wrap_rows[id].reveal, row->on = id == 0;
+}
+
+// The list drawn whole into pixels (300 by 400, cleared).
+static fn list_wrap_draw(struct ui address_to ui, struct ui_list address_to l, unsigned int address_to pixels)
+{
+        memory_zero(pixels, sizeof(list_wrap_pixels));
+        ui_begin(ui, pixels, 300, 300, 400);
+        ui_list_draw(ui, l);
+}
+
+// The first and last columns inked in rows top to bottom and columns left to right of them (-1 for none).
+static int list_wrap_ink(const unsigned int address_to pixels, int top, int bottom, int left, int right, int address_to last)
+{
+        int first = -1;
+
+        *last = -1;
+        for (int y = top; y < bottom; y++)
+                for (int x = left; x < right; x++)
+                        if (pixels[y * 300 + x])
+                                first = first < 0 || x < first ? x : first, *last = x > *last ? x : *last;
+        return first;
+}
+
+static fn check_kit_list_wrap(void)
+{
+        static unsigned int scratch[300 * UI_SCRATCH_ROWS];
+        static font_face face;
+        static struct ui_list l, plain;
+        struct ui ui;
+        struct ui_control address_to toggle;
+        int first[4], last[4], aim;
+        b32 heights, lines, same = true, mirror = true, centred, hits, lit = true;
+
+        rtl_font_make();
+        if (font_load(&face, rtl_font_bytes, rtl_font_size, 0) != 0)
+        {
+                check("kit list wrap: the block face loads", false);
+                return;
+        }
+        ui = terminal.ui;
+        ui.scale = 100, ui.scratch = scratch, ui.scratch_width = 300, ui.band_top = ui.band_bottom = 0, ui.mono = null, ui.scene = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.rtl = 0, ui_kit.motion = 0, ui_kit_held = null;
+        ui_kit.test_clock = 6000000000ull, ui_kit.now = ui_kit.test_clock;
+        ui_kit_settle();
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        for (int k = 0; k < 2; k++)
+        {
+                struct ui_list address_to list = k ? &plain : &l;
+
+                memory_zero(list, sizeof(*list));
+                list->count = list->ids = 5, list->describe = list_wrap_row, list->empty = "", list->focus = list->hover = list->down = -1;
+                list->wrap = !k;
+                for (int at = 0; at < 5; at++)
+                        list->id[at] = (unsigned short)at;
+                ui_begin(&ui, list_wrap_pixels, 300, 300, 400);
+                ui_list_place(&ui, list, 0, 0, 300, 400);
+                ui_list_layout(&ui, list);
+        }
+        heights = l.tall[0] == 60 && l.tall[1] == 40 && l.tall[2] == 80 && l.tall[3] == 60 && l.whole[4] == 60 && l.tall[4] == 30 && l.top[1] == 60 &&
+                  l.top[2] == 100 && l.top[3] == 180 && l.top[4] == 240 && l.content == 270 && plain.tall[0] == 40 && plain.content == 180;
+        check("kit list wrap: a row whose words do not fit its room is as tall as its lines (60, 80 and 60 for two, three and two), one whose words fit is a row (40), one that folds is its share of its lines, and the rows under them follow",
+              heights);
+
+        // Drawn: the lines of a label from the row's start, in a block in the middle of the row; a value's each ending at the row's end.
+        list_wrap_draw(&ui, &l, list_wrap_pixels);
+        first[0] = list_wrap_ink(list_wrap_pixels, 10, 30, 0, 220, &last[0]), first[1] = list_wrap_ink(list_wrap_pixels, 30, 50, 0, 220, &last[1]);
+        first[2] = list_wrap_ink(list_wrap_pixels, 0, 10, 0, 220, &last[2]), first[3] = list_wrap_ink(list_wrap_pixels, 50, 60, 0, 220, &last[3]);
+        lines = first[0] == 14 && last[0] == 209 && first[1] == 14 && last[1] == 69 && first[2] < 0 && first[3] < 0;
+        first[0] = list_wrap_ink(list_wrap_pixels, 190, 210, 80, 300, &last[0]), first[1] = list_wrap_ink(list_wrap_pixels, 210, 230, 80, 300, &last[1]);
+        first[2] = list_wrap_ink(list_wrap_pixels, 200, 220, 0, 80, &last[2]), first[3] = list_wrap_ink(list_wrap_pixels, 180, 200, 0, 80, &last[3]);
+        lines = lines && first[0] == 90 && last[0] == 285 && first[1] == 160 && last[1] == 285 && first[2] == 14 && last[2] == 69 && first[3] < 0;
+        check("kit list wrap: a label's lines are drawn from the row's start in a block in the middle of the row, a value's each ending at its end, and a short label is its one line in the middle",
+              lines);
+
+        // A row whose words fit is drawn as a list that does not wrap draws it: the second row, 60 down here and 40 in the other.
+        list_wrap_draw(&ui, &plain, list_wrap_other);
+        for (int y = 0; y < 40; y++)
+                for (int x = 0; x < 300; x++)
+                        same &= list_wrap_pixels[(60 + y) * 300 + x] == list_wrap_other[(40 + y) * 300 + x];
+        check("kit list wrap: a row whose words fit is the same pixels as in a list whose words do not wrap", same);
+
+        // Its switch in the middle of its 60, and a point anywhere down it is it; the next row starts under it.
+        toggle = ui_list_control(&l, 0, 0);
+        centred = toggle && toggle->kind == UI_SWITCH && toggle->y + toggle->h / 2 == 30;
+        hits = ui_list_hit(&ui, &l, 100, 1) == 0 && ui_list_hit(&ui, &l, 100, 59) == 0 && ui_list_hit(&ui, &l, 100, 60) == 1 &&
+               ui_list_hit(&ui, &l, 100, 179) == 2 && ui_list_hit(&ui, &l, 100, 255) == 4 && ui_list_hit(&ui, &l, 100, 270) == -1;
+        check("kit list wrap: a row's switch is in the middle of its lines, and a point anywhere down a row is that row, as far as it is tall", centred && hits);
+
+        // The keys on the first row: lit from its top to its foot, and not the row under it.
+        l.lit = 1, l.focus = 0;
+        list_wrap_draw(&ui, &l, list_wrap_other);
+        for (int y = 0; y < 60; y++)
+                lit &= list_wrap_other[y * 300 + 2] != list_wrap_pixels[y * 300 + 2];
+        lit = lit && list_wrap_other[62 * 300 + 2] == list_wrap_pixels[62 * 300 + 2];
+        check("kit list wrap: the row the keys are on is lit as tall as its lines", lit);
+
+        // Reading from the right: the picture is the mirror.
+        l.lit = 0, l.focus = -1;
+        ui_kit.rtl = 1;
+        ui_list_place(&ui, &l, 0, 0, 300, 400);
+        ui_list_layout(&ui, &l);
+        list_wrap_draw(&ui, &l, list_wrap_other);
+        ui_kit.rtl = 0;
+        for (int y = 0; y < 400; y++)
+                for (int x = 0; x < 300; x++)
+                        mirror &= list_wrap_other[y * 300 + 299 - x] == list_wrap_pixels[y * 300 + x];
+        check("kit list wrap: reading from the right the rows and their lines are the mirror of the rows from the left", mirror);
+
+        // A key's reveal brings all of a row into a view that shows less: the third row (100 to 180) in a view of 100 is shown to its foot.
+        ui_list_place(&ui, &l, 0, 0, 300, 100);
+        ui_list_layout(&ui, &l);
+        ui_scroll_set(&l.scroll, 0);
+        l.focus = 2;
+        ui_list_reveal(&ui, &l);
+        aim = (int)((l.scroll.body.target + UI_ONE / 2) >> UI_Q);
+        check("kit list wrap: the keys moving to a row bring all of its lines into view", aim == 80);
+        l.focus = -1;
+        if (ui_cuts)
+                memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
+        ui_kit.test_clock = 0;
 }
 
 static fn check_kit_view_controls(void)
@@ -159036,7 +159186,7 @@ static void fold_checks(void)
 {
         const b64 base = 1000000000ll, ms = 1000000ll;
         positive unit;
-        int closed, lines, open, mid_content;
+        int closed, lines, open, mid_content, tall_lines = 0;
         b64 mid;
         struct ui_row row;
 
@@ -159061,7 +159211,12 @@ static void fold_checks(void)
         check("settings fold: the chevron turns with the spring, part way between shut and open", row.turn == mid && row.expander == UI_ROW_EXPANDER_OPEN);
         fold_run(base + 100 * ms + fold_frame_ns, base + 2000 * ms);
         open = settings.list.content;
-        check("settings fold: at rest the lines are open at their height, and the rows under them moved down by it", settings_fold_at[fold_row] == UI_ONE && open == closed + lines * (int)unit);
+        // The lines' height: each as tall as its words, which wrap (the list's words do): more than a row each where they do not fit one.
+        for (int at = 0; at < settings.list.count; at++)
+                tall_lines += settings.list.id[at] >= (int)SETTINGS_ALL ? settings.list.whole[at] : 0;
+        string_format(log, "  settings fold: %b lines open, %b tall (a row each would be %b)\n", (bipolar)lines, (bipolar)tall_lines, (bipolar)(lines * (int)unit));
+        check("settings fold: at rest the lines are open at their height, and the rows under them moved down by it",
+              settings_fold_at[fold_row] == UI_ONE && tall_lines > lines * (int)unit && open == closed + tall_lines);
         check("settings fold: part way the rows under the lines were between shut and open (they move each frame)", mid_content > closed && mid_content < open);
         check("settings fold: at rest the board has no fold running", !settings_fold_live[fold_row] && !(ui_kit.busy));
 
@@ -159076,7 +159231,7 @@ static void fold_checks(void)
         // Reduced motion: at once, no spring.
         ui_kit.motion = 1;
         settings_toggle(fold_row);
-        check("settings fold: with reduced motion the lines are open at once, and no spring runs", settings_fold_at[fold_row] == UI_ONE && !settings_fold_live[fold_row] && settings.list.content == closed + lines * (int)unit);
+        check("settings fold: with reduced motion the lines are open at once, and no spring runs", settings_fold_at[fold_row] == UI_ONE && !settings_fold_live[fold_row] && settings.list.content == closed + tall_lines);
         settings_toggle(fold_row);
         check("settings fold: with reduced motion they shut at once", settings_fold_at[fold_row] == 0 && settings_sub_count == 0 && settings.list.content == closed);
         ui_kit.motion = 0;
@@ -167618,6 +167773,7 @@ b32 main()
         check_kit_mouse_drag();
         check_kit_view_controls();
         check_kit_view_wrap();
+        check_kit_list_wrap();
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();

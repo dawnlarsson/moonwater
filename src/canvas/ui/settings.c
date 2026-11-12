@@ -1880,6 +1880,7 @@ static fn settings_layout(void)
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
                 settings.list.hover = settings.list.down = -1;
+                settings.list.wrap = true; // a label, a value or a note too long for its row's room goes onto more lines, and the row with it
                 settings.map.display = settings.map.drag = -1;
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
                 {
@@ -3295,7 +3296,7 @@ static fn settings_reading_changed(int row)
         if (settings.page.menu_row == row)
                 ui_page_redraw(&settings.page);
         else if (!settings.page.card)
-                ui_list_damage(&settings.ui, &settings.list, row);
+                ui_list_row_changed(&settings.ui, &settings.list, row);
 }
 
 // Whether a row's verb waits for another machine (a pairing): its job has the pairing's time, and what it says while it waits is shown.

@@ -18653,9 +18653,11 @@ struct ui_list
         b32 lit;                           // the row the keys are on is shown (the keys are in it, or a search lists it)
         b32 keys;                          // and ringed: the keys are in it and the window has them
         int focus;                         // the row the keys are on, -1 none
+        b32 wrap;                          // a row's words that do not fit the room it gives them wrap, and the row is as tall as they are (else they are cut with dots)
         // The kit's.
         int top[UI_LIST_MOST];             // each place's top, from the list's
         int tall[UI_LIST_MOST];            // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
+        int whole[UI_LIST_MOST];           // each place's line as tall as its words: a row, or more where they wrap (a tall row's line is a row)
         unsigned char starts[UI_LIST_MOST]; // each place's first of a section, and with a header (UI_LIST_STARTS, _HEADED)
         int content;
         int x, y, w, h;                    // where it is in the window, device pixels: the box its words and controls keep to
@@ -18694,9 +18696,10 @@ static struct ui_control address_to ui_list_control(struct ui_list address_to l,
 }
 
 static int ui_row_drive_height(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row);
+static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row);
 
 // Where each row is: a header over the first of a section that has one, a gap under the last of each.
-static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_to l)
+static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
 {
         int y = 0, section = 0;
 
@@ -18712,9 +18715,11 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
                         y += ui_dev(ui, UI_SECTION);
                 section = row.section;
                 l->top[at] = y;
-                // A row is its share of a row while it folds: a line under an option that is opening or shutting (the app's spring).
-                // A tall row is as tall as a drive's line, its strip and its legend are (ui_row_drive_height); a row that folds is its share of that.
-                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, row.tall ? ui_row_drive_height(ui, l, &row) : ui_dev(ui, UI_ROW));
+                // A row is a row high, and in a list whose words wrap as tall as its lines (its own tree's height, ui_row_whole). A tall row
+                // is as tall as a drive's line, its strip and its legend are (ui_row_drive_height). A row that folds is its share of that: a
+                // line under an option that is opening or shutting (the app's spring).
+                l->whole[at] = l->wrap && !row.tall && ui->regular ? ui_row_whole(ui, l, l->id[at], &row) : ui_dev(ui, UI_ROW);
+                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, row.tall ? ui_row_drive_height(ui, l, &row) : l->whole[at]);
                 y += l->tall[at];
         }
         // A list in sections has the gap under its last one too; a list of rows alone ends with its last row.
@@ -18789,6 +18794,29 @@ static fn ui_list_damage_all(const struct ui address_to ui, const struct ui_list
 {
         if (l->damaged)
                 l->damaged(l->y - ui_dev(ui, UI_ROW), l->y + l->h + ui_dev(ui, UI_ROW));
+}
+
+/*
+        A row's words changed (a reading came back): it is drawn again. In a list whose words wrap a row is as tall as its lines, so one
+        that is not as tall as it was laid out has the rows laid out again, and the whole list is drawn again (what is under it moved, and
+        the bar's thumb with the rows' length).
+*/
+static fn ui_list_row_changed(struct ui address_to ui, struct ui_list address_to l, int id)
+{
+        int at = ui_list_at(l, id);
+        struct ui_row row;
+
+        if (at >= 0 && l->wrap && ui->regular)
+        {
+                ui_list_describe(l, id, &row);
+                if (!row.tall && ui_row_whole(ui, l, id, &row) != l->whole[at])
+                {
+                        ui_list_layout(ui, l);
+                        ui_list_damage_all(ui, l);
+                        return;
+                }
+        }
+        ui_list_damage(ui, l, id);
 }
 
 // The row under a point of the window, or -1.
@@ -19066,6 +19094,14 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_li
         it, at its end, a field, or the note in the room the value leaves and the value with its step marks or its chevron. A tall
         row (a drive) is a column: that line, its strip (each segment as wide as ui_strip_widths has it), its legend (a row of
         columns, each a column of entries) and a hairline.
+
+        In a list whose words wrap (ui_list.wrap), a label, a value and a note that do not fit the room their row gives them take as
+        many lines as they need (the kit's wrapper), and the row is as tall as its lines: the root's height is what they come to (the
+        layout's height for width, ui_row_measure), a row's for one line and a line more for each more. The label keeps a few words'
+        width at the least (ui_row_label_least, or its own where that is less) and a zone keeps its own least (a field's, or a value's
+        marks and a little of the value); what gives way past that is what gave way before (a slider's number, then its control), at a
+        width narrower than the rows need. A note whose longest word does not fit its room is dropped
+        whole, as it was. A tall row's line is a row and is cut, as every row of a list whose words do not wrap is.
 */
 static struct ui_row_parts
 {
@@ -19075,7 +19111,104 @@ static struct ui_row_parts
                 address_to legend, address_to rule, address_to segment[UI_STRIP_MOST], address_to entry[UI_STRIP_MOST + 1];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
         char label_cut[UI_CUT_TEXT], value_cut[UI_CUT_TEXT], number[40]; // and a slider's number with its unit
+        // A row whose words wrap: what its parts' lines are asked with, its note, its zone, and its label's width on one line (0: not yet measured).
+        b32 wraps;
+        struct ui address_to ui;
+        const char address_to note_shown;
+        struct ui_node address_to zone;
+        int label_one;
 } ui_row_parts;
+
+#define UI_ROW_LABEL_LEAST 120 // a label's least width in a list whose words wrap, logical pixels (more with the text past 100 percent): a few words a line
+
+// The least width of a label in a list whose words wrap, device pixels: a few words, wider as the text is past its size.
+static int ui_row_label_least(const struct ui address_to ui)
+{
+        return ui_dev(ui, ui_text_percent > 100 ? UI_ROW_LABEL_LEAST * (int)ui_text_percent / 100 : UI_ROW_LABEL_LEAST);
+}
+
+// The widest word of a text of a role (device pixels): what a line of it can be no narrower than without a word broken.
+static int ui_wrap_word(struct ui address_to ui, const char address_to text, int type)
+{
+        positive length = string_length((string_address)text), at = 0;
+        int most = 0;
+
+        while (at < length)
+        {
+                positive from;
+
+                while (at < length && (text[at] == ' ' || text[at] == '\n'))
+                        at++;
+                from = at;
+                while (at < length && text[at] != ' ' && text[at] != '\n')
+                        at++;
+                if (at > from)
+                {
+                        int wide = ui_wrap_span(ui, text, from, at, type, ui_types[type].size);
+
+                        most = wide > most ? wide : most;
+                }
+        }
+        return most;
+}
+
+/*
+        A part of a row whose words wrap, broken at width: its lines (with at given, where each starts and its bytes), 1 where its words fit
+        on one line (where a row's words have always been drawn). A note fits where it is narrower than its room (the room the value leaves
+        it, or its own part beside a control), and one that does not is its lines only where its longest word fits: else it has none, and is
+        dropped whole.
+*/
+static int ui_row_break(struct ui_row_parts address_to p, const struct ui_node address_to n, int width, positive address_to at, positive address_to bytes)
+{
+        b32 note = n == p->note, label = n == p->label;
+        const char address_to text = label ? p->label_shown : note ? p->note_shown : p->value_shown;
+        int type = note ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, room = note && p->note_room ? p->note_room->w - p->note_room->pad[1] : width, one;
+
+        if (!text)
+                return 1;
+        // A label that grows was not measured with the row: whether it fits is the kit's kept cut's answer (ui_fit), as it was before it
+        // could wrap, and it is measured only where it does not.
+        if (label && !p->label_one && ui_fit(p->ui, (string_address)text, UI_BODY_MEDIUM, width, p->label_cut, sizeof(p->label_cut)) == (string_address)text)
+                one = 0;
+        else if (label && !p->label_one)
+                one = p->label_one = ui_kit_measure(p->ui, (string_address)text, UI_BODY_MEDIUM);
+        else
+                one = label ? p->label_one : n->content[0];
+        if (note && p->note_room ? one < room : one <= width)
+        {
+                if (at)
+                        at[0] = 0, bytes[0] = string_length((string_address)text);
+                return 1;
+        }
+        if (note && ui_wrap_word(p->ui, text, type) > (p->note_room ? room - 1 : width))
+                return 0;
+        return ui_wrap_lines(p->ui, text, type, ui_types[type].size, width, at, bytes, UI_WRAP_MOST);
+}
+
+// A part of a row that wraps, as the layout asks it (ui_tree_run): the height of the row its lines make at a width, a row's for one line.
+static int ui_row_measure(address_any by, int node, int width)
+{
+        struct ui_row_parts address_to p = by;
+        const struct ui_node address_to n = &p->tree.node[node];
+        int type = n == p->note ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, lines = ui_row_break(p, n, width, null, null);
+
+        return ui_dev(p->ui, UI_ROW) + (lines > 1 ? (lines - 1) * ui_wrap_pitch(p->ui, type, ui_types[type].size) : 0);
+}
+
+// The widest of a text's lines at room (device pixels): what a label that wraps is wide.
+static int ui_wrap_widest(struct ui address_to ui, const char address_to text, int type, int room)
+{
+        positive at[UI_WRAP_MOST], bytes[UI_WRAP_MOST];
+        int count = ui_wrap_lines(ui, text, type, ui_types[type].size, room, at, bytes, UI_WRAP_MOST), most = 0;
+
+        for (int k = 0; k < count && k < UI_WRAP_MOST; k++)
+        {
+                int wide = ui_wrap_span(ui, text, at[k], at[k] + bytes[k], type, ui_types[type].size);
+
+                most = wide > most ? wide : most;
+        }
+        return most;
+}
 
 // A leaf of the tree being declared: UI_FIXED and its width, UI_GROW and its weight, or UI_FIT and what its words measure.
 static struct ui_node address_to ui_row_leaf(struct ui_tree address_to t, int kind, int value)
@@ -19087,21 +19220,27 @@ static struct ui_node address_to ui_row_leaf(struct ui_tree address_to t, int ki
         return n;
 }
 
-// The tree of a row height tall, declared and run: every part's rectangle from the row's own corner, as the row reads from the left.
-// words: its words are measured and placed (a row no pixel of which may be written has its controls placed and no word measured).
-static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row, int height, b32 words)
+// The tree of a row width wide and height tall (0: as tall as its lines), declared and run: every part's rectangle from the row's own
+// corner, as the row reads from the left. words: its words are measured and placed (a row no pixel of which may be written has its
+// controls placed and no word measured).
+static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row, int width, int height, b32 words)
 {
         struct ui_row_parts address_to p = &ui_row_parts;
         struct ui_tree address_to t = &p->tree;
         struct ui_node address_to n, address_to zone = null;
         struct ui_control address_to c = ui_list_trailing(ui, l, id, row);
-        int gap = ui_dev(ui, UI_ROW_GAP), inset = ui_dev(ui, UI_INSET), lead = ui_dev(ui, 16) - gap, size = ui_dev(ui, 4), marks;
+        int gap = ui_dev(ui, UI_ROW_GAP), inset = ui_dev(ui, UI_INSET), lead = ui_dev(ui, 16) - gap, size = ui_dev(ui, 4), marks = 0, own = 0, least = 0;
         b32 field = row->kind == UI_ROW_FIELD, held = row->kind == UI_ROW_TABS || row->kind == UI_ROW_SWATCHES || row->kind == UI_ROW_SLIDER;
+        b32 wraps = l->wrap && !row->tall && ui->regular;
 
         memory_zero(&p->mark, sizeof(*p) - offset_of(struct ui_row_parts, mark));
+        p->wraps = wraps && words, p->ui = ui;
         ui_tree_begin(t);
+        if (p->wraps && height <= 0)
+                t->measure = ui_row_measure, t->by = p;
         n = ui_tree_open(t);
-        n->size[0].kind = n->size[1].kind = UI_FIXED, n->size[0].value = l->w, n->size[1].value = height;
+        n->size[0].kind = UI_FIXED, n->size[0].value = width;
+        n->size[1] = height > 0 ? (struct ui_size){UI_FIXED, height, 0, UI_TREE_MOST, 0} : (struct ui_size){UI_FIT, 0, ui_dev(ui, UI_ROW), UI_TREE_MOST, 0};
         n->pad[0] = inset + (row->sub ? ui_dev(ui, 20) : 0), n->pad[1] = inset, n->gap = row->tall ? 0 : gap, n->dir = row->tall != 0;
         // A tall row is a column, and the first thing in it is its line, a row high, which is laid out as any row is.
         if (row->tall)
@@ -19109,9 +19248,11 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
+        least = wraps ? ui_row_label_least(ui) : 0;
         if (row->kind == UI_ROW_SWITCH || held)
         {
-                p->label = ui_row_leaf(t, UI_GROW, 1);
+                p->label = n = ui_row_leaf(t, UI_GROW, 1);
+                n->size[0].min = least, n->wrap = (short)p->wraps;
                 // A slider's number and its unit, from the slider's own value (the hand's while it holds it): a percent is written against its
                 // number (100%), any other unit after a blank (30 per second). A tabs row's note (a port's state) is where the number would be.
                 // A row too narrow for them gives up the number's node and then the control's: each ends where its node does, whole.
@@ -19127,27 +19268,30 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
                         p->value = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)p->number, UI_BODY_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT;
                 }
                 else if (c && words && row->kind == UI_ROW_TABS && row->note)
-                        p->note = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT;
+                        p->note = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM)), n->size[0].shrink = UI_TREE_WEIGHT,
+                        n->wrap = (short)p->wraps;
                 if (c && held)
                         p->control = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, c->w)), n->size[0].shrink = 1;
         }
         else
         {
-                p->label = n = ui_row_leaf(t, UI_FIT, row->label && (words || field) ? ui_kit_measure(ui, (string_address)row->label, UI_BODY_MEDIUM) : 0);
-                n->size[0].shrink = 1;
-                zone = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
-                n->size[0].min = (l->w - 2 * inset) * (field && row->head ? 2 : 1) / 3 - gap;
+                p->label_one = row->label && (words || field) ? ui_kit_measure(ui, (string_address)row->label, UI_BODY_MEDIUM) : 0;
+                p->label = n = ui_row_leaf(t, UI_FIT, p->label_one);
+                n->size[0].shrink = 1, n->size[0].min = p->label_one < least ? p->label_one : least, n->wrap = (short)p->wraps;
+                p->zone = zone = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
+                n->size[0].min = (width - 2 * inset) * (field && row->head ? 2 : 1) / 3 - gap;
                 if (field && c)
                 {
                         p->control = n = ui_row_leaf(t, UI_GROW, 1), n->margin[2] = n->margin[3] = ui_dev(ui, 6);
-                        n->size[0].min = ui_dev(ui, UI_ROW_FIELD_LEAST), n->size[0].max = row->head ? UI_TREE_MOST : ui_dev(ui, UI_ROW_FIELD_W);
+                        n->size[0].min = own = ui_dev(ui, UI_ROW_FIELD_LEAST), n->size[0].max = row->head ? UI_TREE_MOST : ui_dev(ui, UI_ROW_FIELD_W);
                 }
                 // A value keeps 16 from its label, and the note the gap from the label and from the value: its room is what the value leaves.
                 if (!field && words && row->note)
                 {
                         p->note_room = n = ui_tree_open(t), n->size[0].kind = UI_GROW, n->size[0].value = 1, n->justify = UI_END;
                         n->pad[1] = row->value ? gap - lead : 0;
-                        p->note = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM));
+                        p->note = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->note, UI_LABEL_MEDIUM));
+                        n->size[0].shrink = p->wraps, n->wrap = (short)p->wraps;
                         ui_tree_close(t);
                 }
                 if (!field && words && row->value)
@@ -19156,12 +19300,18 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
                         if (row->kind == UI_ROW_STEP)
                                 p->back = ui_row_leaf(t, UI_FIXED, marks = ui_kit_measure(ui, (string_address) "\xe2\x80\xba", UI_LABEL_LARGE));
                         p->value = n = ui_row_leaf(t, UI_FIT, ui_kit_measure(ui, (string_address)row->value, UI_BODY_MEDIUM)), n->size[0].shrink = 1;
+                        n->wrap = (short)p->wraps;
                         if (row->kind == UI_ROW_STEP)
                                 p->on = ui_row_leaf(t, UI_FIXED, marks);
                         else if (row->kind == UI_ROW_CHOICE)
                                 p->more = ui_row_leaf(t, UI_FIXED, 2 * size);
+                        // The zone's own least: the value's box less the value, and a little of the value.
+                        own = lead + (row->kind == UI_ROW_STEP ? 2 * (marks + ui_dev(ui, 8)) : row->kind == UI_ROW_CHOICE ? 2 * size + ui_dev(ui, 8) : 0) + ui_dev(ui, 24);
                         ui_tree_close(t);
                 }
+                // Where words wrap, the zone keeps its own least too: the label gives way first, down to a few words.
+                if (wraps && own > zone->size[0].min)
+                        zone->size[0].min = own;
                 ui_tree_close(t);
         }
         if (row->expander)
@@ -19204,10 +19354,26 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
                 p->rule = n = ui_row_leaf(t, UI_FIT, 0), n->size[1].kind = UI_FIXED, n->size[1].value = 1;
         }
         ui_tree_close(t);
-        ui_tree_run(t, l->w, height);
+        // Where words wrap, they are what they are: the label, the value and the note whole, broken into lines where they are drawn. A label
+        // of its own width that wraps is as wide as its widest line, and the zone is placed from that: run again.
+        if (p->wraps)
+        {
+                p->label_shown = row->label, p->note_shown = row->note;
+                if (p->value_box)
+                        p->value_shown = row->value;
+                ui_tree_run(t, width, height);
+                if (zone && p->label_shown && p->label_one > p->label->w)
+                {
+                        p->label->size[0] = (struct ui_size){UI_FIXED, ui_wrap_widest(ui, p->label_shown, UI_BODY_MEDIUM, p->label->w), 0, UI_TREE_MOST, 0};
+                        zone->size[0].min = own;
+                        ui_tree_run(t, width, height);
+                }
+                return;
+        }
+        ui_tree_run(t, width, height);
         // A tabs row's note (a port's state) that has not the room for its words whole is dropped, and the label has its room.
         if (p->note && !p->note_room && p->note->w < p->note->content[0])
-                p->note->size[0] = (struct ui_size){UI_FIXED, 0, 0, 0, 0}, ui_tree_run(t, l->w, height);
+                p->note->size[0] = (struct ui_size){UI_FIXED, 0, 0, 0, 0}, ui_tree_run(t, width, height);
         // The layout has no one to ask how wide a text is: the label and the value are cut to the nodes it gave them, to no less than 40 and 24.
         // A label that was cut is narrower than the room it was cut to, and the zone is placed from the label as it is written: run again.
         if (row->label && (words || field))
@@ -19217,11 +19383,23 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
         {
                 p->label->size[0] = (struct ui_size){UI_FIXED, ui_kit_measure(ui, (string_address)p->label_shown, UI_BODY_MEDIUM), 0, UI_TREE_MOST, 0};
                 zone->size[0].min = 0;
-                ui_tree_run(t, l->w, height);
+                ui_tree_run(t, width, height);
         }
         if (p->value_box)
                 p->value_shown = (const char address_to)ui_fit(ui, (string_address)row->value, UI_BODY_MEDIUM,
                                                                p->value->w < ui_dev(ui, 24) ? ui_dev(ui, 24) : p->value->w, p->value_cut, sizeof(p->value_cut));
+}
+
+static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row, int height, b32 words)
+{
+        ui_row_tree_at(ui, l, id, row, l->w, height, words);
+}
+
+// How tall a row is in a list whose words wrap (device pixels): its tree as tall as its lines, a row high at the least.
+static int ui_row_whole(struct ui address_to ui, struct ui_list address_to l, int id, const struct ui_row address_to row)
+{
+        ui_row_tree_at(ui, l, id, row, l->w, 0, true);
+        return ui_row_parts.tree.node[0].h;
 }
 
 // A row's control put in its part, in logical pixels (ui_logical). Across, it ends where its part ends, at the row's end side, and is its
@@ -19403,6 +19581,35 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_list address_to
 }
 
 /*
+        A part's words in a row whose words wrap (ui_row_break). Where they are one line they are drawn as a row's have always been: on
+        baseline (the line's in the middle of the row), in from the part's start, or ending where the part ends (closing: a value, a note).
+        Else their lines are a block in the middle of the part, each from its start or ending at its end. A note dropped is not drawn.
+*/
+static fn ui_row_text(struct ui address_to ui, struct ui_row_parts address_to p, const struct ui_node address_to n, int baseline, unsigned int ink, b32 closing)
+{
+        positive at[UI_WRAP_MOST], bytes[UI_WRAP_MOST];
+        int count = ui_row_break(p, n, n->w, at, bytes), type = n == p->note ? UI_LABEL_MEDIUM : UI_BODY_MEDIUM, pitch, top;
+        const char address_to text = n == p->label ? p->label_shown : n == p->note ? p->note_shown : p->value_shown;
+        char line[UI_WRAP_PROBE];
+
+        if (count == 1)
+        {
+                ui_row_words(ui, n, closing ? n->w - n->content[0] : 0, baseline, text, type, ink);
+                return;
+        }
+        pitch = ui_wrap_pitch(ui, type, ui_types[type].size);
+        top = n->y + (n->h - (ui_dev(ui, ui_types[type].line) + (count - 1) * pitch)) / 2;
+        for (int k = 0; k < count && k < UI_WRAP_MOST; k++)
+        {
+                positive keep = bytes[k] < sizeof(line) ? bytes[k] : sizeof(line) - 1;
+
+                memory_copy(line, text + at[k], keep);
+                line[keep] = 0;
+                ui_row_words(ui, n, closing ? n->w - ui_kit_measure(ui, (string_address)line, type) : 0, ui_kit_baseline(ui, top + k * pitch, type), line, type, ink);
+        }
+}
+
+/*
         A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
         the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
@@ -19461,13 +19668,20 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->mark))
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
                             ui_role(UI_PRIMARY), null);
-        if (p->label_shown)
+        // Where words wrap, the label, the note and the value are their lines (ui_row_text), one where they fit, drawn as below.
+        if (p->label_shown && p->wraps)
+                ui_row_text(ui, &ui_row_parts, p->label, baseline, ink, false);
+        else if (p->label_shown)
                 ui_row_words(ui, p->label, 0, baseline, p->label_shown, UI_BODY_MEDIUM, ink);
         // The note is dropped whole where the label and the value leave it no room to spare. It and the value end where their parts do: a
         // value that was cut is narrower than the room it was cut to.
-        if ((n = p->note) && n->w > 0 && (!p->note_room || n->w < p->note_room->w - p->note_room->pad[1]))
+        if ((n = p->note) && n->w > 0 && p->wraps)
+                ui_row_text(ui, &ui_row_parts, n, ui_row_baseline(ui, n, UI_LABEL_MEDIUM), row.mark ? strong : quiet, true);
+        else if ((n = p->note) && n->w > 0 && (!p->note_room || n->w < p->note_room->w - p->note_room->pad[1]))
                 ui_row_words(ui, n, n->w - n->content[0], ui_row_baseline(ui, n, UI_LABEL_MEDIUM), row.note, UI_LABEL_MEDIUM, row.mark ? strong : quiet);
-        if ((n = p->value))
+        if ((n = p->value) && p->wraps && p->value_box)
+                ui_row_text(ui, &ui_row_parts, n, baseline, row.tall || (row.kind != UI_ROW_PLAIN && !row.dim) ? strong : quiet, true);
+        else if ((n = p->value))
                 ui_row_words(ui, n, n->w - (p->value_shown == p->value_cut ? ui_kit_measure(ui, (string_address)p->value_cut, UI_BODY_MEDIUM) : n->content[0]), baseline,
                              p->value_shown, UI_BODY_MEDIUM, row.tall || (row.kind != UI_ROW_PLAIN && !row.dim) ? strong : quiet);
         if (p->back)
@@ -19544,12 +19758,12 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
                                             (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
                 }
-                // A row folding is cut to its share: its words stay in it while it shows less than a row.
+                // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
                 if (height > 0 && y + height > l->y && y < l->y + l->h)
                 {
                         int band_top = ui->top, band_bottom = ui->bottom;
 
-                        if (height < ui_dev(ui, UI_ROW))
+                        if (height < l->whole[at])
                                 ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
                         ui_list_row(ui, l, l->id[at], y, height);
                         ui->top = band_top, ui->bottom = band_bottom;
