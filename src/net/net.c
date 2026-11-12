@@ -2830,6 +2830,7 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
         crypto_hmac_key key;
         digest_state work;
         p8 block[64];
+        p8 next[64];
         p8 mix[64];
         p8 number[4];
 
@@ -2851,14 +2852,14 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
                 digest_close(address_of work, block);
                 memory_copy(mix, block, size);
 
+                //      A round is the HMAC of the round before under the
+                //      prepared key, which for SHA-256 is lib.c's body: two
+                //      compressions from the two kept states, where this
+                //      copied a digest state and fed and closed it twice.
                 for (positive round = 1; round < rounds; round++)
                 {
-                        work = key.inner;
-                        digest_write(address_of work, block, size);
-                        digest_close(address_of work, block);
-                        work = key.outer;
-                        digest_write(address_of work, block, size);
-                        digest_close(address_of work, block);
+                        crypto_hmac_prepared(address_of key, block, size, next);
+                        memory_copy(block, next, size);
                         for (positive at = 0; at < size; at++)
                                 mix[at] ^= block[at];
                 }
@@ -2869,6 +2870,7 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
         crypto_forget(address_of key, sizeof key);
         crypto_forget(address_of work, sizeof work);
         crypto_forget(block, sizeof block);
+        crypto_forget(next, sizeof next);
         crypto_forget(mix, sizeof mix);
 }
 
