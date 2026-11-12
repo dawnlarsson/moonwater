@@ -12506,7 +12506,9 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         b32 mid = vertical ? rx + rw / 2 : bare ? ry + rh / 2 : ry + rh - ui_q8(ui, 8) - ui_q8(ui, 24); // 48 tall, 8 above the row's bottom (a bare one's box is as tall as its thumb)
         b32 stop, gap = ui_q8(ui, 2), origin, half = ui_q8(ui, bar) / 2;
         struct ui_box fill, rest;
-        unsigned int accent = ui_role(UI_PRIMARY), off = ui_role(UI_CONTROL_OFF), ink, fill_ink = c->on ? ui_role(UI_OUTLINE) : accent;
+        // The rest of the track is a well: its role in a window of the kit's surface, and over glass (the tray's mixer) the ground's ink at
+        // a well's percent, where the role's opaque colour would stand as a block on what is under the window.
+        unsigned int accent = ui_role(UI_PRIMARY), off = ui_well(ui, UI_CONTROL_OFF, 30), ink, fill_ink = c->on ? ui_role(UI_OUTLINE) : accent;
         char shown[24];
         int baseline;
 
