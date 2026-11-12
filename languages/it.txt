@@ -98,7 +98,9 @@ settings_copied	0bd7	copiato negli appunti
 settings_device_drive	8683	unità, %s
 settings_device_name	5f12	Nome del dispositivo
 settings_device_none	3cd5	Nessuna unità o dispositivo USB trovato
+settings_device_sd	14ec	scheda SD, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	unità USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	fatto
 settings_edit_keys	d161	Enter lo imposta, Escape lo lascia com'era, anche un clic fuori lo imposta
@@ -255,7 +257,8 @@ ui_field_full	fe02	non ce ne sta di più
 =Cursor style	ad1e	Stile del puntatore
 =Date format	7a44	Formato della data
 =Devices	f320	Dispositivi
-=Devices in this machine	d7b8	Dispositivi di questa macchina
+=Internal storage	e961	Memoria interna
+=External devices	5769	Dispositivi esterni
 =Display	d9b5	Schermo
 =Double-click time (ms, or default)	9af1	Tempo del doppio clic (ms o default)
 =Drag lists with the mouse	4ee2	Trascina gli elenchi con il mouse

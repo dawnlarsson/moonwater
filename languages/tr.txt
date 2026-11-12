@@ -98,7 +98,9 @@ settings_copied	0bd7	panoya kopyalandı
 settings_device_drive	8683	sürücü, %s
 settings_device_name	5f12	Aygıtın adı
 settings_device_none	3cd5	Sürücü veya USB aygıtı bulunamadı
+settings_device_sd	14ec	SD kart, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	USB sürücü %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	tamam
 settings_edit_keys	d161	Enter ayarlar, Escape olduğu gibi bırakır, dışarıya tıklamak da ayarlar
@@ -255,7 +257,8 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Cursor style	ad1e	İmleç stili
 =Date format	7a44	Tarih biçimi
 =Devices	f320	Aygıtlar
-=Devices in this machine	d7b8	Bu makinedeki aygıtlar
+=Internal storage	e961	Dahili depolama
+=External devices	5769	Harici aygıtlar
 =Display	d9b5	Ekran
 =Double-click time (ms, or default)	9af1	Çift tıklama süresi (ms veya default)
 =Drag lists with the mouse	4ee2	Listeleri fareyle sürükle

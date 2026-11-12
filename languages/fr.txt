@@ -98,7 +98,9 @@ settings_copied	0bd7	copié dans le presse-papiers
 settings_device_drive	8683	disque, %s
 settings_device_name	5f12	Nom de l'appareil
 settings_device_none	3cd5	Aucun disque ni périphérique USB trouvé
+settings_device_sd	14ec	carte SD, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	clé USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	terminé
 settings_edit_keys	d161	Enter l'applique, Escape le laisse tel quel, un clic à côté l'applique aussi
@@ -255,7 +257,8 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Cursor style	ad1e	Style du pointeur
 =Date format	7a44	Format de la date
 =Devices	f320	Périphériques
-=Devices in this machine	d7b8	Périphériques de cette machine
+=Internal storage	e961	Stockage interne
+=External devices	5769	Périphériques externes
 =Display	d9b5	Écran
 =Double-click time (ms, or default)	9af1	Délai du double-clic (ms ou default)
 =Drag lists with the mouse	4ee2	Faire glisser les listes avec la souris

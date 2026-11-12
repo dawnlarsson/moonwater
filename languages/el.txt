@@ -98,7 +98,9 @@ settings_copied	0bd7	αντιγράφηκε στο πρόχειρο
 settings_device_drive	8683	δίσκος, %s
 settings_device_name	5f12	Όνομα της συσκευής
 settings_device_none	3cd5	Δεν βρέθηκαν δίσκοι ή συσκευές USB
+settings_device_sd	14ec	κάρτα SD, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	δίσκος USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	έγινε
 settings_edit_keys	d161	το Enter το ορίζει, το Escape το αφήνει όπως ήταν, και ένα κλικ έξω το ορίζει
@@ -255,7 +257,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Cursor style	ad1e	Στυλ δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
 =Devices	f320	Συσκευές
-=Devices in this machine	d7b8	Συσκευές σε αυτό το μηχάνημα
+=Internal storage	e961	Εσωτερικός χώρος αποθήκευσης
+=External devices	5769	Εξωτερικές συσκευές
 =Display	d9b5	Οθόνη
 =Double-click time (ms, or default)	9af1	Χρόνος διπλού κλικ (ms ή default)
 =Drag lists with the mouse	4ee2	Σύρσιμο λιστών με το ποντίκι

@@ -98,7 +98,9 @@ settings_copied	0bd7	skopiowano do schowka
 settings_device_drive	8683	dysk, %s
 settings_device_name	5f12	Nazwa urządzenia
 settings_device_none	3cd5	Nie znaleziono dysków ani urządzeń USB
+settings_device_sd	14ec	karta SD, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	dysk USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	gotowe
 settings_edit_keys	d161	Enter ustawia, Escape zostawia bez zmian, kliknięcie obok też ustawia
@@ -255,7 +257,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =Cursor style	ad1e	Styl wskaźnika
 =Date format	7a44	Format daty
 =Devices	f320	Urządzenia
-=Devices in this machine	d7b8	Urządzenia w tej maszynie
+=Internal storage	e961	Pamięć wewnętrzna
+=External devices	5769	Urządzenia zewnętrzne
 =Display	d9b5	Ekran
 =Double-click time (ms, or default)	9af1	Czas dwukrotnego kliknięcia (ms lub default)
 =Drag lists with the mouse	4ee2	Przeciąganie list myszą

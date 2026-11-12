@@ -99,7 +99,9 @@ settings_copied	0bd7	در کلیپ‌بورد کپی شد
 settings_device_drive	8683	درایو، %s
 settings_device_name	5f12	نام دستگاه
 settings_device_none	3cd5	هیچ درایو یا دستگاه USB پیدا نشد
+settings_device_sd	14ec	کارت SD، %s
 settings_device_usb	20ae	USB %1$s، %2$s
+settings_device_usb_drive	e9fb	درایو USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	انجام شد
 settings_edit_keys	d161	Enter آن را اعمال می‌کند، Escape مقدار قبلی را نگه می‌دارد، و کلیک بیرون هم اعمال می‌کند
@@ -256,7 +258,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Cursor style	ad1e	سبک نشانگر
 =Date format	7a44	قالب تاریخ
 =Devices	f320	دستگاه‌ها
-=Devices in this machine	d7b8	دستگاه‌های این دستگاه
+=Internal storage	e961	حافظهٔ داخلی
+=External devices	5769	دستگاه‌های خارجی
 =Display	d9b5	نمایشگر
 =Double-click time (ms, or default)	9af1	زمان دوبار کلیک (ms یا default)
 =Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس

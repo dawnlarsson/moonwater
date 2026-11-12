@@ -7656,7 +7656,9 @@ LANGUAGE_ID(settings_copied, "copied to the clipboard") \
 LANGUAGE_ID(settings_device_drive, "drive, %s") \
 LANGUAGE_ID(settings_device_name, "Name of the device") \
 LANGUAGE_ID(settings_device_none, "No drives or USB devices found") \
+LANGUAGE_ID(settings_device_sd, "SD card, %s") \
 LANGUAGE_ID(settings_device_usb, "USB %1$s, %2$s") \
+LANGUAGE_ID(settings_device_usb_drive, "USB drive %s") \
 LANGUAGE_ID(settings_device_usb_port, "USB %s") \
 LANGUAGE_ID(settings_done, "done") \
 LANGUAGE_ID(settings_edit_keys, "Enter sets it, Escape keeps it, a click outside sets it too") \

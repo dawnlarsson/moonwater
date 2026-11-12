@@ -220,7 +220,7 @@ struct settings_feed
 static const struct settings_feed settings_feeds[] = {
     {"Wi-Fi", "Wi-Fi", {"wifi"}, "In range and saved", 2000, SETTINGS_FEED_WIFI},
     {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
-    {"Devices", null, {"device", "list"}, "Devices in this machine", 3000, SETTINGS_FEED_HARDWARE},
+    {"Devices", null, {"device", "list"}, "Internal storage", 3000, SETTINGS_FEED_HARDWARE},
     {"Waterlink", "Waterlink", {"link"}, "Linked machines", 2000, SETTINGS_FEED_LINKS},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
@@ -244,6 +244,14 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
 #define SETTINGS_ITEM_DRIVE 32u  // a drive the device list shows: its strip, and no verb holds it
 #define SETTINGS_ITEM_USB 64u    // a port the device list says is a USB device's
+#define SETTINGS_ITEM_DISK 128u  // a USB device that holds a drive (its "drive" line): its row is the drive's too, its strip under its tabs
+
+// Where a device of the device list is, and so the section of the Devices group it is in.
+#define SETTINGS_WHERE_INTERNAL 0 // a drive in the machine: Internal storage (a drive a host from before "where" lines says nothing of too)
+#define SETTINGS_WHERE_EXTERNAL 1 // plugged in, External devices: a USB device, or a drive the host says is external
+#define SETTINGS_WHERE_SD 2       // an SD card, which is external
+#define SETTINGS_WHERE_NONE 3     // the note that no device was found: under no header
+#define SETTINGS_EXTERNAL_HEADER "External devices"
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
 #define SETTINGS_STATE 24        // a device's state as the host says it: allowed, blocked or waiting for a port, view only for a drive
@@ -258,6 +266,7 @@ struct settings_item
         char security[12];
         signed short dbm;
         unsigned char bars, flags, kind;
+        unsigned char where;                            // a device of the device list: SETTINGS_WHERE_*
         unsigned char segment_count;                    // a drive's partitions and free room, in order (SETTINGS_SEGMENTS most)
         unsigned short segment_more;                    // a drive's partitions the host did not show (its "more" line)
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
@@ -946,11 +955,11 @@ static fn settings_toggle(int row)
         const struct settings_item address_to item = settings_item(row);
         b64 target;
 
-        if (row < 0 || row >= (int)SETTINGS_ALL || (row >= SETTINGS_ANY && !(item && (item->flags & SETTINGS_ITEM_DRIVE))))
+        if (row < 0 || row >= (int)SETTINGS_ALL || (row >= SETTINGS_ANY && !(item && (item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK)))))
                 return;
         settings_expanded[row] = !settings_expanded[row];
         if (item)
-                settings_drive_keep(item->label, settings_expanded[row]);
+                settings_drive_keep(item->flags & SETTINGS_ITEM_DISK ? item->port : item->label, settings_expanded[row]);
         target = settings_expanded[row] ? UI_ONE : 0;
         if (ui_kit.motion)
                 settings_fold_at[row] = target, settings_fold_live[row] = 0;
@@ -1283,9 +1292,26 @@ static b32 settings_takes(int row)
         return !generic || settings_large->pool[generic->command + generic->verb] != 0;
 }
 
-// The first row of the section a row is in: a list is a section of its own.
+/*
+        The section of the device list a device is in: 0 Internal storage, 1 External devices, 2 the note that says nothing was found,
+        which has no header. The list holds its devices in that order (settings_feed_hardware).
+*/
+static int settings_device_section(const struct settings_item address_to item)
+{
+        return item->where == SETTINGS_WHERE_INTERNAL ? 0 : item->where == SETTINGS_WHERE_NONE ? 2 : 1;
+}
+
+// The first row of the section a row is in: a list is a section of its own, and the device list is one for each place a device is.
 static int settings_section_start(int row)
 {
+        if (row >= (int)SETTINGS_LIST && settings_list_of(row) == 2 && settings_item(row))
+        {
+                int at = row - (int)SETTINGS_LIST - 2 * SETTINGS_LIST_ROWS, section = settings_device_section(settings_item(row));
+
+                while (at > 0 && settings_device_section(&settings_large->item[2][at - 1]) == section)
+                        at--;
+                return (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
+        }
         if (row >= (int)SETTINGS_LIST)
                 return (int)SETTINGS_LIST + settings_list_of(row) * SETTINGS_LIST_ROWS;
         if (row >= SETTINGS_ANY)
@@ -1297,6 +1323,8 @@ static int settings_section_start(int row)
 
 static const char address_to settings_section(int row)
 {
+        if (row >= (int)SETTINGS_LIST && settings_list_of(row) == 2 && settings_item(row) && settings_device_section(settings_item(row)))
+                return settings_device_section(settings_item(row)) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
         if (row >= (int)SETTINGS_LIST)
                 return settings_feeds[settings_list_of(row)].heading;
         return row >= SETTINGS_ANY ? SETTINGS_ALL_HEADER : settings_rows[settings_section_start(row)].section;
@@ -2991,10 +3019,25 @@ static fn settings_drive_heading(const struct settings_item address_to item, str
         }
         else
         {
-                language_format(settings_drive_share, sizeof(settings_drive_share), WORDS(settings_partitioned), settings_share_of(used, item->total, 100));
+                long percent = settings_share_of(used, item->total, 100);
+
+                // A disk with free room is not said to be wholly partitioned, however little the room is.
+                language_format(settings_drive_share, sizeof(settings_drive_share), WORDS(settings_partitioned), free && percent > 99 ? 99l : percent);
                 language_format(settings_drive_amount, sizeof(settings_drive_amount), WORDS(settings_used_of), used_text, total_text);
         }
         row->share = settings_drive_share, row->amount = settings_drive_amount;
+}
+
+// Whether a device of the list is a drive: one of the machine's, or a USB device that holds one.
+static b32 settings_item_storage(const struct settings_item address_to item)
+{
+        return item && (item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK));
+}
+
+// The name a drive's partitions are remembered as showing by: a USB drive's port (two of one kind have one name), any other its name.
+static const char address_to settings_drive_name(const struct settings_item address_to item)
+{
+        return item->flags & SETTINGS_ITEM_DISK ? item->port : item->label;
 }
 
 // A drive's partitions: its segments that are not free room (a disk with no table has none).
@@ -3019,7 +3062,7 @@ static int settings_drive_rows(int row, int count)
         int section = settings_section_start(row), next;
         b32 free = false;
 
-        if (!item || !(item->flags & SETTINGS_ITEM_DRIVE) || !(settings_partitions_of(item) || item->segment_more))
+        if (!settings_item_storage(item) || !(settings_partitions_of(item) || item->segment_more))
                 return count;
         settings_sub_owner = row;
         next = settings_sub_put(section, false, null, "", count);
@@ -3129,7 +3172,7 @@ static fn settings_drive_follow(void)
         {
                 int row = (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
                 const struct settings_item address_to item = at < settings.item_count[2] ? &settings_large->item[2][at] : null;
-                b32 open = item && (item->flags & SETTINGS_ITEM_DRIVE) && settings_drive_is_open(item->label);
+                b32 open = settings_item_storage(item) && settings_drive_is_open(settings_drive_name(item));
 
                 if (settings_expanded[row] != open)
                         settings_expanded[row] = (unsigned char)open, settings_fold_at[row] = open ? UI_ONE : 0, settings_fold_live[row] = 0;
@@ -3253,6 +3296,20 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
         settings_item_word(item->state, sizeof(item->state), text + at, size - at);
 }
 
+// The devices of the device list in the order of their sections (settings_device_section), each section's in the order they came.
+static fn settings_device_order(struct settings_item address_to items, positive count)
+{
+        static struct settings_item moved;
+
+        for (positive at = 1; at < count; at++)
+                for (positive back = at; back > 0 && settings_device_section(&items[back]) < settings_device_section(&items[back - 1]); back--)
+                {
+                        memory_copy(&moved, &items[back], sizeof(moved));
+                        memory_copy(&items[back], &items[back - 1], sizeof(moved));
+                        memory_copy(&items[back - 1], &moved, sizeof(moved));
+                }
+}
+
 static fn settings_feed_hardware(void)
 {
         struct settings_item address_to items = settings_large->item[2];
@@ -3261,6 +3318,7 @@ static fn settings_feed_hardware(void)
         positive at, size, count = 0, hidden = 0;
         b32 open = false; // the row before is a drive that is kept: the part lines after it are its strip
         unsigned long long spanned = 0; // the bytes of the open drive's part lines so far, those no segment shows among them
+        struct settings_item address_to last = null; // the device of the last device line, null where that line was past the rows
 
         memory_zero(items, sizeof(settings_large->item[2]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
@@ -3289,13 +3347,13 @@ static fn settings_feed_hardware(void)
                         while (word < size && text[word] == ' ')
                                 word++;
                         // The drive is as large as its line says or as its part lines add up to, whichever is more (the line's MB is cut).
-                        if (drive && drive->kind == SETTINGS_NOTE)
+                        if (drive)
                         {
                                 spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes;
                                 drive->total = spanned > drive->total ? spanned : drive->total;
                         }
                         // Free room no bigger than the alignment the partitions keep is no room a person can use: it has no segment.
-                        if (drive && drive->kind == SETTINGS_NOTE && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
+                        if (drive && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
                             (code != 4 || bytes > SETTINGS_ALIGNMENT))
                         {
                                 drive->segment_bytes[drive->segment_count] = bytes;
@@ -3315,6 +3373,42 @@ static fn settings_feed_hardware(void)
                         items[count - 1].segment_more = more > 65535 ? 65535 : (unsigned short)more;
                         continue;
                 }
+                // A USB device's drive, "    drive NAME N MB" under its line: its size, and the part lines after it are its strip. A
+                // device's second drive is not shown (its part lines are no one's).
+                if (size > 10 && !memory_compare(text, "    drive ", 10))
+                {
+                        struct settings_item address_to port = last;
+                        positive word = 10, megabytes = 0;
+
+                        open = port && port->kind == SETTINGS_PORT && !(port->flags & SETTINGS_ITEM_DISK);
+                        while (word < size && text[word] != ' ')
+                                word++;
+                        while (word < size && text[word] == ' ')
+                                word++;
+                        for (; word < size && text[word] >= '0' && text[word] <= '9'; word++)
+                                if (megabytes < 1000000000000ull)
+                                        megabytes = megabytes * 10 + (positive)(text[word] - '0');
+                        if (open)
+                        {
+                                port->flags |= SETTINGS_ITEM_DISK;
+                                port->total = megabytes * 1000000ull;
+                                settings_size_text(port->total, port->size, sizeof(port->size));
+                        }
+                        spanned = 0;
+                        continue;
+                }
+                // Where a drive is, after its segments: "    where internal BUS" or "    where external BUS", an SD card's bus sd.
+                if (size > 10 && !memory_compare(text, "    where ", 10))
+                {
+                        struct settings_item address_to drive = last;
+
+                        if (drive && (drive->flags & SETTINGS_ITEM_DRIVE))
+                                drive->where = size >= 18 && !memory_compare(text + 10, "external", 8)
+                                                   ? (size >= 21 && !memory_compare(text + size - 3, " sd", 3) ? SETTINGS_WHERE_SD : SETTINGS_WHERE_EXTERNAL)
+                                                   : SETTINGS_WHERE_INTERNAL;
+                        open = false;
+                        continue;
+                }
                 // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.
                 open = false;
                 if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ')
@@ -3324,7 +3418,7 @@ static fn settings_feed_hardware(void)
                         // A row past the list's rows is not shown: it is counted, and the note under the rows says how many.
                         if (count + 1 >= SETTINGS_LIST_ROWS)
                         {
-                                hidden++;
+                                hidden++, last = null;
                                 continue;
                         }
                         // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
@@ -3334,8 +3428,10 @@ static fn settings_feed_hardware(void)
                         items[count].kind = word + 7 <= size && !memory_compare(text + word + 1, "drive ", 6) ? SETTINGS_NOTE : SETTINGS_PORT;
                         items[count].flags = (size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
                                              (items[count].kind == SETTINGS_NOTE ? SETTINGS_ITEM_DRIVE : 0);
+                        // A drive is inside the machine until its "where" line says otherwise; a USB device, any port, is plugged in.
+                        items[count].where = items[count].kind == SETTINGS_NOTE ? SETTINGS_WHERE_INTERNAL : SETTINGS_WHERE_EXTERNAL;
                         open = items[count].kind == SETTINGS_NOTE;
-                        spanned = 0;
+                        spanned = 0, last = &items[count];
                         if (open)
                                 settings_item_drive(&items[count], text, size, word);
                         else
@@ -3343,7 +3439,9 @@ static fn settings_feed_hardware(void)
                         count++;
                 }
         }
-        // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown.
+        // The devices in the order of their sections, Internal storage and then External devices, each in the order the host said them.
+        settings_device_order(items, count);
+        // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown, in the last section.
         hidden += settings.cut_rows;
         if (hidden && count < SETTINGS_LIST_ROWS)
         {
@@ -3351,12 +3449,14 @@ static fn settings_feed_hardware(void)
 
                 language_format(note, sizeof(note), WORDS(settings_not_shown), (long)hidden);
                 items[count].kind = SETTINGS_NOTE;
+                items[count].where = count ? items[count - 1].where : SETTINGS_WHERE_NONE;
                 settings_item_label(&items[count++], note, string_length((string_address)note));
         }
-        // A reading that lists nothing says so, where the devices would be.
+        // A reading that lists nothing says so, where the devices would be, under no header.
         if (!count)
         {
                 items[count].kind = SETTINGS_NOTE;
+                items[count].where = SETTINGS_WHERE_NONE;
                 settings_item_label(&items[count++], WORDS(settings_device_none), string_length((string_address)WORDS(settings_device_none)));
         }
         settings.item_count[2] = (unsigned short)count;
@@ -5203,7 +5303,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 return;
         }
         row->section = settings_section_start(id);
-        row->header = language_of(settings_section(id));
+        // A section whose header is empty (the note that no device was found) is under no header.
+        row->header = settings_section(id) && !settings_section(id)[0] ? null : language_of(settings_section(id));
         row->label = settings_label_shown(id);
         if (which)
         {
@@ -5261,7 +5362,11 @@ static fn settings_describe(int id, struct ui_row address_to row)
 
                         row->kind = UI_ROW_TABS, row->words = settings_port_words();
                         row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
-                        if (item->flags & SETTINGS_ITEM_USB && waiting)
+                        // A USB device that holds a drive is a drive's row too: its line is the port's, its kind USB drive and its port, its
+                        // allow and deny at its end, and under them the drive's heading and its strip, and its partitions under its row.
+                        if (item->flags & SETTINGS_ITEM_DISK)
+                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_drive), item->port);
+                        else if (item->flags & SETTINGS_ITEM_USB && waiting)
                                 language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port,
                                                 settings_state_word(item->state));
                         else if (item->flags & SETTINGS_ITEM_USB)
@@ -5270,12 +5375,21 @@ static fn settings_describe(int id, struct ui_row address_to row)
                                 string_copy_bounded((string_address)settings_device_note, (string_address)(waiting ? settings_state_word(item->state) : ""),
                                                     sizeof(settings_device_note));
                         row->note = settings_device_note[0] ? settings_device_note : null;
+                        if ((item->flags & SETTINGS_ITEM_DISK) && item->segment_count)
+                        {
+                                row->tall = true;
+                                row->strip_bytes = item->segment_bytes;
+                                row->strip_roles = item->segment_role;
+                                row->strip_count = item->segment_count;
+                                settings_drive_heading(item, row);
+                        }
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
                         // A drive with a strip is as tall as its line, the heading and the strip under it; the heading says its size, and its
                         // partitions are the rows under it (settings_drive_rows). A drive the host lists no segments of says its size at its line's end.
-                        language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_drive), settings_state_word(item->state));
+                        language_format(settings_device_note, sizeof(settings_device_note),
+                                        item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive), settings_state_word(item->state));
                         row->note = settings_device_note;
                         row->value = item->segment_count ? null : item->size;
                         row->tall = item->segment_count != 0;
@@ -5601,6 +5715,9 @@ static fn settings_press_at(void)
                 }
                 return;
         }
+        // A USB drive's row is tall: a press on its heading or its strip, outside its tabs, allows or blocks nothing.
+        if (settings_item(row) && (settings_item(row)->flags & SETTINGS_ITEM_DISK))
+                return;
         if (settings_editing() != row && !(row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SLIDER))
                 settings_activate(row, settings.list.way);
 }

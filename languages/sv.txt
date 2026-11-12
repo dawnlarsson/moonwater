@@ -98,7 +98,9 @@ settings_copied	0bd7	kopierat till urklippet
 settings_device_drive	8683	disk, %s
 settings_device_name	5f12	Enhetens namn
 settings_device_none	3cd5	Inga diskar eller USB-enheter hittades
+settings_device_sd	14ec	SD-kort, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	USB-enhet %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	klart
 settings_edit_keys	d161	Enter ställer in, Escape lämnar som det var, ett klick utanför ställer också in
@@ -255,7 +257,8 @@ ui_field_full	fe02	mer ryms inte
 =Cursor style	ad1e	Pekarstil
 =Date format	7a44	Datumformat
 =Devices	f320	Enheter
-=Devices in this machine	d7b8	Enheter i den här datorn
+=Internal storage	e961	Intern lagring
+=External devices	5769	Externa enheter
 =Display	d9b5	Skärm
 =Double-click time (ms, or default)	9af1	Tid för dubbelklick (ms eller default)
 =Drag lists with the mouse	4ee2	Dra listor med musen

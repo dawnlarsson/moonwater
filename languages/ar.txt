@@ -99,7 +99,9 @@ settings_copied	0bd7	نُسخ إلى الحافظة
 settings_device_drive	8683	محرك، %s
 settings_device_name	5f12	اسم الجهاز
 settings_device_none	3cd5	لم يُعثر على محركات أو أجهزة USB
+settings_device_sd	14ec	بطاقة SD، %s
 settings_device_usb	20ae	USB %1$s، %2$s
+settings_device_usb_drive	e9fb	محرك USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	تم
 settings_edit_keys	d161	Enter يضبطه، Escape يبقيه كما كان، والنقر خارجه يضبطه أيضا
@@ -256,7 +258,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Cursor style	ad1e	نمط المؤشر
 =Date format	7a44	تنسيق التاريخ
 =Devices	f320	الأجهزة
-=Devices in this machine	d7b8	الأجهزة في هذا الجهاز
+=Internal storage	e961	التخزين الداخلي
+=External devices	5769	الأجهزة الخارجية
 =Display	d9b5	الشاشة
 =Double-click time (ms, or default)	9af1	مدة النقر المزدوج (ms أو default)
 =Drag lists with the mouse	4ee2	سحب القوائم بالماوس

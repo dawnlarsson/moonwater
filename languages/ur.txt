@@ -99,7 +99,9 @@ settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
 settings_device_drive	8683	ڈرائیو، %s
 settings_device_name	5f12	ڈیوائس کا نام
 settings_device_none	3cd5	کوئی ڈرائیو یا USB آلہ نہیں ملا
+settings_device_sd	14ec	SD کارڈ، %s
 settings_device_usb	20ae	USB %1$s، %2$s
+settings_device_usb_drive	e9fb	USB ڈرائیو %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	ہو گیا
 settings_edit_keys	d161	Enter اسے لاگو کرتا ہے، Escape پہلے جیسا رکھتا ہے، اور باہر کلک بھی لاگو کرتا ہے
@@ -256,7 +258,8 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Cursor style	ad1e	پوائنٹر کا انداز
 =Date format	7a44	تاریخ کی شکل
 =Devices	f320	ڈیوائسز
-=Devices in this machine	d7b8	اس مشین کے ڈیوائسز
+=Internal storage	e961	اندرونی اسٹوریج
+=External devices	5769	بیرونی ڈیوائسز
 =Display	d9b5	اسکرین
 =Double-click time (ms, or default)	9af1	ڈبل کلک کا وقت (ms یا default)
 =Drag lists with the mouse	4ee2	ماؤس سے فہرستیں گھسیٹیں

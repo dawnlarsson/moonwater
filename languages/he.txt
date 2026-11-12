@@ -99,7 +99,9 @@ settings_copied	0bd7	הועתק ללוח הגזירים
 settings_device_drive	8683	כונן, %s
 settings_device_name	5f12	שם ההתקן
 settings_device_none	3cd5	לא נמצאו כוננים או התקני USB
+settings_device_sd	14ec	כרטיס SD, %s
 settings_device_usb	20ae	USB %1$s, %2$s
+settings_device_usb_drive	e9fb	כונן USB %s
 settings_device_usb_port	42c3	USB %s
 settings_done	8071	בוצע
 settings_edit_keys	d161	Enter קובע, Escape משאיר כפי שהיה, ולחיצה בחוץ קובעת גם כן
@@ -256,7 +258,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Cursor style	ad1e	סגנון המצביע
 =Date format	7a44	תבנית תאריך
 =Devices	f320	התקנים
-=Devices in this machine	d7b8	התקנים במכונה זו
+=Internal storage	e961	אחסון פנימי
+=External devices	5769	התקנים חיצוניים
 =Display	d9b5	מסך
 =Double-click time (ms, or default)	9af1	זמן לחיצה כפולה (ms או default)
 =Drag lists with the mouse	4ee2	גרירת רשימות בעכבר

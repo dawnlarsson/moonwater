@@ -47,7 +47,8 @@ src/canvas/ui/settings.c	and
 src/canvas/ui/settings.c	wifi
 src/canvas/ui/settings.c	system notices
 src/canvas/ui/settings.c	Devices
-src/canvas/ui/settings.c	Devices in this machine
+src/canvas/ui/settings.c	Internal storage
+src/canvas/ui/settings.c	External devices
 src/canvas/ui/settings.c	Waterlink
 src/canvas/ui/settings.c	Linked machines
 src/canvas/ui/settings.c	GB

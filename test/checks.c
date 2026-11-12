@@ -144270,14 +144270,72 @@ static unsigned int drive_pixel(int x, int y)
         return settings_frames_whole[(positive)y * SETTINGS_FRAMES_W + (positive)x] & 0xffffffu;
 }
 
+/*
+        The headers of the sections of the Devices group as the list has them, in order, the empty word for a section with none, and the
+        header of the section the row with a label is in: the list as it is laid out (ui_list_layout), its places' starts and their rows'
+        headers. The headers are kept a line each in drive_headers.
+*/
+static char drive_headers[8][48];
+
+// The place in the list of the row with a label, or -1.
+static int drive_place_of(const char address_to label)
+{
+        for (int at = 0; at < settings.list.count; at++)
+        {
+                struct ui_row row;
+
+                ui_list_describe(&settings.list, settings.list.id[at], &row);
+                if (row.label && string_equals((string_address)row.label, (string_address)label))
+                        return at;
+        }
+        return -1;
+}
+
+static int drive_sections(void)
+{
+        int count = 0;
+
+        for (int at = 0; at < settings.list.count && count < 8; at++)
+                if (settings.list.starts[at] & UI_LIST_STARTS)
+                {
+                        struct ui_row row;
+
+                        ui_list_describe(&settings.list, settings.list.id[at], &row);
+                        string_copy_bounded((string_address)drive_headers[count++], (string_address)(row.header ? row.header : ""), sizeof(drive_headers[0]));
+                }
+        return count;
+}
+
+// The header of the section a row with this label is in ("" none), and the row itself described; null when no row has the label.
+static const char address_to drive_section_of(const char address_to label, struct ui_row address_to found)
+{
+        static char header[48];
+
+        header[0] = 0;
+        for (int at = 0; at < settings.list.count; at++)
+        {
+                struct ui_row row;
+
+                ui_list_describe(&settings.list, settings.list.id[at], &row);
+                if (settings.list.starts[at] & UI_LIST_STARTS)
+                        string_copy_bounded((string_address)header, (string_address)(row.header ? row.header : ""), sizeof(header));
+                if (row.label && string_equals((string_address)row.label, (string_address)label))
+                {
+                        *found = row;
+                        return header;
+                }
+        }
+        return null;
+}
+
 // Every drive of the list shut (the window as it starts), or open, by their names, as a press leaves them; the reading then shows them so.
 static fn drive_open_all(const char address_to text, b32 open)
 {
         memory_zero(settings_drives_open, sizeof(settings_drives_open));
         drive_feed(text);
         for (int at = 0; open && at < settings.item_count[2]; at++)
-                if (settings_large->item[2][at].flags & SETTINGS_ITEM_DRIVE)
-                        settings_drive_keep(settings_large->item[2][at].label, true);
+                if (settings_item_storage(&settings_large->item[2][at]))
+                        settings_drive_keep(settings_drive_name(&settings_large->item[2][at]), true);
         drive_feed(text);
 }
 
@@ -144635,8 +144693,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         check("settings drive rows: open, each partition's row has a square of its role's colour, and the free room's, the last, the track's", listed);
         check("settings drive rows: the sizes and the shares of the rows are each a column whose end is the same in every row, the shares' at the strip's end", columns);
 
-        // The partitions stay open by the drive's name when the list is read again and another device comes before it: its row moves.
-        string_copy_bounded((string_address)moved, (string_address) "  1-1 usb 0781:5581 SanDisk Ultra allowed\n", sizeof(moved));
+        // The partitions stay open by the drive's name when the list is read again and another drive comes before it: its row moves.
+        string_copy_bounded((string_address)moved, (string_address) "  sda drive 1000 MB view only\n", sizeof(moved));
         string_append_bounded((string_address)moved, (string_address)nvme, sizeof(moved));
         drive_feed(moved);
         drive_show(SETTINGS_WIDTH, 1, false);
@@ -144679,6 +144737,120 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         }
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         check("settings drive rows: every role's colour stands out from the track and from the surface by 3:1, light and dark, and each is its own", apart);
+
+        /*
+                The Devices group in its sections: New devices, Internal storage (an NVMe, a SATA and a virtio disk, and a drive whose host
+                says nothing of where it is), External devices (a USB stick with two partitions, its bar under its allow and deny, an SD card,
+                a removable SATA disk and a USB keyboard), each section's in the order the host said them.
+        */
+        {
+                static const char machine[] = "  1-1 usb 0781:5581 SanDisk Ultra allowed\n    drive sdc 30752 MB\n    part 0 1048576 free -\n"
+                                              "    part 1048576 30000000000 other Ventoy\n    part 30001048576 33554432 efi VTOYEFI\n"
+                                              "    part 30034603008 717396992 free -\n"
+                                              "  1-2 usb 046d:c31c Logitech USB Keyboard allowed\n"
+                                              "  mmcblk0 drive 63864 MB view only\n    part 0 4194304 free -\n    part 4194304 63859805696 other -\n"
+                                              "    where external sd\n"
+                                              "  nvme0n1 drive 512110 MB view only\n    part 0 512110000000 linux Linux_filesystem\n    where internal nvme\n"
+                                              "  sda drive 1000204 MB view only\n    part 0 1000204000000 other Basic_data_partition\n    where internal ata\n"
+                                              "  sdd drive 2000 MB view only\n    part 0 2000000000 unpartitioned -\n    where external ata\n"
+                                              "  vda drive 20000 MB view only\n    part 0 20000000000 linux -\n    where internal virtio\n"
+                                              "  vdb drive 1000 MB view only\n    part 0 1000000000 linux -\n";
+                struct ui_row row;
+                const char address_to section;
+                b32 inside = true, outside = true, stick = false, card = false, ordered = false, alone = false, held = false;
+                int sections, devices = settings_groups_named("Devices");
+
+                drive_open_all(machine, false);
+                drive_show(SETTINGS_WIDTH, 1, false);
+                for (int k = 0; k < 4; k++)
+                {
+                        static const char address_to const internal[4] = {"nvme0n1", "sda", "vda", "vdb"};
+
+                        section = drive_section_of(internal[k], &row);
+                        inside &= section && string_equals((string_address)section, (string_address) "Internal storage") && row.tall;
+                }
+                for (int k = 0; k < 3; k++)
+                {
+                        static const char address_to const external[3] = {"Logitech USB Keyboard", "mmcblk0", "sdd"};
+
+                        section = drive_section_of(external[k], &row);
+                        outside &= section && string_equals((string_address)section, (string_address) "External devices");
+                }
+                check("settings devices: an NVMe, a SATA and a virtio disk, and one the host says nothing of, are under Internal storage; a removable disk and a keyboard under External devices",
+                      inside && outside);
+                section = drive_section_of("SanDisk Ultra", &row);
+                stick = section && string_equals((string_address)section, (string_address) "External devices") && row.kind == UI_ROW_TABS && row.tall &&
+                        row.strip_count == 3 && row.note && string_equals((string_address)row.note, (string_address) "USB drive 1-1") && row.share &&
+                        string_equals((string_address)row.share, (string_address) "98% partitioned");
+                if (stick)
+                {
+                        int at = drive_place_of("SanDisk Ultra");
+                        struct ui_row next;
+
+                        // The row after the stick's is its disclosure: two partitions.
+                        ui_list_describe(&settings.list, settings.list.id[at + 1], &next);
+                        stick = at >= 0 && next.kind == UI_ROW_SHARE && next.share && string_equals((string_address)next.share, (string_address) "2");
+                }
+                check("settings devices: a USB stick with partitions is under External devices, its allow and deny on its line and its heading, its bar and its partitions under it",
+                      stick);
+                section = drive_section_of("mmcblk0", &row);
+                card = section && string_equals((string_address)section, (string_address) "External devices") && row.tall && row.note &&
+                       string_equals((string_address)row.note, (string_address) "SD card, view only");
+                check("settings devices: an SD card is under External devices, and says it is an SD card", card);
+                sections = drive_sections();
+                ordered = sections >= 3 && string_equals((string_address)drive_headers[sections - 3], (string_address) "Devices") &&
+                          string_equals((string_address)drive_headers[sections - 2], (string_address) "Internal storage") &&
+                          string_equals((string_address)drive_headers[sections - 1], (string_address) "External devices") &&
+                          settings.page.chosen == devices;
+                check("settings devices: the group is New devices, then Internal storage, then External devices", ordered);
+                // A press on the stick's strip allows or blocks nothing; one on its deny tab blocks it. The stick's row is scrolled to the
+                // list's top, and drawn there (its tabs are placed as they are drawn); a change of a row (not a feed's reading, which a change
+                // would end) is running, so a change waits in the queue.
+                {
+                        int queued = (settings.child = 1, settings.job = SETTINGS_JOB_ACT, settings.queued), at = drive_place_of("SanDisk Ultra"), y;
+                        struct ui_control address_to tabs = at >= 0 ? ui_list_control(&settings.list, settings.list.id[at], 1) : null;
+
+                        if (at >= 0)
+                        {
+                                settings.list.scroll.scroll = settings.list.top[at];
+                                ui_scroll_clamp(&settings.list.scroll);
+                                settings_draw_rows(settings_frames_whole, 0, 0);
+                                y = ui_list_row_y(&settings.list, at) + settings.list.tall[at] - ui_dev(&settings.ui, 10);
+                                drive_click(settings.list.x + settings.list.w / 2, y);
+                                held = settings.queued == queued && tabs && tabs->kind == UI_TABS && y < settings.list.y + settings.list.h;
+                        }
+                        if (held)
+                        {
+                                settings_draw_rows(settings_frames_whole, 0, 0);
+                                drive_click(ui_dev(&settings.ui, tabs->x + tabs->w * 3 / 4), ui_dev(&settings.ui, tabs->y + tabs->h / 2));
+                                held = settings.queued == queued + 1 && settings.queue[queued].row == SETTINGS_JOB_ACT &&
+                                       string_equals((string_address)settings.queue[queued].value, (string_address) "x\n1-1");
+                        }
+                        settings.queued = 0, settings.child = 0;
+                }
+                check("settings devices: a press on a USB stick's strip allows or blocks nothing, and one on its deny tab blocks it", held);
+                // A section with no rows has no header: drives alone, and USB devices alone.
+                drive_open_all("  nvme0n1 drive 512110 MB view only\n    part 0 512110000000 linux -\n    where internal nvme\n", false);
+                drive_show(SETTINGS_WIDTH, 1, false);
+                sections = drive_sections();
+                alone = sections >= 2 && string_equals((string_address)drive_headers[sections - 1], (string_address) "Internal storage");
+                for (int k = 0; k < sections; k++)
+                        alone &= !string_equals((string_address)drive_headers[k], (string_address) "External devices");
+                drive_open_all("  1-2 usb 046d:c31c Logitech USB Keyboard allowed\n", false);
+                drive_show(SETTINGS_WIDTH, 1, false);
+                sections = drive_sections();
+                alone &= sections >= 2 && string_equals((string_address)drive_headers[sections - 1], (string_address) "External devices");
+                for (int k = 0; k < sections; k++)
+                        alone &= !string_equals((string_address)drive_headers[k], (string_address) "Internal storage");
+                drive_open_all("", false);
+                drive_show(SETTINGS_WIDTH, 1, false);
+                sections = drive_sections();
+                alone &= sections >= 2 && !drive_headers[sections - 1][0];
+                for (int k = 0; k < sections; k++)
+                        alone &= !string_equals((string_address)drive_headers[k], (string_address) "Internal storage") &&
+                                 !string_equals((string_address)drive_headers[k], (string_address) "External devices");
+                check("settings devices: a section with no rows is not drawn, and a list with nothing in it says so under no header", alone);
+        }
 
         memory_zero(settings_drives_open, sizeof(settings_drives_open));
         memory_copy(settings_expanded, drive_expanded_kept, sizeof(drive_expanded_kept));
