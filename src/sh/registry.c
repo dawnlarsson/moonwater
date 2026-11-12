@@ -283,7 +283,7 @@ static const struct settings_row settings_rows[] = {
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BORDER_WIDTH_PATH, .standard = "2",
                       .unit = "pixels", .low = 1, .high = 4,
                       .usage = "canvas border width [PIXELS|default]",
-                      .help = "how wide the highlight on a window's edge or corner is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]"),
+                      .help = "how wide the highlight on the edge or corner of a window is when the pointer is over it or the hand holds it, 1 to 4 pixels [2]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .live = SETTING_LIVE_NONE, .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on",
