@@ -14711,7 +14711,8 @@ static void ui_scroll_track(const struct ui address_to ui, const struct ui_scrol
 }
 
 // The thumb's top and length (device pixels); false when everything shows and there is no bar. The thumb is where the body is drawn,
-// unclamped: a pull past an end takes it off its track, as the rubber band takes the content.
+// unclamped: a pull past an end takes it off its track, as the rubber band takes the content. Its least length is the track's when the
+// track is shorter than UI_SCROLL_LEAST: a thumb is never longer than the track it is in.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
         int track, at, least = UI_SCROLL_LEAST * ui->scale / 100, rest = s->content - s->view;
@@ -14719,6 +14720,7 @@ static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll
         ui_scroll_track(ui, s, &at, &track);
         if (s->content <= s->view || s->view <= 0 || track <= 0)
                 return 0;
+        least = least > track ? track : least;
         *length = (int)((b64)track * s->view / s->content);
         *length = *length < least ? least : *length > track ? track : *length;
         *top = at + (int)((b64)(track - *length) * s->scroll / rest);
@@ -19093,7 +19095,9 @@ static inline b32 ui_page_in_column(const struct ui_page address_to p, int x)
 
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
 {
-        int group = (y - p->top + p->column_scroll.scroll) / ui_dev(ui, UI_ROW);
+        // The groups are drawn at rest (ui_page_column): a pull past an end stretches the picture and moves no group, so the hit boxes
+        // are where the groups are drawn, at rest too, as a list's rows are (ui_list_hit).
+        int group = (y - p->top + ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top)) / ui_dev(ui, UI_ROW);
 
         if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x) || group >= p->column.count)
                 return -1;

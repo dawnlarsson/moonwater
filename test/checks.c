@@ -149569,6 +149569,20 @@ static fn check_kit_place(void)
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
 
+        // A track shorter than the least thumb (24 at 100 percent) has a thumb its own length and no longer: it lies in its track
+        // wherever the scroll is, where one of 24 in a track of 16 began above the track at the end of the content.
+        {
+                struct ui_scroll tiny = {100, 10, 16, 1000, 16, 0, false, false, 0};
+                int top = 0, length = 0;
+                b32 at_start, at_end;
+
+                at_start = ui_scroll_thumb(&ui, &tiny, &top, &length) && length == 16 && top == 10;
+                tiny.scroll = 1000 - 16;
+                at_end = ui_scroll_thumb(&ui, &tiny, &top, &length) && length == 16 && top == 10;
+                check("kit scrollbar: a track shorter than the least thumb has a thumb the track's length, inside it at either end of the scroll",
+                      at_start && at_end);
+        }
+
         // A track that starts below an inset (a window's close button at its top): the track is the region from the inset to its
         // end, so the thumb never reaches into the button, a press there is not the bar's, and a bar at the end of its content
         // reaches the region's bottom.
@@ -151559,6 +151573,24 @@ static fn check_kit_page_pointer(void)
                 ui_page_pointer(&ui, &p, &rows, &finger_up, check_kit_pointer_done);
                 clicked = kit_pointer_done == 1;
                 check("kit page pointer: and on the same rows at rest, the same press shows its row pressed and its lift is the row's click", shown && clicked);
+        }
+
+        // The column's groups are hit where they are drawn: at rest, inside the column's ends. A column pulled past an end is its
+        // picture stretched and no group moved, so the body's place past the end (three quarters of a row here) shifts no hit:
+        // ten groups in a column of five, pulled past the top and then past the far end.
+        {
+                int row = ui_dev(&ui, UI_ROW), top_hit, far_hit;
+
+                memory_zero(&p, sizeof(p));
+                p.width = 400, p.height = 5 * row, p.top = 0, p.bottom = 5 * row, p.column_on = 1, p.seam = 150;
+                p.column.count = 10;
+                p.column_scroll.view = p.column_scroll.height = 5 * row, p.column_scroll.content = 10 * row;
+                p.column_scroll.scroll = -(row - row / 4);
+                top_hit = ui_page_column_hit(&ui, &p, 10, row + row / 4);
+                p.column_scroll.scroll = 5 * row + (row - row / 4);
+                far_hit = ui_page_column_hit(&ui, &p, 10, row - row / 4);
+                check("kit page: the column's groups are hit where they are drawn, at rest, while the column is pulled past an end",
+                      top_hit == 1 && far_hit == 5);
         }
         ui_kit.test_clock = 0;
 }
