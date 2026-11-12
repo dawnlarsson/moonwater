@@ -247,7 +247,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Clock format	70d0	Formato da hora
 =Connect over	2789	Conectar por
 =Cursor look	34ce	Aparência do ponteiro
-=Cursor size	65d4	Tamanho do ponteiro
+=Cursor size (percent, or default)	dc84	Tamanho do ponteiro (percentagem, ou padrão)
 =Cursor style	ad1e	Estilo do ponteiro
 =Date format	7a44	Formato da data
 =Devices	f320	Dispositivos

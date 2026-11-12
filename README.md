@@ -64,7 +64,7 @@ moonwater canvas modes [largest|preferred]  which mode a screen is driven at [la
 
 
 # Input
-moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
+moonwater canvas cursor [size [PERCENT|default]|look [light|dark|auto]]  the pointer: its size, 50 to 300 percent of the size the desktop scale gives it, and its colours [80, auto]
 moonwater canvas cursor style [classic|dynamic]  the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]
 moonwater canvas cursor squeeze [PERCENT|default]  how far a pointer shrinks while a button is held, 0 to 50 percent, 0 for none; the right button grows it by half that [25]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]

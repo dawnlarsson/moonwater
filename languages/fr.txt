@@ -247,7 +247,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Clock format	70d0	Format de l'heure
 =Connect over	2789	Connexion par
 =Cursor look	34ce	Apparence du pointeur
-=Cursor size	65d4	Taille du pointeur
+=Cursor size (percent, or default)	dc84	Taille du pointeur (pourcentage, ou défaut)
 =Cursor style	ad1e	Style du pointeur
 =Date format	7a44	Format de la date
 =Devices	f320	Périphériques

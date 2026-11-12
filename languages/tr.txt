@@ -247,7 +247,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Clock format	70d0	Saat biçimi
 =Connect over	2789	Bağlantı yolu
 =Cursor look	34ce	İşaretçi görünümü
-=Cursor size	65d4	İşaretçi boyutu
+=Cursor size (percent, or default)	dc84	İşaretçi boyutu (yüzde veya varsayılan)
 =Cursor style	ad1e	İmleç stili
 =Date format	7a44	Tarih biçimi
 =Devices	f320	Aygıtlar

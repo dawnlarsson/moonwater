@@ -397,10 +397,13 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on",
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch runs to its step (two and a half rows) at once and eases out; off moves a whole step at once [on]"),
-    SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
-                      .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto",
-                      .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
-                      .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"),
+    //  The pointer's size (compositor.c's compositor_cursor_size): a percent of the size the desktop's scale gives it, which is 100;
+    //  the standard, 80, is a little smaller. A file kept before it was a percent says auto or 1 to 4 (setting_cursor_size_was).
+    SETTING_PLAIN_ROW(null, "Cursor size (percent, or default)", SETTINGS_SLIDER, 0, ("canvas", "cursor", "size"), "size ", null,
+                      .type = SETTING_NUMBER, .path = SETTING_CURSOR_SIZE_PATH,
+                      .standard = "80", .unit = "percent", .low = 50, .high = 300,
+                      .usage = "canvas cursor [size [PERCENT|default]|look [light|dark|auto]]",
+                      .help = "the pointer: its size, 50 to 300 percent of the size the desktop scale gives it, and its colours [80, auto]"),
     SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
                       .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto",
                       .refusal = "cursor look is light, dark or auto, not %s\n"),
@@ -925,6 +928,27 @@ static long setting_standard(const struct settings_row address_to row)
 }
 
 /*
+        The pointer's size as a file kept it before it was a percent, when it was a choice of auto or a whole
+        number from 1 to 4: auto was the size the desktop's scale gives the pointer, which is 100, and N was N
+        pixels a cell, which is N times that on a desktop drawn at one pixel a logical pixel (any scale below
+        150 percent), so N is N times 100 and looks as it did there. A 4 is 400, more than the slider's
+        greatest, which the compositor draws as it was and the slider shows at its end. False for any other
+        word or row; a word of these typed is refused, as any number outside the range is.
+*/
+static bool setting_cursor_size_was(const struct settings_row address_to row, string_address word, long address_to percent)
+{
+        if (!row->path || !string_equals((string_address)row->path, (string_address)SETTING_CURSOR_SIZE_PATH))
+                return false;
+        if (string_equals(word, (string_address) "auto"))
+                address_to percent = 100;
+        else if (word[0] >= '1' && word[0] <= '4' && !word[1])
+                address_to percent = (word[0] - '0') * 100;
+        else
+                return false;
+        return true;
+}
+
+/*
         What a file of a plain row holds, as a value, in value: the standard when it holds nothing,
         the word default or a word that is none of the row's. True when something is kept.
 */
@@ -935,6 +959,8 @@ static bool setting_kept(const struct settings_row address_to row, string_addres
 
         long found;
 
+        if (setting_cursor_size_was(row, word, value))
+                return true;
         address_to value = setting_standard(row);
         if (!word[0] || string_equals(word, (string_address) "default") || string_equals(word, (string_address)reset) ||
             !setting_parse(row, word, kept, sizeof(kept), &found))
@@ -944,9 +970,26 @@ static bool setting_kept(const struct settings_row address_to row, string_addres
 }
 
 /*
+        The pointer's size as a program that draws a pointer of its own takes it (the session bus's
+        cursor-size, src/dbus/service.c): the 24 pixels of a pointer at 100 percent times the percent
+        the file of the size says, as setting_kept reads it, to the nearest pixel and never less than 12.
+*/
+static long setting_cursor_pixels(string_address word)
+{
+        const struct settings_row address_to row = setting_by_path((string_address)SETTING_CURSOR_SIZE_PATH);
+        long percent = 100, pixels;
+
+        if (row)
+                setting_kept(row, word, &percent);
+        pixels = (24 * percent + 50) / 100;
+        return pixels < 12 ? 12 : pixels;
+}
+
+/*
         What a plain row says of what its file holds: the word, a colour
         normalised, a number and its unit; the standard when nothing is kept
-        or what is kept is none of its words.
+        or what is kept is none of its words. The pointer's size kept before
+        it was a percent is said as the percent it is read as.
 */
 static string_address setting_shown(const struct settings_row address_to row, string_address word, p8 address_to into, positive room)
 {
@@ -954,7 +997,9 @@ static string_address setting_shown(const struct settings_row address_to row, st
         long value = 0;
         positive length;
 
-        if (!word[0] || string_equals(word, (string_address) "default") || !setting_parse(row, word, kept, sizeof(kept), &value))
+        if (setting_cursor_size_was(row, word, &value))
+                positive_into_string(into, (positive)value);
+        else if (!word[0] || string_equals(word, (string_address) "default") || !setting_parse(row, word, kept, sizeof(kept), &value))
                 string_copy_bounded(into, (string_address)row->standard, room);
         else
                 string_copy_bounded(into, kept, room);

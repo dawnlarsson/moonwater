@@ -15,7 +15,7 @@
           org.freedesktop.appearance accent-color    canvas theme accent, when one is kept (else out of range = none)
           org.freedesktop.appearance contrast        0 (no setting yet)
           org.gnome.desktop.interface color-scheme, gtk-theme, enable-animations (canvas motion), text-scaling-factor (1.0),
-                                      cursor-size (canvas cursor size: 24 pixels a step, 24 for auto)
+                                      cursor-size (canvas cursor size: 24 pixels times the percent over 100, 12 at least)
         and a change of any is told to the programs that listen (SettingChanged) within the time the loop takes to wake: at
         once for a file written, within 20 s for the clock turning auto from dark to light.
 */
@@ -226,9 +226,10 @@ static void sessionbus_settings(void)
         dbus_setting_set("org.gnome.desktop.interface", "clock-format", 's', 0, 0, string_equals((string_address)word, (string_address) "12h") ? "12h" : "24h");
         sessionbus_word(SETTING_DATE_FORMAT_PATH, word, sizeof word);
         dbus_setting_set("org.gnome.desktop.interface", "clock-show-date", 'b', word[0] == 'y' || word[0] == 'd' || word[0] == 'm', 0, 0);
-        // The pointer is the compositor's; this is the size a program that draws one of its own (a drag, a popup) takes.
+        // The pointer is the compositor's; this is the size a program that draws one of its own (a drag, a popup) takes: the 24 pixels
+        // of a pointer at 100 percent times the percent the file says (80 when none is kept), to a whole pixel (setting_cursor_pixels).
         sessionbus_word(SETTING_CURSOR_SIZE_PATH, word, sizeof word);
-        dbus_setting_set("org.gnome.desktop.interface", "cursor-size", 'i', word[0] >= '1' && word[0] <= '4' && !word[1] ? 24 * (word[0] - '0') : 24, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "cursor-size", 'i', setting_cursor_pixels((string_address)word), 0, 0);
         sessionbus.dirty = 0;
         sessionbus.last_settings = sessionbus_now(0);
 }

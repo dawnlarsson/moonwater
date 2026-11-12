@@ -247,7 +247,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Clock format	70d0	Format czasu
 =Connect over	2789	Połącz przez
 =Cursor look	34ce	Wygląd wskaźnika
-=Cursor size	65d4	Rozmiar wskaźnika
+=Cursor size (percent, or default)	dc84	Rozmiar wskaźnika (procent lub domyślnie)
 =Cursor style	ad1e	Styl wskaźnika
 =Date format	7a44	Format daty
 =Devices	f320	Urządzenia

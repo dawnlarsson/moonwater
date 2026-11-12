@@ -146,12 +146,20 @@ for _ in range(100):
 row(any(s[1] == "enable-animations" and s[2] is False for s in seen), "motion reduced is enable-animations false", str(seen))
 
 seen.clear()
+setting("canvas.cursor.size", "150")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "cursor-size" and s[2] == 36 for s in seen),
+    "a pointer size of 150 percent is a cursor-size of 36, 24 pixels times the percent, to the programs that draw their own", str(seen))
+seen.clear()
 setting("canvas.cursor.size", "3")
 for _ in range(100):
     pump(50)
     if seen:
         break
-row(any(s[1] == "cursor-size" and s[2] == 72 for s in seen), "a pointer size of 3 is a cursor-size of 72 to the programs that draw their own", str(seen))
+row(any(s[1] == "cursor-size" and s[2] == 72 for s in seen), "and a size of 3 kept before it was a percent is 300 percent, a cursor-size of 72", str(seen))
 
 seen.clear()
 setting("time.format", "12h")

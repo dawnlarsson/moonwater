@@ -247,7 +247,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Clock format	70d0	Formato dell'ora
 =Connect over	2789	Connetti tramite
 =Cursor look	34ce	Aspetto del puntatore
-=Cursor size	65d4	Dimensione del puntatore
+=Cursor size (percent, or default)	dc84	Dimensione del puntatore (percentuale, o predefinito)
 =Cursor style	ad1e	Stile del puntatore
 =Date format	7a44	Formato della data
 =Devices	f320	Dispositivi

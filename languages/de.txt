@@ -247,7 +247,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Clock format	70d0	Uhrzeitformat
 =Connect over	2789	Verbindung über
 =Cursor look	34ce	Aussehen des Mauszeigers
-=Cursor size	65d4	Größe des Mauszeigers
+=Cursor size (percent, or default)	dc84	Größe des Mauszeigers (Prozent oder Standard)
 =Cursor style	ad1e	Stil des Mauszeigers
 =Date format	7a44	Datumsformat
 =Devices	f320	Geräte

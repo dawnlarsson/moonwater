@@ -247,7 +247,7 @@ ui_field_full	fe02	no cabe más
 =Clock format	70d0	Formato de hora
 =Connect over	2789	Conectar por
 =Cursor look	34ce	Aspecto del puntero
-=Cursor size	65d4	Tamaño del puntero
+=Cursor size (percent, or default)	dc84	Tamaño del puntero (por ciento, o predeterminado)
 =Cursor style	ad1e	Estilo del puntero
 =Date format	7a44	Formato de fecha
 =Devices	f320	Dispositivos

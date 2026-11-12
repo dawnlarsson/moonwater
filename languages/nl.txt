@@ -247,7 +247,7 @@ ui_field_full	fe02	meer past er niet in
 =Clock format	70d0	Tijdnotatie
 =Connect over	2789	Verbinden via
 =Cursor look	34ce	Uiterlijk van de aanwijzer
-=Cursor size	65d4	Grootte van de aanwijzer
+=Cursor size (percent, or default)	dc84	Grootte van de aanwijzer (procent, of standaard)
 =Cursor style	ad1e	Stijl van de aanwijzer
 =Date format	7a44	Datumnotatie
 =Devices	f320	Apparaten

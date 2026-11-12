@@ -248,7 +248,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Clock format	70d0	תבנית שעה
 =Connect over	2789	חיבור דרך
 =Cursor look	34ce	מראה המצביע
-=Cursor size	65d4	גודל המצביע
+=Cursor size (percent, or default)	dc84	גודל המצביע (אחוזים, או ברירת מחדל)
 =Cursor style	ad1e	סגנון המצביע
 =Date format	7a44	תבנית תאריך
 =Devices	f320	התקנים

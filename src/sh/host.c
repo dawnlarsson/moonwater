@@ -5496,7 +5496,7 @@ static b32 host_canvas_identify(positive count);
 
 /* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
    display NAME rotation DEGREES|refresh HZ|preferred|place X Y|
-   identify|background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
+   identify|background [COLOUR|default]|cursor [size [PERCENT|default]|look [light|dark|auto]]] */
 /*
         moonwater canvas record [SECONDS] and moonwater canvas record report: the compositor's present record (src/canvas/record.h). A recording
         of SECONDS (1 to 10, three by default) is asked for by the file /run/moonwater/record/start, and the compositor takes it at its next look
@@ -21963,8 +21963,9 @@ static b32 host_taskbar(string_address address_to arguments, positive count)
         return host_setting_verb(arguments, count);
 }
 
-//      moonwater canvas cursor: bare it says the size and the look in one line, then the rows that are
-//      the shake's; any other word is a usage page (the rows have words of their own, found before this).
+//      moonwater canvas cursor: bare it says the size, a percent (cursor size 80 percent), and the look in one
+//      line, then the rows that are the shake's; any other word is a usage page (the rows have words of their
+//      own, found before this).
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
 {
         p8 word[32], shown[48], other[32], more[48];

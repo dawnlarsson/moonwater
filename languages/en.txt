@@ -247,7 +247,7 @@ ui_field_full	fe02	that is as much as it holds
 =Clock format	70d0	Clock format
 =Connect over	2789	Connect over
 =Cursor look	34ce	Cursor look
-=Cursor size	65d4	Cursor size
+=Cursor size (percent, or default)	dc84	Cursor size (percent, or default)
 =Cursor style	ad1e	Cursor style
 =Date format	7a44	Date format
 =Devices	f320	Devices

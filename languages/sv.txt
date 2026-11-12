@@ -247,7 +247,7 @@ ui_field_full	fe02	mer ryms inte
 =Clock format	70d0	Tidsformat
 =Connect over	2789	Anslut via
 =Cursor look	34ce	Pekarens utseende
-=Cursor size	65d4	Pekarens storlek
+=Cursor size (percent, or default)	dc84	Pekarens storlek (procent, eller standard)
 =Cursor style	ad1e	Pekarstil
 =Date format	7a44	Datumformat
 =Devices	f320	Enheter

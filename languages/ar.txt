@@ -248,7 +248,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Clock format	70d0	تنسيق الوقت
 =Connect over	2789	الاتصال عبر
 =Cursor look	34ce	شكل المؤشر
-=Cursor size	65d4	حجم المؤشر
+=Cursor size (percent, or default)	dc84	حجم المؤشر (بالمئة، أو الافتراضي)
 =Cursor style	ad1e	نمط المؤشر
 =Date format	7a44	تنسيق التاريخ
 =Devices	f320	الأجهزة

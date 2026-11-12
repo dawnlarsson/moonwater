@@ -247,7 +247,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Clock format	70d0	Μορφή ώρας
 =Connect over	2789	Σύνδεση μέσω
 =Cursor look	34ce	Εμφάνιση δείκτη
-=Cursor size	65d4	Μέγεθος δείκτη
+=Cursor size (percent, or default)	dc84	Μέγεθος δείκτη (ποσοστό, ή προεπιλογή)
 =Cursor style	ad1e	Στυλ δείκτη
 =Date format	7a44	Μορφή ημερομηνίας
 =Devices	f320	Συσκευές

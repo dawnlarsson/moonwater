@@ -4730,7 +4730,7 @@ static struct
                 int shake_off;          // `moonwater canvas cursor shake off`: a shake finds nothing
                 int click_off;          // `moonwater canvas cursor click off`: a held button leaves the pointer its size (on by default)
                 positive shake_ns;      // how long a shaken pointer stays large (0 is COMPOSITOR_MAGNIFIED_NS)
-                int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
+                int size, look;         // `moonwater canvas cursor`: its size in percent of the desktop's, 0 for 100; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
                 int style;              // `moonwater canvas cursor style`: 1 dynamic (the default), 0 classic
                 int dyn;                // the dynamic cursor is what is drawn now: the style, or a touch was the last input (touch.hidden)
@@ -4878,11 +4878,15 @@ static unsigned int compositor_cursor_ink(int outline, unsigned int alpha)
 // small for the size it was asked to be.
 static int compositor_turning(void);
 
-// The pointer's whole size, in pixels a cell: its own when `moonwater canvas cursor size` gave one and the desktop's when it did not,
-// and three times that while it is shaken large.
+/*
+        The pointer's whole size, in 256ths of a pixel a cell: the desktop's own size for it (the whole device pixels of a logical pixel,
+        compositor_px1) times the percent `moonwater canvas cursor size` gives, to the nearest 256th, and three times that while it is
+        shaken large. At a desktop of 100 percent, 80 is 204.8 256ths and so 205, and at 200 percent it is 409.6 and so 410.
+*/
 static int compositor_cursor_size(void)
 {
-        int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
+        int percent = compositor.cursor.size ? compositor.cursor.size : 100;
+        int base = (compositor_px1(compositor.scale) * 256 * percent + 50) / 100;
 
         return compositor.cursor.magnified ? 3 * base : base;
 }
@@ -4890,9 +4894,9 @@ static int compositor_cursor_size(void)
 static int compositor_cursor_in_scene(void)
 {
         // A screen turned (by the card or by Canvas) has no plane that turns with it: its pointer is drawn into the scene. So is one
-        // larger than twice its size, shaken or not, which is the most the plane holds of the dynamic shape with its stretch.
+        // larger than two pixels a cell, shaken or not, which is the most the plane holds of the dynamic shape with its stretch.
         return compositor.cursor.soft || compositor_turning() ||
-               (compositor.cursor.handle[0] && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL);
+               (compositor.cursor.handle[0] && compositor_cursor_size() > CP_PLANE / CP_DYN_CELL * 256);
 }
 
 // The screens as rectangles of the space, and how many: one, the whole space, where none is listed.
@@ -11493,18 +11497,21 @@ static int compositor_pointer_dynamic(void)
 
 /*
         The pointer as it is to be drawn now: its bitmap or the dynamic shape, at its size (compositor_cursor_size), smaller or larger
-        by what a held button has it at. The dynamic shape is on its way to the rectangle while the pointer is over text.
+        by what a held button has it at, and no larger than the largest picture (CP_SPAN_MOST) holds it. The dynamic shape is on its way
+        to the rectangle while the pointer is over text.
 */
 static void compositor_pointer_now(struct compositor_pointer *p)
 {
         // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
         positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
-        int morph, grow;
+        int morph, grow, scale, most;
 
         compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
         morph = compositor_sway_at(&compositor.cursor.morph, now);
         grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
-        *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now))};
+        scale = (compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now)) + 128) >> 8;
+        most = (CP_SPAN_MOST << 8) / (compositor.cursor.dyn ? CP_DYN_CELL : CP_CELL);
+        *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = scale < most ? scale : most};
         if (!p->dyn)
         {
                 p->shape = compositor.cursor.shape < CP_SHAPES ? compositor.cursor.shape : CP_ARROW;
@@ -11980,17 +11987,18 @@ static void compositor_word(const char *path, char *word, unsigned int room)
 
 /*
         What `moonwater canvas background` and `moonwater canvas cursor` kept in /root: the desktop's ink,
-        the pointer's size (1 to 4, or the desktop's own) and its colours (light or dark, or the light it
-        always was). Read when the compositor starts and again when a file of them is written; a word it
-        does not know is the default, as if nothing were kept. What changed is drawn at once.
+        the pointer's size (a percent of the desktop's own for it, 80 when nothing is kept, and auto or 1 to
+        4 kept before as the registry reads them) and its colours (light or dark, or the light it always
+        was). Read when the compositor starts and again when a file of them is written; a word it does not
+        know is the default, as if nothing were kept. What changed is drawn at once.
 */
 static p8 compositor_setting_kept(const char *path, const char *word, long *value);
 
 static void compositor_look_read(void)
 {
         char word[16];
-        long colour;
-        int size = 0, look = 0, style, squeeze = 25;
+        long colour, sized = 0;
+        int size, look = 0, style, squeeze = 25;
         long percent = 25;
 
         compositor_word(SETTING_BACKGROUND_PATH, word, sizeof(word));
@@ -12002,8 +12010,8 @@ static void compositor_look_read(void)
         }
 
         compositor_word(SETTING_CURSOR_SIZE_PATH, word, sizeof(word));
-        if (word[0] >= '1' && word[0] <= '4' && !word[1])
-                size = word[0] - '0';
+        compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, word, &sized);
+        size = sized < 50 ? 50 : sized > 400 ? 400 : (int)sized;
         compositor_word(SETTING_CURSOR_LOOK_PATH, word, sizeof(word));
         if (!string_compare((string_address)word, (string_address) "light"))
                 look = 1;

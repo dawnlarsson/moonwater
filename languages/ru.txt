@@ -247,7 +247,7 @@ ui_field_full	fe02	больше не помещается
 =Clock format	70d0	Формат времени
 =Connect over	2789	Соединение через
 =Cursor look	34ce	Вид указателя
-=Cursor size	65d4	Размер указателя
+=Cursor size (percent, or default)	dc84	Размер указателя (процент или по умолчанию)
 =Cursor style	ad1e	Стиль указателя
 =Date format	7a44	Формат даты
 =Devices	f320	Устройства

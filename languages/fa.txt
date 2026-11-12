@@ -248,7 +248,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Clock format	70d0	قالب زمان
 =Connect over	2789	اتصال از طریق
 =Cursor look	34ce	ظاهر نشانگر
-=Cursor size	65d4	اندازه نشانگر
+=Cursor size (percent, or default)	dc84	اندازه نشانگر (درصد، یا پیش‌فرض)
 =Cursor style	ad1e	سبک نشانگر
 =Date format	7a44	قالب تاریخ
 =Devices	f320	دستگاه‌ها

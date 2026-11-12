@@ -46767,7 +46767,7 @@ def harness_moonwater_cli(argv):
                 "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
                 "latency", "latency sideways", "latency reset extra", "canvas background 112233",
                 "canvas modes preferred",
-                "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
+                "canvas cursor size 200", "canvas cursor look dark", "canvas cursor shake off",
                 "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
                 "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
                 "canvas touch on", "device lock", "device allow 1-1", "device class storage allow",
@@ -46801,7 +46801,7 @@ def harness_moonwater_cli(argv):
                 "latency reset extra": (2, ""),
                 "canvas modes preferred": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
                 "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
-                "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
+                "canvas cursor size 200": (1, "needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor shake off": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor shake delay 800": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
@@ -46866,7 +46866,7 @@ def harness_moonwater_cli(argv):
                 "canvas background", "canvas background 112233", "canvas background default", "canvas background red",
                 "canvas background a b", "canvas arrange", "canvas arrange Virtual-2 Virtual-1",
                 "canvas arrange Virtual-2@off", "canvas arrange default", "canvas arrange x@", "canvas arrange a a",
-                "canvas cursor", "canvas cursor size", "canvas cursor size 2",
+                "canvas cursor", "canvas cursor size", "canvas cursor size 200",
                 "canvas cursor size 9", "canvas cursor size 2 3", "canvas cursor look", "canvas cursor look dark",
                 "canvas cursor look sideways", "canvas cursor look dark light", "canvas cursor bogus",
                 #       The rows of the settings table that one generic path answers.
@@ -46990,7 +46990,7 @@ def harness_moonwater_cli(argv):
             'canvas arrange default',
             'canvas cursor',
             'canvas cursor size',
-            'canvas cursor size 2',
+            'canvas cursor size 200',
             'canvas cursor look',
             'canvas cursor look dark',
             'canvas cursor shake',
@@ -49619,14 +49619,14 @@ while True:
                    "".join(locale_say("canvas background " + bad) + look_kept("background")
                            for bad in ("red", '"#12345"', '"#1234567"', "12345g", '""', '"##123456"')) +
                    locale_say("canvas background default") + look_kept("background") +
-                   locale_say("canvas cursor size 3") + look_kept("cursor.size") +
+                   locale_say("canvas cursor size 150") + look_kept("cursor.size") +
                    locale_say("canvas cursor look dark") + look_kept("cursor.look") +
                    locale_say("canvas cursor size") + locale_say("canvas cursor look") +
                    "".join(locale_say("canvas cursor size " + bad) + look_kept("cursor.size")
-                           for bad in ("0", "5", "big", "2x", '""')) +
+                           for bad in ("0", "2", "auto", "301", "big", "2x", '""')) +
                    "".join(locale_say("canvas cursor look " + bad) + look_kept("cursor.look")
                            for bad in ("grey", "Light", '""')) +
-                   locale_say("canvas cursor size auto") + look_kept("cursor.size") +
+                   locale_say("canvas cursor size default") + look_kept("cursor.size") +
                    locale_say("canvas cursor look light") + look_kept("cursor.look") +
                    locale_say("canvas background a b") + locale_say("canvas cursor bogus") +
                    locale_say("canvas cursor size 2 3") + locale_say("canvas cursor look dark light") +
@@ -49688,7 +49688,7 @@ while True:
                  "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
                  "keyboard": ("keyboard de",),
                  "canvas modes": ("modes preferred",), "canvas background": ("background #ff0000",),
-                 "canvas cursor": ("size 3", "look dark"), "canvas arrange": ("arrange Virtual-2 HDMI-A-1@off",),
+                 "canvas cursor": ("size 300 percent", "look dark"), "canvas arrange": ("arrange Virtual-2 HDMI-A-1@off",),
                  "status": ("Europe/Paris", "ntp off", "keyboard de")}
         for verb in readers:
             shut, kept = text(f"shut {verb}"), text(f"kept {verb}")
@@ -49739,27 +49739,27 @@ while True:
         #       In the order they ran: none kept (three), then #ff8800, #00aaff, #336699; six refusals
         #       leave it; default; then the sizes and looks, the refusals leaving them as they were.
         looks = [line[len("@@look "):] for line in lines if line.startswith("@@look ")]
-        wanted = (["none"] * 3 + ["#ff8800", "#00aaff", "#336699"] + ["#336699"] * 6 + ["default", "3", "dark"] +
-                  ["3"] * 5 + ["dark"] * 3 + ["auto", "light"] + ["default", "auto", "light"])
+        wanted = (["none"] * 3 + ["#ff8800", "#00aaff", "#336699"] + ["#336699"] * 6 + ["default", "150", "dark"] +
+                  ["150"] * 7 + ["dark"] * 3 + ["default", "light"] + ["default", "default", "light"])
         check(looks == wanted,
               "canvas background and cursor keep the word they were given and nothing a refusal was given",
               repr(looks))
-        check("background #1e1e1e" in text("canvas background") and "cursor size auto, look auto" in text("canvas cursor") and
+        check("background #1e1e1e" in text("canvas background") and "cursor size 80 percent, look auto" in text("canvas cursor") and
               seen.get("canvas background", {}).get("status") == 0 and
               "background #ff8800" in text("canvas background \"#FF8800\"") and
               "background #00aaff" in text("canvas background 0af") and
               "background #1e1e1e" in text("canvas background default") and
-              "cursor size 3" in text("canvas cursor size 3") and "cursor look dark" in text("canvas cursor look dark") and
-              "cursor size 3" in text("canvas cursor size") and "cursor look dark" in text("canvas cursor look"),
+              "cursor size 150 percent" in text("canvas cursor size 150") and "cursor look dark" in text("canvas cursor look dark") and
+              "cursor size 150 percent" in text("canvas cursor size") and "cursor look dark" in text("canvas cursor look"),
               "the bare words say what is kept, the default when nothing is, and a word is kept and said",
-              text("canvas background") + text("canvas cursor") + text("canvas cursor size 3"))
+              text("canvas background") + text("canvas cursor") + text("canvas cursor size 150"))
         for bad in ("red", '"#12345"', '"#1234567"', "12345g", '""', '"##123456"'):
             check(seen.get("canvas background " + bad, {}).get("status") == 1 and
                   "background is a colour like 1e1e1e, or default" in text("canvas background " + bad),
                   f"canvas background {bad} is refused in words", text("canvas background " + bad))
-        for bad in ("0", "5", "big", "2x", '""'):
+        for bad in ("0", "2", "auto", "301", "big", "2x", '""'):
             check(seen.get("canvas cursor size " + bad, {}).get("status") == 1 and
-                  "cursor size is auto or a number from 1 to 4" in text("canvas cursor size " + bad),
+                  "cursor size is a number from 50 to 300 percent, or default" in text("canvas cursor size " + bad),
                   f"canvas cursor size {bad} is refused in words", text("canvas cursor size " + bad))
         for bad in ("grey", "Light", '""'):
             check(seen.get("canvas cursor look " + bad, {}).get("status") == 1 and
@@ -49857,7 +49857,7 @@ while True:
               plain_seen.get("group-repeat", {}).get("status") == 0,
               "and so does keyboard repeat", plain_text("group-repeat"))
         check("cursor shake on" in plain_text("group-cursor") and "cursor shake delay 1200 ms" in plain_text("group-cursor") and
-              "cursor size auto, look " in plain_text("group-cursor"),
+              "cursor size 80 percent, look " in plain_text("group-cursor"),
               "canvas cursor says its size and look and then its shake rows", plain_text("group-cursor"))
         check(plain_seen.get("group-repeat-extra", {}).get("status") == 2,
               "a word too many to a row under a group is a usage page", repr(plain_seen.get("group-repeat-extra")))
@@ -52141,7 +52141,7 @@ main()
 #   UPPERCASE words that stand for a value, [..] for what may be left out,
 #   a|b for a choice, ... for more of the same. Inside brackets a bar that
 #   has blanks around its alternatives splits whole runs of words
-#   ("[size [N|auto]|look [light|dark|auto]]"); between two words that touch
+#   ("[size [PERCENT|default]|look [light|dark|auto]]"); between two words that touch
 #   it chooses one of them ("[N%|+N|-N]"). A line the bars of which are read
 #   the second way for lack of knowing which is meant is not "plain", and is
 #   not held to the rule that valid words are never answered with a usage.
@@ -77861,7 +77861,7 @@ def harness_state_cuts(argv):
         ("ntp nts", ["ntp nts on"], "ntp nts only", None),
         ("mouse acceleration", ["mouse acceleration on"], "mouse acceleration off", None),
         ("taskbar text", ["taskbar text edge"], "taskbar text center", None),
-        ("canvas cursor size", ["canvas cursor size 2"], "canvas cursor size 3", None),
+        ("canvas cursor size", ["canvas cursor size 200"], "canvas cursor size 150", None),
     ]
     for path, text in {
             "/sys/firmware/acpi/platform_profile": "balanced\n",
@@ -78170,7 +78170,7 @@ def harness_moonwater_state_fuzz(argv):
         "link add peera " + key, "link group lab S3cretOne11xyz allow run", "link port 22400",
         "device allow 0627:0001/S1", "device deny 0627:0001/S2", "device class storage allow",
         "canvas modes preferred", "canvas background 112233",
-        "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
+        "canvas cursor size 200", "canvas cursor look dark", "canvas cursor shake off",
         "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate 20",
         "mouse sensitivity 150", "mouse acceleration off", "taskbar position top",
         "taskbar display all", "desktop on", "airplane on", "airplane off", "power powersave",
@@ -78294,7 +78294,7 @@ def harness_moonwater_state_fuzz(argv):
         ("desktop", "/root/desktop", ["desktop", "desktop on", "desktop off", "status"], "word"),
         ("canvas.modes", "/root/canvas.modes", ["canvas modes", "canvas modes largest"], "word"),
         ("canvas.background", "/root/canvas.background", ["canvas background", "canvas background 445566", "canvas background default"], "word"),
-        ("canvas.cursor.size", "/root/canvas.cursor.size", ["canvas cursor size", "canvas cursor size 3", "canvas cursor"], "word"),
+        ("canvas.cursor.size", "/root/canvas.cursor.size", ["canvas cursor size", "canvas cursor size 150", "canvas cursor"], "word"),
         ("canvas.cursor.look", "/root/canvas.cursor.look", ["canvas cursor look", "canvas cursor look light", "canvas cursor"], "word"),
         ("canvas.cursor.shake", "/root/canvas.cursor.shake", ["canvas cursor shake", "canvas cursor shake on", "canvas cursor"], "word"),
         ("canvas.cursor.shake.delay", "/root/canvas.cursor.shake.delay", ["canvas cursor shake delay", "canvas cursor shake delay 900", "canvas cursor shake delay default"], "word"),

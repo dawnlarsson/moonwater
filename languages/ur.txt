@@ -248,7 +248,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Clock format	70d0	وقت کی شکل
 =Connect over	2789	رابطے کا ذریعہ
 =Cursor look	34ce	پوائنٹر کی شکل
-=Cursor size	65d4	پوائنٹر کا سائز
+=Cursor size (percent, or default)	dc84	پوائنٹر کا سائز (فیصد، یا ڈیفالٹ)
 =Cursor style	ad1e	پوائنٹر کا انداز
 =Date format	7a44	تاریخ کی شکل
 =Devices	f320	ڈیوائسز

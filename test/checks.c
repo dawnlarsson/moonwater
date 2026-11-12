@@ -127801,6 +127801,8 @@ static void check_taskbar_text(string_address face_path)
     taskbar_settings_set("bottom", "primary", "battery none\n");
 }
 
+static int settings_row_named(const char address_to label);
+
 static void check_compositor_look(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE], glass[64 * 32], band[64 * 32];
@@ -127939,36 +127941,105 @@ static void check_compositor_look(void)
               edge == 4 * 53 && fill == 4 * 81 && other == 0);
     }
 
+    /*
+        The pointer's size: a percent of the desktop's own size for it (whole device pixels a logical pixel), in 256ths of a pixel a
+        cell to the nearest, three times that shaken; the plane holds up to two pixels a cell and the scene draws more.
+    */
     {
         struct compositor_pointer p;
+        int hot_x, hot_y;
 
         compositor.scale = 200;
         compositor_pointer_now(&p);
-        check("look: the pointer is the desktop's scale with no size", p.scale == 2 * 256);
-        compositor.cursor.size = 1;
+        check("look: with no size read yet the pointer is 100 percent of the desktop's scale, two pixels a cell at 200", p.scale == 2 * 256);
+        compositor.cursor.size = 50;
         compositor_pointer_now(&p);
-        check("look: and the size that was asked when there is one", p.scale == 256);
+        check("look: and the percent that was asked of it: 50 at a desktop of 200 is one pixel a cell", p.scale == 256);
         compositor.cursor.handle[0] = 7;
-        check("look: at once or twice its size the pointer is the plane's", !compositor_cursor_in_scene());
+        check("look: at one pixel a cell the pointer is the plane's", !compositor_cursor_in_scene());
         compositor.cursor.magnified = 1;
         compositor_pointer_now(&p);
         check("look: shaken it is three times its size, which the plane does not hold: it is drawn", p.scale == 3 * 256 && compositor_cursor_in_scene());
         compositor.cursor.magnified = 0;
-        compositor.cursor.size = 4;
+        compositor.cursor.size = 200;
         compositor_pointer_now(&p);
-        check("look: a plane is too small for a size of 4, which is drawn", p.scale == 4 * 256 && compositor_cursor_in_scene());
-        compositor.cursor.size = 3;
-        check("look: a size of 3 is drawn, the dynamic shape's cell being larger than the plane at it", compositor_cursor_in_scene());
-        compositor.cursor.size = 2;
-        check("look: and a size of 2 is the plane's", !compositor_cursor_in_scene());
+        check("look: a plane is too small for 200 percent at a desktop of 200, four pixels a cell, which is drawn", p.scale == 4 * 256 && compositor_cursor_in_scene());
+        compositor.cursor.size = 150;
+        check("look: 150 percent there, three pixels a cell, is drawn, the dynamic shape's cell being larger than the plane at it", compositor_cursor_in_scene());
+        compositor.cursor.size = 100;
+        check("look: and 100 percent, two pixels a cell, is the plane's", !compositor_cursor_in_scene());
         compositor.cursor.size = 0;
         compositor.scale = 300;
         check("look: with no size, a desktop at three times has a pointer the plane does not hold either", compositor_cursor_in_scene());
+
+        // Between whole sizes: 80 percent, the standard, is four fifths of the desktop's own, 204.8 256ths a cell rounded to 205 at a
+        // desktop of 100 and 409.6 rounded to 410 at 200; shaken, three times that.
+        compositor.cursor.size = 80;
+        compositor.scale = 100;
+        compositor_pointer_now(&p);
+        check("look: 80 percent at a desktop of 100 is 0.8 pixels a cell, 205 in 256ths to the nearest", p.scale == 205);
+        compositor.scale = 200;
+        compositor_pointer_now(&p);
+        check("look: and at a desktop of 200 is 1.6 pixels a cell, 410 in 256ths", p.scale == 410);
+        compositor.scale = 100;
+        compositor.cursor.magnified = 1;
+        compositor_pointer_now(&p);
+        check("look: shaken, 80 percent is three times its size, 615 in 256ths, which the scene draws", p.scale == 3 * 205 && compositor_cursor_in_scene());
+        compositor.cursor.magnified = 0;
+        compositor.cursor.size = 200;
+        compositor_pointer_now(&p);
+        check("look: the plane holds up to two pixels a cell, 200 percent at a desktop of 100", p.scale == 512 && !compositor_cursor_in_scene());
+        compositor.cursor.size = 205;
+        check("look: and the scene takes any more, 205 percent", compositor_cursor_in_scene());
+        compositor.cursor.size = 300;
+        compositor.scale = 200;
+        compositor.cursor.magnified = 1;
+        compositor.cursor.dyn = 1;
+        compositor_pointer_now(&p);
+        check("look: shaken at 300 percent of a desktop of 200 the dynamic shape is no larger than the largest picture, 12 pixels a cell",
+              p.scale == CP_SPAN_MOST / CP_DYN_CELL * 256 && compositor_pointer_span(&p, &hot_x, &hot_y) == CP_SPAN_MOST);
+        compositor.cursor.magnified = 0;
+        compositor.cursor.dyn = 0;
+        compositor.cursor.size = 0;
         compositor.scale = 200;
         compositor.cursor.handle[0] = 0;
         compositor.cursor.soft = 1;
         check("look: with no plane the pointer is drawn", compositor_cursor_in_scene());
         compositor.cursor.soft = 0;
+    }
+
+    /*
+        What the settings keep of it: a slider of percents, 50 to 300 in steps of 5, 80 when nothing is kept; a file kept before it was
+        a percent reads as it meant, auto as 100 and a whole N as N times 100, which a typed word does not; and the size the session
+        bus tells a program that draws its own pointer is 24 pixels times the percent over 100.
+    */
+    {
+        int row = settings_row_named("Cursor size (percent, or default)");
+        const struct settings_row address_to size = row >= 0 ? &settings_rows[row] : null;
+        long value = 0;
+        p8 kept[16], shown[48];
+
+        check("look: the pointer's size is a slider of 50 to 300 percent in steps of 5, 80 when nothing is kept",
+              size && size->kind == SETTINGS_SLIDER && size->type == SETTING_NUMBER && size->low == 50 && size->high == 300 &&
+                  settings_slider_step(size) == 5 && string_equals((string_address)size->standard, (string_address) "80") &&
+                  string_equals((string_address)size->unit, (string_address) "percent") && !setting_kept(size, (string_address) "", &value) &&
+                  value == 80 && compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, "", &value) == 0 && value == 80);
+        check("look: a size kept before it was a percent reads as it meant: 2 as 200, 4 as 400, 1 as 100 and auto as 100",
+              size && setting_kept(size, (string_address) "2", &value) && value == 200 && setting_kept(size, (string_address) "4", &value) &&
+                  value == 400 && setting_kept(size, (string_address) "1", &value) && value == 100 &&
+                  setting_kept(size, (string_address) "auto", &value) && value == 100 &&
+                  compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, "2", &value) && value == 200 &&
+                  !string_compare(setting_shown(size, (string_address) "2", shown, sizeof(shown)), (string_address) "200 percent") &&
+                  !string_compare(setting_shown(size, (string_address) "auto", shown, sizeof(shown)), (string_address) "100 percent") &&
+                  !string_compare(setting_shown(size, (string_address) "", shown, sizeof(shown)), (string_address) "80 percent"));
+        check("look: and those words typed are refused, as a number outside 50 to 300 is",
+              size && !setting_parse(size, (string_address) "2", kept, sizeof(kept), &value) &&
+                  !setting_parse(size, (string_address) "auto", kept, sizeof(kept), &value) &&
+                  setting_parse(size, (string_address) "125", kept, sizeof(kept), &value) && value == 125);
+        check("look: a program that draws its own pointer is told 24 pixels times the percent: 19 at 80, 24 at 100, 72 at 300, 48 for a 2 kept before",
+              setting_cursor_pixels((string_address) "") == 19 && setting_cursor_pixels((string_address) "100") == 24 &&
+                  setting_cursor_pixels((string_address) "300") == 72 && setting_cursor_pixels((string_address) "50") == 12 &&
+                  setting_cursor_pixels((string_address) "2") == 48 && setting_cursor_pixels((string_address) "auto") == 24);
     }
 }
 
@@ -127982,7 +128053,7 @@ static void check_compositor_click(void)
 {
     struct compositor_pointer p;
     struct compositor_sway sway = {0, 0, 0};
-    int hot = 1, sizes[5] = {192, 256, 384, 512, 576}, half;
+    int hot = 1, sizes[8] = {128, 192, 205, 256, 320, 384, 512, 576}, half;
 
     memory_zero(&compositor, sizeof(compositor));
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -128030,7 +128101,7 @@ static void check_compositor_click(void)
     check("press: sent elsewhere on its way, it leaves from where it had got to", sway.from == 100 - half && sway.to == 50);
 
     for (unsigned int shape = 0; shape < CP_SHAPES; shape++)
-        for (unsigned int size = 0; size < 5; size++)
+        for (unsigned int size = 0; size < sizeof(sizes) / sizeof(sizes[0]); size++)
         {
             unsigned char fill[CP_SPAN_MOST], edge[CP_SPAN_MOST];
             struct compositor_pointer at = {.shape = shape, .scale = sizes[size]};
@@ -128039,7 +128110,8 @@ static void check_compositor_click(void)
             compositor_pointer_row(&at, hot_y, span, hot_x, hot_y, fill, edge);
             hot &= span <= CP_PLANE && hot_x < span && hot_y < span && (fill[hot_x] || edge[hot_x]);
         }
-    check("press: at three quarters, once, one and a half, twice and two and a quarter times, the pixel the pointer is on is the shape's own, for every shape", hot);
+    check("press: at a half (50 percent), three quarters, four fifths (80 percent), once, one and a quarter (125 percent), one and a half, twice "
+          "and two and a quarter times, the pixel the pointer is on is the shape's own, for every shape", hot);
 }
 
 /*
@@ -139961,12 +140033,12 @@ static fn check_settings(string_address regular, string_address bold)
                 // The desktop's colour and the pointer: what canvas background and canvas cursor say, and the words that set them.
                 {
                         int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
-                            size = settings_row_named("Cursor size"), look = settings_row_named("Cursor look");
+                            size = settings_row_named("Cursor size (percent, or default)"), look = settings_row_named("Cursor look");
 
-                        check("settings: the desktop colour has a choice of inks and a field, and the pointer a size and a look",
+                        check("settings: the desktop colour has a choice of inks and a field, and the pointer a size slider and a look",
                               settings_rows[ink].kind == SETTINGS_CHOICE && (settings_rows[ink].flags & SETTINGS_INK) &&
                                   settings_rows[colour].kind == SETTINGS_FIELD && !(settings_rows[colour].flags & SETTINGS_INK) &&
-                                  settings_rows[size].kind == SETTINGS_CHOICE && settings_rows[look].kind == SETTINGS_CHOICE &&
+                                  settings_rows[size].kind == SETTINGS_SLIDER && settings_rows[look].kind == SETTINGS_CHOICE &&
                                   settings_group_of(colour) == settings_group_of(ink) &&
                                   settings_group_of(size) == settings_group_of(look) && settings_group_of(size) != settings_group_of(ink) &&
                                   settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
@@ -139989,13 +140061,29 @@ static fn check_settings(string_address regular, string_address bold)
                                   settings_read(&settings_rows[ink], "[Moonwater] background #123456\n", 30, value, SETTINGS_VALUE, false) ==
                                       SETTINGS_READ &&
                                   string_equals((string_address)value, (string_address) "#123456"));
-                        check("settings: the pointer's size and look are each one word of the one line the verb says",
-                              settings_parsed(size, "[Moonwater] cursor size auto, look dark\n", value) == SETTINGS_READ &&
-                                  string_equals((string_address)value, (string_address) "auto") &&
-                                  settings_parsed(look, "[Moonwater] cursor size auto, look dark\n", value) == SETTINGS_READ &&
+                        check("settings: the pointer's size, a percent, and its look are each one word of the one line the verb says",
+                              settings_parsed(size, "[Moonwater] cursor size 80 percent, look dark\n", value) == SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "80") &&
+                                  settings_parsed(look, "[Moonwater] cursor size 80 percent, look dark\n", value) == SETTINGS_READ &&
                                   string_equals((string_address)value, (string_address) "dark") &&
-                                  settings_parsed(size, "[Moonwater] cursor size 3, look auto\n", value) == SETTINGS_READ &&
-                                  string_equals((string_address)value, (string_address) "3"));
+                                  settings_parsed(size, "[Moonwater] cursor size 300 percent, look auto\n", value) == SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "300"));
+                        {
+                                struct ui_row described;
+                                unsigned char state = settings.state[size];
+                                char had[SETTINGS_VALUE];
+
+                                memory_copy(had, settings.value[size], SETTINGS_VALUE);
+                                settings.state[size] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[size], (string_address) "400", SETTINGS_VALUE);
+                                memory_zero(&described, sizeof(described));
+                                settings_describe(size, &described);
+                                check("settings: the pointer's size is a slider of 50 to 300 in steps of 5, in percent, and a 4 kept before (400) rests at its end",
+                                      described.kind == UI_ROW_SLIDER && described.at == 300 && described.low == 50 && described.high == 300 &&
+                                          described.step == 5 && described.words && string_equals((string_address)described.words, (string_address) "%"));
+                                settings.state[size] = state;
+                                memory_copy(settings.value[size], had, SETTINGS_VALUE);
+                        }
                         count = settings_command(&settings_rows[ink], (string_address) "/moonwater", "plum", words, SETTINGS_WORDS, false);
                         check("settings: an ink is set as its rrggbb, after canvas background",
                               count == 4 && string_equals(words[1], (string_address) "canvas") &&
@@ -140006,10 +140094,10 @@ static fn check_settings(string_address regular, string_address bold)
                         count = settings_command(&settings_rows[colour], (string_address) "/moonwater", "a0b1c2", words, SETTINGS_WORDS, false);
                         check("settings: a colour typed is the word the verb is run with, whatever it is",
                               count == 4 && string_equals(words[3], (string_address) "a0b1c2"));
-                        count = settings_command(&settings_rows[size], (string_address) "/moonwater", "4", words, SETTINGS_WORDS, false);
-                        check("settings: the pointer's size is canvas cursor size and its word",
+                        count = settings_command(&settings_rows[size], (string_address) "/moonwater", "150", words, SETTINGS_WORDS, false);
+                        check("settings: the pointer's size is canvas cursor size and its percent",
                               count == 5 && string_equals(words[2], (string_address) "cursor") && string_equals(words[3], (string_address) "size") &&
-                                  string_equals(words[4], (string_address) "4") && !words[5]);
+                                  string_equals(words[4], (string_address) "150") && !words[5]);
                         count = settings_command(&settings_rows[look], (string_address) "/moonwater", "light", words, SETTINGS_WORDS, false);
                         check("settings: and its look is canvas cursor look and its word",
                               count == 5 && string_equals(words[3], (string_address) "look") && string_equals(words[4], (string_address) "light"));
@@ -140065,8 +140153,8 @@ static fn check_settings(string_address regular, string_address bold)
 "\n"
 "\n"
 "Input\n"
-"  canvas cursor [size [N|auto]|look [light|dark|auto]]\n"
-"                                    the pointer: size 1 to 4, colours [auto]\n"
+"  canvas cursor [size [PERCENT|default]|look [light|dark|auto]]\n"
+"                                    the pointer: its size, 50 to 300 percent of the size the desktop scale gives it, and its colours [80, auto]\n"
 "  canvas cursor style [classic|dynamic]\n"
 "                                    the classic pointers, or one filled shape that stretches with a fast hand and is a rounded block over text [dynamic]\n"
 "  canvas cursor squeeze [PERCENT|default]\n"
@@ -141086,7 +141174,7 @@ static fn check_settings(string_address regular, string_address bold)
                         // a field that keeps what is typed as it is, and the pointer's rows found by what they are called.
                         {
                                 int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
-                                    size = settings_row_named("Cursor size"), look = settings_row_named("Cursor look");
+                                    size = settings_row_named("Cursor size (percent, or default)"), look = settings_row_named("Cursor look");
 
                                 settings.page.chosen = settings_group_of(ink);
                                 settings_refilter();
@@ -141129,13 +141217,11 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.page.pane = 1;
                                 settings.list.focus = size;
                                 settings.state[size] = SETTINGS_READ;
-                                string_copy_bounded((string_address)settings.value[size], (string_address) "auto", SETTINGS_VALUE);
+                                string_copy_bounded((string_address)settings.value[size], (string_address) "80", SETTINGS_VALUE);
                                 settings_press(UI_KEY_ENTER);
-                                settings_type_code('3');
-                                settings_press(UI_KEY_ENTER);
-                                check("settings: the pointer's size is chosen from auto and 1 to 4",
+                                check("settings: the pointer's size is a slider that Enter steps on from 80 percent to 85",
                                       settings.queued == 1 && settings.queue[0].row == size &&
-                                          string_equals((string_address)settings.queue[0].value, (string_address) "3"));
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "85"));
                                 settings.queued = 0;
                                 settings.list.focus = look;
                                 settings.state[look] = SETTINGS_READ;
@@ -143573,7 +143659,7 @@ static fn check_settings_groups(void)
         } placed[] = {
             {"Keyboard", "Input"}, {"On-screen keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
             {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
-            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
+            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size (percent, or default)", "Input"}, {"Cursor look", "Input"},
             {"Cursor style", "Input"}, {"Pointer squeeze (percent, or default)", "Input"},
             {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
             {"Pointer squeezes on click", "Input"},
@@ -144224,7 +144310,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         }
         {
                 // Canvas holds the desktop's drawing; the pointer, the wheel and touch are Input's, so Input has its own scripts.
-                int canvas = settings_group_of(settings_row_named("Background")), input = settings_group_of(settings_row_named("Cursor size"));
+                int canvas = settings_group_of(settings_row_named("Background")), input = settings_group_of(settings_row_named("Cursor size (percent, or default)"));
                 static const struct settings_frames_step hover[] = {
                     {0, SF_ROW, "Background", 450, 0}, {30, SF_ROW, "Background colour (rrggbb or default)", 450, 0},
                     {90, SF_ROW, "Theme", 300, 0}, {120, SF_ROW, "Accent", 300, 0}, {150, SF_ROW, "Motion", 300, 0},
@@ -144290,7 +144376,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {60, SF_KEY, null, UI_KEY_DOWN, 0}, {80, SF_KEY, null, UI_KEY_DOWN, 0}, {200, SF_KEY, null, UI_KEY_ENTER, 0},
                     {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, UI_KEY_ENTER, 0}, {320, SF_KEY, null, UI_KEY_ESCAPE, 0}};
                 static const struct settings_frames_step input_menu[] = {
-                    {0, SF_ROW, "Cursor size", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
+                    {0, SF_ROW, "Keyboard", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {60, SF_KEY, null, UI_KEY_DOWN, 0}, {80, SF_KEY, null, UI_KEY_DOWN, 0}, {200, SF_KEY, null, UI_KEY_ENTER, 0},
                     {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, UI_KEY_ENTER, 0}, {320, SF_KEY, null, UI_KEY_ESCAPE, 0}};
 
