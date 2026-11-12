@@ -6843,7 +6843,9 @@ static p32 doc_tokenize_c(const p8 address_to line, positive length, p32 state, 
 
                 at = close ? (positive)(close - line) + 2 : length;
                 doc_token_put(tokens, count, room, 0, at, DOC_ROLE_COMMENT);
-                state = close ? 0 : 1;
+                // A comment this line does not close goes on: the next line starts inside it too.
+                if (!close)
+                        return 1;
         }
         else if (state == 2)
         {
@@ -6854,7 +6856,9 @@ static p32 doc_tokenize_c(const p8 address_to line, positive length, p32 state, 
                 finish = finish < length ? finish + 1 : length;
                 doc_token_put(tokens, count, room, 0, finish, DOC_ROLE_STRING);
                 at = finish;
-                state = finish >= length && length && line[length - 1] == '\\' ? 2 : 0;
+                // A string a backslash at this line's end continues goes on onto the next line.
+                if (finish >= length && length && line[length - 1] == '\\')
+                        return 2;
         }
         {
                 positive first = at;

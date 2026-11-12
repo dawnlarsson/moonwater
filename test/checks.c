@@ -166267,6 +166267,72 @@ static positive ripple_outside_rounded(const unsigned int address_to with, const
         return outside;
 }
 
+#if MOONWATER_UI_EDITOR
+// Whether lines first to last of a document are a comment's from their first byte to their last, as the editor colours them.
+static b32 editor_comment_lines(struct doc address_to doc, p64 first, p64 last)
+{
+        static struct doc_token tokens[512];
+        b32 whole = true;
+
+        for (p64 line = first; line <= last; line++)
+        {
+                positive count = doc_tokens(doc, line, tokens, 512), covered = 0;
+                const p8 address_to bytes;
+                positive length;
+
+                for (positive k = 0; k < count; k++)
+                        whole = whole && tokens[k].role == DOC_ROLE_COMMENT && tokens[k].start == covered, covered += tokens[k].length;
+                length = doc_line_bytes(doc, line, &bytes);
+                whole = whole && count && covered == length;
+        }
+        return whole;
+}
+
+// Whether a line of a document has no comment in it and a string: a quoted letter the comment's close has let be one.
+static b32 editor_code_line(struct doc address_to doc, p64 line)
+{
+        static struct doc_token tokens[512];
+        positive count = doc_tokens(doc, line, tokens, 512);
+        b32 comment = false, string = false;
+
+        for (positive k = 0; k < count; k++)
+                comment = comment || tokens[k].role == DOC_ROLE_COMMENT, string = string || tokens[k].role == DOC_ROLE_STRING;
+        return !comment && string;
+}
+
+/*
+        A block comment of twenty lines whose words have apostrophes in them (the kit's, the window's) is the comment's colour on every
+        line, from its first byte to its last: in a document opened with it, and after a letter typed before the comment on its first
+        line, which tokenizes the lines again from the states the edit kept. The line after the comment's close is code again, and a
+        quoted letter on it is a string.
+*/
+static fn check_editor_comments(void)
+{
+        static const char inner[] = "\tthe kit's own page, the window's edge and the tabs' row\n";
+        static p8 text[2048];
+        positive length = 0;
+        struct doc doc;
+        static struct doc_token tokens[512];
+        positive count;
+        b32 fresh, edited, first;
+
+        memory_copy(text, "/*\n", 3), length = 3;
+        for (int k = 0; k < 18; k++)
+                memory_copy(text + length, inner, sizeof(inner) - 1), length += sizeof(inner) - 1;
+        memory_copy(text + length, "*/\nint x = 'a';\n", 16), length += 16;
+        doc_open(&doc, text, length);
+        doc.language = DOC_LANGUAGE_C;
+        fresh = editor_comment_lines(&doc, 0, 19) && editor_code_line(&doc, 20);
+        doc_replace(&doc, 0, 0, (const p8 address_to) "x", 1);
+        count = doc_tokens(&doc, 0, tokens, 512);
+        first = count == 2 && tokens[0].role == DOC_ROLE_TEXT && tokens[1].role == DOC_ROLE_COMMENT && tokens[1].start == 1 && tokens[1].length == 2;
+        edited = first && editor_comment_lines(&doc, 1, 19) && editor_code_line(&doc, 20);
+        doc_close(&doc);
+        check("editor colours: every line of a block comment of twenty lines with apostrophes in its words is the comment's, opened fresh", fresh);
+        check("editor colours: and after a letter typed before the comment on its first line, and the line after its close is code again", edited);
+}
+#endif
+
 #if MOONWATER_UI_ANY
 static fn check_kit_defaults(struct ui address_to wui)
 {
@@ -169883,6 +169949,9 @@ b32 main()
         check_no_element_by_hand();
 #if MOONWATER_UI_ANY
         check_kit_defaults(&terminal.ui);
+#endif
+#if MOONWATER_UI_EDITOR
+        check_editor_comments();
 #endif
 
         // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.
