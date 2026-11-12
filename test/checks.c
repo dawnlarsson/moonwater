@@ -135434,6 +135434,32 @@ static void scroll_code(struct ui address_to wui, struct ui_text address_to t, i
     ui_text_draw(wui, t, SCROLL_CODE_LEFT, SCROLL_CODE_TOP, SCROLL_CODE_WIDTH, SCROLL_CODE_HEIGHT, 0);
 }
 
+// The same code view with one line longer than its box: line 12 is SCROLL_WIDE_COLUMNS columns, the rest seven as before.
+#define SCROLL_WIDE_LINE 12
+#define SCROLL_WIDE_COLUMNS 64
+
+static void scroll_code_wide(struct ui address_to wui, struct ui_text address_to t, int top)
+{
+    static char text[40 * SCROLL_LINE + SCROLL_WIDE_COLUMNS];
+    positive length = 0;
+
+    for (int n = 0; n < 40; n++)
+    {
+        text[length++] = 'l', text[length++] = 'i', text[length++] = 'n', text[length++] = 'e', text[length++] = ' ';
+        text[length++] = (char)('0' + n / 10), text[length++] = (char)('0' + n % 10);
+        for (int column = 7; n == SCROLL_WIDE_LINE && column < SCROLL_WIDE_COLUMNS; column++)
+            text[length++] = 'x';
+        text[length++] = '\n';
+    }
+    ui_text_open(t, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
+    t->focused = true;
+    t->top_line = (p64)top;
+    t->sel.dragging = false;
+    t->sel.edge.past = 0;
+    t->sel.edge.at = 0;
+    ui_text_draw(wui, t, SCROLL_CODE_LEFT, SCROLL_CODE_TOP, SCROLL_CODE_WIDTH, SCROLL_CODE_HEIGHT, 0);
+}
+
 static void scroll_field(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, b32 at_end)
 {
     const char address_to text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau";
@@ -136011,21 +136037,61 @@ static void check_code_wheel(struct ui address_to wui)
     check("code view wheel: the lift of a quick hand throws the view, and the app's ticks spend the throw", thrown && spent);
     ui_text_close(&view);
 
+    /*
+            Across. The view shows a line longer than its box (scroll_code_wide), so there is something across to turn to: Shift turns a
+            notch three columns toward the lines' end, a sideways turn (b set, its amount positive to the right, as the compositor sends
+            it) goes the way it is turned, and both stop at the lines' start and where the widest line in view ends at the box's far side
+            with the caret's room past it. A view whose lines all fit, and a wrapped one, are not turned across at all.
+    */
     {
-        struct window_event across = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, -120, 0};
+        struct window_event across = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, -120, 0}, back = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, 120, 0};
+        struct window_event right = {WINDOW_EVENT_WHEEL, 0, 120, 1}, left = {WINDOW_EVENT_WHEEL, 0, -120, 1};
         struct window_event zoomed = {WINDOW_EVENT_WHEEL, WINDOW_KEY_CONTROL, 120, 0};
-        long moved_across, lines_down;
+        long moved_across, lines_down, cell, most, held, home, tilted, tilted_back, fits, wrapped;
+        p32 wrapped_asks;
         int zoom;
+
+        scroll_setup(0);
+        scroll_code_wide(wui, &view, 10);
+        cell = (long)view.cell;
+        most = SCROLL_WIDE_COLUMNS * cell - (view.right - view.left) + 2 * wui->scale / 100;
+        ui_text_event(wui, &view, &across, x, y);
+        moved_across = (long)view.scroll_x;
+        lines_down = (long)view.top_line - 10;
+        for (int k = 0; k < 40; k++)
+            ui_text_event(wui, &view, &across, x, y);
+        held = (long)view.scroll_x;
+        for (int k = 0; k < 40; k++)
+            ui_text_event(wui, &view, &back, x, y);
+        home = (long)view.scroll_x;
+        ui_text_event(wui, &view, &right, x, y);
+        tilted = (long)view.scroll_x;
+        ui_text_event(wui, &view, &left, x, y);
+        tilted_back = (long)view.scroll_x;
+        zoom = view.zoom;
+        ui_text_event(wui, &view, &zoomed, x, y);
+        check("code view wheel: Shift turns a notch across (three columns), and no line moves; Control zooms the view", moved_across == 3 * cell &&
+              lines_down == 0 && view.zoom == zoom + 1);
+        check("code view wheel: a turn across stops where the widest line in view ends, the caret's room kept, and comes back to the lines' start",
+              most > 3 * cell && held == most && home == 0);
+        check("code view wheel: a sideways turn goes the way it is turned, right toward the lines' end (three columns a notch) and left back",
+              tilted == 3 * cell && tilted_back == 0);
+        ui_text_close(&view);
 
         scroll_setup(0);
         scroll_code(wui, &view, 10);
         ui_text_event(wui, &view, &across, x, y);
-        moved_across = (long)view.scroll_x;
-        lines_down = (long)view.top_line - 10;
-        zoom = view.zoom;
-        ui_text_event(wui, &view, &zoomed, x, y);
-        check("code view wheel: Shift turns a notch across (three columns), and no line moves; Control zooms the view", moved_across == 3 * (long)view.cell &&
-              lines_down == 0 && view.zoom == zoom + 1);
+        ui_text_event(wui, &view, &right, x, y);
+        fits = (long)view.scroll_x;
+        ui_text_close(&view);
+        scroll_setup(0);
+        scroll_code_wide(wui, &view, 10);
+        view.wrap = true;
+        wrapped_asks = ui_text_event(wui, &view, &across, x, y);
+        wrapped_asks |= ui_text_event(wui, &view, &right, x, y);
+        wrapped = (long)view.scroll_x;
+        check("code view wheel: a view whose lines all fit is not turned across, and a wrapped one is not either and says nothing moved",
+              fits == 0 && wrapped == 0 && !wrapped_asks && (long)view.top_line == 10);
         ui_text_close(&view);
     }
 }

@@ -22472,6 +22472,23 @@ static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_t
         return most > 0 ? most : 0;
 }
 
+// How far across a view whose lines are not wrapped can be turned: to where the widest line it shows now ends at the box's far side,
+// the caret's room past it kept (as ui_text_reveal keeps it), and not at all when every line in view fits. A field is its one line.
+static b64 ui_text_across_most(struct ui address_to ui, struct ui_text address_to t)
+{
+        static struct ui_text_layout l;
+        struct ui_text_row row;
+        int rows = ui_text_rows(t), widest = 0;
+        b64 most;
+
+        if (t->mode == UI_TEXT_FIELD)
+                return ui_text_scroll_most(ui, t);
+        for (int index = 0; index < rows && ui_text_nth_row(ui, t, index, &l, &row); index++)
+                widest = l.width > widest ? l.width : widest;
+        most = (b64)widest - (t->right - t->left) + 2 * ui->scale / 100;
+        return most > 0 ? most : 0;
+}
+
 // Any event of the window the widget may take: keys only while it has the keys; the pointer within its box. A key is
 // no finger's selection (its handles and bar go), and neither is a text that changed.
 static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
@@ -23361,14 +23378,27 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         return 0;
                 if ((event->flags & WINDOW_KEY_CONTROL) && t->mode == UI_TEXT_CODE)
                         return ui_text_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
+                // A wrapped text has no line longer than its box, so a turn across it has nothing to show and moves nothing.
+                if ((event->b || (event->flags & WINDOW_KEY_SHIFT)) && t->wrap && t->mode != UI_TEXT_FIELD)
+                        return 0;
                 s->quiet_at = now + UI_SELECT_BAR_AFTER_NS;
                 // A turn is pixels (a notch three lines or columns, a precise turn its share of UI_NOTCH, natural direction applied), and the view
                 // moves by the lines they make: the rest under a line is kept for the next turn, and no turn is rounded up to a line of its own.
-                // Shift turns a vertical wheel across, as every editor's does
+                // Shift turns a vertical wheel across, as every editor's does. A sideways turn (event->b) is across already, and its amount is
+                // positive to the right where a vertical turn's is positive up, so it is turned over to be pixels toward the lines' far end.
+                // The view stops at the lines' start and where the widest line in view ends (ui_text_across_most); one that the caret has
+                // taken further (ui_text_reveal) is not pulled back by a turn, and goes no further by one.
                 if (event->b || (event->flags & WINDOW_KEY_SHIFT))
                 {
-                        pixels = ui_wheel_pixels(ui, event, 3 * (long)t->cell, &s->wheel_rest_x);
-                        t->scroll_x = t->scroll_x + pixels > 0 ? t->scroll_x + pixels : 0;
+                        struct window_event across = *event;
+                        b64 most = ui_text_across_most(ui, t), to;
+
+                        if (event->b)
+                                across.a = -across.a;
+                        pixels = ui_wheel_pixels(ui, &across, 3 * (long)t->cell, &s->wheel_rest_x);
+                        most = most > t->scroll_x ? most : t->scroll_x;
+                        to = t->scroll_x + pixels;
+                        t->scroll_x = to < 0 ? 0 : to > most ? most : to;
                 }
                 else
                 {
