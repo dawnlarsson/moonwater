@@ -41,6 +41,46 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-194: a pool grown under a picture shown in place ended the compositor
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `5e9bf33` |
+| Class | Stale pointer after a mapping moves (use after unmap); denial of the whole session |
+| Attacker | 1 or 8: any program that can open `/run/moonwater/wayland-0`, which is mode 0666, a bowl's programs included |
+| Reachable | src/canvas/wayland_host.c `compositor_wl_remap`, from `wl_shm_pool.resize` (src/canvas/wayland.c) |
+
+**What happened.** A window whose whole buffer is committed is not copied: the
+compositor reads the picture where the client keeps it (`compositor_wl_lend`),
+and remembers the address of its first pixel and of the pool's mapping. A pool
+that grows is remapped with `mremap` and may move; `compositor_wl_remap`
+updated the pool's own record and not the lent pictures in it, so the row kept
+an address that was no mapping any more. The next compose of that window, with
+no commit of its own to lend it again, read it and the compositor died of
+SIGSEGV (the handler that maps zeros over a cut pool is SIGBUS's). Every
+window went with it. Shown with a raw client and a headless compositor: three
+pools, a 256 by 256 window shown from the middle one, the middle one grown
+sixteen times, a second window opened over the first and closed; status 139.
+
+**The fix.** After a successful `mremap`, every lent picture whose mapping was
+the old address is moved by the same distance and its mapping set to the new
+one.
+
+**Tests that fail without the fix.** test/wayland_e2e.sh (lane `wayland`): "a
+pool grown under a picture shown in place moves the picture with it, and the
+compositor goes on". The scene's client was run by hand against a headless
+compositor built from the parent tree (compositor dead, status 139) and from
+the fix (alive, the client kept), with the pool-cut scene's neighbour still
+refused as before. The lane itself was NOT RUN where this was written: it
+needs libwayland's client and scanner, which were not there.
+
+**Still open.** The card's address of a lent dma-buf is not a pool's and does
+not come this way. Found with five other compositor findings the same day that
+are not fixed yet (a desktop turned off for good by four quick compositor
+ends, the X window manager keeping a row past its window's unmap, a lost flip
+event stopping one screen, only `/dev/dri/card0` opened, a poll list two
+entries short).
+
 ### MW-2026-193: the ARP conflict probe heard every interface until it was bound
 
 | | |
