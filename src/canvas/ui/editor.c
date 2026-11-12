@@ -677,8 +677,9 @@ static positive editor_status_text(char address_to text, positive room, struct d
 }
 
 /*
-        The window as a view, laid out each draw and event: the file tabs (none with one file), the find bar's band (none while closed),
-        the code view below them, and the status bar at the foot. Its words are made first, so the view measures them.
+        The window as a view, laid out each draw and event: the file tabs (none with one file), in from the window's margin at its start
+        and a gap from its top, clear of its rounded corner, the find bar's band (none while closed), the code view below them, and the
+        status bar at the foot. Its words are made first, so the view measures them.
 */
 static fn editor_layout(void)
 {
@@ -690,7 +691,7 @@ static fn editor_layout(void)
                 strip->kind = UI_TABS, strip->variant = UI_TABS_SEGMENTED, ui_control_start(strip);
         ui_tabs_fill(strip, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
         ui_view_begin(&editor.view, &editor.ui, editor.width, -editor.height);
-        ui_control(strip, .h = UI_TABS_H, .hidden = editor.count <= 1, .on = editor_tabbed);
+        ui_control(strip, .class = "filetabs", .hidden = editor.count <= 1, .on = editor_tabbed);
         ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
         ui_host(&editor.text_box, .grow = 1);
         ui_row(.class = "bar")

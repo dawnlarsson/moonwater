@@ -17010,6 +17010,7 @@ static const struct ui_class ui_classes[] = {
         {"bar", .h = UI_PAGE_FOOT, .pad = {UI_INSET, UI_INSET, 0, 0}, .gap = UI_INSET, .align = UI_CENTER, .fill = UI_ROLE(UI_SURFACE_CONTAINER)}, // a status bar at a window's foot: its words in a row
         {"middle", .justify = UI_CENTER},                                                // the children in the middle of the room along the main axis
         {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
+        {"filetabs", .margin = {UI_PAD, UI_PAD, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},      // a window's strip of files along its top: in from its margin at either end, a gap above and below
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         {"page", .pad = {24, 24, 24, 24}, .gap = 24, .fill = UI_ROLE(UI_SURFACE)},        // a page of the kit's surfaces on the theme's paper: its margin, and the room between its rows
         {"cards", .gap = 24},                                                            // a row of them

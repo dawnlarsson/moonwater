@@ -166510,6 +166510,7 @@ static fn check_kit_defaults(struct ui address_to wui)
         struct ui ui = *wui;
         positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
         b32 ripples_held = true, confirm_ok = false, field_ok = false, outside_ok = false, clicks_ok = false, tabs_ok = false;
+        b32 inset_ok[2] = {false, false};
         positive differing = 0, outside = 0;
 
         if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
@@ -166700,11 +166701,29 @@ static fn check_kit_defaults(struct ui address_to wui)
                 tabs_ok = editor.tab == 0;
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});
                 tabs_ok = tabs_ok && editor.tab == 2;
+                // The strip is clear of the window's edges and its rounded corner: the window's margin in from its start, a gap from its
+                // top, the first tab's pill starting there; reading from the right, the margin in from the right edge, where the first tab ends.
+                for (int rtl = 0; rtl < 2; rtl++)
+                {
+                        int first, wide = 600 * 100 / editor.ui.scale; // the window's width in logical pixels, the strip's
+
+                        ui_kit.rtl = rtl;
+                        editor_draw(pixels);
+                        first = ui_tab_left(&editor.ui, &editor.strip, 0);
+                        inset_ok[rtl] = editor.strip.y == UI_GAP2 && editor.strip.h == UI_TABS_H &&
+                                        (rtl ? editor.strip.x + editor.strip.w == wide - UI_PAD && first + ui_tab_width(&editor.ui, &editor.strip, 0) == wide - UI_PAD
+                                             : editor.strip.x == UI_PAD && first == UI_PAD);
+                }
+                ui_kit.rtl = 0;
                 editor.count = 0;
         }
         check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", tabs_ok);
+        check("editor tabs: the strip is the window's margin in from its start and a gap from its top, its first pill clear of the corner", inset_ok[0]);
+        check("editor tabs: and reading from the right the margin is in from the right edge, where the first pill ends", inset_ok[1]);
 #else
         check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", false);
+        check("editor tabs: the strip is the window's margin in from its start and a gap from its top, its first pill clear of the corner", inset_ok[0]);
+        check("editor tabs: and reading from the right the margin is in from the right edge, where the first pill ends", inset_ok[1]);
 #endif
 
         /* The focus rule: the code view has the keys when the window has them and the find bar does not. Opening the bar takes them from
