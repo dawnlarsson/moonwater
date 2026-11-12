@@ -21100,8 +21100,10 @@ static b32 compositor_main()
 
         while (running)
         {
-                // The Wayland shim's: its socket, its clients, its transfers' knock and the dma-bufs its stalled clients wait for.
-                struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32]; // 6: one more, the doors' threads
+                // The Wayland shim's: its socket, its clients, its transfers' knock, the dma-bufs its stalled clients wait for, and the two of
+                // the X window manager's (its listener and its connection, compositor_xwm_poll), which this count left out: with every input,
+                // every client stalled on a dma-buf and a flip in flight the list was two entries past its end.
+                struct compositor_poll wanted[6 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32 + 2]; // 6: one more, the doors' threads
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0, done_at = 0;
                 positive now = 0, until = 0;
                 b32 idle_turn = 0;
