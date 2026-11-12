@@ -151360,6 +151360,24 @@ static fn check_kit_focus(void)
         pill = focus_at(pixels, 20 + 300 - 26, 164);
         disabled = pill != (ui_role(UI_PRIMARY) & 0xffffffu) && (pill >> 16 & 255) - (pill & 255) + 8 < 17;
 
+        // A segmented strip whose chosen tab is hovered: the pip under the hand is the accent itself, the hover layer being under the pip.
+        {
+                struct ui_control tabs;
+                b32 pure = 0;
+
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                memory_zero(&tabs, sizeof(tabs));
+                tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 20, tabs.count = 3, tabs.w = 300;
+                tabs.items[0] = "All", tabs.items[1] = "Running", tabs.items[2] = "Stopped";
+                ui_control_start(&tabs);
+                tabs.item = 0, tabs.hover = 1;
+                ui_control_draw(&ui, &tabs);
+                ui_kit.now += 1000000000ll;
+                ui_control_draw(&ui, &tabs);
+                pure = focus_at(pixels, 26, 36) == (ui_role(UI_PRIMARY) & 0xffffffu) && ui_kit_layer(&tabs) > 0;
+                check("kit focus: a hovered tab's state layer is under the tabs' pip, so the pip is the accent itself where it lies", pure);
+        }
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
         check("kit focus: a button the keys are on has the focus ring a gap out from its pill, 3:1 from the ground, and one they are not on has nothing round it",
               ringed && bare);

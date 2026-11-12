@@ -12991,6 +12991,17 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_number_to(&c->pip_w, ui_q(ui_tab_width(ui, c, chosen) - (seg ? 0 : 16)), 350, &ui_ease);
         pip_x = ui_q(c->x) + ui_kit_tween(&c->pip_x);
         pip_w = ui_kit_tween(&c->pip_w);
+        // The hovered tab's state layer is under the pip, so a pip sliding past it keeps its own accent and is not muddied by the layer's grey.
+        if (c->item >= 0 && c->item < c->count)
+        {
+                int x = ui_tab_left(ui, c, c->item), w = ui_tab_width(ui, c, c->item);
+                b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
+                b64 dom = ui_stretch_at(&c->item_dom[c->item], &live);
+                struct ui_box face = ui_box_transform(ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2), dom, UI_ONE, anchor, 0, 0, 0);
+
+                ui_kit_layer_to(c, 0);
+                ui_kit_layer_fill(ui, &face, ui_kit_colour(&c->item_ink[c->item]), ui_kit_layer(c));
+        }
         {
                 struct ui_box pip = seg ? ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2)
                                         : ui_box_of(ui, pip_x, ui_q(c->y + height - 1), pip_w, ui_q(2), ui_q(2));
@@ -13003,18 +13014,15 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 b64 dom = ui_stretch_at(&c->item_dom[item], &live);
                 b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
                 struct ui_box face = ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2);
-                unsigned int ink, layer;
+                unsigned int ink;
 
                 ui_kit_colour_to(&c->item_ink[item], item == chosen ? ui_role(seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT),
                                  200, &ui_ease);
                 ink = ui_kit_colour(&c->item_ink[item]);
                 face = ui_box_transform(face, dom, UI_ONE, anchor, 0, 0, 0);
-                // The state layer and the ripple: a tab is a button.
+                // The ripple: a tab is a button (its state layer is under the pip, above).
                 if (c->item == item)
                 {
-                        ui_kit_layer_to(c, 0);
-                        layer = ui_kit_layer(c);
-                        ui_kit_layer_fill(ui, &face, ink, layer);
                         {
                                 struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
                                 struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
