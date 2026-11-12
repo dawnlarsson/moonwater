@@ -85,6 +85,8 @@ settings_role_free	ad01	فضای آزاد
 settings_role_unpartitioned	3c10	بدون جدول پارتیشن
 settings_partitioned	70f5	%d%% پارتیشن‌بندی‌شده
 settings_used_of	58fb	%1$s / %2$s
+settings_partitions	9b2e	پارتیشن‌ها
+settings_share	9902	%1$d.%2$d%%
 settings_battery_discharging	7964	، در حال تخلیه
 settings_battery_full	ded8	، شارژ کامل
 settings_battery_idle	1635	، در حال شارژ نیست

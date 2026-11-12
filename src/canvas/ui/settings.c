@@ -249,8 +249,7 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_STATE 24        // a device's state as the host says it: allowed, blocked or waiting for a port, view only for a drive
 #define SETTINGS_PORT 24         // a port's name, which device allow and device deny take (1-1, 3-2.4)
 #define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
-#define SETTINGS_SEGMENT_TEXT 16 // a segment's size, drawn in the segment where it has room (ui.c's UI_STRIP_TEXT is this)
-#define SETTINGS_SEGMENT_NAME 40 // a partition's name as the legend says it, cut where a character ends
+#define SETTINGS_SEGMENT_NAME 40 // a partition's name as its row says it, cut where a character ends
 #define SETTINGS_ALIGNMENT 1048576ull // free room this small is the room a partition table and the partitions' alignment keep, and is not shown
 
 struct settings_item
@@ -267,7 +266,6 @@ struct settings_item
         char state[SETTINGS_STATE];                     // a device's state, as the host says it
         char port[SETTINGS_PORT];                       // a port's name; none for a drive
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
-        char segment_text[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_TEXT]; // each segment's size, as the legend says it
         char segment_name[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
 };
 
@@ -825,7 +823,7 @@ static fn settings_say(string_address text);
         The board is read once a second while Settings is open, and the lines are made again when what they say changed. Each line is a
         list row of its own, numbered after the rows, so the kit lays them out, scrolls them and moves the rows under them.
 */
-#define SETTINGS_SUBS 40           // the lines under the rows at most
+#define SETTINGS_SUBS 80           // the lines under the rows at most: an option's, and a drive's partitions (settings_drive_rows)
 #define SETTINGS_SUB_TEXT 240      // bytes of one line
 #define SETTINGS_BOARD_NS 1000000000ll
 #define SETTINGS_REAP_NS 10000000ll // how often a child that is ending is asked whether it has exited (settings_reap)
@@ -838,10 +836,15 @@ struct settings_sub
         unsigned int code;           // a message line's issue code (a kernel notice's, for Delete to dismiss it), 0 for none
         unsigned int action;         // SETTINGS_SUB_COPY (the default), or SETTINGS_SUB_DISMISS_ALL (the line that clears every kernel notice)
         int owner;                   // the row the line is under (its fold: how much of a row the line shows while the row opens or shuts)
+        int part;                    // a drive's partition row: its segment, or SETTINGS_PART_FREE or SETTINGS_PART_MORE
         char text[SETTINGS_SUB_TEXT];
 };
 #define SETTINGS_SUB_COPY 0u
 #define SETTINGS_SUB_DISMISS_ALL 1u
+#define SETTINGS_SUB_PARTITIONS 2u // a drive's disclosure: a press, Enter or Space opens or shuts its partitions, as Right and Left do
+#define SETTINGS_SUB_PARTITION 3u  // a row of them, which a press does nothing to
+#define SETTINGS_PART_FREE -1      // the row of the free room the host lists, all of it
+#define SETTINGS_PART_MORE -2      // the row of the partitions the host did not show
 static struct settings_sub settings_sub[SETTINGS_SUBS];
 static int settings_sub_count, settings_sub_owner;
 static struct windows_issues settings_board;
@@ -905,15 +908,49 @@ static int settings_expander(int row)
         return settings_expanded[row] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
 }
 
-// Opens or shuts a row's lines, and lists them again. They fold on the kit's spring (settings_fold_step moves them frame by frame); with
-// reduced motion they are at their place at once.
+/*
+        The drives whose partitions show, by their names, while the window is open: a reading of the device list puts a drive's row
+        where the list has it now (another device before it moves it), and its partitions show as they did (settings_drive_follow).
+*/
+static char settings_drives_open[SETTINGS_LIST_ROWS][SETTINGS_ITEM_LABEL];
+
+static b32 settings_drive_is_open(const char address_to name)
+{
+        for (positive at = 0; at < SETTINGS_LIST_ROWS; at++)
+                if (settings_drives_open[at][0] && string_equals((string_address)settings_drives_open[at], (string_address)name))
+                        return true;
+        return false;
+}
+
+// A drive's partitions remembered as showing or not: its name kept, in the first free place (the last when none is), or let go.
+static fn settings_drive_keep(const char address_to name, b32 open)
+{
+        positive free = SETTINGS_LIST_ROWS - 1;
+
+        for (positive at = 0; at < SETTINGS_LIST_ROWS; at++)
+                if (settings_drives_open[at][0] && string_equals((string_address)settings_drives_open[at], (string_address)name))
+                        settings_drives_open[at][0] = 0;
+        if (!open)
+                return;
+        for (positive at = SETTINGS_LIST_ROWS; at-- > 0;)
+                free = settings_drives_open[at][0] ? free : at;
+        string_copy_bounded((string_address)settings_drives_open[free], (string_address)name, sizeof(settings_drives_open[free]));
+}
+
+static struct settings_item address_to settings_item(int row);
+
+// Opens or shuts a row's lines (an option's, or a drive's partitions), and lists them again. They fold on the kit's spring
+// (settings_fold_step moves them frame by frame); with reduced motion they are at their place at once.
 static fn settings_toggle(int row)
 {
+        const struct settings_item address_to item = settings_item(row);
         b64 target;
 
-        if (row < 0 || row >= SETTINGS_ANY)
+        if (row < 0 || row >= (int)SETTINGS_ALL || (row >= SETTINGS_ANY && !(item && (item->flags & SETTINGS_ITEM_DRIVE))))
                 return;
         settings_expanded[row] = !settings_expanded[row];
+        if (item)
+                settings_drive_keep(item->label, settings_expanded[row]);
         target = settings_expanded[row] ? UI_ONE : 0;
         if (ui_kit.motion)
                 settings_fold_at[row] = target, settings_fold_live[row] = 0;
@@ -1002,6 +1039,7 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
                 return count;
         sub = &settings_sub[settings_sub_count];
         sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY, sub->owner = settings_sub_owner;
+        sub->part = 0;
         string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
         settings.list.id[count] = (unsigned short)(SETTINGS_ALL + (positive)settings_sub_count++);
         return count + 1;
@@ -1113,9 +1151,17 @@ static int settings_sub_rows(int row, int count)
 }
 
 // A line under a row, described for the kit: indented, its text quiet, and its badge's words at the right when it is an issue.
+static fn settings_part_describe(const struct settings_sub address_to sub, struct ui_row address_to row);
+
 static fn settings_sub_describe(int at, struct ui_row address_to row)
 {
         const struct settings_sub address_to sub = &settings_sub[at];
+
+        if (sub->action == SETTINGS_SUB_PARTITIONS || sub->action == SETTINGS_SUB_PARTITION)
+        {
+                settings_part_describe(sub, row);
+                return;
+        }
 
         row->sub = 1, row->section = sub->section, row->label = sub->text, row->value = sub->words;
         row->dim = sub->detail;
@@ -1946,6 +1992,7 @@ static fn settings_layout(void)
 }
 
 static fn settings_edit_end(void);
+static int settings_drive_rows(int row, int count);
 
 /*
         The rows that match the filter, laid out; the focus stays on its row
@@ -1976,7 +2023,10 @@ static fn settings_rebuild(void)
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
                         if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches(row) : group == settings.page.chosen))
+                        {
                                 settings.list.id[count++] = (unsigned short)row;
+                                count = settings_drive_rows(row, count);
+                        }
                 }
         }
         settings.list.count = count;
@@ -2869,7 +2919,7 @@ static const char address_to settings_role_word(unsigned int role)
                : role == 3 ? WORDS(settings_role_other) : role == 4 ? WORDS(settings_role_free) : WORDS(settings_role_unpartitioned);
 }
 
-// A size in a whole number of GB (from 1 GB) or MB, as the strip and its legend say it.
+// A size in a whole number of GB (from 1 GB) or MB, as a drive's heading and the rows of its partitions say it.
 static fn settings_size_text(unsigned long long bytes, char address_to into, positive room)
 {
         unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
@@ -2889,7 +2939,7 @@ static fn settings_size_text(unsigned long long bytes, char address_to into, pos
 
 /*
         Whether a partition's name says its role's word already, whatever the case of its ASCII letters (EFI system partition, Linux
-        swap): its legend entry then says the role no second time.
+        swap): its row then says the role no second time.
 */
 static b32 settings_name_says(const char address_to name, const char address_to word)
 {
@@ -2907,31 +2957,7 @@ static b32 settings_name_says(const char address_to name, const char address_to 
         return false;
 }
 
-/*
-        A drive's legend as its row shows it: an entry for each segment, its name (the partition's, else its role's word), its role's
-        word where the name is not it, and its size; then the partitions the host did not show. The words are the language's at the
-        moment the row is described, so they are made then, into these, and the item keeps what the host said.
-*/
-static const char address_to settings_strip_names[SETTINGS_SEGMENTS];
-static const char address_to settings_strip_kinds[SETTINGS_SEGMENTS];
-static char settings_strip_more[SETTINGS_ITEM_LABEL];
 static char settings_device_note[SETTINGS_ITEM_LABEL];
-
-static fn settings_legend(const struct settings_item address_to item, struct ui_row address_to row)
-{
-        for (positive at = 0; at < item->segment_count; at++)
-        {
-                const char address_to role = settings_role_word(item->segment_role[at]);
-
-                settings_strip_names[at] = item->segment_name[at][0] ? item->segment_name[at] : role;
-                settings_strip_kinds[at] = item->segment_name[at][0] && !settings_name_says(item->segment_name[at], role) ? role : null;
-        }
-        settings_strip_more[0] = 0;
-        if (item->segment_more)
-                language_format(settings_strip_more, sizeof(settings_strip_more), WORDS(settings_not_shown), (long)item->segment_more);
-        row->strip_names = settings_strip_names, row->strip_kinds = settings_strip_kinds;
-        row->strip_more = settings_strip_more[0] ? settings_strip_more : null;
-}
 
 // part of whole in parts of scale (100: a percent, 1000: tenths of one), to the nearest; none of nothing.
 static long settings_share_of(unsigned long long part, unsigned long long whole, unsigned long long scale)
@@ -2969,6 +2995,145 @@ static fn settings_drive_heading(const struct settings_item address_to item, str
                 language_format(settings_drive_amount, sizeof(settings_drive_amount), WORDS(settings_used_of), used_text, total_text);
         }
         row->share = settings_drive_share, row->amount = settings_drive_amount;
+}
+
+// A drive's partitions: its segments that are not free room (a disk with no table has none).
+static int settings_partitions_of(const struct settings_item address_to item)
+{
+        int count = 0;
+
+        for (positive at = 0; at < item->segment_count; at++)
+                count += item->segment_role[at] < UI_STRIP_FREE;
+        return count;
+}
+
+/*
+        The rows under a drive's row, listed after it from position count: the disclosure, whenever the drive has partitions or the
+        host says some are not shown; and while they are open, and while they shut (they fold away on the spring), a row for each
+        partition in the order they are on the disk, a row of the partitions not shown, and a row of the free room, the last.
+        Returns the new count.
+*/
+static int settings_drive_rows(int row, int count)
+{
+        const struct settings_item address_to item = settings_item(row);
+        int section = settings_section_start(row), next;
+        b32 free = false;
+
+        if (!item || !(item->flags & SETTINGS_ITEM_DRIVE) || !(settings_partitions_of(item) || item->segment_more))
+                return count;
+        settings_sub_owner = row;
+        next = settings_sub_put(section, false, null, "", count);
+        if (next == count)
+                return count;
+        settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_PARTITIONS;
+        count = next;
+        if (!settings_expanded[row] && !settings_fold_at[row])
+                return count;
+        for (int at = 0; at <= (int)item->segment_count + 1; at++)
+        {
+                int part = at < (int)item->segment_count ? at : at == (int)item->segment_count ? SETTINGS_PART_MORE : SETTINGS_PART_FREE;
+
+                if (part >= 0 && item->segment_role[part] >= UI_STRIP_FREE)
+                {
+                        free |= item->segment_role[part] == UI_STRIP_FREE;
+                        continue;
+                }
+                if ((part == SETTINGS_PART_MORE && !item->segment_more) || (part == SETTINGS_PART_FREE && !free))
+                        continue;
+                next = settings_sub_put(section, false, null, "", count);
+                if (next == count)
+                        break;
+                settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_PARTITION;
+                settings_sub[settings_sub_count - 1].part = part;
+                count = next;
+        }
+        return count;
+}
+
+// The drive whose disclosure a row is (a line under its row), or -1.
+static int settings_partitions_owner(int row)
+{
+        int at = row - (int)SETTINGS_ALL;
+
+        return row >= (int)SETTINGS_ALL && at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_PARTITIONS ? settings_sub[at].owner : -1;
+}
+
+/*
+        A row under a drive, described for the kit as a share row (UI_ROW_SHARE). The disclosure: its chevron, turning with the fold,
+        the word for partitions and how many the host shows. A partition: its square of its role's colour, its name (the partition's,
+        else its role's word), its role's word in the quiet ink after a name that does not say it, its size and its share of the drive
+        to a tenth of a percent. The partitions not shown: how many, in the quiet ink, with the bytes the other rows leave. The free
+        room: all that the host lists, its square the track's. Each but the disclosure is as tall as the drive's fold.
+*/
+static char settings_part_size[SETTINGS_SIZE_TEXT], settings_part_share[SETTINGS_ITEM_LABEL], settings_part_label[SETTINGS_ITEM_LABEL];
+
+static fn settings_part_describe(const struct settings_sub address_to sub, struct ui_row address_to row)
+{
+        const struct settings_item address_to item = settings_item(sub->owner);
+        unsigned long long bytes = 0;
+        long tenths;
+
+        row->section = sub->section, row->kind = UI_ROW_SHARE;
+        if (!item)
+                return;
+        if (sub->action == SETTINGS_SUB_PARTITIONS)
+        {
+                row->label = WORDS(settings_partitions);
+                row->expander = settings_expanded[sub->owner] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                row->turn = settings_fold_at[sub->owner];
+                settings_part_share[positive_into_string((p8 address_to)settings_part_share, (positive)settings_partitions_of(item))] = 0;
+                row->share = settings_part_share;
+                return;
+        }
+        row->reveal = settings_fold_at[sub->owner];
+        if (sub->part >= 0 && sub->part < (int)item->segment_count)
+        {
+                const char address_to name = item->segment_name[sub->part], address_to role = settings_role_word(item->segment_role[sub->part]);
+
+                bytes = item->segment_bytes[sub->part];
+                row->swatch = item->segment_role[sub->part] + 1;
+                row->label = name[0] ? name : role;
+                row->aside = name[0] && !settings_name_says(name, role) ? role : null;
+        }
+        else if (sub->part == SETTINGS_PART_FREE)
+        {
+                for (positive at = 0; at < item->segment_count; at++)
+                        bytes += item->segment_role[at] == UI_STRIP_FREE ? item->segment_bytes[at] : 0;
+                row->swatch = UI_STRIP_FREE + 1, row->label = WORDS(settings_role_free);
+        }
+        else
+        {
+                unsigned long long shown = 0;
+
+                for (positive at = 0; at < item->segment_count; at++)
+                        shown += item->segment_bytes[at];
+                bytes = item->total > shown ? item->total - shown : 0;
+                language_format(settings_part_label, sizeof(settings_part_label), WORDS(settings_not_shown), (long)item->segment_more);
+                row->label = settings_part_label, row->dim = true;
+                if (bytes <= SETTINGS_ALIGNMENT)
+                        return;
+        }
+        settings_size_text(bytes, settings_part_size, sizeof(settings_part_size));
+        tenths = settings_share_of(bytes, item->total, 1000);
+        language_format(settings_part_share, sizeof(settings_part_share), WORDS(settings_share), tenths / 10, tenths % 10);
+        row->amount = settings_part_size, row->share = settings_part_share;
+}
+
+/*
+        After a reading of the device list, each row of it shows its partitions as its drive's name says (settings_drives_open): one
+        whose drive is not what the row showed is open or shut at once, and a row that is no drive's is shut.
+*/
+static fn settings_drive_follow(void)
+{
+        for (int at = 0; at < SETTINGS_LIST_ROWS; at++)
+        {
+                int row = (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
+                const struct settings_item address_to item = at < settings.item_count[2] ? &settings_large->item[2][at] : null;
+                b32 open = item && (item->flags & SETTINGS_ITEM_DRIVE) && settings_drive_is_open(item->label);
+
+                if (settings_expanded[row] != open)
+                        settings_expanded[row] = (unsigned char)open, settings_fold_at[row] = open ? UI_ONE : 0, settings_fold_live[row] = 0;
+        }
 }
 
 // A device's state in the language: the host's word for it, or what the host said when it is none of them.
@@ -3067,7 +3232,7 @@ static fn settings_segment_name(char address_to into, const char address_to text
 */
 /*
         A drive's line from its word after the name (word is the blank after it): "NAME drive N MB STATE". The name is the label, N MB
-        is the size (in GB from 1000 MB, as the legend says it), and the state is what the line says after the size.
+        is the size (in GB from 1000 MB, as the heading says it), and the state is what the line says after the size.
 */
 static fn settings_item_drive(struct settings_item address_to item, const char address_to text, positive size, positive word)
 {
@@ -3134,13 +3299,12 @@ static fn settings_feed_hardware(void)
                             (code != 4 || bytes > SETTINGS_ALIGNMENT))
                         {
                                 drive->segment_bytes[drive->segment_count] = bytes;
-                                settings_size_text(bytes, drive->segment_text[drive->segment_count], sizeof(drive->segment_text[0]));
                                 settings_segment_name(drive->segment_name[drive->segment_count], text + word, size - word);
                                 drive->segment_role[drive->segment_count++] = (unsigned char)code;
                         }
                         continue;
                 }
-                // A drive's "more" line, after its parts: the partitions its strip does not show, said in its legend.
+                // A drive's "more" line, after its parts: the partitions its strip does not show, said in a row under it.
                 if (open && size > 9 && !memory_compare(text, "    more ", 9))
                 {
                         positive more = 0;
@@ -3196,6 +3360,7 @@ static fn settings_feed_hardware(void)
                 settings_item_label(&items[count++], WORDS(settings_device_none), string_length((string_address)WORDS(settings_device_none)));
         }
         settings.item_count[2] = (unsigned short)count;
+        settings_drive_follow();
 }
 
 /*
@@ -4385,9 +4550,17 @@ static fn settings_activate(int row, int way)
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         char next[SETTINGS_VALUE];
 
-        // A line under a row (an issue, a status) is no row: Enter on it does nothing.
+        // A line under a row (an issue, a status) is no row: Enter on it does nothing, but on a drive's disclosure it opens or shuts the
+        // drive's partitions.
         if (row >= (int)SETTINGS_ALL)
+        {
+                if (settings_partitions_owner(row) >= 0)
+                {
+                        settings_toggle(settings_partitions_owner(row));
+                        ui_page_redraw(&settings.page);
+                }
                 return;
+        }
 
         if (item)
         {
@@ -4833,14 +5006,16 @@ static b32 settings_key(const struct window_event address_to event)
         }
         // Right opens the lines under the row the keys are on, and Left shuts them (an expander's keys); any other key is the row's.
         // While the filter holds something its field has the arrows first (the caret), so they open and shut nothing then.
-        if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings.list.focus < SETTINGS_ANY && settings_editing() < 0 &&
-            !settings_filter_typed())
+        if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings_editing() < 0 && !settings_filter_typed())
         {
-                int expander = settings_expander(settings.list.focus);
+                // A drive's disclosure is its drive's expander.
+                int drive = settings_partitions_owner(settings.list.focus), row = drive >= 0 ? drive : settings.list.focus;
+                int expander = drive >= 0 ? (settings_expanded[drive] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT)
+                               : row < SETTINGS_ANY ? settings_expander(row) : 0;
 
                 if (expander && (event->a == UI_KEY_RIGHT) == (expander == UI_ROW_EXPANDER_SHUT))
                 {
-                        settings_toggle(settings.list.focus);
+                        settings_toggle(row);
                         ui_page_redraw(&settings.page);
                         return true;
                 }
@@ -5098,22 +5273,19 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
-                        // A drive with a strip (or a note of the partitions not shown) is as tall as its line, the heading, the strip and the
-                        // legend under it; the heading says its size. A drive the host lists no partitions of says its size at its line's end.
+                        // A drive with a strip is as tall as its line, the heading and the strip under it; the heading says its size, and its
+                        // partitions are the rows under it (settings_drive_rows). A drive the host lists no segments of says its size at its line's end.
                         language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_drive), settings_state_word(item->state));
                         row->note = settings_device_note;
                         row->value = item->segment_count ? null : item->size;
-                        row->tall = item->segment_count || item->segment_more;
+                        row->tall = item->segment_count != 0;
                         if (item->segment_count)
                         {
                                 row->strip_bytes = item->segment_bytes;
                                 row->strip_roles = item->segment_role;
-                                row->strip_text = &item->segment_text[0][0];
                                 row->strip_count = item->segment_count;
                                 settings_drive_heading(item, row);
                         }
-                        if (row->tall)
-                                settings_legend(item, row);
                 }
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
@@ -5381,9 +5553,11 @@ static fn settings_press_at(void)
         {
                 int at = row - (int)SETTINGS_ALL;
 
-                if (at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_DISMISS_ALL)
+                if (settings_partitions_owner(row) >= 0)
+                        settings_toggle(settings_partitions_owner(row));
+                else if (at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_DISMISS_ALL)
                         windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
-                else
+                else if (at < settings_sub_count && settings_sub[at].action != SETTINGS_SUB_PARTITION)
                         settings_copy(at);
                 ui_page_redraw(&settings.page);
                 return;
@@ -5502,7 +5676,7 @@ static fn settings_fold_step(void)
         b32 moved = false, shut = false;
         int first = -1;
 
-        for (int row = 0; row < SETTINGS_ANY; row++)
+        for (int row = 0; row < (int)SETTINGS_ALL; row++)
         {
                 b64 target = settings_expanded[row] ? UI_ONE : 0, was = settings_fold_at[row], now;
                 b32 live;

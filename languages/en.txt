@@ -82,6 +82,8 @@ settings_role_free	ad01	Free space
 settings_role_unpartitioned	3c10	No partition table
 settings_partitioned	70f5	%d%% partitioned
 settings_used_of	58fb	%1$s / %2$s
+settings_partitions	9b2e	Partitions
+settings_share	9902	%1$d.%2$d%%
 settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
 settings_battery_idle	1635	, Not charging
