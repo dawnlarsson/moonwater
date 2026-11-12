@@ -155784,10 +155784,11 @@ static fn check_kit_strips(void)
         }
 
         // More strips than room: they scroll by the wheel over the ground and by Shift, a drag of the ground, and the keys, held to their ends.
+        // A sideways turn is as the compositor sends one: its amount in a (120ths of a notch, positive to the right) and b saying it is sideways.
         {
                 struct window_event move = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
-                                    release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0}, side = {WINDOW_EVENT_WHEEL, 0, 0, 120},
-                                    shift = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, 120, 0};
+                                    release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0}, side = {WINDOW_EVENT_WHEEL, 0, 120, 1},
+                                    side_back = {WINDOW_EVENT_WHEEL, 0, -120, 1}, shift = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, 120, 0};
                 p32 bits;
                 int most;
                 b64 at;
@@ -155812,6 +155813,21 @@ static fn check_kit_strips(void)
                         at = strips_shift_after(s);
                 }
                 check("kit strips: and held to the end", at == most);
+                // Two notches in quick succession: the second comes 50 ms into the first one's move (220 ms), and is a strip on from where
+                // that move was going, so the two are two strips; a notch the other way while they still move takes one of them back.
+                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                ui_strips_event(&ui, s, &side);
+                (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                ui_kit.now += 50000000ll;
+                ui_strips_event(&ui, s, &side);
+                at = strips_shift_after(s);
+                check("kit strips: two notches in quick succession are two strips, the second a strip on from where the first was going", at == 2 * UI_STRIP_W && 2 * UI_STRIP_W < most);
+                ui_strips_event(&ui, s, &side);
+                (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
+                ui_kit.now += 50000000ll;
+                ui_strips_event(&ui, s, &side_back);
+                at = strips_shift_after(s);
+                check("kit strips: and a sideways notch the other way while they move takes a strip back from where they were going", at == 2 * UI_STRIP_W);
                 // A drag of the ground.
                 ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
                 move.a = 300, move.b = 395;

@@ -17899,11 +17899,13 @@ static p32 ui_strips_key(struct ui address_to ui, struct ui_strips address_to s,
 }
 
 // The wheel: over a strip it changes the volume, two a notch, up raising it; elsewhere, or sideways, or with Shift, it scrolls the strips.
+// A turn's amount is event->a, in 120ths of a notch, whichever way the wheel lies: event->b says only that it is a sideways one, whose
+// amount is positive to the right (the strips then go toward their end, where a vertical turn up goes toward their start).
 static p32 ui_strips_wheel(struct ui address_to ui, struct ui_strips address_to s, const struct window_event address_to event)
 {
         int over = ui_strips_over(ui, s, s->pointer_x), steps;
         b32 sideways = event->b != 0 || (event->flags & WINDOW_KEY_SHIFT) != 0 || over < 0 || s->pointer_y < s->y || s->pointer_y >= s->y + s->h;
-        long total = (long)s->wheel + (long)(event->b ? event->b : event->a);
+        long total = (long)s->wheel + (long)event->a;
 
         steps = (int)(total / 120);
         s->wheel = (int)(total - (long)steps * 120);
@@ -17911,10 +17913,13 @@ static p32 ui_strips_wheel(struct ui address_to ui, struct ui_strips address_to 
                 return UI_STRIPS_TAKEN;
         if (sideways)
         {
-                b64 now = ui_tween_at(&s->shift, &(b32){0});
+                // A notch is a strip from where the strips are going, not from where they have got to: a notch that comes while the last
+                // one's move still runs adds its strip to that move's end, so two quick notches are two strips.
                 int most = ui_strips_most(ui, s);
-                b64 want = now - (b64)(event->b ? -steps : steps) * ui_dev(ui, UI_STRIP_W) * ui_dir();
+                b64 going = s->shift.pending ? s->shift.want : s->shift.to, want;
 
+                going = going < 0 ? 0 : going > most ? most : going;
+                want = going - (b64)(event->b ? -steps : steps) * ui_dev(ui, UI_STRIP_W) * ui_dir();
                 ui_kit_number_to(&s->shift, want < 0 ? 0 : want > most ? most : want, 220, &ui_ease);
                 return UI_STRIPS_DRAW | UI_STRIPS_TAKEN;
         }
