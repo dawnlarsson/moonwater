@@ -140711,6 +140711,43 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event_at(&lift);
                                 lift.flags &= ~WINDOW_KEY_CANCEL;
                                 check("settings: a finger's press the compositor took back does nothing", settings.queued == 0 && settings.page.menu_row < 0);
+                                // The rows thrown again, and the finger put down where a row is passing: it stops them and presses none, so
+                                // no row shows pressed, and its lift there is no click (the keys stay on the row they were on, nothing opens).
+                                {
+                                        int over = -1, focus;
+
+                                        ui_page_scroll(&settings.page, 0);
+                                        finger.b = settings.page.top + ui_px(&settings.ui, 60);
+                                        settings_event_real(&finger);
+                                        settings_event_real(&land);
+                                        for (int step = 1; step <= 6; step++)
+                                        {
+                                                finger.b -= ui_px(&settings.ui, 10);
+                                                settings_event_real(&finger);
+                                        }
+                                        settings_event_real(&lift);
+                                        // A place with rows under it for the next row's height of the throw, so that a row is under the finger
+                                        // when it lands two events on, however far the rows have gone by then.
+                                        for (int y = settings.list.y; y + ui_px(&settings.ui, UI_ROW) < settings.list.y + settings.list.h && over < 0; y++)
+                                        {
+                                                b32 rows = true;
+
+                                                for (int ahead = 0; ahead <= ui_px(&settings.ui, UI_ROW) && rows; ahead++)
+                                                        rows = ui_list_hit(&settings.ui, &settings.list, finger.a, y + ahead) >= 0;
+                                                if (rows)
+                                                        over = y;
+                                        }
+                                        finger.b = over;
+                                        settings_event_real(&finger);
+                                        focus = settings.list.focus;
+                                        check("settings: a finger that lands on rows still thrown stops them and presses none of them",
+                                              over >= 0 && scroll_gliding(&settings.list.scroll) &&
+                                                  (settings_event_real(&land), !scroll_gliding(&settings.list.scroll)) && settings.page.press.down &&
+                                                  settings.page.press.target < 0 && settings.list.down < 0);
+                                        settings_event_real(&lift);
+                                        check("settings: and its lift there is no click: the keys stay where they were and nothing opens",
+                                              settings.list.focus == focus && settings.queued == 0 && settings.page.menu_row < 0 && settings_editing() < 0);
+                                }
                                 settings.height = SETTINGS_HEIGHT;
                                 settings_refilter();
                                 ui_page_scroll(&settings.page,0);
@@ -151439,6 +151476,46 @@ static fn check_kit_page_pointer(void)
         ui_page_pointer(&ui, &p, &l, &finger_up, check_kit_pointer_done);
         drag_done = kit_pointer_done == 0;
         check("kit page pointer: a finger that drags past the slop is no click", drag_held && drag_done);
+
+        // A finger that lands on rows still in motion stops them, and that is all it does: no row shows pressed for it and its lift is
+        // no click, whatever row was passing under it. On the same rows at rest, the same press and lift is the row's click. The rows
+        // are thrown as a finger's lift throws them, and drawn a frame on (the kit's loop steps them) before the finger lands.
+        {
+                static struct ui_list rows;
+                struct window_event finger_at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 200, 100};
+                b32 thrown, under, stopped, untargeted, unshown, unclicked, shown, clicked;
+
+                bounds_list_make(&ui, &rows, 40, 200);
+                memory_zero(&p, sizeof(p));
+                p.width = 400, p.height = 400, p.top = 0, p.bottom = 400, p.left = 100, p.right = 400;
+                p.body = &rows.scroll;
+                ui_scroll_drag(&rows.scroll, 0);
+                ui_scroll_let_go(&rows.scroll, 2000);
+                ui_kit.test_clock += 16000000ull, ui_kit.now = ui_kit.test_clock;
+                ui_scroll_frame(&ui, &rows.scroll);
+                thrown = scroll_gliding(&rows.scroll) && rows.scroll.scroll > 0;
+                kit_pointer_done = 0;
+                ui_event_context(&finger_at);
+                under = ui_page_target(&ui, &p, &rows, 200, 100) >= 0;
+                ui_event_context(&finger_down);
+                ui_page_pointer(&ui, &p, &rows, &finger_down, check_kit_pointer_done);
+                stopped = !ui_body_going(&rows.scroll.body);
+                untargeted = p.press.down && p.press.target < 0;
+                unshown = rows.down < 0;
+                ui_event_context(&finger_up);
+                ui_page_pointer(&ui, &p, &rows, &finger_up, check_kit_pointer_done);
+                unclicked = kit_pointer_done == 0;
+                check("kit page pointer: a finger that lands on rows in motion stops them and presses none: no row shows pressed, and its lift is no click",
+                      thrown && under && stopped && untargeted && unshown && unclicked);
+                kit_pointer_done = 0;
+                ui_event_context(&finger_down);
+                ui_page_pointer(&ui, &p, &rows, &finger_down, check_kit_pointer_done);
+                shown = p.press.target >= 0 && rows.down == p.press.target;
+                ui_event_context(&finger_up);
+                ui_page_pointer(&ui, &p, &rows, &finger_up, check_kit_pointer_done);
+                clicked = kit_pointer_done == 1;
+                check("kit page pointer: and on the same rows at rest, the same press shows its row pressed and its lift is the row's click", shown && clicked);
+        }
         ui_kit.test_clock = 0;
 }
 
@@ -151456,6 +151533,16 @@ static void slider_row(int id, struct ui_row address_to row)
         row->label = "Taskbar scale";
         row->kind = UI_ROW_SLIDER;
         row->at = slider_app_value[id];
+        row->low = 50, row->high = 200, row->step = 5, row->words = "percent";
+}
+
+// Every row a slider at one value, for a list long enough to scroll.
+static void slider_many_row(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "Taskbar scale";
+        row->kind = UI_ROW_SLIDER;
+        row->at = 100;
         row->low = 50, row->high = 200, row->step = 5, row->words = "percent";
 }
 
@@ -151562,6 +151649,54 @@ static fn check_kit_slider_row(void)
         ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
         elsewhere = l.slide == 0 && l.slid == 0 && kit_pointer_done == 1;
         check("kit slider row: a press on the row away from its slider is the row's click, and no change of the slider", elsewhere);
+
+        // A finger that lands on a slider passing under it, on rows in motion, stops the rows and takes no slider: nothing is held and
+        // its lift names no value. Thirty slider rows in a body of five, thrown as a finger's lift throws them and drawn a frame on.
+        {
+                static struct ui_list many;
+                struct window_event finger_at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+                struct window_event finger_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                struct window_event finger_up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                b32 thrown, on_slider = false, untaken = false, unchanged = false;
+                int id;
+
+                memory_zero(&many, sizeof(many));
+                many.count = 30, many.ids = 30, many.describe = slider_many_row, many.focus = many.hover = many.down = -1;
+                for (int at = 0; at < 30; at++)
+                        many.id[at] = (unsigned short)at;
+                ui_list_place(&ui, &many, 0, 0, 400, 200);
+                ui_list_layout(&ui, &many);
+                memory_zero(&p, sizeof(p));
+                p.width = 400, p.height = 200, p.top = 0, p.bottom = 200, p.left = 0, p.right = 400;
+                p.body = &many.scroll;
+                ui_kit_held = null;
+                ui_scroll_drag(&many.scroll, 0);
+                ui_scroll_let_go(&many.scroll, 2000);
+                ui_kit.test_clock += 16000000ull, ui_kit.now = ui_kit.test_clock;
+                ui_scroll_frame(&ui, &many.scroll);
+                thrown = scroll_gliding(&many.scroll) && many.scroll.scroll > 0;
+                // The row at the body's middle now, and its slider where a draw puts it.
+                id = ui_list_hit(&ui, &many, 20, 100);
+                ui_list_describe(&many, id, &row);
+                c = id < 0 ? null : ui_list_trailing(&ui, &many, id, &row, right, ui_list_row_y(&many, ui_list_at(&many, id)), 0);
+                if (c)
+                {
+                        x = ui_dev(&ui, c->x + c->w / 2), y = ui_dev(&ui, c->y + c->h / 2);
+                        finger_at.a = x, finger_at.b = y;
+                        ui_event_context(&finger_at);
+                        on_slider = ui_list_hit(&ui, &many, x, y) == id && ui_control_hit(&ui, c, x, y) >= 0;
+                        kit_pointer_done = 0;
+                        ui_event_context(&finger_down);
+                        ui_page_pointer(&ui, &p, &many, &finger_down, check_kit_pointer_done);
+                        untaken = many.slide == 0 && ui_kit_held == null && !ui_body_going(&many.scroll.body) && p.press.down && p.press.target < 0;
+                        ui_event_context(&finger_up);
+                        ui_page_pointer(&ui, &p, &many, &finger_up, check_kit_pointer_done);
+                        unchanged = many.slid == 0 && many.slide == 0 && kit_pointer_done == 0;
+                }
+                check("kit slider row: a finger that lands on a slider passing under it on rows in motion stops the rows and takes no slider, and its lift changes nothing",
+                      thrown && on_slider && untaken && unchanged);
+                ui_kit_held = null;
+        }
         slider_app_value[0] = 100;
         ui_kit.test_clock = 0;
 }

@@ -18893,13 +18893,28 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         ui_press_follow moves it (past the slop it is a drag: the region follows the finger, one for one, and a pull past an end gives
         as the hand's does from its first pixel, whatever the finger's speed), and answers the pixels the region moved by, which a
         region-less press (the terminal's grid) moves by itself; ui_press_lift throws the region at the finger's fitted speed (floored
-        and capped) and answers the press's click (ui_press_end). A press taken back (WINDOW_KEY_CANCEL) is no click.
+        and capped) and answers the press's click (ui_press_end). A press taken back (WINDOW_KEY_CANCEL) is no click. A finger that
+        lands on a region that still runs on by itself (ui_scroll_running) stops it, and that is all its press does: the press has no
+        target, so nothing shows pressed for it and its lift clicks nothing, whatever lay under it.
 */
+// Whether the region runs on by itself at the kit's time: a throw's coast, or a notch's run to its target. The body is stepped to now
+// first, so a run that is over by now is a region at rest. None is a region that does not run.
+static b32 ui_scroll_running(struct ui_scroll address_to region)
+{
+        if (!region)
+                return false;
+        ui_scroll_extent(region);
+        ui_body_step(&region->body, ui_kit_time());
+        return region->body.state == BODY_COAST || region->body.state == BODY_NOTCH;
+}
+
 static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region)
 {
+        b32 stops = ui_scroll_running(region);
+
         if (region)
                 ui_scroll_hold(region);
-        ui_press_begin(press, x, y, target, true);
+        ui_press_begin(press, x, y, stops ? -1 : target, true);
         press->region = region;
 }
 
@@ -19540,7 +19555,8 @@ static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page addr
 }
 
 // A finger's button: down, its target shows pressed and nothing is done yet; up, the press is done where it went down if it
-// did not move off its target, and the region is thrown if it was moving.
+// did not move off its target, and the region is thrown if it was moving. A finger that lands on a region that still runs stops it
+// and has no target (ui_press_down): what shows pressed is what the press took, which is then nothing, and its lift does nothing.
 static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                                 const struct window_event address_to event, void (*done)(void))
 {
@@ -19551,7 +19567,7 @@ static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page ad
                 int target = ui_page_target(ui, p, l, x, y);
 
                 ui_press_down(&p->press, x, y, target, ui_page_region(ui, p, x, y));
-                ui_page_press_show(ui, p, l, target, x, y);
+                ui_page_press_show(ui, p, l, p->press.target, x, y);
                 ui_page_changed(p);
                 return;
         }
@@ -19636,6 +19652,9 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
         if (p->card || event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !(event->flags & WINDOW_KEY_DOWN))
                 return false;
         x = ui_kit.pointer_x, y = ui_kit.pointer_y;
+        // A finger that lands on rows that still run stops them (ui_press_down) and takes no slider that was passing under it.
+        if ((event->flags & WINDOW_KEY_TOUCH) && ui_scroll_running(ui_page_region(ui, p, x, y)))
+                return false;
         id = ui_list_hit(ui, l, x, y);
         if (id < 0)
                 return false;
