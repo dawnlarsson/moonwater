@@ -74,22 +74,37 @@ static fn host_prefix(bool label)
 #define HOST_SYSTEM_NAME "moonwater-boot"
 #define HOST_DATA_NAME "moonwater-data"
 /* The removable-media name the UEFI specification gives each machine's loader:
-   firmware on a disk with no boot entry of its own starts this file. */
+   firmware on a disk with no boot entry of its own starts this file. An update
+   carried on a stick that is not to start the machine is the image under the
+   name the build gives it in dist/, in a directory firmware does not look in,
+   so copying that one file onto any FAT stick is enough. The machine is the
+   one a PE header names, which an image for another one does not. */
 #if X64
 #define HOST_IMAGE "/EFI/BOOT/BOOTX64.EFI"
 #define HOST_IMAGE_NEXT "/EFI/BOOT/BOOTX64.NEW"
+#define HOST_UPDATE_FILE "/moonwater/bootx64.efi"
+#define HOST_PE_MACHINE 0x8664
 #elif ARM64
 #define HOST_IMAGE "/EFI/BOOT/BOOTAA64.EFI"
 #define HOST_IMAGE_NEXT "/EFI/BOOT/BOOTAA64.NEW"
+#define HOST_UPDATE_FILE "/moonwater/bootaa64.efi"
+#define HOST_PE_MACHINE 0xaa64
 #elif RISCV64
 #define HOST_IMAGE "/EFI/BOOT/BOOTRISCV64.EFI"
 #define HOST_IMAGE_NEXT "/EFI/BOOT/BOOTRISCV64.NEW"
+#define HOST_UPDATE_FILE "/moonwater/bootriscv64.efi"
+#define HOST_PE_MACHINE 0x5064
 #else
 #error "no removable-media loader name for this architecture"
 #endif
 #define HOST_KEPT_DIRECTORY "/EFI/moonwater"
 #define HOST_KEPT_IMAGE HOST_KEPT_DIRECTORY "/previous.efi"
 #define HOST_KEPT_IMAGE_NEXT HOST_KEPT_DIRECTORY "/previous.new"
+/* What a stick says the update's bytes are, beside it: sha256sum's line. */
+#define HOST_DIGEST_SUFFIX ".sha256"
+/* Where a stick is looked at for the build it carries, read-only. */
+#define HOST_STICK HOST_STATE "/stick"
+#define HOST_STICKS 8
 
 #define HOST_NAME_ROOM 64
 #define HOST_PATH_ROOM 256
@@ -179,6 +194,9 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings);
 static p64 host_settings_section(bipolar handle);
 static bool host_image_whole(string_address path);
+static b32 host_image_fit(string_address path, p8 address_to build, positive room,
+                          p16 address_to machine);
+static string_address host_fit_said(b32 fit, p16 machine);
 static bool host_settings_slots(bipolar handle, host_settings address_to slots,
                                 p64 address_to offset);
 static bool host_settings_booted(host_settings address_to into);
@@ -1312,10 +1330,15 @@ static fn host_plain_line(p8 address_to text)
                         text[at] = '?';
 }
 
-#if X64
+/*
+        The two places an image says its build: x86's setup header, and the
+        kernel's own banner in an arm64 or riscv64 image. Both are here on
+        every machine, for build.sh, which reads the image it wrote whatever
+        machine it is for; host_image_version is this machine's one.
+*/
+
 /* The version string in an x86 boot image's setup header, if it has one. */
-static bool host_image_version(bipolar handle, p8 address_to into,
-                               positive room)
+static bool host_setup_version(bipolar handle, p8 address_to into, positive room)
 {
         p8 header[0x210];
 
@@ -1339,7 +1362,7 @@ static bool host_image_version(bipolar handle, p8 address_to into,
 
         return false;
 }
-#else
+
 #define HOST_BANNER_HEAD "Linux version "
 #define HOST_BANNER_ROOM 512
 #define HOST_BANNER_CHUNK ((positive)1 << 20)
@@ -1420,8 +1443,7 @@ static bool host_banner_parse(p8 address_to at, positive length,
         read a megabyte at a time until one parses, the tail of each chunk
         carried into the next so a banner across the seam is still whole.
 */
-static bool host_image_version(bipolar handle, p8 address_to into,
-                               positive room)
+static bool host_banner_version(bipolar handle, p8 address_to into, positive room)
 {
         static p8 chunk[HOST_BANNER_CHUNK + HOST_BANNER_ROOM];
         positive head = sizeof(HOST_BANNER_HEAD) - 1;
@@ -1470,7 +1492,16 @@ static bool host_image_version(bipolar handle, p8 address_to into,
                 memory_copy(chunk, chunk + have - kept, kept);
         }
 }
+
+// The build this machine's image says, where its images say it.
+static bool host_image_version(bipolar handle, p8 address_to into, positive room)
+{
+#if X64
+        return host_setup_version(handle, into, room);
+#else
+        return host_banner_version(handle, into, room);
 #endif
+}
 
 /* The build an image carries, as host_running_build spells this one. */
 static bool host_image_build(string_address path, p8 address_to into,
@@ -1491,6 +1522,123 @@ static bool host_image_build(string_address path, p8 address_to into,
                 into[0] = end;
 
         return found;
+}
+
+/*
+        Which of two builds is the later one, from what each says of itself.
+
+        A build's words end with the moment its kernel was linked, as date(1)
+        spells it -- "#4 SMP PREEMPT Tue Sep 22 07:21:00 CEST 2026" -- and
+        start that part with the count of links (#4) the tree had made. The
+        moment is the builder's clock in the builder's zone: the zones of the
+        table are taken to UTC, and any other zone is read as UTC, which
+        orders two builds of one zone rightly whatever it is. Two builds of
+        the same second are ordered by their count. 1 when a is the later, -1
+        when b is, 0 when they are the same build, and HOST_BUILD_UNORDERED
+        when they differ and their words do not say which came first.
+*/
+#define HOST_BUILD_UNORDERED 2
+#define HOST_BUILD_WORDS 32
+
+static const struct
+{
+        string_address name;
+        b32 minutes;
+} host_build_zones[] = {
+    {"UTC", 0},     {"GMT", 0},     {"WET", 0},     {"WEST", 60},   {"BST", 60},
+    {"CET", 60},    {"CEST", 120},  {"EET", 120},   {"EEST", 180},  {"MSK", 180},
+    {"EST", -300},  {"EDT", -240},  {"CST", -360},  {"CDT", -300},  {"MST", -420},
+    {"MDT", -360},  {"PST", -480},  {"PDT", -420},
+};
+
+typedef struct
+{
+        b64 seconds; // when it was linked, in seconds from 1970 in UTC
+        positive count;
+        bool dated;
+        bool counted;
+} host_build_moment;
+
+static fn host_build_when(string_address build, host_build_moment address_to when)
+{
+        static const p8 months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+        p8 copy[HOST_BUILD_ROOM];
+        string_address words[HOST_BUILD_WORDS];
+        positive count = 0;
+        positive length = string_length(build);
+        positive day, hour, minute, second, year, month = 12;
+        b64 offset = 0;
+        string_address at;
+
+        memory_zero(when, sizeof(address_to when));
+        if (length >= sizeof(copy))
+                return;
+        memory_copy(copy, build, length + 1);
+
+        for (positive i = 0; copy[i] && count < HOST_BUILD_WORDS;)
+        {
+                while (copy[i] == ' ')
+                        copy[i++] = end;
+                if (!copy[i])
+                        break;
+                words[count++] = (string_address)copy + i;
+                while (copy[i] && copy[i] != ' ')
+                        i++;
+        }
+
+        for (positive i = 0; i < count; i++)
+        {
+                at = words[i] + 1;
+                if (words[i][0] == '#' &&
+                    string_digits_checked_exact(at, 10, address_of when->count))
+                {
+                        when->counted = true;
+                        break;
+                }
+        }
+
+        //      Wday Mon DD HH:MM:SS ZONE YYYY, the last six words.
+        if (count < 6 || string_length(words[count - 5]) != 3)
+                return;
+        for (positive i = 0; i < 12; i++)
+                if (!memory_compare(months + 3 * i, words[count - 5], 3))
+                        month = i;
+        at = words[count - 3];
+        if (month == 12 || !string_digits_checked_exact(words[count - 4], 10, address_of day) ||
+            !string_digits_checked_exact(words[count - 1], 10, address_of year) ||
+            !string_digits_checked(address_of at, 10, address_of hour) || *at++ != ':' ||
+            !string_digits_checked(address_of at, 10, address_of minute) || *at++ != ':' ||
+            !string_digits_checked_exact(at, 10, address_of second) || !day || day > 31 ||
+            hour > 23 || minute > 59 || second > 60 || year < 1970 || year > 9999)
+                return;
+
+        for (positive i = 0; i < array_count(host_build_zones); i++)
+                if (string_equals(words[count - 2], host_build_zones[i].name))
+                        offset = (b64)host_build_zones[i].minutes * 60;
+
+        when->seconds = (b64)clock_days_from_civil((bipolar)year, (bipolar)month + 1,
+                                                   (bipolar)day) * 86400 +
+                        (b64)(hour * 3600 + minute * 60 + second) - offset;
+        when->dated = true;
+}
+
+static b32 host_build_order(string_address a, string_address b)
+{
+        host_build_moment first;
+        host_build_moment second;
+
+        if (string_equals(a, b))
+                return 0;
+
+        host_build_when(a, address_of first);
+        host_build_when(b, address_of second);
+        if (!first.dated || !second.dated)
+                return HOST_BUILD_UNORDERED;
+        if (first.seconds != second.seconds)
+                return first.seconds > second.seconds ? 1 : -1;
+        if (first.counted && second.counted && first.count != second.count)
+                return first.count > second.count ? 1 : -1;
+        return HOST_BUILD_UNORDERED;
 }
 
 static bipolar host_mount(string_address name, string_address target,
@@ -1789,11 +1937,28 @@ static bool host_files_alike(string_address left, string_address right, p64 hole
         return alike;
 }
 
+/* Whether both of an image's settings slots are carry. */
+static bool host_image_slots_are(string_address path, host_settings address_to carry)
+{
+        host_settings slots[2];
+        p64 offset = 0;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bool alike;
+
+        if (handle < 0)
+                return false;
+
+        alike = host_settings_slots(handle, slots, address_of offset) &&
+                !memory_compare(slots, carry, SPARK_SETTINGS_SLOT) &&
+                !memory_compare(slots + 1, carry, SPARK_SETTINGS_SLOT);
+        system_close(handle);
+        return alike;
+}
+
 /* Whether path is the image at source with the slots it is to be stamped with. */
 static bool host_image_is(string_address path, string_address source,
                           host_settings address_to carry)
 {
-        host_settings slots[2];
         bipolar handle = system_open_at(AT_FDCWD, source, FILE_READ | O_CLOEXEC);
         p64 offset = 0;
         bool alike;
@@ -1809,15 +1974,53 @@ static bool host_image_is(string_address path, string_address source,
         if (!alike || !offset)
                 return alike;
 
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        return host_image_slots_are(path, carry);
+}
+
+/*
+        The SHA-256 of a file, and with masked the bytes of its settings
+        slots read as nought, so that an image sums the same whatever
+        settings are stamped in it. False when it cannot be read whole.
+*/
+static bool host_image_sum(string_address path, bool masked, p8 address_to sum)
+{
+        static p8 block[16384];
+        digest_state digest;
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        p64 hole;
+        p64 offset = 0;
+        bool read;
+
         if (handle < 0)
                 return false;
 
-        alike = host_settings_slots(handle, slots, address_of offset) &&
-                !memory_compare(slots, carry, SPARK_SETTINGS_SLOT) &&
-                !memory_compare(slots + 1, carry, SPARK_SETTINGS_SLOT);
+        hole = masked ? host_settings_section(handle) : 0;
+        read = file_look_code(AT_FDCWD, path, 0, address_of facts) >= 0;
+        digest_open(address_of digest, DIGEST_SHA256, 32);
+        while (read && offset < facts.size)
+        {
+                positive want = facts.size - offset < sizeof(block)
+                                    ? (positive)(facts.size - offset)
+                                    : sizeof(block);
+                p64 low = hole > offset ? hole : offset;
+                p64 high = hole + 2 * SPARK_SETTINGS_SLOT < offset + want
+                               ? hole + 2 * SPARK_SETTINGS_SLOT
+                               : offset + want;
+
+                if (storage_read(handle, block, want, offset) != want)
+                {
+                        read = false;
+                        break;
+                }
+                if (hole && low < high)
+                        memory_zero(block + (low - offset), (positive)(high - low));
+                digest_write(address_of digest, block, want);
+                offset += want;
+        }
+        digest_close(address_of digest, sum);
         system_close(handle);
-        return alike;
+        return read;
 }
 
 /* What a place that did not finish leaves is not left: the copies it was
@@ -1833,18 +2036,20 @@ static fn host_image_discard(string_address system)
 }
 
 /*
-        The image the partition keeps, as the disk has it: the partition is
-        let go of, its buffers dropped, and it is mounted again with the file's
-        pages dropped, so what is compared is what a firmware would read and
-        not memory. The partition is left unmounted.
+        The images the partition keeps, as the disk has them: the partition
+        is let go of, its buffers dropped, and it is mounted again with the
+        pages of both images dropped, so what look is given (the mount, at
+        system) is what a firmware would read and not memory. The partition
+        is left unmounted.
 */
-static bool host_image_on_disk(string_address name, string_address system,
-                               string_address source, host_settings address_to carry)
+static bool host_on_disk(string_address name, string_address system,
+                         host_image_visitor look, address_any opaque)
 {
+        static const string_address kept[] = {HOST_IMAGE, HOST_KEPT_IMAGE};
         p8 device[HOST_NAME_ROOM + 8];
         p8 path[HOST_PATH_ROOM];
         bipolar handle;
-        bool alike = false;
+        bool alike;
 
         if (!host_unmount(system) || !host_join(device, sizeof(device), "/dev/", name))
                 return false;
@@ -1859,8 +2064,10 @@ static bool host_image_on_disk(string_address name, string_address system,
         if (host_mount(name, system, "vfat", HOST_READ_ONLY) < 0)
                 return false;
 
-        if (host_join(path, sizeof(path), system, HOST_IMAGE))
+        for (positive at = 0; at < array_count(kept); at++)
         {
+                if (!host_join(path, sizeof(path), system, kept[at]))
+                        continue;
                 handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
                 if (handle >= 0)
                 {
@@ -1868,119 +2075,321 @@ static bool host_image_on_disk(string_address name, string_address system,
                                       HOST_FADVISE_DONTNEED);
                         system_close(handle);
                 }
-
-                alike = host_image_is(path, source, carry);
         }
 
+        alike = look(system, opaque);
         host_unmount(system);
         return alike;
 }
 
-static b32 host_place_written(string_address system, string_address running,
-                              host_settings address_to carry, bool address_to carried)
+/*
+        An image put where firmware starts it, on a system partition that
+        is mounted: what is put there and the build it is to read back as,
+        the settings stamped into it, and the names on the partition.
+
+        The loader is only ever replaced by a rename, from a file beside it
+        that has been written, synced and read back, and the build it
+        replaces is kept the same way, as previous.efi: so a machine that
+        loses power at any step finds a loader that is whole, the one it had
+        or the new one, and previous.efi the build it kept or the one the
+        loader was. What a cut left beside them is removed before the next
+        write and never opened, since a file a cut write left on FAT can
+        share its clusters with another (test/run's power cuts hold this on
+        a disk killed at every few milliseconds of the write).
+*/
+typedef struct
 {
+        string_address system;
+        string_address source;
+        string_address build;
+        host_settings address_to carry;
+        bool carried;    // the slots of what was put in place are carry
+        bool had_loader; // a rollback found a loader to keep
         p8 image[HOST_PATH_ROOM];
         p8 next[HOST_PATH_ROOM];
         p8 kept[HOST_PATH_ROOM];
-        p8 source[HOST_PATH_ROOM];
-        p8 build[HOST_BUILD_ROOM];
-        bipolar failed;
+        p8 kept_next[HOST_PATH_ROOM];
+        p8 kept_build[HOST_BUILD_ROOM]; // a rollback's: the build previous.efi reads as
+        p8 sums[2][32];  // a rollback's: the new loader, its slots aside, and the one it replaces
+} host_place;
 
-        if (!host_join(image, sizeof(image), system, "/EFI") ||
-            (system_make_directory_at(AT_FDCWD, image, 0755),
-             !host_join(image, sizeof(image), system, "/EFI/BOOT")) ||
-            (system_make_directory_at(AT_FDCWD, image, 0755),
-             !host_join(image, sizeof(image), system, HOST_KEPT_DIRECTORY)) ||
-            (system_make_directory_at(AT_FDCWD, image, 0755),
-             !host_join(image, sizeof(image), system, HOST_IMAGE)) ||
-            !host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE))
-                return host_refuse("%s: path too long\n", system);
+/*
+        An update, a step at a time, each one atomic on the partition or
+        leaving only a file beside the images. A cut between any two leaves
+        the loader it had before SWITCH and the new one after it. Nothing on
+        the partition is touched for an image JUDGE refuses.
+*/
+enum
+{
+        HOST_PLACE_JUDGE,     // the image is one this machine starts, of the build it is to be
+        HOST_PLACE_CLEAR,     // what a cut write left beside the images is removed
+        HOST_PLACE_KEEP_COPY, // the loader copied to previous.new and synced
+        HOST_PLACE_KEEP,      // and renamed over previous.efi once it is the loader byte for byte
+        HOST_PLACE_COPY,      // the image copied to BOOTX64.NEW and synced
+        HOST_PLACE_STAMP,     // both its slots say what the disk is to keep
+        HOST_PLACE_CHECK,     // read back: the image but the slots, one this machine starts, the build
+        HOST_PLACE_SWITCH,    // renamed over the loader, and the partition synced
+        HOST_PLACE_STEPS
+};
 
-        //      What an earlier write that was cut off left beside the images is
-        //      not trusted to be a file, and is not opened: it is removed.
-        host_image_discard(system);
+/*
+        A rollback: previous.efi made the loader, and the loader kept as
+        previous.efi. A cut before SWITCH leaves the machine as it was; one
+        between SWITCH and KEEP leaves it starting the build asked for, with
+        that build in previous.efi as well and the one it replaced only in
+        the copy beside it, which the next write removes.
+*/
+enum
+{
+        HOST_BACK_JUDGE,     // previous.efi is one this machine starts, of the build it is to be
+        HOST_BACK_CLEAR,     // what a cut write left beside the images is removed
+        HOST_BACK_COPY,      // previous.efi copied to BOOTX64.NEW and synced
+        HOST_BACK_STAMP,     // both its slots say what the loader keeps now
+        HOST_BACK_CHECK,     // read back: previous.efi but the slots, one this machine starts, its build
+        HOST_BACK_KEEP_COPY, // the loader copied to previous.new, synced and read back
+        HOST_BACK_SWITCH,    // BOOTX64.NEW renamed over the loader
+        HOST_BACK_KEEP,      // previous.new renamed over previous.efi, and the partition synced
+        HOST_BACK_STEPS
+};
 
-        if (system_access_at(AT_FDCWD, image, 0) >= 0 &&
-            host_join(next, sizeof(next), system, HOST_KEPT_IMAGE_NEXT) &&
-            host_join(kept, sizeof(kept), system, HOST_KEPT_IMAGE))
+static bool host_place_open(host_place address_to place, string_address system,
+                            string_address source, string_address build,
+                            host_settings address_to carry)
+{
+        static const string_address directories[] = {"/EFI", "/EFI/BOOT", HOST_KEPT_DIRECTORY};
+        p8 directory[HOST_PATH_ROOM];
+
+        memory_zero(place, sizeof(address_to place));
+        place->system = system;
+        place->source = source;
+        place->build = build;
+        place->carry = carry;
+
+        for (positive at = 0; at < array_count(directories); at++)
         {
-                if (host_copy_file(image, next))
-                        return 1;
-
-                if (!host_files_alike(image, next, 0, 0))
-                        return host_refuse("%s could not be kept whole\n", image);
-
-                failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, kept, 0);
-                return_if(failed < 0, host_fail(kept, failed));
+                if (!host_join(directory, sizeof(directory), system, directories[at]))
+                        return false;
+                system_make_directory_at(AT_FDCWD, directory, 0755);
         }
 
-        if (!host_join(next, sizeof(next), system, HOST_IMAGE_NEXT) ||
-            host_copy_file(source, next))
-                return 1;
+        return host_join(place->image, sizeof(place->image), system, HOST_IMAGE) &&
+               host_join(place->next, sizeof(place->next), system, HOST_IMAGE_NEXT) &&
+               host_join(place->kept, sizeof(place->kept), system, HOST_KEPT_IMAGE) &&
+               host_join(place->kept_next, sizeof(place->kept_next), system,
+                         HOST_KEPT_IMAGE_NEXT);
+}
 
-        //      Both slots of the new image say what the disk is to keep, before
-        //      the rename makes it the one that starts.
-        failed = carry ? host_settings_stamp(next, carry) : 0;
-        return_if(failed < 0, host_fail(next, failed));
+static fn host_place_sync(string_address system)
+{
+        bipolar directory = system_open_at(AT_FDCWD, system,
+                                           FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
-        *carried = carry && !failed;
-        if (carry && failed)
-                carry = null;
-
-        //      And the file that is renamed is the one that was copied, in every
-        //      byte but the slots, and the slots are the ones stamped.
-        if (!host_image_is(next, source, carry))
-                return host_refuse("%s is not the image it was copied from\n", next);
-
-        if (!host_image_build(next, build, sizeof(build)) ||
-            !string_equals(build, running))
-                return host_refuse("%s did not read back as this build\n", next);
-
-        failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, image, 0);
-        return_if(failed < 0, host_fail(image, failed));
-
+        if (directory >= 0)
         {
-                bipolar directory = system_open_at(AT_FDCWD, system,
-                                                   FILE_READ | O_DIRECTORY | O_CLOEXEC);
-
-                if (directory >= 0)
-                {
-                        system_call_1(syscall(syncfs), (positive)directory);
-                        system_close(directory);
-                }
+                system_call_1(syscall(syncfs), (positive)directory);
+                system_close(directory);
         }
+}
 
+/* Both slots of the image beside the loader as carry, before a rename makes
+   it the one that starts: an image with no section for them is put in place
+   as it is, and its caller says it starts with the defaults. */
+static b32 host_place_stamp(host_place address_to place)
+{
+        bipolar failed = place->carry ? host_settings_stamp(place->next, place->carry) : 0;
+
+        return_if(failed < 0, host_fail(place->next, failed));
+        place->carried = place->carry && !failed;
         return 0;
 }
 
 /*
-        The running image onto a mounted system partition, which is the whole
-        of an update. The image there before is kept as previous.efi, for the
-        firmware's shell or a stick to start when a build turns out bad; the
-        new one is written beside the old and renamed over it, so a machine
-        that loses power part way finds the image it had or this one, whole
-        (test/run's power cuts hold that on a disk killed at every few
-        milliseconds of the write). Nothing is renamed that is not what was
-        copied, nothing it was copying is left behind when it stops, what a cut
-        left is removed before the next write, and what it did is read back
-        from the disk itself, the partition unmounted. The partition is left
-        unmounted.
+        What is to be written is an image this machine's firmware starts, and
+        the build it is to be, as its bytes say and not as anything said it
+        was; asked before anything on the partition is touched.
+*/
+static b32 host_place_judge(host_place address_to place)
+{
+        p8 build[HOST_BUILD_ROOM];
+        p16 machine;
+        b32 fit = host_image_fit(place->source, build, sizeof(build), address_of machine);
+
+        if (fit)
+                return host_refuse("%s is not an image this machine starts, so nothing was "
+                                   "written: %s\n", place->source, host_fit_said(fit, machine));
+        if (!string_equals(build, place->build))
+                return host_refuse("%s is %s, not %s, so nothing was written\n", place->source,
+                                   build, place->build);
+        return 0;
+}
+
+/*
+        The file that is to be renamed over the loader is the one that was
+        copied, in every byte but the slots, and the slots are the ones
+        stamped; it is an image this machine's firmware starts; and it is the
+        build it is to be, read again from the copy.
+*/
+static b32 host_place_check(host_place address_to place)
+{
+        p8 build[HOST_BUILD_ROOM];
+
+        if (!host_image_is(place->next, place->source, place->carried ? place->carry : null))
+                return host_refuse("%s is not the image it was copied from\n", place->next);
+
+        if (host_image_fit(place->next, build, sizeof(build), null) ||
+            !string_equals(build, place->build))
+                return host_refuse("%s did not read back as %s\n", place->next, place->build);
+
+        return 0;
+}
+
+static b32 host_place_step(host_place address_to place, positive step)
+{
+        bipolar failed;
+        bool loader = system_access_at(AT_FDCWD, place->image, 0) >= 0;
+
+        switch (step)
+        {
+        case HOST_PLACE_JUDGE:
+                return host_place_judge(place);
+        case HOST_PLACE_CLEAR:
+                host_image_discard(place->system);
+                return 0;
+        case HOST_PLACE_KEEP_COPY:
+                return loader ? host_copy_file(place->image, place->kept_next) : 0;
+        case HOST_PLACE_KEEP:
+                if (!loader)
+                        return 0;
+                if (!host_files_alike(place->image, place->kept_next, 0, 0))
+                        return host_refuse("%s could not be kept whole\n", place->image);
+                failed = system_rename_at(AT_FDCWD, place->kept_next, AT_FDCWD, place->kept, 0);
+                return failed < 0 ? host_fail(place->kept, failed) : 0;
+        case HOST_PLACE_COPY:
+                return host_copy_file(place->source, place->next);
+        case HOST_PLACE_STAMP:
+                return host_place_stamp(place);
+        case HOST_PLACE_CHECK:
+                return host_place_check(place);
+        case HOST_PLACE_SWITCH:
+                failed = system_rename_at(AT_FDCWD, place->next, AT_FDCWD, place->image, 0);
+                return_if(failed < 0, host_fail(place->image, failed));
+                host_place_sync(place->system);
+                return 0;
+        }
+        return 0;
+}
+
+static b32 host_back_step(host_place address_to place, positive step)
+{
+        bipolar failed;
+
+        switch (step)
+        {
+        case HOST_BACK_JUDGE:
+                return host_place_judge(place);
+        case HOST_BACK_CLEAR:
+                host_image_discard(place->system);
+                return 0;
+        case HOST_BACK_COPY:
+                return host_copy_file(place->kept, place->next);
+        case HOST_BACK_STAMP:
+                return host_place_stamp(place);
+        case HOST_BACK_CHECK:
+                if (host_place_check(place))
+                        return 1;
+                return host_image_sum(place->next, true, place->sums[0])
+                           ? 0
+                           : host_refuse("%s could not be read back\n", place->next);
+        case HOST_BACK_KEEP_COPY:
+                place->had_loader = system_access_at(AT_FDCWD, place->image, 0) >= 0;
+                if (!place->had_loader)
+                        return 0;
+                if (host_copy_file(place->image, place->kept_next))
+                        return 1;
+                if (!host_files_alike(place->image, place->kept_next, 0, 0) ||
+                    !host_image_sum(place->kept_next, false, place->sums[1]))
+                        return host_refuse("%s could not be kept whole\n", place->image);
+                return 0;
+        case HOST_BACK_SWITCH:
+                failed = system_rename_at(AT_FDCWD, place->next, AT_FDCWD, place->image, 0);
+                return failed < 0 ? host_fail(place->image, failed) : 0;
+        case HOST_BACK_KEEP:
+                failed = place->had_loader ? system_rename_at(AT_FDCWD, place->kept_next,
+                                                              AT_FDCWD, place->kept, 0)
+                                           : 0;
+                return_if(failed < 0, host_fail(place->kept, failed));
+                host_place_sync(place->system);
+                return 0;
+        }
+        return 0;
+}
+
+/* Every step of an update, or of a rollback, in order: the first that fails
+   stops it, and what it was making beside the images is removed. A refusal
+   of the judge is before anything, and leaves the partition as it was. */
+static b32 host_place_written(host_place address_to place, bool back)
+{
+        positive steps = back ? HOST_BACK_STEPS : HOST_PLACE_STEPS;
+
+        for (positive step = 0; step < steps; step++)
+                if (back ? host_back_step(place, step) : host_place_step(place, step))
+                {
+                        if (step != HOST_PLACE_JUDGE)
+                                host_image_discard(place->system);
+                        return 1;
+                }
+        return 0;
+}
+
+// What an update put in place, as the disk has it: the image it was copied from.
+static bool host_place_landed(string_address system, address_any opaque)
+{
+        host_place address_to place = (host_place address_to)opaque;
+
+        (void)system;
+        return host_image_is(place->image, place->source,
+                             place->carried ? place->carry : null);
+}
+
+// What a rollback put in place, as the disk has it: the two sums it took on the way.
+static bool host_back_landed(string_address system, address_any opaque)
+{
+        host_place address_to place = (host_place address_to)opaque;
+        p8 sum[32];
+
+        (void)system;
+        return host_image_sum(place->image, true, sum) &&
+               !memory_compare(sum, place->sums[0], sizeof(sum)) &&
+               (!place->carried || host_image_slots_are(place->image, place->carry)) &&
+               (!place->had_loader ||
+                (host_image_sum(place->kept, false, sum) &&
+                 !memory_compare(sum, place->sums[1], sizeof(sum))));
+}
+
+/*
+        An image onto a mounted system partition, which is the last step of
+        an install and the whole of an update: source, which is to read back
+        as build, with the settings carry stamped into it. The image there
+        before is kept as previous.efi, for `setup rollback`, the firmware's
+        shell or a stick to start when a build turns out bad. What it did is
+        read back from the disk itself, the partition unmounted, and the
+        partition is left unmounted.
 */
 static b32 host_place_image(string_address name, string_address system,
-                            string_address running, host_settings address_to carry,
-                            bool address_to carried)
+                            string_address source, string_address build,
+                            host_settings address_to carry, bool address_to carried)
 {
-        p8 source[HOST_PATH_ROOM];
+        host_place place;
 
         *carried = false;
-        if (host_place_written(system, running, carry, carried))
-        {
-                host_image_discard(system);
-                return 1;
-        }
+        if (!host_place_open(address_of place, system, source, build, carry))
+                return host_refuse("%s: path too long\n", system);
 
-        if (!host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE) ||
-            !host_image_on_disk(name, system, source, *carried ? carry : null))
+        if (host_place_written(address_of place, false))
+                return 1;
+
+        *carried = place.carried;
+        if (!host_on_disk(name, system, host_place_landed, address_of place))
                 return host_refuse("%s did not read back from the disk as the image "
                                    "that was written\n", name);
 
@@ -2093,10 +2502,78 @@ static fn host_medium_fresh(p8 address_to medium, positive size)
                 system_random_fill(medium, size, 0);
 }
 
+/*
+        An update keeps the disk's settings: they are that machine's, and the
+        stick is only carrying a build. An image from before there were
+        settings has none, which is the defaults. What the loader on the
+        system partition mounted at HOST_SYSTEM keeps, as the next generation
+        of it, into disk; 1, said, when the loader is there and cannot be read.
+*/
+static b32 host_settings_carried(host_install address_to install, host_settings address_to disk)
+{
+        p8 path[HOST_PATH_ROOM];
+        b32 read = -1;
+        b32 failed = 0;
+
+        host_settings_empty(disk);
+        if (host_join(path, sizeof(path), HOST_SYSTEM, HOST_IMAGE))
+        {
+                bipolar opened = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+                //      An image that is there and cannot be read says nothing of
+                //      the settings in it, and is not replaced on a guess that it
+                //      has none.
+                if (opened >= 0)
+                {
+                        system_close(opened);
+                        read = host_settings_image(path, disk);
+                }
+                else if (opened != -ERROR_NO_ENTRY)
+                        failed = host_refuse("%s cannot be read, so its settings "
+                                             "cannot be kept\n", install->system);
+        }
+
+        if (read == 0)
+                host_say(log, host_label "both settings slots on %s are damaged: "
+                                         "it starts from the defaults\n",
+                         install->disk);
+
+        disk->generation++;
+        host_medium_fresh(disk->medium, sizeof(disk->medium));
+        return failed;
+}
+
+/* What became of the settings an image was given, said: whose names the image. */
+static fn host_settings_landed(host_install address_to install, host_settings address_to disk,
+                               bool carried, string_address whose)
+{
+        host_settings session;
+
+        if (!carried)
+        {
+                host_say(log, host_label "%s has no place for settings, so %s starts "
+                                         "with the defaults\n", whose, install->disk);
+                return;
+        }
+
+        //      A session started from this disk is still its copy.
+        if (host_settings_kept(address_of session) &&
+            !memory_compare(session.medium, disk->medium, sizeof(disk->medium)))
+        {
+                session.generation = disk->generation;
+                host_settings_keep(address_of session);
+        }
+
+        host_say(log, host_label "%s keeps its own settings\n", install->disk);
+}
+
 static b32 host_update_locked(host_install address_to install)
 {
         p8 running[HOST_BUILD_ROOM];
+        p8 source[HOST_PATH_ROOM];
         host_medium_search search;
+        host_settings disk;
+        bool carried;
         bipolar mounted;
         b32 failed;
 
@@ -2135,67 +2612,14 @@ static b32 host_update_locked(host_install address_to install)
         host_say(log, host_label "writing this build to %s, from %s\n",
                  install->system, search.name);
 
-        /*      An update keeps the disk's settings: they are that machine's,
-                and the stick is only carrying a build. An image from before
-                there were settings has none, which is the defaults. */
-        {
-                host_settings disk;
-                host_settings session;
-                p8 path[HOST_PATH_ROOM];
-                bool carried;
-                b32 read = -1;
-
-                host_settings_empty(address_of disk);
-                failed = 0;
-                if (host_join(path, sizeof(path), HOST_SYSTEM, HOST_IMAGE))
-                {
-                        bipolar opened = system_open_at(AT_FDCWD, path,
-                                                        FILE_READ | O_CLOEXEC);
-
-                        //      An image that is there and cannot be read says
-                        //      nothing of the settings in it, and is not
-                        //      replaced on a guess that it has none.
-                        if (opened >= 0)
-                        {
-                                system_close(opened);
-                                read = host_settings_image(path, address_of disk);
-                        }
-                        else if (opened != -ERROR_NO_ENTRY)
-                                failed = host_refuse("%s cannot be read, so its settings "
-                                                     "cannot be kept\n", install->system);
-                }
-
-                if (read == 0)
-                        host_say(log, host_label "both settings slots on %s are damaged: "
-                                                 "it starts from the defaults\n",
-                                 install->disk);
-
-                disk.generation++;
-                host_medium_fresh(disk.medium, sizeof(disk.medium));
-
-                if (!failed)
-                        failed = host_place_image(install->system, HOST_SYSTEM, running,
-                                                  address_of disk, address_of carried);
-
-                if (!failed && !carried)
-                        host_say(log, host_label "this build's image has no place for "
-                                                 "settings, so %s starts with the "
-                                                 "defaults\n", install->disk);
-                else if (!failed)
-                {
-                        //      A session started from this disk is still its copy.
-                        if (host_settings_kept(address_of session) &&
-                            !memory_compare(session.medium, disk.medium,
-                                            sizeof(disk.medium)))
-                        {
-                                session.generation = disk.generation;
-                                host_settings_keep(address_of session);
-                        }
-
-                        host_say(log, host_label "%s keeps its own settings\n",
-                                 install->disk);
-                }
-        }
+        failed = host_settings_carried(install, address_of disk);
+        if (!failed && !host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE))
+                failed = host_refuse("%s: path too long\n", HOST_MEDIUM);
+        if (!failed)
+                failed = host_place_image(install->system, HOST_SYSTEM, source, running,
+                                          address_of disk, address_of carried);
+        if (!failed)
+                host_settings_landed(install, address_of disk, carried, "this build's image");
 
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
@@ -3360,8 +3784,10 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         host_say(log, host_label "writing this build to %s, from %s\n",
                  target.system, search.name);
 
-        failed = host_place_image(target.system, HOST_SYSTEM, running, address_of carry,
-                                  address_of carried);
+        failed = host_join(path, sizeof(path), HOST_MEDIUM, HOST_IMAGE)
+                     ? host_place_image(target.system, HOST_SYSTEM, path, running,
+                                        address_of carry, address_of carried)
+                     : host_refuse("%s: path too long\n", HOST_MEDIUM);
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
         if (failed)
@@ -3892,6 +4318,116 @@ static bool host_image_whole(string_address path)
 
         system_close(handle);
         return whole;
+}
+
+/*
+        Whether a file is an image this machine's firmware starts, from the
+        file and not from its name: a PE32+ EFI application (subsystem 10)
+        whose header names this machine, that runs as far as its own sections
+        say, and that names a build, which goes into build as
+        host_running_build spells this one. 0 when it is; else why not, one
+        of the reasons below. machine, when asked for, is what the header
+        names.
+*/
+enum
+{
+        HOST_FIT_GOOD,
+        HOST_FIT_NONE,     // nothing that can be read is there
+        HOST_FIT_NOT_EFI,  // not an EFI application
+        HOST_FIT_MACHINE,  // one for another machine
+        HOST_FIT_SHORT,    // cut short of its own sections
+        HOST_FIT_NO_BUILD, // no build named in it
+};
+
+#define HOST_PE_OPTIONAL_LEAST 72 // the optional header as far as its subsystem
+#define HOST_PE_PLUS 0x20b
+#define HOST_PE_EFI_APPLICATION 10
+
+/* The header's half of that, for an image for the machine expected: one of
+   HOST_FIT_GOOD, NONE, NOT_EFI and MACHINE. */
+static b32 host_image_shape(string_address path, p16 expected, p16 address_to machine)
+{
+        p8 head[HOST_SETTINGS_PAGE];
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        file_facts facts;
+        positive table;
+        positive count;
+        b32 fit = HOST_FIT_NOT_EFI;
+
+        if (machine)
+                *machine = 0;
+        if (handle < 0)
+                return HOST_FIT_NONE;
+
+        //      A file, and no FIFO or device a stick might put at the name.
+        if (file_look_code(AT_FDCWD, path, 0, address_of facts) < 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+                fit = HOST_FIT_NONE;
+        else if (host_pe_table(handle, head, address_of table, address_of count) && count)
+        {
+                positive pe = storage_le32(head + 0x3c);
+                p16 named = storage_le16(head + pe + 4);
+
+                if (machine)
+                        *machine = named;
+                //      The section table is inside the page (host_pe_table), and an
+                //      optional header as long as this one ends before it.
+                if (storage_le16(head + pe + 20) >= HOST_PE_OPTIONAL_LEAST &&
+                    storage_le16(head + pe + 24) == HOST_PE_PLUS &&
+                    storage_le16(head + pe + 24 + 68) == HOST_PE_EFI_APPLICATION)
+                        fit = named == expected ? HOST_FIT_GOOD : HOST_FIT_MACHINE;
+        }
+        system_close(handle);
+        return fit;
+}
+
+static b32 host_image_fit(string_address path, p8 address_to build, positive room,
+                          p16 address_to machine)
+{
+        b32 fit = host_image_shape(path, HOST_PE_MACHINE, machine);
+
+        build[0] = end;
+        if (fit)
+                return fit;
+        if (!host_image_whole(path))
+                return HOST_FIT_SHORT;
+        if (!host_image_build(path, build, room))
+                return HOST_FIT_NO_BUILD;
+        return HOST_FIT_GOOD;
+}
+
+// A machine as a PE header names it.
+static string_address host_pe_machine(p16 machine)
+{
+        return machine == 0x8664   ? "x86-64"
+               : machine == 0xaa64 ? "arm64"
+               : machine == 0x5064 ? "riscv64"
+               : machine == 0x14c  ? "32-bit x86"
+               : machine == 0x1c4  ? "32-bit arm"
+                                   : "another kind of machine";
+}
+
+// Why an image is not one to write, in words that follow a colon.
+static string_address host_fit_said(b32 fit, p16 machine)
+{
+        static p8 said[96];
+
+        switch (fit)
+        {
+        case HOST_FIT_NONE:
+                return "there is no image there that can be read";
+        case HOST_FIT_NOT_EFI:
+                return "it is not an EFI application";
+        case HOST_FIT_MACHINE:
+                (void)string_join(said, sizeof(said), "it is for ", host_pe_machine(machine),
+                                  ", and this machine is ", host_pe_machine(HOST_PE_MACHINE));
+                return said;
+        case HOST_FIT_SHORT:
+                return "it ends before its own sections do";
+        case HOST_FIT_NO_BUILD:
+                return "it names no build";
+        }
+        return "";
 }
 
 /*
@@ -25594,6 +26130,8 @@ static const host_row host_rows[] = {
     {null, "", "removable takes a disk that says it is; yes", 'f'},
     {null, "", "is for a script, which cannot be asked", 'f'},
     {null, "setup update [DISK]", "write this build over an install, keeping its data", 'f'},
+    {null, "setup update usb [DISK] [yes]", "write the build a stick carries over an install, keeping its data and the build it had", 'f'},
+    {null, "setup rollback [DISK] [yes]", "start the build an install had before its last update again, keeping its data", 'f'},
     {null, "setup use [DISK]", "run this build with the data of an install", 'f'},
     {null, "setup live", "leave the disks alone this session", 'f'},
     {null, "wipe [yes]", "forget /home and /root, keep the machine; yes", 'b'},
@@ -26034,6 +26572,639 @@ static fn host_status_wifi(void)
         string_format(log, "  wifi on\n");
 }
 
+// Sticks --------------------------------------------------------
+
+/*
+        A build on a stick, looked at without starting it.
+
+        A stick written by build.sh --usb carries the image where firmware
+        starts it (HOST_IMAGE), and one written by build.sh --usb-update, or
+        by hand, carries it as HOST_UPDATE_FILE on a FAT stick that may hold
+        anything else besides. Every FAT partition of a disk something can be
+        plugged into (host_disk_external) is looked at, read-only, unless it
+        is an install's own system partition or on the disk an update writes
+        to: the update file first, then the loader. What a stick carries is
+        judged by its bytes (host_image_fit), never by its name.
+
+        The device policy decides first: a stick on a USB device the policy
+        holds is not mounted. A held device has no disk to begin with, since
+        nothing binds to it; this is for the moments the kernel and the
+        policy disagree, at a boot before the first restore or with the
+        policy changed and not yet applied.
+*/
+typedef struct
+{
+        p8 name[HOST_NAME_ROOM]; // the partition
+        p8 disk[HOST_NAME_ROOM]; // and its disk
+        string_address file;     // where on it the image is, or none
+        p8 build[HOST_BUILD_ROOM];
+        b32 fit; // host_image_fit's answer
+        p16 machine;
+        bool held; // the device policy holds the device it is on
+} host_stick;
+
+typedef struct
+{
+        host_stick found[HOST_STICKS];
+        positive count;
+        positive dropped;
+        string_address skip; // a disk not looked at
+} host_sticks;
+
+/*
+        Whether the device policy lets a disk be read. A disk on USB is
+        below the devices its sysfs place names -- every hub between it and
+        its root hub, and the stick itself (1-4, 1-4.2) -- and the interface
+        its driver is bound to (1-4.2:1.0). Each device must be authorized
+        and let in by the policy (usb_judge, which boot, every verb and the
+        watcher judge by), and so must the interface (usb_interface_let). A
+        device on the path the census does not show is held: what cannot be
+        judged is not read. A disk on no USB bus is not the device policy's.
+*/
+static bool host_stick_let(string_address disk)
+{
+        static usb_census census;
+        static usb_policy policy;
+        p8 sysfs[HOST_PATH_ROOM];
+        p8 link[HOST_PATH_ROOM * 2];
+        p8 word[USB_PORT_ROOM];
+        usb_device address_to device = null;
+        string_address at;
+        bool loaded = false;
+
+        if (!host_join(sysfs, sizeof(sysfs), "/sys/class/block/", disk) ||
+            file_link_text(sysfs, link, sizeof(link)) <= 0)
+                return false;
+
+        for (at = (string_address)link; *at;)
+        {
+                positive length = (positive)(string_first_of_or_end(at, '/') - at);
+                bool port;
+
+                if (length && length < sizeof(word))
+                {
+                        memory_copy(word, at, length);
+                        word[length] = end;
+                        port = usb_port_valid((string_address)word);
+                        if ((port || (device && string_first_of((string_address)word, ':'))) &&
+                            !loaded)
+                        {
+                                usb_census_take(address_of census);
+                                usb_policy_load(address_of policy);
+                                loaded = true;
+                        }
+                        if (port)
+                        {
+                                device = usb_find(address_of census, (string_address)word);
+                                if (!device || !device->authorized ||
+                                    !usb_let(usb_judge(address_of policy, device)))
+                                        return false;
+                        }
+                        else if (device && string_first_of((string_address)word, ':'))
+                        {
+                                bool found = false;
+
+                                for (positive one = 0; one < census.interfaces; one++)
+                                        if (string_equals((string_address)census.interface[one].name,
+                                                          (string_address)word))
+                                        {
+                                                usb_interface address_to it = census.interface + one;
+
+                                                if (!usb_owns(device, it) || !it->authorized ||
+                                                    !usb_interface_let(address_of policy, device,
+                                                                       usb_judge(address_of policy,
+                                                                                 device),
+                                                                       it))
+                                                        return false;
+                                                found = true;
+                                        }
+                                if (!found)
+                                        return false;
+                                //      Below the interface is the disk's own:
+                                //      its SCSI host, target and block device.
+                                return true;
+                        }
+                }
+                at += length + (at[length] == '/');
+        }
+
+        //      A USB device with no interface on the path is not one a disk is on.
+        return !device;
+}
+
+/* What the stick mounted at where carries, into stick: the update file, else
+   the loader; nothing when it carries neither. */
+static fn host_stick_look(host_stick address_to stick, string_address where)
+{
+        static const string_address files[] = {HOST_UPDATE_FILE, HOST_IMAGE};
+        p8 path[HOST_PATH_ROOM];
+
+        stick->file = null;
+        stick->fit = HOST_FIT_NONE;
+        for (positive at = 0; at < array_count(files); at++)
+                if (host_join(path, sizeof(path), where, files[at]) &&
+                    system_access_at(AT_FDCWD, path, 0) >= 0)
+                {
+                        stick->file = files[at];
+                        stick->fit = host_image_fit(path, stick->build, sizeof(stick->build),
+                                                    address_of stick->machine);
+                        return;
+                }
+}
+
+static bool host_sticks_visit(storage_identity address_to identity, address_any opaque)
+{
+        host_sticks address_to sticks = (host_sticks address_to)opaque;
+        string_address name = identity->path + sizeof("/dev/") - 1;
+        p8 parent[HOST_NAME_ROOM];
+        host_stick address_to stick;
+
+        if (!string_equals(identity->type, "vfat") ||
+            string_equals(identity->partlabel, HOST_SYSTEM_NAME) || !host_name_valid(name) ||
+            !host_parent(name, parent, sizeof(parent)) ||
+            (sticks->skip && string_equals(parent, sticks->skip)) ||
+            !host_disk_external(parent))
+                return true;
+
+        if (sticks->count == HOST_STICKS)
+        {
+                sticks->dropped++;
+                return true;
+        }
+
+        stick = sticks->found + sticks->count;
+        memory_zero(stick, sizeof(address_to stick));
+        string_copy(stick->name, name);
+        string_copy(stick->disk, parent);
+        stick->fit = HOST_FIT_NONE;
+
+        if (!host_stick_let(parent))
+                stick->held = true;
+        else if (host_mount(name, HOST_STICK, "vfat", HOST_READ_ONLY) >= 0)
+        {
+                host_stick_look(stick, HOST_STICK);
+                host_unmount(HOST_STICK);
+        }
+
+        //      A FAT stick with no Moonwater on it is nobody's business here.
+        if (stick->held || stick->file)
+                sticks->count++;
+        return true;
+}
+
+/* Every stick plugged in that carries an image, or that the device policy
+   holds, but those on skip. */
+static fn host_sticks_take(host_sticks address_to sticks, string_address skip)
+{
+        memory_zero(sticks, sizeof(address_to sticks));
+        sticks->skip = skip;
+        storage_each_device(host_sticks_visit, sticks);
+}
+
+/* Which of two builds a stick's is, in the words a line about it starts with. */
+static string_address host_build_named(string_address build, string_address other)
+{
+        b32 order = host_build_order(build, other);
+
+        return order == 0    ? "the same build"
+               : order == 1  ? "a newer build"
+               : order == -1 ? "an older build"
+                             : "another build";
+}
+
+/*
+        The sticks, as setup says them under the installs: the build each
+        carries beside running, an image refused and why, and a stick the
+        device policy holds, once for the disk. shown is the partition
+        already said to carry this image, which is not said twice. With one
+        install, and a stick whose build is neither running nor the one the
+        install has, the command that writes it.
+*/
+static fn host_sticks_said(string_address running, string_address shown,
+                           host_census address_to census)
+{
+        static host_sticks sticks;
+        host_install address_to install = census->count == 1 ? census->found : null;
+        bool other = false;
+
+        host_sticks_take(address_of sticks, null);
+        for (positive at = 0; at < sticks.count; at++)
+        {
+                host_stick address_to stick = sticks.found + at;
+                bool said = false;
+
+                for (positive before = 0; before < at; before++)
+                        said |= sticks.found[before].held &&
+                                string_equals(sticks.found[before].disk, stick->disk);
+
+                if (stick->held)
+                {
+                        if (!said)
+                                string_format(log, "  %s is held by the device policy, so what "
+                                                   "it carries is not read\n", stick->disk);
+                }
+                else if (stick->fit)
+                        string_format(log, "  %s carries an image this machine cannot start: %s\n",
+                                      stick->name, host_fit_said(stick->fit, stick->machine));
+                else if (string_equals(stick->build, running))
+                {
+                        if (!shown || !string_equals(stick->name, shown))
+                                string_format(log, "  the same build on %s\n", stick->name);
+                }
+                else
+                {
+                        string_format(log, "  %s on %s: %s\n",
+                                      host_build_named(stick->build, running), stick->name,
+                                      stick->build);
+                        other |= install && (!install->readable ||
+                                             !string_equals(stick->build, install->build));
+                }
+        }
+
+        if (other)
+                string_format(log, "  moonwater setup update usb writes it over %s, keeping "
+                                   "its data\n", install->disk);
+}
+
+/*
+        What a stick says its update's bytes are, where it says it: beside
+        the image, its name and .sha256, a line whose first word is the
+        image's SHA-256 in hex, as sha256sum writes it. It is the stick's
+        word about its own bytes, so it catches a copy that went wrong and
+        not a stick that was made to lie (anyone who writes the image writes
+        this too). 0 when the image is what it says or it says nothing; 1,
+        said, when it says another or says what is not a sum.
+*/
+static b32 host_stick_digest(string_address image, bool address_to said)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 text[160];
+        p8 want[32];
+        p8 sum[32];
+        bipolar got;
+
+        *said = false;
+        if (!host_join(path, sizeof(path), image, HOST_DIGEST_SUFFIX))
+                return host_refuse("%s: path too long\n", image);
+
+        got = file_slurp_regular_at(AT_FDCWD, path, text, sizeof(text), O_NOFOLLOW);
+        if (got == -ERROR_NO_ENTRY)
+                return 0;
+        if (got < 64 || !memory_from_hex(want, (string_address)text, 32) ||
+            (got > 64 && text[64] != ' ' && text[64] != '\n' && text[64] != '\t'))
+                return host_refuse("%s says nothing that is a SHA-256, so the image beside it "
+                                   "is not written\n", path);
+
+        if (!host_image_sum(image, false, sum))
+                return host_refuse("%s could not be read to its end\n", image);
+
+        if (memory_compare(sum, want, sizeof(sum)))
+                return host_refuse("%s is not the image %s says it is: the copy on the "
+                                   "stick is damaged, or is not the one the sum was made of; "
+                                   "nothing written\n", image, path);
+
+        *said = true;
+        return 0;
+}
+
+/*
+        The install a command that writes its system partition names, or
+        else the one this session keeps, the one boot asked about, or the
+        only one there is. A session that keeps one disk can still have
+        another's image written: only the system partition is touched.
+*/
+static host_install address_to host_install_chosen(host_census address_to census,
+                                                   string_address disk)
+{
+        p8 verdict[HOST_NAME_ROOM + 16];
+        host_install address_to install = null;
+
+        host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
+        host_census_take(census);
+
+        if (disk)
+                install = host_census_find(census, disk);
+        else if (string_has_prefix(verdict, "disk "))
+                install = host_census_find(census, verdict + 5);
+        else if (string_has_prefix(verdict, "ask "))
+                install = host_census_find(census, verdict + 4);
+        else if (census->count == 1)
+                install = census->found;
+
+        if (!install)
+                host_refuse(disk               ? "%s has no Moonwater install\n"
+                            : census->count > 1 ? "more than one disk has Moonwater; name one%s\n"
+                                                : "no disk here has Moonwater installed%s\n",
+                            disk ? disk : (string_address) "");
+        return install;
+}
+
+/* A question a person answers yes to before an image is written, at a
+   terminal; whoever said yes in the command's words is not asked. */
+static bool host_said_yes(bool said_yes, string_address question)
+{
+        p8 answer[8];
+
+        if (said_yes)
+                return true;
+
+        host_say(log, host_label "%s Type " HOST_YES " to go on: ", question);
+        if (host_read_line(answer, sizeof(answer)) < 0 || !string_equals(answer, HOST_YES))
+        {
+                host_say(log, host_label "nothing written\n");
+                return false;
+        }
+        return true;
+}
+
+/*
+        The one stick whose build an update writes over install: an image
+        this machine starts, of a build the install does not have. None, or
+        more than one, is refused in words that say why, so a person who
+        plugged in the wrong stick, a stick the policy holds or one that
+        carries the build already there is told which.
+*/
+static host_stick address_to host_stick_chosen(host_sticks address_to sticks,
+                                               host_install address_to install)
+{
+        host_stick address_to chosen = null;
+        host_stick address_to same = null;
+        host_stick address_to held = null;
+        host_stick address_to refused = null;
+
+        for (positive at = 0; at < sticks->count; at++)
+        {
+                host_stick address_to stick = sticks->found + at;
+
+                if (stick->held)
+                        held = held ? held : stick;
+                else if (stick->fit)
+                        refused = refused ? refused : stick;
+                else if (install->readable && string_equals(stick->build, install->build))
+                        same = same ? same : stick;
+                else
+                {
+                        if (chosen)
+                        {
+                                host_refuse("%s and %s both carry a build to write: leave the one "
+                                            "to write plugged in\n", chosen->name, stick->name);
+                                return null;
+                        }
+                        chosen = stick;
+                }
+        }
+
+        if (chosen)
+                return chosen;
+
+        if (refused)
+                host_refuse("%s carries an image this machine cannot start, so nothing was "
+                            "written: %s\n", refused->name,
+                            host_fit_said(refused->fit, refused->machine));
+        else if (same)
+                host_refuse("%s carries the build %s already has: %s\n", same->name,
+                            install->disk, same->build);
+        else if (held)
+                host_refuse("%s is held by the device policy, so what it carries is not "
+                            "read: moonwater device list shows it, and device allow lets it "
+                            "in\n", held->disk);
+        else
+                host_refuse("no stick plugged in carries a Moonwater image: build.sh "
+                            "--usb-update writes one, or copy dist/%s to %s on any FAT "
+                            "stick\n", HOST_UPDATE_FILE + sizeof("/moonwater/") - 1,
+                            HOST_UPDATE_FILE);
+        return null;
+}
+
+/*
+        The build a stick carries, written over an install and kept as the
+        one it starts, without the stick being started: the update's own
+        steps (host_place_image) with the stick's image as the source. It is
+        judged three times, by its bytes each time: when the sticks are
+        looked at, once mounted for the write, and as the copy on the
+        install; it is the digest beside it, when the stick has one; and it
+        is read back from the install's disk, unmounted, as the bytes it was
+        copied from. The build the install had is kept as previous.efi, which
+        setup rollback starts again.
+*/
+static b32 host_update_stick_locked(host_install address_to install, bool said_yes)
+{
+        static host_sticks sticks;
+        host_stick address_to stick;
+        host_settings disk;
+        p8 source[HOST_PATH_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+        p8 question[HOST_BUILD_ROOM * 2 + 128];
+        p16 machine;
+        bool carried;
+        bool summed = false;
+        bipolar mounted;
+        b32 fit;
+        b32 failed;
+
+        if (!host_install_refresh(install))
+                return host_refuse("%s is no longer here\n", install->disk);
+        host_install_read(install);
+
+        host_sticks_take(address_of sticks, install->disk);
+        stick = host_stick_chosen(address_of sticks, install);
+        if (!stick)
+                return 1;
+
+        //      Looked at again where it is to be read from: the stick can have
+        //      been changed, or another put in its place, since.
+        if (!host_stick_let(stick->disk))
+                return host_refuse("%s is held by the device policy, so it is not read\n",
+                                   stick->disk);
+        mounted = host_mount(stick->name, HOST_MEDIUM, "vfat", HOST_READ_ONLY);
+        if (mounted < 0)
+                return host_fail(stick->name, mounted);
+
+        failed = 0;
+        fit = host_join(source, sizeof(source), HOST_MEDIUM, stick->file)
+                  ? host_image_fit(source, build, sizeof(build), address_of machine)
+                  : HOST_FIT_NONE;
+        if (fit)
+                failed = host_refuse("%s carries an image this machine cannot start, so "
+                                     "nothing was written: %s\n", stick->name,
+                                     host_fit_said(fit, machine));
+        else if (!string_equals(build, stick->build))
+                failed = host_refuse("what %s carries changed while it was looked at; "
+                                     "nothing written\n", stick->name);
+        else
+                failed = host_stick_digest(source, address_of summed);
+
+        if (failed)
+        {
+                host_unmount(HOST_MEDIUM);
+                return 1;
+        }
+
+        host_say(log, host_label "%s has %s\n", install->disk,
+                 install->readable ? (string_address)install->build
+                                   : (string_address) "an image whose build cannot be read");
+        host_say(log, host_label "%s carries %s: %s%s\n", stick->name,
+                 install->readable ? host_build_named(build, install->build)
+                                   : (string_address) "a build",
+                 build, summed ? ", and its bytes are the sum beside it" : "");
+
+        (void)string_join(question, sizeof(question), "Writing it over ", install->disk,
+                          " keeps the data there, and the build it has as the one to go "
+                          "back to.");
+        if (!host_said_yes(said_yes, (string_address)question))
+        {
+                host_unmount(HOST_MEDIUM);
+                return 1;
+        }
+
+        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+        if (mounted < 0)
+        {
+                host_unmount(HOST_MEDIUM);
+                return host_fail(install->system, mounted);
+        }
+
+        host_say(log, host_label "writing the build on %s to %s\n", stick->name,
+                 install->system);
+
+        failed = host_settings_carried(install, address_of disk);
+        if (!failed)
+                failed = host_place_image(install->system, HOST_SYSTEM, source, build,
+                                          address_of disk, address_of carried);
+        if (!failed)
+        {
+                p8 whose[HOST_NAME_ROOM + 24];
+
+                (void)string_join(whose, sizeof(whose), "the image on ", stick->name);
+                host_settings_landed(install, address_of disk, carried, (string_address)whose);
+                host_say(log, host_label "%s starts %s from its next start, keeping its data; "
+                                         "moonwater setup rollback starts the build it had "
+                                         "again. reboot starts it now\n",
+                         install->disk, build);
+        }
+
+        host_unmount(HOST_SYSTEM);
+        host_unmount(HOST_MEDIUM);
+        return failed;
+}
+
+/*
+        previous.efi made the image that starts and the one that started
+        kept as previous.efi in its place: back is the build previous.efi
+        reads as, and carry is stamped into it. The partition is left
+        unmounted.
+*/
+static b32 host_back_image(string_address name, string_address system, string_address back,
+                           host_settings address_to carry, bool address_to carried)
+{
+        host_place place;
+
+        *carried = false;
+        if (!host_place_open(address_of place, system, null, back, carry))
+                return host_refuse("%s: path too long\n", system);
+        place.source = place.kept;
+
+        if (host_place_written(address_of place, true))
+                return 1;
+
+        *carried = place.carried;
+        if (!host_on_disk(name, system, host_back_landed, address_of place))
+                return host_refuse("%s did not read back from the disk as the images that "
+                                   "were written\n", name);
+
+        return 0;
+}
+
+/*
+        The build an install had before its last update, made the one it
+        starts again, and the one it starts now kept in its place: so a
+        second rollback undoes the first. The data is not touched, and the
+        settings the install keeps now go with it, as an update carries
+        them. A build that does not start at all cannot run this: the
+        firmware's own menu or shell starts \EFI\moonwater\previous.efi, or
+        a stick does, and either is a session from which this runs.
+*/
+static b32 host_rollback_locked(host_install address_to install, bool said_yes)
+{
+        host_settings disk;
+        p8 path[HOST_PATH_ROOM];
+        p8 back[HOST_BUILD_ROOM];
+        p16 machine;
+        bool carried;
+        bipolar mounted;
+        b32 fit;
+        b32 failed;
+
+        if (!host_install_refresh(install))
+                return host_refuse("%s is no longer here\n", install->disk);
+        host_install_read(install);
+
+        mounted = host_mount(install->system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
+        if (mounted < 0)
+                return host_fail(install->system, mounted);
+
+        failed = 0;
+        fit = host_join(path, sizeof(path), HOST_SYSTEM, HOST_KEPT_IMAGE)
+                  ? host_image_fit(path, back, sizeof(back), address_of machine)
+                  : HOST_FIT_NONE;
+        if (fit == HOST_FIT_NONE)
+                failed = host_refuse("%s keeps no build from before: an update keeps the one "
+                                     "it replaces, and none has run since it was "
+                                     "installed\n", install->disk);
+        else if (fit)
+                failed = host_refuse("the build %s keeps from before is not one this machine "
+                                     "starts: %s\n", install->disk, host_fit_said(fit, machine));
+        else if (install->readable && string_equals(back, install->build))
+                failed = host_refuse("the build %s keeps from before is the one it starts: "
+                                     "%s\n", install->disk, back);
+
+        if (!failed)
+        {
+                host_say(log, host_label "%s has %s\n", install->disk,
+                         install->readable ? (string_address)install->build
+                                           : (string_address) "an image whose build cannot "
+                                                              "be read");
+                host_say(log, host_label "and keeps %s from before\n", back);
+                if (!host_said_yes(said_yes, "Starting that one again keeps the data, and "
+                                             "the build it has now as the one to go back to."))
+                        failed = 1;
+        }
+
+        if (!failed)
+                failed = host_settings_carried(install, address_of disk);
+        if (!failed)
+                failed = host_back_image(install->system, HOST_SYSTEM, back, address_of disk,
+                                         address_of carried);
+        if (!failed)
+        {
+                host_settings_landed(install, address_of disk, carried, "the build from before");
+                host_say(log, host_label "%s starts %s from its next start, keeping its data; "
+                                         "moonwater setup rollback starts the other again. "
+                                         "reboot starts it now\n", install->disk, back);
+        }
+
+        host_unmount(HOST_SYSTEM);
+        return failed;
+}
+
+/* setup update usb and setup rollback: the install chosen, under the lock. */
+static b32 host_image_verb(string_address disk, bool said_yes, bool rollback)
+{
+        host_census census;
+        host_install address_to install;
+        b32 failed = 1;
+
+        if (!host_acquire())
+                return 1;
+
+        install = host_install_chosen(address_of census, disk);
+        if (install)
+                failed = rollback ? host_rollback_locked(install, said_yes)
+                                  : host_update_stick_locked(install, said_yes);
+        host_release();
+        return failed;
+}
+
 /*
         Where this session runs and what is on the disks: the build, whether
         the session is live, kept on a disk or waiting for an answer, every
@@ -26092,11 +27263,18 @@ static fn host_setup_state(void)
 
         //      Nor is a stick looked for by anybody who cannot mount it: the
         //      search keeps at it for up to ten seconds while storage arrives.
+        search.found = false;
         if (running[0] && bowl_is_root() && host_medium_find(address_of search, running, null))
         {
                 string_format(log, "  this image is on %s\n", search.name);
                 host_unmount(HOST_MEDIUM);
         }
+
+        //      And the builds the sticks plugged in carry, which an update can
+        //      write without starting them.
+        if (running[0] && bowl_is_root())
+                host_sticks_said(running, search.found ? (string_address)search.name : null,
+                                 address_of census);
 }
 
 /*
@@ -26417,6 +27595,32 @@ static b32 host_setup(string_address address_to arguments, positive count)
                         return 1;
                 host_say(log, host_label "the disks are left alone this session\n");
                 return 0;
+        }
+
+        /*      An image from a stick, or the one kept from before: [DISK]
+                [yes], judged before root is asked for, and refused where
+                nothing can be asked and nobody said yes, as install is. */
+        if ((update && count > 3 && string_equals(arguments[3], "usb")) ||
+            string_equals(verb, "rollback"))
+        {
+                positive first = update ? 4 : 3;
+                bool said_yes = count > first && string_equals(arguments[count - 1], HOST_YES);
+                positive words = count - said_yes;
+                string_address disk = words > first ? host_disk_word(arguments[first]) : null;
+
+                return_if(words > first + 1 || (disk && !disk[0]), host_usage());
+                host_need_root();
+                if (!said_yes && !host_asks())
+                        return host_refuse("%s and nothing here can be asked: moonwater setup "
+                                           "%s%s%s " HOST_YES "\n",
+                                           update ? "writing a stick's build over an install "
+                                                    "changes what it starts,"
+                                                  : "going back to the build an install had "
+                                                    "changes what it starts,",
+                                           update ? "update usb" : "rollback",
+                                           disk ? " " : "", disk ? disk : (string_address) "");
+                host_state_ready();
+                return host_image_verb(disk, said_yes, !update);
         }
 
         if ((update || string_equals(verb, "use")) && count <= 4)

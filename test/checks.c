@@ -111171,6 +111171,748 @@ static fn settings_codes(void)
               stamps[2] == 1 && whole && stamps[3] < 0);
 }
 
+/*
+        An update from a stick, on a system partition that is a directory
+        here: the build each image says and how two compare, what an image
+        has to be to be written, what a stick carries and which one an update
+        takes, the sum a stick says beside it, an update and a rollback whole,
+        and the same cut after every step and inside every copy, which must
+        leave a loader firmware starts, of the build there before or the new
+        one, and the next write finishing what the cut left. Unmounting and
+        reading back from the disk itself is the install lane's, in a guest.
+*/
+#define UPDATE_BYTES 0xc000
+#define UPDATE_ROOT_ROOM 96
+
+static p8 update_bytes[UPDATE_BYTES];
+static p8 update_root[UPDATE_ROOT_ROOM];
+static host_settings update_disk;
+static host_settings update_carry;
+
+static const p8 update_old[] = "7.2.6moonwater-25 (root@box) #4 SMP PREEMPT Tue Sep 22 07:21:00 CEST 2026";
+static const p8 update_new[] = "7.2.6moonwater-25 (root@box) #5 SMP PREEMPT Wed Sep 23 09:02:11 CEST 2026";
+static const p8 update_older[] = "7.2.5moonwater-24 (root@box) #3 SMP PREEMPT Mon Sep 21 18:40:00 CEST 2026";
+
+// The machine an image for this one is not.
+#if X64
+#define UPDATE_OTHER 0xaa64
+#else
+#define UPDATE_OTHER 0x8664
+#endif
+
+/*
+        A PE image as an install keeps one, in update_bytes: the machine its
+        header names, the build it says (in the setup header on x86, in the
+        kernel's banner elsewhere), a body of its own and a settings section
+        of two slots never written. How many bytes it is.
+*/
+static positive update_image(p16 machine, string_address build, p8 body)
+{
+        p8 address_to image = update_bytes;
+        p8 address_to table = image + 0x40 + 24 + 0xf0;
+
+        memory_zero(image, UPDATE_BYTES);
+        image[0] = 'M';
+        image[1] = 'Z';
+        storage_put32(image + 0x3c, 0x40);
+        memory_copy_apart(image + 0x40, "PE\0\0", 4);
+        storage_put16(image + 0x44, machine);
+        storage_put16(image + 0x46, 2);
+        storage_put16(image + 0x54, 0xf0);
+        storage_put16(image + 0x58, 0x20b);
+        storage_put16(image + 0x58 + 68, 10);
+        memory_copy_apart(table, ".text\0\0\0", 8);
+        storage_put32(table + 8, 0x1000);
+        storage_put32(table + 12, 0x1000);
+        storage_put32(table + 16, 0x1000);
+        storage_put32(table + 20, 0x1000);
+        memory_copy_apart(table + 40, ".mwset\0\0", 8);
+        storage_put32(table + 48, 0x8000);
+        storage_put32(table + 52, 0x2000);
+        storage_put32(table + 56, 0x8000);
+        storage_put32(table + 60, 0x2000);
+#if X64
+        memory_copy_apart(image + 0x202, "HdrS", 4);
+        storage_put16(image + 0x206, 0x020f);
+        storage_put16(image + 0x20e, 0x0e00);
+        memory_copy_apart(image + 0x1000, build, string_length(build));
+#else
+        {
+                //      "R (who) " and the rest, with the compiler between them.
+                string_address rest = string_find(build, ") #");
+                positive head = rest ? (positive)(rest - build) + 1 : 0;
+                static const p8 compiler[] = " (gcc (GCC) 16.1.0, GNU ld (GNU Binutils) 2.47)";
+                p8 address_to at = image + 0x1000;
+
+                memory_copy_apart(at, "Linux version ", 14);
+                at += 14;
+                memory_copy_apart(at, build, head);
+                at += head;
+                memory_copy_apart(at, compiler, sizeof(compiler) - 1);
+                at += sizeof(compiler) - 1;
+                memory_copy_apart(at, build + head, string_length(build) - head);
+                at += string_length(build) - head;
+                *at = '\n';
+        }
+#endif
+        memory_fill(image + 0x1400, body, 0xc00);
+        host_settings_empty(address_of settings_block_slot);
+        memory_copy_apart(image + 0x2000, address_of settings_block_slot, 64);
+        memory_copy_apart(image + 0x6000, address_of settings_block_slot, 64);
+        memory_fill(image + 0xa000, body ^ 0x5a, 0x2000);
+        return UPDATE_BYTES;
+}
+
+// A path under the check's own directory.
+static string_address update_at(p8 address_to into, positive room, string_address leaf)
+{
+        string_copy(into, update_root);
+        string_append_bounded(into, leaf, room);
+        return (string_address)into;
+}
+
+static bool update_write(string_address path, positive length)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, path,
+                                             FILE_READ_WRITE | FILE_CREATE | FILE_TRUNCATE |
+                                                 O_CLOEXEC,
+                                             0644);
+        bool written;
+
+        if (handle < 0)
+                return false;
+        written = storage_write(handle, update_bytes, length, 0) == (bipolar)length;
+        system_close(handle);
+        return written;
+}
+
+// An image written at a path under the check's directory.
+static bool update_put(string_address leaf, p16 machine, string_address build, p8 body)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        return update_write(update_at(path, sizeof(path), leaf), update_image(machine, build, body));
+}
+
+static bool update_gone(string_address leaf)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        return system_access_at(AT_FDCWD, update_at(path, sizeof(path), leaf), 0) < 0;
+}
+
+// The partition and the sticks as they were before any scene.
+static fn update_clear(void)
+{
+        static const string_address files[] = {
+            "/esp" HOST_IMAGE,       "/esp" HOST_IMAGE_NEXT,  "/esp" HOST_KEPT_IMAGE,
+            "/esp" HOST_KEPT_IMAGE_NEXT, "/stick" HOST_IMAGE, "/stick" HOST_UPDATE_FILE,
+            "/stick" HOST_UPDATE_FILE HOST_DIGEST_SUFFIX,
+        };
+        p8 path[HOST_PATH_ROOM];
+
+        for (positive at = 0; at < array_count(files); at++)
+                system_remove_at(AT_FDCWD, update_at(path, sizeof(path), files[at]), 0);
+}
+
+static fn update_directories(bool remove)
+{
+        static const string_address made[] = {
+            "", "/esp", "/esp/EFI", "/esp/EFI/BOOT", "/esp" HOST_KEPT_DIRECTORY, "/stick",
+            "/stick/EFI", "/stick/EFI/BOOT", "/stick/moonwater",
+        };
+        p8 path[HOST_PATH_ROOM];
+
+        for (positive at = 0; at < array_count(made); at++)
+        {
+                positive one = remove ? array_count(made) - 1 - at : at;
+
+                update_at(path, sizeof(path), made[one]);
+                if (remove)
+                        system_remove_at(AT_FDCWD, path, AT_REMOVEDIR);
+                else
+                        system_make_directory_at(AT_FDCWD, path, 0755);
+        }
+}
+
+// The sum of a file under the check's directory, its slots aside with masked.
+static bool update_sum(string_address leaf, bool masked, p8 address_to sum)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        return host_image_sum(update_at(path, sizeof(path), leaf), masked, sum);
+}
+
+static bool update_sum_is(string_address leaf, bool masked, p8 address_to want)
+{
+        p8 sum[32];
+
+        return update_sum(leaf, masked, sum) && !memory_compare(sum, want, 32);
+}
+
+/*
+        The images of the scenes: the old one as the disk keeps it (stamped
+        with the disk's settings), the one kept from before it, and the new
+        one a stick carries; their sums, whole and with the slots aside.
+*/
+static p8 update_sum_old[32];      // the loader the partition had, as it is there
+static p8 update_sum_old_body[32]; // and with its slots aside
+static p8 update_sum_new_body[32];
+static p8 update_sum_kept[32];     // previous.efi before the scene
+
+static bool update_ready(void)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        update_clear();
+        settings_one(address_of update_disk, 7, 'q', 120);
+        return update_put("/esp" HOST_IMAGE, HOST_PE_MACHINE, (string_address)update_old, 0x11) &&
+               !host_settings_stamp(update_at(path, sizeof(path), "/esp" HOST_IMAGE),
+                                    address_of update_disk) &&
+               update_put("/esp" HOST_KEPT_IMAGE, HOST_PE_MACHINE, (string_address)update_older,
+                          0x33) &&
+               update_put("/stick" HOST_UPDATE_FILE, HOST_PE_MACHINE, (string_address)update_new,
+                          0x22) &&
+               update_sum("/esp" HOST_IMAGE, false, update_sum_old) &&
+               update_sum("/esp" HOST_IMAGE, true, update_sum_old_body) &&
+               update_sum("/stick" HOST_UPDATE_FILE, true, update_sum_new_body) &&
+               update_sum("/esp" HOST_KEPT_IMAGE, false, update_sum_kept);
+}
+
+// The settings an update of the partition carries: the loader's, a generation on.
+static bool update_carried(void)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        if (host_settings_image(update_at(path, sizeof(path), "/esp" HOST_IMAGE),
+                                address_of update_carry) != 1)
+                return false;
+        update_carry.generation++;
+        return true;
+}
+
+/* An update from the stick, or with back a rollback, of the partition, to build. */
+static bool update_open(host_place address_to place, bool back, string_address build)
+{
+        static p8 esp[HOST_PATH_ROOM];
+        static p8 source[HOST_PATH_ROOM];
+
+        update_at(esp, sizeof(esp), "/esp");
+        update_at(source, sizeof(source), "/stick" HOST_UPDATE_FILE);
+        if (!update_carried() ||
+            !host_place_open(place, (string_address)esp, back ? null : (string_address)source,
+                             build, address_of update_carry))
+                return false;
+        if (back)
+                place->source = place->kept;
+        return true;
+}
+
+/*
+        What a firmware finds on the partition: a loader that is an image
+        this machine starts, whole, whose bytes but its slots are the old
+        image's or the new one's; which of them, 1 for the new, 0 for the old,
+        -1 for neither.
+*/
+static b32 update_boots(void)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+
+        if (host_image_fit(update_at(path, sizeof(path), "/esp" HOST_IMAGE), build,
+                           sizeof(build), null))
+                return -1;
+        if (string_equals(build, update_new) && update_sum_is("/esp" HOST_IMAGE, true,
+                                                              update_sum_new_body))
+                return 1;
+        if (string_equals(build, update_old) && update_sum_is("/esp" HOST_IMAGE, true,
+                                                              update_sum_old_body))
+                return 0;
+        return -1;
+}
+
+// Nothing beside the images, as every write ends and every next write begins.
+static bool update_unstaged(void)
+{
+        return update_gone("/esp" HOST_IMAGE_NEXT) && update_gone("/esp" HOST_KEPT_IMAGE_NEXT);
+}
+
+static fn update_builds(void)
+{
+        check("a build linked a day later is the newer, the earlier one the older",
+              host_build_order(update_new, update_old) == 1 &&
+                  host_build_order(update_old, update_new) == -1 &&
+                  host_build_order(update_older, update_old) == -1);
+        check("a build is the same build as itself",
+              host_build_order(update_old, update_old) == 0 &&
+                  string_equals(host_build_named(update_old, update_old), "the same build"));
+        check("a stick's build is named newer, the same or older beside this one",
+              string_equals(host_build_named(update_new, update_old), "a newer build") &&
+                  string_equals(host_build_named(update_older, update_old), "an older build"));
+        check("two builds of one second are told apart by their count",
+              host_build_order("7.2.6 (a@b) #9 SMP Tue Sep 22 07:21:00 UTC 2026",
+                               "7.2.6 (a@b) #8 SMP Tue Sep 22 07:21:00 UTC 2026") == 1);
+        check("a zone the table knows is taken to UTC: 02:10 CET is after 02:30 CEST",
+              host_build_order("7.2.6 (a@b) #2 SMP Sun Oct 25 02:10:00 CET 2026",
+                               "7.2.6 (a@b) #1 SMP Sun Oct 25 02:30:00 CEST 2026") == 1);
+        check("a build whose words say no moment is not put before or after another",
+              host_build_order("7.2.6 (a@b) #2 SMP some other words", update_old) ==
+                      HOST_BUILD_UNORDERED &&
+                  host_build_order("7.2.6 (a@b) #2 SMP Sun Oct 32 02:10:00 CET 2026", update_old) ==
+                      HOST_BUILD_UNORDERED &&
+                  string_equals(host_build_named("7.2.6 (a@b) #2 SMP x", update_old),
+                                "another build"));
+}
+
+/*
+        What an image has to be, judged by its bytes: one for this machine
+        is taken and its build read; one for another machine, one that is no
+        EFI application, one cut short of its sections and one that names no
+        build are refused, each for its own reason, and an update from any
+        of them leaves every byte of the partition as it was.
+*/
+static fn update_fits(void)
+{
+        static const struct
+        {
+                positive at;
+                positive width;
+                p64 value;
+                positive length;
+                b32 fit;
+        } cases[] = {
+            {0x44, 2, UPDATE_OTHER, UPDATE_BYTES, HOST_FIT_MACHINE},
+            {0x58, 2, 0x10b, UPDATE_BYTES, HOST_FIT_NOT_EFI},     // PE32, not PE32+
+            {0x58 + 68, 2, 3, UPDATE_BYTES, HOST_FIT_NOT_EFI},    // a console program
+            {0x54, 2, 0x40, UPDATE_BYTES, HOST_FIT_NOT_EFI},      // no subsystem to read
+            {0x40, 1, 'Q', UPDATE_BYTES, HOST_FIT_NOT_EFI},       // no PE header
+            {0, 1, 0, 0x9000, HOST_FIT_SHORT},                    // its settings past the end
+            {0, 1, 0, 0x800, HOST_FIT_NOT_EFI},                   // not a page of header
+#if X64
+            {0x20e, 2, 0, UPDATE_BYTES, HOST_FIT_NO_BUILD},
+#else
+            {0x1000, 1, 'X', UPDATE_BYTES, HOST_FIT_NO_BUILD},
+#endif
+        };
+        p8 path[HOST_PATH_ROOM];
+        p8 build[HOST_BUILD_ROOM];
+        p8 sums[2][32];
+        p16 machine = 0;
+        p8 reasons = true;
+        p8 untouched = true;
+        host_place place;
+
+        update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE);
+        check("an image for this machine is taken, and names its build as the running one is spelled",
+              update_ready() && !host_image_fit((string_address)path, build, sizeof(build),
+                                                address_of machine) &&
+                  string_equals(build, update_new) && machine == HOST_PE_MACHINE);
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                positive length = update_image(HOST_PE_MACHINE, (string_address)update_new, 0x22);
+
+                if (cases[at].width == 2)
+                        storage_put16(update_bytes + cases[at].at, (p16)cases[at].value);
+                else if (cases[at].at || cases[at].value)
+                        update_bytes[cases[at].at] = (p8)cases[at].value;
+                if (cases[at].length < length)
+                        length = cases[at].length;
+                if (!update_write((string_address)path, length))
+                {
+                        reasons = untouched = false;
+                        continue;
+                }
+                reasons &= host_image_fit((string_address)path, build, sizeof(build),
+                                          address_of machine) == cases[at].fit;
+
+                //      And put through an update, which refuses it first.
+                untouched &= update_sum("/esp" HOST_IMAGE, false, sums[0]) &&
+                             update_sum("/esp" HOST_KEPT_IMAGE, false, sums[1]) &&
+                             update_open(address_of place, false, (string_address)update_new) &&
+                             host_place_written(address_of place, false) &&
+                             update_sum_is("/esp" HOST_IMAGE, false, sums[0]) &&
+                             update_sum_is("/esp" HOST_KEPT_IMAGE, false, sums[1]) &&
+                             update_unstaged();
+        }
+        check("an image for another machine, no EFI application, one cut short and one that "
+              "names no build are each refused for what they are",
+              reasons);
+        check("and an update from any of them is refused before a byte of the partition changes",
+              untouched);
+        check("the words for another machine name both",
+              string_find(host_fit_said(HOST_FIT_MACHINE, UPDATE_OTHER),
+                          host_pe_machine(UPDATE_OTHER)) &&
+                  string_find(host_fit_said(HOST_FIT_MACHINE, UPDATE_OTHER),
+                              host_pe_machine(HOST_PE_MACHINE)) &&
+                  !string_equals(host_pe_machine(UPDATE_OTHER), host_pe_machine(HOST_PE_MACHINE)));
+
+        update_at(path, sizeof(path), "/stick" HOST_IMAGE);
+        check("a FIFO where an image goes is no image, and is not waited on",
+              !system_call_4(syscall(mknodat), AT_FDCWD, (positive)(string_address)path,
+                             0010644, 0) &&
+                  host_image_fit((string_address)path, build, sizeof(build), null) ==
+                      HOST_FIT_NONE);
+        system_remove_at(AT_FDCWD, path, 0);
+}
+
+/*
+        What a stick carries, looked at where it is mounted: a stick written
+        by build.sh --usb has the loader, and a FAT stick anybody copied the
+        one file to has the update file, which is the one taken when both are
+        there; and which stick an update takes, of several looked at.
+*/
+static fn update_detects(void)
+{
+        static host_sticks sticks;
+        host_stick stick;
+        host_install install;
+        p8 where[HOST_PATH_ROOM];
+
+        update_clear();
+        update_at(where, sizeof(where), "/stick");
+        memory_zero(address_of stick, sizeof(stick));
+        host_stick_look(address_of stick, (string_address)where);
+        check("a FAT stick with no Moonwater on it carries nothing", !stick.file);
+
+        update_put("/stick" HOST_IMAGE, HOST_PE_MACHINE, (string_address)update_new, 0x22);
+        host_stick_look(address_of stick, (string_address)where);
+        check("a stick written to start a machine is read where firmware starts it, without starting it",
+              stick.file && string_equals(stick.file, HOST_IMAGE) && !stick.fit &&
+                  string_equals(stick.build, update_new) &&
+                  string_equals(host_build_named(stick.build, update_old), "a newer build"));
+
+        update_clear();
+        update_put("/stick" HOST_UPDATE_FILE, HOST_PE_MACHINE, (string_address)update_old, 0x11);
+        host_stick_look(address_of stick, (string_address)where);
+        check("a plain FAT stick with only the update file at its documented path is read",
+              stick.file && string_equals(stick.file, HOST_UPDATE_FILE) && !stick.fit &&
+                  string_equals(host_build_named(stick.build, update_old), "the same build"));
+
+        update_put("/stick" HOST_IMAGE, HOST_PE_MACHINE, (string_address)update_older, 0x33);
+        host_stick_look(address_of stick, (string_address)where);
+        check("with both, the update file is the one taken",
+              string_equals(stick.file, HOST_UPDATE_FILE) &&
+                  string_equals(stick.build, update_old));
+
+        update_clear();
+        update_put("/stick" HOST_UPDATE_FILE, HOST_PE_MACHINE, (string_address)update_older, 0x33);
+        host_stick_look(address_of stick, (string_address)where);
+        check("a stick with an older build says so",
+              !stick.fit && string_equals(host_build_named(stick.build, update_old),
+                                          "an older build"));
+
+        update_put("/stick" HOST_UPDATE_FILE, UPDATE_OTHER, (string_address)update_new, 0x22);
+        host_stick_look(address_of stick, (string_address)where);
+        check("a stick with an image for another machine says it is refused, and why",
+              stick.fit == HOST_FIT_MACHINE && stick.machine == UPDATE_OTHER);
+        update_clear();
+
+        //      Which one an update takes: only one, of another build than the disk's.
+        memory_zero(address_of install, sizeof(install));
+        string_copy(install.disk, "nvme0n1");
+        string_copy(install.build, update_old);
+        install.readable = true;
+
+        memory_zero(address_of sticks, sizeof(sticks));
+        sticks.count = 4;
+        string_copy(sticks.found[0].name, "sdb1");
+        string_copy(sticks.found[0].disk, "sdb");
+        sticks.found[0].held = true;
+        string_copy(sticks.found[1].name, "sdc1");
+        sticks.found[1].fit = HOST_FIT_NONE;
+        string_copy(sticks.found[2].name, "sdd1");
+        string_copy(sticks.found[2].build, update_old);
+        string_copy(sticks.found[3].name, "sde1");
+        string_copy(sticks.found[3].build, update_new);
+        check("of a held stick, a refused one, one of the disk's build and a newer one, the newer is taken",
+              host_stick_chosen(address_of sticks, address_of install) == sticks.found + 3);
+        check("a held stick alone is no stick to update from",
+              (sticks.count = 1, !host_stick_chosen(address_of sticks, address_of install)));
+        sticks.found[0] = sticks.found[2];
+        check("nor is one that carries the build the disk has",
+              !host_stick_chosen(address_of sticks, address_of install));
+        sticks.found[1] = sticks.found[3];
+        sticks.found[0] = sticks.found[3];
+        sticks.count = 2;
+        string_copy(sticks.found[1].name, "sdf1");
+        check("and two that carry a build to write are refused, the person to choose by plugging",
+              !host_stick_chosen(address_of sticks, address_of install));
+        //      What the census last read of a disk whose image cannot be read is no build.
+        install.readable = false;
+        string_copy(install.build, update_new);
+        sticks.count = 1;
+        check("a disk whose image cannot be read takes the build of the one stick there is",
+              host_stick_chosen(address_of sticks, address_of install) == sticks.found);
+}
+
+/* The sum a stick says beside its update: none, its own, another, and words that are none. */
+static fn update_digests(void)
+{
+        p8 path[HOST_PATH_ROOM];
+        p8 line[160];
+        p8 sum[32];
+        bool said = true;
+        positive length;
+
+        update_clear();
+        update_put("/stick" HOST_UPDATE_FILE, HOST_PE_MACHINE, (string_address)update_new, 0x22);
+        update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE);
+        check("an update with no sum beside it is taken, and not said to match one",
+              !host_stick_digest((string_address)path, address_of said) && !said);
+
+        update_sum("/stick" HOST_UPDATE_FILE, false, sum);
+        length = memory_into_hex(line, sum, 32);
+        memory_copy_apart(line + length, "  bootx64.efi\n", 14);
+        length += 14;
+        memory_copy_apart(update_bytes, line, length);
+        update_write(update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE HOST_DIGEST_SUFFIX),
+                     length);
+        update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE);
+        check("an update whose bytes are the sum beside it is taken, and said to be",
+              !host_stick_digest((string_address)path, address_of said) && said);
+
+        line[0] = line[0] == '0' ? '1' : '0';
+        memory_copy_apart(update_bytes, line, length);
+        update_write(update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE HOST_DIGEST_SUFFIX),
+                     length);
+        update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE);
+        check("an update that is not the sum beside it is refused",
+              host_stick_digest((string_address)path, address_of said) == 1);
+
+        memory_copy_apart(update_bytes, "not a sum\n", 10);
+        update_write(update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE HOST_DIGEST_SUFFIX),
+                     10);
+        update_at(path, sizeof(path), "/stick" HOST_UPDATE_FILE);
+        check("and so is one beside words that are no sum",
+              host_stick_digest((string_address)path, address_of said) == 1);
+        update_clear();
+}
+
+/*
+        An update and a rollback whole: the new build is the loader, carrying
+        the disk's settings a generation on, the one it had kept as
+        previous.efi byte for byte, nothing left beside them; a rollback
+        swaps the two, carrying the settings the disk has then; a second one
+        swaps them back.
+*/
+static fn update_places(void)
+{
+        host_place place;
+        p8 path[HOST_PATH_ROOM];
+        p8 loader[32];
+        host_settings read;
+
+        check("an update from a stick writes its build over the partition",
+              update_ready() && update_open(address_of place, false, (string_address)update_new) &&
+                  !host_place_written(address_of place, false) && update_boots() == 1 &&
+                  place.carried);
+        check("and the build the partition had is kept as previous.efi, byte for byte",
+              update_sum_is("/esp" HOST_KEPT_IMAGE, false, update_sum_old));
+        check("and the disk's settings go with it, a generation on",
+              host_settings_image(update_at(path, sizeof(path), "/esp" HOST_IMAGE),
+                                  address_of read) == 1 &&
+                  read.generation == update_disk.generation + 1 &&
+                  settings_same(address_of read, address_of update_carry) &&
+                  !memory_compare(read.medium, update_disk.medium, sizeof(read.medium)));
+        check("and nothing is left beside them", update_unstaged());
+
+        update_sum("/esp" HOST_IMAGE, false, loader);
+        check("a rollback starts the build kept from before again",
+              update_open(address_of place, true, (string_address)update_old) &&
+                  !host_place_written(address_of place, true) && update_boots() == 0 &&
+                  place.carried);
+        check("and keeps the build it replaces as previous.efi, byte for byte",
+              update_sum_is("/esp" HOST_KEPT_IMAGE, false, loader) && update_unstaged());
+        check("and carries the settings the disk has now",
+              host_settings_image(update_at(path, sizeof(path), "/esp" HOST_IMAGE),
+                                  address_of read) == 1 &&
+                  read.generation == update_disk.generation + 2);
+
+        check("a second rollback undoes the first",
+              update_open(address_of place, true, (string_address)update_new) &&
+                  !host_place_written(address_of place, true) && update_boots() == 1 &&
+                  update_unstaged() &&
+                  update_sum_is("/esp" HOST_KEPT_IMAGE, true, update_sum_old_body));
+
+        //      What a cut left beside the images, which on FAT can share its
+        //      clusters with a file that is kept, is gone before the first copy.
+        update_put("/esp" HOST_IMAGE_NEXT, HOST_PE_MACHINE, (string_address)update_older, 0x44);
+        update_put("/esp" HOST_KEPT_IMAGE_NEXT, HOST_PE_MACHINE, (string_address)update_older, 0x44);
+        check("what a cut write left beside the images is removed before anything is copied",
+              update_open(address_of place, false, (string_address)update_new) &&
+                  !host_place_step(address_of place, HOST_PLACE_JUDGE) &&
+                  !host_place_step(address_of place, HOST_PLACE_CLEAR) && update_unstaged());
+
+        system_remove_at(AT_FDCWD, update_at(path, sizeof(path), "/esp" HOST_KEPT_IMAGE), 0);
+        update_sum("/esp" HOST_IMAGE, false, loader);
+        check("a rollback with no build kept from before is refused, the loader as it was",
+              update_open(address_of place, true, (string_address)update_old) &&
+                  host_place_written(address_of place, true) &&
+                  update_sum_is("/esp" HOST_IMAGE, false, loader) && update_unstaged());
+
+        update_put("/esp" HOST_KEPT_IMAGE, UPDATE_OTHER, (string_address)update_old, 0x11);
+        check("and so is one whose kept build is for another machine",
+              update_open(address_of place, true, (string_address)update_old) &&
+                  host_place_written(address_of place, true) &&
+                  update_sum_is("/esp" HOST_IMAGE, false, loader) && update_unstaged());
+        update_clear();
+}
+
+/*
+        The power going out after every step of an update and of a
+        rollback, and inside each copy (the file being written cut to half):
+        what is left starts the build there before or the one asked for,
+        whole, and keeps a build from before that is whole; and the next
+        update, or rollback, from there ends as an uncut one does.
+*/
+static b32 update_cut(bool back, positive steps, bool inside)
+{
+        host_place place;
+        positive copy = back ? HOST_BACK_COPY : HOST_PLACE_COPY;
+        positive keep = back ? HOST_BACK_KEEP_COPY : HOST_PLACE_KEEP_COPY;
+        b32 boots;
+
+        if (!update_ready())
+                return -2;
+
+        //      A rollback is cut from what an update leaves: the new build the
+        //      loader, the old one kept.
+        if (back && (!update_open(address_of place, false, (string_address)update_new) ||
+                     host_place_written(address_of place, false)))
+                return -2;
+
+        if (!update_open(address_of place, back,
+                         (string_address)(back ? update_old : update_new)))
+                return -2;
+
+        for (positive step = 0; step < steps; step++)
+                if (back ? host_back_step(address_of place, step)
+                         : host_place_step(address_of place, step))
+                        return -2;
+
+        if (inside && (steps - 1 == copy || steps - 1 == keep))
+        {
+                string_address cut = (string_address)(steps - 1 == copy ? place.next
+                                                                       : place.kept_next);
+                bipolar handle = system_open_at(AT_FDCWD, cut, FILE_READ_WRITE | O_CLOEXEC);
+
+                if (handle < 0)
+                        return -2;
+                system_call_2(syscall(ftruncate), (positive)handle, UPDATE_BYTES / 2);
+                system_close(handle);
+        }
+
+        boots = update_boots();
+        //      What is kept from before is whole, whichever it is now.
+        if (!update_sum_is("/esp" HOST_KEPT_IMAGE, false, update_sum_kept) &&
+            !update_sum_is("/esp" HOST_KEPT_IMAGE, false, update_sum_old) &&
+            !update_sum_is("/esp" HOST_KEPT_IMAGE, true, update_sum_new_body))
+                return -1;
+        return boots;
+}
+
+/*
+        The next write from where a cut left the partition, and what it
+        leaves. An update cut before its switch is run again and ends as an
+        uncut one; one cut after it is done, with the old build kept. A
+        rollback cut before its switch is run again; one cut after it starts
+        the old build, kept twice where its last rename did not land (the
+        new one only in the copy beside them), and the next update from the
+        stick takes the copy away and ends as an uncut update does.
+*/
+static bool update_after(bool back, b32 boots)
+{
+        host_place place;
+
+        if (boots == (back ? 1 : 0))
+                return update_open(address_of place, back,
+                                   (string_address)(back ? update_old : update_new)) &&
+                       !host_place_written(address_of place, back) &&
+                       update_boots() == (back ? 0 : 1) &&
+                       update_sum_is("/esp" HOST_KEPT_IMAGE, true,
+                                     back ? update_sum_new_body : update_sum_old_body) &&
+                       update_unstaged();
+        if (!back)
+                return update_sum_is("/esp" HOST_KEPT_IMAGE, true, update_sum_old_body) &&
+                       update_unstaged();
+        return update_open(address_of place, false, (string_address)update_new) &&
+               !host_place_written(address_of place, false) && update_boots() == 1 &&
+               update_sum_is("/esp" HOST_KEPT_IMAGE, true, update_sum_old_body) &&
+               update_unstaged();
+}
+
+/* Every cut of an update, or a rollback with back: into held, whether each
+   left a loader firmware starts (0, after a step; 1, inside a copy), whether
+   it was the one it should be, and whether the next write ended right. */
+static fn update_cuts_of(bool back, p8 address_to held)
+{
+        positive steps = back ? HOST_BACK_STEPS : HOST_PLACE_STEPS;
+        positive switched = back ? HOST_BACK_SWITCH : HOST_PLACE_SWITCH;
+        positive copy = back ? HOST_BACK_COPY : HOST_PLACE_COPY;
+        positive keep = back ? HOST_BACK_KEEP_COPY : HOST_PLACE_KEEP_COPY;
+        //      The build asked for once the switch is done, the one before until then.
+        b32 asked = back ? 0 : 1;
+
+        for (positive at = 0; at < 4; at++)
+                held[at] = true;
+
+        for (positive cut = 0; cut <= steps; cut++)
+                for (positive half = 0; half < 2; half++)
+                {
+                        b32 boots;
+
+                        if (half && !(cut && (cut - 1 == copy || cut - 1 == keep)))
+                                continue;
+                        boots = update_cut(back, cut, half);
+                        if (boots < 0)
+                        {
+                                held[half] = false;
+                                continue;
+                        }
+                        held[2] &= boots == (cut > switched ? asked : 1 - asked);
+                        held[3] &= update_after(back, boots);
+                }
+}
+
+static fn update_cuts(void)
+{
+        p8 held[4];
+
+        update_cuts_of(false, held);
+        check("an update cut after any step starts the build it had or the new one, whole", held[0]);
+        check("and cut inside either of its copies, the same", held[1]);
+        check("and the one it had until its switch, the new one after", held[2]);
+        check("and the next update from there ends as an uncut one does", held[3]);
+
+        update_cuts_of(true, held);
+        check("a rollback cut after any step starts the build it had or the one asked for, whole",
+              held[0]);
+        check("and cut inside either of its copies, the same", held[1]);
+        check("and the one it had until its switch, the one asked for after", held[2]);
+        check("and the next write from there ends as an uncut one does", held[3]);
+        update_clear();
+}
+
+
+static fn update_scenes(void)
+{
+        string_copy(update_root, "/tmp/moonwater-update-check-");
+        positive_into_string(update_root + string_length(update_root),
+                             (positive)system_call(syscall(getpid)));
+        update_directories(false);
+
+        update_builds();
+        update_fits();
+        update_detects();
+        update_digests();
+        update_places();
+        update_cuts();
+
+        update_clear();
+        update_directories(true);
+}
+
 b32 main(void)
 {
         settings_format();
@@ -111191,6 +111933,7 @@ b32 main(void)
         format_layouts();
         install_census();
         install_helpers();
+        update_scenes();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);

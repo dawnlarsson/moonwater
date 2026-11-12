@@ -242,7 +242,9 @@ moonwater settings [gallery]           the settings window, on the desktop of th
 moonwater setup                        where this session runs, and the installs found
 moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it removable takes a disk that says it is; yes is for a script, which cannot be asked
 moonwater setup live                   leave the disks alone this session
+moonwater setup rollback [DISK] [yes]  start the build an install had before its last update again, keeping its data
 moonwater setup update [DISK]          write this build over an install, keeping its data
+moonwater setup update usb [DISK] [yes]  write the build a stick carries over an install, keeping its data and the build it had
 moonwater setup use [DISK]             run this build with the data of an install
 moonwater sleep | hibernate            suspend to RAM or to disk
 moonwater status                       this session as one page
