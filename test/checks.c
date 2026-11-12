@@ -139569,7 +139569,8 @@ static fn check_settings(string_address regular, string_address bold)
                   string_equals((string_address)settings.queue[0].value, (string_address) "off"));
         settings.queued = 0;
         // A slider row (the taskbar scale): the kit's slider over the row's range at the number the verb said, moved a step by the keys inside
-        // its range, and changed once to the value the hand left it at.
+        // its range, and changed once to the value the hand left it at. Its unit is a percent, which the row says as the sign the kit writes
+        // against the number (125%), and not as the registry's word for it.
         {
                 int scale = settings_row_named("Taskbar scale (percent)");
                 struct ui_row described;
@@ -139580,7 +139581,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_describe(scale, &described);
                 check("settings: the taskbar scale is a slider row over 50 to 200 at the number the verb said, in percent",
                       described.kind == UI_ROW_SLIDER && described.at == 125 && described.low == 50 && described.high == 200 && described.step == 5 &&
-                          described.words && string_equals((string_address)described.words, (string_address) "percent"));
+                          described.words && string_equals((string_address)described.words, (string_address) "%"));
                 check("settings: the keys step a slider row, which is no field and no choice", settings_steps(scale) &&
                           settings_rows[scale].kind == SETTINGS_SLIDER);
                 settings_activate(scale, 1);
