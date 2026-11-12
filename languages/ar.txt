@@ -75,7 +75,6 @@ settings_asks_first	e9bd	يسأل أولا
 settings_badge_error	9cf1	خطأ
 settings_badge_warning	fc8f	تحذير
 settings_battery_charging	5116	، قيد الشحن
-settings_drive_state	0bb3	محرك، 
 settings_item_drive	269a	معروض، غير محجوز: لا يغيّر أي أمر أي محرك
 settings_not_shown	8efd	%d إضافية غير معروضة
 settings_role_efi	d41a	نظام EFI
@@ -93,7 +92,10 @@ settings_cannot_run	954f	تعذر تشغيل أمر moonwater
 settings_card_back	db52	Escape أو نقرة للرجوع
 settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
 settings_copied	0bd7	نُسخ إلى الحافظة
+settings_device_drive	8683	محرك، %s
 settings_device_name	5f12	اسم الجهاز
+settings_device_none	3cd5	لم يُعثر على محركات أو أجهزة USB
+settings_device_usb	20ae	USB %1$s، %2$s
 settings_done	8071	تم
 settings_edit_keys	d161	Enter يضبطه، Escape يبقيه كما كان، والنقر خارجه يضبطه أيضا
 settings_filter_hint	4aa0	اكتب للتصفية
@@ -165,6 +167,10 @@ settings_scale_best	2ba0	%d%% (موصى به)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	الشاشة %1$d: %2$s
 settings_screen_named	d918	الشاشة %1$d: %2$s [%3$s]
+settings_state_allowed	e443	مسموح
+settings_state_blocked	6eb3	محظور
+settings_state_view_only	031a	للعرض فقط
+settings_state_waiting	06a8	في الانتظار
 settings_status_in_use	2ec7	قيد الاستخدام: ركّبت البطاقة %1$d من %2$d إطارًا (%3$d%%)
 settings_status_none	afed	لا توجد وحدة معالجة رسومية مدعومة: يرسم المعالج كل شيء
 settings_status_not	2583	غير مستخدمة: ركّبت البطاقة %1$d من %2$d إطارًا، ورسم المعالج الباقي

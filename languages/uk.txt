@@ -74,7 +74,6 @@ settings_asks_first	e9bd	спершу запитає
 settings_badge_error	9cf1	Помилка
 settings_badge_warning	fc8f	Попередження
 settings_battery_charging	5116	, заряджається
-settings_drive_state	0bb3	диск, 
 settings_item_drive	269a	показано, не утримується: жодна команда не змінює диск
 settings_not_shown	8efd	ще %d не показано
 settings_role_efi	d41a	Системний EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	команду moonwater не вдалося викон
 settings_card_back	db52	Escape або клацання — назад
 settings_card_stopped	e24d	зупинено: Escape або клацання — назад
 settings_copied	0bd7	скопійовано до буфера обміну
+settings_device_drive	8683	диск, %s
 settings_device_name	5f12	Назва пристрою
+settings_device_none	3cd5	Диски та USB-пристрої не знайдено
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	готово
 settings_edit_keys	d161	Enter задає, Escape залишає як було, клацання поза полем теж задає
 settings_filter_hint	4aa0	Введіть для фільтрації
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (рекомендовано)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Екран %1$d: %2$s
 settings_screen_named	d918	Екран %1$d: %2$s [%3$s]
+settings_state_allowed	e443	дозволено
+settings_state_blocked	6eb3	заблоковано
+settings_state_view_only	031a	лише перегляд
+settings_state_waiting	06a8	очікує
 settings_status_in_use	2ec7	Використовується: відеокарта зібрала %1$d з %2$d кадрів (%3$d%%)
 settings_status_none	afed	Немає підтримуваного GPU: усе малює процесор
 settings_status_not	2583	Не використовується: відеокарта зібрала %1$d з %2$d кадрів, решту намалював процесор

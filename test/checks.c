@@ -142970,6 +142970,15 @@ static fn check_settings_device_strip(void)
                 struct ui_row line;
 
                 memory_zero(&line, sizeof(line));
+                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 2, &line);
+                check("settings: a USB device's line is its name, then USB, its port and its state, and its port is what a press allows or blocks",
+                      string_equals((string_address)items[2].label, (string_address) "Stick") && string_equals((string_address)items[2].port, (string_address) "1-1") &&
+                          line.kind == UI_ROW_TABS && line.at == 0 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1, allowed"));
+        }
+        {
+                struct ui_row line;
+
+                memory_zero(&line, sizeof(line));
                 settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
                 check("settings: a drive's legend has an entry for each segment, its role's word where the partition has no name, and its size",
                       line.tall && line.strip_count == 4 && line.strip_names && line.strip_kinds && line.strip_text &&
@@ -143065,6 +143074,12 @@ static fn check_settings_device_strip(void)
                                   string_equals((string_address)line.strip_names[2], (string_address) "Linux data") && !line.strip_kinds[2] &&
                                   string_equals((string_address)(line.strip_text + 1 * UI_STRIP_TEXT), (string_address) "4 GB"));
                 }
+                // A reading that lists nothing is a note that says so.
+                settings.said_length = 0;
+                settings_feed_hardware();
+                check("settings: a device list with nothing in it is one note that says no drive or USB device was found",
+                      settings.item_count[2] == 1 && items[0].kind == SETTINGS_NOTE &&
+                          string_equals((string_address)items[0].label, (string_address) "No drives or USB devices found"));
                 length = 0;
                 for (const char address_to line = "  1-2 usb 0627:0001 "; *line; line++)
                         rows[length++] = *line;
@@ -143084,10 +143099,10 @@ static fn check_settings_device_strip(void)
                         memory_zero(&described, sizeof(described));
                         settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &described);
                         check("settings: a device line too long for its label keeps its state word",
-                              settings.item_count[2] == 1 && items[0].kind == SETTINGS_PORT && string_length((string_address)items[0].label) == 95 &&
+                              settings.item_count[2] == 1 && items[0].kind == SETTINGS_PORT && string_length((string_address)items[0].label) == 80 &&
                                   string_equals((string_address)items[0].state, (string_address) "blocked") &&
                                   described.kind == UI_ROW_TABS && described.at == 1 && described.note &&
-                                  string_equals((string_address)described.note, (string_address) "blocked"));
+                                  string_equals((string_address)described.note, (string_address) "USB 1-2, blocked"));
                 }
         }
 }

@@ -74,7 +74,6 @@ settings_asks_first	e9bd	fragt zuerst
 settings_badge_error	9cf1	Fehler
 settings_badge_warning	fc8f	Warnung
 settings_battery_charging	5116	, lädt
-settings_drive_state	0bb3	Laufwerk, 
 settings_item_drive	269a	angezeigt, nicht gehalten: kein Befehl ändert ein Laufwerk
 settings_not_shown	8efd	%d weitere nicht angezeigt
 settings_role_efi	d41a	EFI-System
@@ -92,7 +91,10 @@ settings_cannot_run	954f	der moonwater-Befehl ließ sich nicht ausführen
 settings_card_back	db52	Escape oder ein Klick geht zurück
 settings_card_stopped	e24d	angehalten: Escape oder ein Klick geht zurück
 settings_copied	0bd7	in die Zwischenablage kopiert
+settings_device_drive	8683	Laufwerk, %s
 settings_device_name	5f12	Name des Geräts
+settings_device_none	3cd5	Keine Laufwerke oder USB-Geräte gefunden
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	erledigt
 settings_edit_keys	d161	Enter übernimmt es, Escape lässt es, ein Klick daneben übernimmt es auch
 settings_filter_hint	4aa0	Zum Filtern tippen
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (empfohlen)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Bildschirm %1$d: %2$s
 settings_screen_named	d918	Bildschirm %1$d: %2$s [%3$s]
+settings_state_allowed	e443	erlaubt
+settings_state_blocked	6eb3	gesperrt
+settings_state_view_only	031a	nur ansehen
+settings_state_waiting	06a8	wartet
 settings_status_in_use	2ec7	In Benutzung: die Grafikkarte hat %1$d von %2$d Bildern zusammengesetzt (%3$d%%)
 settings_status_none	afed	Keine unterstützte GPU: der Prozessor zeichnet alles
 settings_status_not	2583	Nicht in Benutzung: die Grafikkarte hat %1$d von %2$d Bildern zusammengesetzt, der Prozessor hat den Rest gezeichnet

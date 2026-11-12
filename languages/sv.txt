@@ -74,7 +74,6 @@ settings_asks_first	e9bd	frågar först
 settings_badge_error	9cf1	Fel
 settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
-settings_drive_state	0bb3	disk, 
 settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
 settings_not_shown	8efd	%d till visas inte
 settings_role_efi	d41a	EFI-system
@@ -92,7 +91,10 @@ settings_cannot_run	954f	moonwater-kommandot kunde inte köras
 settings_card_back	db52	Escape eller ett klick går tillbaka
 settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
 settings_copied	0bd7	kopierat till urklippet
+settings_device_drive	8683	disk, %s
 settings_device_name	5f12	Enhetens namn
+settings_device_none	3cd5	Inga diskar eller USB-enheter hittades
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	klart
 settings_edit_keys	d161	Enter ställer in, Escape lämnar som det var, ett klick utanför ställer också in
 settings_filter_hint	4aa0	Skriv för att filtrera
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (rekommenderad)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Skärm %1$d: %2$s
 settings_screen_named	d918	Skärm %1$d: %2$s [%3$s]
+settings_state_allowed	e443	tillåten
+settings_state_blocked	6eb3	blockerad
+settings_state_view_only	031a	endast visning
+settings_state_waiting	06a8	väntar
 settings_status_in_use	2ec7	Används: grafikkortet sammanställde %1$d av %2$d bildrutor (%3$d%%)
 settings_status_none	afed	Inget GPU som stöds: processorn ritar allt
 settings_status_not	2583	Används inte: grafikkortet sammanställde %1$d av %2$d bildrutor, processorn ritade resten

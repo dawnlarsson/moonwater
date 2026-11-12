@@ -74,7 +74,6 @@ settings_asks_first	e9bd	pyta najpierw
 settings_badge_error	9cf1	Błąd
 settings_badge_warning	fc8f	Ostrzeżenie
 settings_battery_charging	5116	, ładowanie
-settings_drive_state	0bb3	dysk, 
 settings_item_drive	269a	pokazany, nie przytrzymany: żadne polecenie nie zmienia dysku
 settings_not_shown	8efd	%d więcej nie pokazano
 settings_role_efi	d41a	System EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	nie można uruchomić polecenia moonwater
 settings_card_back	db52	Escape lub kliknięcie wraca
 settings_card_stopped	e24d	zatrzymano: Escape lub kliknięcie wraca
 settings_copied	0bd7	skopiowano do schowka
+settings_device_drive	8683	dysk, %s
 settings_device_name	5f12	Nazwa urządzenia
+settings_device_none	3cd5	Nie znaleziono dysków ani urządzeń USB
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	gotowe
 settings_edit_keys	d161	Enter ustawia, Escape zostawia bez zmian, kliknięcie obok też ustawia
 settings_filter_hint	4aa0	Wpisz, aby filtrować
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d%% (zalecana)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_state_allowed	e443	dozwolone
+settings_state_blocked	6eb3	zablokowane
+settings_state_view_only	031a	tylko podgląd
+settings_state_waiting	06a8	oczekuje
 settings_status_in_use	2ec7	W użyciu: karta złożyła %1$d z %2$d prezentacji (%3$d%%)
 settings_status_none	afed	Brak obsługiwanego GPU: procesor rysuje wszystko
 settings_status_not	2583	Nieużywana: karta złożyła %1$d z %2$d prezentacji, resztę narysował procesor

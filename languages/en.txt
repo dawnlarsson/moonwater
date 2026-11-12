@@ -74,7 +74,6 @@ settings_asks_first	e9bd	asks first
 settings_badge_error	9cf1	Error
 settings_badge_warning	fc8f	Warning
 settings_battery_charging	5116	, Charging
-settings_drive_state	0bb3	drive, 
 settings_role_efi	d41a	EFI system
 settings_role_linux	2c8f	Linux data
 settings_role_swap	d36e	Swap
@@ -90,7 +89,10 @@ settings_cannot_run	954f	the moonwater command could not be run
 settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_copied	0bd7	copied to the clipboard
+settings_device_drive	8683	drive, %s
 settings_device_name	5f12	Name of the device
+settings_device_none	3cd5	No drives or USB devices found
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	done
 settings_edit_keys	d161	Enter sets it, Escape keeps it, a click outside sets it too
 settings_filter_hint	4aa0	Type to filter
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d%% (recommended)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Screen %1$d: %2$s
 settings_screen_named	d918	Screen %1$d: %2$s [%3$s]
+settings_state_allowed	e443	allowed
+settings_state_blocked	6eb3	blocked
+settings_state_view_only	031a	view only
+settings_state_waiting	06a8	waiting
 settings_status_in_use	2ec7	In use: the card composed %1$d of %2$d presents (%3$d%%)
 settings_status_none	afed	No supported GPU: the processor draws everything
 settings_status_not	2583	Not in use: the card composed %1$d of %2$d presents, the processor drew the rest

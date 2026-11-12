@@ -75,7 +75,6 @@ settings_asks_first	e9bd	ישאל קודם
 settings_badge_error	9cf1	שגיאה
 settings_badge_warning	fc8f	אזהרה
 settings_battery_charging	5116	, בטעינה
-settings_drive_state	0bb3	כונן, 
 settings_item_drive	269a	מוצג, לא מוחזק: אף פקודה לא משנה כונן
 settings_not_shown	8efd	עוד %d שלא מוצגים
 settings_role_efi	d41a	מערכת EFI
@@ -93,7 +92,10 @@ settings_cannot_run	954f	לא ניתן היה להריץ את פקודת moonwat
 settings_card_back	db52	Escape או לחיצה לחזרה
 settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
 settings_copied	0bd7	הועתק ללוח הגזירים
+settings_device_drive	8683	כונן, %s
 settings_device_name	5f12	שם ההתקן
+settings_device_none	3cd5	לא נמצאו כוננים או התקני USB
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	בוצע
 settings_edit_keys	d161	Enter קובע, Escape משאיר כפי שהיה, ולחיצה בחוץ קובעת גם כן
 settings_filter_hint	4aa0	הקלד כדי לסנן
@@ -165,6 +167,10 @@ settings_scale_best	2ba0	%d%% (מומלץ)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	מסך %1$d: %2$s
 settings_screen_named	d918	מסך %1$d: %2$s [%3$s]
+settings_state_allowed	e443	מותר
+settings_state_blocked	6eb3	חסום
+settings_state_view_only	031a	צפייה בלבד
+settings_state_waiting	06a8	ממתין
 settings_status_in_use	2ec7	בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים (%3$d%%)
 settings_status_none	afed	אין GPU נתמך: המעבד מצייר הכול
 settings_status_not	2583	לא בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים, והמעבד צייר את השאר

@@ -74,7 +74,6 @@ settings_asks_first	e9bd	vraagt eerst
 settings_badge_error	9cf1	Fout
 settings_badge_warning	fc8f	Waarschuwing
 settings_battery_charging	5116	, laadt op
-settings_drive_state	0bb3	schijf, 
 settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
 settings_not_shown	8efd	%d meer niet getoond
 settings_role_efi	d41a	EFI-systeem
@@ -92,7 +91,10 @@ settings_cannot_run	954f	de moonwater-opdracht kon niet worden uitgevoerd
 settings_card_back	db52	Escape of een klik gaat terug
 settings_card_stopped	e24d	gestopt: Escape of een klik gaat terug
 settings_copied	0bd7	gekopieerd naar het klembord
+settings_device_drive	8683	schijf, %s
 settings_device_name	5f12	Naam van het apparaat
+settings_device_none	3cd5	Geen schijven of USB-apparaten gevonden
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	klaar
 settings_edit_keys	d161	Enter stelt het in, Escape laat het zoals het was, een klik ernaast stelt het ook in
 settings_filter_hint	4aa0	Typ om te filteren
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d%% (aanbevolen)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Scherm %1$d: %2$s
 settings_screen_named	d918	Scherm %1$d: %2$s [%3$s]
+settings_state_allowed	e443	toegestaan
+settings_state_blocked	6eb3	geblokkeerd
+settings_state_view_only	031a	alleen weergeven
+settings_state_waiting	06a8	wachtend
 settings_status_in_use	2ec7	In gebruik: de kaart heeft %1$d van %2$d presentaties samengesteld (%3$d%%)
 settings_status_none	afed	Geen ondersteunde GPU: de processor tekent alles
 settings_status_not	2583	Niet in gebruik: de kaart heeft %1$d van %2$d presentaties samengesteld; de processor heeft de rest getekend

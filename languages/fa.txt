@@ -75,7 +75,6 @@ settings_asks_first	e9bd	ابتدا می‌پرسد
 settings_badge_error	9cf1	خطا
 settings_badge_warning	fc8f	هشدار
 settings_battery_charging	5116	، در حال شارژ
-settings_drive_state	0bb3	درایو، 
 settings_item_drive	269a	نمایش داده می‌شود، نگه‌داشته نمی‌شود: هیچ فرمانی درایوی را تغییر نمی‌دهد
 settings_not_shown	8efd	%d مورد دیگر نشان داده نمی‌شود
 settings_role_efi	d41a	سیستم EFI
@@ -93,7 +92,10 @@ settings_cannot_run	954f	فرمان moonwater اجرا نشد
 settings_card_back	db52	Escape یا کلیک برای بازگشت
 settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
 settings_copied	0bd7	در کلیپ‌بورد کپی شد
+settings_device_drive	8683	درایو، %s
 settings_device_name	5f12	نام دستگاه
+settings_device_none	3cd5	هیچ درایو یا دستگاه USB پیدا نشد
+settings_device_usb	20ae	USB %1$s، %2$s
 settings_done	8071	انجام شد
 settings_edit_keys	d161	Enter آن را اعمال می‌کند، Escape مقدار قبلی را نگه می‌دارد، و کلیک بیرون هم اعمال می‌کند
 settings_filter_hint	4aa0	برای پالایش تایپ کنید
@@ -165,6 +167,10 @@ settings_scale_best	2ba0	%d%% (پیشنهادی)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	نمایشگر %1$d: %2$s
 settings_screen_named	d918	نمایشگر %1$d: %2$s [%3$s]
+settings_state_allowed	e443	مجاز
+settings_state_blocked	6eb3	مسدود
+settings_state_view_only	031a	فقط مشاهده
+settings_state_waiting	06a8	در انتظار
 settings_status_in_use	2ec7	در حال استفاده: کارت %1$d از %2$d فریم را ترکیب کرد (%3$d%%)
 settings_status_none	afed	هیچ GPU پشتیبانی‌شده‌ای نیست: پردازنده همه چیز را می‌کشد
 settings_status_not	2583	استفاده نمی‌شود: کارت %1$d از %2$d فریم را ترکیب کرد و پردازنده بقیه را کشید

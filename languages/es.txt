@@ -74,7 +74,6 @@ settings_asks_first	e9bd	pregunta antes
 settings_badge_error	9cf1	Error
 settings_badge_warning	fc8f	Aviso
 settings_battery_charging	5116	, cargando
-settings_drive_state	0bb3	unidad, 
 settings_item_drive	269a	se muestra, no se retiene: ningún comando cambia una unidad
 settings_not_shown	8efd	%d más no mostrados
 settings_role_efi	d41a	Sistema EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	no se pudo ejecutar el comando moonwater
 settings_card_back	db52	Escape o un clic vuelve atrás
 settings_card_stopped	e24d	detenido: Escape o un clic vuelve atrás
 settings_copied	0bd7	copiado al portapapeles
+settings_device_drive	8683	unidad, %s
 settings_device_name	5f12	Nombre del dispositivo
+settings_device_none	3cd5	No se encontraron unidades ni dispositivos USB
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	hecho
 settings_edit_keys	d161	Enter lo aplica, Escape lo deja como estaba, un clic fuera también lo aplica
 settings_filter_hint	4aa0	Escriba para filtrar
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (recomendada)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Pantalla %1$d: %2$s
 settings_screen_named	d918	Pantalla %1$d: %2$s [%3$s]
+settings_state_allowed	e443	permitido
+settings_state_blocked	6eb3	bloqueado
+settings_state_view_only	031a	solo visualización
+settings_state_waiting	06a8	en espera
 settings_status_in_use	2ec7	En uso: la tarjeta compuso %1$d de %2$d presentaciones (%3$d%%)
 settings_status_none	afed	No hay GPU compatible: el procesador dibuja todo
 settings_status_not	2583	No en uso: la tarjeta compuso %1$d de %2$d presentaciones; el procesador dibujó el resto

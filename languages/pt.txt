@@ -74,7 +74,6 @@ settings_asks_first	e9bd	pergunta antes
 settings_badge_error	9cf1	Erro
 settings_badge_warning	fc8f	Aviso
 settings_battery_charging	5116	, carregando
-settings_drive_state	0bb3	unidade, 
 settings_item_drive	269a	mostrado, não retido: nenhum comando altera uma unidade
 settings_not_shown	8efd	mais %d não mostrados
 settings_role_efi	d41a	Sistema EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	não foi possível executar o comando moonwater
 settings_card_back	db52	Escape ou um clique volta
 settings_card_stopped	e24d	interrompido: Escape ou um clique volta
 settings_copied	0bd7	copiado para a área de transferência
+settings_device_drive	8683	unidade, %s
 settings_device_name	5f12	Nome do dispositivo
+settings_device_none	3cd5	Nenhuma unidade ou dispositivo USB encontrado
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	concluído
 settings_edit_keys	d161	Enter aplica, Escape mantém como estava, um clique fora também aplica
 settings_filter_hint	4aa0	Digite para filtrar
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d%% (recomendada)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Tela %1$d: %2$s
 settings_screen_named	d918	Tela %1$d: %2$s [%3$s]
+settings_state_allowed	e443	permitido
+settings_state_blocked	6eb3	bloqueado
+settings_state_view_only	031a	apenas visualização
+settings_state_waiting	06a8	em espera
 settings_status_in_use	2ec7	Em uso: a placa compôs %1$d de %2$d apresentações (%3$d%%)
 settings_status_none	afed	Nenhuma GPU suportada: o processador desenha tudo
 settings_status_not	2583	Não está em uso: a placa compôs %1$d de %2$d apresentações; o processador desenhou o resto

@@ -74,7 +74,6 @@ settings_asks_first	e9bd	demande d'abord
 settings_badge_error	9cf1	Erreur
 settings_badge_warning	fc8f	Avertissement
 settings_battery_charging	5116	, en charge
-settings_drive_state	0bb3	disque, 
 settings_item_drive	269a	affiché, non retenu : aucune commande ne modifie un disque
 settings_not_shown	8efd	%d autres non affichés
 settings_role_efi	d41a	Système EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
 settings_card_back	db52	Escape ou un clic revient en arrière
 settings_card_stopped	e24d	arrêté : Escape ou un clic revient en arrière
 settings_copied	0bd7	copié dans le presse-papiers
+settings_device_drive	8683	disque, %s
 settings_device_name	5f12	Nom de l'appareil
+settings_device_none	3cd5	Aucun disque ni périphérique USB trouvé
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	terminé
 settings_edit_keys	d161	Enter l'applique, Escape le laisse tel quel, un clic à côté l'applique aussi
 settings_filter_hint	4aa0	Saisir pour filtrer
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (recommandée)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Écran %1$d : %2$s
 settings_screen_named	d918	Écran %1$d : %2$s [%3$s]
+settings_state_allowed	e443	autorisé
+settings_state_blocked	6eb3	bloqué
+settings_state_view_only	031a	consultation seule
+settings_state_waiting	06a8	en attente
 settings_status_in_use	2ec7	En service : la carte a composé %1$d présentations sur %2$d (%3$d%%)
 settings_status_none	afed	Aucun GPU pris en charge : le processeur dessine tout
 settings_status_not	2583	Non utilisée : la carte a composé %1$d présentations sur %2$d, le processeur a dessiné le reste

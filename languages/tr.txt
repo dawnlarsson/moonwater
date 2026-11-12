@@ -74,7 +74,6 @@ settings_asks_first	e9bd	önce sorar
 settings_badge_error	9cf1	Hata
 settings_badge_warning	fc8f	Uyarı
 settings_battery_charging	5116	, şarj oluyor
-settings_drive_state	0bb3	sürücü, 
 settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
 settings_not_shown	8efd	%d tane daha gösterilmiyor
 settings_role_efi	d41a	EFI sistemi
@@ -92,7 +91,10 @@ settings_cannot_run	954f	moonwater komutu çalıştırılamadı
 settings_card_back	db52	Escape veya bir tıklama geri döner
 settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
 settings_copied	0bd7	panoya kopyalandı
+settings_device_drive	8683	sürücü, %s
 settings_device_name	5f12	Aygıtın adı
+settings_device_none	3cd5	Sürücü veya USB aygıtı bulunamadı
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	tamam
 settings_edit_keys	d161	Enter ayarlar, Escape olduğu gibi bırakır, dışarıya tıklamak da ayarlar
 settings_filter_hint	4aa0	Süzmek için yazın
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%%%d (önerilen)
 settings_scale_plain	e76a	%%%d
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_state_allowed	e443	izin verildi
+settings_state_blocked	6eb3	engellendi
+settings_state_view_only	031a	yalnızca görüntüleme
+settings_state_waiting	06a8	bekliyor
 settings_status_in_use	2ec7	Kullanımda: kart %2$d sunumun %1$d tanesini birleştirdi (%3$d%%)
 settings_status_none	afed	Desteklenen GPU yok: her şeyi işlemci çizer
 settings_status_not	2583	Kullanılmıyor: kart %2$d sunumun %1$d tanesini birleştirdi; kalanını işlemci çizdi

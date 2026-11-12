@@ -7604,9 +7604,11 @@ LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run") \
 LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
 LANGUAGE_ID(settings_copied, "copied to the clipboard") \
+LANGUAGE_ID(settings_device_drive, "drive, %s") \
 LANGUAGE_ID(settings_device_name, "Name of the device") \
+LANGUAGE_ID(settings_device_none, "No drives or USB devices found") \
+LANGUAGE_ID(settings_device_usb, "USB %1$s, %2$s") \
 LANGUAGE_ID(settings_done, "done") \
-LANGUAGE_ID(settings_drive_state, "drive, ") \
 LANGUAGE_ID(settings_edit_keys, "Enter sets it, Escape keeps it, a click outside sets it too") \
 LANGUAGE_ID(settings_filter_hint, "Type to filter") \
 LANGUAGE_ID(settings_forget, "forget %s") \
@@ -7685,6 +7687,10 @@ LANGUAGE_ID(settings_scale_best, "%d%% (recommended)") \
 LANGUAGE_ID(settings_scale_plain, "%d%%") \
 LANGUAGE_ID(settings_screen_bare, "Screen %1$d: %2$s") \
 LANGUAGE_ID(settings_screen_named, "Screen %1$d: %2$s [%3$s]") \
+LANGUAGE_ID(settings_state_allowed, "allowed") \
+LANGUAGE_ID(settings_state_blocked, "blocked") \
+LANGUAGE_ID(settings_state_view_only, "view only") \
+LANGUAGE_ID(settings_state_waiting, "waiting") \
 LANGUAGE_ID(settings_status_in_use, "In use: the card composed %1$d of %2$d presents (%3$d%%)") \
 LANGUAGE_ID(settings_status_none, "No supported GPU: the processor draws everything") \
 LANGUAGE_ID(settings_status_not, "Not in use: the card composed %1$d of %2$d presents, the processor drew the rest") \
@@ -18935,6 +18941,9 @@ static fn ui_row_tree(struct ui address_to ui, struct ui_list address_to l, int 
         }
         ui_tree_close(t);
         ui_tree_run(t, l->w, height);
+        // A tabs row's note (a port's state) that has not the room for its words whole is dropped, and the label has its room.
+        if (p->note && !p->note_room && p->note->w < p->note->content[0])
+                p->note->size[0] = (struct ui_size){UI_FIXED, 0, 0, 0, 0}, ui_tree_run(t, l->w, height);
         // The layout has no one to ask how wide a text is: the label and the value are cut to the nodes it gave them, to no less than 40 and 24.
         // A label that was cut is narrower than the room it was cut to, and the zone is placed from the label as it is written: run again.
         if (row->label && (words || field))
@@ -19176,7 +19185,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_row_words(ui, p->label, 0, baseline, p->label_shown, UI_BODY_MEDIUM, ink);
         // The note is dropped whole where the label and the value leave it no room to spare. It and the value end where their parts do: a
         // value that was cut is narrower than the room it was cut to.
-        if ((n = p->note) && (!p->note_room || n->w < p->note_room->w - p->note_room->pad[1]))
+        if ((n = p->note) && n->w > 0 && (!p->note_room || n->w < p->note_room->w - p->note_room->pad[1]))
                 ui_row_words(ui, n, n->w - n->content[0], ui_row_baseline(ui, n, UI_LABEL_MEDIUM), row.note, UI_LABEL_MEDIUM, row.mark ? strong : quiet);
         if ((n = p->value))
                 ui_row_words(ui, n, n->w - (p->value_shown == p->value_cut ? ui_kit_measure(ui, (string_address)p->value_cut, UI_BODY_MEDIUM) : n->content[0]), baseline,

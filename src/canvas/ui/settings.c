@@ -243,9 +243,11 @@ static const struct settings_feed settings_feeds[] = {
 #define SETTINGS_ITEM_OPEN 8u    // asks for no passphrase
 #define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
 #define SETTINGS_ITEM_DRIVE 32u  // a drive the device list shows: its strip, and no verb holds it
+#define SETTINGS_ITEM_USB 64u    // a port the device list says is a USB device's
 
 #define SETTINGS_SEGMENTS 33 // a drive's segments: the host's 16 partitions, and the free room before, between and after them
-#define SETTINGS_STATE 24        // a port's state word (allowed, blocked, waiting), or a drive's kind and state (drive, view only)
+#define SETTINGS_STATE 24        // a device's state as the host says it: allowed, blocked or waiting for a port, view only for a drive
+#define SETTINGS_PORT 24         // a port's name, which device allow and device deny take (1-1, 3-2.4)
 #define SETTINGS_SIZE_TEXT 16    // a size as the strip says it: 512 MB, 500 GB
 #define SETTINGS_SEGMENT_TEXT 16 // a segment's size, drawn in the segment where it has room (ui.c's UI_STRIP_TEXT is this)
 #define SETTINGS_SEGMENT_NAME 40 // a partition's name as the legend says it, cut where a character ends
@@ -261,7 +263,8 @@ struct settings_item
         unsigned short segment_more;                    // a drive's partitions the host did not show (its "more" line)
         unsigned char segment_role[SETTINGS_SEGMENTS];  // each one's UI_STRIP_* role
         unsigned long long segment_bytes[SETTINGS_SEGMENTS];
-        char state[SETTINGS_STATE];                     // a port's state word, or a drive's kind and state
+        char state[SETTINGS_STATE];                     // a device's state, as the host says it
+        char port[SETTINGS_PORT];                       // a port's name; none for a drive
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
         char segment_text[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_TEXT]; // each segment's size, as the legend says it
         char segment_name[SETTINGS_SEGMENTS][SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
@@ -2864,6 +2867,7 @@ static b32 settings_name_says(const char address_to name, const char address_to 
 static const char address_to settings_strip_names[SETTINGS_SEGMENTS];
 static const char address_to settings_strip_kinds[SETTINGS_SEGMENTS];
 static char settings_strip_more[SETTINGS_ITEM_LABEL];
+static char settings_device_note[SETTINGS_ITEM_LABEL];
 
 static fn settings_legend(const struct settings_item address_to item, struct ui_row address_to row)
 {
@@ -2881,27 +2885,65 @@ static fn settings_legend(const struct settings_item address_to item, struct ui_
         row->strip_more = settings_strip_more[0] ? settings_strip_more : null;
 }
 
-/*
-        A port's line as its label and its state: the state is the line's last word (allowed, blocked or waiting), and the label is
-        what comes before it. The label is cut by the row when it is too long; the state is its own, and is always shown.
-*/
-static fn settings_item_split(struct settings_item address_to item, const char address_to text, positive size)
+// A device's state in the language: the host's word for it, or what the host said when it is none of them.
+static const char address_to settings_state_word(const char address_to state)
 {
-        positive state = size, stop;
+        int at = string_equals((string_address)state, (string_address) "allowed")     ? 0
+                 : string_equals((string_address)state, (string_address) "blocked")   ? 1
+                 : string_equals((string_address)state, (string_address) "waiting")   ? 2
+                 : string_equals((string_address)state, (string_address) "view only") ? 3
+                                                                                      : -1;
+
+        return at == 0 ? WORDS(settings_state_allowed) : at == 1 ? WORDS(settings_state_blocked) : at == 2 ? WORDS(settings_state_waiting)
+               : at == 3 ? WORDS(settings_state_view_only) : state;
+}
+
+// A word of a line into room bytes: what does not fit is cut off.
+static fn settings_item_word(char address_to into, positive room, const char address_to text, positive size)
+{
+        positive took = size >= room ? room - 1 : size;
+
+        memory_copy(into, text, took);
+        into[took] = 0;
+}
+
+/*
+        A port's line, "PORT usb ID NAME STATE": the port is the name device allow and device deny take, the label is what the device
+        says it is (its id when it says nothing), and the state is the line's last word (allowed, blocked or waiting), its own and
+        always shown. A line whose second word is not usb is a port with what comes before its state as its label. The label is cut
+        by the row when it is too long.
+*/
+static fn settings_item_port(struct settings_item address_to item, const char address_to text, positive size)
+{
+        positive state = size, stop, first = 0, from;
 
         while (state > 0 && text[state - 1] != ' ')
                 state--;
         stop = state;
         while (stop > 0 && text[stop - 1] == ' ')
                 stop--;
+        while (first < size && text[first] != ' ')
+                first++;
+        settings_item_word(item->port, sizeof(item->port), text, first);
         if (!state || !stop)
                 return settings_item_label(item, text, size);
-        settings_item_label(item, text, stop);
+        settings_item_word(item->state, sizeof(item->state), text + state, size - state);
+        if (first + 5 > stop || memory_compare(text + first, " usb ", 5))
+                return settings_item_label(item, text, stop);
+        // After usb, the id, and after it what the device says it is.
+        item->flags |= SETTINGS_ITEM_USB;
+        from = first + 5;
+        while (from < stop && text[from] != ' ')
+                from++;
         {
-                positive took = size - state >= sizeof(item->state) ? sizeof(item->state) - 1 : size - state;
+                positive name = from;
 
-                memory_copy(item->state, text + state, took);
-                item->state[took] = 0;
+                while (name < stop && text[name] == ' ')
+                        name++;
+                if (name < stop)
+                        settings_item_label(item, text + name, stop - name);
+                else
+                        settings_item_label(item, text + first + 5, from - first - 5);
         }
 }
 
@@ -2939,7 +2981,7 @@ static fn settings_segment_name(char address_to into, const char address_to text
 */
 /*
         A drive's line from its word after the name (word is the blank after it): "NAME drive N MB STATE". The name is the label, N MB
-        is the size (in GB from 1000 MB, as the legend says it), and the state is "drive, " and what the line says after the size.
+        is the size (in GB from 1000 MB, as the legend says it), and the state is what the line says after the size.
 */
 static fn settings_item_drive(struct settings_item address_to item, const char address_to text, positive size, positive word)
 {
@@ -2956,15 +2998,7 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
         while (at < size && text[at] == ' ')
                 at++;
         settings_size_text(megabytes * 1000000ull, item->size, sizeof(item->size));
-        // The state is the window's word for a drive (drive, in the language), then what the line says after the size.
-        string_copy_bounded((string_address)item->state, (string_address)WORDS(settings_drive_state), sizeof(item->state));
-        {
-                positive word_length = string_length((string_address)item->state), left = sizeof(item->state) - word_length - 1;
-                positive tail = size - at > left ? left : size - at;
-
-                memory_copy(item->state + word_length, text + at, tail);
-                item->state[word_length + tail] = 0;
-        }
+        settings_item_word(item->state, sizeof(item->state), text + at, size - at);
 }
 
 static fn settings_feed_hardware(void)
@@ -3046,7 +3080,7 @@ static fn settings_feed_hardware(void)
                         if (open)
                                 settings_item_drive(&items[count], text, size, word);
                         else
-                                settings_item_split(&items[count], text + 2, size - 2);
+                                settings_item_port(&items[count], text + 2, size - 2);
                         count++;
                 }
         }
@@ -3059,6 +3093,12 @@ static fn settings_feed_hardware(void)
                 language_format(note, sizeof(note), WORDS(settings_not_shown), (long)hidden);
                 items[count].kind = SETTINGS_NOTE;
                 settings_item_label(&items[count++], note, string_length((string_address)note));
+        }
+        // A reading that lists nothing says so, where the devices would be.
+        if (!count)
+        {
+                items[count].kind = SETTINGS_NOTE;
+                settings_item_label(&items[count++], WORDS(settings_device_none), string_length((string_address)WORDS(settings_device_none)));
         }
         settings.item_count[2] = (unsigned short)count;
 }
@@ -4182,16 +4222,7 @@ static b32 settings_edit_shown(void)
 // A port is allowed (allow) or denied (deny) by its name, the first word of its line that device allow and device deny take.
 static fn settings_port_set(const struct settings_item address_to item, b32 allow)
 {
-        char name[SETTINGS_ITEM_LABEL];
-        positive at = 0;
-
-        while (item->label[at] && item->label[at] != ' ' && at + 1 < sizeof(name))
-        {
-                name[at] = item->label[at];
-                at++;
-        }
-        name[at] = 0;
-        settings_act(allow ? 'v' : 'x', name, null);
+        settings_act(allow ? 'v' : 'x', item->port, null);
 }
 
 // A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
@@ -4948,17 +4979,27 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 }
                 else if (item->kind == SETTINGS_DEVICE)
                         row->value = WORDS(settings_kept);
+                /*
+                        Every device's line is one design: its name, then in the quiet ink what kind it is and its state, then its size
+                        (a drive) or the kit's two tabs, allow and deny, the one its state is selected (a port: one not allowed is denied).
+                */
                 else if (item->kind == SETTINGS_PORT)
                 {
-                        // The state is the note; the kit's two tabs are allow and deny, the one the state is selected (a port not allowed is denied).
                         row->kind = UI_ROW_TABS, row->words = settings_port_words();
                         row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
-                        row->note = item->state[0] ? item->state : null;
+                        if (item->flags & SETTINGS_ITEM_USB)
+                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port,
+                                                settings_state_word(item->state));
+                        else
+                                string_copy_bounded((string_address)settings_device_note, (string_address)settings_state_word(item->state),
+                                                    sizeof(settings_device_note));
+                        row->note = settings_device_note[0] ? settings_device_note : null;
                 }
                 else if (item->flags & SETTINGS_ITEM_DRIVE)
                 {
                         // A drive with a strip (or a note of the partitions not shown) is as tall as its line, the strip and the legend under it.
-                        row->note = item->state;
+                        language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_drive), settings_state_word(item->state));
+                        row->note = settings_device_note;
                         row->value = item->size;
                         row->tall = item->segment_count || item->segment_more;
                         if (item->segment_count)

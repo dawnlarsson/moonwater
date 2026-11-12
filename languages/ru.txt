@@ -74,7 +74,6 @@ settings_asks_first	e9bd	сначала спросит
 settings_badge_error	9cf1	Ошибка
 settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
-settings_drive_state	0bb3	диск, 
 settings_item_drive	269a	показан, не удерживается: ни одна команда не меняет диск
 settings_not_shown	8efd	ещё %d не показано
 settings_role_efi	d41a	Системный EFI
@@ -92,7 +91,10 @@ settings_cannot_run	954f	команду moonwater не удалось выпол
 settings_card_back	db52	Escape или щелчок — назад
 settings_card_stopped	e24d	остановлено: Escape или щелчок — назад
 settings_copied	0bd7	скопировано в буфер обмена
+settings_device_drive	8683	диск, %s
 settings_device_name	5f12	Имя устройства
+settings_device_none	3cd5	Диски и USB-устройства не найдены
+settings_device_usb	20ae	USB %1$s, %2$s
 settings_done	8071	готово
 settings_edit_keys	d161	Enter задаёт, Escape оставляет как было, щелчок снаружи тоже задаёт
 settings_filter_hint	4aa0	Введите для фильтрации
@@ -164,6 +166,10 @@ settings_scale_best	2ba0	%d %% (рекомендуется)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Экран %1$d: %2$s
 settings_screen_named	d918	Экран %1$d: %2$s [%3$s]
+settings_state_allowed	e443	разрешено
+settings_state_blocked	6eb3	заблокировано
+settings_state_view_only	031a	только просмотр
+settings_state_waiting	06a8	ожидает
 settings_status_in_use	2ec7	Используется: видеокарта собрала %1$d из %2$d кадров (%3$d%%)
 settings_status_none	afed	Нет поддерживаемого GPU: всё рисует процессор
 settings_status_not	2583	Не используется: видеокарта собрала %1$d из %2$d кадров, остальное нарисовал процессор
