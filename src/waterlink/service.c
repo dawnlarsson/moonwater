@@ -2167,9 +2167,14 @@ static bipolar link_part_open(string_address target, positive length,
                         return -EIO;
                 memory_into_hex(part + length + 11, random, 8);
                 part[length + 27] = 0;
+                //      To read as well as to write: a packed push is read
+                //      back from the stage it was packed into, which a
+                //      descriptor opened to write alone refuses (EBADF),
+                //      and that failed every push that packed.
                 handle = system_open_at_mode(
                         AT_FDCWD, part,
-                        FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC,
+                        FILE_READ_WRITE | FILE_CREATE | FILE_EXCLUSIVE |
+                                O_NOFOLLOW | O_CLOEXEC,
                         mode);
                 if (handle >= 0 || handle != -ERROR_EXISTS)
                         return handle;
