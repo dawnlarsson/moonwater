@@ -9,6 +9,8 @@
 #   - Placeholders (%s, %d, %1$s) and {names} are kept whole; a translation may put them in another order, naming them (%2$s).
 #   - A mnemonic is & before one ASCII letter; Cyrillic, Greek, Arabic, Hebrew, Persian and Urdu texts have none, and no menu has two the same.
 #   - One line of UTF-8, short: the windows cut with "..." where it does not fit. German and Russian run 30 to 40 percent over English.
+#   - A blank at the start or the end of a text is English's, no more and no fewer: code joins such a text to what stands beside it.
+#     French sets a semicolon off with a space, and writes a no-break space (U+00A0) where that space would begin a text.
 #   - Brazilian Portuguese and Latin American neutral Spanish where the two regions differ. Formal "you" where a text addresses one.
 #   - Machine translations: marked @translated machine in the file, until a person who speaks the language has reviewed it.
 #   - ar, he, fa and ur read from the right: their files say @direction rtl, and no other file does. They keep ASCII digits 0-9 and the
