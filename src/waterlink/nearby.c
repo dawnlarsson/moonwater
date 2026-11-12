@@ -265,10 +265,18 @@ static p32 link_name_check(string_address name, positive room)
 
 //      A one-use group that has run out, or has taken its machine and been
 //      kept its half minute.
+/*      A code is spent when its time is past, and when it has more time left
+        than any code is given: expires is seconds since boot, and the record
+        is on the disk, so after a boot the clock is near zero again and a
+        code made an hour into the last boot read as an hour from running
+        out. It was open, with every grant a code gives, for as long as the
+        machine had been up when it was made. */
 static p8 link_group_spent(struct link_group_record address_to record,
                              p64 now)
 {
-        return (record->flags & LINK_GROUP_ONCE) && record->expires <= now;
+        return (record->flags & LINK_GROUP_ONCE) &&
+               (record->expires <= now ||
+                record->expires - now > LINK_PAIR_SECONDS);
 }
 
 /*

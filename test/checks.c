@@ -93138,6 +93138,22 @@ static fn pairing_codes(bipolar listener, p16 port)
         wls_greeted(address_of wls_client, "machine-a", 25, port, 8500000);
         check("while the name it waits for is let in", wls_peers_count() == 1);
 
+        //      A code left in the file by the boot before this one: its time
+        //      is seconds since that boot, and reads here as hours ahead. No
+        //      code is given more than its five minutes, so it is spent.
+        wls_group_file(LINK_GROUP_ONCE, boot + LINK_PAIR_SECONDS + 1, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_b, "machine-c", 26, port, 8600000);
+        check("sec: a code from the boot before, with more time left than a "
+              "code is given, lets nobody in",
+              wls_peers_count() == 1 &&
+                      link_group_spent(link_nearby.groups.record, boot) &&
+                      !link_pair_waiting(link_nearby.groups.record, "office",
+                                         boot));
+        link_nearby.groups.record[0].expires = boot + LINK_PAIR_SECONDS;
+        check("while one with exactly its five minutes left is open",
+              !link_group_spent(link_nearby.groups.record, boot));
+
         //      Runs out in the file as well, as the listener's turn finds it.
         wls_group_file(LINK_GROUP_ONCE, boot, 0);
         link_nearby.socket = wls_quiet_socket();

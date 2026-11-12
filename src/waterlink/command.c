@@ -260,9 +260,9 @@ static b32 link_status(void)
                         if (groups.record[g].flags & LINK_GROUP_ONCE)
                         {
                                 p64 now = link_boot_seconds();
-                                p64 left = groups.record[g].expires > now
-                                                   ? groups.record[g].expires - now
-                                                   : 0;
+                                p64 left = link_group_spent(groups.record + g, now)
+                                                   ? 0
+                                                   : groups.record[g].expires - now;
 
                                 //      A code is not a group: what it linked
                                 //      is not said to be in one. A code that is
@@ -1306,9 +1306,9 @@ typedef struct
 static p8 link_pair_waiting(struct link_group_record address_to record,
                             string_address namespace, p64 now)
 {
-        return (record->flags & LINK_GROUP_ONCE) &&
-               !(record->flags & LINK_GROUP_DONE) &&
-               record->expires > now &&
+        return !(record->flags & LINK_GROUP_DONE) &&
+               !link_group_spent(record, now) &&
+               (record->flags & LINK_GROUP_ONCE) &&
                string_equals(record->namespace, namespace);
 }
 
