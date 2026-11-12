@@ -1929,6 +1929,21 @@ static fn ui_tree_mirror(struct ui_tree address_to t)
                 t->node[i].x = 2 * t->node[0].x + t->node[0].w - t->node[i].x - t->node[i].w;
 }
 
+// Whether a point is in an element's rectangle, as the run left it.
+static inline b32 ui_tree_in(const struct ui_node address_to n, int x, int y)
+{
+        return x >= n->x && x < n->x + n->w && y >= n->y && y < n->y + n->h;
+}
+
+// The child of element at that a point is in, where the element holds the point too, or -1: what a pointer is over, one level down.
+static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y)
+{
+        for (int ch = at < t->count && ui_tree_in(&t->node[at], x, y) ? t->node[at].first : -1; ch >= 0; ch = t->node[ch].next)
+                if (ui_tree_in(&t->node[ch], x, y))
+                        return ch;
+        return -1;
+}
+
 /*
         Text: what a field, a text area and a code editor are made of, below
         any pixel. A document is bytes, a history of what changed them, and
@@ -15357,12 +15372,6 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         ui_popmenu_present, ui_popmenu_pump (its event loop) and ui_popmenu_scroll. The sizes are the UI_MENU_ numbers, one set for every menu.
 */
 
-// Whether a point is in an element's rectangle, as the run left it: an answer of the layout's own, kept here until it is folded into it.
-static inline b32 ui_tree_in(const struct ui_node address_to n, int x, int y)
-{
-        return x >= n->x && x < n->x + n->w && y >= n->y && y < n->y + n->h;
-}
-
 /*
         Every menu of the kit is one of these, and these are its defaults, all in logical pixels (ui_popmenu_size declares them
         at the scale, and every size of a menu is read from its tree): a row of 28, a finger's row of 44, the face's pad of
@@ -15687,7 +15696,7 @@ static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 
 /*
         The menu's bar, when it has one: a motion, a press or a release on it is its (a held thumb follows the hand, a press on
-        the track pages it). True when it took the event: the scroll it asks for goes in as the root's offset, its end as the
+        the track puts the thumb there and holds it). True when it took the event: the scroll it asks for goes in as the root's offset, its end as the
         tree's own, and the menu rests on the item that is in.
 */
 static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu address_to m, int type, int x, int y, b32 down)
@@ -17717,18 +17726,6 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
         }
 }
 
-// The child of element at of a tree that a point is in, where the element shows it (the point is in the element too), or -1: what
-// a pointer is over, one level down. The layout has no such question yet and the strips ask it, so it is here above them.
-static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y)
-{
-        const struct ui_node address_to n = &t->node[at];
-
-        for (int ch = at < t->count && x >= n->x && x < n->x + n->w && y >= n->y && y < n->y + n->h ? n->first : -1; ch >= 0; ch = t->node[ch].next)
-                if (x >= t->node[ch].x && x < t->node[ch].x + t->node[ch].w && y >= t->node[ch].y && y < t->node[ch].y + t->node[ch].h)
-                        return ch;
-        return -1;
-}
-
 /*
         Strips: the channels of a mixer, one for each thing that plays and the device first, and every one the same design. A strip is
         a track, which takes all the height it can (its name set on end beside a level meter and a vertical slider, in the slider's
@@ -18500,12 +18497,14 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
         return true;
 }
 
-// A tree that was run, put where the window has it: turned over its root's width when the window reads from the right (as ui_view_end turns
-// a screen), then moved so that the root's corner is at x, y.
+// A tree that was run, put where the window has it: turned over its root's width when the window reads from the right (ui_tree_mirror, as
+// ui_view_end turns a screen), then moved so that the root's corner is at x, y.
 static fn ui_tree_origin(struct ui_tree address_to t, int x, int y)
 {
-        for (int at = 0, wide = t->node[0].w; at < t->count; at++)
-                t->node[at].x = (ui_rtl() ? wide - t->node[at].x - t->node[at].w : t->node[at].x) + x, t->node[at].y += y;
+        if (ui_rtl())
+                ui_tree_mirror(t);
+        for (int at = 0; at < t->count; at++)
+                t->node[at].x += x, t->node[at].y += y;
 }
 
 // A length of the window in logical pixels: the one conversion of what the layout answers (device pixels) to what a control is told.
@@ -19462,8 +19461,9 @@ static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to
 }
 
 /*
-        A mouse's motion, press or release on the page's scrollbars (the body's and the column's): the thumb lights under the
-        pointer, is dragged, and a press on the track pages. True when it was a bar's.
+        A mouse's motion, press or release on the page's scrollbars (the body's and the column's), each as every region's bar takes
+        it (ui_scroll_bar): the thumb lights under the pointer and is dragged, a press on the track puts the thumb there and holds it,
+        and a thumb pulled past an end stretches its region and springs home when it is let go. True when it was a bar's.
 */
 static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to p, int type, b32 down)
 {
@@ -19472,26 +19472,10 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
 
         for (int k = 0; k < 3; k++)
         {
-                b32 lit, held;
-                int scroll;
+                b32 lit = bars[k] ? bars[k]->hover : 0, took = bars[k] && ui_scroll_bar(ui, bars[k], type, ui_kit.pointer_x, ui_kit.pointer_y, down);
 
-                if (!bars[k])
-                        continue;
-                lit = bars[k]->hover;
-                held = bars[k]->held;
-                scroll = ui_scroll_pointer(ui, bars[k], type, ui_kit.pointer_x, ui_kit.pointer_y, down);
-                if (scroll >= 0)
-                {
-                        taken = true;
-                        // A thumb stretching its region past an end keeps the stretch; its release lets it go, as a finger's does.
-                        if (bars[k]->body.state != BODY_TRACK)
-                                ui_scroll_set(bars[k], scroll);
-                }
-                // The thumb released: a held thumb lets the body go, so a pull past an end springs home. Only a thumb that was held lets
-                // go: a finger dragging the content has the region dragging too, and its own release throws it.
-                if (type == WINDOW_EVENT_BUTTON && !down && held && bars[k]->body.state == BODY_TRACK && !bars[k]->precise)
-                        ui_scroll_let_go(bars[k], 0);
-                if (scroll >= 0 || lit != bars[k]->hover)
+                taken |= took;
+                if (bars[k] && (took || lit != bars[k]->hover))
                         ui_page_moved(ui, p, bars[k]);
         }
         return taken;
