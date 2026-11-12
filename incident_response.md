@@ -41,6 +41,276 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-193: the ARP conflict probe heard every interface until it was bound
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `8f6faa0` |
+| Class | Reply accepted off the wrong link (identity: interface); datagram queue archaeology (attack queue 2) |
+| Attacker | 3, a station on another link of a machine with two |
+| Reachable | src/sh/net.c `net_packet_open`, read by `net_arp_conflict` before a lease is taken |
+
+**What happened.** The probe's packet socket was made with the ARP protocol and
+bound to the interface afterwards. A packet socket made with a protocol is
+hooked to that protocol on every interface at once, and what queued before the
+bind stays queued; the receive takes no source, so the interface was never
+asked. An ARP for the offered address arriving on another link in that window
+read as a conflict on this one: the client sent DHCPDECLINE for a good address,
+held the link off ten seconds and took no lease, and the server marked the
+address unusable. Repeated, the link never got an address. Shown on Linux 6.18
+with two veth pairs: made with the protocol then bound, the socket returned a
+frame from the other pair; made with protocol 0 and bound with the protocol, it
+returned none. `dhcp_frames_open` already made its socket the second way.
+
+**The fix.** `socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0)`; the bind,
+which already carried the protocol and the index, names both together.
+
+**Tests.** `storage_test_arp_probe` (test/checks.c) still passes; no row sends
+ARP on a second link inside the window, which is a few system calls wide.
+
+**Still open.** A station on the same link can still claim any offered address,
+which is what an ARP probe is for.
+
+### MW-2026-192: a certificate's SCTs were counted, not the logs that made them
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `433d50b` |
+| Class | Policy count met by a duplicate (Certificate Transparency) |
+| Attacker | A CA that mis-issues and chooses the certificate's contents; tight tier, or `security ct on` |
+| Reachable | src/net/net.c `tls_ct_holds` |
+
+**What happened.** A leaf of more than 180 days is asked for three SCTs from
+logs of two operators, one of them a log still current. Every SCT that verified
+was counted, with nothing remembering which log it was from, so a list of log
+A's SCT, log B's and log B's again met three with two logs. The two-operator
+rule held.
+
+**The fix.** An SCT whose log has counted already is passed over.
+
+**Tests that fail without the fix.** CHECK_net, beside "no more than sixteen
+SCTs of a list are read": the fixture's three SCTs rebuilt hold, and two of
+them with a copy of one do not ("sec: two logs' SCTs and a copy of one are not
+three logs"). RED with the pass-over removed, GREEN with it.
+
+**Still open.** Nothing in this count. CT is asked only at the tight tier.
+
+### MW-2026-191: a name constraint spelled outside DER constrained nothing
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `e532a43` |
+| Class | Parser differential: a constraint another validator enforces, accepted here and then never applied |
+| Attacker | 3 or 4, serving a chain from a constrained CA key they hold, where the constraint's bytes are not one of the nine DER GeneralName tags (a CA that signs what a requester sent, or an owner-added anchor's PKI) |
+| Reachable | src/net/net.c `tls_name_allowed`, from `tls_parse_extensions` and the path walk |
+
+**What happened.** A subtree's base was entered under whatever tag it carried.
+One that was not a GeneralName tag -- `[2]` constructed, a long-form tag, a
+plain OCTET STRING -- parsed, and then matched no name's form, so it neither
+permitted nor excluded anything: a CA held to `example.com` issued for
+`evil.test`. Compared against OpenSSL 3.0.13 on the same bytes: OpenSSL reports
+a permitted-subtree violation for the first two spellings and an invalid CA for
+the third, an excluded subtree spelled the same way included. The subjectAltName
+reader already held a name to the nine tags; this function did not.
+
+**The fix.** The base's tag is one of `a0 81 82 a3 a4 a5 86 87 88`, or the
+constraints are refused, which refuses the certificate that carries them.
+
+**Tests that fail without the fix.** CHECK_net, the `tls_name_allowed` table:
+four rows ("a dNSName base spelled constructed is refused", "a base under a
+long-form tag is refused", "a base that is an OCTET STRING is refused", "an
+excluded dNSName spelled constructed is refused"). RED with the allow-list
+out, GREEN with it.
+
+**Still open.** `tls_parse_cert` still takes a few signed-but-malformed fields
+OpenSSL refuses (unique identifiers out of order or empty, the bodies of
+otherName, directoryName and ediPartyName in a subjectAltName, an issuer or
+subject that is not a Name inside). None changes a decision here; holding them
+needs a run of the public-host corpus first.
+
+### MW-2026-190: a pairing code stayed in the process list for the five minutes it was good
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `9956b4e` |
+| Class | Secret in argv |
+| Attacker | 1, a local user, below the locked tier (which hides other users' processes) |
+| Reachable | src/waterlink/command.c `link_pair_there` |
+
+**What happened.** `moonwater link NAME CODE` cleaned the code into its own
+bytes and then waited up to five minutes with the argument as typed, readable
+in `/proc/PID/cmdline`. While it waits this machine has a group of one open
+under that code that gives every grant. A group's secret was already wiped from
+the arguments for this reason; a code was not. The same commit makes `link
+group leave NAME forget` refuse with a status when the machines could not be
+locked or read, and has a client that follows a peer to a new address write the
+machines only under their lock (it read and wrote without checking the lock, so
+it could put back a grant a `link deny` took away in between).
+
+**The fix.** `crypto_forget(typed, ...)` once the code is taken.
+
+**Tests.** None runs here: the row needs another process to read the command
+line during the wait. By reading only.
+
+**Still open.** SECURITY.md already accepts the code in root's shell history.
+The code is thirty bits and its key is derived with nothing but the waiting
+machine's name as salt, so whoever records one greeting on the network can
+work the code out offline (2^30 slow derivations) and ahead of time for a
+known name; what that buys ends when the code is used or expires, which is why
+MW-2026-185 mattered. A longer code or a PAKE is the fix, and is a design
+change.
+
+### MW-2026-189: a peer with files alone could read where every other machine is, and switch the link off
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `ae2cb3f` |
+| Class | The link's own files outside the list that protects them |
+| Attacker | A linked machine granted `files` and nothing else |
+| Reachable | src/waterlink/service.c `link_path_is_own`, asked by push and pull |
+
+**What happened.** `files` is every file root has but the link's own.
+`/root/link.places` (the key and address of every machine heard), `/root/link`
+(the switch), `/root/link.port` and `/root/link.transport` were not on the
+list. Shown between two namespaces: `link pull b /root/link.places FILE`
+succeeded for a peer with `files` alone. The same peer could write the places,
+which say where this machine dials the others, or push `off` to the switch.
+
+**The fix.** The four are on the list, protected by inode and by name as the
+rest are.
+
+**Tests that fail without the fix.** CHECK_waterlink_service `own_files` and
+`missing_own_files`, whose lists now name the four (twenty rows more); the
+link lane asks a pull of the places and a push to the switch.
+
+**Still open.** `files` is root's files by design: a peer granted it can write
+what root runs. The list keeps it from widening its own grants or taking the
+key, not from being root.
+
+### MW-2026-188: the mDNS reader was a copy of the listener, keys included, and an empty datagram ended it
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `7b97c3d` |
+| Class | Containment: a confined parser holding what it is confined from; cheap input to a fork (attack queue 3) |
+| Attacker | Any host on the link (the fork); anyone who finds a parser bug in the reader (the keys) |
+| Reachable | src/waterlink/nearby.c `link_mdns_child`, `link_mdns_read_apart` |
+
+**What happened.** The reader runs apart "because the listener is root and
+keeps the link's key" (SECURITY.md). It is forked from the listener after the
+key is loaded, so its memory held the link's private key, the cookies' secret,
+every session's AES keys and frame buffers, every group's key and pre-shared
+key, and the datagrams last opened; and the listener sends what the reader
+calls the question, up to 259 bytes, back onto the network. A reader taken
+over had the machine's identity to send. Separately, a UDP datagram of no
+bytes to port 5353 was passed to the reader as a record of no bytes, which a
+sequenced socket reads as its end: the reader exited and the next packet
+forked and confined another, so each empty datagram cost the root listener a
+fork. And a reader reaped by the listener's own wait was still sent SIGKILL by
+number afterwards.
+
+**The fix.** `link_secrets_forget` unmaps the sessions' frames and wipes the
+listener's state in the child before it confines itself or reads; a packet
+shorter than a DNS header is not sent to the reader; a reader that was waited
+for is not signalled.
+
+**Tests that fail without the fix.** CHECK_waterlink_service `mdns_apart`:
+"a packet of no bytes, or of fewer than a header, is no reading and costs no
+reader" and "a copy of the listener that has forgotten the link holds none of
+it". RED with the length test out and with one wipe removed, GREEN as fixed.
+`security_hygiene` holds the reader to forgetting, then confining, then
+reading.
+
+**Still open.** The audio modem's key is not wiped in the reader (modem.c was
+out of this work's scope). The reader still names ports that become greeting
+destinations, sixteen bits a greeting; it has nothing left worth sending.
+
+### MW-2026-187: a member could be kept under a name another machine has
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `524e01c` |
+| Class | Name collision in the machines file |
+| Attacker | A holder of a group's secret |
+| Reachable | src/waterlink/nearby.c `link_name_for`, from `link_pair_keep` |
+
+**What happened.** A member whose name is taken gets the name with three to
+six digits of its key. The walk looked up every name it made but the last, so
+with the name and its three, four, five and six digit forms all taken, the
+six digit one was handed out again. A member holding the secret greets under
+five invented keys offering those names (it learns the victim's key prefix by
+opening its greeting), and the victim's own first greeting is then kept under
+a name another record has. `link allow NAME`, `link remove NAME` and `link
+NAME` go by the first match, and a remove moves the last record into the hole.
+
+**The fix.** `link_name_for` says whether the name it ends on is free, and a
+greeting with no free name keeps nobody.
+
+**Tests that fail without the fix.** CHECK_waterlink_service: "with every
+suffix taken there is no name, where the last one made was given to a second
+machine". RED with the answer forced true, GREEN as fixed.
+
+**Still open.** One group's members can still fill all 64 places of the
+machines file with invented keys, after which nothing pairs; a ceiling per
+group is a decision about how large a group may be.
+
+### MW-2026-186: `cancel` and `doctor` were verbs a machine could be called
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `88a2035` |
+| Class | Verb/name namespace collision, MW-2026-041 again |
+| Attacker | Operator confusion; a group member offering the name |
+| Reachable | src/waterlink/service.c `link_words` |
+
+**What happened.** `link cancel` and `link doctor` became verbs without
+joining the words no machine may be called. `link add cancel KEY` was taken,
+and a member greeting under either name was kept under it; `moonwater link
+cancel`, meant as a terminal on that machine, then ended every wait for a
+pairing code. The tree's own row for this, `names_and_words`, which loops
+over the verbs, was red, in a check section that had stopped compiling
+(the kit's switches, `b7d62e9`), so nothing reported it.
+
+**The fix.** Both words in `link_words`.
+
+**Tests that fail without the fix.** CHECK_waterlink_service
+`names_and_words`: "and none of the verbs link has, port among them".
+
+**Still open.** Nothing ties the dispatcher's table to `link_words` but that
+row; it is the row that must run.
+
+### MW-2026-185: a pairing code outlived a reboot by the uptime it was made at
+
+| | |
+|---|---|
+| Status | Fixed, 2026-11-12, `f51b705` |
+| Class | Expiry by a clock that restarts; stale authenticated state kept across a boot |
+| Attacker | Anyone on the network who has or works out the code after an unclean reboot |
+| Reachable | src/waterlink/nearby.c `link_group_spent`; src/waterlink/command.c `link_pair_waiting` and the status page |
+
+**What happened.** A code's record says when it runs out in seconds since
+boot, and is written to `/root/link.groups` with a sync. Nothing tied it to
+the boot it was made in. A machine that lost power during `link pair` an hour
+into a boot came back with a record that read as an hour from running out:
+the listener, started by the switch the pairing had set, announced and swept
+under it again, and whoever used the code was linked with every grant a code
+gives. The five minutes the thirty-bit code relies on were gone. The status
+page said the code had thousands of seconds left, and a new `link pair` was
+refused as already waiting.
+
+**The fix.** No code is given more than `LINK_PAIR_SECONDS`, so a record with
+more than that left is spent, by the one rule the listener, the wait and the
+status page ask; the listener drops it from the file at its next turn.
+
+**Tests that fail without the fix.** CHECK_waterlink_service `pairing_codes`:
+"a code from the boot before, with more time left than a code is given, lets
+nobody in", with a neighbour that has exactly its five minutes and is open.
+RED on the parent tree, GREEN after.
+
+**Still open.** A code is live again if the new boot's uptime comes within
+five minutes below the old record's time before the listener's first turn
+drops it; the listener's turn is at most half a second after it starts.
+
 ### MW-2026-184: the monitor wrote an interface's name and the hostname to the terminal with their control bytes
 
 | | |
