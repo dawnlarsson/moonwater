@@ -32,12 +32,14 @@
 // This file is the whole of the UI kit, in three parts that a program takes by how far it reads (the switches
 // of the features are in the second part, so a program that reads the second part has them):
 //   UI_LIST_ONLY    the window list's format (window.c reads it before the compositor and the fonts exist);
+//   UI_SWITCHES_ONLY  the switches alone, which are nothing but #defines, so a table may read them where no
+//                   declaration can stand (tools.inc, inside the tool tables);
 //   UI_SHARED_ONLY  the list, the switches, the theme, the motion, the touch recogniser and the taskbar's geometry
 //                   (compositor.c, which draws the chrome with them);
 //   neither         all of it: the kit, the text engine, the language, the battery reader.
 // Each part is in the file once, however many times it is included.
 
-#ifndef MOONWATER_CANVAS_UI_LIST
+#if !defined(UI_SWITCHES_ONLY) && !defined(MOONWATER_CANVAS_UI_LIST)
 #define MOONWATER_CANVAS_UI_LIST
 
 /*
@@ -147,8 +149,8 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 
 #endif /* MOONWATER_CANVAS_UI_LIST */
 
-#if !defined(UI_LIST_ONLY) && !defined(MOONWATER_CANVAS_UI_SHARED)
-#define MOONWATER_CANVAS_UI_SHARED
+#if !defined(UI_LIST_ONLY) && !defined(MOONWATER_CANVAS_UI_SWITCHES)
+#define MOONWATER_CANVAS_UI_SWITCHES
 
 /*
         The desktop's features, one file each under src/canvas/ui. A feature
@@ -203,6 +205,14 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #endif
 
 #define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES)
+
+#endif /* MOONWATER_CANVAS_UI_SWITCHES */
+
+/*      The rest of the second part declares things, which the switches do not: the utilities alone (programs/utilities.c),
+        which have no kit, first meet this file where tools.inc reads the switches inside a table, and a function there did
+        not compile. */
+#if !defined(UI_LIST_ONLY) && !defined(UI_SWITCHES_ONLY) && !defined(MOONWATER_CANVAS_UI_SHARED)
+#define MOONWATER_CANVAS_UI_SHARED
 
 /*
         The kit's theme: the roles, the palettes they are written as, and the maker that turns a choice of light or
@@ -1422,7 +1432,7 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
 
 #endif /* MOONWATER_CANVAS_UI_SHARED */
 
-#if !defined(UI_LIST_ONLY) && !defined(UI_SHARED_ONLY) && !defined(MOONWATER_CANVAS_UI)
+#if !defined(UI_LIST_ONLY) && !defined(UI_SWITCHES_ONLY) && !defined(UI_SHARED_ONLY) && !defined(MOONWATER_CANVAS_UI)
 #define MOONWATER_CANVAS_UI
 
 /*

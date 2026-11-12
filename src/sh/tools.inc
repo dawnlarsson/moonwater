@@ -1,7 +1,8 @@
-/* the switches of the kit (ui/ui.c, its first part), which the rows below read; the shell has them already */
-#define UI_SHARED_ONLY
+/* the switches of the kit (ui/ui.c), which the rows below read; the shell has them already, and the utilities alone take
+   only them here, inside a table, where the declarations of the kit's first part cannot stand */
+#define UI_SWITCHES_ONLY
 #include "../canvas/ui/ui.c"
-#undef UI_SHARED_ONLY
+#undef UI_SWITCHES_ONLY
 /* category, installed name, implementation */
 SHELL_TOOL(GENERAL, awk, text_awk)
 SHELL_TOOL(GENERAL, b2sum, checksum_main)

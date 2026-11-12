@@ -89503,6 +89503,23 @@ static bipolar wls_poll_wait(system_poll_descriptor address_to descriptors,
 #include "../src/sh/shell.c"
 #undef system_poll_wait
 #undef system_call_3
+
+/*      The audio modem's half of the link (the send section of modem.c) is
+        built with the sound server, which the utilities alone have not: here
+        the transport is the network, as it is on a machine whose
+        /root/link.transport says nothing. */
+static p8 link_modem_carrying(void) { return false; }
+static p8 link_modem_put(p8 address_to bytes, positive length, p64 when)
+{
+        (void)bytes; (void)length; (void)when;
+        return false;
+}
+static p64 link_modem_turn(p64 now) { (void)now; return ~0ull; }
+static void link_modem_stop(void) {}
+static p64 link_modem_floor(void) { return 0; }
+static p64 link_modem_ceiling(void) { return 0; }
+static p64 link_modem_queued_from(void) { return ~0ull; }
+static positive link_modem_free(void) { return 0; }
 #define SHARED_counted
 #include "checks.c"
 #undef SHARED_counted
