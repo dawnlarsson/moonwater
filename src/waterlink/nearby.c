@@ -1585,6 +1585,9 @@ static COLD bool link_mdns_confine(b32 channel, bipolar parent)
 
 static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
 {
+        //      Before a byte is read: this process is a copy of the listener,
+        //      and what it is kept apart from, it was holding.
+        link_secrets_forget();
         if (!link_mdns_confine(channel, parent))
                 system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
         for (;;)
@@ -1675,7 +1678,11 @@ static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
         network_deadline deadline;
 
         memory_zero(found, sizeof(*found));
-        if (link_mdns.refused || length > WATERLINK_MDNS_MAX)
+        //      Shorter than a header is no message, and is not sent: an
+        //      empty one reads at the reader as its channel's end, so each
+        //      cost the listener a reader, the fork and the confinement of
+        //      the next, for a datagram of no bytes from anyone on the link.
+        if (link_mdns.refused || length < DNS_HEADER || length > WATERLINK_MDNS_MAX)
                 return false;
         if (link_mdns.channel < 0 && !link_mdns_start())
                 return false;
@@ -1690,14 +1697,17 @@ static COLD p8 link_mdns_read_apart(const p8 address_to packet, positive length,
                 positive raw = 0;
 
                 //      A reader that could not be confined says so by its exit,
-                //      once: there is no reading here from then on.
+                //      once: there is no reading here from then on. Waited for
+                //      here, however it ended, it is not this listener's to
+                //      signal: its number may be another process's by the
+                //      time link_mdns_end sends the kill.
                 if (link_mdns.pid > 0 &&
                     system_wait4_retry(link_mdns.pid, address_of raw, 1 /* WNOHANG */, null) ==
-                        link_mdns.pid &&
-                    (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED)
+                        link_mdns.pid)
                 {
                         link_mdns.pid = -1;
-                        link_mdns.refused = true;
+                        link_mdns.refused = (raw & 0x7f) == 0 &&
+                                            ((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED;
                 }
                 link_mdns_end();
                 return false;

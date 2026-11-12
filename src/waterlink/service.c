@@ -3024,6 +3024,13 @@ static fn link_keep_heard(p8 address_to key)
                 entry->next = 0;
 }
 
+/*      What a process made of the listener to read strangers' bytes drops
+        before it reads one (link_mdns_child): the reader is apart because
+        the listener keeps the link's key, and a fork is a copy of the
+        listener, the key included. Defined at the end of this file, where
+        everything it wipes has been declared. */
+static fn link_secrets_forget(void);
+
 #include "nearby.c"
 
 // The handshake, at the machine's end -----------------------------------------
@@ -5099,6 +5106,24 @@ static b32 link_client_run(string_address name, p8 kind,
                 log_flush();
         }
         return answer;
+}
+
+/*      Everything of the link a copy of the listener holds, gone: each
+        session's frames unmapped, then the key, the cookies' secret, the
+        sessions with their keys, the groups with theirs, the initiation out
+        and the datagrams last opened where they lay. Nothing here closes a
+        descriptor: the caller keeps the ones it needs and closes the rest. */
+static fn link_secrets_forget(void)
+{
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used && link_self.session[at].link)
+                        system_call_2(syscall(munmap),
+                                      (positive)link_self.session[at].link,
+                                      sizeof(struct waterlink_link));
+        crypto_forget(address_of link_self, sizeof link_self);
+        crypto_forget(address_of link_nearby, sizeof link_nearby);
+        crypto_forget(address_of link_client, sizeof link_client);
+        crypto_forget(link_inbound, sizeof link_inbound);
 }
 
 #endif // WATERLINK_SERVICE_INCLUDED

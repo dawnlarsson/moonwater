@@ -77170,6 +77170,18 @@ def harness_security_hygiene(argv):
                "confinement: %s is no longer handed to net_apart in %s" % (task, home))
         for caller in sorted(found_callers.get(task, set())):
             checks(False, "confinement: %s calls the task %s directly" % (caller, task))
+    #   The listener's mDNS reader is a fork of the listener, which keeps the
+    #   link's key and every session's and group's: it forgets the link
+    #   before it confines itself, and both before it reads a packet.
+    reader = re.search(r"static DEAD_END COLD fn link_mdns_child\(.*?^\}$",
+                       uncommented((HARNESS_ROOT / "src/waterlink/nearby.c").read_text()),
+                       re.M | re.S)
+    checks(reader is not None and
+           0 <= reader.group(0).find("link_secrets_forget()") <
+           reader.group(0).find("link_mdns_confine(") <
+           reader.group(0).find("waterlink_mdns_read("),
+           "confinement: the mDNS reader forgets the link's secrets, then confines "
+           "itself, then reads")
     apart = uncommented(net)
     install = re.search(r"static COLD bool net_filter_install\(.*?^\}$", apart, re.M | re.S)
     child = re.search(r"static DEAD_END COLD fn net_apart_child\(.*?^\}$", apart, re.M | re.S)

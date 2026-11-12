@@ -96756,9 +96756,65 @@ static fn mdns_apart(void)
         memory_fill(packet, 0xc0, 64);
         check("noise read apart is no reading",
               !link_mdns_read_apart(packet, 64, address_of apart) && !apart.count);
+        {
+                bipolar reader = link_mdns.pid;
+
+                check("sec: a packet of no bytes, or of fewer than a header, is "
+                      "no reading and costs no reader: an empty one was its "
+                      "channel's end to it, a fork of the listener a datagram",
+                      !link_mdns_read_apart(packet, 0, address_of apart) &&
+                              !link_mdns_read_apart(packet, DNS_HEADER - 1,
+                                                    address_of apart) &&
+                              reader > 0 && link_mdns.pid == reader &&
+                              link_mdns.channel >= 0);
+        }
         read_apart = link_mdns_read_apart(packet, length, address_of apart);
         link_mdns_end();
         check("and the reader is let go", link_mdns.pid < 0 && link_mdns.channel < 0);
+
+        //      The reader is a copy of the listener, which keeps the link's
+        //      key: what it wipes before it reads, asked of a copy made here.
+        {
+                positive raw = 1;
+                bipolar copy;
+
+                memory_fill(link_self.me.secret, 0x5a, sizeof link_self.me.secret);
+                memory_fill(link_nearby.keys[0].psk, 0x5a,
+                            sizeof link_nearby.keys[0].psk);
+                memory_fill(link_client.cookie, 0x5a, sizeof link_client.cookie);
+                memory_fill(link_inbound[1], 0x5a, 64);
+                copy = system_fork();
+                if (!copy)
+                {
+                        link_secrets_forget();
+                        system_call_1(
+                            syscall(exit_group),
+                            memory_span_byte(address_of link_self, 0,
+                                             sizeof link_self) == sizeof link_self &&
+                                    memory_span_byte(address_of link_nearby, 0,
+                                                     sizeof link_nearby) ==
+                                            sizeof link_nearby &&
+                                    memory_span_byte(address_of link_client, 0,
+                                                     sizeof link_client) ==
+                                            sizeof link_client &&
+                                    memory_span_byte(link_inbound, 0,
+                                                     sizeof link_inbound) ==
+                                            sizeof link_inbound
+                                ? 0
+                                : 1);
+                }
+                check("sec: a copy of the listener that has forgotten the link "
+                      "holds none of it: its key, the groups' keys, the "
+                      "initiation out and the datagrams last opened",
+                      copy > 0 &&
+                              system_wait4_retry(copy, address_of raw, 0, null) ==
+                                      copy &&
+                              raw == 0);
+                memory_zero(link_self.me.secret, sizeof link_self.me.secret);
+                memory_zero(link_nearby.keys[0].psk, sizeof link_nearby.keys[0].psk);
+                memory_zero(link_client.cookie, sizeof link_client.cookie);
+                memory_zero(link_inbound[1], 64);
+        }
 }
 
 b32 main(void)
