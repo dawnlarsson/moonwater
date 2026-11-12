@@ -141129,7 +141129,17 @@ static fn check_settings(string_address regular, string_address bold)
                                 pass = settings_act_words(words);
                                 check("settings: forgetting is wifi remove and the name", words[0] && !pass && string_equals(words[2], (string_address) "remove") &&
                                           string_equals(words[3], (string_address) "Old Cafe") && !words[4]);
-                                string_copy_bounded((string_address)settings.job_value, (string_address) "x\nwhatever", sizeof(settings.job_value));
+                                // A device of the Devices list is denied or allowed by its name: x and v, as a press on its row asks (settings_port_set).
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "x\n1-1", sizeof(settings.job_value));
+                                pass = settings_act_words(words);
+                                check("settings: denying a device is device deny and its name, and allowing it device allow",
+                                      words[0] && !pass && string_equals(words[1], (string_address) "device") && string_equals(words[2], (string_address) "deny") &&
+                                          string_equals(words[3], (string_address) "1-1") && !words[4] &&
+                                          (string_copy_bounded((string_address)settings.job_value, (string_address) "v\n1-1", sizeof(settings.job_value)),
+                                           settings_act_words(words), words[0] && string_equals(words[1], (string_address) "device") &&
+                                                                          string_equals(words[2], (string_address) "allow") &&
+                                                                          string_equals(words[3], (string_address) "1-1") && !words[4]));
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "q\nwhatever", sizeof(settings.job_value));
                                 settings_act_words(words);
                                 check("settings: and a change that is none of these runs nothing", !words[0]);
                                 string_copy_bounded((string_address)settings.job_value, (string_address) "j\n", sizeof(settings.job_value));
@@ -142821,8 +142831,12 @@ static fn check_settings_device_strip(void)
         check("settings: a drive's partitions are its strip, in order, with free room",
               settings.item_count[2] == 3 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 4 &&
                   items[0].segment_role[0] == 0 && items[0].segment_role[1] == 1 && items[0].segment_role[2] == 2 &&
-                  items[0].segment_role[3] == 4 && items[0].segment_bytes[1] == 1073741824ull &&
-                  string_equals((string_address)items[0].label, (string_address) "vda drive 2048 MB view only"));
+                  items[0].segment_role[3] == 4 && items[0].segment_bytes[1] == 1073741824ull);
+        // The drive's line is not one label: its name is at the row's left, and its size and its state are the row's right.
+        check("settings: a drive's line is its name, its size in GB from 1000 MB, and after the word drive what the line says of it",
+              string_equals((string_address)items[0].label, (string_address) "vda") && string_equals((string_address)items[0].size, (string_address) "2 GB") &&
+                  string_equals((string_address)items[0].state, (string_address) "drive, view only") &&
+                  string_equals((string_address)items[1].label, (string_address) "sdb") && string_equals((string_address)items[1].size, (string_address) "512 MB"));
         check("settings: a drive with no partition table is one unpartitioned segment",
               items[1].kind == SETTINGS_NOTE && items[1].segment_count == 1 && items[1].segment_role[0] == 5 &&
                   items[1].segment_bytes[0] == 536870912ull);
@@ -142889,10 +142903,19 @@ static fn check_settings_device_strip(void)
                         settings_large->said[at] = rows[at];
                 settings.said_length = length;
                 settings_feed_hardware();
-                check("settings: a device line too long for its label keeps its state word",
-                      settings.item_count[2] == 1 && string_length((string_address)items[0].label) == 95 &&
-                          string_find((string_address)items[0].label, (string_address) "...") != null &&
-                          string_find((string_address)items[0].label, (string_address) " blocked") != null);
+                // The state is the line's last word and a field of its own, which the row shows beside its allow and deny: the label
+                // is what comes before it, cut to its room, and no cut of the label reaches the state.
+                {
+                        struct ui_row described;
+
+                        memory_zero(&described, sizeof(described));
+                        settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &described);
+                        check("settings: a device line too long for its label keeps its state word",
+                              settings.item_count[2] == 1 && items[0].kind == SETTINGS_PORT && string_length((string_address)items[0].label) == 95 &&
+                                  string_equals((string_address)items[0].state, (string_address) "blocked") &&
+                                  described.kind == UI_ROW_TABS && described.at == 1 && described.note &&
+                                  string_equals((string_address)described.note, (string_address) "blocked"));
+                }
         }
 }
 
