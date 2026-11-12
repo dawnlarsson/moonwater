@@ -153191,6 +153191,21 @@ static fn check_kit_layout(void)
                 ui_tree_run(&layout_tree, 100, 200);
                 alone = text->w == 60 && text->h == 10 && row->h == 10;
                 check("kit layout: with no measure a leaf that says it wraps is the line it has", alone);
+
+                // A column 50 by 50 that scrolls, the five words (three lines, 30) over a box 40 tall: 70 long, so an offset of 20 is its
+                // end. On one line the words were 50 long and nothing scrolled; the offset asked is the second run's, not the first's 0.
+                root = layout_root(1);
+                layout_tree.measure = layout_lines;
+                column = ui_tree_open(&layout_tree);
+                column->dir = 1, column->scroll = 1, column->offset = 20;
+                column->size[0] = (struct ui_size){UI_FIXED, 50, 0, UI_TREE_MOST, 0}, column->size[1] = (struct ui_size){UI_FIXED, 50, 0, UI_TREE_MOST, 0};
+                text = layout_words();
+                after = layout_child(50, 40);
+                ui_tree_close(&layout_tree);
+                ui_tree_close(&layout_tree);
+                ui_tree_run(&layout_tree, 300, 200);
+                check("kit layout: a scroll element's offset is held to the length its wrapped lines make, not the length they made on one line",
+                      column->extent == 70 && column->offset == 20 && text->y == -20 && text->h == 30 && after->y == 10);
         }
 
         // The limits: elements past the tree's room and a second root are refused and counted, and nothing is written outside the arrays.

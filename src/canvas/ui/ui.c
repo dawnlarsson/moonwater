@@ -1955,12 +1955,16 @@ static fn ui_tree_lay(struct ui_tree address_to t, int width, int height)
 /*
         The rectangles of the tree for a viewport of width by height: every element's x, y, w and h. Each leaf that wraps is then
         asked its height at the width it was given, and when any is not the height it was laid out at the tree is run again with
-        theirs: its widths are those of the first run (no width depends on a height), and its heights are the lines'.
+        theirs: its widths are those of the first run (no width depends on a height), and its heights are the lines'. A scroll
+        element's offset goes into the second run as it was asked, not as the first held it to a length the lines have changed.
 */
 static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
 {
+        int asked[UI_TREE_NODES];
         b32 again = false;
 
+        for (int at = 0; t->measure && at < t->count; at++)
+                asked[at] = t->node[at].offset;
         ui_tree_lay(t, width, height);
         for (int at = 0; t->measure && at < t->count; at++)
         {
@@ -1973,8 +1977,11 @@ static fn ui_tree_run(struct ui_tree address_to t, int width, int height)
                 again |= tall != n->content[1];
                 n->content[1] = tall;
         }
-        if (again)
-                ui_tree_lay(t, width, height);
+        if (!again)
+                return;
+        for (int at = 0; at < t->count; at++)
+                t->node[at].offset = asked[at];
+        ui_tree_lay(t, width, height);
 }
 
 // The first element named id, or null: 0 names none.
@@ -19103,8 +19110,8 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_li
         width at the least (ui_row_label_least, or its own where that is less) and a zone keeps its own least (a field's, or a value's
         marks and a little of the value); what gives way past that is what gave way before (a slider's number, then its control), at a
         width narrower than the rows need, which a page's window is not made (ui_row_least, ui_list_least, ui_page_least). A note
-        whose longest word does not fit its room is dropped
-        whole, as it was. A tall row's line is a row and is cut, as every row of a list whose words do not wrap is.
+        whose longest word does not fit its room is dropped whole, as it was. A tall row's line is a row and is cut, as every row of
+        a list whose words do not wrap is.
 */
 static struct ui_row_parts
 {

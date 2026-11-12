@@ -1873,11 +1873,11 @@ static fn settings_size(unsigned int width, unsigned int height);
         The window's least size (device pixels), and the table told it in logical pixels, which the compositor holds a resize to. Its
         width is the page's least (ui_page_least): the title's band whole, the column of groups at its least, and the list as wide as
         the widest of every row of every group needs, as the machine has said them (a switch, tabs, a slider beside a label of a few
-        words), whether the window shows the rows or a card. Its height is what the Display group needs to show a row: the title's band, the map of the screens with its caption
-        on two lines, and a row. Worked out again only when what it depends on changed: the scale, the text's size, the way the
-        window reads, the language and the rows' readings (the list's revision). Answers 2 when it was worked out again, 1 when the
-        one kept holds, and 0 when there is none: the gallery has none of its own, and there is none before the page's frame is or
-        with no face to measure the rows in.
+        words), whether the window shows the rows or a card. Its height is what the Display group needs to show a row: the title's
+        band, the map of the screens with its caption on two lines, and a row. Worked out again only when what it depends on changed:
+        the scale, the text's size, the way the window reads, the language and the rows' readings (the list's revision). Answers 2
+        when it was worked out again, 1 when the one kept holds, and 0 when there is none: the gallery has none of its own, and there
+        is none before the page's frame is or with no face to measure the rows in.
 */
 static int settings_least(void)
 {
