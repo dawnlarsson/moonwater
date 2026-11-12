@@ -124277,9 +124277,11 @@ static fn check_pointer(void)
                         {
                                 b32 moved = true;
 
-                                // The step terminal_tick takes on the frame: the body's whole pixels, sent as the drag's were.
+                                // The step terminal_tick takes on the frame: the body's whole pixels, sent as the drag's were, to no pty (-1), so
+                                // they stay queued to be counted. The terminal's own master is 0 in a check, which is standard input: one that
+                                // takes a write (a terminal, a socket) takes the arrows, and the queue is then empty whatever was thrown.
                                 ui_kit.now = ui_kit.test_clock = (b64)(clock += 16000000ull);
-                                terminal_finger_scroll(terminal.master, (int)ui_body_given(&terminal.alt, ui_kit_time()), &dirty, &moved);
+                                terminal_finger_scroll(-1, (int)ui_body_given(&terminal.alt, ui_kit_time()), &dirty, &moved);
                         }
                         string_format(log, "  pointer alternate screen: the drag sent %b bytes, the throw sent %b more, going %b\n",
                                       (bipolar)sent_drag, (bipolar)(to_shell_length - sent_drag), (bipolar)ui_body_going(&terminal.alt));
