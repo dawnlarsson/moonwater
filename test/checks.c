@@ -142117,6 +142117,7 @@ static fn settings_end_check(void)
         for (int scale = 1; scale <= 2; scale++)
         {
                 int x, y, bar_x, bar_y;
+                b32 pulled;
 
                 settings.ui.scale = scale * 100;
                 ui_kit_settle();
@@ -142159,8 +142160,10 @@ static fn settings_end_check(void)
                 bar_ok = bar_ok && settings.list.scroll.scroll >= expected - settings.list.scroll.view / 4 && settings.list.scroll.scroll <= expected &&
                          !settings.list.scroll.held;
 
-                // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end.
-                ui_page_scroll(&settings.page,0);
+                // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end. The pull is
+                // ten views long (60 steps of 40 px), so the list is put eight views above its end first: the pull ends two views
+                // past the end however many rows the longest group has, and the row says so (pulled) before it looks where it rests.
+                ui_page_scroll(&settings.page, expected > 8 * settings.list.scroll.view ? expected - 8 * settings.list.scroll.view : 0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
                 settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
@@ -142170,9 +142173,10 @@ static fn settings_end_check(void)
                         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
                         settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
                 }
+                pulled = scroll_at(&settings.list.scroll) > (b64)expected * 256;
                 settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
                 settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
-                finger_ok = finger_ok && settings.list.scroll.scroll == expected && !scroll_back(&settings.list.scroll);
+                finger_ok = finger_ok && pulled && settings.list.scroll.scroll == expected && !scroll_back(&settings.list.scroll);
                 string_format(log, "  settings end (scale %p): rows %p, view %p, maximum %p, wheel and bar at %p\n", (positive)scale,
                               (positive)settings.list.content, (positive)settings.list.scroll.view, (positive)expected, (positive)settings.list.scroll.scroll);
         }
