@@ -150490,10 +150490,11 @@ static void check_terminal_stretch_edges(void)
     pull_back = terminal_grid_pull();
     string_format(log, "  terminal stretch edges: stretched %b px, alternate %b, mouse %b, after output %b (frame %b), back at the live end %b\n",
                   (bipolar)pull_stretched, (bipolar)pull_alternate, (bipolar)pull_mouse, (bipolar)pull_output, (bipolar)framed, (bipolar)pull_back);
-    check("terminal stretch edges: a pull past the oldest line stretches the grid", pull_stretched > 4);
+    // The pull is the body's place less its rest (terminal_grid_pull): past the oldest line the body is above its rest, so the pull is under 0.
+    check("terminal stretch edges: a pull past the oldest line stretches the grid", pull_stretched < -4);
     check("terminal stretch edges: on the alternate screen there is no stretch (the pull is 0)", pull_alternate == 0);
     check("terminal stretch edges: a program that asked for the mouse has the wheel, so no stretch", pull_mouse == 0);
-    check("terminal stretch edges: output that arrives while stretched is drawn, and the stretch holds", framed && pull_output > 4);
+    check("terminal stretch edges: output that arrives while stretched is drawn, and the stretch holds", framed && pull_output < -4);
     check("terminal stretch edges: and at rest at the live end there is none", pull_back == 0);
     ui_kit.test_clock = 0;
 }
